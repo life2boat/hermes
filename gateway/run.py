@@ -954,7 +954,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home
-from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
+from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value, safe_json_loads
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -9844,7 +9844,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 text_to_speech_tool, text=tts_text, output_path=audio_path
             )
             try:
-                result = json.loads(result_json)
+                result = safe_json_loads(result_json, None)
+                if not isinstance(result, dict):
+                    raise TypeError("invalid JSON payload")
             except (json.JSONDecodeError, TypeError):
                 logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
                 return
@@ -11640,7 +11642,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     image_url=path,
                     user_prompt=analysis_prompt,
                 )
-                result = json.loads(result_json)
+                result = safe_json_loads(result_json, {})
                 if result.get("success"):
                     description = result.get("analysis", "")
                     description = sanitize_context(description)

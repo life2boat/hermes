@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -270,17 +271,48 @@ def atomic_roundtrip_yaml_update(
 # ─── JSON Helpers ─────────────────────────────────────────────────────────────
 
 
-def safe_json_loads(text: str, default: Any = None) -> Any:
-    """Parse JSON, returning *default* on any parse error.
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 
-    Replaces the ``try: json.loads(x) except (JSONDecodeError, TypeError)``
-    pattern duplicated across display.py, anthropic_adapter.py,
-    auxiliary_client.py, and others.
+
+def _json_load_candidates(text: str) -> list[str]:
+    cleaned = (text or "").lstrip("\ufeff").strip()
+    if not cleaned:
+        return []
+
+    candidates: list[str] = []
+
+    def _add(candidate: str) -> None:
+        normalized = candidate.lstrip("\ufeff").strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    _add(cleaned)
+
+    fence_match = _JSON_FENCE_RE.search(cleaned)
+    if fence_match:
+        _add(fence_match.group(1))
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = cleaned.find(opener)
+        end = cleaned.rfind(closer)
+        if 0 <= start < end:
+            _add(cleaned[start:end + 1])
+
+    return candidates
+
+
+def safe_json_loads(text: str, default: Any = None) -> Any:
+    """Parse JSON leniently, returning *default* on any parse error.
+
+    Accepts clean JSON, fenced `````json````` blocks, and responses with a
+    short prose preamble/suffix around the actual JSON payload.
     """
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return default
+    for candidate in _json_load_candidates(text):
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return default
 
 
 # ─── Environment Variable Helpers ─────────────────────────────────────────────

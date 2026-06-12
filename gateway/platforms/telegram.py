@@ -86,7 +86,7 @@ from gateway.platforms.telegram_network import (
     discover_fallback_ips,
     parse_fallback_ip_env,
 )
-from utils import atomic_replace
+from utils import atomic_replace, safe_json_loads
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -5902,7 +5902,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 image_url=cached_path,
                 user_prompt=STICKER_VISION_PROMPT,
             )
-            result = json.loads(result_json)
+            result = safe_json_loads(result_json, {})
 
             if result.get("success"):
                 description = result.get("analysis", "a sticker")

@@ -15,9 +15,6 @@ services:
       PYTHONIOENCODING: ${PYTHONIOENCODING:-utf-8}
       LANG: ${LANG:-C.UTF-8}
       LC_ALL: ${LC_ALL:-C.UTF-8}
-      MEMORY_VECTOR_ENABLED: ${MEMORY_VECTOR_ENABLED:-false}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
-      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-healbite_memory_os}
     volumes:
       - /home/hermes/.hermes:/home/hermes/.hermes
       - /home/hermes/healbite.db:/home/hermes/healbite.db

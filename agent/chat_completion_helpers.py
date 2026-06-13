@@ -33,6 +33,7 @@ from agent.message_sanitization import (
     _sanitize_surrogates,
     _repair_tool_call_arguments,
 )
+from agent.auxiliary_client import safe_chat_completion_create
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_int
 
@@ -236,7 +237,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
                         api_kwargs=api_kwargs,
                     )
                 )
-                result["response"] = request_client.chat.completions.create(**api_kwargs)
+                result["response"] = safe_chat_completion_create(
+                    request_client,
+                    task="chat_completion_request",
+                    user_safe=False,
+                    **api_kwargs,
+                )
         except Exception as e:
             # If the request was cancelled by the main thread's interrupt
             # handler, the transport error is the expected consequence of our
@@ -1467,7 +1473,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=agent._is_anthropic_oauth)
                 final_response = (_summary_result.content or "").strip()
             else:
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                summary_response = safe_chat_completion_create(
+                    agent._ensure_primary_openai_client(reason="iteration_limit_summary"),
+                    task="iteration_limit_summary",
+                    user_safe=False,
+                    **summary_kwargs,
+                )
                 _summary_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_summary_result.content or "").strip()
 
@@ -1510,7 +1521,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                summary_response = safe_chat_completion_create(
+                    agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry"),
+                    task="iteration_limit_summary_retry",
+                    user_safe=False,
+                    **summary_kwargs,
+                )
                 _retry_result = agent._get_transport().normalize_response(summary_response)
                 final_response = (_retry_result.content or "").strip()
 
@@ -1828,7 +1844,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # ``request_client_holder["diag"]`` for closure access.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
-        stream = request_client.chat.completions.create(**stream_kwargs)
+        stream = safe_chat_completion_create(
+            request_client,
+            task="chat_completion_stream_request",
+            user_safe=False,
+            **stream_kwargs,
+        )
 
         # Capture rate limit headers from the initial HTTP response.
         # The OpenAI SDK Stream object exposes the underlying httpx

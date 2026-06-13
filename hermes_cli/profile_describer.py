@@ -26,7 +26,6 @@ Design notes
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -35,6 +34,7 @@ from typing import Optional
 
 from hermes_cli import profiles as profiles_mod
 from agent.skill_utils import is_excluded_skill_path
+from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -136,21 +136,8 @@ def _collect_skills(profile_dir: Path) -> list[str]:
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    if not raw:
-        return None
-    stripped = _FENCE_RE.sub("", raw.strip())
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    parsed = safe_json_loads(raw or "", None)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def describe_profile(
@@ -211,8 +198,11 @@ def describe_profile(
 
     try:
         from agent.auxiliary_client import (  # type: ignore
+            LLMServiceUnavailableError,
+            extract_content_or_reasoning,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
+            safe_call_llm,
         )
     except Exception as exc:
         logger.debug("describe: auxiliary client import failed: %s", exc)
@@ -237,7 +227,8 @@ def describe_profile(
     )
 
     try:
-        resp = client.chat.completions.create(
+        resp = safe_call_llm(
+            task="profile_describer",
             model=aux_model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -248,14 +239,14 @@ def describe_profile(
             timeout=timeout or 60,
             extra_body=get_auxiliary_extra_body() or None,
         )
+    except LLMServiceUnavailableError as exc:
+        logger.info("describe: API call failed for %s (%s)", canon, exc)
+        return DescribeOutcome(canon, False, "LLM service temporarily unavailable")
     except Exception as exc:
         logger.info("describe: API call failed for %s (%s)", canon, exc)
         return DescribeOutcome(canon, False, f"LLM error: {type(exc).__name__}")
 
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
+    raw = extract_content_or_reasoning(resp) or ""
 
     parsed = _extract_json_blob(raw)
     if parsed is None:

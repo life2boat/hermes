@@ -29,13 +29,14 @@ Nothing in this module touches the agent's system prompt or toolset.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -161,10 +162,14 @@ class GoalState:
     subgoals: List[str] = field(default_factory=list)
 
     def to_json(self) -> str:
+        import json
+
         return json.dumps(asdict(self), ensure_ascii=False)
 
     @classmethod
     def from_json(cls, raw: str) -> "GoalState":
+        import json
+
         data = json.loads(raw)
         raw_subgoals = data.get("subgoals") or []
         subgoals: List[str] = []
@@ -342,17 +347,11 @@ def _parse_judge_response(raw: str) -> Tuple[bool, str, bool]:
             text = text[nl + 1:]
 
     # First try: parse the whole blob.
-    data: Optional[Dict[str, Any]] = None
-    try:
-        data = json.loads(text)
-    except Exception:
-        # Second try: pull the first JSON object out.
+    data: Optional[Dict[str, Any]] = safe_json_loads(text, None)
+    if not isinstance(data, dict):
         match = _JSON_OBJECT_RE.search(text)
         if match:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:
-                data = None
+            data = safe_json_loads(match.group(0), None)
 
     if not isinstance(data, dict):
         return False, f"judge reply was not JSON: {_truncate(raw, 200)!r}", True
@@ -402,7 +401,13 @@ def judge_goal(
         return "continue", "empty response (nothing to evaluate)", False
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            LLMServiceUnavailableError,
+            extract_content_or_reasoning,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+            safe_call_llm,
+        )
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
         return "continue", "auxiliary client unavailable", False
@@ -437,7 +442,8 @@ def judge_goal(
         )
 
     try:
-        resp = client.chat.completions.create(
+        resp = safe_call_llm(
+            task="goal_judge",
             model=model,
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
@@ -448,14 +454,14 @@ def judge_goal(
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
         )
+    except LLMServiceUnavailableError as exc:
+        logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
+        return "continue", "judge service temporarily unavailable", False
     except Exception as exc:
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
         return "continue", f"judge error: {type(exc).__name__}", False
 
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
+    raw = extract_content_or_reasoning(resp) or ""
 
     done, reason, parse_failed = _parse_judge_response(raw)
     verdict = "done" if done else "continue"

@@ -1795,8 +1795,8 @@ def test_resolve_api_key_provider_skips_unconfigured_anthropic(monkeypatch):
 
 
 class TestTransientTransportRetry:
-    """call_llm retries ONCE on the same provider for a transient transport
-    blip before escalating to the fallback chain.
+    """call_llm retries transient transport/provider errors on the same
+    provider before escalating to the fallback chain.
 
     Salvaged from PR #16587 (@ARegalado1). The original fixed only the
     context-compression caller; this lives in call_llm so every auxiliary
@@ -1838,13 +1838,13 @@ class TestTransientTransportRetry:
         # Same client called twice — no provider fallback needed.
         assert client.chat.completions.create.call_count == 2
 
-    def test_retries_5xx_once_same_provider(self):
-        class _Err503(Exception):
-            status_code = 503
+    def test_retries_http_502_same_provider(self):
+        class _Err502(Exception):
+            status_code = 502
 
         client = MagicMock()
         client.base_url = "https://openrouter.ai/api/v1"
-        client.chat.completions.create.side_effect = [_Err503("upstream"), {"ok": True}]
+        client.chat.completions.create.side_effect = [_Err502("bad gateway"), {"ok": True}]
         p1, p2, p3 = self._patches(client)
         with p1, p2, p3:
             result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
@@ -1865,7 +1865,7 @@ class TestTransientTransportRetry:
         assert client.chat.completions.create.call_count == 1
 
     def test_second_transient_failure_escalates_to_fallback(self):
-        """Two transient failures in a row exhaust the same-target retry and
+        """Repeated transient failures exhaust the retry budget and then
         fall through to the existing connection-error provider fallback."""
         primary = MagicMock()
         primary.base_url = "https://openrouter.ai/api/v1"
@@ -1880,6 +1880,7 @@ class TestTransientTransportRetry:
         p1, p2, p3 = self._patches(primary)
         with (
             p1, p2, p3,
+            patch("agent.auxiliary_client.time.sleep"),
             patch(
                 "agent.auxiliary_client._try_configured_fallback_chain",
                 return_value=(None, None, ""),
@@ -1891,9 +1892,75 @@ class TestTransientTransportRetry:
         ):
             result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
         assert result == {"fallback": True}
-        # Primary tried twice (initial + same-target retry), then fallback.
-        assert primary.chat.completions.create.call_count == 2
+        # Primary exhausted the retry budget before fallback.
+        assert primary.chat.completions.create.call_count == 3
         assert fb_client.chat.completions.create.call_count == 1
+
+
+    def test_safe_chat_completion_create_retries_http_502(self):
+        from agent.auxiliary_client import safe_chat_completion_create
+
+        class _Err502(Exception):
+            status_code = 502
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [_Err502("bad gateway"), {"ok": True}]
+
+        with (
+            patch("agent.auxiliary_client._validate_llm_response", side_effect=lambda resp, _task: resp),
+            patch("agent.auxiliary_client.time.sleep") as sleep_mock,
+        ):
+            result = safe_chat_completion_create(
+                client,
+                task="unit_test",
+                user_safe=False,
+                model="some-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result == {"ok": True}
+        assert client.chat.completions.create.call_count == 2
+        sleep_mock.assert_called_once()
+
+    def test_safe_chat_completion_create_fails_fast_on_http_401(self):
+        from agent.auxiliary_client import safe_chat_completion_create
+
+        class _Err401(Exception):
+            status_code = 401
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = _Err401("unauthorized")
+
+        with patch("agent.auxiliary_client.time.sleep") as sleep_mock, pytest.raises(_Err401):
+            safe_chat_completion_create(
+                client,
+                task="unit_test",
+                user_safe=False,
+                model="some-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert client.chat.completions.create.call_count == 1
+        sleep_mock.assert_not_called()
+
+    def test_safe_chat_completion_create_wraps_exhausted_retryable_error(self):
+        from agent.auxiliary_client import LLMServiceUnavailableError, safe_chat_completion_create
+
+        class _Err502(Exception):
+            status_code = 502
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = _Err502("bad gateway")
+
+        with patch("agent.auxiliary_client.time.sleep"), pytest.raises(LLMServiceUnavailableError):
+            safe_chat_completion_create(
+                client,
+                task="unit_test",
+                model="some-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert client.chat.completions.create.call_count == 3
 
 
 class TestIsConnectionError:
@@ -2541,7 +2608,7 @@ class TestAuxiliaryPoolRotationRetry:
 
         stale_client = MagicMock()
         stale_client.base_url = "https://chatgpt.com/backend-api/codex"
-        stale_client.chat.completions.create.side_effect = [rate_err, rate_err]
+        stale_client.chat.completions.create.side_effect = [rate_err, rate_err, rate_err]
 
         fresh_client = MagicMock()
         fresh_client.base_url = "https://chatgpt.com/backend-api/codex"
@@ -2568,6 +2635,7 @@ class TestAuxiliaryPoolRotationRetry:
             patch("agent.auxiliary_client._get_cached_client", side_effect=[(stale_client, "gpt-5.4"), (fresh_client, "gpt-5.4")]),
             patch("agent.auxiliary_client._refresh_provider_credentials", return_value=False),
             patch("agent.auxiliary_client.load_pool", return_value=pool),
+            patch("agent.auxiliary_client.time.sleep"),
             patch("agent.auxiliary_client._try_payment_fallback") as mock_fallback,
         ):
             resp = call_llm(
@@ -2578,7 +2646,7 @@ class TestAuxiliaryPoolRotationRetry:
             )
 
         assert resp.choices[0].message.content == "rotated-sync"
-        assert stale_client.chat.completions.create.call_count == 2
+        assert stale_client.chat.completions.create.call_count == 3
         assert fresh_client.chat.completions.create.call_count == 1
         assert len(pool.rotate_calls) == 1
         assert pool.rotate_calls[0]["status_code"] == 429
@@ -2591,7 +2659,7 @@ class TestAuxiliaryPoolRotationRetry:
 
         stale_client = MagicMock()
         stale_client.base_url = "https://chatgpt.com/backend-api/codex"
-        stale_client.chat.completions.create = AsyncMock(side_effect=[rate_err, rate_err])
+        stale_client.chat.completions.create = AsyncMock(side_effect=[rate_err, rate_err, rate_err])
 
         fresh_client = MagicMock()
         fresh_client.base_url = "https://chatgpt.com/backend-api/codex"
@@ -2618,6 +2686,7 @@ class TestAuxiliaryPoolRotationRetry:
             patch("agent.auxiliary_client._get_cached_client", side_effect=[(stale_client, "gpt-5.4"), (fresh_client, "gpt-5.4")]),
             patch("agent.auxiliary_client._refresh_provider_credentials", return_value=False),
             patch("agent.auxiliary_client.load_pool", return_value=pool),
+            patch("agent.auxiliary_client.asyncio.sleep", new=AsyncMock()),
             patch("agent.auxiliary_client._try_payment_fallback") as mock_fallback,
         ):
             resp = await async_call_llm(
@@ -2628,7 +2697,7 @@ class TestAuxiliaryPoolRotationRetry:
             )
 
         assert resp.choices[0].message.content == "rotated-async"
-        assert stale_client.chat.completions.create.await_count == 2
+        assert stale_client.chat.completions.create.await_count == 3
         assert fresh_client.chat.completions.create.await_count == 1
         assert len(pool.rotate_calls) == 1
         assert pool.rotate_calls[0]["status_code"] == 429

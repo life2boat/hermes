@@ -36,7 +36,6 @@ Design notes
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -45,6 +44,7 @@ from typing import Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import profiles as profiles_mod
+from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +143,8 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    if not raw:
-        return None
-    stripped = _FENCE_RE.sub("", raw.strip())
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    parsed = safe_json_loads(raw or "", None)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _profile_author() -> str:
@@ -299,8 +286,11 @@ def decompose_task(
 
     try:
         from agent.auxiliary_client import (  # type: ignore
+            LLMServiceUnavailableError,
+            extract_content_or_reasoning,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
+            safe_call_llm,
         )
     except Exception as exc:
         logger.debug("decompose: auxiliary client import failed: %s", exc)
@@ -324,7 +314,8 @@ def decompose_task(
     )
 
     try:
-        resp = client.chat.completions.create(
+        resp = safe_call_llm(
+            task="kanban_decomposer",
             model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -335,16 +326,18 @@ def decompose_task(
             timeout=timeout or 180,
             extra_body=get_auxiliary_extra_body() or None,
         )
+    except LLMServiceUnavailableError as exc:
+        logger.info(
+            "decompose: API call failed for %s (%s)", task_id, exc,
+        )
+        return DecomposeOutcome(task_id, False, "LLM service temporarily unavailable")
     except Exception as exc:
         logger.info(
             "decompose: API call failed for %s (%s)", task_id, exc,
         )
         return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
 
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
+    raw = extract_content_or_reasoning(resp) or ""
 
     parsed = _extract_json_blob(raw)
     if parsed is None:

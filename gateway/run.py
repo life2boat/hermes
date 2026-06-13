@@ -97,6 +97,10 @@ _GATEWAY_PROVIDER_ERROR_RE = re.compile(
     r"|\bhttp\s*\d{3}\b"
     r"|incorrect\s+api\s+key"
     r"|invalid\s+api\s+key"
+    r"|llmserviceunavailableerror"
+    r"|auxiliary\s+.*failed:"
+    r"|llmserviceunavailableerror"
+    r"|auxiliary\s+.*failed:"
     r")",
     re.IGNORECASE,
 )
@@ -284,6 +288,9 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
 
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
+    lowered = str(text or "").lower()
+    if "llmserviceunavailableerror" in lowered or "llm service temporarily unavailable" in lowered:
+        return "Сервис временно перегружен, попробуйте через минуту."
     if _GATEWAY_AUTH_ERROR_RE.search(text):
         return (
             "⚠️ Provider authentication failed. Check the configured credentials; "

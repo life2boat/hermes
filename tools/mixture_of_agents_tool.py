@@ -45,16 +45,14 @@ Usage:
     )
 """
 
+import asyncio
 import json
+import datetime
 import logging
 import os
-import asyncio
-import datetime
-from typing import Dict, Any, List, Optional
-from tools.openrouter_client import get_async_client as _get_openrouter_client, check_api_key as check_openrouter_api_key
-from agent.auxiliary_client import extract_content_or_reasoning
+from typing import Any, Dict, List, Optional
+from agent.auxiliary_client import extract_content_or_reasoning, safe_async_call_llm
 from tools.debug_helpers import DebugSession
-import sys
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +83,11 @@ AGGREGATOR_SYSTEM_PROMPT = """You have been provided with a set of responses fro
 Responses from models:"""
 
 _debug = DebugSession("moa_tools", env_var="MOA_TOOLS_DEBUG")
+
+
+def _get_openrouter_client():
+    """Legacy test seam retained for compatibility with existing tests."""
+    return None
 
 
 def _construct_aggregator_prompt(system_prompt: str, responses: List[str]) -> str:
@@ -144,7 +147,11 @@ async def _run_reference_model_safe(
             if not model.lower().startswith('gpt-'):
                 api_params["temperature"] = temperature
             
-            response = await _get_openrouter_client().chat.completions.create(**api_params)
+            response = await safe_async_call_llm(
+                task="mixture_of_agents_reference",
+                provider="openrouter",
+                **api_params,
+            )
             
             content = extract_content_or_reasoning(response)
             if not content:
@@ -219,14 +226,22 @@ async def _run_aggregator_model(
     if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
         api_params["temperature"] = temperature
 
-    response = await _get_openrouter_client().chat.completions.create(**api_params)
+    response = await safe_async_call_llm(
+        task="mixture_of_agents_aggregator",
+        provider="openrouter",
+        **api_params,
+    )
 
     content = extract_content_or_reasoning(response)
 
     # Retry once on empty content (reasoning-only response)
     if not content:
         logger.warning("Aggregator returned empty content, retrying once")
-        response = await _get_openrouter_client().chat.completions.create(**api_params)
+        response = await safe_async_call_llm(
+            task="mixture_of_agents_aggregator",
+            provider="openrouter",
+            **api_params,
+        )
         content = extract_content_or_reasoning(response)
 
     logger.info("Aggregation complete (%s characters)", len(content))

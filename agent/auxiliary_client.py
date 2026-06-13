@@ -40,6 +40,7 @@ Payment / credit exhaustion fallback:
   their OpenRouter balance but has Codex OAuth or another provider available.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -102,9 +103,228 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 from agent.credential_pool import load_pool
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
-from utils import base_url_host_matches, base_url_hostname, model_forces_max_completion_tokens, normalize_proxy_env_vars
+from utils import base_url_host_matches, base_url_hostname, model_forces_max_completion_tokens, normalize_proxy_env_vars, safe_json_loads
 
 logger = logging.getLogger(__name__)
+
+
+_AUX_RETRY_MAX_ATTEMPTS = 3
+_AUX_RETRY_BASE_DELAY_SECONDS = 0.25
+
+
+class LLMServiceUnavailableError(RuntimeError):
+    """User-safe wrapper for exhausted or non-recoverable LLM failures."""
+
+    user_safe_message = "LLM service temporarily unavailable; please try again soon."
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        task: Optional[str] = None,
+        cause: Optional[BaseException] = None,
+    ) -> None:
+        super().__init__(message)
+        self.task = task
+        self.cause = cause
+
+
+def _extract_status_code(exc: Exception) -> Optional[int]:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_fail_fast_error(exc: Exception) -> bool:
+    status = _extract_status_code(exc)
+    if status in {400, 401, 403}:
+        return True
+    err_name = type(exc).__name__.lower()
+    return err_name in {
+        "authenticationerror",
+        "permissiondeniederror",
+        "badrequesterror",
+    }
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    if _is_connection_error(exc) or _is_rate_limit_error(exc):
+        return True
+    status = _extract_status_code(exc)
+    return status in {408, 429, 500, 502, 503, 504}
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    return _AUX_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0))
+
+
+def _perform_llm_request_sync(
+    create_fn,
+    *,
+    task: Optional[str] = None,
+    retry_context: str = "Auxiliary",
+    validate_response: bool = True,
+):
+    for attempt in range(1, _AUX_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            response = create_fn()
+            return _validate_llm_response(response, task) if validate_response else response
+        except Exception as exc:
+            if _is_fail_fast_error(exc):
+                logger.warning(
+                    "%s %s: fail-fast on %s: %s",
+                    retry_context,
+                    task or "call",
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+            if not _is_retryable_llm_error(exc) or attempt >= _AUX_RETRY_MAX_ATTEMPTS:
+                if _is_retryable_llm_error(exc):
+                    logger.warning(
+                        "%s %s: retries exhausted after %s attempts (%s: %s)",
+                        retry_context,
+                        task or "call",
+                        attempt,
+                        type(exc).__name__,
+                        exc,
+                    )
+                raise
+            delay = _retry_delay_seconds(attempt)
+            logger.warning(
+                "%s %s: transient %s on attempt %s/%s; retrying in %.2fs",
+                retry_context,
+                task or "call",
+                type(exc).__name__,
+                attempt,
+                _AUX_RETRY_MAX_ATTEMPTS,
+                delay,
+            )
+            time.sleep(delay)
+
+
+async def _perform_llm_request_async(
+    create_fn,
+    *,
+    task: Optional[str] = None,
+    retry_context: str = "Auxiliary",
+    validate_response: bool = True,
+):
+    for attempt in range(1, _AUX_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            response = await create_fn()
+            return _validate_llm_response(response, task) if validate_response else response
+        except Exception as exc:
+            if _is_fail_fast_error(exc):
+                logger.warning(
+                    "%s %s: fail-fast on %s: %s",
+                    retry_context,
+                    task or "call",
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+            if not _is_retryable_llm_error(exc) or attempt >= _AUX_RETRY_MAX_ATTEMPTS:
+                if _is_retryable_llm_error(exc):
+                    logger.warning(
+                        "%s %s: retries exhausted after %s attempts (%s: %s)",
+                        retry_context,
+                        task or "call",
+                        attempt,
+                        type(exc).__name__,
+                        exc,
+                    )
+                raise
+            delay = _retry_delay_seconds(attempt)
+            logger.warning(
+                "%s %s: transient %s on attempt %s/%s; retrying in %.2fs",
+                retry_context,
+                task or "call",
+                type(exc).__name__,
+                attempt,
+                _AUX_RETRY_MAX_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+def _coerce_safe_llm_error(exc: Exception, *, task: Optional[str] = None) -> Exception:
+    if isinstance(exc, LLMServiceUnavailableError):
+        return exc
+    if (
+        _is_fail_fast_error(exc)
+        or _is_retryable_llm_error(exc)
+        or _is_payment_error(exc)
+        or _is_auth_error(exc)
+        or _is_connection_error(exc)
+    ):
+        return LLMServiceUnavailableError(
+            f"Auxiliary {task or 'call'} failed: {type(exc).__name__}",
+            task=task,
+            cause=exc,
+        )
+    return exc
+
+
+def safe_chat_completion_create(
+    client: Any,
+    *,
+    task: str = None,
+    user_safe: bool = True,
+    **kwargs,
+) -> Any:
+    validate_response = not bool(kwargs.get("stream"))
+    try:
+        return _perform_llm_request_sync(
+            lambda: client.chat.completions.create(**kwargs),
+            task=task,
+            retry_context="Direct LLM",
+            validate_response=validate_response,
+        )
+    except Exception as exc:
+        if not user_safe:
+            raise
+        raise _coerce_safe_llm_error(exc, task=task) from exc
+
+
+async def safe_chat_completion_create_async(
+    client: Any,
+    *,
+    task: str = None,
+    user_safe: bool = True,
+    **kwargs,
+) -> Any:
+    validate_response = not bool(kwargs.get("stream"))
+    try:
+        return await _perform_llm_request_async(
+            lambda: client.chat.completions.create(**kwargs),
+            task=task,
+            retry_context="Direct LLM (async)",
+            validate_response=validate_response,
+        )
+    except Exception as exc:
+        if not user_safe:
+            raise
+        raise _coerce_safe_llm_error(exc, task=task) from exc
+
+
+def safe_call_llm(*args, **kwargs) -> Any:
+    task = kwargs.get("task")
+    try:
+        return call_llm(*args, **kwargs)
+    except Exception as exc:
+        raise _coerce_safe_llm_error(exc, task=task) from exc
+
+
+async def safe_async_call_llm(*args, **kwargs) -> Any:
+    task = kwargs.get("task")
+    try:
+        return await async_call_llm(*args, **kwargs)
+    except Exception as exc:
+        raise _coerce_safe_llm_error(exc, task=task) from exc
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -2826,8 +3046,10 @@ def _retry_same_provider_sync(
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
-    return _validate_llm_response(
-        retry_client.chat.completions.create(**retry_kwargs), task,
+    return _perform_llm_request_sync(
+        lambda: retry_client.chat.completions.create(**retry_kwargs),
+        task=task,
+        retry_context="Auxiliary retry",
     )
 
 
@@ -2883,8 +3105,10 @@ async def _retry_same_provider_async(
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
-    return _validate_llm_response(
-        await retry_client.chat.completions.create(**retry_kwargs), task,
+    return await _perform_llm_request_async(
+        lambda: retry_client.chat.completions.create(**retry_kwargs),
+        task=task,
+        retry_context="Auxiliary retry (async)",
     )
 
 
@@ -5013,24 +5237,16 @@ def _build_call_kwargs(
 
 
 def _validate_llm_response(response: Any, task: str = None) -> Any:
-    """Validate that an LLM response has the expected .choices[0].message shape.
-
-    Fails fast with a clear error instead of letting malformed payloads
-    propagate to downstream consumers where they crash with misleading
-    AttributeError (e.g. "'str' object has no attribute 'choices'").
-
-    See #7264.
-    """
+    """Validate that an LLM response has the expected .choices[0].message shape."""
     if response is None:
         raise RuntimeError(
             f"Auxiliary {task or 'call'}: LLM returned None response"
         )
-    # Allow SimpleNamespace responses from adapters (CodexAuxiliaryClient,
-    # AnthropicAuxiliaryClient) — they have .choices[0].message.
     try:
         choices = response.choices
         if not choices or not hasattr(choices[0], "message"):
             raise AttributeError("missing choices[0].message")
+        message = choices[0].message
     except (AttributeError, TypeError, IndexError) as exc:
         response_type = type(response).__name__
         response_preview = str(response)[:120]
@@ -5040,6 +5256,18 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
             f"Expected object with .choices[0].message — check provider "
             f"adapter or custom endpoint compatibility."
         ) from exc
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        parsed = safe_json_loads(content, None)
+        if isinstance(parsed, (dict, list)):
+            normalized = json.dumps(parsed, ensure_ascii=False)
+            try:
+                message.content = normalized
+            except Exception:
+                msg_dict = getattr(message, "__dict__", {}).copy()
+                msg_dict["content"] = normalized
+                choices[0].message = SimpleNamespace(**msg_dict)
     return response
 
 
@@ -5171,28 +5399,11 @@ def call_llm(
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:
-        # Retry ONCE on the same provider for a one-off transient transport
-        # blip (streaming-close / incomplete chunked read / 5xx / 408) before
-        # the except-chain below escalates to provider/model fallback. A
-        # single dropped connection shouldn't abandon an otherwise-healthy
-        # provider. A second failure (or any non-transient error) falls
-        # through to ``first_err`` and the existing fallback handling
-        # unchanged. This is the unified home for the transient retry that
-        # every auxiliary task (compression, memory flush, title-gen,
-        # session-search, vision) shares. (PR #16587)
-        try:
-            return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task)
-        except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
-                raise
-            logger.info(
-                "Auxiliary %s: transient transport error; retrying once on "
-                "the same provider before fallback: %s",
-                task or "call", transient_err,
-            )
-            return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task)
+        return _perform_llm_request_sync(
+            lambda: client.chat.completions.create(**kwargs),
+            task=task,
+            retry_context="Auxiliary",
+        )
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -5368,17 +5579,10 @@ def call_llm(
         # _select_unlocked() return the NEXT key by mistake).
         _client_api_key = str(getattr(client, "api_key", "") or "")
         if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+            # The primary request path already consumed the retry budget for
+            # transient/rate-limit failures. Do not hit the same exhausted
+            # credential again here; rotate the pool based on the last error.
             recovery_err = first_err
-            # Skip the extra retry for clear payment/quota errors — the endpoint
-            # won't accept another request with the same exhausted key.
-            if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
-                try:
-                    return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
-                except Exception as retry_err:
-                    if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
-                        raise
-                    recovery_err = retry_err
             if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
                 logger.info(
                     "Auxiliary %s: recovered %s via credential-pool rotation after %s",
@@ -5658,22 +5862,11 @@ async def async_call_llm(
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     try:
-        # Retry ONCE on the same provider for a transient transport blip
-        # before the except-chain escalates to fallback — see call_llm()
-        # for the rationale. (PR #16587)
-        try:
-            return _validate_llm_response(
-                await client.chat.completions.create(**kwargs), task)
-        except Exception as transient_err:
-            if not _is_transient_transport_error(transient_err):
-                raise
-            logger.info(
-                "Auxiliary %s (async): transient transport error; retrying "
-                "once on the same provider before fallback: %s",
-                task or "call", transient_err,
-            )
-            return _validate_llm_response(
-                await client.chat.completions.create(**kwargs), task)
+        return await _perform_llm_request_async(
+            lambda: client.chat.completions.create(**kwargs),
+            task=task,
+            retry_context="Auxiliary (async)",
+        )
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -5837,17 +6030,10 @@ async def async_call_llm(
         pool_provider = _recoverable_pool_provider(resolved_provider, client, main_runtime=main_runtime)
         _client_api_key = str(getattr(client, "api_key", "") or "")
         if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+            # The primary async request path already consumed the retry budget
+            # for transient/rate-limit failures. Rotate the pool immediately
+            # instead of firing a fourth request with the same credential.
             recovery_err = first_err
-            # Skip the extra retry for clear payment/quota errors — the endpoint
-            # won't accept another request with the same exhausted key.
-            if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
-                try:
-                    return _validate_llm_response(
-                        await client.chat.completions.create(**kwargs), task)
-                except Exception as retry_err:
-                    if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
-                        raise
-                    recovery_err = retry_err
             if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
                 logger.info(
                     "Auxiliary %s (async): recovered %s via credential-pool rotation after %s",

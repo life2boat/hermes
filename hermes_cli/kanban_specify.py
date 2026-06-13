@@ -31,7 +31,6 @@ Design notes
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -40,7 +39,7 @@ from typing import Optional
 
 from hermes_cli import kanban_db as kb
 
-from utils import env_int
+from utils import env_int, safe_json_loads
 
 HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(
     1500,
@@ -109,24 +108,9 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    """Lenient JSON extraction — tolerates fenced code blocks and
-    leading/trailing whitespace. Returns None if nothing parses."""
-    if not raw:
-        return None
-    stripped = _FENCE_RE.sub("", raw.strip())
-    # Greedy: find the first `{` and last `}` and try that slice.
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
-    try:
-        val = json.loads(candidate)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(val, dict):
-        return None
-    return val
+    """Lenient JSON extraction — tolerates fenced code blocks and prose."""
+    parsed = safe_json_loads(raw or "", None)
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _profile_author() -> str:
@@ -162,7 +146,13 @@ def specify_task(
         )
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            LLMServiceUnavailableError,
+            extract_content_or_reasoning,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+            safe_call_llm,
+        )
     except Exception as exc:  # pragma: no cover — import smoke test
         logger.debug("specify: auxiliary client import failed: %s", exc)
         return SpecifyOutcome(task_id, False, "auxiliary client unavailable")
@@ -185,7 +175,8 @@ def specify_task(
     )
 
     try:
-        resp = client.chat.completions.create(
+        resp = safe_call_llm(
+            task="triage_specifier",
             model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -196,6 +187,14 @@ def specify_task(
             timeout=timeout or 120,
             extra_body=get_auxiliary_extra_body() or None,
         )
+    except LLMServiceUnavailableError as exc:
+        logger.info(
+            "specify: API call failed for %s (%s) — skipping",
+            task_id, exc,
+        )
+        return SpecifyOutcome(
+            task_id, False, "LLM service temporarily unavailable"
+        )
     except Exception as exc:
         logger.info(
             "specify: API call failed for %s (%s) — skipping",
@@ -205,10 +204,7 @@ def specify_task(
             task_id, False, f"LLM error: {type(exc).__name__}"
         )
 
-    try:
-        raw = (resp.choices[0].message.content or "").strip()
-    except Exception:
-        raw = ""
+    raw = (extract_content_or_reasoning(resp) or "").strip()
 
     parsed = _extract_json_blob(raw)
 

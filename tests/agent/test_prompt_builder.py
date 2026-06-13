@@ -1337,3 +1337,52 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 
 
+
+def test_context_files_prompt_logs_analytics(tmp_path, monkeypatch):
+    import agent.prompt_builder as prompt_builder_module
+
+    events = []
+
+    class StubAnalyticsLogger:
+        def log_injection(self, **kwargs):
+            events.append(kwargs)
+
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(
+        prompt_builder_module,
+        "get_default_memory_analytics_logger",
+        lambda: StubAnalyticsLogger(),
+    )
+    (tmp_path / "AGENTS.md").write_text("Use Ruff for linting.")
+
+    result = prompt_builder_module.build_context_files_prompt(cwd=str(tmp_path))
+
+    assert "Ruff for linting" in result
+    assert events
+    assert events[0]["source"] == "context_files"
+    assert events[0]["found_count"] >= 1
+    assert events[0]["processing_time_ms"] >= 0
+
+
+def test_context_files_prompt_ignores_analytics_failures(tmp_path, monkeypatch):
+    import agent.prompt_builder as prompt_builder_module
+
+    class BrokenAnalyticsLogger:
+        def log_injection(self, **kwargs):
+            raise RuntimeError("analytics unavailable")
+
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(
+        prompt_builder_module,
+        "get_default_memory_analytics_logger",
+        lambda: BrokenAnalyticsLogger(),
+    )
+    (tmp_path / "AGENTS.md").write_text("Use Ruff for linting.")
+
+    result = prompt_builder_module.build_context_files_prompt(cwd=str(tmp_path))
+
+    assert "Ruff for linting" in result

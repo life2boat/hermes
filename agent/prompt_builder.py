@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
+from gateway.memory.analytics import get_default_memory_analytics_logger
 from agent.skill_utils import (
     extract_skill_conditions,
     extract_skill_description,
@@ -1579,6 +1581,18 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
+def _log_context_injection_analytics(*, found_count: int, processing_time_ms: float) -> None:
+    try:
+        get_default_memory_analytics_logger().log_injection(
+            user_id=None,
+            source="context_files",
+            found_count=found_count,
+            processing_time_ms=processing_time_ms,
+        )
+    except Exception:
+        pass
+
+
 def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
     """Discover and load context files for the system prompt.
 
@@ -1594,6 +1608,7 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     When *skip_soul* is True, SOUL.md is not included here (it was already
     loaded via ``load_soul_md()`` for the identity slot).
     """
+    started_at = time.perf_counter()
     if cwd is None:
         cwd = os.getcwd()
 
@@ -1615,6 +1630,11 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
         soul_content = load_soul_md()
         if soul_content:
             sections.append(soul_content)
+
+    _log_context_injection_analytics(
+        found_count=len(sections),
+        processing_time_ms=(time.perf_counter() - started_at) * 1000.0,
+    )
 
     if not sections:
         return ""

@@ -3,10 +3,12 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterator
 
+from gateway.memory.analytics import MemoryAnalyticsLogger
 from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter, QdrantMemoryHit
@@ -90,12 +92,18 @@ class HealBiteMemoryBridge:
         *,
         qdrant_adapter: QdrantMemoryAdapter | None = None,
         embedding_adapter: EmbeddingAdapter | None = None,
+        analytics_logger: MemoryAnalyticsLogger | None = None,
         background_write: bool = True,
         min_trust_score: float = 0.0,
     ) -> None:
         self.db_path = Path(db_path)
         self.embedding_adapter = embedding_adapter or EmbeddingAdapter()
         self.qdrant_adapter = qdrant_adapter
+        self._owns_analytics_logger = analytics_logger is None
+        self.analytics_logger = analytics_logger or MemoryAnalyticsLogger(
+            self.db_path,
+            background_write=background_write,
+        )
         self._vector_enabled = bool(
             qdrant_adapter is not None
             and getattr(qdrant_adapter, "enabled", True)
@@ -115,6 +123,8 @@ class HealBiteMemoryBridge:
     def close(self) -> None:
         if self._executor is not None:
             self._executor.shutdown(wait=True)
+        if self._owns_analytics_logger:
+            self.analytics_logger.close()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -137,6 +147,7 @@ class HealBiteMemoryBridge:
                     self._fts_enabled = False
                 else:
                     raise
+        self.analytics_logger.ensure_schema()
 
     def upsert_fact(
         self,
@@ -209,10 +220,17 @@ class HealBiteMemoryBridge:
             yield dict(row)
 
     def rebuild_qdrant_index(self, *, user_id: int | None = None) -> int:
+        started_at = time.perf_counter()
         synced = 0
         for fact in self.iter_facts(user_id=user_id):
             if self._push_fact_to_qdrant(fact):
                 synced += 1
+        self.analytics_logger.log_rebuild(
+            user_id=require_memory_user_id(user_id) if user_id is not None else None,
+            source="qdrant",
+            found_count=synced,
+            processing_time_ms=(time.perf_counter() - started_at) * 1000.0,
+        )
         return synced
 
     def search_relevant_facts(
@@ -225,6 +243,10 @@ class HealBiteMemoryBridge:
     ) -> list[dict[str, Any]]:
         user_id = require_memory_user_id(user_id)
         trust_threshold = self.min_trust_score if min_trust_score is None else float(min_trust_score)
+        started_at = time.perf_counter()
+        analytics_source = "like"
+        results: list[dict[str, Any]] = []
+
         if self._vector_enabled and self.qdrant_adapter is not None:
             qdrant_hits = self.qdrant_adapter.search(
                 query_text=query,
@@ -237,21 +259,36 @@ class HealBiteMemoryBridge:
                 min_trust_score=trust_threshold,
             )
             if hydrated:
-                return hydrated[:limit]
-        fts_results = self._search_sqlite_fts(
+                results = hydrated[:limit]
+                analytics_source = "qdrant"
+
+        if not results:
+            fts_results = self._search_sqlite_fts(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                min_trust_score=trust_threshold,
+            )
+            if fts_results:
+                results = fts_results
+                analytics_source = "fts5"
+
+        if not results:
+            results = self._search_sqlite_like(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                min_trust_score=trust_threshold,
+            )
+            analytics_source = "like"
+
+        self.analytics_logger.log_search(
             user_id=user_id,
-            query=query,
-            limit=limit,
-            min_trust_score=trust_threshold,
+            source=analytics_source,
+            found_count=len(results),
+            processing_time_ms=(time.perf_counter() - started_at) * 1000.0,
         )
-        if fts_results:
-            return fts_results
-        return self._search_sqlite_like(
-            user_id=user_id,
-            query=query,
-            limit=limit,
-            min_trust_score=trust_threshold,
-        )
+        return results
 
     def _schedule_qdrant_sync(self, fact: dict[str, Any]) -> None:
         if not self._vector_enabled or self.qdrant_adapter is None:

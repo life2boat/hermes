@@ -81,6 +81,7 @@ from gateway.platforms.base import (
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
     utf16_len,
 )
+from gateway.memory.analytics import compute_memory_analytics_summary, format_memory_analytics_report
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -5359,12 +5360,114 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._apply_telegram_group_observe_attribution(event)
         self._enqueue_text_event(event)
 
+    def _memory_stats_scope(self, chat_type: str | None) -> str:
+        normalized = (chat_type or "").lower()
+        if normalized in {"", "dm", "direct", "private"}:
+            return "dm"
+        return "group"
+
+    def _memory_stats_is_admin(self, msg: Message) -> bool:
+        from gateway.slash_access import policy_from_extra
+
+        policy = policy_from_extra(getattr(self.config, "extra", {}) or {}, self._memory_stats_scope(getattr(getattr(msg, "chat", None), "type", None)))
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        return bool(policy.admin_user_ids) and policy.is_admin(str(user_id) if user_id is not None else None)
+
+    def _parse_memory_stats_args(self, text: str) -> tuple[float | None, int | None, str | None]:
+        tokens = (text or "").strip().split()
+        if not tokens:
+            return None, None, "Usage: /memory_stats [--hours N] [--user-id ID]"
+
+        hours: float | None = None
+        user_id: int | None = None
+        index = 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--hours":
+                index += 1
+                if index >= len(tokens):
+                    return None, None, "Usage: /memory_stats [--hours N] [--user-id ID]"
+                try:
+                    hours = float(tokens[index])
+                except ValueError:
+                    return None, None, "Invalid value for --hours."
+            elif token.startswith("--hours="):
+                try:
+                    hours = float(token.split("=", 1)[1])
+                except ValueError:
+                    return None, None, "Invalid value for --hours."
+            elif token == "--user-id":
+                index += 1
+                if index >= len(tokens):
+                    return None, None, "Usage: /memory_stats [--hours N] [--user-id ID]"
+                try:
+                    user_id = int(tokens[index])
+                except ValueError:
+                    return None, None, "Invalid value for --user-id."
+            elif token.startswith("--user-id="):
+                try:
+                    user_id = int(token.split("=", 1)[1])
+                except ValueError:
+                    return None, None, "Invalid value for --user-id."
+            else:
+                return None, None, "Usage: /memory_stats [--hours N] [--user-id ID]"
+            index += 1
+
+        if hours is not None and hours <= 0:
+            return None, None, "--hours must be positive."
+        return hours, user_id, None
+
+    async def _maybe_handle_memory_stats_command(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/memory_stats":
+            return False
+
+        thread_id = getattr(msg, "message_thread_id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+
+        if not self._memory_stats_is_admin(msg):
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="This command is admin-only.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        hours, user_id, error = self._parse_memory_stats_args(text)
+        if error:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=error,
+                message_thread_id=thread_id,
+            )
+            return True
+
+        summary = compute_memory_analytics_summary(user_id=user_id, hours=hours)
+        report = format_memory_analytics_report(summary)
+        scope_parts: list[str] = []
+        if hours is not None:
+            scope_parts.append(f"last {hours:g}h")
+        if user_id is not None:
+            scope_parts.append(f"user_id={user_id}")
+        if scope_parts:
+            report += "\nScope: " + ", ".join(scope_parts)
+
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=report,
+            message_thread_id=thread_id,
+        )
+        return True
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
         if not self._should_process_message(msg, is_command=True):
+            return
+        if await self._maybe_handle_memory_stats_command(msg):
             return
         await self._ensure_forum_commands(msg)
 

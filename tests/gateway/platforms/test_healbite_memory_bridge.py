@@ -3,11 +3,13 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import sqlite3
 import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from gateway.memory.analytics import MemoryAnalyticsLogger, compute_memory_analytics_summary
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter, QdrantMemoryHit
 from gateway.platforms.healbite_memory_bridge import HealBiteMemoryBridge, build_memory_session_id
@@ -455,3 +457,76 @@ def test_build_memory_session_id_rejects_missing_user_id():
         assert "non-null user_id" in str(exc)
     else:
         raise AssertionError("expected ValueError for missing user_id")
+
+def test_search_survives_analytics_db_write_failure(tmp_path):
+    mock_client = MagicMock()
+    bridge = _build_bridge(tmp_path, mock_client)
+    bridge._fts_enabled = False
+    bridge.upsert_fact(
+        user_id=909,
+        entity="profile",
+        key="goal",
+        value="walk after dinner",
+        source="user",
+        trust_score=0.8,
+    )
+
+    def broken_connect():
+        raise sqlite3.OperationalError("database is locked")
+
+    bridge.analytics_logger._connect = broken_connect
+
+    results = bridge.search_relevant_facts(user_id=909, query="walk", limit=2)
+
+    assert len(results) == 1
+    assert results[0]["retrieval_source"] == "sqlite_like"
+    bridge.close()
+
+
+def test_search_analytics_rows_stay_scoped_to_user_id(tmp_path):
+    mock_client = MagicMock()
+    bridge = _build_bridge(tmp_path, mock_client)
+    bridge._fts_enabled = False
+    bridge.upsert_fact(
+        user_id=111,
+        entity="profile",
+        key="goal",
+        value="reduce sodium",
+        source="user",
+        trust_score=0.9,
+    )
+    bridge.upsert_fact(
+        user_id=222,
+        entity="profile",
+        key="goal",
+        value="increase protein",
+        source="user",
+        trust_score=0.9,
+    )
+
+    bridge.search_relevant_facts(user_id=111, query="sodium", limit=2)
+    bridge.search_relevant_facts(user_id=222, query="protein", limit=2)
+    bridge.close()
+
+    conn = sqlite3.connect(tmp_path / "memory.sqlite")
+    try:
+        rows = conn.execute(
+            "SELECT user_id, source, found_count FROM memory_analytics_logs WHERE event_type = 'search' ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [(111, "like", 1), (222, "like", 1)]
+    assert compute_memory_analytics_summary(tmp_path / "memory.sqlite", user_id=111)["total_searches"] == 1
+    assert compute_memory_analytics_summary(tmp_path / "memory.sqlite", user_id=222)["total_searches"] == 1
+
+
+def test_memory_analytics_logger_swallow_db_errors(tmp_path):
+    logger = MemoryAnalyticsLogger(tmp_path / "analytics.sqlite", background_write=False)
+
+    def broken_connect():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    logger._connect = broken_connect
+    logger.log_search(user_id=1, source="like", found_count=1, processing_time_ms=12.5)
+    logger.close()

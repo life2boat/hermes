@@ -1408,15 +1408,19 @@ def _try_resolve_fallback_provider() -> dict | None:
 
 
 _VISION_SAFE_RU_FALLBACK = (
-    "\u0424\u043e\u0442\u043e \u043f\u043e\u043b\u0443\u0447\u0438\u043b, \u043d\u043e \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435 \u043c\u043e\u0433\u0443 \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435: \u0441\u0435\u0440\u0432\u0438\u0441 \u0430\u043d\u0430\u043b\u0438\u0437\u0430 \u0444\u043e\u0442\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443 \u0438\u043b\u0438 \u043e\u043f\u0438\u0448\u0438\u0442\u0435 \u0435\u0434\u0443 \u0442\u0435\u043a\u0441\u0442\u043e\u043c."
+    "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u0440\u0438\u0441\u043b\u0430\u0442\u044c \u0444\u043e\u0442\u043e \u043a\u0440\u0443\u043f\u043d\u0435\u0435 \u0438 \u0447\u0451\u0442\u0447\u0435."
 )
+
+
+def _vision_safe_fallback_text() -> str:
+    return _VISION_SAFE_RU_FALLBACK
 
 
 def _vision_safe_fallback_prompt() -> str:
     return (
         "[The user sent an image, but automated vision recognition is unavailable. "
         "Do not guess the image contents. Reply to the user in Russian with this "
-        f"safe fallback and no technical details: {_VISION_SAFE_RU_FALLBACK}]"
+        f"safe fallback and no technical details: {_vision_safe_fallback_text()}]"
     )
 
 
@@ -7692,10 +7696,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
                         _img_mode, len(image_paths),
                     )
-                    message_text = await self._enrich_message_with_vision(
+                    message_text, vision_success = await self._try_enrich_message_with_vision(
                         message_text,
                         image_paths,
                     )
+                    if not vision_success:
+                        logger.info(
+                            "Image routing: auxiliary vision unavailable; replying with safe fallback and skipping text-only model path."
+                        )
+                        await self._send_vision_unavailable_reply(source=source, event=event)
+                        return None
 
             if audio_paths:
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
@@ -11621,26 +11631,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
-    async def _enrich_message_with_vision(
+    async def _send_vision_unavailable_reply(
+        self,
+        *,
+        source: SessionSource,
+        event: MessageEvent,
+    ) -> None:
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not source.chat_id:
+            return
+        metadata = self._thread_metadata_for_source(
+            source,
+            self._reply_anchor_for_event(event),
+        )
+        try:
+            await adapter.send(
+                source.chat_id,
+                _vision_safe_fallback_text(),
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to deliver vision-unavailable fallback: %s",
+                exc,
+            )
+
+    async def _try_enrich_message_with_vision(
         self,
         user_text: str,
         image_paths: List[str],
-    ) -> str:
-        """
-        Auto-analyze user-attached images with the vision tool and prepend
-        the descriptions to the message text.
+    ) -> tuple[str, bool]:
+        """Analyze attached images and build text context for the agent.
 
-        Each image is analyzed with a general-purpose prompt.  The resulting
-        description *and* the local cache path are injected so the model can:
-          1. Immediately understand what the user sent (no extra tool call).
-          2. Re-examine the image with vision_analyze if it needs more detail.
-
-        Args:
-            user_text:   The user's original caption / message text.
-            image_paths: List of local file paths to cached images.
-
-        Returns:
-            The enriched message string with vision descriptions prepended.
+        Returns ``(enriched_text, success)``. ``success`` is true only when at
+        least one image was actually analyzed successfully. Callers that must
+        avoid text-only fallbacks for image turns can use this to stop before
+        invoking a non-vision main model.
         """
         from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
@@ -11669,21 +11695,55 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         f"image_url: {path} ~]"
                     )
                 else:
-                    logger.warning("Vision auto-analysis returned a non-success result")
-                    enriched_parts.append(_vision_safe_fallback_prompt())
+                    logger.warning(
+                        "Vision auto-analysis returned a non-success result for user image"
+                    )
             except Exception:
-                logger.warning("Vision auto-analysis failed for a user image", exc_info=True)
-                enriched_parts.append(_vision_safe_fallback_prompt())
+                logger.warning(
+                    "Vision auto-analysis failed for a user image",
+                    exc_info=True,
+                )
 
-        # Combine: vision descriptions first, then the user's original text
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
             if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
-        return user_text
+                return f"{prefix}\n\n{user_text}", True
+            return prefix, True
+        return user_text, False
+
+    async def _enrich_message_with_vision(
+        self,
+        user_text: str,
+        image_paths: List[str],
+    ) -> str:
+        """
+        Auto-analyze user-attached images with the vision tool and prepend
+        the descriptions to the message text.
+
+        Each image is analyzed with a general-purpose prompt.  The resulting
+        description *and* the local cache path are injected so the model can:
+          1. Immediately understand what the user sent (no extra tool call).
+          2. Re-examine the image with vision_analyze if it needs more detail.
+
+        Args:
+            user_text:   The user's original caption / message text.
+            image_paths: List of local file paths to cached images.
+
+        Returns:
+            The enriched message string with vision descriptions prepended.
+            If automated vision is unavailable, returns a safe fallback string
+            with no provider/auth details.
+        """
+        enriched_text, success = await self._try_enrich_message_with_vision(
+            user_text,
+            image_paths,
+        )
+        if success:
+            return enriched_text
+        return _vision_safe_fallback_text()
 
     async def _enrich_message_with_transcription(
+
         self,
         user_text: str,
         audio_paths: List[str],

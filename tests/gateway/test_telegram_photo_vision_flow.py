@@ -1,13 +1,16 @@
 import base64
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.platforms.base import MessageType
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.platforms.telegram import TelegramAdapter
+from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 
 
 def _png_bytes() -> bytes:
@@ -133,3 +136,90 @@ async def test_text_only_reply_does_not_attach_image_without_photo(adapter):
     assert event.message_type == MessageType.TEXT
     assert event.media_urls == []
     assert event.media_types == []
+
+SAFE_VISION_FALLBACK = (
+    "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u0440\u0438\u0441\u043b\u0430\u0442\u044c \u0444\u043e\u0442\u043e \u043a\u0440\u0443\u043f\u043d\u0435\u0435 \u0438 \u0447\u0451\u0442\u0447\u0435."
+)
+
+
+def _make_text_only_runner():
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")},
+    )
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._model = "deepseek-chat"
+    runner._base_url = None
+    runner._has_setup_skill = lambda: False
+    runner._decide_image_input_mode = lambda: "text"
+    return runner, adapter
+
+
+def _runner_source():
+    return SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="100",
+        chat_type="dm",
+        user_id="1",
+        user_name="Test User",
+    )
+
+
+def _runner_photo_event(source, *, text: str = ""):
+    return MessageEvent(
+        text=text,
+        message_type=MessageType.PHOTO,
+        source=source,
+        media_urls=["/tmp/meal.png"],
+        media_types=["image/png"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_only_skips_text_only_path_when_vision_unavailable():
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    failure = json.dumps({
+        "success": False,
+        "error": "Provider authentication failed. Check configured credentials.",
+        "analysis": "No LLM provider configured for task=vision provider=auto.",
+    })
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=failure)):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert sent_text == SAFE_VISION_FALLBACK
+    assert "Provider authentication failed" not in sent_text
+    assert "No LLM provider configured" not in sent_text
+    assert "vision_analyze" not in sent_text
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_caption_skips_text_only_path_when_vision_unavailable():
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source, text="Count calories")
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(side_effect=RuntimeError("auth failed"))):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert sent_text == SAFE_VISION_FALLBACK
+    assert "auth failed" not in sent_text
+    assert "Count calories" not in sent_text
+

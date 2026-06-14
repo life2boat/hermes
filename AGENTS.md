@@ -4,6 +4,14 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Local Workflow Guardrails
+
+- Read `RUNBOOK_CODING_LOOP.md` before bounded coding-loop work that changes code, checks, or deploy preparation.
+- Follow the `Private Artifacts Policy`: `backups/`, `memory_capsules/`, `.env` snapshots, database dumps, and auth files must never live in the git working tree.
+- Store private artifacts under `/home/hermes/private_backups/hermes-agent/` with `chmod 700`.
+- Do not print secret values.
+- `scripts/agent_check.sh` runs `scripts/secret_check.sh` as its first step and should be used before commits for local coding tasks.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a

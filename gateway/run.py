@@ -292,10 +292,7 @@ def _gateway_provider_error_reply(text: str) -> str:
     if "llmserviceunavailableerror" in lowered or "llm service temporarily unavailable" in lowered:
         return "Сервис временно перегружен, попробуйте через минуту."
     if _GATEWAY_AUTH_ERROR_RE.search(text):
-        return (
-            "⚠️ Provider authentication failed. Check the configured credentials; "
-            "raw provider details are in the gateway logs."
-        )
+        return "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443."
     if _GATEWAY_PROVIDER_POLICY_RE.search(text):
         return (
             "⚠️ The model provider rejected the request. I kept the raw provider "
@@ -13881,9 +13878,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "run_agent resolved: model=%s provider=%s session=%s",
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
-            except Exception as exc:
+            except Exception:
+                logger.exception(
+                    "run_agent failed to resolve provider runtime for session %s",
+                    session_key or "",
+                )
                 return {
-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
+                    "final_response": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],

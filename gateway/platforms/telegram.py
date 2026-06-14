@@ -5367,11 +5367,31 @@ class TelegramAdapter(BasePlatformAdapter):
         return "group"
 
     def _memory_stats_is_admin(self, msg: Message) -> bool:
-        from gateway.slash_access import policy_from_extra
+        from gateway.config import Platform, load_gateway_config
+        from gateway.session import SessionSource
+        from gateway.slash_access import policy_for_source, policy_from_extra
 
-        policy = policy_from_extra(getattr(self.config, "extra", {}) or {}, self._memory_stats_scope(getattr(getattr(msg, "chat", None), "type", None)))
+        chat = getattr(msg, "chat", None)
         user_id = getattr(getattr(msg, "from_user", None), "id", None)
-        return bool(policy.admin_user_ids) and policy.is_admin(str(user_id) if user_id is not None else None)
+        user_id_str = str(user_id) if user_id is not None else None
+        scope = self._memory_stats_scope(getattr(chat, "type", None))
+        fallback_policy = policy_from_extra(getattr(self.config, "extra", {}) or {}, scope)
+
+        try:
+            gateway_cfg = load_gateway_config()
+            source = SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id=str(getattr(chat, "id", "")),
+                chat_type=scope,
+                user_id=user_id_str,
+            )
+            runtime_policy = policy_for_source(gateway_cfg, source)
+            if runtime_policy.admin_user_ids:
+                return runtime_policy.is_admin(user_id_str)
+        except Exception:
+            pass
+
+        return bool(fallback_policy.admin_user_ids) and fallback_policy.is_admin(user_id_str)
 
     def _parse_memory_stats_args(self, text: str) -> tuple[float | None, int | None, str | None]:
         tokens = (text or "").strip().split()

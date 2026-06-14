@@ -62,17 +62,18 @@ def test_telegram_final_response_sanitizes_raw_provider_errors():
     assert "req_abc" not in sanitized
 
 
-def test_telegram_final_response_redacts_auth_secrets():
-    """Authentication errors should be useful without leaking key material."""
+def test_telegram_final_response_masks_provider_auth_failures():
+    """Authentication failures must collapse to the single safe user-facing reply."""
     raw = (
-        "⚠️ Provider authentication failed: Incorrect API key provided: "
+        "?? Provider authentication failed: Incorrect API key provided: "
         "sk-live_abcdefghijklmnopqrstuvwxyz1234567890"
     )
 
     sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, raw)
 
-    assert "authentication failed" in sanitized.lower()
-    assert "check the configured credentials" in sanitized.lower()
+    assert sanitized == "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443."
+    assert "authentication failed" not in sanitized.lower()
+    assert "configured credentials" not in sanitized.lower()
     assert "sk-live" not in sanitized
 
 

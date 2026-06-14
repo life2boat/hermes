@@ -5,7 +5,9 @@ exercise the dispatch site live in test_slash_access_dispatch.py.
 """
 from __future__ import annotations
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from pathlib import Path
+
+from gateway.config import GatewayConfig, Platform, PlatformConfig, load_gateway_config
 from gateway.session import SessionSource
 from gateway.slash_access import (
     policy_for_source,
@@ -286,3 +288,40 @@ class TestPolicyForSource:
         p = policy_for_source(cfg, tg_src)
         assert p.enabled is False
         assert p.can_run("999", "stop") is True
+
+
+def test_load_gateway_config_preserves_nested_telegram_admin_acl(tmp_path, monkeypatch):
+    hermes_home = tmp_path / '.hermes'
+    hermes_home.mkdir()
+    (hermes_home / 'config.yaml').write_text(
+        """
+platforms:
+  telegram:
+    enabled: true
+    extra:
+      allow_admin_from:
+        - 968323641
+      group_allow_admin_from:
+        - 968323641
+telegram:
+  channel_prompts: {}
+  allowed_chats: ''
+""".lstrip(),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setattr('gateway.config.get_hermes_home', lambda: Path(str(hermes_home)))
+
+    cfg = load_gateway_config()
+    telegram_cfg = cfg.platforms[Platform.TELEGRAM]
+    assert telegram_cfg.extra['allow_admin_from'] == [968323641]
+
+    src = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id='968323641',
+        chat_type='dm',
+        user_id='968323641',
+    )
+    policy = policy_for_source(cfg, src)
+    assert policy.admin_user_ids == frozenset({'968323641'})
+    assert policy.is_admin('968323641') is True

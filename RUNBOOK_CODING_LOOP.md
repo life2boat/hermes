@@ -15,6 +15,15 @@ bash scripts/agent_check.sh
 
 The script compiles key Python files, runs Ruff if available, and executes the targeted pytest set used by the current Hermes/HealBite workflow.
 
+## Private Artifacts Policy
+
+- `backups/`, `memory_capsules/`, `.env` snapshots, database dumps, and auth files must never live in the git working tree.
+- Use `/home/hermes/private_backups/hermes-agent/` and keep it protected with `chmod 700`.
+- Do not print secret values.
+- Do not commit raw memory capsules.
+- Useful knowledge from capsules may only be saved as sanitized docs in a separate reviewable commit.
+- `scripts/secret_check.sh` must run before compile, lint, and tests via `scripts/agent_check.sh`.
+
 ## How To Set CHANGED_FILES
 
 Use `CHANGED_FILES` when you want the compile step to focus on specific Python files:

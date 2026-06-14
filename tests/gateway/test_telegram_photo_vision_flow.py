@@ -223,3 +223,28 @@ async def test_runner_photo_caption_skips_text_only_path_when_vision_unavailable
     assert "auth failed" not in sent_text
     assert "Count calories" not in sent_text
 
+
+@pytest.mark.asyncio
+async def test_runner_photo_turn_ignores_old_water_history_when_vision_unavailable():
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    history = [{"role": "user", "content": "????? ?????? ????"}]
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=json.dumps({
+        "success": False,
+        "error": "Provider authentication failed. Check configured credentials.",
+        "analysis": "No LLM provider configured for task=vision provider=auto.",
+    }))):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=history,
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert sent_text == SAFE_VISION_FALLBACK
+    assert "???" not in sent_text.lower()
+

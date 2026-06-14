@@ -7681,6 +7681,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # pre-run + prepend description).  See agent/image_routing.py.
                 _img_mode = self._decide_image_input_mode()
                 if _img_mode == "native":
+                    logger.info(
+                        "[Gateway][vision_route_selected] mode=native images=%d platform=%s",
+                        len(image_paths),
+                        getattr(source.platform, "value", source.platform),
+                    )
                     # Defer attachment to the run_conversation call site.
                     pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
                     if pending_native is None:
@@ -7693,6 +7698,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 else:
                     logger.info(
+                        "[Gateway][vision_route_selected] mode=%s images=%d platform=%s",
+                        _img_mode,
+                        len(image_paths),
+                        getattr(source.platform, "value", source.platform),
+                    )
+                    logger.info(
                         "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
                         _img_mode, len(image_paths),
                     )
@@ -7701,6 +7712,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         image_paths,
                     )
                     if not vision_success:
+                        logger.info(
+                            "[Gateway][vision_unavailable] platform=%s images=%d",
+                            getattr(source.platform, "value", source.platform),
+                            len(image_paths),
+                        )
                         logger.info(
                             "Image routing: auxiliary vision unavailable; replying with safe fallback and skipping text-only model path."
                         )
@@ -11645,6 +11661,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._reply_anchor_for_event(event),
         )
         try:
+            logger.info(
+                "[Gateway][vision_unavailable] sending_safe_fallback platform=%s",
+                getattr(source.platform, "value", source.platform),
+            )
             await adapter.send(
                 source.chat_id,
                 _vision_safe_fallback_text(),
@@ -11689,6 +11709,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if result.get("success"):
                     description = result.get("analysis", "")
                     description = sanitize_context(description)
+                    logger.info("[Gateway][vision_success] path=%s", path)
                     enriched_parts.append(
                         f"[The user sent an image~ Here's what I can see:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
@@ -11696,9 +11717,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 else:
                     logger.warning(
+                        "[Gateway][vision_failed] non_success_result path=%s",
+                        path,
+                    )
+                    logger.warning(
                         "Vision auto-analysis returned a non-success result for user image"
                     )
             except Exception:
+                logger.warning(
+                    "[Gateway][vision_failed] exception path=%s",
+                    path,
+                )
                 logger.warning(
                     "Vision auto-analysis failed for a user image",
                     exc_info=True,

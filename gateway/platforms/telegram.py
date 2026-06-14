@@ -5134,6 +5134,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if photo is None:
             return False
 
+        logger.info("[Telegram][photo_received] context=%s", context)
+
         try:
             file_obj = await photo.get_file()
             image_bytes = await file_obj.download_as_bytearray()
@@ -5148,7 +5150,7 @@ class TelegramAdapter(BasePlatformAdapter):
             event.media_urls.append(cached_path)
             event.media_types.append(_TELEGRAM_IMAGE_EXT_TO_MIME.get(ext, f"image/{ext.lstrip('.')}"))
             event.message_type = MessageType.PHOTO
-            logger.info("[Telegram] Cached user %s at %s", context, cached_path)
+            logger.info("[Telegram][photo_download_ok] context=%s path=%s", context, cached_path)
             return True
         except Exception as exc:
             logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)

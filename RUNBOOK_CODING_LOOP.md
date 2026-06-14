@@ -24,6 +24,33 @@ The script compiles key Python files, runs Ruff if available, and executes the t
 - Useful knowledge from capsules may only be saved as sanitized docs in a separate reviewable commit.
 - `scripts/secret_check.sh` must run before compile, lint, and tests via `scripts/agent_check.sh`.
 
+## Hook Bootstrap
+
+The tracked `lefthook.yml` config includes a `pre-commit` `secret-check` command for `bash scripts/secret_check.sh`.
+
+For a new checkout, install or reinstall local git hooks from the project root:
+
+```bash
+cd /home/hermes/.hermes/hermes-agent
+venv/bin/lefthook install
+```
+
+To verify the hook path manually:
+
+```bash
+cd /home/hermes/.hermes/hermes-agent
+venv/bin/lefthook run pre-commit --verbose
+```
+
+Fallback if hooks are not installed yet:
+
+```bash
+bash scripts/secret_check.sh
+bash scripts/agent_check.sh
+```
+
+Local `.git/hooks` files are not versioned and must be installed or reinstalled in each checkout.
+
 ## How To Set CHANGED_FILES
 
 Use `CHANGED_FILES` when you want the compile step to focus on specific Python files:

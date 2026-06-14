@@ -9,7 +9,11 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.platforms.telegram import TelegramAdapter
-from gateway.run import GatewayRunner
+from gateway.run import (
+    GatewayRunner,
+    _exec_approval_policy_for_turn,
+    _filter_user_facing_toolsets_for_turn,
+)
 from gateway.session import SessionSource
 
 
@@ -247,4 +251,41 @@ async def test_runner_photo_turn_ignores_old_water_history_when_vision_unavailab
     sent_text = adapter.send.await_args.args[1]
     assert sent_text == SAFE_VISION_FALLBACK
     assert "???" not in sent_text.lower()
+
+
+def test_photo_turn_removes_terminal_and_execute_code_toolsets():
+    source = _runner_source()
+    event = _runner_photo_event(source, text="Count calories")
+
+    enabled, disabled = _filter_user_facing_toolsets_for_turn(
+        source=source,
+        event=event,
+        enabled_toolsets=["terminal", "code_execution", "file", "vision", "memory"],
+        disabled_toolsets=[],
+    )
+
+    assert "terminal" not in enabled
+    assert "code_execution" not in enabled
+    assert "file" not in enabled
+    assert "vision" in enabled
+    assert "memory" in enabled
+    assert {"terminal", "code_execution", "file"}.issubset(set(disabled))
+
+
+def test_photo_turn_auto_denies_exec_approval_ui():
+    source = _runner_source()
+    event = _runner_photo_event(source)
+
+    policy = _exec_approval_policy_for_turn(source=source, event=event)
+
+    assert policy == "auto_deny"
+
+
+def test_text_turn_keeps_interactive_approval_policy():
+    source = _runner_source()
+    event = MessageEvent(text="hello", message_type=MessageType.TEXT, source=source)
+
+    policy = _exec_approval_policy_for_turn(source=source, event=event)
+
+    assert policy == "interactive"
 

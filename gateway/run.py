@@ -1424,6 +1424,55 @@ def _vision_safe_fallback_prompt() -> str:
     )
 
 
+_TELEGRAM_PHOTO_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file"})
+
+
+def _event_has_image_context(event: Any) -> bool:
+    if event is None:
+        return False
+    if getattr(event, "message_type", None) == MessageType.PHOTO:
+        return True
+    media_types = getattr(event, "media_types", None) or []
+    return any(str(mtype).startswith("image/") for mtype in media_types)
+
+
+def _filter_user_facing_toolsets_for_turn(
+    *,
+    source: SessionSource,
+    event: Optional[MessageEvent],
+    enabled_toolsets: list[str],
+    disabled_toolsets: Optional[list[str]],
+) -> tuple[list[str], list[str]]:
+    from gateway.config import Platform
+
+    enabled = list(enabled_toolsets or [])
+    disabled = list(disabled_toolsets or [])
+    if source.platform != Platform.TELEGRAM or not _event_has_image_context(event):
+        return enabled, disabled
+
+    filtered_enabled = [toolset for toolset in enabled if toolset not in _TELEGRAM_PHOTO_BLOCKED_TOOLSETS]
+    merged_disabled = sorted(set(disabled) | _TELEGRAM_PHOTO_BLOCKED_TOOLSETS)
+    removed = sorted(set(enabled) & _TELEGRAM_PHOTO_BLOCKED_TOOLSETS)
+    if removed:
+        logger.info(
+            "[Gateway][photo_tool_guard] platform=telegram removed_toolsets=%s",
+            ",".join(removed),
+        )
+    return filtered_enabled, merged_disabled
+
+
+def _exec_approval_policy_for_turn(
+    *,
+    source: SessionSource,
+    event: Optional[MessageEvent],
+) -> str:
+    from gateway.config import Platform
+
+    if source.platform == Platform.TELEGRAM and _event_has_image_context(event):
+        return "auto_deny"
+    return "interactive"
+
+
 def _build_media_placeholder(event) -> str:
     """Build a text placeholder for media-only events so they aren't dropped.
 
@@ -8600,6 +8649,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                event=event,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -13144,6 +13194,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        event: Optional[MessageEvent] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -13185,6 +13236,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
+        enabled_toolsets, disabled_toolsets = _filter_user_facing_toolsets_for_turn(
+            source=source,
+            event=event,
+            enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
+        )
+        approval_policy = _exec_approval_policy_for_turn(
+            source=source,
+            event=event,
+        )
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
@@ -14418,6 +14479,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
 
+                if approval_policy == "auto_deny":
+                    try:
+                        from tools.approval import resolve_gateway_approval
+
+                        resolved = resolve_gateway_approval(_approval_session_key, "deny")
+                        logger.warning(
+                            "[Gateway][approval_suppressed] platform=%s session=%s resolved=%d description=%s",
+                            source.platform.value if source.platform else "unknown",
+                            _approval_session_key,
+                            resolved,
+                            desc,
+                        )
+                    except Exception as _deny_exc:
+                        logger.error(
+                            "Failed to auto-deny suppressed approval for session %s: %s",
+                            _approval_session_key,
+                            _deny_exc,
+                        )
+                    return
+
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
                 # false positives from MagicMock auto-attribute creation in tests.
@@ -15509,6 +15590,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    event=pending_event,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

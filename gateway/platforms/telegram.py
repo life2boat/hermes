@@ -5115,6 +5115,45 @@ class TelegramAdapter(BasePlatformAdapter):
             return MessageType.VOICE
         return MessageType.DOCUMENT
 
+    @staticmethod
+    def _largest_photo_size(message: Message | None):
+        photos = getattr(message, "photo", None) if message is not None else None
+        if isinstance(photos, (list, tuple)) and photos:
+            return photos[-1]
+        return None
+
+    async def _cache_photo_message_to_event(
+        self,
+        photo_message: Message,
+        event: MessageEvent,
+        *,
+        context: str,
+    ) -> bool:
+        """Download a Telegram photo into the image cache and attach it to an event."""
+        photo = self._largest_photo_size(photo_message)
+        if photo is None:
+            return False
+
+        try:
+            file_obj = await photo.get_file()
+            image_bytes = await file_obj.download_as_bytearray()
+            ext = ".jpg"
+            file_path = getattr(file_obj, "file_path", "") or ""
+            file_path = str(file_path)
+            for candidate in [".png", ".webp", ".gif", ".jpeg", ".jpg"]:
+                if file_path.lower().endswith(candidate):
+                    ext = candidate
+                    break
+            cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
+            event.media_urls.append(cached_path)
+            event.media_types.append(_TELEGRAM_IMAGE_EXT_TO_MIME.get(ext, f"image/{ext.lstrip('.')}"))
+            event.message_type = MessageType.PHOTO
+            logger.info("[Telegram] Cached user %s at %s", context, cached_path)
+            return True
+        except Exception as exc:
+            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            return False
+
     async def _cache_observed_media(self, msg: Message, event: MessageEvent) -> None:
         """Cache an unmentioned group attachment and annotate the observed text.
 
@@ -5357,6 +5396,15 @@ class TelegramAdapter(BasePlatformAdapter):
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
+
+        reply_msg = getattr(msg, "reply_to_message", None)
+        if self._largest_photo_size(reply_msg) is not None:
+            await self._cache_photo_message_to_event(
+                reply_msg,
+                event,
+                context="reply-to photo",
+            )
+
         event = self._apply_telegram_group_observe_attribution(event)
         self._enqueue_text_event(event)
 
@@ -5720,24 +5768,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
         if msg.photo:
-            try:
-                # msg.photo is a list of PhotoSize sorted by size; take the largest
-                photo = msg.photo[-1]
-                file_obj = await photo.get_file()
-                # Download the image bytes directly into memory
-                image_bytes = await file_obj.download_as_bytearray()
-                # Determine extension from the file path if available
-                ext = ".jpg"
-                if file_obj.file_path:
-                    for candidate in [".png", ".webp", ".gif", ".jpeg", ".jpg"]:
-                        if file_obj.file_path.lower().endswith(candidate):
-                            ext = candidate
-                            break
-                # Save to local cache (for vision tool access)
-                cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
-                event.media_urls = [cached_path]
-                event.media_types = [f"image/{ext.lstrip('.')}" ]
-                logger.info("[Telegram] Cached user photo at %s", cached_path)
+            if await self._cache_photo_message_to_event(msg, event, context="photo"):
                 media_group_id = getattr(msg, "media_group_id", None)
                 if media_group_id:
                     await self._queue_media_group_event(str(media_group_id), event)
@@ -5745,9 +5776,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     batch_key = self._photo_batch_key(event, msg)
                     self._enqueue_photo_event(batch_key, event)
                 return
-
-            except Exception as e:
-                logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
 
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:

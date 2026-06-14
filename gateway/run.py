@@ -1407,6 +1407,19 @@ def _try_resolve_fallback_provider() -> dict | None:
     return None
 
 
+_VISION_SAFE_RU_FALLBACK = (
+    "\u0424\u043e\u0442\u043e \u043f\u043e\u043b\u0443\u0447\u0438\u043b, \u043d\u043e \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435 \u043c\u043e\u0433\u0443 \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435: \u0441\u0435\u0440\u0432\u0438\u0441 \u0430\u043d\u0430\u043b\u0438\u0437\u0430 \u0444\u043e\u0442\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443 \u0438\u043b\u0438 \u043e\u043f\u0438\u0448\u0438\u0442\u0435 \u0435\u0434\u0443 \u0442\u0435\u043a\u0441\u0442\u043e\u043c."
+)
+
+
+def _vision_safe_fallback_prompt() -> str:
+    return (
+        "[The user sent an image, but automated vision recognition is unavailable. "
+        "Do not guess the image contents. Reply to the user in Russian with this "
+        f"safe fallback and no technical details: {_VISION_SAFE_RU_FALLBACK}]"
+    )
+
+
 def _build_media_placeholder(event) -> str:
     """Build a text placeholder for media-only events so they aren't dropped.
 
@@ -11656,18 +11669,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         f"image_url: {path} ~]"
                     )
                 else:
-                    enriched_parts.append(
-                        "[The user sent an image but I couldn't quite see it "
-                        "this time (>_<) You can try looking at it yourself "
-                        f"with vision_analyze using image_url: {path}]"
-                    )
-            except Exception as e:
-                logger.error("Vision auto-analysis error: %s", e)
-                enriched_parts.append(
-                    f"[The user sent an image but something went wrong when I "
-                    f"tried to look at it~ You can try examining it yourself "
-                    f"with vision_analyze using image_url: {path}]"
-                )
+                    logger.warning("Vision auto-analysis returned a non-success result")
+                    enriched_parts.append(_vision_safe_fallback_prompt())
+            except Exception:
+                logger.warning("Vision auto-analysis failed for a user image", exc_info=True)
+                enriched_parts.append(_vision_safe_fallback_prompt())
 
         # Combine: vision descriptions first, then the user's original text
         if enriched_parts:

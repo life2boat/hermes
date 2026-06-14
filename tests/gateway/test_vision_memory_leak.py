@@ -78,3 +78,29 @@ class TestEnrichMessageWithVision:
         assert "photograph of a dog" in out
         assert "fenced leak" not in out
         assert "<memory-context>" not in out
+
+    def test_vision_provider_failure_uses_safe_russian_fallback(self, gateway_runner):
+        """Provider/auth failures must not leak raw vision errors or tool-unavailable text."""
+        fake_result = json.dumps({
+            "success": False,
+            "error": "Provider authentication failed. Check configured credentials.",
+            "analysis": "No LLM provider configured for task=vision provider=auto.",
+        })
+        with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=fake_result)):
+            out = _run(gateway_runner._enrich_message_with_vision("", ["/tmp/meal.jpg"]))
+
+        assert "\u0424\u043e\u0442\u043e \u043f\u043e\u043b\u0443\u0447\u0438\u043b" in out
+        assert "\u043e\u043f\u0438\u0448\u0438\u0442\u0435 \u0435\u0434\u0443 \u0442\u0435\u043a\u0441\u0442\u043e\u043c" in out
+        assert "Provider authentication failed" not in out
+        assert "No LLM provider configured" not in out
+        assert "vision_analyze" not in out
+        assert "image_url" not in out
+
+    def test_vision_exception_uses_safe_russian_fallback(self, gateway_runner):
+        with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(side_effect=RuntimeError("auth failed"))):
+            out = _run(gateway_runner._enrich_message_with_vision("caption", ["/tmp/meal.jpg"]))
+
+        assert "\u0424\u043e\u0442\u043e \u043f\u043e\u043b\u0443\u0447\u0438\u043b" in out
+        assert "caption" in out
+        assert "auth failed" not in out
+        assert "vision_analyze" not in out

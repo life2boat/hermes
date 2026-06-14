@@ -39,6 +39,7 @@ $PY -m pytest -q \
   tests/gateway/test_telegram_memory_stats.py \
   tests/gateway/test_slash_access.py \
   tests/gateway/test_telegram_noise_filter.py \
+  tests/gateway/test_telegram_photo_vision_flow.py \
   tests/gateway/platforms/test_healbite_memory_bridge.py \
   tests/agent/test_auxiliary_client.py \
   tests/agent/test_prompt_builder.py \

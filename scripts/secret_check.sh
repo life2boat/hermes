@@ -16,17 +16,46 @@ import sys
 from pathlib import Path
 
 repo_root = Path.cwd()
-modified_raw = subprocess.run(
-    ["git", "diff", "--name-only", "-z", "--diff-filter=ACMR"],
-    check=True,
-    capture_output=True,
-).stdout
-staged_raw = subprocess.run(
-    ["git", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
-    check=True,
-    capture_output=True,
-).stdout
-entries = set(filter(None, modified_raw.split(b"\0") + staged_raw.split(b"\0")))
+
+def _diff_text(args: list[str]) -> str:
+    return subprocess.run(
+        args,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).stdout
+
+def _added_lines(diff_text: str) -> list[tuple[str, int, str]]:
+    rows: list[tuple[str, int, str]] = []
+    current_file: str | None = None
+    new_lineno = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith("+++ b/"):
+            current_file = raw[6:]
+            continue
+        if raw.startswith("@@ "):
+            match = re.search(r"\+(\d+)(?:,(\d+))?", raw)
+            new_lineno = int(match.group(1)) if match else 0
+            continue
+        if current_file is None:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            rows.append((current_file, new_lineno, raw[1:]))
+            new_lineno += 1
+        elif raw.startswith("-") and not raw.startswith("---"):
+            continue
+        elif raw.startswith(" "):
+            new_lineno += 1
+    return rows
+
+changed_lines = _added_lines(_diff_text([
+    "git", "diff", "--unified=0", "--diff-filter=ACMR", "--no-ext-diff",
+]))
+changed_lines.extend(_added_lines(_diff_text([
+    "git", "diff", "--cached", "--unified=0", "--diff-filter=ACMR", "--no-ext-diff",
+])))
 
 patterns = [
     ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
@@ -64,30 +93,21 @@ placeholder_markers = (
 findings: list[tuple[str, int, str]] = []
 seen: set[tuple[str, int, str]] = set()
 
-if not entries:
-    print("secret_check: no changed tracked/staged files to scan")
+if not changed_lines:
+    print("secret_check: no changed tracked/staged lines to scan")
     sys.exit(0)
 
-for entry in sorted(entries):
-    rel = Path(entry.decode("utf-8", "surrogateescape"))
-    path = repo_root / rel
-    if not path.is_file():
+for rel, lineno, line in changed_lines:
+    lower = line.lower()
+    if any(marker in lower for marker in placeholder_markers):
         continue
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        continue
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        lower = line.lower()
-        if any(marker in lower for marker in placeholder_markers):
-            continue
-        for label, pattern in patterns:
-            if pattern.search(line):
-                item = (rel.as_posix(), lineno, label)
-                if item not in seen:
-                    seen.add(item)
-                    findings.append(item)
-                break
+    for label, pattern in patterns:
+        if pattern.search(line):
+            item = (rel, lineno, label)
+            if item not in seen:
+                seen.add(item)
+                findings.append(item)
+            break
 
 if findings:
     print("secret_check: potential tracked secrets detected:", file=sys.stderr)
@@ -95,5 +115,5 @@ if findings:
         print(f"  - {rel}:{lineno} [{label}]", file=sys.stderr)
     sys.exit(1)
 
-print("secret_check: no high-confidence secrets found in changed tracked/staged files")
+print("secret_check: no high-confidence secrets found in changed tracked/staged lines")
 PY

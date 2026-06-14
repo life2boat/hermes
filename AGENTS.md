@@ -11,6 +11,7 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 - Store private artifacts under `/home/hermes/private_backups/hermes-agent/` with `chmod 700`.
 - Do not print secret values.
 - `scripts/agent_check.sh` runs `scripts/secret_check.sh` as its first step and should be used before commits for local coding tasks.
+- See `RUNBOOK_CODING_LOOP.md` -> `Hook Bootstrap`; for a new checkout run `venv/bin/lefthook install`, verify with `venv/bin/lefthook run pre-commit --verbose`, and fall back to `bash scripts/agent_check.sh` if hooks are not installed yet.
 
 ## What Hermes Is
 

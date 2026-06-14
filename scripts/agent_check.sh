@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "$SCRIPT_DIR/secret_check.sh"
+
 CHANGED_FILES="${CHANGED_FILES:-}"
 
 echo "== Python compile =="

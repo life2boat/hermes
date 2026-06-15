@@ -396,6 +396,16 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "Don't stop with a plan — execute it.\n"
 )
 
+HEALBITE_PUBLIC_SEARCH_GUIDANCE = (
+    "# HealBite public nutrition search\n"
+    "Use `healbite_public_search` only for generic public nutrition/activity facts "
+    "when internal HealBite memory, cached answers, or local rules are not enough.\n"
+    "- Allowed: rare food calories, Harvard Plate, activity multipliers, public nutrition references.\n"
+    "- Do NOT include personal user data in the topic: no names, Telegram IDs, diagnoses, weight, height, age, location, or raw chat history.\n"
+    "- Pass only a short anonymized topic such as a dish name, food name, or public concept.\n"
+    "- Prefer the narrowest category and cite the returned sources or uncertainty in the final answer.\n"
+)
+
 
 # Guidance injected into the system prompt when the computer_use toolset
 # is active. Universal — works for any model (Claude, GPT, open models).

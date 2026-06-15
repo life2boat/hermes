@@ -102,6 +102,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "nutrition_search": {
+        "description": "Privacy-safe public nutrition and activity reference lookup for HealBite",
+        "tools": ["healbite_public_search"],
+        "includes": []
+    },
+
     "x_search": {
         "description": (
             "Search X (Twitter) posts and threads via xAI's built-in "
@@ -445,7 +451,7 @@ TOOLSETS = {
 
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",
-        "tools": _HERMES_CORE_TOOLS,
+        "tools": _HERMES_CORE_TOOLS + ["healbite_public_search"],
         "includes": []
     },
     

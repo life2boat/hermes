@@ -143,6 +143,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         from agent.prompt_builder import COMPUTER_USE_GUIDANCE
         stable_parts.append(COMPUTER_USE_GUIDANCE)
 
+    if "healbite_public_search" in agent.valid_tool_names:
+        from agent.prompt_builder import HEALBITE_PUBLIC_SEARCH_GUIDANCE
+        stable_parts.append(HEALBITE_PUBLIC_SEARCH_GUIDANCE)
+
     nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:
         stable_parts.append(nous_subscription_prompt)

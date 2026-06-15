@@ -36,7 +36,29 @@ def _make_photo(file_obj=None):
     return photo
 
 
-def _make_message(*, text: str = "", caption: str | None = None, photo=None, reply_to_message=None):
+def _make_document(
+    *,
+    file_name: str = "meal.jpg",
+    mime_type: str = "image/jpeg",
+    file_size: int = 64,
+    file_obj=None,
+):
+    document = MagicMock()
+    document.file_name = file_name
+    document.mime_type = mime_type
+    document.file_size = file_size
+    document.get_file = AsyncMock(return_value=file_obj or _make_file_obj(file_path=f"documents/{file_name}"))
+    return document
+
+
+def _make_message(
+    *,
+    text: str = "",
+    caption: str | None = None,
+    photo=None,
+    document=None,
+    reply_to_message=None,
+):
     chat = SimpleNamespace(id=100, type="private", title=None, full_name="Test User", is_forum=False)
     user = SimpleNamespace(id=1, full_name="Test User")
     return SimpleNamespace(
@@ -49,7 +71,7 @@ def _make_message(*, text: str = "", caption: str | None = None, photo=None, rep
         audio=None,
         voice=None,
         sticker=None,
-        document=None,
+        document=document,
         media_group_id=None,
         chat=chat,
         from_user=user,
@@ -129,6 +151,26 @@ async def test_reply_to_photo_with_text_routes_to_vision_image_flow(adapter):
 
 
 @pytest.mark.asyncio
+async def test_reply_to_image_document_with_text_routes_to_vision_image_flow(adapter):
+    original_document = _make_message(
+        caption="count this meal",
+        document=_make_document(file_name="meal.jpg", mime_type="image/jpeg"),
+    )
+    msg = _make_message(text="what is in the file?", reply_to_message=original_document)
+
+    with patch.object(adapter, "_enqueue_text_event") as enqueue_mock:
+        await adapter._handle_text_message(_make_update(msg), MagicMock())
+
+    enqueue_mock.assert_called_once()
+    event = enqueue_mock.call_args.args[0]
+    assert event.message_type == MessageType.PHOTO
+    assert event.media_urls and os.path.exists(event.media_urls[0])
+    assert event.media_types == ["image/jpeg"]
+    assert event.text == "what is in the file?"
+    assert event.reply_to_text == "count this meal"
+
+
+@pytest.mark.asyncio
 async def test_text_only_reply_does_not_attach_image_without_photo(adapter):
     original_text = _make_message(text="????my lunch?")
     msg = _make_message(text="reply", reply_to_message=original_text)
@@ -177,6 +219,16 @@ def _runner_photo_event(source, *, text: str = ""):
         source=source,
         media_urls=["/tmp/meal.png"],
         media_types=["image/png"],
+    )
+
+
+def _runner_document_image_event(source, *, text: str = "", media_type: str = "image/jpeg"):
+    return MessageEvent(
+        text=text,
+        message_type=MessageType.DOCUMENT,
+        source=source,
+        media_urls=["/tmp/meal.jpg"],
+        media_types=[media_type],
     )
 
 
@@ -272,9 +324,37 @@ def test_photo_turn_removes_terminal_and_execute_code_toolsets():
     assert {"terminal", "code_execution", "file"}.issubset(set(disabled))
 
 
+def test_image_document_turn_removes_terminal_and_execute_code_toolsets():
+    source = _runner_source()
+    event = _runner_document_image_event(source, text="Count calories", media_type="image/png")
+
+    enabled, disabled = _filter_user_facing_toolsets_for_turn(
+        source=source,
+        event=event,
+        enabled_toolsets=["terminal", "code_execution", "file", "vision", "memory"],
+        disabled_toolsets=[],
+    )
+
+    assert "terminal" not in enabled
+    assert "code_execution" not in enabled
+    assert "file" not in enabled
+    assert "vision" in enabled
+    assert "memory" in enabled
+    assert {"terminal", "code_execution", "file"}.issubset(set(disabled))
+
+
 def test_photo_turn_auto_denies_exec_approval_ui():
     source = _runner_source()
     event = _runner_photo_event(source)
+
+    policy = _exec_approval_policy_for_turn(source=source, event=event)
+
+    assert policy == "auto_deny"
+
+
+def test_image_document_turn_auto_denies_exec_approval_ui():
+    source = _runner_source()
+    event = _runner_document_image_event(source, media_type="image/webp")
 
     policy = _exec_approval_policy_for_turn(source=source, event=event)
 
@@ -288,4 +368,3 @@ def test_text_turn_keeps_interactive_approval_policy():
     policy = _exec_approval_policy_for_turn(source=source, event=event)
 
     assert policy == "interactive"
-

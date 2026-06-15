@@ -5122,6 +5122,40 @@ class TelegramAdapter(BasePlatformAdapter):
             return photos[-1]
         return None
 
+    @staticmethod
+    def _image_document_details(message: Message | None) -> tuple[Any, str, str] | tuple[None, None, None]:
+        """Return a document plus normalized image extension/MIME when it is an image."""
+        if message is None:
+            return None, None, None
+        document = getattr(message, "document", None)
+        if document is None:
+            return None, None, None
+
+        original_filename = getattr(document, "file_name", None) or ""
+        ext = ""
+        if original_filename:
+            _, ext = os.path.splitext(original_filename)
+            ext = ext.lower()
+
+        mime_type = (getattr(document, "mime_type", None) or "").lower()
+        if not ext and mime_type:
+            ext = _TELEGRAM_IMAGE_MIME_TO_EXT.get(mime_type, "")
+
+        if ext in _TELEGRAM_IMAGE_EXTENSIONS or mime_type.startswith("image/"):
+            normalized_ext = (
+                ext
+                if ext in _TELEGRAM_IMAGE_EXTENSIONS
+                else _TELEGRAM_IMAGE_MIME_TO_EXT.get(mime_type, ".jpg")
+            )
+            normalized_mime = (
+                mime_type
+                if mime_type.startswith("image/")
+                else _TELEGRAM_IMAGE_EXT_TO_MIME.get(normalized_ext, "image/jpeg")
+            )
+            return document, normalized_ext, normalized_mime
+
+        return None, None, None
+
     async def _cache_photo_message_to_event(
         self,
         photo_message: Message,
@@ -5155,6 +5189,36 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
             return False
+
+    async def _cache_image_document_message_to_event(
+        self,
+        document_message: Message,
+        event: MessageEvent,
+        *,
+        context: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Download a Telegram image document into the image cache and attach it to an event."""
+        document, image_ext, image_mime = self._image_document_details(document_message)
+        if document is None or image_ext is None or image_mime is None:
+            return False, None
+
+        logger.info("[Telegram][photo_received] context=%s", context)
+
+        try:
+            file_obj = await document.get_file()
+            image_bytes = await file_obj.download_as_bytearray()
+            cached_path = cache_image_from_bytes(bytes(image_bytes), ext=image_ext)
+            event.media_urls.append(cached_path)
+            event.media_types.append(image_mime)
+            event.message_type = MessageType.PHOTO
+            logger.info("[Telegram][photo_download_ok] context=%s path=%s", context, cached_path)
+            return True, None
+        except ValueError as exc:
+            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            return False, "invalid-image"
+        except Exception as exc:
+            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            return False, "cache-error"
 
     async def _cache_observed_media(self, msg: Message, event: MessageEvent) -> None:
         """Cache an unmentioned group attachment and annotate the observed text.
@@ -5405,6 +5469,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_msg,
                 event,
                 context="reply-to photo",
+            )
+        else:
+            await self._cache_image_document_message_to_event(
+                reply_msg,
+                event,
+                context="reply-to image-document",
             )
 
         event = self._apply_telegram_group_observe_attribution(event)
@@ -5868,32 +5938,28 @@ class TelegramAdapter(BasePlatformAdapter):
                 # payload is actually an image, route it through the image cache
                 # and batching path instead of rejecting it as a document.
                 if ext in _TELEGRAM_IMAGE_EXTENSIONS or doc_mime.startswith("image/"):
-                    file_obj = await doc.get_file()
-                    image_bytes = await file_obj.download_as_bytearray()
-                    image_ext = ext if ext in _TELEGRAM_IMAGE_EXTENSIONS else _TELEGRAM_IMAGE_MIME_TO_EXT.get(doc_mime, ".jpg")
-                    try:
-                        cached_path = cache_image_from_bytes(bytes(image_bytes), ext=image_ext)
-                    except ValueError as e:
-                        logger.warning("[Telegram] Failed to cache image document: %s", e, exc_info=True)
+                    attached, image_error = await self._cache_image_document_message_to_event(
+                        msg,
+                        event,
+                        context="image-document",
+                    )
+                    if image_error:
                         event.text = (
                             f"Image document '{original_filename or doc_mime or ext or 'unknown'}' "
                             "could not be read as an image."
                         )
                         await self.handle_message(event)
                         return
+                    if attached:
+                        logger.info("[Telegram] Cached user image-document at %s", event.media_urls[0])
 
-                    event.message_type = MessageType.PHOTO
-                    event.media_urls = [cached_path]
-                    event.media_types = [doc_mime if doc_mime.startswith("image/") else _TELEGRAM_IMAGE_EXT_TO_MIME.get(image_ext, "image/jpeg")]
-                    logger.info("[Telegram] Cached user image-document at %s", cached_path)
-
-                    media_group_id = getattr(msg, "media_group_id", None)
-                    if media_group_id:
-                        await self._queue_media_group_event(str(media_group_id), event)
-                    else:
-                        batch_key = self._photo_batch_key(event, msg)
-                        self._enqueue_photo_event(batch_key, event)
-                    return
+                        media_group_id = getattr(msg, "media_group_id", None)
+                        if media_group_id:
+                            await self._queue_media_group_event(str(media_group_id), event)
+                        else:
+                            batch_key = self._photo_batch_key(event, msg)
+                            self._enqueue_photo_event(batch_key, event)
+                        return
 
                 if not ext and doc.mime_type:
                     video_mime_to_ext = {v: k for k, v in SUPPORTED_VIDEO_TYPES.items()}

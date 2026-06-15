@@ -281,6 +281,50 @@ class TestDocumentDownloadBlock:
         assert adapter.handle_message.call_count == 0
 
     @pytest.mark.asyncio
+    async def test_jpeg_document_with_caption_is_routed_as_image(self, adapter):
+        """JPEG documents with captions should stay on the vision image path."""
+        file_obj = _make_file_obj(b"\xff\xd8\xff\xe0" + b"\x00" * 32, file_path="documents/meal.jpg")
+        doc = _make_document(file_name="meal.jpg", mime_type="image/jpeg", file_size=36, file_obj=file_obj)
+        msg = _make_message(document=doc, caption="что на фото?")
+        update = _make_update(msg)
+
+        with patch.object(adapter, "_photo_batch_key", return_value="batch-jpeg"), patch.object(
+            adapter, "_enqueue_photo_event"
+        ) as enqueue_mock:
+            await adapter._handle_media_message(update, MagicMock())
+
+        enqueue_mock.assert_called_once()
+        event = enqueue_mock.call_args.args[1]
+        assert event.message_type == MessageType.PHOTO
+        assert event.media_urls and event.media_urls[0].endswith(".jpg")
+        assert event.media_types == ["image/jpeg"]
+        assert event.text == "что на фото?"
+        assert adapter.handle_message.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_webp_document_without_extension_is_routed_as_image(self, adapter):
+        """MIME-only WEBP documents should still count as image context."""
+        file_obj = _make_file_obj(
+            b"RIFF" + b"\x24\x00\x00\x00" + b"WEBPVP8 " + b"\x10\x00\x00\x00" + b"\x00" * 16,
+            file_path="documents/file",
+        )
+        doc = _make_document(file_name=None, mime_type="image/webp", file_size=36, file_obj=file_obj)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        with patch.object(adapter, "_photo_batch_key", return_value="batch-webp"), patch.object(
+            adapter, "_enqueue_photo_event"
+        ) as enqueue_mock:
+            await adapter._handle_media_message(update, MagicMock())
+
+        enqueue_mock.assert_called_once()
+        event = enqueue_mock.call_args.args[1]
+        assert event.message_type == MessageType.PHOTO
+        assert event.media_urls and event.media_urls[0].endswith(".webp")
+        assert event.media_types == ["image/webp"]
+        assert adapter.handle_message.call_count == 0
+
+    @pytest.mark.asyncio
     async def test_spoofed_png_document_falls_back_with_error(self, adapter):
         """A .png filename with non-image bytes should fail clearly, not disappear."""
         file_obj = _make_file_obj(b"not-a-real-image")

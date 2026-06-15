@@ -92,6 +92,7 @@ from gateway.platforms.base import (
     utf16_len,
 )
 from gateway.memory.analytics import compute_memory_analytics_summary, format_memory_analytics_report
+from gateway.healbite_nutrition_diary import compute_nutrition_diary_summary, format_nutrition_diary_report
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -5699,6 +5700,33 @@ class TelegramAdapter(BasePlatformAdapter):
             message_thread_id=thread_id,
         )
         return True
+    async def _maybe_handle_nutrition_diary_command(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/diary", "/stats"}:
+            return False
+
+        thread_id = getattr(msg, "message_thread_id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Could not resolve user for nutrition diary.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        summary = compute_nutrition_diary_summary(user_id=int(user_id))
+        report = format_nutrition_diary_report(summary)
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=report,
+            message_thread_id=thread_id,
+        )
+        return True
+
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
         del context
@@ -5712,6 +5740,8 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._send_healbite_menu_message(msg, command=command)
             return
         if await self._maybe_handle_memory_stats_command(msg):
+            return
+        if await self._maybe_handle_nutrition_diary_command(msg):
             return
         await self._ensure_forum_commands(msg)
 

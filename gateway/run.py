@@ -7756,10 +7756,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
                         _img_mode, len(image_paths),
                     )
-                    message_text, vision_success = await self._try_enrich_message_with_vision(
-                        message_text,
-                        image_paths,
-                    )
+                    if source.platform == Platform.TELEGRAM:
+                        message_text, vision_success = await self._try_enrich_message_with_healbite_nutrition(
+                            event=event,
+                            source=source,
+                            user_text=message_text,
+                            image_paths=image_paths,
+                        )
+                    else:
+                        message_text, vision_success = await self._try_enrich_message_with_vision(
+                            message_text,
+                            image_paths,
+                        )
                     if not vision_success:
                         logger.info(
                             "[Gateway][vision_unavailable] platform=%s images=%d",
@@ -11725,6 +11733,60 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Failed to deliver vision-unavailable fallback: %s",
                 exc,
             )
+
+    def _get_healbite_nutrition_diary(self):
+        diary = getattr(self, "_healbite_nutrition_diary", None)
+        if diary is None:
+            from gateway.healbite_nutrition_diary import get_default_nutrition_diary
+
+            diary = get_default_nutrition_diary()
+            self._healbite_nutrition_diary = diary
+        return diary
+
+    @staticmethod
+    def _healbite_image_ref(source: SessionSource, event: MessageEvent) -> str | None:
+        message_ref = event.reply_to_message_id or event.message_id
+        if not message_ref or not getattr(source, "chat_id", None):
+            return None
+        return f"telegram:{source.chat_id}:{message_ref}"
+
+    async def _try_enrich_message_with_healbite_nutrition(
+        self,
+        *,
+        event: MessageEvent,
+        source: SessionSource,
+        user_text: str,
+        image_paths: List[str],
+    ) -> tuple[str, bool]:
+        from gateway.healbite_nutrition_diary import format_nutrition_context
+
+        diary = self._get_healbite_nutrition_diary()
+        try:
+            outcome = await diary.analyze_and_maybe_log(
+                user_id=int(source.user_id),
+                image_path=image_paths[0],
+                user_text=user_text,
+                source="vision" if event.message_type == MessageType.PHOTO else "photo",
+                image_ref=self._healbite_image_ref(source, event),
+                occurred_at=event.timestamp,
+            )
+        except Exception:
+            logger.warning(
+                "[Gateway][vision_failed] nutrition diary analysis exception path=%s",
+                image_paths[0],
+                exc_info=True,
+            )
+            return user_text, False
+        if not outcome.available or outcome.record is None:
+            return user_text, False
+        context = format_nutrition_context(
+            outcome.record,
+            saved=outcome.saved,
+            duplicate=outcome.duplicate,
+        )
+        if user_text:
+            return f"{context}\n\n{user_text}", True
+        return context, True
 
     async def _try_enrich_message_with_vision(
         self,

@@ -63,7 +63,9 @@ class CommandDef:
 
 COMMAND_REGISTRY: list[CommandDef] = [
     # Session
-    CommandDef("start", "Acknowledge platform start pings without a reply", "Session",
+    CommandDef("start", "Open the HealBite navigation menu", "Session",
+               gateway_only=True),
+    CommandDef("menu", "Show the HealBite navigation keyboard", "Session",
                gateway_only=True),
     CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
                aliases=("reset",), args_hint="[name]"),
@@ -528,6 +530,7 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
 _TELEGRAM_MENU_PRIORITY = (
     # Most-typed everyday commands first.
     "help",
+    "menu",
     "new",
     "stop",
     "status",

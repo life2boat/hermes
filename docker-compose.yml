@@ -11,6 +11,7 @@ services:
       - /home/hermes/.hermes/.env
     environment:
       HOME: /home/hermes
+      HERMES_HOME: /home/hermes/.hermes
       HF_HOME: /home/hermes/.cache/huggingface
       PYTHONIOENCODING: ${PYTHONIOENCODING:-utf-8}
       LANG: ${LANG:-C.UTF-8}

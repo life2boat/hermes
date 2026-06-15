@@ -21,7 +21,15 @@ from typing import Dict, List, Optional, Set, Any
 logger = logging.getLogger(__name__)
 
 try:
-    from telegram import Update, Bot, Message, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import (
+        Update,
+        Bot,
+        Message,
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+        KeyboardButton,
+        ReplyKeyboardMarkup,
+    )
     try:
         from telegram import LinkPreviewOptions
     except ImportError:
@@ -44,6 +52,8 @@ except ImportError:
     Message = Any
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
+    KeyboardButton = Any
+    ReplyKeyboardMarkup = Any
     LinkPreviewOptions = None
     Application = Any
     CommandHandler = Any
@@ -107,6 +117,16 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
 
 
 MAX_COMMANDS_PER_SCOPE = 30
+HEALBITE_REPLY_KEYBOARD_ROWS = [
+    ["Дневник", "Статистика"],
+    ["Настройки", "Помощь"],
+]
+HEALBITE_REPLY_KEYBOARD_ACTIONS = {
+    "Дневник": "/menu",
+    "Статистика": "/status",
+    "Настройки": "/profile",
+    "Помощь": "/help",
+}
 
 
 def check_telegram_requirements() -> bool:
@@ -118,7 +138,8 @@ def check_telegram_requirements() -> bool:
     so the adapter's class-level type aliases get rebound.
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
-    global InlineKeyboardMarkup, LinkPreviewOptions, Application
+    global InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+    global LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
@@ -130,7 +151,12 @@ def check_telegram_requirements() -> bool:
         return False
     try:
         from telegram import Update as _Update, Bot as _Bot, Message as _Message
-        from telegram import InlineKeyboardButton as _IKB, InlineKeyboardMarkup as _IKM
+        from telegram import (
+            InlineKeyboardButton as _IKB,
+            InlineKeyboardMarkup as _IKM,
+            KeyboardButton as _KB,
+            ReplyKeyboardMarkup as _RKM,
+        )
         try:
             from telegram import LinkPreviewOptions as _LPO
         except ImportError:
@@ -150,6 +176,8 @@ def check_telegram_requirements() -> bool:
     Message = _Message
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
+    KeyboardButton = _KB
+    ReplyKeyboardMarkup = _RKM
     LinkPreviewOptions = _LPO
     Application = _App
     CommandHandler = _CH
@@ -5444,6 +5472,75 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
+    def _healbite_main_menu_keyboard(self) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        rows = [
+            [KeyboardButton(label) for label in button_row]
+            for button_row in HEALBITE_REPLY_KEYBOARD_ROWS
+        ]
+        return ReplyKeyboardMarkup(
+            rows,
+            resize_keyboard=True,
+            one_time_keyboard=False,
+            is_persistent=False,
+        )
+
+    @staticmethod
+    def _healbite_command_from_text(text: str) -> str:
+        stripped = (text or "").strip()
+        if not stripped:
+            return ""
+        if stripped.startswith("/"):
+            command_token = stripped.split(maxsplit=1)[0].split("@", 1)[0].lower()
+            return command_token if command_token.startswith("/") else f"/{command_token}"
+        return HEALBITE_REPLY_KEYBOARD_ACTIONS.get(stripped, "")
+
+    async def _send_healbite_menu_message(self, msg: Message, *, command: str) -> None:
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        if chat_id is None:
+            return
+        thread_id = getattr(msg, "message_thread_id", None)
+        if command == "/start":
+            text = (
+                "Добро пожаловать в HealBite.\n"
+                "Ниже вернул главное меню, чтобы можно было быстро перейти к нужному разделу."
+            )
+        else:
+            text = "Главное меню HealBite снова на месте. Используйте кнопки ниже."
+        kwargs: Dict[str, Any] = {
+            "chat_id": int(chat_id),
+            "text": text,
+            "reply_markup": self._healbite_main_menu_keyboard(),
+            **self._link_preview_kwargs(),
+        }
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _maybe_handle_healbite_menu_button(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> bool:
+        del context
+        msg = self._effective_update_message(update)
+        if not msg or not msg.text:
+            return False
+        command = self._healbite_command_from_text(msg.text)
+        if command not in HEALBITE_REPLY_KEYBOARD_ACTIONS.values():
+            return False
+        if command == "/menu":
+            await self._send_healbite_menu_message(msg, command=command)
+            return True
+        if not self._should_process_message(msg, is_command=True):
+            return True
+        await self._ensure_forum_commands(msg)
+        event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
+        event.text = self._clean_bot_trigger_text(command)
+        event = self._apply_telegram_group_observe_attribution(event)
+        await self.handle_message(event)
+        return True
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
 
@@ -5453,6 +5550,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
+            return
+        if await self._maybe_handle_healbite_menu_button(update, context):
             return
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
@@ -5602,10 +5701,15 @@ class TelegramAdapter(BasePlatformAdapter):
         return True
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
+        del context
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
         if not self._should_process_message(msg, is_command=True):
+            return
+        command = self._healbite_command_from_text(msg.text)
+        if command in {"/start", "/menu"}:
+            await self._send_healbite_menu_message(msg, command=command)
             return
         if await self._maybe_handle_memory_stats_command(msg):
             return

@@ -50,12 +50,106 @@ logger = logging.getLogger(__name__)
 # Maximum number of concurrent worker threads for parallel tool execution.
 # Mirrors the constant in ``run_agent`` for tests/imports that look here.
 _MAX_TOOL_WORKERS = 8
+_IMAGE_ANALYSIS_BLOCKED_TOOL_NAMES = frozenset({"terminal", "execute_code"})
+_IMAGE_ANALYSIS_CONTEXT_MARKERS = (
+    "vision_analyze",
+    "image_url:",
+    '"type":"image_url"',
+    '"type": "image_url"',
+    "[the user sent an image",
+    "[user sent an image:",
+    "[if you need a closer look, use vision_analyze",
+    "error analyzing image",
+)
 
 
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
     return run_agent
+
+
+def _flatten_message_text(value: Any) -> str:
+    """Return a best-effort plain-text view of nested message content."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\n".join(
+            part for part in (_flatten_message_text(item) for item in value) if part
+        )
+    if isinstance(value, dict):
+        if value.get("_multimodal") is True:
+            return _flatten_message_text(value.get("content"))
+        pieces = []
+        for key in ("text", "content", "text_summary", "analysis", "error", "url", "image_url"):
+            if key in value:
+                text = _flatten_message_text(value.get(key))
+                if text:
+                    pieces.append(text)
+        return "\n".join(pieces)
+    return ""
+
+
+def _content_has_image_parts(value: Any) -> bool:
+    """Return True when nested message content contains an image block."""
+    if isinstance(value, dict):
+        if str(value.get("type") or "").lower() in {"image", "image_url", "input_image"}:
+            return True
+        if value.get("_multimodal") is True:
+            return _content_has_image_parts(value.get("content"))
+        return any(_content_has_image_parts(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_content_has_image_parts(item) for item in value)
+    return False
+
+
+def _message_indicates_image_analysis(message: Any) -> bool:
+    """Return True when a transcript message is part of an image-analysis task."""
+    if not isinstance(message, dict):
+        return False
+    tool_name = str(message.get("tool_name") or message.get("name") or "").strip().lower()
+    if tool_name == "vision_analyze":
+        return True
+    content = message.get("content")
+    if _content_has_image_parts(content):
+        return True
+    text = _flatten_message_text(content).lower()
+    return any(marker in text for marker in _IMAGE_ANALYSIS_CONTEXT_MARKERS)
+
+
+def _assistant_message_requests_image_analysis(assistant_message: Any) -> bool:
+    """Return True when the current tool-call batch already includes vision analysis."""
+    tool_calls = getattr(assistant_message, "tool_calls", None) or []
+    for tool_call in tool_calls:
+        try:
+            if str(tool_call.function.name or "").strip().lower() == "vision_analyze":
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _image_analysis_tool_block_message(
+    function_name: str,
+    *,
+    messages: list[Any],
+    assistant_message: Any,
+) -> str | None:
+    """Return a synthetic block message for terminal/code execution on image tasks."""
+    if function_name not in _IMAGE_ANALYSIS_BLOCKED_TOOL_NAMES:
+        return None
+    recent_messages = messages[-12:] if isinstance(messages, list) else []
+    if not (
+        _assistant_message_requests_image_analysis(assistant_message)
+        or any(_message_indicates_image_analysis(message) for message in recent_messages)
+    ):
+        return None
+    return (
+        f"Blocked {function_name}: terminal and execute_code are disabled for image-analysis tasks. "
+        "Do not inspect local image files or write scripts to analyze images. "
+        "If vision_analyze failed, stop escalating to terminal and reply to the user in Russian "
+        "that the image could not be recognized without exposing technical details."
+    )
 
 
 def _emit_terminal_post_tool_call(
@@ -342,23 +436,13 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 middleware_trace=list(middleware_trace),
             )
         else:
-            try:
-                from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
-                    function_name,
-                    function_args,
-                    task_id=effective_task_id or "",
-                    session_id=getattr(agent, "session_id", "") or "",
-                    tool_call_id=getattr(tool_call, "id", "") or "",
-                    turn_id=getattr(agent, "_current_turn_id", "") or "",
-                    api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                    middleware_trace=list(middleware_trace),
-                )
-            except Exception:
-                block_message = None
-
-            if block_message is not None:
-                block_result = json.dumps({"error": block_message}, ensure_ascii=False)
+            image_block_message = _image_analysis_tool_block_message(
+                function_name,
+                messages=messages,
+                assistant_message=assistant_message,
+            )
+            if image_block_message is not None:
+                block_result = json.dumps({"error": image_block_message}, ensure_ascii=False)
                 _emit_terminal_post_tool_call(
                     agent,
                     function_name=function_name,
@@ -367,15 +451,28 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     effective_task_id=effective_task_id,
                     tool_call_id=getattr(tool_call, "id", "") or "",
                     status="blocked",
-                    error_type="plugin_block",
-                    error_message=block_message,
+                    error_type="image_analysis_tool_block",
+                    error_message=image_block_message,
                     middleware_trace=list(middleware_trace),
                 )
             else:
-                guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-                if not guardrail_decision.allows_execution:
-                    block_result = agent._guardrail_block_result(guardrail_decision)
-                    blocked_by_guardrail = True
+                try:
+                    from hermes_cli.plugins import get_pre_tool_call_block_message
+                    block_message = get_pre_tool_call_block_message(
+                        function_name,
+                        function_args,
+                        task_id=effective_task_id or "",
+                        session_id=getattr(agent, "session_id", "") or "",
+                        tool_call_id=getattr(tool_call, "id", "") or "",
+                        turn_id=getattr(agent, "_current_turn_id", "") or "",
+                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                        middleware_trace=list(middleware_trace),
+                    )
+                except Exception:
+                    block_message = None
+
+                if block_message is not None:
+                    block_result = json.dumps({"error": block_message}, ensure_ascii=False)
                     _emit_terminal_post_tool_call(
                         agent,
                         function_name=function_name,
@@ -384,10 +481,27 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         effective_task_id=effective_task_id,
                         tool_call_id=getattr(tool_call, "id", "") or "",
                         status="blocked",
-                        error_type="guardrail_block",
-                        error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
+                        error_type="plugin_block",
+                        error_message=block_message,
                         middleware_trace=list(middleware_trace),
                     )
+                else:
+                    guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                    if not guardrail_decision.allows_execution:
+                        block_result = agent._guardrail_block_result(guardrail_decision)
+                        blocked_by_guardrail = True
+                        _emit_terminal_post_tool_call(
+                            agent,
+                            function_name=function_name,
+                            function_args=function_args,
+                            result=block_result,
+                            effective_task_id=effective_task_id,
+                            tool_call_id=getattr(tool_call, "id", "") or "",
+                            status="blocked",
+                            error_type="guardrail_block",
+                            error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
+                            middleware_trace=list(middleware_trace),
+                        )
 
         # ── Checkpoint preflight (only for tools that will execute) ──
         if block_result is None:
@@ -850,9 +964,18 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
-            guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-            if not guardrail_decision.allows_execution:
-                _guardrail_block_decision = guardrail_decision
+            image_block_message = _image_analysis_tool_block_message(
+                function_name,
+                messages=messages,
+                assistant_message=assistant_message,
+            )
+            if image_block_message is not None:
+                _block_msg = image_block_message
+                _block_error_type = "image_analysis_tool_block"
+            else:
+                guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                if not guardrail_decision.allows_execution:
+                    _guardrail_block_decision = guardrail_decision
 
         _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
 

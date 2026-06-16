@@ -207,6 +207,28 @@ if [ "$needs_chown" = true ]; then
     done
 fi
 
+
+# When HealBite keeps its SQLite DB at /home/hermes/healbite.db while
+# HERMES_HOME lives under /home/hermes/.hermes, SQLite still needs the
+# parent /home/hermes directory to be writable by the runtime user so it
+# can create rollback-journal / WAL / SHM sidecars next to the DB file.
+# Without this, food-diary writes fail with "attempt to write a readonly
+# database" even though the DB file itself is mounted and writable.
+# Keep the fix narrow: touch only the parent dir and the DB file/sidecars,
+# not the whole /home/hermes tree.
+if [ -f /home/hermes/healbite.db ]; then
+    chgrp hermes /home/hermes 2>/dev/null || \
+        echo "[stage2] Warning: chgrp /home/hermes failed - SQLite sidecars may remain unwritable"
+    chmod 770 /home/hermes 2>/dev/null || \
+        echo "[stage2] Warning: chmod 770 /home/hermes failed - SQLite sidecars may remain unwritable"
+    chown hermes:hermes /home/hermes/healbite.db 2>/dev/null || true
+    for sidecar in /home/hermes/healbite.db-journal /home/hermes/healbite.db-wal /home/hermes/healbite.db-shm; do
+        if [ -e "$sidecar" ]; then
+            chown hermes:hermes "$sidecar" 2>/dev/null || true
+        fi
+    done
+fi
+
 # --- Fix ownership of build trees under $INSTALL_DIR ---
 # Hermes-owned trees under $INSTALL_DIR must be re-chowned whenever the
 # runtime hermes UID no longer owns them — otherwise:

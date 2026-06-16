@@ -156,14 +156,14 @@ def _rolling_window(days: int, now: datetime | None = None) -> tuple[datetime, d
 
 def _format_kcal(value: Any) -> str:
     numeric = float(value or 0.0)
-    return f"{numeric:.0f} ????????"
+    return f"{numeric:.0f} \u043a\u043a\u0430\u043b"
 
 
 def _format_grams(value: Any) -> str:
     numeric = float(value or 0.0)
     if abs(numeric - round(numeric)) < 0.05:
-        return f"{int(round(numeric))} ??"
-    return f"{numeric:.1f} ??"
+        return f"{int(round(numeric))} \u0433"
+    return f"{numeric:.1f} \u0433"
 
 
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
@@ -545,11 +545,11 @@ class HealBiteNutritionDiary:
         if normalized_days == 1:
             start_utc, end_utc = _local_day_window(now)
             period_key = "today"
-            period_label = "??????????????"
+            period_label = "\u0441\u0435\u0433\u043e\u0434\u043d\u044f"
         else:
             start_utc, end_utc = _rolling_window(normalized_days, now)
             period_key = f"{normalized_days}d"
-            period_label = f"?????????????????? {normalized_days} ????????"
+            period_label = f"\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 {normalized_days} \u0434\u043d\u0435\u0439"
         params = (int(user_id), _sqlite_timestamp(start_utc), _sqlite_timestamp(end_utc))
         with self._connect() as conn:
             rows = conn.execute(
@@ -590,37 +590,37 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     days = max(1, int(summary.get("days") or 1))
     if not entries:
         if days == 1:
-            return "???? <b>???????? ?????????????? ???? ?????????????? ???????? ????????.</b>"
-        return f"???? <b>???????? ???????????????????? ???? {days} ???????? ???????? ??????????.</b>"
+            return "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442.</b>"
+        return f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439 \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442\u0430.</b>"
 
     if days == 1:
-        title = "???? <b>???????? ?????????????? ???? ??????????????:</b>"
+        title = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>"
     else:
-        title = f"???? <b>???????? ???????????????????? ???? {days} ????????:</b>"
+        title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
 
     lines = [
         title,
-        f"???? ??????????????: {_format_kcal(summary.get('calories_kcal'))}",
-        f"???? ??????????: {_format_grams(summary.get('protein_g'))}",
-        f"???? ????????: {_format_grams(summary.get('fat_g'))}",
-        f"???? ????????????????: {_format_grams(summary.get('carbs_g'))}",
+        f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('calories_kcal'))}",
+        f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('protein_g'))}",
+        f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('fat_g'))}",
+        f"\U0001f35e \u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b: {_format_grams(summary.get('carbs_g'))}",
     ]
     if days > 1:
         lines.extend(
             [
                 "",
-                "???? <b>?? ?????????????? ???? ????????:</b>",
-                f"???? ??????????????: {_format_kcal(summary.get('average_calories_kcal'))}",
-                f"???? ??????????: {_format_grams(summary.get('average_protein_g'))}",
-                f"???? ????????: {_format_grams(summary.get('average_fat_g'))}",
-                f"???? ????????????????: {_format_grams(summary.get('average_carbs_g'))}",
+                "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>",
+                f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('average_calories_kcal'))}",
+                f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('average_protein_g'))}",
+                f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('average_fat_g'))}",
+                f"\U0001f35e \u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b: {_format_grams(summary.get('average_carbs_g'))}",
             ]
         )
-    lines.extend(["", "???? <b>???????????? ????????:</b>"])
+    lines.extend(["", "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>"])
     for row in entries:
-        meal_name = html.escape(str(row.get("meal_name") or "??????????"))
+        meal_name = html.escape(str(row.get("meal_name") or "\u0411\u043b\u044e\u0434\u043e"))
         kcal = _format_kcal(row.get("calories_kcal"))
-        lines.append(f"??? {meal_name} (~{kcal})")
+        lines.append(f"\u2022 {meal_name} (~{kcal})")
     return "\n".join(lines)
 
 

@@ -20,6 +20,9 @@ from utils import safe_json_loads
 logger = logging.getLogger(__name__)
 
 NUTRITION_LOG_TABLE = "nutrition_log"
+_PROFILES_TABLE = "profiles"
+_STRUCTURED_FACTS_TABLE = "structured_user_facts"
+_MEMORY_FACTS_TABLE = "memory_os_facts"
 
 _DEFAULT_DB_PATH = Path("/home/hermes/healbite.db")
 _GLOBAL_DIARY_LOCK = threading.Lock()
@@ -82,6 +85,61 @@ class NutritionDiaryOutcome:
     duplicate: bool = False
     sqlite_id: int | None = None
     raw_analysis: str = ""
+
+
+@dataclass(slots=True)
+class NutritionTargets:
+    calories_kcal: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
+
+    def has_any(self) -> bool:
+        return any(
+            value is not None and float(value) > 0
+            for value in (self.calories_kcal, self.protein_g, self.fat_g, self.carbs_g)
+        )
+
+
+_TARGET_FACT_ALIASES = {
+    "calories_kcal": (
+        "daily_calories",
+        "target_calories",
+        "target_calories_kcal",
+        "calories_target",
+        "calories_limit",
+    ),
+    "protein_g": (
+        "daily_protein_g",
+        "target_protein_g",
+        "protein_target_g",
+        "protein_g_target",
+        "protein_target",
+    ),
+    "fat_g": (
+        "daily_fat_g",
+        "target_fat_g",
+        "fat_target_g",
+        "fat_g_target",
+        "fat_target",
+    ),
+    "carbs_g": (
+        "daily_carbs_g",
+        "target_carbs_g",
+        "carbs_target_g",
+        "carbs_g_target",
+        "carbs_target",
+    ),
+}
+
+_TARGET_JSON_FIELDS = {
+    "calories_kcal": ("calories_kcal", "calories", "daily_calories", "target_calories", "calories_limit"),
+    "protein_g": ("protein_g", "protein", "daily_protein_g", "target_protein_g"),
+    "fat_g": ("fat_g", "fat", "daily_fat_g", "target_fat_g"),
+    "carbs_g": ("carbs_g", "carbs", "daily_carbs_g", "target_carbs_g"),
+}
+
+_TARGET_BLOB_KEYS = ("nutrition_targets", "nutrition_target", "macro_targets", "targets")
 
 
 def resolve_healbite_db_path(db_path: str | Path | None = None) -> Path:
@@ -164,6 +222,160 @@ def _format_grams(value: Any) -> str:
     if abs(numeric - round(numeric)) < 0.05:
         return f"{int(round(numeric))} \u0433"
     return f"{numeric:.1f} \u0433"
+
+
+def _format_percent(value: float) -> str:
+    return f"{int(round(value))}%"
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _set_target_if_missing(targets: NutritionTargets, metric: str, raw_value: Any) -> None:
+    current_value = getattr(targets, metric)
+    if current_value is not None:
+        return
+    numeric = _to_float(raw_value)
+    if numeric is None or numeric <= 0:
+        return
+    setattr(targets, metric, numeric)
+
+
+def _extract_target_from_value(metric: str, fact_key: str, fact_value: str) -> float | None:
+    if fact_key in _TARGET_FACT_ALIASES.get(metric, ()):
+        return _to_float(fact_value)
+    parsed = safe_json_loads(fact_value, None)
+    if isinstance(parsed, dict):
+        for field_name in _TARGET_JSON_FIELDS.get(metric, ()):
+            numeric = _to_float(parsed.get(field_name))
+            if numeric is not None and numeric > 0:
+                return numeric
+    return None
+
+
+def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> NutritionTargets:
+    targets = NutritionTargets()
+
+    if _table_exists(conn, _PROFILES_TABLE):
+        columns = {
+            row[1]
+            for row in conn.execute(f"PRAGMA table_info({_PROFILES_TABLE})").fetchall()
+            if len(row) > 1
+        }
+        select_parts = []
+        if "calories_limit" in columns:
+            select_parts.append("calories_limit")
+        if "target_calories" in columns:
+            select_parts.append("target_calories")
+        if "daily_calories" in columns:
+            select_parts.append("daily_calories")
+        if select_parts:
+            row = conn.execute(
+                f"SELECT {', '.join(select_parts)} FROM {_PROFILES_TABLE} WHERE telegram_id = ?",
+                (int(user_id),),
+            ).fetchone()
+            if row is not None:
+                for column_name in select_parts:
+                    _set_target_if_missing(targets, "calories_kcal", row[column_name])
+
+    fact_keys = sorted({key for keys in _TARGET_FACT_ALIASES.values() for key in keys}.union(_TARGET_BLOB_KEYS))
+    if _table_exists(conn, _STRUCTURED_FACTS_TABLE):
+        placeholders = ", ".join("?" for _ in fact_keys)
+        rows = conn.execute(
+            f"""
+            SELECT fact_key, fact_value
+            FROM {_STRUCTURED_FACTS_TABLE}
+            WHERE user_id = ? AND fact_key IN ({placeholders})
+            ORDER BY trust_score DESC, updated_at DESC
+            """,
+            (int(user_id), *fact_keys),
+        ).fetchall()
+        for row in rows:
+            fact_key = str(row["fact_key"])
+            fact_value = str(row["fact_value"])
+            for metric_name in ("calories_kcal", "protein_g", "fat_g", "carbs_g"):
+                _set_target_if_missing(
+                    targets,
+                    metric_name,
+                    _extract_target_from_value(metric_name, fact_key, fact_value),
+                )
+
+    if _table_exists(conn, _MEMORY_FACTS_TABLE):
+        placeholders = ", ".join("?" for _ in fact_keys)
+        rows = conn.execute(
+            f"""
+            SELECT "key", value
+            FROM {_MEMORY_FACTS_TABLE}
+            WHERE user_id = ? AND "key" IN ({placeholders})
+            ORDER BY trust_score DESC, updated_at DESC
+            """,
+            (int(user_id), *fact_keys),
+        ).fetchall()
+        for row in rows:
+            fact_key = str(row["key"])
+            fact_value = str(row["value"])
+            for metric_name in ("calories_kcal", "protein_g", "fat_g", "carbs_g"):
+                _set_target_if_missing(
+                    targets,
+                    metric_name,
+                    _extract_target_from_value(metric_name, fact_key, fact_value),
+                )
+
+    return targets
+
+
+def _build_target_progress(
+    current_values: dict[str, float],
+    targets: NutritionTargets,
+) -> dict[str, dict[str, float]]:
+    progress: dict[str, dict[str, float]] = {}
+    for metric_name in ("calories_kcal", "protein_g", "fat_g", "carbs_g"):
+        target_value = getattr(targets, metric_name)
+        if target_value is None or float(target_value) <= 0:
+            continue
+        current_value = float(current_values.get(metric_name, 0.0))
+        progress[metric_name] = {
+            "current": current_value,
+            "target": float(target_value),
+            "percent": (current_value / float(target_value)) * 100.0 if float(target_value) > 0 else 0.0,
+        }
+    return progress
+
+
+def _build_progress_hints(progress: dict[str, dict[str, float]]) -> list[str]:
+    hints: list[str] = []
+    calories_progress = progress.get("calories_kcal")
+    protein_progress = progress.get("protein_g")
+    if calories_progress is not None and calories_progress["percent"] < 70.0:
+        hints.append("\u0421\u0435\u0433\u043e\u0434\u043d\u044f \u043f\u043e\u043a\u0430 \u043c\u0430\u043b\u043e \u043a\u0430\u043b\u043e\u0440\u0438\u0439 \u2014 \u043c\u043e\u0436\u043d\u043e \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u043e\u043b\u043d\u043e\u0446\u0435\u043d\u043d\u044b\u0439 \u043f\u0440\u0438\u0451\u043c \u043f\u0438\u0449\u0438.")
+    if protein_progress is not None and protein_progress["percent"] < 70.0:
+        hints.append("\u0411\u0435\u043b\u043a\u0430 \u043f\u043e\u043a\u0430 \u043c\u0430\u043b\u043e\u0432\u0430\u0442\u043e \u2014 \u043c\u043e\u0436\u043d\u043e \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0440\u044b\u0431\u0443, \u044f\u0439\u0446\u0430, \u0442\u0432\u043e\u0440\u043e\u0433, \u043c\u044f\u0441\u043e \u0438\u043b\u0438 \u0431\u043e\u0431\u043e\u0432\u044b\u0435.")
+    if any(item["percent"] > 120.0 for item in progress.values()):
+        hints.append("\u0426\u0435\u043b\u044c \u0443\u0436\u0435 \u043f\u0440\u0435\u0432\u044b\u0448\u0435\u043d\u0430, \u0434\u0430\u043b\u044c\u0448\u0435 \u043b\u0443\u0447\u0448\u0435 \u0432\u044b\u0431\u0438\u0440\u0430\u0442\u044c \u043b\u0451\u0433\u043a\u0438\u0435 \u0431\u043b\u044e\u0434\u0430.")
+    return hints
+
+
+def _format_progress_line(
+    *,
+    emoji: str,
+    label: str,
+    metric_name: str,
+    current_value: float,
+    progress: dict[str, dict[str, float]],
+) -> str:
+    formatter = _format_kcal if metric_name == "calories_kcal" else _format_grams
+    metric_progress = progress.get(metric_name)
+    if metric_progress is None:
+        return f"{emoji} {label}: {formatter(current_value)}"
+    return (
+        f"{emoji} {label}: {formatter(metric_progress['current'])} / "
+        f"{formatter(metric_progress['target'])} ({_format_percent(metric_progress['percent'])})"
+    )
 
 
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
@@ -560,11 +772,25 @@ class HealBiteNutritionDiary:
                 """,
                 params,
             ).fetchall()
+            targets = _load_nutrition_targets(conn, user_id=int(user_id))
         entries = [dict(row) for row in rows]
         calories_total = sum(float(row["calories_kcal"] or 0.0) for row in rows)
         protein_total = sum(float(row["protein_g"] or 0.0) for row in rows)
         fat_total = sum(float(row["fat_g"] or 0.0) for row in rows)
         carbs_total = sum(float(row["carbs_g"] or 0.0) for row in rows)
+        average_values = {
+            "calories_kcal": calories_total / normalized_days,
+            "protein_g": protein_total / normalized_days,
+            "fat_g": fat_total / normalized_days,
+            "carbs_g": carbs_total / normalized_days,
+        }
+        comparison_values = average_values if normalized_days > 1 else {
+            "calories_kcal": calories_total,
+            "protein_g": protein_total,
+            "fat_g": fat_total,
+            "carbs_g": carbs_total,
+        }
+        progress = _build_target_progress(comparison_values, targets)
         return {
             "entries": entries,
             "entry_count": len(entries),
@@ -575,10 +801,20 @@ class HealBiteNutritionDiary:
             "days": normalized_days,
             "period_key": period_key,
             "period_label": period_label,
-            "average_calories_kcal": calories_total / normalized_days,
-            "average_protein_g": protein_total / normalized_days,
-            "average_fat_g": fat_total / normalized_days,
-            "average_carbs_g": carbs_total / normalized_days,
+            "average_calories_kcal": average_values["calories_kcal"],
+            "average_protein_g": average_values["protein_g"],
+            "average_fat_g": average_values["fat_g"],
+            "average_carbs_g": average_values["carbs_g"],
+            "targets": {
+                "calories_kcal": targets.calories_kcal,
+                "protein_g": targets.protein_g,
+                "fat_g": targets.fat_g,
+                "carbs_g": targets.carbs_g,
+            },
+            "targets_available": targets.has_any(),
+            "progress": progress,
+            "comparison_values": comparison_values,
+            "hints": _build_progress_hints(progress),
         }
 
     def get_daily_summary(self, *, user_id: int, now: datetime | None = None) -> dict[str, Any]:
@@ -588,34 +824,80 @@ class HealBiteNutritionDiary:
 def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     entries = summary.get("entries") or []
     days = max(1, int(summary.get("days") or 1))
+    progress = summary.get("progress") or {}
+    comparison_values = summary.get("comparison_values") or {
+        "calories_kcal": float(summary.get("calories_kcal") or 0.0),
+        "protein_g": float(summary.get("protein_g") or 0.0),
+        "fat_g": float(summary.get("fat_g") or 0.0),
+        "carbs_g": float(summary.get("carbs_g") or 0.0),
+    }
+    no_target_hint = "\U0001f3af \u0426\u0435\u043b\u044c \u0435\u0449\u0451 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430. \u0417\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u0435 /profile, \u0447\u0442\u043e\u0431\u044b \u044f \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u043b \u043f\u0440\u043e\u0433\u0440\u0435\u0441\u0441."
     if not entries:
         if days == 1:
-            return "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442.</b>"
-        return f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439 \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442\u0430.</b>"
+            message = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442.</b>"
+        else:
+            message = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439 \u043f\u043e\u043a\u0430 \u043f\u0443\u0441\u0442\u0430.</b>"
+        if not summary.get("targets_available"):
+            message += "\n\n" + no_target_hint
+        return message
 
     if days == 1:
         title = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>"
     else:
         title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
 
-    lines = [
-        title,
-        f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('calories_kcal'))}",
-        f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('protein_g'))}",
-        f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('fat_g'))}",
-        f"\U0001f35e \u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b: {_format_grams(summary.get('carbs_g'))}",
-    ]
+    lines = [title]
+    if days > 1:
+        lines.append("\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>")
+    lines.extend(
+        [
+            _format_progress_line(
+                emoji="\U0001f525",
+                label="\u041a\u0430\u043b\u043e\u0440\u0438\u0438",
+                metric_name="calories_kcal",
+                current_value=float(comparison_values.get("calories_kcal") or 0.0),
+                progress=progress,
+            ),
+            _format_progress_line(
+                emoji="\U0001f969",
+                label="\u0411\u0435\u043b\u043a\u0438",
+                metric_name="protein_g",
+                current_value=float(comparison_values.get("protein_g") or 0.0),
+                progress=progress,
+            ),
+            _format_progress_line(
+                emoji="\U0001f9c8",
+                label="\u0416\u0438\u0440\u044b",
+                metric_name="fat_g",
+                current_value=float(comparison_values.get("fat_g") or 0.0),
+                progress=progress,
+            ),
+            _format_progress_line(
+                emoji="\U0001f35e",
+                label="\u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b",
+                metric_name="carbs_g",
+                current_value=float(comparison_values.get("carbs_g") or 0.0),
+                progress=progress,
+            ),
+        ]
+    )
     if days > 1:
         lines.extend(
             [
                 "",
-                "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>",
-                f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('average_calories_kcal'))}",
-                f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('average_protein_g'))}",
-                f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('average_fat_g'))}",
-                f"\U0001f35e \u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b: {_format_grams(summary.get('average_carbs_g'))}",
+                f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>",
+                f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('calories_kcal'))}",
+                f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('protein_g'))}",
+                f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('fat_g'))}",
+                f"\U0001f35e \u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b: {_format_grams(summary.get('carbs_g'))}",
             ]
         )
+    if not summary.get("targets_available"):
+        lines.extend(["", no_target_hint])
+    hints = summary.get("hints") or []
+    if hints:
+        lines.extend(["", "\U0001f4a1 <b>\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438:</b>"])
+        lines.extend(f"\u2022 {html.escape(str(hint))}" for hint in hints)
     lines.extend(["", "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>"])
     for row in entries:
         meal_name = html.escape(str(row.get("meal_name") or "\u0411\u043b\u044e\u0434\u043e"))

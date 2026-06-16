@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import html
 import json
 import logging
 import os
@@ -145,6 +146,24 @@ def _local_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
     start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_local = start_local + timedelta(days=1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _rolling_window(days: int, now: datetime | None = None) -> tuple[datetime, datetime]:
+    end_utc = _normalize_timestamp(now)
+    start_utc = end_utc - timedelta(days=days)
+    return start_utc, end_utc
+
+
+def _format_kcal(value: Any) -> str:
+    numeric = float(value or 0.0)
+    return f"{numeric:.0f} ????????"
+
+
+def _format_grams(value: Any) -> str:
+    numeric = float(value or 0.0)
+    if abs(numeric - round(numeric)) < 0.05:
+        return f"{int(round(numeric))} ??"
+    return f"{numeric:.1f} ??"
 
 
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
@@ -515,8 +534,22 @@ class HealBiteNutritionDiary:
                 )
         return indexed
 
-    def get_daily_summary(self, *, user_id: int, now: datetime | None = None) -> dict[str, Any]:
-        start_utc, end_utc = _local_day_window(now)
+    def get_summary(
+        self,
+        *,
+        user_id: int,
+        now: datetime | None = None,
+        days: int = 1,
+    ) -> dict[str, Any]:
+        normalized_days = max(1, int(days))
+        if normalized_days == 1:
+            start_utc, end_utc = _local_day_window(now)
+            period_key = "today"
+            period_label = "??????????????"
+        else:
+            start_utc, end_utc = _rolling_window(normalized_days, now)
+            period_key = f"{normalized_days}d"
+            period_label = f"?????????????????? {normalized_days} ????????"
         params = (int(user_id), _sqlite_timestamp(start_utc), _sqlite_timestamp(end_utc))
         with self._connect() as conn:
             rows = conn.execute(
@@ -528,40 +561,66 @@ class HealBiteNutritionDiary:
                 params,
             ).fetchall()
         entries = [dict(row) for row in rows]
+        calories_total = sum(float(row["calories_kcal"] or 0.0) for row in rows)
+        protein_total = sum(float(row["protein_g"] or 0.0) for row in rows)
+        fat_total = sum(float(row["fat_g"] or 0.0) for row in rows)
+        carbs_total = sum(float(row["carbs_g"] or 0.0) for row in rows)
         return {
             "entries": entries,
             "entry_count": len(entries),
-            "calories_kcal": sum(float(row["calories_kcal"] or 0.0) for row in rows),
-            "protein_g": sum(float(row["protein_g"] or 0.0) for row in rows),
-            "fat_g": sum(float(row["fat_g"] or 0.0) for row in rows),
-            "carbs_g": sum(float(row["carbs_g"] or 0.0) for row in rows),
+            "calories_kcal": calories_total,
+            "protein_g": protein_total,
+            "fat_g": fat_total,
+            "carbs_g": carbs_total,
+            "days": normalized_days,
+            "period_key": period_key,
+            "period_label": period_label,
+            "average_calories_kcal": calories_total / normalized_days,
+            "average_protein_g": protein_total / normalized_days,
+            "average_fat_g": fat_total / normalized_days,
+            "average_carbs_g": carbs_total / normalized_days,
         }
+
+    def get_daily_summary(self, *, user_id: int, now: datetime | None = None) -> dict[str, Any]:
+        return self.get_summary(user_id=user_id, now=now, days=1)
 
 
 def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     entries = summary.get("entries") or []
+    days = max(1, int(summary.get("days") or 1))
     if not entries:
-        return "No nutrition diary entries for today yet."
+        if days == 1:
+            return "???? <b>???????? ?????????????? ???? ?????????????? ???????? ????????.</b>"
+        return f"???? <b>???????? ???????????????????? ???? {days} ???????? ???????? ??????????.</b>"
+
+    if days == 1:
+        title = "???? <b>???????? ?????????????? ???? ??????????????:</b>"
+    else:
+        title = f"???? <b>???????? ???????????????????? ???? {days} ????????:</b>"
+
     lines = [
-        "Nutrition Diary for Today",
-        "",
-        f"Meals: {summary.get('entry_count', 0)}",
-        f"Calories: {summary.get('calories_kcal', 0.0):.0f} kcal",
-        f"Protein: {summary.get('protein_g', 0.0):.1f} g",
-        f"Fat: {summary.get('fat_g', 0.0):.1f} g",
-        f"Carbs: {summary.get('carbs_g', 0.0):.1f} g",
-        "",
-        "Entries:",
+        title,
+        f"???? ??????????????: {_format_kcal(summary.get('calories_kcal'))}",
+        f"???? ??????????: {_format_grams(summary.get('protein_g'))}",
+        f"???? ????????: {_format_grams(summary.get('fat_g'))}",
+        f"???? ????????????????: {_format_grams(summary.get('carbs_g'))}",
     ]
-    for index, row in enumerate(entries, start=1):
-        kcal = float(row.get("calories_kcal") or 0.0)
-        protein = float(row.get("protein_g") or 0.0)
-        fat = float(row.get("fat_g") or 0.0)
-        carbs = float(row.get("carbs_g") or 0.0)
-        meal_name = row.get("meal_name") or "Meal"
-        lines.append(
-            f"{index}. {meal_name} - {kcal:.0f} kcal (P {protein:.1f} / F {fat:.1f} / C {carbs:.1f})"
+    if days > 1:
+        lines.extend(
+            [
+                "",
+                "???? <b>?? ?????????????? ???? ????????:</b>",
+                f"???? ??????????????: {_format_kcal(summary.get('average_calories_kcal'))}",
+                f"???? ??????????: {_format_grams(summary.get('average_protein_g'))}",
+                f"???? ????????: {_format_grams(summary.get('average_fat_g'))}",
+                f"???? ????????????????: {_format_grams(summary.get('average_carbs_g'))}",
+            ]
         )
+    lines.extend(["", "???? <b>???????????? ????????:</b>"])
+    for row in entries:
+        meal_name = html.escape(str(row.get("meal_name") or "??????????"))
+        kcal = _format_kcal(row.get("calories_kcal"))
+        lines.append(f"??? {meal_name} (~{kcal})")
     return "\n".join(lines)
 
 
@@ -570,9 +629,10 @@ def compute_nutrition_diary_summary(
     *,
     user_id: int,
     now: datetime | None = None,
+    days: int = 1,
 ) -> dict[str, Any]:
     diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
-    return diary.get_daily_summary(user_id=user_id, now=now)
+    return diary.get_summary(user_id=user_id, now=now, days=days)
 
 
 def get_default_nutrition_diary() -> HealBiteNutritionDiary:

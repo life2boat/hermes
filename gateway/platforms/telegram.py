@@ -5700,6 +5700,15 @@ class TelegramAdapter(BasePlatformAdapter):
             message_thread_id=thread_id,
         )
         return True
+    @staticmethod
+    def _parse_nutrition_diary_args(text: str) -> tuple[int | None, str | None]:
+        parts = text.split()
+        if len(parts) <= 1:
+            return 1, None
+        if len(parts) == 2 and parts[1].lower() == "7d":
+            return 7, None
+        return None, "??????????????????????????: /diary [7d] ?????? /stats [7d]"
+
     async def _maybe_handle_nutrition_diary_command(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
@@ -5713,18 +5722,30 @@ class TelegramAdapter(BasePlatformAdapter):
         if user_id is None:
             await self._send_message_with_thread_fallback(
                 chat_id=chat_id,
-                text="Could not resolve user for nutrition diary.",
+                text="???? ?????????????? ???????????????????? ???????????????????????? ?????? ???????????????? ??????????????.",
                 message_thread_id=thread_id,
             )
             return True
 
-        summary = compute_nutrition_diary_summary(user_id=int(user_id))
+        days, error = self._parse_nutrition_diary_args(text)
+        if error is not None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=error,
+                message_thread_id=thread_id,
+            )
+            return True
+
+        summary = compute_nutrition_diary_summary(user_id=int(user_id), days=int(days or 1))
         report = format_nutrition_diary_report(summary)
-        await self._send_message_with_thread_fallback(
-            chat_id=chat_id,
-            text=report,
-            message_thread_id=thread_id,
-        )
+        kwargs = {
+            "chat_id": chat_id,
+            "text": report,
+            "message_thread_id": thread_id,
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
         return True
 
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

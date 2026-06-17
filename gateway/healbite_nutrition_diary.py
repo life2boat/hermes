@@ -100,6 +100,18 @@ class UndoMealResult:
 
 
 @dataclass(slots=True)
+class UpdateMealResult:
+    updated: bool
+    sqlite_id: int | None = None
+    meal_name: str = ""
+    calories_kcal: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
+    occurred_at: str = ""
+
+
+@dataclass(slots=True)
 class NutritionTargets:
     calories_kcal: float | None = None
     protein_g: float | None = None
@@ -742,6 +754,137 @@ class HealBiteNutritionDiary:
             fat_g=_to_float(row["fat_g"]),
             carbs_g=_to_float(row["carbs_g"]),
             occurred_at=str(row["occurred_at"] or ""),
+        )
+
+    def update_last_meal(
+        self,
+        user_id: str,
+        new_meal_name: str = None,
+        new_calories: int = None,
+        new_protein: float = None,
+        new_fat: float = None,
+        new_carbs: float = None,
+        *,
+        now: datetime | None = None,
+    ) -> UpdateMealResult:
+        normalized_user_id = int(user_id)
+        normalized_meal_name = (new_meal_name or "").strip() or None
+
+        def _normalize_numeric(value: Any, field_name: str) -> float | None:
+            if value is None:
+                return None
+            numeric = _to_float(value)
+            if numeric is None:
+                raise ValueError(f"{field_name} must be a number.")
+            return numeric
+
+        calories_value = _normalize_numeric(new_calories, "new_calories")
+        protein_value = _normalize_numeric(new_protein, "new_protein")
+        fat_value = _normalize_numeric(new_fat, "new_fat")
+        carbs_value = _normalize_numeric(new_carbs, "new_carbs")
+
+        if all(
+            value is None
+            for value in (
+                normalized_meal_name,
+                calories_value,
+                protein_value,
+                fat_value,
+                carbs_value,
+            )
+        ):
+            raise ValueError("Provide at least one field to update.")
+
+        start_utc, end_utc = _local_day_window(now)
+        params = (
+            normalized_user_id,
+            _sqlite_timestamp(start_utc),
+            _sqlite_timestamp(end_utc),
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    meal_name,
+                    items_json,
+                    calories_kcal,
+                    protein_g,
+                    fat_g,
+                    carbs_g,
+                    confidence,
+                    occurred_at,
+                    raw_summary,
+                    created_at
+                FROM {NUTRITION_LOG_TABLE}
+                WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?
+                ORDER BY occurred_at DESC, created_at DESC, id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if row is None:
+                return UpdateMealResult(updated=False)
+
+            sqlite_id = int(row["id"])
+            updated_meal_name = normalized_meal_name or str(row["meal_name"] or "\u0411\u043b\u044e\u0434\u043e")
+            updated_calories = calories_value if calories_value is not None else _to_float(row["calories_kcal"])
+            updated_protein = protein_value if protein_value is not None else _to_float(row["protein_g"])
+            updated_fat = fat_value if fat_value is not None else _to_float(row["fat_g"])
+            updated_carbs = carbs_value if carbs_value is not None else _to_float(row["carbs_g"])
+            occurred_at_sql = str(row["occurred_at"] or "")
+            raw_summary = str(row["raw_summary"] or updated_meal_name)
+            confidence = _coerce_confidence(row["confidence"])
+            items_payload = safe_json_loads(str(row["items_json"] or "[]"), [])
+            items = items_payload if isinstance(items_payload, list) else []
+
+            conn.execute(
+                f"""
+                UPDATE {NUTRITION_LOG_TABLE}
+                SET meal_name = ?,
+                    calories_kcal = ?,
+                    protein_g = ?,
+                    fat_g = ?,
+                    carbs_g = ?,
+                    qdrant_indexed = 0
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    updated_meal_name,
+                    updated_calories,
+                    updated_protein,
+                    updated_fat,
+                    updated_carbs,
+                    sqlite_id,
+                    normalized_user_id,
+                ),
+            )
+
+        self._schedule_qdrant_index(
+            sqlite_id=sqlite_id,
+            user_id=normalized_user_id,
+            record=NutritionRecord(
+                is_food=True,
+                meal_name=updated_meal_name,
+                items=items,
+                calories_kcal=updated_calories,
+                protein_g=updated_protein,
+                fat_g=updated_fat,
+                carbs_g=updated_carbs,
+                confidence=confidence,
+                raw_summary=raw_summary,
+            ),
+            occurred_at=occurred_at_sql,
+        )
+        return UpdateMealResult(
+            updated=True,
+            sqlite_id=sqlite_id,
+            meal_name=updated_meal_name,
+            calories_kcal=updated_calories,
+            protein_g=updated_protein,
+            fat_g=updated_fat,
+            carbs_g=updated_carbs,
+            occurred_at=occurred_at_sql,
         )
 
     def _schedule_qdrant_index(

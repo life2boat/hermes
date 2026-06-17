@@ -53,6 +53,8 @@ _HERMES_CORE_TOOLS = [
     "todo", "memory",
     # Session history search
     "session_search",
+    # HealBite diary corrections
+    "update_last_meal",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -237,6 +239,12 @@ TOOLSETS = {
         "includes": []
     },
     
+    "nutrition_diary": {
+        "description": "HealBite nutrition diary tools for correcting the latest meal entry",
+        "tools": ["update_last_meal"],
+        "includes": []
+    },
+
     "clarify": {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],

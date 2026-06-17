@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway.session_context import clear_session_vars, set_session_vars
 from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
@@ -18,6 +19,7 @@ from gateway.healbite_nutrition_diary import (
     normalize_nutrition_payload,
 )
 from gateway.platforms.telegram import TelegramAdapter
+from tools.healbite_nutrition_diary_tool import update_last_meal_tool
 
 
 class _RecordingQdrantAdapter:
@@ -737,6 +739,168 @@ def test_format_undo_meal_report_is_html_safe_and_unicode_clean():
     assert "<b>Семга &amp; &lt;сыр&gt;</b>" in report
     assert "Было: 520 ккал · Б 35 г · Ж 20 г · У 30 г" in report
     assert "????" not in report
+
+
+
+def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
+    adapter = _RecordingQdrantAdapter(should_succeed=True)
+    diary = HealBiteNutritionDiary(
+        db_path=tmp_path / "healbite.db",
+        qdrant_adapter=adapter,
+        background_write=False,
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    older = _build_record(
+        meal_name="\u0413\u0440\u0435\u0447\u043a\u0430",
+        calories_kcal=310,
+        protein_g=11,
+        fat_g=7,
+        carbs_g=49,
+    )
+    newer = _build_record(
+        meal_name="\u041a\u0443\u0440\u0438\u0446\u0430",
+        calories_kcal=520,
+        protein_g=42,
+        fat_g=18,
+        carbs_g=14,
+    )
+    older_id, _ = diary.save_record(
+        user_id=92,
+        source="text",
+        record=older,
+        image_ref="telegram:92:1",
+        occurred_at=now - timedelta(hours=2),
+    )
+    newer_id, _ = diary.save_record(
+        user_id=92,
+        source="text",
+        record=newer,
+        image_ref="telegram:92:2",
+        occurred_at=now - timedelta(minutes=5),
+    )
+    monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
+    tokens = set_session_vars(platform="telegram", chat_id="chat-92", user_id="92", session_key="s-92", session_id="session-92")
+    try:
+        payload = json.loads(update_last_meal_tool(new_calories=400))
+    finally:
+        clear_session_vars(tokens)
+
+    summary = diary.get_daily_summary(user_id=92, now=now)
+    assert payload["success"] is True
+    assert payload["sqlite_id"] == newer_id
+    assert older_id is not None
+    assert newer_id is not None
+    assert summary["entries"][0]["id"] == older_id
+    assert summary["entries"][0]["calories_kcal"] == pytest.approx(310.0)
+    assert summary["entries"][-1]["id"] == newer_id
+    assert summary["entries"][-1]["calories_kcal"] == pytest.approx(400.0)
+
+
+def test_update_last_meal_tool_ignores_none_fields(tmp_path, monkeypatch):
+    adapter = _RecordingQdrantAdapter(should_succeed=True)
+    diary = HealBiteNutritionDiary(
+        db_path=tmp_path / "healbite.db",
+        qdrant_adapter=adapter,
+        background_write=False,
+    )
+    now = datetime.now(timezone.utc)
+    original = _build_record(
+        meal_name="\u0411\u043e\u0440\u0449",
+        calories_kcal=280,
+        protein_g=12,
+        fat_g=9,
+        carbs_g=31,
+    )
+    sqlite_id, _ = diary.save_record(
+        user_id=93,
+        source="text",
+        record=original,
+        image_ref="telegram:93:1",
+        occurred_at=now,
+    )
+    monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
+    tokens = set_session_vars(platform="telegram", chat_id="chat-93", user_id="93", session_key="s-93", session_id="session-93")
+    try:
+        payload = json.loads(update_last_meal_tool(new_calories=400))
+    finally:
+        clear_session_vars(tokens)
+
+    summary = diary.get_daily_summary(user_id=93, now=now)
+    row = summary["entries"][0]
+    assert payload["success"] is True
+    assert payload["sqlite_id"] == sqlite_id
+    assert row["meal_name"] == "\u0411\u043e\u0440\u0449"
+    assert row["calories_kcal"] == pytest.approx(400.0)
+    assert row["protein_g"] == pytest.approx(12.0)
+    assert row["fat_g"] == pytest.approx(9.0)
+    assert row["carbs_g"] == pytest.approx(31.0)
+
+
+def test_update_last_meal_tool_returns_error_for_empty_diary(tmp_path, monkeypatch):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
+    tokens = set_session_vars(platform="telegram", chat_id="chat-94", user_id="94", session_key="s-94", session_id="session-94")
+    try:
+        payload = json.loads(update_last_meal_tool(new_calories=400))
+    finally:
+        clear_session_vars(tokens)
+
+    assert payload["success"] is False
+    assert payload["code"] == "diary_empty"
+    assert "\u043d\u0435\u0442 \u0437\u0430\u043f\u0438\u0441\u0435\u0439" in payload["error"]
+
+
+def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
+    adapter = _RecordingQdrantAdapter(should_succeed=True)
+    diary = HealBiteNutritionDiary(
+        db_path=tmp_path / "healbite.db",
+        qdrant_adapter=adapter,
+        background_write=False,
+    )
+    now = datetime.now(timezone.utc)
+    user_one = _build_record(
+        meal_name="\u041f\u043b\u043e\u0432",
+        calories_kcal=640,
+        protein_g=22,
+        fat_g=24,
+        carbs_g=68,
+    )
+    user_two = _build_record(
+        meal_name="\u0421\u0430\u043b\u0430\u0442",
+        calories_kcal=180,
+        protein_g=8,
+        fat_g=11,
+        carbs_g=16,
+    )
+    diary.save_record(
+        user_id=95,
+        source="text",
+        record=user_one,
+        image_ref="telegram:95:1",
+        occurred_at=now - timedelta(minutes=10),
+    )
+    second_id, _ = diary.save_record(
+        user_id=96,
+        source="text",
+        record=user_two,
+        image_ref="telegram:96:1",
+        occurred_at=now - timedelta(minutes=5),
+    )
+    monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
+    tokens = set_session_vars(platform="telegram", chat_id="chat-96", user_id="96", session_key="s-96", session_id="session-96")
+    try:
+        payload = json.loads(update_last_meal_tool(new_meal_name="?????????????? ??????????", new_calories=210))
+    finally:
+        clear_session_vars(tokens)
+
+    first_summary = diary.get_daily_summary(user_id=95, now=now)
+    second_summary = diary.get_daily_summary(user_id=96, now=now)
+    assert payload["success"] is True
+    assert payload["sqlite_id"] == second_id
+    assert first_summary["entries"][0]["meal_name"] == "\u041f\u043b\u043e\u0432"
+    assert first_summary["entries"][0]["calories_kcal"] == pytest.approx(640.0)
+    assert second_summary["entries"][0]["meal_name"] == "?????????????? ??????????"
+    assert second_summary["entries"][0]["calories_kcal"] == pytest.approx(210.0)
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
     compute_nutrition_diary_summary,
@@ -124,6 +125,29 @@ def _seed_targets(
                     "INSERT INTO structured_user_facts(user_id, fact_key, fact_value, trust_score) VALUES (?, ?, ?, ?)",
                     (user_id, fact_key, str(fact_value), 1.0),
                 )
+
+
+def test_nutrition_diary_commands_are_registered_for_gateway_dispatch():
+    diary_def = resolve_command("/diary")
+    stats_def = resolve_command("/stats")
+
+    assert diary_def is not None
+    assert diary_def.name == "diary"
+    assert diary_def.gateway_only is True
+
+    assert stats_def is not None
+    assert stats_def.name == "stats"
+    assert stats_def.gateway_only is True
+
+    assert "diary" in GATEWAY_KNOWN_COMMANDS
+    assert "stats" in GATEWAY_KNOWN_COMMANDS
+    assert is_gateway_known_command("diary") is True
+    assert is_gateway_known_command("stats") is True
+
+
+def test_unknown_slash_command_remains_unknown():
+    assert resolve_command("/totally_unknown_diary_command") is None
+    assert is_gateway_known_command("totally_unknown_diary_command") is False
 
 
 def test_normalize_nutrition_payload_extracts_structured_json():
@@ -655,6 +679,51 @@ async def test_telegram_stats_7d_command_routes_correctly(monkeypatch):
         message_thread_id=None,
     )
     update = SimpleNamespace(update_id=2, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c" in kwargs["text"]
+    assert "????" not in kwargs["text"]
+    assert captured_days == [7]
+
+
+@pytest.mark.asyncio
+async def test_telegram_diary_7d_command_routes_correctly(monkeypatch):
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_message_with_thread_fallback = AsyncMock()
+    adapter._ensure_forum_commands = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    captured_days: list[int] = []
+
+    def _fake_summary(*args, **kwargs):
+        captured_days.append(kwargs.get("days", 1))
+        return {
+            "entries": [{"meal_name": "\u041a\u0430\u0448\u0430", "calories_kcal": 250, "protein_g": 9, "fat_g": 4, "carbs_g": 44}],
+            "entry_count": 2,
+            "calories_kcal": 1750,
+            "protein_g": 77,
+            "fat_g": 49,
+            "carbs_g": 210,
+            "days": kwargs.get("days", 1),
+        }
+
+    monkeypatch.setattr("gateway.platforms.telegram.compute_nutrition_diary_summary", _fake_summary)
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_nutrition_diary_report",
+        lambda summary: f"\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 {summary['days']} \u0434\u043d\u0435\u0439:</b>\n\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>",
+    )
+
+    msg = SimpleNamespace(
+        text="/diary 7d",
+        chat=SimpleNamespace(id=333, type="private"),
+        from_user=SimpleNamespace(id=333),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=3, message=msg, effective_message=None)
 
     await adapter._handle_command(update, SimpleNamespace())
 

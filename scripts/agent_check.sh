@@ -44,4 +44,5 @@ $PY -m pytest -q \
   tests/gateway/platforms/test_healbite_memory_bridge.py \
   tests/agent/test_auxiliary_client.py \
   tests/agent/test_prompt_builder.py \
-  tests/scripts/test_memory_analytics_report.py
+  tests/scripts/test_memory_analytics_report.py \
+  tests/scripts/test_healbite_cli.py

@@ -62,6 +62,33 @@ CHANGED_FILES="gateway/run.py gateway/config.py agent/auxiliary_client.py" bash 
 
 Keep the value space-separated. Only include Python files that should be sent to `python3 -m py_compile`.
 
+## HealBite Diagnostic CLI
+
+Before fixing a HealBite runtime issue, capture a fresh snapshot with:
+
+```bash
+cd /home/hermes/.hermes/hermes-agent
+./scripts/healbite status
+```
+
+Useful follow-up commands:
+
+```bash
+./scripts/healbite logs --last 80
+./scripts/healbite test-diary
+./scripts/healbite check-admins
+./scripts/healbite inspect-profile --user-id 248875361
+./scripts/healbite simulate-message "/diary 7d" --user-id 248875361
+./scripts/healbite fix-plan --issue provider-auth
+```
+
+Guardrails for this CLI:
+
+- it must not print secret values;
+- it must not mutate provider/model/admin-list/Qdrant toggles;
+- it is read-only by default;
+- any write probe must be a synthetic insert/delete probe only.
+
 ## Commands That Require User Confirmation
 
 Do not run these without explicit user approval:

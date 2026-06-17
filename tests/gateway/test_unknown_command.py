@@ -420,6 +420,52 @@ async def test_stats_slash_command_short_circuits_before_agent_loop(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_undo_meal_slash_command_short_circuits_before_agent_loop(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("/undo_meal leaked into the agent loop")
+    )
+    runner._handle_healbite_undo_meal_command = AsyncMock(
+        return_value="Undo summary"
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/undo_meal"))
+
+    assert result == "Undo summary"
+    runner._handle_healbite_undo_meal_command.assert_awaited_once()
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_diary_undo_alias_short_circuits_before_agent_loop(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("/diary_undo leaked into the agent loop")
+    )
+    runner._handle_healbite_undo_meal_command = AsyncMock(
+        return_value="Undo summary"
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/diary_undo"))
+
+    assert result == "Undo summary"
+    runner._handle_healbite_undo_meal_command.assert_awaited_once()
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_diary_slash_handler_preserves_weekly_arg(monkeypatch):
     runner = _make_runner()
     captured_days: list[int] = []

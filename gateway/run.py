@@ -6969,6 +6969,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_commands_command(event)
                 if _cmd_def_inner.name in {"diary", "stats"}:
                     return await self._handle_healbite_nutrition_diary_command(event)
+                if _cmd_def_inner.name == "undo_meal":
+                    return await self._handle_healbite_undo_meal_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
@@ -7232,6 +7234,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical in {"diary", "stats"}:
             return await self._handle_healbite_nutrition_diary_command(event)
+
+        if canonical == "undo_meal":
+            return await self._handle_healbite_undo_meal_command(event)
         
         if canonical == "profile":
             return await self._handle_profile_command(event)
@@ -11792,6 +11797,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
         report = format_nutrition_diary_report(summary)
+        return self._plain_healbite_nutrition_diary_report(report)
+
+    @staticmethod
+    def _parse_healbite_undo_meal_command_args(text: str) -> str | None:
+        tokens = (text or "").strip().split()
+        if len(tokens) <= 1:
+            return None
+        return "Использование: /undo_meal или /diary_undo"
+
+    async def _handle_healbite_undo_meal_command(self, event: MessageEvent) -> str:
+        from gateway.healbite_nutrition_diary import format_undo_meal_report
+
+        source = event.source
+        user_id = getattr(source, "user_id", None)
+        if user_id is None:
+            return "Не удалось определить пользователя для удаления записи."
+
+        error = self._parse_healbite_undo_meal_command_args(event.text or "")
+        if error:
+            return error
+
+        try:
+            result = self._get_healbite_nutrition_diary().delete_last_meal(
+                user_id=int(user_id),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to delete the last HealBite meal for user=%s",
+                user_id,
+                exc_info=True,
+            )
+            return "Не удалось удалить последнюю запись. Попробуйте еще раз чуть позже."
+
+        report = format_undo_meal_report(result)
         return self._plain_healbite_nutrition_diary_report(report)
 
     @staticmethod

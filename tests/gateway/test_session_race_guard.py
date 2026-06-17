@@ -373,6 +373,7 @@ async def test_start_command_is_noop_during_active_session():
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
         ("/diary", "_handle_healbite_nutrition_diary_command", "Diary text"),
+        ("/undo_meal", "_handle_healbite_undo_meal_command", "Undo text"),
         ("/update", "_handle_update_command", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
         ("/stats 7d", "_handle_healbite_nutrition_diary_command", "Stats text"),

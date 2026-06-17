@@ -18,8 +18,14 @@ SUPPORTED_SIMULATION_COMMANDS = {
     "/diary 7d",
     "/stats",
     "/stats 7d",
+    "/undo_meal",
+    "/diary_undo",
     "/memory_stats",
     "/menu",
+}
+STATE_CHANGING_SIMULATION_COMMANDS = {
+    "/undo_meal",
+    "/diary_undo",
 }
 IMPORTANT_LOG_PATTERN = re.compile(
     r"(traceback|exception|provider authentication|command approval|execute_code|terminal|readonly|permissionerror|"
@@ -243,7 +249,12 @@ def normalize_simulation_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
-def simulate_local_message(text: str, *, user_id: int | None = None) -> str:
+def simulate_local_message(
+    text: str,
+    *,
+    user_id: int | None = None,
+    allow_write: bool = False,
+) -> str:
     normalized = normalize_simulation_text(text)
     lowered = normalized.lower()
     if lowered not in SUPPORTED_SIMULATION_COMMANDS:
@@ -252,6 +263,11 @@ def simulate_local_message(text: str, *, user_id: int | None = None) -> str:
             f"Unsupported for local simulation: {normalized or '<empty>'}\n"
             "LLM and external calls are disabled by default for this diagnostic path.\n"
             f"Supported local commands: {supported}"
+        )
+    if lowered in STATE_CHANGING_SIMULATION_COMMANDS and not allow_write:
+        return (
+            f"Simulated {normalized}\n"
+            "This command changes state. Use --allow-write to execute."
         )
     if lowered == "/menu":
         return (
@@ -465,6 +481,7 @@ class HealBiteCLI:
             f"- nutrition_log_count: {result.get('nutrition_log_count', 'unknown')}",
             f"- write_probe_ok: {result.get('write_probe_ok', False)}",
             f"- summary_ok: {result.get('summary_ok', False)}",
+            f"- undo_probe_ok: {result.get('undo_probe_ok', False)}",
             f"- encoding_ok: {result.get('encoding_ok', False)}",
         ]
         columns = result.get("columns") or []
@@ -473,6 +490,9 @@ class HealBiteCLI:
         preview = result.get("summary_preview")
         if preview:
             lines.extend(["", "Probe summary preview:", preview])
+        undo_preview = result.get("undo_preview")
+        if undo_preview:
+            lines.extend(["", "Undo preview:", undo_preview])
         detail = result.get("detail")
         if detail:
             lines.append(f"- detail: {detail}")
@@ -521,15 +541,40 @@ class HealBiteCLI:
             lines.append(f"- detail: {detail}")
         return redact_secrets("\n".join(lines))
 
-    def cmd_simulate_message(self, text: str, *, user_id: int | None = None) -> str:
+    def cmd_simulate_message(
+        self,
+        text: str,
+        *,
+        user_id: int | None = None,
+        allow_write: bool = False,
+    ) -> str:
         lowered = normalize_simulation_text(text).lower()
+        if lowered in STATE_CHANGING_SIMULATION_COMMANDS:
+            if not allow_write:
+                return simulate_local_message(text, user_id=user_id, allow_write=False)
+            if user_id is None:
+                return (
+                    f"Simulated {normalize_simulation_text(text)}\n"
+                    "This command changes state. Pass --user-id together with --allow-write to execute."
+                )
+            result = self._docker_exec_python(
+                _SIMULATE_UNDO_MEAL_CODE_TEMPLATE.format(user_id=int(user_id)),
+                user="10000:10000",
+            )
+            if not result.get("ok", False):
+                detail = result.get("detail", "Local undo simulation failed.")
+                return f"Simulated {normalize_simulation_text(text)}\n{detail}"
+            return (
+                f"Simulated {normalize_simulation_text(text)} for user_id={user_id}\n"
+                f"{result.get('text', '').strip()}"
+            )
         if user_id is None or lowered not in {
             "/diary",
             "/diary 7d",
             "/stats",
             "/stats 7d",
         }:
-            return simulate_local_message(text, user_id=user_id)
+            return simulate_local_message(text, user_id=user_id, allow_write=allow_write)
         result = self._docker_exec_python(
             _SIMULATE_DIARY_CODE_TEMPLATE.format(
                 user_id=int(user_id),
@@ -694,9 +739,11 @@ import sqlite3
 from datetime import datetime, timezone
 
 from gateway.healbite_nutrition_diary import (
+    HealBiteNutritionDiary,
     NUTRITION_LOG_TABLE,
     compute_nutrition_diary_summary,
     format_nutrition_diary_report,
+    format_undo_meal_report,
     resolve_healbite_db_path,
 )
 
@@ -709,9 +756,11 @@ result = {
     "nutrition_log_count": None,
     "write_probe_ok": False,
     "summary_ok": False,
+    "undo_probe_ok": False,
     "encoding_ok": False,
     "columns": [],
     "summary_preview": "",
+    "undo_preview": "",
     "detail": "",
 }
 
@@ -761,9 +810,15 @@ try:
         result["summary_ok"] = bool(summary.get("entry_count"))
         result["encoding_ok"] = "????" not in report
         result["summary_preview"] = "\n".join(report.splitlines()[:8])
+        undo_result = HealBiteNutritionDiary(db_path=db_path, background_write=False).delete_last_meal(
+            probe_user_id
+        )
+        result["undo_probe_ok"] = bool(undo_result.deleted and undo_result.sqlite_id == probe_id)
+        result["undo_preview"] = format_undo_meal_report(undo_result)
+        result["encoding_ok"] = result["encoding_ok"] and "????" not in result["undo_preview"]
         conn.execute(
-            f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE id = ? AND user_id = ?",
-            (probe_id, probe_user_id),
+            f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND image_ref = ?",
+            (probe_user_id, probe_ref),
         )
         conn.commit()
 except Exception as exc:
@@ -897,6 +952,26 @@ print(json.dumps(result, ensure_ascii=False))
 """
 
 
+_SIMULATE_UNDO_MEAL_CODE_TEMPLATE = r"""
+from __future__ import annotations
+import json
+
+from gateway.healbite_nutrition_diary import HealBiteNutritionDiary, format_undo_meal_report, resolve_healbite_db_path
+
+user_id = {user_id}
+result = {{"ok": False, "text": "", "detail": ""}}
+try:
+    diary = HealBiteNutritionDiary(db_path=resolve_healbite_db_path(), background_write=False)
+    undo_result = diary.delete_last_meal(user_id=user_id)
+    result["ok"] = True
+    result["text"] = format_undo_meal_report(undo_result)
+except Exception as exc:
+    result["detail"] = f"{{type(exc).__name__}}: {{exc}}"
+
+print(json.dumps(result, ensure_ascii=False))
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="HealBite diagnostic CLI for agent workflows"
@@ -934,6 +1009,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional user for diary/stats summary",
     )
+    simulate_parser.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="Allow state-changing simulation commands to execute",
+    )
 
     fix_parser = subparsers.add_parser(
         "fix-plan", help="Show a diagnostic plan for a known issue"
@@ -964,7 +1044,13 @@ def main(argv: list[str] | None = None) -> int:
         print(cli.cmd_inspect_profile(args.user_id))
         return 0
     if args.command == "simulate-message":
-        print(cli.cmd_simulate_message(args.text, user_id=args.user_id))
+        print(
+            cli.cmd_simulate_message(
+                args.text,
+                user_id=args.user_id,
+                allow_write=args.allow_write,
+            )
+        )
         return 0
     if args.command == "fix-plan":
         print(cli.cmd_fix_plan(args.issue))

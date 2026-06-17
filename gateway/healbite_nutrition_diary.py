@@ -88,6 +88,18 @@ class NutritionDiaryOutcome:
 
 
 @dataclass(slots=True)
+class UndoMealResult:
+    deleted: bool
+    sqlite_id: int | None = None
+    meal_name: str = ""
+    calories_kcal: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
+    occurred_at: str = ""
+
+
+@dataclass(slots=True)
 class NutritionTargets:
     calories_kcal: float | None = None
     protein_g: float | None = None
@@ -682,6 +694,56 @@ class HealBiteNutritionDiary:
         )
         return sqlite_id, False
 
+    def delete_last_meal(
+        self,
+        user_id: str | int,
+        *,
+        now: datetime | None = None,
+    ) -> UndoMealResult:
+        normalized_user_id = int(user_id)
+        start_utc, end_utc = _local_day_window(now)
+        params = (
+            normalized_user_id,
+            _sqlite_timestamp(start_utc),
+            _sqlite_timestamp(end_utc),
+        )
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    meal_name,
+                    calories_kcal,
+                    protein_g,
+                    fat_g,
+                    carbs_g,
+                    occurred_at,
+                    created_at
+                FROM {NUTRITION_LOG_TABLE}
+                WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?
+                ORDER BY occurred_at DESC, created_at DESC, id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if row is None:
+                return UndoMealResult(deleted=False)
+            sqlite_id = int(row["id"])
+            conn.execute(
+                f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE id = ? AND user_id = ?",
+                (sqlite_id, normalized_user_id),
+            )
+        return UndoMealResult(
+            deleted=True,
+            sqlite_id=sqlite_id,
+            meal_name=str(row["meal_name"] or "Блюдо"),
+            calories_kcal=_to_float(row["calories_kcal"]),
+            protein_g=_to_float(row["protein_g"]),
+            fat_g=_to_float(row["fat_g"]),
+            carbs_g=_to_float(row["carbs_g"]),
+            occurred_at=str(row["occurred_at"] or ""),
+        )
+
     def _schedule_qdrant_index(
         self,
         *,
@@ -906,6 +968,26 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_undo_meal_report(result: UndoMealResult) -> str:
+    if not result.deleted:
+        return "\u0423\u0434\u0430\u043b\u044f\u0442\u044c \u043d\u0435\u0447\u0435\u0433\u043e \u2014 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0443\u0441\u0442."
+
+    meal_name = html.escape(result.meal_name or "\u0411\u043b\u044e\u0434\u043e")
+    return "\n".join(
+        [
+            f"\U0001f5d1 \u0417\u0430\u043f\u0438\u0441\u044c <b>{meal_name}</b> \u0443\u0434\u0430\u043b\u0435\u043d\u0430.",
+            (
+                f"\u0411\u044b\u043b\u043e: {_format_kcal(result.calories_kcal)} \u00b7 "
+                f"\u0411 {_format_grams(result.protein_g)} \u00b7 "
+                f"\u0416 {_format_grams(result.fat_g)} \u00b7 "
+                f"\u0423 {_format_grams(result.carbs_g)}"
+            ),
+            "",
+            "\u0412\u044b\u0437\u043e\u0432\u0438 /diary, \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d\u043d\u044b\u0439 \u0438\u0442\u043e\u0433.",
+        ]
+    )
+
+
 def compute_nutrition_diary_summary(
     db_path: str | Path | None = None,
     *,
@@ -924,4 +1006,3 @@ def get_default_nutrition_diary() -> HealBiteNutritionDiary:
             _GLOBAL_DIARY = HealBiteNutritionDiary()
             atexit.register(_GLOBAL_DIARY.close)
         return _GLOBAL_DIARY
-

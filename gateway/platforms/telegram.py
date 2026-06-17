@@ -92,7 +92,12 @@ from gateway.platforms.base import (
     utf16_len,
 )
 from gateway.memory.analytics import compute_memory_analytics_summary, format_memory_analytics_report
-from gateway.healbite_nutrition_diary import compute_nutrition_diary_summary, format_nutrition_diary_report
+from gateway.healbite_nutrition_diary import (
+    compute_nutrition_diary_summary,
+    format_nutrition_diary_report,
+    format_undo_meal_report,
+    get_default_nutrition_diary,
+)
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -5709,6 +5714,13 @@ class TelegramAdapter(BasePlatformAdapter):
             return 7, None
         return None, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /diary [7d] \u0438\u043b\u0438 /stats [7d]"
 
+    @staticmethod
+    def _parse_nutrition_diary_undo_args(text: str) -> str | None:
+        parts = text.split()
+        if len(parts) <= 1:
+            return None
+        return "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /undo_meal \u0438\u043b\u0438 /diary_undo"
+
     async def _maybe_handle_nutrition_diary_command(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
@@ -5748,6 +5760,45 @@ class TelegramAdapter(BasePlatformAdapter):
         await self._send_message_with_thread_fallback(**kwargs)
         return True
 
+    async def _maybe_handle_nutrition_diary_undo_command(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/undo_meal", "/diary_undo"}:
+            return False
+
+        thread_id = getattr(msg, "message_thread_id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f \u0434\u043b\u044f \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f \u0437\u0430\u043f\u0438\u0441\u0438.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        error = self._parse_nutrition_diary_undo_args(text)
+        if error is not None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=error,
+                message_thread_id=thread_id,
+            )
+            return True
+
+        result = get_default_nutrition_diary().delete_last_meal(user_id=int(user_id))
+        report = format_undo_meal_report(result)
+        kwargs = {
+            "chat_id": chat_id,
+            "text": report,
+            "message_thread_id": thread_id,
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+        return True
+
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
         del context
@@ -5761,6 +5812,8 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._send_healbite_menu_message(msg, command=command)
             return
         if await self._maybe_handle_memory_stats_command(msg):
+            return
+        if await self._maybe_handle_nutrition_diary_undo_command(msg):
             return
         if await self._maybe_handle_nutrition_diary_command(msg):
             return

@@ -11,8 +11,10 @@ import pytest
 from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
+    UndoMealResult,
     compute_nutrition_diary_summary,
     format_nutrition_diary_report,
+    format_undo_meal_report,
     normalize_nutrition_payload,
 )
 from gateway.platforms.telegram import TelegramAdapter
@@ -130,6 +132,8 @@ def _seed_targets(
 def test_nutrition_diary_commands_are_registered_for_gateway_dispatch():
     diary_def = resolve_command("/diary")
     stats_def = resolve_command("/stats")
+    undo_def = resolve_command("/undo_meal")
+    undo_alias_def = resolve_command("/diary_undo")
 
     assert diary_def is not None
     assert diary_def.name == "diary"
@@ -139,10 +143,22 @@ def test_nutrition_diary_commands_are_registered_for_gateway_dispatch():
     assert stats_def.name == "stats"
     assert stats_def.gateway_only is True
 
+    assert undo_def is not None
+    assert undo_def.name == "undo_meal"
+    assert undo_def.gateway_only is True
+
+    assert undo_alias_def is not None
+    assert undo_alias_def.name == "undo_meal"
+    assert undo_alias_def.gateway_only is True
+
     assert "diary" in GATEWAY_KNOWN_COMMANDS
     assert "stats" in GATEWAY_KNOWN_COMMANDS
+    assert "undo_meal" in GATEWAY_KNOWN_COMMANDS
+    assert "diary_undo" in GATEWAY_KNOWN_COMMANDS
     assert is_gateway_known_command("diary") is True
     assert is_gateway_known_command("stats") is True
+    assert is_gateway_known_command("undo_meal") is True
+    assert is_gateway_known_command("diary_undo") is True
 
 
 def test_unknown_slash_command_remains_unknown():
@@ -600,6 +616,129 @@ def test_duplicate_photo_retry_does_not_double_save(tmp_path):
     assert summary["entry_count"] == 1
 
 
+def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    now = datetime.now(timezone.utc)
+    older = _build_record(
+        meal_name="Овсянка",
+        calories_kcal=200,
+        protein_g=8,
+        fat_g=4,
+        carbs_g=32,
+    )
+    newer = _build_record(
+        meal_name="Запеченная семга",
+        calories_kcal=520,
+        protein_g=35,
+        fat_g=20,
+        carbs_g=30,
+    )
+
+    older_id, _ = diary.save_record(
+        user_id=70,
+        source="text",
+        record=older,
+        image_ref="telegram:70:1",
+        occurred_at=now - timedelta(hours=2),
+    )
+    newer_id, _ = diary.save_record(
+        user_id=70,
+        source="text",
+        record=newer,
+        image_ref="telegram:70:2",
+        occurred_at=now - timedelta(minutes=5),
+    )
+
+    deleted = diary.delete_last_meal(70, now=now)
+    summary = diary.get_daily_summary(user_id=70, now=now)
+    report = format_nutrition_diary_report(summary)
+
+    assert older_id is not None
+    assert newer_id is not None
+    assert deleted.deleted is True
+    assert deleted.sqlite_id == newer_id
+    assert deleted.meal_name == "Запеченная семга"
+    assert summary["entry_count"] == 1
+    assert summary["entries"][0]["id"] == older_id
+    assert summary["calories_kcal"] == pytest.approx(200.0)
+    assert "Овсянка" in report
+    assert "Запеченная семга" not in report
+
+
+def test_delete_last_meal_does_not_touch_other_users(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    now = datetime.now(timezone.utc)
+    user_one = _build_record(
+        meal_name="Суп",
+        calories_kcal=180,
+        protein_g=10,
+        fat_g=6,
+        carbs_g=22,
+    )
+    user_two = _build_record(
+        meal_name="Паста",
+        calories_kcal=430,
+        protein_g=16,
+        fat_g=12,
+        carbs_g=58,
+    )
+
+    diary.save_record(
+        user_id=80,
+        source="text",
+        record=user_one,
+        image_ref="telegram:80:1",
+        occurred_at=now - timedelta(minutes=30),
+    )
+    other_id, _ = diary.save_record(
+        user_id=81,
+        source="text",
+        record=user_two,
+        image_ref="telegram:81:1",
+        occurred_at=now - timedelta(minutes=10),
+    )
+
+    deleted = diary.delete_last_meal(80, now=now)
+    other_summary = diary.get_daily_summary(user_id=81, now=now)
+
+    assert deleted.deleted is True
+    assert other_id is not None
+    assert other_summary["entry_count"] == 1
+    assert other_summary["entries"][0]["id"] == other_id
+    assert other_summary["entries"][0]["meal_name"] == "Паста"
+
+
+def test_delete_last_meal_empty_diary_returns_empty_result(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+
+    deleted = diary.delete_last_meal(91)
+    report = format_undo_meal_report(deleted)
+
+    assert deleted.deleted is False
+    assert "Удалять нечего" in report
+    assert "????" not in report
+
+
+def test_format_undo_meal_report_is_html_safe_and_unicode_clean():
+    result = UndoMealResult(
+        deleted=True,
+        sqlite_id=55,
+        meal_name='Семга & <сыр>',
+        calories_kcal=520,
+        protein_g=35,
+        fat_g=20,
+        carbs_g=30,
+        occurred_at="2026-06-17 08:30:00",
+    )
+
+    report = format_undo_meal_report(result)
+
+    assert "&lt;сыр&gt;" in report
+    assert "<b>Семга &amp; &lt;сыр&gt;</b>" in report
+    assert "Было: 520 ккал · Б 35 г · Ж 20 г · У 30 г" in report
+    assert "????" not in report
+
+
 @pytest.mark.asyncio
 async def test_telegram_diary_command_routes_correctly(monkeypatch):
     adapter = object.__new__(TelegramAdapter)
@@ -733,6 +872,89 @@ async def test_telegram_diary_7d_command_routes_correctly(monkeypatch):
     assert "\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c" in kwargs["text"]
     assert "????" not in kwargs["text"]
     assert captured_days == [7]
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_undo_meal_command_routes_correctly(monkeypatch):
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_message_with_thread_fallback = AsyncMock()
+    adapter._ensure_forum_commands = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    class _FakeDiary:
+        def delete_last_meal(self, user_id):
+            assert user_id == 555
+            return UndoMealResult(
+                deleted=True,
+                sqlite_id=101,
+                meal_name="Запеченная семга",
+                calories_kcal=520,
+                protein_g=35,
+                fat_g=20,
+                carbs_g=30,
+            )
+
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_nutrition_diary", lambda: _FakeDiary())
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_undo_meal_report",
+        lambda result: (
+            f"\U0001f5d1 Запись <b>{result.meal_name}</b> удалена.\n"
+            "Было: 520 ккал · Б 35 г · Ж 20 г · У 30 г"
+        ),
+    )
+
+    msg = SimpleNamespace(
+        text="/undo_meal",
+        chat=SimpleNamespace(id=555, type="private"),
+        from_user=SimpleNamespace(id=555),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=5, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "удалена" in kwargs["text"]
+    assert "520 ккал" in kwargs["text"]
+    assert kwargs["parse_mode"] is not None
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_diary_undo_alias_routes_correctly(monkeypatch):
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_message_with_thread_fallback = AsyncMock()
+    adapter._ensure_forum_commands = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    class _FakeDiary:
+        def delete_last_meal(self, user_id):
+            assert user_id == 556
+            return UndoMealResult(deleted=False)
+
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_nutrition_diary", lambda: _FakeDiary())
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_undo_meal_report",
+        lambda result: "Удалять нечего — сегодня дневник пуст." if not result.deleted else "unexpected",
+    )
+
+    msg = SimpleNamespace(
+        text="/diary_undo",
+        chat=SimpleNamespace(id=556, type="private"),
+        from_user=SimpleNamespace(id=556),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=6, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Удалять нечего" in kwargs["text"]
     adapter.handle_message.assert_not_awaited()
 
 

@@ -33,6 +33,21 @@ def test_build_parser_parses_simulate_message_user_id():
     assert args.user_id == 248875361
 
 
+def test_build_parser_parses_simulate_message_allow_write():
+    parser = healbite_cli.build_parser()
+    args = parser.parse_args([
+        "simulate-message",
+        "/undo_meal",
+        "--user-id",
+        "248875361",
+        "--allow-write",
+    ])
+    assert args.command == "simulate-message"
+    assert args.text == "/undo_meal"
+    assert args.user_id == 248875361
+    assert args.allow_write is True
+
+
 def test_filter_log_lines_keeps_only_diagnostic_matches_and_redacts_secrets():
     raw = "\n".join([
         "plain info line",
@@ -61,6 +76,33 @@ def test_simulate_message_rejects_unsupported_external_calls_by_default():
     report = healbite_cli.simulate_local_message("what is on this photo?")
     assert "Unsupported for local simulation" in report
     assert "LLM and external calls are disabled by default" in report
+
+
+def test_simulate_message_blocks_state_change_without_allow_write():
+    report = healbite_cli.simulate_local_message("/undo_meal")
+    assert "This command changes state. Use --allow-write to execute." in report
+
+
+def test_cmd_simulate_message_state_change_without_allow_write_stays_local(monkeypatch):
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=None)
+    monkeypatch.setattr(
+        cli,
+        "_docker_exec_python",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("docker should not run")),
+    )
+    report = cli.cmd_simulate_message("/undo_meal")
+    assert "This command changes state. Use --allow-write to execute." in report
+
+
+def test_cmd_simulate_message_state_change_requires_user_id_for_write(monkeypatch):
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=None)
+    monkeypatch.setattr(
+        cli,
+        "_docker_exec_python",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("docker should not run")),
+    )
+    report = cli.cmd_simulate_message("/undo_meal", allow_write=True)
+    assert "Pass --user-id together with --allow-write to execute." in report
 
 
 def test_render_status_report_never_prints_secret_values():

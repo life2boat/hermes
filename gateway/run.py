@@ -43,7 +43,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Any, List, Union
+from typing import Dict, Optional, Any, List, Union, Iterable
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -1425,6 +1425,45 @@ def _vision_safe_fallback_prompt() -> str:
 
 
 _TELEGRAM_PHOTO_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file"})
+_TELEGRAM_DIARY_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "delegation"})
+_TELEGRAM_DIARY_CORRECTION_TOOLSETS = ("nutrition_diary",)
+_TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/diary_undo"})
+_TELEGRAM_DIARY_CONTEXT_HINTS = (
+    "дневник",
+    "статист",
+    "калор",
+    "ккал",
+    "кбжу",
+    "белк",
+    "жир",
+    "углев",
+    "последн",
+    "запис",
+    "прием пищ",
+    "приём пищ",
+)
+_TELEGRAM_DIARY_SUMMARY_HINTS = (
+    "что у меня",
+    "что сегодня",
+    "посмотри",
+    "покажи",
+    "дневник",
+    "статист",
+    "за сегодня",
+    "за неделю",
+    "7d",
+    "7 д",
+    "недел",
+)
+_TELEGRAM_DIARY_CORRECTION_HINTS = (
+    "исправ",
+    "скоррект",
+    "обнов",
+    "измени",
+    "переимен",
+    "замени",
+    "добавь",
+)
 
 
 def _event_has_image_context(event: Any) -> bool:
@@ -1436,10 +1475,97 @@ def _event_has_image_context(event: Any) -> bool:
     return any(str(mtype).startswith("image/") for mtype in media_types)
 
 
+def _normalize_telegram_turn_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _iter_history_text_fragments(history: Optional[List[Dict[str, Any]]]) -> Iterable[str]:
+    for item in history or []:
+        content = item.get("content") if isinstance(item, dict) else None
+        if isinstance(content, str):
+            yield content
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").lower() != "text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                yield text
+
+
+def _history_has_recent_diary_context(history: Optional[List[Dict[str, Any]]]) -> bool:
+    recent_fragments = list(_iter_history_text_fragments(history))[-6:]
+    for fragment in recent_fragments:
+        normalized = _normalize_telegram_turn_text(fragment)
+        if any(hint in normalized for hint in _TELEGRAM_DIARY_CONTEXT_HINTS):
+            return True
+    return False
+
+
+def _turn_has_explicit_diary_update_value(text: str) -> bool:
+    if re.search(r"\b\d+(?:[.,]\d+)?\s*(?:ккал|калори[йя]|грамм?\w*|г)\b", text):
+        return True
+    if re.search(r"\bпереимен\w*\b.*\bв\b\s+[\wа-яё-]+", text):
+        return True
+    if re.search(r"\b(?:назови|назвать)\b.*\bв\b\s+[\wа-яё-]+", text):
+        return True
+    return False
+
+
+def _classify_telegram_diary_turn(
+    *,
+    source: SessionSource,
+    event: Optional[MessageEvent],
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    from gateway.config import Platform
+
+    if source.platform != Platform.TELEGRAM or _event_has_image_context(event):
+        return "none"
+
+    text = _normalize_telegram_turn_text(getattr(event, "text", None) or message)
+    if not text:
+        return "none"
+
+    first_token = text.split()[0]
+    if first_token in _TELEGRAM_DIARY_SLASH_COMMANDS:
+        return "slash"
+
+    recent_diary_context = _history_has_recent_diary_context(history)
+    diary_context = recent_diary_context or any(hint in text for hint in _TELEGRAM_DIARY_CONTEXT_HINTS)
+    summary_intent = any(hint in text for hint in _TELEGRAM_DIARY_SUMMARY_HINTS)
+    correction_intent = any(hint in text for hint in _TELEGRAM_DIARY_CORRECTION_HINTS) or "ошиб" in text
+    explicit_value = _turn_has_explicit_diary_update_value(text)
+
+    if correction_intent and explicit_value and diary_context:
+        return "correction"
+    if summary_intent and diary_context:
+        return "summary"
+    if correction_intent and diary_context:
+        return "ambiguous"
+    if "дневник" in text or "статист" in text:
+        return "summary"
+    return "none"
+
+
+def _telegram_diary_summary_days(text: str) -> int:
+    normalized = _normalize_telegram_turn_text(text)
+    if re.search(r"\b7d\b|\b7\s*(?:д|дн|дней)\b|недел", normalized):
+        return 7
+    return 1
+
+
 def _filter_user_facing_toolsets_for_turn(
     *,
     source: SessionSource,
     event: Optional[MessageEvent],
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: list[str],
     disabled_toolsets: Optional[list[str]],
 ) -> tuple[list[str], list[str]]:
@@ -1447,7 +1573,27 @@ def _filter_user_facing_toolsets_for_turn(
 
     enabled = list(enabled_toolsets or [])
     disabled = list(disabled_toolsets or [])
-    if source.platform != Platform.TELEGRAM or not _event_has_image_context(event):
+
+    if source.platform != Platform.TELEGRAM:
+        return enabled, disabled
+
+    diary_turn = _classify_telegram_diary_turn(
+        source=source,
+        event=event,
+        message=message,
+        history=history,
+    )
+    if diary_turn == "correction":
+        merged_disabled = sorted(set(disabled) | _TELEGRAM_DIARY_BLOCKED_TOOLSETS)
+        logger.info(
+            "[Gateway][diary_tool_guard] platform=telegram classification=%s enabled_toolsets=%s blocked_toolsets=%s",
+            diary_turn,
+            ",".join(_TELEGRAM_DIARY_CORRECTION_TOOLSETS),
+            ",".join(sorted(_TELEGRAM_DIARY_BLOCKED_TOOLSETS)),
+        )
+        return list(_TELEGRAM_DIARY_CORRECTION_TOOLSETS), merged_disabled
+
+    if not _event_has_image_context(event):
         return enabled, disabled
 
     filtered_enabled = [toolset for toolset in enabled if toolset not in _TELEGRAM_PHOTO_BLOCKED_TOOLSETS]
@@ -1465,10 +1611,22 @@ def _exec_approval_policy_for_turn(
     *,
     source: SessionSource,
     event: Optional[MessageEvent],
+    message: str = "",
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     from gateway.config import Platform
 
-    if source.platform == Platform.TELEGRAM and _event_has_image_context(event):
+    if source.platform != Platform.TELEGRAM:
+        return "interactive"
+    if _event_has_image_context(event):
+        return "auto_deny"
+    diary_turn = _classify_telegram_diary_turn(
+        source=source,
+        event=event,
+        message=message,
+        history=history,
+    )
+    if diary_turn in {"correction", "summary", "ambiguous"}:
         return "auto_deny"
     return "interactive"
 
@@ -11833,6 +11991,81 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         report = format_undo_meal_report(result)
         return self._plain_healbite_nutrition_diary_report(report)
 
+    def _handle_healbite_nutrition_diary_text_query(
+        self,
+        *,
+        source: SessionSource,
+        text: str,
+    ) -> str:
+        from gateway.healbite_nutrition_diary import (
+            compute_nutrition_diary_summary,
+            format_nutrition_diary_report,
+        )
+
+        user_id = getattr(source, "user_id", None)
+        if user_id is None:
+            return "Не удалось определить пользователя для дневника питания."
+
+        days = _telegram_diary_summary_days(text)
+        try:
+            summary = compute_nutrition_diary_summary(
+                user_id=int(user_id),
+                days=days,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to compute HealBite nutrition diary text query for user=%s",
+                user_id,
+                exc_info=True,
+            )
+            return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
+
+        report = format_nutrition_diary_report(summary)
+        return self._plain_healbite_nutrition_diary_report(report)
+
+    async def _maybe_handle_healbite_nutrition_diary_turn(
+        self,
+        *,
+        message: str,
+        history: List[Dict[str, Any]],
+        source: SessionSource,
+        session_id: str,
+        event: Optional[MessageEvent],
+    ) -> Optional[Dict[str, Any]]:
+        classification = _classify_telegram_diary_turn(
+            source=source,
+            event=event,
+            message=message,
+            history=history,
+        )
+        if classification == "summary":
+            final_response = self._handle_healbite_nutrition_diary_text_query(
+                source=source,
+                text=message,
+            )
+        elif classification == "ambiguous":
+            final_response = (
+                "Похоже, ты хочешь исправить запись в дневнике. "
+                "Напиши конкретно, что поменять: например, «исправь последнюю запись на 400 ккал» "
+                "или «переименуй последнюю запись в борщ»."
+            )
+        else:
+            return None
+
+        return {
+            "final_response": final_response,
+            "messages": [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": final_response},
+            ],
+            "api_calls": 0,
+            "tools": [],
+            "history_offset": len(history),
+            "session_id": session_id,
+            "completed": True,
+            "response_previewed": False,
+        }
+
     @staticmethod
     def _healbite_image_ref(source: SessionSource, event: MessageEvent) -> str | None:
         message_ref = event.reply_to_message_id or event.message_id
@@ -13360,6 +13593,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        diary_short_circuit = await self._maybe_handle_healbite_nutrition_diary_turn(
+            message=message,
+            history=history,
+            source=source,
+            session_id=session_id,
+            event=event,
+        )
+        if diary_short_circuit is not None:
+            return diary_short_circuit
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -13391,12 +13634,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enabled_toolsets, disabled_toolsets = _filter_user_facing_toolsets_for_turn(
             source=source,
             event=event,
+            message=message,
+            history=history,
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
         )
         approval_policy = _exec_approval_policy_for_turn(
             source=source,
             event=event,
+            message=message,
+            history=history,
         )
 
         display_config = user_config.get("display", {})

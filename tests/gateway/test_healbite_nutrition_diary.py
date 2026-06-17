@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway.config import Platform
 from gateway.session_context import clear_session_vars, set_session_vars
+from gateway.run import GatewayRunner, _classify_telegram_diary_turn, _exec_approval_policy_for_turn, _filter_user_facing_toolsets_for_turn
 from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
@@ -1200,3 +1202,143 @@ def test_compute_nutrition_diary_summary_supports_7d_window(tmp_path):
     assert summary["calories_kcal"] == pytest.approx(1200.0)
     assert "\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c" in report
     assert "????" not in report
+
+
+def _telegram_source(user_id: int = 111):
+    return SimpleNamespace(platform=Platform.TELEGRAM, user_id=str(user_id), chat_id=f"chat-{user_id}")
+
+
+def _telegram_text_event(text: str):
+    return SimpleNamespace(text=text, message_type=None, media_types=[])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "исправь последнюю запись на 400 ккал",
+        "добавь к последней записи 100 ккал",
+        "переименуй последнюю запись в борщ",
+    ],
+)
+def test_explicit_diary_correction_turn_blocks_general_tools(text):
+    source = _telegram_source()
+    event = _telegram_text_event(text)
+
+    enabled, disabled = _filter_user_facing_toolsets_for_turn(
+        source=source,
+        event=event,
+        message=text,
+        history=[],
+        enabled_toolsets=["hermes-telegram", "terminal", "file", "code_execution", "delegation"],
+        disabled_toolsets=[],
+    )
+
+    assert _classify_telegram_diary_turn(
+        source=source,
+        event=event,
+        message=text,
+        history=[],
+    ) == "correction"
+    assert enabled == ["nutrition_diary"]
+    assert {"terminal", "file", "code_execution", "delegation"} <= set(disabled)
+    assert _exec_approval_policy_for_turn(
+        source=source,
+        event=event,
+        message=text,
+        history=[],
+    ) == "auto_deny"
+
+
+@pytest.mark.asyncio
+async def test_natural_language_diary_summary_short_circuits_without_tools(monkeypatch):
+    runner = object.__new__(GatewayRunner)
+    source = _telegram_source(201)
+    event = _telegram_text_event("что у меня сегодня в дневнике?")
+
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.compute_nutrition_diary_summary",
+        lambda *args, **kwargs: {
+            "entries": [{"meal_name": "Суп", "calories_kcal": 300, "protein_g": 12, "fat_g": 8, "carbs_g": 40}],
+            "entry_count": 1,
+            "calories_kcal": 300,
+            "protein_g": 12,
+            "fat_g": 8,
+            "carbs_g": 40,
+            "days": kwargs.get("days", 1),
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.format_nutrition_diary_report",
+        lambda summary: "<b>Твой дневник за сегодня:</b> Калории: 300 ккал",
+    )
+
+    result = await runner._maybe_handle_healbite_nutrition_diary_turn(
+        message=event.text,
+        history=[],
+        source=source,
+        session_id="session-201",
+        event=event,
+    )
+
+    assert result is not None
+    assert "Твой дневник" in result["final_response"]
+    assert result["tools"] == []
+    assert result["api_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_diary_turn_returns_clarification_without_tools(monkeypatch):
+    runner = object.__new__(GatewayRunner)
+    source = _telegram_source(202)
+    event = _telegram_text_event("наверное тут ошибка")
+
+    def _unexpected_diary_access():
+        raise AssertionError("Diary mutation path should not run for ambiguous turns")
+
+    monkeypatch.setattr(runner, "_get_healbite_nutrition_diary", _unexpected_diary_access)
+
+    result = await runner._maybe_handle_healbite_nutrition_diary_turn(
+        message=event.text,
+        history=[
+            {"role": "assistant", "content": "Твой дневник за сегодня: 400 ккал"},
+        ],
+        source=source,
+        session_id="session-202",
+        event=event,
+    )
+
+    assert result is not None
+    assert "исправить запись в дневнике" in result["final_response"]
+    assert "400 ккал" in result["messages"][0]["content"] or result["messages"][0]["content"] == event.text
+    assert result["tools"] == []
+    assert result["api_calls"] == 0
+
+
+def test_unrelated_code_fix_request_is_not_classified_as_diary_turn():
+    source = _telegram_source()
+    event = _telegram_text_event("исправь ошибку в коде")
+
+    assert _classify_telegram_diary_turn(
+        source=source,
+        event=event,
+        message=event.text,
+        history=[],
+    ) == "none"
+
+
+def test_photo_tool_guard_still_blocks_general_toolsets():
+    source = _telegram_source()
+    event = SimpleNamespace(text="посчитай кбжу", message_type=None, media_types=["image/jpeg"])
+
+    enabled, disabled = _filter_user_facing_toolsets_for_turn(
+        source=source,
+        event=event,
+        message=event.text,
+        history=[],
+        enabled_toolsets=["terminal", "file", "code_execution", "vision"],
+        disabled_toolsets=[],
+    )
+
+    assert "vision" in enabled
+    assert "terminal" not in enabled
+    assert {"terminal", "file", "code_execution"} <= set(disabled)

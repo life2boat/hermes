@@ -687,6 +687,7 @@ async def test_telegram_stats_7d_command_routes_correctly(monkeypatch):
     assert "\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c" in kwargs["text"]
     assert "????" not in kwargs["text"]
     assert captured_days == [7]
+    adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -732,6 +733,32 @@ async def test_telegram_diary_7d_command_routes_correctly(monkeypatch):
     assert "\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c" in kwargs["text"]
     assert "????" not in kwargs["text"]
     assert captured_days == [7]
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_menu_command_stays_local(monkeypatch):
+    del monkeypatch
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_healbite_menu_message = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    msg = SimpleNamespace(
+        text="/menu",
+        chat=SimpleNamespace(id=444, type="private"),
+        from_user=SimpleNamespace(id=444),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=4, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    adapter._send_healbite_menu_message.assert_awaited_once_with(
+        msg,
+        command="/menu",
+    )
+    adapter.handle_message.assert_not_awaited()
 
 
 def test_compute_nutrition_diary_summary_uses_today_window(tmp_path):

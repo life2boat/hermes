@@ -6967,6 +6967,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_help_command(event)
                 if _cmd_def_inner.name == "commands":
                     return await self._handle_commands_command(event)
+                if _cmd_def_inner.name in {"diary", "stats"}:
+                    return await self._handle_healbite_nutrition_diary_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
@@ -7227,6 +7229,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "commands":
             return await self._handle_commands_command(event)
+
+        if canonical in {"diary", "stats"}:
+            return await self._handle_healbite_nutrition_diary_command(event)
         
         if canonical == "profile":
             return await self._handle_profile_command(event)
@@ -11742,6 +11747,52 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             diary = get_default_nutrition_diary()
             self._healbite_nutrition_diary = diary
         return diary
+
+    @staticmethod
+    def _parse_healbite_nutrition_diary_command_args(text: str) -> tuple[int | None, str | None]:
+        tokens = (text or "").strip().split()
+        if not tokens:
+            return None, "Использование: /diary [7d] или /stats [7d]"
+        if len(tokens) == 1:
+            return 1, None
+        if len(tokens) == 2 and tokens[1].lower() == "7d":
+            return 7, None
+        return None, "Использование: /diary [7d] или /stats [7d]"
+
+    @staticmethod
+    def _plain_healbite_nutrition_diary_report(report: str) -> str:
+        return re.sub(r"</?[^>]+>", "", report or "")
+
+    async def _handle_healbite_nutrition_diary_command(self, event: MessageEvent) -> str:
+        from gateway.healbite_nutrition_diary import (
+            compute_nutrition_diary_summary,
+            format_nutrition_diary_report,
+        )
+
+        source = event.source
+        user_id = getattr(source, "user_id", None)
+        if user_id is None:
+            return "Не удалось определить пользователя для дневника питания."
+
+        days, error = self._parse_healbite_nutrition_diary_command_args(event.text or "")
+        if error:
+            return error
+
+        try:
+            summary = compute_nutrition_diary_summary(
+                user_id=int(user_id),
+                days=int(days or 1),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to compute HealBite nutrition diary slash command for user=%s",
+                user_id,
+                exc_info=True,
+            )
+            return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
+
+        report = format_nutrition_diary_report(summary)
+        return self._plain_healbite_nutrition_diary_report(report)
 
     @staticmethod
     def _healbite_image_ref(source: SessionSource, event: MessageEvent) -> str | None:

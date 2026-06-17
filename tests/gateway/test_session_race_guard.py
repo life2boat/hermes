@@ -372,8 +372,10 @@ async def test_start_command_is_noop_during_active_session():
     [
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
+        ("/diary", "_handle_healbite_nutrition_diary_command", "Diary text"),
         ("/update", "_handle_update_command", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
+        ("/stats 7d", "_handle_healbite_nutrition_diary_command", "Stats text"),
     ],
 )
 async def test_active_session_bypass_commands_dispatch_without_interrupt(

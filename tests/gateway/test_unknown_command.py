@@ -19,7 +19,7 @@ from gateway.session import SessionEntry, SessionSource, build_session_key
 def _make_source() -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
-        user_id="u1",
+        user_id="1",
         chat_id="c1",
         user_name="tester",
         chat_type="dm",
@@ -371,3 +371,127 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     # First emit_collect fires on the original command; after rewrite the
     # dispatcher does NOT re-fire for the new command (one decision per turn).
     assert call_log == ["command:status"]
+
+
+@pytest.mark.asyncio
+async def test_diary_slash_command_short_circuits_before_agent_loop(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("/diary leaked into the agent loop")
+    )
+    runner._handle_healbite_nutrition_diary_command = AsyncMock(
+        return_value="Diary summary"
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/diary"))
+
+    assert result == "Diary summary"
+    runner._handle_healbite_nutrition_diary_command.assert_awaited_once()
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stats_slash_command_short_circuits_before_agent_loop(monkeypatch):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        side_effect=AssertionError("/stats leaked into the agent loop")
+    )
+    runner._handle_healbite_nutrition_diary_command = AsyncMock(
+        return_value="Stats summary"
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("/stats 7d"))
+
+    assert result == "Stats summary"
+    runner._handle_healbite_nutrition_diary_command.assert_awaited_once()
+    runner._run_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_diary_slash_handler_preserves_weekly_arg(monkeypatch):
+    runner = _make_runner()
+    captured_days: list[int] = []
+
+    def _fake_summary(*args, **kwargs):
+        captured_days.append(kwargs.get("days", 1))
+        return {
+            "entries": [],
+            "entry_count": 0,
+            "calories_kcal": 0,
+            "protein_g": 0,
+            "fat_g": 0,
+            "carbs_g": 0,
+            "days": kwargs.get("days", 1),
+        }
+
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.compute_nutrition_diary_summary",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.format_nutrition_diary_report",
+        lambda summary: (
+            f"<b>Твой дневник за {summary['days']} дней:</b>\n"
+            "<b>В среднем за день:</b>"
+        ),
+    )
+
+    result = await runner._handle_healbite_nutrition_diary_command(
+        _make_event("/diary 7d")
+    )
+
+    assert "Твой дневник за 7 дней" in result
+    assert "В среднем за день" in result
+    assert "????" not in result
+    assert captured_days == [7]
+
+
+@pytest.mark.asyncio
+async def test_stats_slash_handler_preserves_weekly_arg(monkeypatch):
+    runner = _make_runner()
+    captured_days: list[int] = []
+
+    def _fake_summary(*args, **kwargs):
+        captured_days.append(kwargs.get("days", 1))
+        return {
+            "entries": [],
+            "entry_count": 0,
+            "calories_kcal": 0,
+            "protein_g": 0,
+            "fat_g": 0,
+            "carbs_g": 0,
+            "days": kwargs.get("days", 1),
+        }
+
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.compute_nutrition_diary_summary",
+        _fake_summary,
+    )
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.format_nutrition_diary_report",
+        lambda summary: (
+            f"<b>Твоя статистика за {summary['days']} дней:</b>\n"
+            "<b>В среднем за день:</b>"
+        ),
+    )
+
+    result = await runner._handle_healbite_nutrition_diary_command(
+        _make_event("/stats 7d")
+    )
+
+    assert "Твоя статистика за 7 дней" in result
+    assert "В среднем за день" in result
+    assert "????" not in result
+    assert captured_days == [7]

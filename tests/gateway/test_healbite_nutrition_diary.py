@@ -21,7 +21,10 @@ from gateway.healbite_nutrition_diary import (
     normalize_nutrition_payload,
 )
 from gateway.platforms.telegram import TelegramAdapter
-from tools.healbite_nutrition_diary_tool import update_last_meal_tool
+from tools.healbite_nutrition_diary_tool import (
+    _build_update_last_meal_user_reply,
+    update_last_meal_tool,
+)
 
 
 class _RecordingQdrantAdapter:
@@ -790,6 +793,13 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
     summary = diary.get_daily_summary(user_id=92, now=now)
     assert payload["success"] is True
     assert payload["sqlite_id"] == newer_id
+    assert "ОБЯЗАТЕЛЬНО ответь пользователю" in payload["assistant_directive"]
+    assert payload["user_facing_reply"] == (
+        "✅ Исправил последнюю запись:\n"
+        "Курица — 400 ккал\n"
+        "Б 42 г · Ж 18 г · У 14 г\n\n"
+        "Вызови /diary, чтобы посмотреть итог за день."
+    )
     assert older_id is not None
     assert newer_id is not None
     entries_by_id = {entry["id"]: entry for entry in summary["entries"]}
@@ -830,6 +840,7 @@ def test_update_last_meal_tool_ignores_none_fields(tmp_path, monkeypatch):
     row = summary["entries"][0]
     assert payload["success"] is True
     assert payload["sqlite_id"] == sqlite_id
+    assert "Б 12 г · Ж 9 г · У 31 г" in payload["user_facing_reply"]
     assert row["meal_name"] == "\u0411\u043e\u0440\u0449"
     assert row["calories_kcal"] == pytest.approx(400.0)
     assert row["protein_g"] == pytest.approx(12.0)
@@ -898,10 +909,28 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
     second_summary = diary.get_daily_summary(user_id=96, now=now)
     assert payload["success"] is True
     assert payload["sqlite_id"] == second_id
+    assert "210 ккал" in payload["user_facing_reply"]
     assert first_summary["entries"][0]["meal_name"] == "\u041f\u043b\u043e\u0432"
     assert first_summary["entries"][0]["calories_kcal"] == pytest.approx(640.0)
     assert second_summary["entries"][0]["meal_name"] == "?????????????? ??????????"
     assert second_summary["entries"][0]["calories_kcal"] == pytest.approx(210.0)
+
+
+def test_build_update_last_meal_user_reply_omits_missing_macros_and_flattens_name():
+    reply = _build_update_last_meal_user_reply(
+        meal_name="Суп\nдня",
+        calories_kcal=315.0,
+        protein_g=None,
+        fat_g=11,
+        carbs_g=None,
+    )
+
+    assert reply == (
+        "✅ Исправил последнюю запись:\n"
+        "Суп дня — 315 ккал\n"
+        "Ж 11 г\n\n"
+        "Вызови /diary, чтобы посмотреть итог за день."
+    )
 
 
 @pytest.mark.asyncio

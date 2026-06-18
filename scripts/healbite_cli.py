@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,8 +18,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
+    NUTRITION_LOG_TABLE,
     compute_nutrition_diary_summary,
     format_nutrition_diary_report,
+    normalize_nutrition_payload,
     resolve_healbite_db_path,
 )
 
@@ -45,6 +49,9 @@ AMBIGUOUS_DIARY_PHRASES = {
     "\u043d\u0430\u0432\u0435\u0440\u043d\u043e\u0435 \u0442\u0443\u0442 \u043e\u0448\u0438\u0431\u043a\u0430",
     "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043e\u0448\u0438\u0431\u043a\u0443",
 }
+CORRECTION_SMOKE_USER_ID = 999999
+CORRECTION_SMOKE_SOURCE = "cli_correction_smoke"
+CORRECTION_SMOKE_IMAGE_REF_PREFIX = "cli-correction-smoke-"
 IMPORTANT_LOG_PATTERN = re.compile(
     r"(traceback|exception|provider authentication|command approval|execute_code|terminal|readonly|permissionerror|"
     r"database is locked|nutrition_log|diary|stats|vision|gemini|qdrant)",
@@ -439,6 +446,214 @@ def _apply_local_correction(
     )
 
 
+def _count_synthetic_correction_rows(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = CORRECTION_SMOKE_USER_ID,
+    source: str = CORRECTION_SMOKE_SOURCE,
+) -> int:
+    resolved = resolve_healbite_db_path(db_path)
+    if not Path(resolved).exists():
+        return 0
+    with sqlite3.connect(resolved) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (NUTRITION_LOG_TABLE,),
+        ).fetchone()
+        if row is None:
+            return 0
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND source = ?",
+            (int(user_id), source),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _cleanup_synthetic_correction_rows(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = CORRECTION_SMOKE_USER_ID,
+    source: str = CORRECTION_SMOKE_SOURCE,
+) -> int:
+    resolved = resolve_healbite_db_path(db_path)
+    if not Path(resolved).exists():
+        return 0
+    with sqlite3.connect(resolved) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (NUTRITION_LOG_TABLE,),
+        ).fetchone()
+        if row is None:
+            return 0
+        conn.execute(
+            f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND source = ?",
+            (int(user_id), source),
+        )
+        conn.commit()
+    return _count_synthetic_correction_rows(db_path=resolved, user_id=user_id, source=source)
+
+
+def _seed_synthetic_correction_row(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = CORRECTION_SMOKE_USER_ID,
+    source: str = CORRECTION_SMOKE_SOURCE,
+) -> str:
+    resolved = resolve_healbite_db_path(db_path)
+    diary = HealBiteNutritionDiary(db_path=resolved, background_write=False)
+    image_ref = f"{CORRECTION_SMOKE_IMAGE_REF_PREFIX}{time.time_ns()}"
+    record = normalize_nutrition_payload(
+        json.dumps(
+            {
+                "is_food": True,
+                "meal_name": "CLI smoke meal",
+                "raw_summary": "CLI smoke meal summary",
+                "confidence": 0.9,
+                "totals": {
+                    "calories_kcal": 321,
+                    "protein_g": 22,
+                    "fat_g": 9,
+                    "carbs_g": 31,
+                },
+                "items": [{"name": "CLI smoke meal"}],
+            },
+            ensure_ascii=False,
+        )
+    )
+    diary.save_record(
+        user_id=int(user_id),
+        source=source,
+        record=record,
+        image_ref=image_ref,
+        occurred_at=None,
+    )
+    return image_ref
+
+
+def _latest_entry_for_user(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int,
+) -> dict[str, Any]:
+    summary = compute_nutrition_diary_summary(
+        db_path=resolve_healbite_db_path(db_path),
+        user_id=int(user_id),
+        days=1,
+    )
+    entries = summary.get("entries") or []
+    if not entries:
+        raise CLIError("Synthetic correction smoke expected a diary entry but found none.")
+    return dict(entries[-1])
+
+
+def _maybe_fail_correction_smoke(fail_after_step: str | None, current_step: str) -> None:
+    if fail_after_step and fail_after_step == current_step:
+        raise RuntimeError(f"Injected failure after step: {current_step}")
+
+
+def run_local_correction_smoke(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = CORRECTION_SMOKE_USER_ID,
+    source: str = CORRECTION_SMOKE_SOURCE,
+    fail_after_step: str | None = None,
+) -> list[str]:
+    resolved = resolve_healbite_db_path(db_path)
+    markers: list[str] = []
+    pending_error: Exception | None = None
+
+    _cleanup_synthetic_correction_rows(db_path=resolved, user_id=user_id, source=source)
+    _seed_synthetic_correction_row(db_path=resolved, user_id=user_id, source=source)
+    try:
+        guard_report = simulate_local_message(
+            "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u043d\u0430 400 \u043a\u043a\u0430\u043b",
+            user_id=user_id,
+            allow_write=False,
+            db_path=resolved,
+        )
+        guard_entry = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if "Use --allow-write" not in guard_report or float(guard_entry.get("calories_kcal") or 0.0) != 321.0:
+            raise CLIError("Correction guard smoke failed.")
+        markers.append("correction_guard_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "guard")
+
+        set_report = simulate_local_message(
+            "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u043d\u0430 400 \u043a\u043a\u0430\u043b",
+            user_id=user_id,
+            allow_write=True,
+            db_path=resolved,
+        )
+        set_entry = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if not set_report.startswith("\u2705 \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u043b \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c:") or float(set_entry.get("calories_kcal") or 0.0) != 400.0:
+            raise CLIError("Set calories smoke failed.")
+        markers.append("set_calories_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "set")
+
+        add_report = simulate_local_message(
+            "\u0434\u043e\u0431\u0430\u0432\u044c \u043a \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0439 \u0437\u0430\u043f\u0438\u0441\u0438 100 \u043a\u043a\u0430\u043b",
+            user_id=user_id,
+            allow_write=True,
+            db_path=resolved,
+        )
+        add_entry = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if "\u2014 500 \u043a\u043a\u0430\u043b" not in add_report or float(add_entry.get("calories_kcal") or 0.0) != 500.0:
+            raise CLIError("Add calories smoke failed.")
+        markers.append("add_calories_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "add")
+
+        rename_report = simulate_local_message(
+            "\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u0443\u0439 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u043e\u0440\u0449",
+            user_id=user_id,
+            allow_write=True,
+            db_path=resolved,
+        )
+        rename_entry = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if "\u0431\u043e\u0440\u0449" not in rename_report or str(rename_entry.get("meal_name") or "") != "\u0431\u043e\u0440\u0449":
+            raise CLIError("Rename smoke failed.")
+        markers.append("rename_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "rename")
+
+        read_only_before = dict(rename_entry)
+        read_only_report = simulate_local_message(
+            "\u0447\u0442\u043e \u0443 \u043c\u0435\u043d\u044f \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435?",
+            user_id=user_id,
+            allow_write=False,
+            db_path=resolved,
+        )
+        read_only_after = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if "\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f" not in read_only_report or "\u0431\u043e\u0440\u0449" not in read_only_report or read_only_before != read_only_after:
+            raise CLIError("Read-only correction smoke failed.")
+        markers.append("read_only_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "read_only")
+
+        ambiguous_before = dict(read_only_after)
+        ambiguous_report = simulate_local_message(
+            "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043e\u0448\u0438\u0431\u043a\u0443",
+            user_id=user_id,
+            allow_write=False,
+            db_path=resolved,
+        )
+        ambiguous_after = _latest_entry_for_user(db_path=resolved, user_id=user_id)
+        if "\u041d\u0443\u0436\u043d\u043e \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435" not in ambiguous_report or ambiguous_before != ambiguous_after:
+            raise CLIError("Ambiguous correction smoke failed.")
+        markers.append("ambiguous_noop_ok")
+    except Exception as exc:
+        pending_error = exc
+    finally:
+        remaining = _cleanup_synthetic_correction_rows(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+        )
+        if remaining != 0:
+            raise CLIError("Synthetic correction cleanup failed.") from pending_error
+        markers.append("cleanup_ok")
+
+    if pending_error is not None:
+        raise pending_error
+    return markers
+
+
 def simulate_local_message(
     text: str,
     *,
@@ -815,6 +1030,9 @@ class HealBiteCLI:
 
     def cmd_fix_plan(self, issue: str) -> str:
         return build_fix_plan(issue)
+
+    def cmd_test_correction(self) -> str:
+        return "\n".join(run_local_correction_smoke())
 
 
 _RUNTIME_STATUS_CODE = r"""
@@ -1214,6 +1432,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "test-diary", help="Probe nutrition_log and diary formatter safely"
     )
+    subparsers.add_parser(
+        "test-correction",
+        help="Run a deterministic synthetic smoke-test for diary correction UX",
+    )
     subparsers.add_parser("check-admins", help="Inspect effective admin ACL policy")
 
     inspect_parser = subparsers.add_parser(
@@ -1260,6 +1482,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "test-diary":
         print(cli.cmd_test_diary())
+        return 0
+    if args.command == "test-correction":
+        print(cli.cmd_test_correction())
         return 0
     if args.command == "check-admins":
         print(cli.cmd_check_admins())

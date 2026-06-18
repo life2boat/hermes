@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -52,6 +53,15 @@ def _seed_record(
     )
 
 
+def _count_rows(db_path: Path, *, user_id: int, source: str) -> int:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM nutrition_log WHERE user_id = ? AND source = ?",
+            (user_id, source),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
 def test_build_parser_parses_logs_command():
     parser = healbite_cli.build_parser()
     args = parser.parse_args(["logs", "--last", "50"])
@@ -85,6 +95,12 @@ def test_build_parser_parses_simulate_message_allow_write():
     assert args.text == "/undo_meal"
     assert args.user_id == 248875361
     assert args.allow_write is True
+
+
+def test_build_parser_parses_test_correction():
+    parser = healbite_cli.build_parser()
+    args = parser.parse_args(["test-correction"])
+    assert args.command == "test-correction"
 
 
 def test_build_parser_parses_free_text_simulation_with_allow_write():
@@ -180,6 +196,26 @@ def test_cmd_simulate_message_free_text_correction_stays_local(monkeypatch):
         allow_write=True,
     )
     assert report == "LOCAL"
+
+
+def test_cmd_test_correction_returns_marker_lines(monkeypatch):
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=None)
+    monkeypatch.setattr(
+        healbite_cli,
+        "run_local_correction_smoke",
+        lambda **kwargs: [
+            "correction_guard_ok",
+            "set_calories_ok",
+            "add_calories_ok",
+            "rename_ok",
+            "read_only_ok",
+            "ambiguous_noop_ok",
+            "cleanup_ok",
+        ],
+    )
+    report = cli.cmd_test_correction()
+    assert "correction_guard_ok" in report
+    assert "cleanup_ok" in report
 
 
 def test_simulate_message_correction_requires_allow_write(tmp_path):
@@ -308,6 +344,57 @@ def test_simulate_message_user_id_isolation(tmp_path):
     summary_two = compute_nutrition_diary_summary(db_path=db_path, user_id=72)
     assert summary_one["entries"][-1]["calories_kcal"] == 400
     assert summary_two["entries"][-1]["calories_kcal"] == 310
+
+
+def test_run_local_correction_smoke_outputs_all_markers_and_cleans_up(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_record(
+        db_path,
+        user_id=424242,
+        meal_name="real-user-meal",
+        calories_kcal=280,
+        image_ref="test:424242:real-user",
+    )
+
+    markers = healbite_cli.run_local_correction_smoke(db_path=db_path)
+
+    assert markers == [
+        "correction_guard_ok",
+        "set_calories_ok",
+        "add_calories_ok",
+        "rename_ok",
+        "read_only_ok",
+        "ambiguous_noop_ok",
+        "cleanup_ok",
+    ]
+    assert _count_rows(
+        db_path,
+        user_id=healbite_cli.CORRECTION_SMOKE_USER_ID,
+        source=healbite_cli.CORRECTION_SMOKE_SOURCE,
+    ) == 0
+    real_user_summary = compute_nutrition_diary_summary(db_path=db_path, user_id=424242)
+    assert real_user_summary["entries"][-1]["meal_name"] == "real-user-meal"
+    assert real_user_summary["entries"][-1]["calories_kcal"] == 280
+
+
+def test_run_local_correction_smoke_cleans_up_on_failure(tmp_path):
+    db_path = tmp_path / "healbite.db"
+
+    try:
+        healbite_cli.run_local_correction_smoke(
+            db_path=db_path,
+            fail_after_step="set",
+        )
+    except RuntimeError as exc:
+        assert "Injected failure after step: set" in str(exc)
+    else:
+        raise AssertionError("Expected injected correction smoke failure")
+
+    assert _count_rows(
+        db_path,
+        user_id=healbite_cli.CORRECTION_SMOKE_USER_ID,
+        source=healbite_cli.CORRECTION_SMOKE_SOURCE,
+    ) == 0
 
 
 def test_render_status_report_never_prints_secret_values():

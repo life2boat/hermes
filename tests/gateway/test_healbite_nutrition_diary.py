@@ -17,6 +17,7 @@ from gateway.healbite_nutrition_diary import (
     PENDING_MEALS_TABLE,
     UndoMealResult,
     compute_nutrition_diary_summary,
+    localized_meal_display_name,
     NutritionRecord,
     format_nutrition_diary_report,
     format_pending_meal_prompt,
@@ -485,6 +486,97 @@ def test_format_nutrition_diary_report_localized_and_html_safe():
     assert "\u0421\u0435\u043c\u0433\u0430 &amp; \u043e\u0432\u043e\u0449\u0438 &lt;\u0433\u0440\u0438\u043b\u044c&gt;" in report
     assert "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>" in report
     assert "????" not in report
+
+
+def test_localized_meal_display_name_uses_legacy_alias_map():
+    assert localized_meal_display_name("Borscht with Sour Cream and Dill") == "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c"
+    assert localized_meal_display_name("  Buckwheat with Tomatoes and Herbs  ") == "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e"
+    assert localized_meal_display_name("Buckwheat Kasha with Tomatoes and Herbs") == "\u0413\u0440\u0435\u0447\u043d\u0435\u0432\u0430\u044f \u043a\u0430\u0448\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e"
+
+
+def test_localized_meal_display_name_prefers_explicit_user_facing_fields():
+    assert localized_meal_display_name(
+        {
+            "display_name": "\u0411\u043e\u0440\u0449 \u0434\u043e\u043c\u0430\u0448\u043d\u0438\u0439",
+            "meal_name_user": "\u0411\u043e\u0440\u0449 \u043f\u043e \u0440\u0435\u0446\u0435\u043f\u0442\u0443 \u043c\u0430\u043c\u044b",
+            "meal_name_ru": "\u0411\u043e\u0440\u0449",
+            "meal_name": "Borscht with Sour Cream and Dill",
+        }
+    ) == "\u0411\u043e\u0440\u0449 \u0434\u043e\u043c\u0430\u0448\u043d\u0438\u0439"
+    assert localized_meal_display_name(
+        {
+            "meal_name_user": "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u0437\u0435\u043b\u0435\u043d\u044c\u044e",
+            "meal_name_ru": "\u0413\u0440\u0435\u0447\u043a\u0430",
+            "meal_name": "Buckwheat with Tomatoes and Herbs",
+        }
+    ) == "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u0437\u0435\u043b\u0435\u043d\u044c\u044e"
+    assert localized_meal_display_name({"meal_name_ru": "\u0411\u043e\u0440\u0449", "meal_name": "Borscht with Sour Cream and Dill"}) == "\u0411\u043e\u0440\u0449"
+
+
+def test_localized_meal_display_name_keeps_unknown_name_and_fallback():
+    assert localized_meal_display_name("Unknown Bowl Deluxe") == "Unknown Bowl Deluxe"
+    assert localized_meal_display_name("   ") == "\u0411\u043b\u044e\u0434\u043e"
+
+
+def test_diary_report_localizes_legacy_names_without_touching_unknown_english():
+    summary = {
+        "entries": [
+            {"meal_name": "Borscht with Sour Cream and Dill", "calories_kcal": 251},
+            {"meal_name": "Buckwheat with Tomatoes and Herbs", "calories_kcal": 236},
+            {"meal_name": "Unknown Bowl Deluxe", "calories_kcal": 199},
+        ],
+        "entry_count": 3,
+        "calories_kcal": 686,
+        "protein_g": 0,
+        "fat_g": 0,
+        "carbs_g": 0,
+        "days": 1,
+    }
+
+    report = format_nutrition_diary_report(summary)
+
+    assert "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c" in report
+    assert "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e" in report
+    assert "Unknown Bowl Deluxe" in report
+    assert "Borscht with Sour Cream and Dill" not in report
+    assert "Buckwheat with Tomatoes and Herbs" not in report
+    assert "????" not in report
+
+
+def test_pending_and_undo_reports_localize_legacy_name_without_display_name():
+    record = NutritionRecord(
+        is_food=True,
+        meal_name="Assorted Dried Meat and Fish Platter",
+        items=[],
+        calories_kcal=480,
+        protein_g=35,
+        fat_g=30,
+        carbs_g=8,
+        confidence=0.87,
+        raw_summary="Snack plate",
+        display_name="",
+    )
+
+    prompt = format_pending_meal_prompt(record)
+    undo_report = format_undo_meal_report(
+        UndoMealResult(
+            deleted=True,
+            sqlite_id=1,
+            meal_name="Vegetable Crudités Platter with Crackers and Olives",
+            calories_kcal=320,
+            protein_g=8,
+            fat_g=18,
+            carbs_g=29,
+            occurred_at="2026-06-19 09:00:00",
+        )
+    )
+
+    assert "\u0410\u0441\u0441\u043e\u0440\u0442\u0438 \u0438\u0437 \u0432\u044f\u043b\u0435\u043d\u043e\u0433\u043e \u043c\u044f\u0441\u0430 \u0438 \u0440\u044b\u0431\u044b" in prompt
+    assert "Assorted Dried Meat and Fish Platter" not in prompt
+    assert "\u041e\u0432\u043e\u0449\u043d\u0430\u044f \u0442\u0430\u0440\u0435\u043b\u043a\u0430 \u0441 \u043a\u0440\u0435\u043a\u0435\u0440\u0430\u043c\u0438 \u0438 \u043e\u043b\u0438\u0432\u043a\u0430\u043c\u0438" in undo_report
+    assert "Vegetable Crudit" not in undo_report
+    assert "????" not in prompt
+    assert "????" not in undo_report
 
 
 
@@ -1132,6 +1224,19 @@ def test_build_update_last_meal_user_reply_omits_missing_macros_and_flattens_nam
         "Вызови /diary, чтобы посмотреть итог за день."
     )
 
+
+def test_build_update_last_meal_user_reply_localizes_legacy_meal_name():
+    reply = _build_update_last_meal_user_reply(
+        meal_name="Borscht with Sour Cream and Dill",
+        calories_kcal=251,
+        protein_g=9,
+        fat_g=14,
+        carbs_g=18,
+    )
+
+    assert "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c" in reply
+    assert "Borscht with Sour Cream and Dill" not in reply
+    assert "????" not in reply
 
 @pytest.mark.asyncio
 async def test_telegram_diary_command_routes_correctly(monkeypatch):

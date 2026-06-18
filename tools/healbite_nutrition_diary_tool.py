@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import math
 
-from gateway.healbite_nutrition_diary import get_default_nutrition_diary, resolve_healbite_db_path
+from gateway.healbite_nutrition_diary import (
+    get_default_nutrition_diary,
+    localized_meal_display_name,
+    resolve_healbite_db_path,
+)
 from gateway.session_context import get_session_env
 from tools.registry import registry, tool_error, tool_result
 
@@ -24,7 +28,7 @@ def _format_metric(value: float | int | None, unit: str) -> str | None:
 
 
 def _build_update_last_meal_user_reply(*, meal_name: str | None, calories_kcal: float | int | None, protein_g: float | int | None, fat_g: float | int | None, carbs_g: float | int | None) -> str:
-    title = (meal_name or "Последняя запись").strip().replace("\r", " ").replace("\n", " ")
+    title = localized_meal_display_name(meal_name or "Последняя запись", "Последняя запись").replace("\r", " ").replace("\n", " ")
     calories = _format_metric(calories_kcal, "ккал") or "без калорий"
     macro_values = {
         "Б": _format_metric(protein_g, "г"),

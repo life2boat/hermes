@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import threading
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -451,9 +452,70 @@ def _normalize_meal_name_text(value: Any, fallback: str = "Блюдо") -> str:
     return text or fallback
 
 
-def _record_display_name(record: NutritionRecord) -> str:
-    return _normalize_meal_name_text(record.display_name or record.meal_name, "Блюдо")
+_LEGACY_MEAL_NAME_ALIASES = {
+    "borscht with sour cream and dill": "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c",
+    "buckwheat with tomatoes and herbs": "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e",
+    "buckwheat kasha with tomatoes and herbs": "\u0413\u0440\u0435\u0447\u043d\u0435\u0432\u0430\u044f \u043a\u0430\u0448\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e",
+    "dried fish and meat jerky platter": "\u0412\u044f\u043b\u0435\u043d\u0430\u044f \u0440\u044b\u0431\u0430 \u0438 \u043c\u044f\u0441\u043d\u044b\u0435 \u0441\u043d\u0435\u043a\u0438",
+    "vegetable crudites platter with crackers and olives": "\u041e\u0432\u043e\u0449\u043d\u0430\u044f \u0442\u0430\u0440\u0435\u043b\u043a\u0430 \u0441 \u043a\u0440\u0435\u043a\u0435\u0440\u0430\u043c\u0438 \u0438 \u043e\u043b\u0438\u0432\u043a\u0430\u043c\u0438",
+    "assorted dried meat and fish platter": "\u0410\u0441\u0441\u043e\u0440\u0442\u0438 \u0438\u0437 \u0432\u044f\u043b\u0435\u043d\u043e\u0433\u043e \u043c\u044f\u0441\u0430 \u0438 \u0440\u044b\u0431\u044b",
+}
 
+
+def _legacy_meal_name_alias(value: Any) -> str | None:
+    normalized = _normalize_meal_name_text(value, "")
+    if not normalized:
+        return None
+    normalized_key = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", normalized.casefold())
+        if not unicodedata.combining(char)
+    )
+    return _LEGACY_MEAL_NAME_ALIASES.get(normalized_key)
+
+
+def localized_meal_display_name(record_or_name: Any, fallback: str = "\u0411\u043b\u044e\u0434\u043e") -> str:
+    explicit_candidates: list[Any] = []
+    meal_name_candidate: Any = None
+
+    if isinstance(record_or_name, NutritionRecord):
+        explicit_candidates = [
+            record_or_name.display_name,
+            getattr(record_or_name, "meal_name_user", ""),
+            getattr(record_or_name, "meal_name_ru", ""),
+        ]
+        meal_name_candidate = record_or_name.meal_name
+    elif isinstance(record_or_name, dict):
+        explicit_candidates = [
+            record_or_name.get("display_name"),
+            record_or_name.get("meal_name_user"),
+            record_or_name.get("meal_name_ru"),
+        ]
+        meal_name_candidate = record_or_name.get("meal_name")
+    elif isinstance(record_or_name, str):
+        meal_name_candidate = record_or_name
+    else:
+        explicit_candidates = [
+            getattr(record_or_name, "display_name", ""),
+            getattr(record_or_name, "meal_name_user", ""),
+            getattr(record_or_name, "meal_name_ru", ""),
+        ]
+        meal_name_candidate = getattr(record_or_name, "meal_name", record_or_name)
+
+
+    for candidate in explicit_candidates:
+        normalized = _normalize_meal_name_text(candidate, "")
+        if normalized:
+            return normalized
+
+    alias = _legacy_meal_name_alias(meal_name_candidate)
+    if alias:
+        return alias
+    return _normalize_meal_name_text(meal_name_candidate, fallback)
+
+
+def _record_display_name(record: NutritionRecord) -> str:
+    return localized_meal_display_name(record, "\u0411\u043b\u044e\u0434\u043e")
 
 def _confidence_bucket(confidence: float | None) -> str:
     if confidence is None:
@@ -1382,7 +1444,7 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
         lines.extend(f"\u2022 {html.escape(str(hint))}" for hint in hints)
     lines.extend(["", "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>"])
     for row in entries:
-        meal_name = html.escape(_normalize_meal_name_text(row.get("meal_name"), "\u0411\u043b\u044e\u0434\u043e"))
+        meal_name = html.escape(localized_meal_display_name(row, "\u0411\u043b\u044e\u0434\u043e"))
         kcal = _format_kcal(row.get("calories_kcal"))
         lines.append(f"\u2022 {meal_name} (~{kcal})")
     return "\n".join(lines)
@@ -1392,7 +1454,7 @@ def format_undo_meal_report(result: UndoMealResult) -> str:
     if not result.deleted:
         return "\u0423\u0434\u0430\u043b\u044f\u0442\u044c \u043d\u0435\u0447\u0435\u0433\u043e \u2014 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0443\u0441\u0442."
 
-    meal_name = html.escape(result.meal_name or "\u0411\u043b\u044e\u0434\u043e")
+    meal_name = html.escape(localized_meal_display_name(result.meal_name, "\u0411\u043b\u044e\u0434\u043e"))
     return "\n".join(
         [
             f"\U0001f5d1 \u0417\u0430\u043f\u0438\u0441\u044c <b>{meal_name}</b> \u0443\u0434\u0430\u043b\u0435\u043d\u0430.",

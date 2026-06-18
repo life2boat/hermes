@@ -184,7 +184,7 @@ async def test_text_only_reply_does_not_attach_image_without_photo(adapter):
     assert event.media_types == []
 
 SAFE_VISION_FALLBACK = (
-    "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u043f\u0440\u0438\u0441\u043b\u0430\u0442\u044c \u0444\u043e\u0442\u043e \u043a\u0440\u0443\u043f\u043d\u0435\u0435 \u0438 \u0447\u0451\u0442\u0447\u0435."
+    "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0444\u043e\u0442\u043e \u0441\u0435\u0439\u0447\u0430\u0441. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437 \u043f\u043e\u0437\u0436\u0435 \u0438\u043b\u0438 \u0434\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u0431\u043b\u044e\u0434\u043e \u0442\u0435\u043a\u0441\u0442\u043e\u043c."
 )
 
 
@@ -278,6 +278,34 @@ async def test_runner_photo_caption_skips_text_only_path_when_vision_unavailable
     assert sent_text == SAFE_VISION_FALLBACK
     assert "auth failed" not in sent_text
     assert "Count calories" not in sent_text
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_skips_text_only_path_when_vision_request_is_rejected():
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    failure = json.dumps(
+        {
+            "success": False,
+            "error": "Error analyzing image: request_rejected",
+            "analysis": "The vision request could not be processed right now. Please try again later or describe the meal in text.",
+        }
+    )
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=failure)):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert sent_text == SAFE_VISION_FALLBACK
+    assert "image_url" not in sent_text
+    assert "request_rejected" not in sent_text
 
 
 @pytest.mark.asyncio

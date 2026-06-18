@@ -3174,6 +3174,8 @@ def _try_payment_fallback(
     failed_provider: str,
     task: str = None,
     reason: str = "payment error",
+    *,
+    require_vision: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try alternative providers after a payment/credit or connection error.
 
@@ -3206,6 +3208,9 @@ def _try_payment_fallback(
             tried.append(f"{label} (unhealthy)")
             continue
         client, model = try_fn()
+        if client is not None and require_vision and not _main_model_supports_vision(label, model):
+            tried.append(f"{label} (no vision)")
+            continue
         if client is not None:
             logger.info(
                 "Auxiliary %s: %s on %s — falling back to %s (%s)",
@@ -3225,6 +3230,8 @@ def _try_main_agent_model_fallback(
     failed_provider: str,
     task: str = None,
     reason: str = "error",
+    *,
+    require_vision: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Last-resort fallback to the user's main agent provider + model.
 
@@ -3253,9 +3260,16 @@ def _try_main_agent_model_fallback(
         return None, None, ""
 
     try:
-        client, resolved_model = resolve_provider_client(
-            provider=main_provider, model=main_model,
-        )
+        if require_vision:
+            _, client, resolved_model = resolve_vision_provider_client(
+                provider=main_provider,
+                model=main_model,
+                async_mode=False,
+            )
+        else:
+            client, resolved_model = resolve_provider_client(
+                provider=main_provider, model=main_model,
+            )
     except Exception:
         client, resolved_model = None, None
 
@@ -3274,6 +3288,8 @@ def _try_configured_fallback_chain(
     task: str,
     failed_provider: str,
     reason: str = "error",
+    *,
+    require_vision: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try user-configured fallback_chain for a specific auxiliary task.
 
@@ -3308,17 +3324,28 @@ def _try_configured_fallback_chain(
         label = f"fallback_chain[{i}]({fb_provider})"
 
         try:
-            fb_client = _resolve_single_provider(
-                fb_provider, fb_model, fb_base_url, fb_api_key)
+            if require_vision:
+                _, fb_client, resolved_fb_model = resolve_vision_provider_client(
+                    provider=fb_provider,
+                    model=fb_model,
+                    base_url=fb_base_url,
+                    api_key=fb_api_key,
+                    async_mode=False,
+                )
+            else:
+                fb_client = _resolve_single_provider(
+                    fb_provider, fb_model, fb_base_url, fb_api_key)
+                resolved_fb_model = fb_model
         except Exception:
             fb_client = None
+            resolved_fb_model = None
 
         if fb_client is not None:
             logger.info(
                 "Auxiliary %s: %s on %s — configured fallback to %s (%s)",
-                task, reason, failed_provider, label, fb_model or "default",
+                task, reason, failed_provider, label, resolved_fb_model or fb_model or "default",
             )
-            return fb_client, fb_model, label
+            return fb_client, resolved_fb_model or fb_model, label
         tried.append(label)
 
     if tried:
@@ -5676,13 +5703,25 @@ def call_llm(
             fb_client, fb_model, fb_label = (None, None, "")
             if is_auto:
                 fb_client, fb_model, fb_label = _try_payment_fallback(
-                    resolved_provider, task, reason=reason)
+                    resolved_provider,
+                    task,
+                    reason=reason,
+                    require_vision=(task == "vision"),
+                )
             else:
                 fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason)
+                    task,
+                    resolved_provider or "auto",
+                    reason=reason,
+                    require_vision=(task == "vision"),
+                )
                 if fb_client is None:
                     fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason)
+                        resolved_provider,
+                        task,
+                        reason=reason,
+                        require_vision=(task == "vision"),
+                    )
 
             if fb_client is not None:
                 fb_kwargs = _build_call_kwargs(
@@ -6095,13 +6134,25 @@ async def async_call_llm(
             fb_client, fb_model, fb_label = (None, None, "")
             if is_auto:
                 fb_client, fb_model, fb_label = _try_payment_fallback(
-                    resolved_provider, task, reason=reason)
+                    resolved_provider,
+                    task,
+                    reason=reason,
+                    require_vision=(task == "vision"),
+                )
             else:
                 fb_client, fb_model, fb_label = _try_configured_fallback_chain(
-                    task, resolved_provider or "auto", reason=reason)
+                    task,
+                    resolved_provider or "auto",
+                    reason=reason,
+                    require_vision=(task == "vision"),
+                )
                 if fb_client is None:
                     fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
-                        resolved_provider, task, reason=reason)
+                        resolved_provider,
+                        task,
+                        reason=reason,
+                        require_vision=(task == "vision"),
+                    )
 
             if fb_client is not None:
                 fb_kwargs = _build_call_kwargs(

@@ -232,6 +232,40 @@ async def test_malformed_vision_output_does_not_create_bad_log(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_path, monkeypatch):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    monkeypatch.setattr(
+        "tools.vision_tools.vision_analyze_tool",
+        AsyncMock(
+            return_value=json.dumps(
+                {
+                    "success": False,
+                    "error": "Error analyzing image: provider_unavailable",
+                    "analysis": "Vision service temporarily unavailable. Please try again later or describe the meal in text.",
+                },
+                ensure_ascii=False,
+            )
+        ),
+    )
+
+    outcome = await diary.analyze_and_maybe_log(
+        user_id=7,
+        image_path="/tmp/meal.jpg",
+        user_text="count calories",
+        image_ref="telegram:7:404",
+    )
+
+    summary = diary.get_daily_summary(user_id=7)
+
+    assert outcome.available is False
+    assert outcome.pending is False
+    assert outcome.record is None
+    assert diary.get_pending_meal(7) is None
+    assert _count_pending_rows(tmp_path / "healbite.db", user_id=7) == 0
+    assert summary["entry_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_saving(tmp_path, monkeypatch):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     monkeypatch.setattr(

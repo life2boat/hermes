@@ -37,7 +37,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
-from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.auxiliary_client import (
+    LLMServiceUnavailableError,
+    extract_content_or_reasoning,
+    safe_async_call_llm,
+)
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
@@ -600,6 +604,49 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     return False
 
 
+def _classify_expected_vision_error(error: Exception) -> str | None:
+    if isinstance(error, LLMServiceUnavailableError):
+        return "provider_unavailable"
+
+    err_str = str(error).lower()
+    if any(
+        hint in err_str
+        for hint in (
+            "invalid_request",
+            "image_url",
+            "unknown variant `image_url`",
+            "unsupported image",
+            "not support image",
+            "does not support vision",
+            "image input",
+            "multimodal",
+            "content_policy",
+            "resource_exhausted",
+            "quota exceeded",
+            "429",
+        )
+    ):
+        return "request_rejected"
+    return None
+
+
+def _safe_vision_failure_analysis(error: Exception) -> str:
+    expected_kind = _classify_expected_vision_error(error)
+    if expected_kind == "provider_unavailable":
+        return (
+            "Vision service temporarily unavailable. "
+            "Please try again later or describe the meal in text."
+        )
+    if expected_kind == "request_rejected":
+        return (
+            "The vision request could not be processed right now. "
+            "Please try again later or describe the meal in text."
+        )
+    return (
+        "There was a problem with the request and the image could not be analyzed."
+    )
+
+
 def _should_use_native_vision_fast_path() -> bool:
     """Whether vision tools should attach the image to the main model directly
     instead of routing through the auxiliary vision LLM.
@@ -975,7 +1022,7 @@ async def vision_analyze_tool(
             call_kwargs["model"] = model
         # Try full-size image first; on size-related rejection, downscale and retry.
         try:
-            response = await async_call_llm(**call_kwargs)
+            response = await safe_async_call_llm(**call_kwargs)
         except Exception as _api_err:
             if (_is_image_size_error(_api_err)
                     and len(image_data_url) > _RESIZE_TARGET_BYTES):
@@ -988,7 +1035,7 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                response = await async_call_llm(**call_kwargs)
+                response = await safe_async_call_llm(**call_kwargs)
             else:
                 raise
         
@@ -998,7 +1045,7 @@ async def vision_analyze_tool(
         # Retry once on empty content (reasoning-only response)
         if not analysis:
             logger.warning("Vision LLM returned empty content, retrying once")
-            response = await async_call_llm(**call_kwargs)
+            response = await safe_async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis)
@@ -1021,40 +1068,20 @@ async def vision_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
         
     except Exception as e:
-        error_msg = f"Error analyzing image: {str(e)}"
-        logger.error("%s", error_msg, exc_info=True)
+        expected_error_kind = _classify_expected_vision_error(e)
+        if expected_error_kind is not None:
+            error_msg = f"Error analyzing image: {expected_error_kind}"
+            logger.warning(
+                "Vision image analysis unavailable (%s)",
+                expected_error_kind,
+            )
+        else:
+            error_msg = f"Error analyzing image: {str(e)}"
+            logger.error("%s", error_msg, exc_info=True)
         
         # Detect vision capability errors — give the model a clear message
         # so it can inform the user instead of a cryptic API error.
-        err_str = str(e).lower()
-        if any(hint in err_str for hint in (
-            "402", "insufficient", "payment required", "credits", "billing",
-        )):
-            analysis = (
-                "Insufficient credits or payment required. Please top up your "
-                f"API provider account and try again. Error: {e}"
-            )
-        elif any(hint in err_str for hint in (
-            "does not support", "not support image",
-            "content_policy", "multimodal",
-            "unrecognized request argument", "image input",
-        )):
-            analysis = (
-                f"{model} does not support vision or our request was not "
-                f"accepted by the server. Error: {e}"
-            )
-        elif "invalid_request" in err_str or "image_url" in err_str:
-            analysis = (
-                "The vision API rejected the image. This can happen when the "
-                "image is in an unsupported format, corrupted, or still too "
-                "large after auto-resize. Try a smaller JPEG/PNG and retry. "
-                f"Error: {e}"
-            )
-        else:
-            analysis = (
-                "There was a problem with the request and the image could not "
-                f"be analyzed. Error: {e}"
-            )
+        analysis = _safe_vision_failure_analysis(e)
         
         # Prepare error response
         result = {
@@ -1459,12 +1486,12 @@ async def video_analyze_tool(
         if model:
             call_kwargs["model"] = model
 
-        response = await async_call_llm(**call_kwargs)
+        response = await safe_async_call_llm(**call_kwargs)
         analysis = extract_content_or_reasoning(response)
 
         if not analysis:
             logger.warning("Empty video response, retrying once")
-            response = await async_call_llm(**call_kwargs)
+            response = await safe_async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis) if analysis else 0

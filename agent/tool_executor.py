@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -60,6 +61,53 @@ _IMAGE_ANALYSIS_CONTEXT_MARKERS = (
     "[user sent an image:",
     "[if you need a closer look, use vision_analyze",
     "error analyzing image",
+)
+_TELEGRAM_END_USER_BLOCKED_TOOL_NAMES = frozenset(
+    {
+        "terminal",
+        "process",
+        "read_terminal",
+        "execute_code",
+        "read_file",
+        "write_file",
+        "patch",
+        "search_files",
+        "delegate_task",
+    }
+)
+_TELEGRAM_DIARY_CONTEXT_HINTS = (
+    "\u0434\u043d\u0435\u0432\u043d\u0438\u043a",
+    "\u0437\u0430\u043f\u0438\u0441",
+    "\u043a\u043a\u0430\u043b",
+    "\u043a\u0430\u043b\u043e\u0440",
+    "\u0431\u0436\u0443",
+    "\u0431\u0435\u043b\u043a",
+    "\u0436\u0438\u0440",
+    "\u0443\u0433\u043b\u0435\u0432",
+    "\u043f\u0440\u0438\u0435\u043c \u043f\u0438\u0449",
+    "\u0435\u0434\u0430",
+    "\u0431\u043b\u044e\u0434",
+)
+_TELEGRAM_DIARY_CORRECTION_HINTS = (
+    "\u0438\u0441\u043f\u0440\u0430\u0432",
+    "\u043a\u043e\u0440\u0440\u0435\u043a\u0442",
+    "\u0438\u0437\u043c\u0435\u043d",
+    "\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d",
+    "\u0434\u043e\u0431\u0430\u0432",
+    "\u0443\u0431\u0430\u0432",
+    "\u0443\u043c\u0435\u043d\u044c\u0448",
+    "\u0443\u0432\u0435\u043b\u0438\u0447",
+    "\u0437\u0430\u043c\u0435\u043d",
+)
+_TELEGRAM_DIARY_READ_ONLY_HINTS = (
+    "\u0447\u0442\u043e \u0443 \u043c\u0435\u043d\u044f",
+    "\u043f\u043e\u043a\u0430\u0436\u0438",
+    "\u0438\u0442\u043e\u0433",
+    "\u0441\u0435\u0433\u043e\u0434\u043d",
+    "\u0437\u0430 \u043d\u0435\u0434\u0435\u043b",
+    "\u0441\u0442\u0430\u0442\u0438\u0441",
+    "\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u044a\u0435\u043b",
+    "\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u044c\u0435\u043b",
 )
 
 
@@ -150,6 +198,166 @@ def _image_analysis_tool_block_message(
         "If vision_analyze failed, stop escalating to terminal and reply to the user in Russian "
         "that the image could not be recognized without exposing technical details."
     )
+
+
+def _get_session_env_value(name: str, default: str = "") -> str:
+    try:
+        from gateway.session_context import get_session_env
+
+        return str(get_session_env(name, default) or default)
+    except Exception:
+        return str(os.getenv(name, default) or default)
+
+
+def _trim_audit_list(items: list[str], *, limit: int = 24) -> list[str]:
+    normalized = [str(item) for item in items if str(item or "").strip()]
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + [f"...(+{len(normalized) - limit} more)"]
+
+
+def _normalize_telegram_guard_text(value: Any) -> str:
+    text = _flatten_message_text(value).lower().replace("\u0451", "\u0435")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _recent_user_text(messages: list[Any]) -> str:
+    for message in reversed(messages or []):
+        if isinstance(message, dict) and str(message.get("role") or "").lower() == "user":
+            return _normalize_telegram_guard_text(message.get("content"))
+    return ""
+
+
+def _history_has_recent_diary_context(messages: list[Any]) -> bool:
+    recent = messages[-8:] if isinstance(messages, list) else []
+    for message in recent:
+        if not isinstance(message, dict):
+            continue
+        normalized = _normalize_telegram_guard_text(message.get("content"))
+        if any(hint in normalized for hint in _TELEGRAM_DIARY_CONTEXT_HINTS):
+            return True
+    return False
+
+
+def _turn_has_explicit_diary_update_value(text: str) -> bool:
+    if not text:
+        return False
+    if re.search(r"\b\d+(?:[.,]\d+)?\s*(?:\u043a\u043a\u0430\u043b|\u043a\u0430\u043b\u043e\u0440\u0438[\u0439\u044f]|\u0433\u0440\u0430\u043c\u043c?\w*|\u0433)\b", text):
+        return True
+    if re.search(r"\b(?:\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\w*|\u043d\u0430\u0437\u043e\u0432\u0438|\u043d\u0430\u0437\u0432\u0430\u0442\u044c)\b.*\b\u0432\b\s+\S+", text):
+        return True
+    return False
+
+
+def _classify_telegram_diary_intent(messages: list[Any]) -> str:
+    text = _recent_user_text(messages)
+    if not text:
+        return "none"
+
+    diary_context = _history_has_recent_diary_context(messages) or any(
+        hint in text for hint in _TELEGRAM_DIARY_CONTEXT_HINTS
+    )
+    correction_intent = any(hint in text for hint in _TELEGRAM_DIARY_CORRECTION_HINTS) or (
+        "\u043e\u0448\u0438\u0431" in text
+    )
+    summary_intent = any(hint in text for hint in _TELEGRAM_DIARY_READ_ONLY_HINTS)
+    explicit_value = _turn_has_explicit_diary_update_value(text)
+
+    if correction_intent and explicit_value and diary_context:
+        return "explicit_correction"
+    if summary_intent and diary_context:
+        return "read_only"
+    if correction_intent and diary_context:
+        return "ambiguous"
+    if "\u0434\u043d\u0435\u0432\u043d\u0438\u043a" in text or "\u0441\u0442\u0430\u0442\u0438\u0441" in text:
+        return "read_only"
+    return "none"
+
+
+def _is_telegram_end_user_turn(agent) -> bool:
+    platform = (
+        _get_session_env_value("HERMES_SESSION_PLATFORM", "")
+        or str(getattr(agent, "platform", "") or "")
+    ).strip().lower()
+    user_id = (
+        _get_session_env_value("HERMES_SESSION_USER_ID", "")
+        or str(getattr(agent, "user_id", "") or "")
+    ).strip()
+    return platform == "telegram" and bool(user_id)
+
+
+def _telegram_end_user_tool_block_message(
+    function_name: str,
+    *,
+    agent,
+    messages: list[Any],
+    assistant_message: Any,
+) -> str | None:
+    if function_name not in _TELEGRAM_END_USER_BLOCKED_TOOL_NAMES:
+        return None
+    if not _is_telegram_end_user_turn(agent):
+        return None
+
+    diary_intent = _classify_telegram_diary_intent(messages)
+    image_context = (
+        _assistant_message_requests_image_analysis(assistant_message)
+        or any(
+            _message_indicates_image_analysis(message)
+            for message in (messages[-12:] if isinstance(messages, list) else [])
+        )
+    )
+    tool_surface_before = sorted(
+        set(
+            str(name)
+            for name in (getattr(agent, "valid_tool_names", None) or [])
+            if str(name or "").strip()
+        )
+    )
+    tool_surface_after = [
+        name for name in tool_surface_before if name not in _TELEGRAM_END_USER_BLOCKED_TOOL_NAMES
+    ]
+    dangerous_tools_removed = sorted(
+        set(tool_surface_before) & _TELEGRAM_END_USER_BLOCKED_TOOL_NAMES
+    )
+
+    logger.warning(
+        "[telegram_user_tool_guard] source=telegram diary_intent=%s image_context=%s "
+        "tool_surface_before=%s tool_surface_after=%s dangerous_tools_removed=%s requested_tool=%s",
+        diary_intent,
+        image_context,
+        _trim_audit_list(tool_surface_before),
+        _trim_audit_list(tool_surface_after),
+        _trim_audit_list(dangerous_tools_removed),
+        function_name,
+    )
+
+    if diary_intent == "explicit_correction":
+        guidance = (
+            "For diary corrections, use only the safe update_last_meal tool and never use "
+            "terminal, code execution, file access, or delegation."
+        )
+    elif diary_intent == "read_only":
+        guidance = (
+            "This is a read-only diary request. Reply directly or use safe diary-summary paths "
+            "without terminal, code execution, file access, or delegation."
+        )
+    elif diary_intent == "ambiguous":
+        guidance = (
+            "Ask the user to clarify the exact correction and do not mutate the diary until they "
+            "provide a concrete value."
+        )
+    elif image_context:
+        guidance = (
+            "Do not inspect local image files or write scripts. If vision is unavailable, reply "
+            "with the safe Russian fallback only."
+        )
+    else:
+        guidance = (
+            "Telegram end-user turns must not use terminal, code execution, file access, or "
+            "delegation. Reply using safe product logic only."
+        )
+
+    return f"Blocked {function_name}: dangerous tools are disabled for Telegram end-user turns. {guidance}"
 
 
 def _emit_terminal_post_tool_call(
@@ -436,13 +644,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 middleware_trace=list(middleware_trace),
             )
         else:
-            image_block_message = _image_analysis_tool_block_message(
+            telegram_block_message = _telegram_end_user_tool_block_message(
                 function_name,
+                agent=agent,
                 messages=messages,
                 assistant_message=assistant_message,
             )
-            if image_block_message is not None:
-                block_result = json.dumps({"error": image_block_message}, ensure_ascii=False)
+            if telegram_block_message is not None:
+                block_result = json.dumps({"error": telegram_block_message}, ensure_ascii=False)
                 _emit_terminal_post_tool_call(
                     agent,
                     function_name=function_name,
@@ -451,28 +660,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     effective_task_id=effective_task_id,
                     tool_call_id=getattr(tool_call, "id", "") or "",
                     status="blocked",
-                    error_type="image_analysis_tool_block",
-                    error_message=image_block_message,
+                    error_type="telegram_user_tool_block",
+                    error_message=telegram_block_message,
                     middleware_trace=list(middleware_trace),
                 )
             else:
-                try:
-                    from hermes_cli.plugins import get_pre_tool_call_block_message
-                    block_message = get_pre_tool_call_block_message(
-                        function_name,
-                        function_args,
-                        task_id=effective_task_id or "",
-                        session_id=getattr(agent, "session_id", "") or "",
-                        tool_call_id=getattr(tool_call, "id", "") or "",
-                        turn_id=getattr(agent, "_current_turn_id", "") or "",
-                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                        middleware_trace=list(middleware_trace),
-                    )
-                except Exception:
-                    block_message = None
-
-                if block_message is not None:
-                    block_result = json.dumps({"error": block_message}, ensure_ascii=False)
+                image_block_message = _image_analysis_tool_block_message(
+                    function_name,
+                    messages=messages,
+                    assistant_message=assistant_message,
+                )
+                if image_block_message is not None:
+                    block_result = json.dumps({"error": image_block_message}, ensure_ascii=False)
                     _emit_terminal_post_tool_call(
                         agent,
                         function_name=function_name,
@@ -481,15 +680,28 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         effective_task_id=effective_task_id,
                         tool_call_id=getattr(tool_call, "id", "") or "",
                         status="blocked",
-                        error_type="plugin_block",
-                        error_message=block_message,
+                        error_type="image_analysis_tool_block",
+                        error_message=image_block_message,
                         middleware_trace=list(middleware_trace),
                     )
                 else:
-                    guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-                    if not guardrail_decision.allows_execution:
-                        block_result = agent._guardrail_block_result(guardrail_decision)
-                        blocked_by_guardrail = True
+                    try:
+                        from hermes_cli.plugins import get_pre_tool_call_block_message
+                        block_message = get_pre_tool_call_block_message(
+                            function_name,
+                            function_args,
+                            task_id=effective_task_id or "",
+                            session_id=getattr(agent, "session_id", "") or "",
+                            tool_call_id=getattr(tool_call, "id", "") or "",
+                            turn_id=getattr(agent, "_current_turn_id", "") or "",
+                            api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+                            middleware_trace=list(middleware_trace),
+                        )
+                    except Exception:
+                        block_message = None
+
+                    if block_message is not None:
+                        block_result = json.dumps({"error": block_message}, ensure_ascii=False)
                         _emit_terminal_post_tool_call(
                             agent,
                             function_name=function_name,
@@ -498,10 +710,27 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                             effective_task_id=effective_task_id,
                             tool_call_id=getattr(tool_call, "id", "") or "",
                             status="blocked",
-                            error_type="guardrail_block",
-                            error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
+                            error_type="plugin_block",
+                            error_message=block_message,
                             middleware_trace=list(middleware_trace),
                         )
+                    else:
+                        guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                        if not guardrail_decision.allows_execution:
+                            block_result = agent._guardrail_block_result(guardrail_decision)
+                            blocked_by_guardrail = True
+                            _emit_terminal_post_tool_call(
+                                agent,
+                                function_name=function_name,
+                                function_args=function_args,
+                                result=block_result,
+                                effective_task_id=effective_task_id,
+                                tool_call_id=getattr(tool_call, "id", "") or "",
+                                status="blocked",
+                                error_type="guardrail_block",
+                                error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
+                                middleware_trace=list(middleware_trace),
+                            )
 
         # ── Checkpoint preflight (only for tools that will execute) ──
         if block_result is None:
@@ -964,18 +1193,28 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
-            image_block_message = _image_analysis_tool_block_message(
+            telegram_block_message = _telegram_end_user_tool_block_message(
                 function_name,
+                agent=agent,
                 messages=messages,
                 assistant_message=assistant_message,
             )
-            if image_block_message is not None:
-                _block_msg = image_block_message
-                _block_error_type = "image_analysis_tool_block"
+            if telegram_block_message is not None:
+                _block_msg = telegram_block_message
+                _block_error_type = "telegram_user_tool_block"
             else:
-                guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-                if not guardrail_decision.allows_execution:
-                    _guardrail_block_decision = guardrail_decision
+                image_block_message = _image_analysis_tool_block_message(
+                    function_name,
+                    messages=messages,
+                    assistant_message=assistant_message,
+                )
+                if image_block_message is not None:
+                    _block_msg = image_block_message
+                    _block_error_type = "image_analysis_tool_block"
+                else:
+                    guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                    if not guardrail_decision.allows_execution:
+                        _guardrail_block_decision = guardrail_decision
 
         _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
 

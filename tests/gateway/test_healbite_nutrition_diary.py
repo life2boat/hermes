@@ -622,7 +622,7 @@ def test_duplicate_photo_retry_does_not_double_save(tmp_path):
 
 def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     older = _build_record(
         meal_name="Овсянка",
         calories_kcal=200,
@@ -751,7 +751,7 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc).replace(microsecond=0)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     older = _build_record(
         meal_name="\u0413\u0440\u0435\u0447\u043a\u0430",
         calories_kcal=310,
@@ -792,10 +792,9 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
     assert payload["sqlite_id"] == newer_id
     assert older_id is not None
     assert newer_id is not None
-    assert summary["entries"][0]["id"] == older_id
-    assert summary["entries"][0]["calories_kcal"] == pytest.approx(310.0)
-    assert summary["entries"][-1]["id"] == newer_id
-    assert summary["entries"][-1]["calories_kcal"] == pytest.approx(400.0)
+    entries_by_id = {entry["id"]: entry for entry in summary["entries"]}
+    assert entries_by_id[older_id]["calories_kcal"] == pytest.approx(310.0)
+    assert entries_by_id[newer_id]["calories_kcal"] == pytest.approx(400.0)
 
 
 def test_update_last_meal_tool_ignores_none_fields(tmp_path, monkeypatch):

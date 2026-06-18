@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from run_agent import AIAgent
+from gateway.session_context import clear_session_vars, set_session_vars
 
 
 def _make_tool_defs(*names: str) -> list[dict]:
@@ -236,6 +237,110 @@ def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     mock_hfc.assert_not_called()
     assert "plugin policy" in messages[0]["content"]
     assert agent._tool_guardrails.before_call("web_search", args).action == "allow"
+
+
+def test_telegram_end_user_turn_blocks_terminal_before_execution():
+    agent = _make_agent("terminal")
+    tc = _mock_tool_call("terminal", json.dumps({"command": "pwd && ls -la"}), "c-telegram-terminal")
+    msg = SimpleNamespace(content="", tool_calls=[tc])
+    messages = [
+        {
+            "role": "user",
+            "content": "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u043d\u0430 400 \u043a\u043a\u0430\u043b",
+        }
+    ]
+    starts = []
+    agent.tool_start_callback = lambda *a, **k: starts.append((a, k))
+
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="chat-guard-1",
+        user_id="111",
+        session_key="s-guard-1",
+        session_id="session-guard-1",
+    )
+    try:
+        with patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc:
+            agent._execute_tool_calls_sequential(msg, messages, "task-1")
+    finally:
+        clear_session_vars(tokens)
+
+    mock_hfc.assert_not_called()
+    assert starts == []
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "c-telegram-terminal"
+    assert "dangerous tools are disabled for Telegram end-user turns" in messages[-1]["content"]
+    assert "update_last_meal" in messages[-1]["content"]
+
+
+def test_telegram_end_user_turn_blocks_execute_code_before_execution():
+    agent = _make_agent("execute_code")
+    tc = _mock_tool_call("execute_code", json.dumps({"script": "print(1)"}), "c-telegram-execute-code")
+    msg = SimpleNamespace(content="", tool_calls=[tc])
+    messages = [
+        {
+            "role": "assistant",
+            "content": "\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f: 400 \u043a\u043a\u0430\u043b",
+        },
+        {
+            "role": "user",
+            "content": "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043e\u0448\u0438\u0431\u043a\u0443",
+        },
+    ]
+    starts = []
+    agent.tool_start_callback = lambda *a, **k: starts.append((a, k))
+
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="chat-guard-2",
+        user_id="111",
+        session_key="s-guard-2",
+        session_id="session-guard-2",
+    )
+    try:
+        with patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc:
+            agent._execute_tool_calls_sequential(msg, messages, "task-1")
+    finally:
+        clear_session_vars(tokens)
+
+    mock_hfc.assert_not_called()
+    assert starts == []
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "c-telegram-execute-code"
+    assert "clarify the exact correction" in messages[-1]["content"]
+
+
+def test_telegram_end_user_turn_blocks_read_file_before_execution():
+    agent = _make_agent("read_file")
+    tc = _mock_tool_call("read_file", json.dumps({"path": "/opt/data/diary"}), "c-telegram-read-file")
+    msg = SimpleNamespace(content="", tool_calls=[tc])
+    messages = [
+        {
+            "role": "user",
+            "content": "\u0447\u0442\u043e \u0443 \u043c\u0435\u043d\u044f \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435?",
+        }
+    ]
+    starts = []
+    agent.tool_start_callback = lambda *a, **k: starts.append((a, k))
+
+    tokens = set_session_vars(
+        platform="telegram",
+        chat_id="chat-guard-3",
+        user_id="111",
+        session_key="s-guard-3",
+        session_id="session-guard-3",
+    )
+    try:
+        with patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc:
+            agent._execute_tool_calls_sequential(msg, messages, "task-1")
+    finally:
+        clear_session_vars(tokens)
+
+    mock_hfc.assert_not_called()
+    assert starts == []
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "c-telegram-read-file"
+    assert "read-only diary request" in messages[-1]["content"]
 
 
 def test_default_run_conversation_warns_without_guardrail_halt():

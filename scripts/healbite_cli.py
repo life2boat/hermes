@@ -10,6 +10,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from gateway.healbite_nutrition_diary import (
+    HealBiteNutritionDiary,
+    compute_nutrition_diary_summary,
+    format_nutrition_diary_report,
+    resolve_healbite_db_path,
+)
 
 CONTAINER_NAME = "hermes-bot"
 DEFAULT_LOG_TAIL = 80
@@ -26,6 +36,14 @@ SUPPORTED_SIMULATION_COMMANDS = {
 STATE_CHANGING_SIMULATION_COMMANDS = {
     "/undo_meal",
     "/diary_undo",
+}
+READ_ONLY_DIARY_PHRASES = {
+    "\u0447\u0442\u043e \u0443 \u043c\u0435\u043d\u044f \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435?",
+    "\u0447\u0442\u043e \u0443 \u043c\u0435\u043d\u044f \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435",
+}
+AMBIGUOUS_DIARY_PHRASES = {
+    "\u043d\u0430\u0432\u0435\u0440\u043d\u043e\u0435 \u0442\u0443\u0442 \u043e\u0448\u0438\u0431\u043a\u0430",
+    "\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043e\u0448\u0438\u0431\u043a\u0443",
 }
 IMPORTANT_LOG_PATTERN = re.compile(
     r"(traceback|exception|provider authentication|command approval|execute_code|terminal|readonly|permissionerror|"
@@ -181,6 +199,12 @@ class CommandResult:
     returncode: int
 
 
+@dataclass(frozen=True)
+class DiaryCorrectionIntent:
+    kind: str
+    value: float | str
+
+
 class SubprocessRunner:
     def run(
         self,
@@ -249,14 +273,208 @@ def normalize_simulation_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+def parse_diary_correction_intent(text: str) -> DiaryCorrectionIntent | None:
+    normalized = normalize_simulation_text(text)
+    set_match = re.fullmatch(
+        r"\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u043d\u0430 (\d+(?:[.,]\d+)?) \u043a\u043a\u0430\u043b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if set_match:
+        return DiaryCorrectionIntent(
+            "set_calories", float(set_match.group(1).replace(",", "."))
+        )
+
+    delta_match = re.fullmatch(
+        r"\u0434\u043e\u0431\u0430\u0432\u044c \u043a \u043f\u043e\u0441\u043b\u0435\u0434\u043d(?:\u0435\u0439)? \u0437\u0430\u043f\u0438\u0441\u0438 (\d+(?:[.,]\d+)?) \u043a\u043a\u0430\u043b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if delta_match:
+        return DiaryCorrectionIntent(
+            "add_calories", float(delta_match.group(1).replace(",", "."))
+        )
+
+    rename_match = re.fullmatch(
+        r"\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u0443\u0439 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0432 (.+)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if rename_match:
+        meal_name = rename_match.group(1).strip()
+        if meal_name:
+            return DiaryCorrectionIntent("rename", meal_name)
+    return None
+
+
+def _format_simulated_metric(value: float | int | None, unit: str) -> str | None:
+    if value is None:
+        return None
+    numeric = float(value)
+    if numeric.is_integer():
+        rendered = str(int(numeric))
+    else:
+        rendered = f"{numeric:.1f}".rstrip("0").rstrip(".")
+    return f"{rendered} {unit}"
+
+
+def _build_simulated_update_reply(
+    *,
+    meal_name: str | None,
+    calories_kcal: float | int | None,
+    protein_g: float | int | None,
+    fat_g: float | int | None,
+    carbs_g: float | int | None,
+) -> str:
+    title = (meal_name or "\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f \u0437\u0430\u043f\u0438\u0441\u044c").strip()
+    calories = _format_simulated_metric(calories_kcal, "\u043a\u043a\u0430\u043b") or "\u0431\u0435\u0437 \u043a\u0430\u043b\u043e\u0440\u0438\u0439"
+    macro_values = {
+        "\u0411": _format_simulated_metric(protein_g, "\u0433"),
+        "\u0416": _format_simulated_metric(fat_g, "\u0433"),
+        "\u0423": _format_simulated_metric(carbs_g, "\u0433"),
+    }
+    macro_parts = [
+        f"{label} {value}" for label, value in macro_values.items() if value is not None
+    ]
+    macros_line = ""
+    if macro_parts:
+        macros_line = "\n" + " \u00b7 ".join(macro_parts)
+    return (
+        "\u2705 \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u043b \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c:\n"
+        f"{title} \u2014 {calories}"
+        f"{macros_line}\n\n"
+        "\u0412\u044b\u0437\u043e\u0432\u0438 /diary, \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u0438\u0442\u043e\u0433 \u0437\u0430 \u0434\u0435\u043d\u044c."
+    )
+
+
+def _render_local_diary_report(
+    *,
+    user_id: int,
+    days: int = 1,
+    db_path: str | Path | None = None,
+) -> str:
+    summary = compute_nutrition_diary_summary(
+        db_path=resolve_healbite_db_path(db_path),
+        user_id=int(user_id),
+        days=max(1, int(days)),
+    )
+    return format_nutrition_diary_report(summary)
+
+
+def _render_diary_clarification() -> str:
+    return (
+        "\u041d\u0443\u0436\u043d\u043e \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435: "
+        "\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, \u00ab\u0438\u0441\u043f\u0440\u0430\u0432\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e "
+        "\u0437\u0430\u043f\u0438\u0441\u044c \u043d\u0430 400 \u043a\u043a\u0430\u043b\u00bb \u0438\u043b\u0438 "
+        "\u00ab\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u0443\u0439 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u0431\u043e\u0440\u0449\u00bb."
+    )
+
+
+def _read_only_write_guard(intent: DiaryCorrectionIntent) -> str:
+    if intent.kind == "set_calories":
+        detail = (
+            "\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u043a\u0430\u043b\u043e\u0440\u0438\u0438 \u043d\u0430 "
+            f"{int(intent.value) if float(intent.value).is_integer() else intent.value} \u043a\u043a\u0430\u043b"
+        )
+    elif intent.kind == "add_calories":
+        detail = (
+            "\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c "
+            f"{int(intent.value) if float(intent.value).is_integer() else intent.value} \u043a\u043a\u0430\u043b "
+            "\u043a \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0439 \u0437\u0430\u043f\u0438\u0441\u0438"
+        )
+    else:
+        detail = (
+            "\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044e\u044e "
+            f"\u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u00ab{intent.value}\u00bb"
+        )
+    return (
+        "This command changes state. Use --allow-write to execute.\n"
+        f"\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043e \u043d\u0430\u043c\u0435\u0440\u0435\u043d\u0438\u0435: {detail}."
+    )
+
+
+def _apply_local_correction(
+    *,
+    intent: DiaryCorrectionIntent,
+    user_id: int,
+    db_path: str | Path | None = None,
+) -> str:
+    diary = HealBiteNutritionDiary(
+        db_path=resolve_healbite_db_path(db_path), background_write=False
+    )
+    if intent.kind == "set_calories":
+        result = diary.update_last_meal(
+            user_id=str(user_id),
+            new_calories=int(round(float(intent.value))),
+        )
+    elif intent.kind == "rename":
+        result = diary.update_last_meal(
+            user_id=str(user_id),
+            new_meal_name=str(intent.value),
+        )
+    else:
+        summary = diary.get_daily_summary(user_id=int(user_id))
+        entries = summary.get("entries") or []
+        if not entries:
+            return (
+                "\u0421\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 "
+                "\u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0434\u043b\u044f \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f."
+            )
+        current_calories = float(entries[-1].get("calories_kcal") or 0.0)
+        result = diary.update_last_meal(
+            user_id=str(user_id),
+            new_calories=int(round(current_calories + float(intent.value))),
+        )
+    if not result.updated:
+        return (
+            "\u0421\u0435\u0433\u043e\u0434\u043d\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0435 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 "
+            "\u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0434\u043b\u044f \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u044f."
+        )
+    return _build_simulated_update_reply(
+        meal_name=result.meal_name,
+        calories_kcal=result.calories_kcal,
+        protein_g=result.protein_g,
+        fat_g=result.fat_g,
+        carbs_g=result.carbs_g,
+    )
+
+
 def simulate_local_message(
     text: str,
     *,
     user_id: int | None = None,
     allow_write: bool = False,
+    db_path: str | Path | None = None,
 ) -> str:
     normalized = normalize_simulation_text(text)
     lowered = normalized.lower()
+    correction_intent = parse_diary_correction_intent(normalized)
+    if correction_intent is not None:
+        if user_id is None:
+            return (
+                "This simulation needs --user-id for a user-scoped diary correction.\n"
+                "LLM and external calls are disabled by default for this diagnostic path."
+            )
+        if not allow_write:
+            return _read_only_write_guard(correction_intent)
+        return _apply_local_correction(
+            intent=correction_intent,
+            user_id=int(user_id),
+            db_path=db_path,
+        )
+    if lowered in READ_ONLY_DIARY_PHRASES:
+        if user_id is None:
+            return (
+                "\u0423\u043a\u0430\u0436\u0438 --user-id, \u0447\u0442\u043e\u0431\u044b \u044f \u043f\u043e\u043a\u0430\u0437\u0430\u043b "
+                "\u043b\u043e\u043a\u0430\u043b\u044c\u043d\u0443\u044e \u0441\u0432\u043e\u0434\u043a\u0443 \u0434\u043d\u0435\u0432\u043d\u0438\u043a\u0430."
+            )
+        return _render_local_diary_report(
+            user_id=int(user_id),
+            days=1,
+            db_path=db_path,
+        )
+    if lowered in AMBIGUOUS_DIARY_PHRASES:
+        return _render_diary_clarification()
     if lowered not in SUPPORTED_SIMULATION_COMMANDS:
         supported = ", ".join(sorted(SUPPORTED_SIMULATION_COMMANDS))
         return (
@@ -365,7 +583,7 @@ class HealBiteCLI:
         runner: SubprocessRunner | None = None,
         container_name: str = CONTAINER_NAME,
     ) -> None:
-        self.repo_root = repo_root or Path(__file__).resolve().parents[1]
+        self.repo_root = repo_root or REPO_ROOT
         self.runner = runner or SubprocessRunner()
         self.container_name = container_name
 
@@ -549,6 +767,12 @@ class HealBiteCLI:
         allow_write: bool = False,
     ) -> str:
         lowered = normalize_simulation_text(text).lower()
+        if (
+            parse_diary_correction_intent(text) is not None
+            or lowered in READ_ONLY_DIARY_PHRASES
+            or lowered in AMBIGUOUS_DIARY_PHRASES
+        ):
+            return simulate_local_message(text, user_id=user_id, allow_write=allow_write)
         if lowered in STATE_CHANGING_SIMULATION_COMMANDS:
             if not allow_write:
                 return simulate_local_message(text, user_id=user_id, allow_write=False)

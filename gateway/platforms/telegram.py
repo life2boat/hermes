@@ -122,6 +122,22 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
 }
 
 
+def _vision_size_bucket(size_bytes: Any) -> str:
+    try:
+        size = int(size_bytes)
+    except (TypeError, ValueError):
+        return "unknown"
+    if size <= 0:
+        return "unknown"
+    if size <= 256 * 1024:
+        return "<=256kb"
+    if size <= 1024 * 1024:
+        return "256kb-1mb"
+    if size <= 5 * 1024 * 1024:
+        return "1mb-5mb"
+    return ">5mb"
+
+
 MAX_COMMANDS_PER_SCOPE = 30
 HEALBITE_REPLY_KEYBOARD_ROWS = [
     ["Дневник", "Статистика"],
@@ -5202,7 +5218,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if photo is None:
             return False
 
-        logger.info("[Telegram][photo_received] context=%s", context)
+        logger.info(
+            "[Telegram][vision_input_received] source=telegram kind=photo context=%s mime=unknown size_bucket=%s",
+            context,
+            _vision_size_bucket(getattr(photo, "file_size", None)),
+        )
 
         try:
             file_obj = await photo.get_file()
@@ -5216,12 +5236,23 @@ class TelegramAdapter(BasePlatformAdapter):
                     break
             cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
             event.media_urls.append(cached_path)
-            event.media_types.append(_TELEGRAM_IMAGE_EXT_TO_MIME.get(ext, f"image/{ext.lstrip('.')}"))
+            mime_type = _TELEGRAM_IMAGE_EXT_TO_MIME.get(ext, f"image/{ext.lstrip('.')}")
+            event.media_types.append(mime_type)
             event.message_type = MessageType.PHOTO
-            logger.info("[Telegram][photo_download_ok] context=%s path=%s", context, cached_path)
+            logger.info(
+                "[Telegram][vision_download_ok] ok=true source=telegram kind=photo context=%s mime=%s size_bucket=%s",
+                context,
+                mime_type,
+                _vision_size_bucket(len(image_bytes)),
+            )
             return True
         except Exception as exc:
-            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            logger.warning(
+                "[Telegram][vision_download_ok] ok=false source=telegram kind=photo context=%s error=%s",
+                context,
+                exc.__class__.__name__,
+                exc_info=True,
+            )
             return False
 
     async def _cache_image_document_message_to_event(
@@ -5236,7 +5267,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if document is None or image_ext is None or image_mime is None:
             return False, None
 
-        logger.info("[Telegram][photo_received] context=%s", context)
+        logger.info(
+            "[Telegram][vision_input_received] source=telegram kind=document context=%s mime=%s size_bucket=%s",
+            context,
+            image_mime,
+            _vision_size_bucket(getattr(document, "file_size", None)),
+        )
 
         try:
             file_obj = await document.get_file()
@@ -5245,13 +5281,28 @@ class TelegramAdapter(BasePlatformAdapter):
             event.media_urls.append(cached_path)
             event.media_types.append(image_mime)
             event.message_type = MessageType.PHOTO
-            logger.info("[Telegram][photo_download_ok] context=%s path=%s", context, cached_path)
+            logger.info(
+                "[Telegram][vision_download_ok] ok=true source=telegram kind=document context=%s mime=%s size_bucket=%s",
+                context,
+                image_mime,
+                _vision_size_bucket(len(image_bytes)),
+            )
             return True, None
         except ValueError as exc:
-            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            logger.warning(
+                "[Telegram][vision_download_ok] ok=false source=telegram kind=document context=%s error=%s",
+                context,
+                exc.__class__.__name__,
+                exc_info=True,
+            )
             return False, "invalid-image"
         except Exception as exc:
-            logger.warning("[Telegram] Failed to cache %s: %s", context, exc, exc_info=True)
+            logger.warning(
+                "[Telegram][vision_download_ok] ok=false source=telegram kind=document context=%s error=%s",
+                context,
+                exc.__class__.__name__,
+                exc_info=True,
+            )
             return False, "cache-error"
 
     async def _cache_observed_media(self, msg: Message, event: MessageEvent) -> None:

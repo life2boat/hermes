@@ -11906,6 +11906,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "[Gateway][vision_unavailable] sending_safe_fallback platform=%s",
                 getattr(source.platform, "value", source.platform),
             )
+            logger.info(
+                "[Gateway][vision_safe_fallback_sent] platform=%s",
+                getattr(source.platform, "value", source.platform),
+            )
             await adapter.send(
                 source.chat_id,
                 _vision_safe_fallback_text(),

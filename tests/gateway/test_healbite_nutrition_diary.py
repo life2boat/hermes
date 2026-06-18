@@ -212,29 +212,35 @@ def test_normalize_nutrition_payload_extracts_structured_json():
 
 
 @pytest.mark.asyncio
-async def test_malformed_vision_output_does_not_create_bad_log(tmp_path, monkeypatch):
+async def test_malformed_vision_output_returns_unavailable_without_creating_log(tmp_path, monkeypatch, caplog):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     monkeypatch.setattr(
         "tools.vision_tools.vision_analyze_tool",
         AsyncMock(return_value=json.dumps({"success": True, "analysis": "looks tasty but no json"})),
     )
 
-    outcome = await diary.analyze_and_maybe_log(
-        user_id=1,
-        image_path="/tmp/meal.jpg",
-        user_text="\u043f\u043e\u0441\u0447\u0438\u0442\u0430\u0439 \u043a\u0431\u0436\u0443",
-        image_ref="telegram:1:10",
-    )
+    with caplog.at_level("INFO", logger="gateway.healbite_nutrition_diary"):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=1,
+            image_path="/tmp/meal.jpg",
+            user_text="\u043f\u043e\u0441\u0447\u0438\u0442\u0430\u0439 \u043a\u0431\u0436\u0443",
+            image_ref="telegram:1:10",
+        )
 
     summary = diary.get_daily_summary(user_id=1)
-    assert outcome.available is True
-    assert outcome.record is not None
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert outcome.available is False
+    assert outcome.record is None
     assert outcome.saved is False
+    assert diary.get_pending_meal(1) is None
     assert summary["entry_count"] == 0
+    assert "vision_parse_ok" in joined
+    assert "structured_json_missing" in joined
+    assert "vision_pending_staged" in joined
 
 
 @pytest.mark.asyncio
-async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_path, monkeypatch):
+async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_path, monkeypatch, caplog):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     monkeypatch.setattr(
         "tools.vision_tools.vision_analyze_tool",
@@ -250,14 +256,16 @@ async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_p
         ),
     )
 
-    outcome = await diary.analyze_and_maybe_log(
-        user_id=7,
-        image_path="/tmp/meal.jpg",
-        user_text="count calories",
-        image_ref="telegram:7:404",
-    )
+    with caplog.at_level("INFO", logger="gateway.healbite_nutrition_diary"):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=7,
+            image_path="/tmp/meal.jpg",
+            user_text="count calories",
+            image_ref="telegram:7:404",
+        )
 
     summary = diary.get_daily_summary(user_id=7)
+    joined = "\n".join(record.getMessage() for record in caplog.records)
 
     assert outcome.available is False
     assert outcome.pending is False
@@ -265,10 +273,13 @@ async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_p
     assert diary.get_pending_meal(7) is None
     assert _count_pending_rows(tmp_path / "healbite.db", user_id=7) == 0
     assert summary["entry_count"] == 0
+    assert "vision_parse_ok" in joined
+    assert "provider_result_non_success" in joined
+    assert "vision_pending_staged" in joined
 
 
 @pytest.mark.asyncio
-async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_saving(tmp_path, monkeypatch):
+async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_saving(tmp_path, monkeypatch, caplog):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     monkeypatch.setattr(
         "tools.vision_tools.vision_analyze_tool",
@@ -298,15 +309,17 @@ async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_savi
         ),
     )
 
-    outcome = await diary.analyze_and_maybe_log(
-        user_id=11,
-        image_path="/tmp/borscht.jpg",
-        user_text="посчитай кбжу",
-        image_ref="telegram:11:77",
-    )
+    with caplog.at_level("INFO", logger="gateway.healbite_nutrition_diary"):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=11,
+            image_path="/tmp/borscht.jpg",
+            user_text="посчитай кбжу",
+            image_ref="telegram:11:77",
+        )
 
     summary = diary.get_daily_summary(user_id=11)
     pending = diary.get_pending_meal(11)
+    joined = "\n".join(record.getMessage() for record in caplog.records)
 
     assert outcome.available is True
     assert outcome.pending is True
@@ -320,6 +333,9 @@ async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_savi
     assert reopened_pending is not None
     assert reopened_pending.record.meal_name == "Борщ"
     assert summary["entry_count"] == 0
+    assert "vision_parse_ok" in joined
+    assert "confidence_bucket=high" in joined
+    assert "vision_pending_staged" in joined
 
 
 def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):

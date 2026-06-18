@@ -647,6 +647,44 @@ def _safe_vision_failure_analysis(error: Exception) -> str:
     )
 
 
+def _vision_size_bucket(size_bytes: int | None) -> str:
+    if not isinstance(size_bytes, int) or size_bytes <= 0:
+        return "unknown"
+    if size_bytes <= 256 * 1024:
+        return "<=256kb"
+    if size_bytes <= 1024 * 1024:
+        return "256kb-1mb"
+    if size_bytes <= 5 * 1024 * 1024:
+        return "1mb-5mb"
+    if size_bytes <= 20 * 1024 * 1024:
+        return "5mb-20mb"
+    return ">20mb"
+
+
+def _vision_source_kind(image_url: str) -> str:
+    if not isinstance(image_url, str):
+        return "unknown"
+    if image_url.startswith(("http://", "https://")):
+        return "remote"
+    return "local"
+
+
+def _configured_vision_provider_and_model(explicit_model: Optional[str] = None) -> tuple[str, str]:
+    provider = "auto"
+    model_name = explicit_model.strip() if isinstance(explicit_model, str) and explicit_model.strip() else ""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        cfg = load_config()
+        vision_cfg = cfg_get(cfg, "auxiliary", "vision", default={}) or {}
+        provider = str(vision_cfg.get("provider") or provider).strip() or "auto"
+        if not model_name:
+            model_name = str(vision_cfg.get("model") or "").strip()
+    except Exception:
+        pass
+    return provider, (model_name or "auto")
+
+
 def _should_use_native_vision_fast_path() -> bool:
     """Whether vision tools should attach the image to the main model directly
     instead of routing through the auxiliary vision LLM.
@@ -886,31 +924,38 @@ async def vision_analyze_tool(
         user_prompt = str(user_prompt) if user_prompt is not None else ""
     debug_call_data = {
         "parameters": {
-            "image_url": image_url,
-            "user_prompt": user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt,
-            "model": model
+            "image_source_kind": _vision_source_kind(image_url),
+            "user_prompt_present": bool(user_prompt.strip()),
+            "user_prompt_length": len(user_prompt),
+            "model": model,
         },
         "error": None,
         "success": False,
         "analysis_length": 0,
         "model_used": model,
-        "image_size_bytes": 0
+        "image_size_bytes": 0,
     }
-    
+
     temp_image_path = None
     # Track whether we should clean up the file after processing.
     # Local files (e.g. from the image cache) should NOT be deleted.
     should_cleanup = True
     detected_mime_type = None
-    
+    source_kind = _vision_source_kind(image_url)
+    provider_name, provider_model = _configured_vision_provider_and_model(model)
+
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        logger.info("Analyzing image: %s", image_url[:60])
-        logger.info("User prompt: %s", user_prompt[:100])
-        
+        logger.info(
+            "[Vision][vision_input_received] source=%s provider=%s model=%s",
+            source_kind,
+            provider_name,
+            provider_model,
+        )
+
         # Determine if this is a local file path or a remote URL
         # Strip file:// scheme so file URIs resolve as local paths.
         resolved_url = image_url
@@ -919,7 +964,6 @@ async def vision_analyze_tool(
         local_path = Path(os.path.expanduser(resolved_url))
         if local_path.is_file():
             # Local file path (e.g. from platform image cache) -- skip download
-            logger.info("Using local image file: %s", image_url)
             temp_image_path = local_path
             should_cleanup = False  # Don't delete cached/local files
         elif await _validate_image_url_async(image_url):
@@ -927,7 +971,6 @@ async def vision_analyze_tool(
             blocked = check_website_access(image_url)
             if blocked:
                 raise PermissionError(blocked["message"])
-            logger.info("Downloading image from URL...")
             temp_dir = get_hermes_dir("cache/vision", "temp_vision_images")
             temp_image_path = temp_dir / f"temp_image_{uuid.uuid4()}.jpg"
             await _download_image(image_url, temp_image_path)
@@ -940,18 +983,28 @@ async def vision_analyze_tool(
         # Get image file size for logging
         image_size_bytes = temp_image_path.stat().st_size
         image_size_kb = image_size_bytes / 1024
-        logger.info("Image ready (%.1f KB)", image_size_kb)
-
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
             raise ValueError("Only real image files are supported for vision analysis.")
-        
+        size_bucket = _vision_size_bucket(image_size_bytes)
+        logger.info(
+            "[Vision][vision_download_ok] ok=true source=%s mime=%s size_bucket=%s",
+            source_kind,
+            detected_mime_type,
+            size_bucket,
+        )
+        logger.info("Image ready (%.1f KB)", image_size_kb)
+
         # Convert image to base64 — send at full resolution first.
         # If the provider rejects it as too large, we auto-resize and retry.
-        logger.info("Converting image to base64...")
         image_data_url = _image_to_base64_data_url(temp_image_path, mime_type=detected_mime_type)
-        data_size_kb = len(image_data_url) / 1024
-        logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
+        logger.info(
+            "[Vision][vision_payload_built] provider=%s model=%s image_bytes=true mime=%s size_bucket=%s",
+            provider_name,
+            provider_model,
+            detected_mime_type,
+            size_bucket,
+        )
 
         # Hard limit (20 MB) — no provider accepts payloads this large.
         if len(image_data_url) > _MAX_BASE64_BYTES:
@@ -1021,6 +1074,11 @@ async def vision_analyze_tool(
         if model:
             call_kwargs["model"] = model
         # Try full-size image first; on size-related rejection, downscale and retry.
+        logger.info(
+            "[Vision][vision_provider_called] provider=%s model=%s",
+            provider_name,
+            provider_model,
+        )
         try:
             response = await safe_async_call_llm(**call_kwargs)
         except Exception as _api_err:
@@ -1049,24 +1107,25 @@ async def vision_analyze_tool(
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis)
-        
+
         logger.info("Image analysis completed (%s characters)", analysis_length)
-        
+        logger.info("[Vision][vision_analysis_received] ok=true chars=%s", analysis_length)
+
         # Prepare successful response
         result = {
             "success": True,
-            "analysis": analysis or "There was a problem with the request and the image could not be analyzed."
+            "analysis": analysis or "There was a problem with the request and the image could not be analyzed.",
         }
-        
+
         debug_call_data["success"] = True
         debug_call_data["analysis_length"] = analysis_length
-        
+
         # Log debug information
         _debug.log_call("vision_analyze_tool", debug_call_data)
         _debug.save()
-        
+
         return json.dumps(result, indent=2, ensure_ascii=False)
-        
+
     except Exception as e:
         expected_error_kind = _classify_expected_vision_error(e)
         if expected_error_kind is not None:
@@ -1078,24 +1137,36 @@ async def vision_analyze_tool(
         else:
             error_msg = f"Error analyzing image: {str(e)}"
             logger.error("%s", error_msg, exc_info=True)
-        
+
+        if temp_image_path is None:
+            logger.info(
+                "[Vision][vision_download_ok] ok=false source=%s mime_hint=unknown size_bucket=unknown",
+                source_kind,
+            )
+        logger.info(
+            "[Vision][vision_provider_failed] category=%s provider=%s model=%s",
+            expected_error_kind or "unexpected_error",
+            provider_name,
+            provider_model,
+        )
+
         # Detect vision capability errors — give the model a clear message
         # so it can inform the user instead of a cryptic API error.
         analysis = _safe_vision_failure_analysis(e)
-        
+
         # Prepare error response
         result = {
             "success": False,
             "error": error_msg,
             "analysis": analysis,
         }
-        
+
         debug_call_data["error"] = error_msg
         _debug.log_call("vision_analyze_tool", debug_call_data)
         _debug.save()
-        
+
         return json.dumps(result, indent=2, ensure_ascii=False)
-    
+
     finally:
         # Clean up temporary image file (but NOT local/cached files)
         if should_cleanup and temp_image_path and temp_image_path.exists():

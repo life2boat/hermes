@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent.auxiliary_client import LLMServiceUnavailableError
 from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.healbite_nutrition_diary import HealBiteNutritionDiary
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.platforms.telegram import TelegramAdapter
 from gateway.run import (
@@ -232,6 +234,32 @@ def _runner_document_image_event(source, *, text: str = "", media_type: str = "i
     )
 
 
+def _vision_success_payload(*, meal_name: str = "Борщ") -> str:
+    return json.dumps(
+        {
+            "success": True,
+            "analysis": json.dumps(
+                {
+                    "is_food": True,
+                    "meal_name": meal_name,
+                    "display_name": meal_name,
+                    "raw_summary": f"{meal_name} на тарелке.",
+                    "confidence": 0.84,
+                    "totals": {
+                        "calories_kcal": 320,
+                        "protein_g": 14,
+                        "fat_g": 11,
+                        "carbs_g": 29,
+                    },
+                    "items": [{"name": meal_name}],
+                },
+                ensure_ascii=False,
+            ),
+        },
+        ensure_ascii=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_runner_photo_only_skips_text_only_path_when_vision_unavailable():
     runner, adapter = _make_text_only_runner()
@@ -331,6 +359,132 @@ async def test_runner_photo_turn_ignores_old_water_history_when_vision_unavailab
     sent_text = adapter.send.await_args.args[1]
     assert sent_text == SAFE_VISION_FALLBACK
     assert "???" not in sent_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_success_stages_pending_meal(tmp_path):
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=_vision_success_payload())):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert "Сохранить в дневник?" in sent_text
+    pending = diary.get_pending_meal(1)
+    assert pending is not None
+    assert pending.record.display_name == "Борщ"
+    assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_image_document_success_stages_pending_meal(tmp_path):
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_document_image_event(source, text="Посчитай КБЖУ")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=_vision_success_payload(meal_name="Салат"))):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert "Сохранить в дневник?" in sent_text
+    pending = diary.get_pending_meal(1)
+    assert pending is not None
+    assert pending.record.display_name == "Салат"
+    assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_parse_failed_returns_safe_fallback(tmp_path):
+    runner, adapter = _make_text_only_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch(
+        "tools.vision_tools.vision_analyze_tool",
+        new=AsyncMock(return_value=json.dumps({"success": True, "analysis": "looks tasty but no json"})),
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert sent_text == SAFE_VISION_FALLBACK
+    assert diary.get_pending_meal(1) is None
+    assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_vision_diagnostic_markers_are_sanitized(tmp_path, caplog, monkeypatch):
+    from tools.vision_tools import vision_analyze_tool
+
+    image_path = tmp_path / "meal.png"
+    image_path.write_bytes(_png_bytes())
+    monkeypatch.setattr("tools.vision_tools.safe_async_call_llm", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        "tools.vision_tools.extract_content_or_reasoning",
+        lambda _response: json.dumps({"ok": True}, ensure_ascii=False),
+    )
+
+    with caplog.at_level("INFO", logger="tools.vision_tools"):
+        result = await vision_analyze_tool(str(image_path), "Посчитай КБЖУ")
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert json.loads(result)["success"] is True
+    assert "vision_input_received" in joined
+    assert "vision_download_ok" in joined
+    assert "vision_payload_built" in joined
+    assert "vision_provider_called" in joined
+    assert "data:image" not in joined
+    assert "base64" not in joined
+    assert "Посчитай КБЖУ" not in joined
+    assert str(image_path) not in joined
+
+
+@pytest.mark.asyncio
+async def test_vision_failure_marker_is_sanitized(tmp_path, caplog, monkeypatch):
+    from tools.vision_tools import vision_analyze_tool
+
+    image_path = tmp_path / "meal.png"
+    image_path.write_bytes(_png_bytes())
+    monkeypatch.setattr(
+        "tools.vision_tools.safe_async_call_llm",
+        AsyncMock(side_effect=LLMServiceUnavailableError("Gemini unavailable")),
+    )
+
+    with caplog.at_level("INFO", logger="tools.vision_tools"):
+        result = await vision_analyze_tool(str(image_path), "Посчитай КБЖУ")
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    payload = json.loads(result)
+    assert payload["success"] is False
+    assert "vision_provider_failed" in joined
+    assert "provider_unavailable" in joined
+    assert "Посчитай КБЖУ" not in joined
+    assert str(image_path) not in joined
 
 
 def test_photo_turn_removes_terminal_and_execute_code_toolsets():

@@ -455,6 +455,16 @@ def _record_display_name(record: NutritionRecord) -> str:
     return _normalize_meal_name_text(record.display_name or record.meal_name, "Блюдо")
 
 
+def _confidence_bucket(confidence: float | None) -> str:
+    if confidence is None:
+        return "unknown"
+    if confidence >= 0.8:
+        return "high"
+    if confidence >= 0.5:
+        return "medium"
+    return "low"
+
+
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
     payload = safe_json_loads(payload_text, {})
     if not isinstance(payload, dict) or not payload:
@@ -669,6 +679,8 @@ class HealBiteNutritionDiary:
         result_json = await vision_analyze_tool(image_url=image_path, user_prompt=prompt)
         result = safe_json_loads(result_json, {})
         if not isinstance(result, dict) or not result.get("success"):
+            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_result_non_success")
+            logger.info("[HealBite][vision_pending_staged] staged=false")
             return NutritionDiaryOutcome(
                 available=False,
                 raw_analysis=str(result.get("analysis", "") if isinstance(result, dict) else ""),
@@ -677,19 +689,15 @@ class HealBiteNutritionDiary:
         raw_analysis = str(result.get("analysis") or "").strip()
         record = normalize_nutrition_payload(raw_analysis)
         if record is None:
-            record = NutritionRecord(
-                is_food=False,
-                meal_name="Meal",
-                items=[],
-                calories_kcal=None,
-                protein_g=None,
-                fat_g=None,
-                carbs_g=None,
-                confidence=0.0,
-                raw_summary=raw_analysis or "Could not extract structured nutrition data.",
-            )
-            return NutritionDiaryOutcome(available=True, record=record, raw_analysis=raw_analysis)
+            logger.info("[HealBite][vision_parse_ok] ok=false reason=structured_json_missing")
+            logger.info("[HealBite][vision_pending_staged] staged=false")
+            return NutritionDiaryOutcome(available=False, raw_analysis=raw_analysis)
 
+        logger.info(
+            "[HealBite][vision_parse_ok] ok=true is_food=%s confidence_bucket=%s",
+            str(record.is_food).lower(),
+            _confidence_bucket(record.confidence),
+        )
         outcome = NutritionDiaryOutcome(available=True, record=record, raw_analysis=raw_analysis)
         if self._should_stage_pending(record):
             self.stage_pending_meal(
@@ -700,6 +708,9 @@ class HealBiteNutritionDiary:
                 occurred_at=occurred_at,
             )
             outcome.pending = True
+            logger.info("[HealBite][vision_pending_staged] staged=true")
+        else:
+            logger.info("[HealBite][vision_pending_staged] staged=false")
         return outcome
 
     def _should_stage_pending(self, record: NutritionRecord) -> bool:

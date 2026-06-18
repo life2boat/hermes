@@ -7925,12 +7925,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _img_mode, len(image_paths),
                     )
                     if source.platform == Platform.TELEGRAM:
-                        message_text, vision_success = await self._try_enrich_message_with_healbite_nutrition(
+                        message_text, vision_success, pending_reply = await self._try_enrich_message_with_healbite_nutrition(
                             event=event,
                             source=source,
                             user_text=message_text,
                             image_paths=image_paths,
                         )
+                        if pending_reply:
+                            adapter = self.adapters.get(source.platform)
+                            metadata = self._thread_metadata_for_source(
+                                source,
+                                self._reply_anchor_for_event(event),
+                            )
+                            if adapter and source.chat_id:
+                                await adapter.send(
+                                    source.chat_id,
+                                    pending_reply,
+                                    metadata=metadata,
+                                )
+                            return None
                     else:
                         message_text, vision_success = await self._try_enrich_message_with_vision(
                             message_text,
@@ -11937,6 +11950,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if user_id is None:
             return "Не удалось определить пользователя для дневника питания."
 
+        self._get_healbite_nutrition_diary().clear_pending_meal(int(user_id))
         days, error = self._parse_healbite_nutrition_diary_command_args(event.text or "")
         if error:
             return error
@@ -11972,6 +11986,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if user_id is None:
             return "Не удалось определить пользователя для удаления записи."
 
+        self._get_healbite_nutrition_diary().clear_pending_meal(int(user_id))
         error = self._parse_healbite_undo_meal_command_args(event.text or "")
         if error:
             return error
@@ -12032,6 +12047,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         event: Optional[MessageEvent],
     ) -> Optional[Dict[str, Any]]:
+        pending_response = self._maybe_handle_healbite_pending_meal_confirmation(
+            message=message,
+            history=history,
+            source=source,
+            session_id=session_id,
+            event=event,
+        )
+        if pending_response is not None:
+            return pending_response
+
         classification = _classify_telegram_diary_turn(
             source=source,
             event=event,
@@ -12067,6 +12092,73 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         }
 
     @staticmethod
+    def _resolve_healbite_pending_meal_choice(text: str) -> str | None:
+        normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
+        if not normalized or normalized.startswith("/"):
+            return None
+        if normalized in {"да", "ага", "ок", "окей", "yes", "y", "сохрани", "сохраняй"}:
+            return "confirm"
+        if normalized in {"нет", "неа", "отмена", "отмени", "cancel", "no", "n"}:
+            return "cancel"
+        return "wait"
+
+    def _maybe_handle_healbite_pending_meal_confirmation(
+        self,
+        *,
+        message: str,
+        history: List[Dict[str, Any]],
+        source: SessionSource,
+        session_id: str,
+        event: Optional[MessageEvent],
+    ) -> Optional[Dict[str, Any]]:
+        from gateway.healbite_nutrition_diary import format_pending_meal_saved_reply
+
+        user_id = getattr(source, "user_id", None)
+        if user_id is None:
+            return None
+
+        diary = self._get_healbite_nutrition_diary()
+        if diary.get_pending_meal(int(user_id)) is None:
+            return None
+
+        choice = self._resolve_healbite_pending_meal_choice(message)
+        if choice is None:
+            return None
+
+        if choice == "confirm":
+            result = diary.confirm_pending_meal(int(user_id))
+            if result is None:
+                final_response = "Не нашел ожидающую запись. Попробуй отправить фото еще раз."
+            else:
+                summary = diary.get_daily_summary(user_id=int(user_id))
+                final_response = format_pending_meal_saved_reply(
+                    summary,
+                    duplicate=bool(result.duplicate),
+                )
+        elif choice == "cancel":
+            diary.clear_pending_meal(int(user_id))
+            final_response = "❌ Отменено. Что исправить?"
+        else:
+            final_response = (
+                "Жду подтверждение записи. Напиши Да или Нет. "
+                "Если передумал, отправь новое фото или вызови /diary."
+            )
+
+        return {
+            "final_response": final_response,
+            "messages": [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": final_response},
+            ],
+            "api_calls": 0,
+            "tools": [],
+            "history_offset": len(history),
+            "session_id": session_id,
+            "completed": True,
+            "response_previewed": False,
+        }
+
+    @staticmethod
     def _healbite_image_ref(source: SessionSource, event: MessageEvent) -> str | None:
         message_ref = event.reply_to_message_id or event.message_id
         if not message_ref or not getattr(source, "chat_id", None):
@@ -12080,8 +12172,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: SessionSource,
         user_text: str,
         image_paths: List[str],
-    ) -> tuple[str, bool]:
-        from gateway.healbite_nutrition_diary import format_nutrition_context
+    ) -> tuple[str, bool, str | None]:
+        from gateway.healbite_nutrition_diary import (
+            format_nutrition_context,
+            format_pending_meal_prompt,
+        )
 
         diary = self._get_healbite_nutrition_diary()
         try:
@@ -12099,17 +12194,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 image_paths[0],
                 exc_info=True,
             )
-            return user_text, False
+            return user_text, False, None
         if not outcome.available or outcome.record is None:
-            return user_text, False
+            return user_text, False, None
+        if outcome.pending:
+            return user_text, True, format_pending_meal_prompt(outcome.record)
         context = format_nutrition_context(
             outcome.record,
             saved=outcome.saved,
             duplicate=outcome.duplicate,
         )
         if user_text:
-            return f"{context}\n\n{user_text}", True
-        return context, True
+            return f"{context}\n\n{user_text}", True, None
+        return context, True, None
 
     async def _try_enrich_message_with_vision(
         self,

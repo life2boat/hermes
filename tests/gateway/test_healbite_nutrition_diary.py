@@ -221,6 +221,106 @@ async def test_malformed_vision_output_does_not_create_bad_log(tmp_path, monkeyp
     assert summary["entry_count"] == 0
 
 
+@pytest.mark.asyncio
+async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_saving(tmp_path, monkeypatch):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    monkeypatch.setattr(
+        "tools.vision_tools.vision_analyze_tool",
+        AsyncMock(
+            return_value=json.dumps(
+                {
+                    "success": True,
+                    "analysis": json.dumps(
+                        {
+                            "is_food": True,
+                            "meal_name": "Борщ",
+                            "raw_summary": "Тарелка борща.",
+                            "confidence": 0.81,
+                            "totals": {
+                                "calories_kcal": 300,
+                                "protein_g": 10,
+                                "fat_g": 12,
+                                "carbs_g": 28,
+                            },
+                            "items": [{"name": "Борщ"}],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        ),
+    )
+
+    outcome = await diary.analyze_and_maybe_log(
+        user_id=11,
+        image_path="/tmp/borscht.jpg",
+        user_text="посчитай кбжу",
+        image_ref="telegram:11:77",
+    )
+
+    summary = diary.get_daily_summary(user_id=11)
+    pending = diary.get_pending_meal(11)
+
+    assert outcome.available is True
+    assert outcome.pending is True
+    assert outcome.saved is False
+    assert outcome.record is not None
+    assert pending is not None
+    assert pending.record.meal_name == "Борщ"
+    assert summary["entry_count"] == 0
+
+
+def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    record = _build_record(
+        meal_name="Омлет",
+        calories_kcal=320,
+        protein_g=18,
+        fat_g=22,
+        carbs_g=4,
+    )
+    diary.stage_pending_meal(
+        user_id=15,
+        source="vision",
+        record=record,
+        image_ref="telegram:15:12",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    outcome = diary.confirm_pending_meal(15)
+    summary = diary.get_daily_summary(user_id=15)
+
+    assert outcome is not None
+    assert outcome.saved is True
+    assert outcome.duplicate is False
+    assert diary.get_pending_meal(15) is None
+    assert summary["entry_count"] == 1
+    assert summary["calories_kcal"] == pytest.approx(320.0)
+
+
+def test_clear_pending_meal_discards_state_without_writing_to_db(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    record = _build_record(
+        meal_name="Салат",
+        calories_kcal=150,
+        protein_g=4,
+        fat_g=8,
+        carbs_g=12,
+    )
+    diary.stage_pending_meal(
+        user_id=18,
+        source="vision",
+        record=record,
+        image_ref="telegram:18:44",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    assert diary.clear_pending_meal(18) is True
+    assert diary.get_pending_meal(18) is None
+    assert diary.get_daily_summary(user_id=18)["entry_count"] == 0
+
+
 def test_sqlite_nutrition_log_save_and_read_works(tmp_path):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     record = normalize_nutrition_payload(
@@ -1315,15 +1415,14 @@ async def test_natural_language_diary_summary_short_circuits_without_tools(monke
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_diary_turn_returns_clarification_without_tools(monkeypatch):
+async def test_ambiguous_diary_turn_returns_clarification_without_tools(tmp_path):
     runner = object.__new__(GatewayRunner)
+    runner._healbite_nutrition_diary = HealBiteNutritionDiary(
+        db_path=tmp_path / "ambiguous-healbite.db",
+        background_write=False,
+    )
     source = _telegram_source(202)
     event = _telegram_text_event("наверное тут ошибка")
-
-    def _unexpected_diary_access():
-        raise AssertionError("Diary mutation path should not run for ambiguous turns")
-
-    monkeypatch.setattr(runner, "_get_healbite_nutrition_diary", _unexpected_diary_access)
 
     result = await runner._maybe_handle_healbite_nutrition_diary_turn(
         message=event.text,
@@ -1370,3 +1469,130 @@ def test_photo_tool_guard_still_blocks_general_toolsets():
     assert "vision" in enabled
     assert "terminal" not in enabled
     assert {"terminal", "file", "code_execution"} <= set(disabled)
+
+
+@pytest.mark.asyncio
+async def test_pending_meal_yes_reply_saves_and_clears_state(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    diary.stage_pending_meal(
+        user_id=203,
+        source="vision",
+        record=_build_record(
+            meal_name="Борщ",
+            calories_kcal=300,
+            protein_g=10,
+            fat_g=12,
+            carbs_g=28,
+        ),
+        image_ref="telegram:203:1",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    runner = object.__new__(GatewayRunner)
+    runner._healbite_nutrition_diary = diary
+    source = _telegram_source(203)
+    event = _telegram_text_event("Да")
+
+    result = await runner._maybe_handle_healbite_nutrition_diary_turn(
+        message=event.text,
+        history=[],
+        source=source,
+        session_id="session-203",
+        event=event,
+    )
+
+    assert result is not None
+    assert "Сохранено" in result["final_response"]
+    assert diary.get_pending_meal(203) is None
+    assert diary.get_daily_summary(user_id=203)["entry_count"] == 1
+    assert result["tools"] == []
+    assert result["api_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_meal_no_reply_clears_state_without_writing(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    diary.stage_pending_meal(
+        user_id=204,
+        source="vision",
+        record=_build_record(
+            meal_name="Каша",
+            calories_kcal=220,
+            protein_g=7,
+            fat_g=5,
+            carbs_g=40,
+        ),
+        image_ref="telegram:204:2",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    runner = object.__new__(GatewayRunner)
+    runner._healbite_nutrition_diary = diary
+    source = _telegram_source(204)
+    event = _telegram_text_event("Нет")
+
+    result = await runner._maybe_handle_healbite_nutrition_diary_turn(
+        message=event.text,
+        history=[],
+        source=source,
+        session_id="session-204",
+        event=event,
+    )
+
+    assert result is not None
+    assert "Отменено" in result["final_response"]
+    assert diary.get_pending_meal(204) is None
+    assert diary.get_daily_summary(user_id=204)["entry_count"] == 0
+    assert result["tools"] == []
+    assert result["api_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_meal_does_not_block_diary_command(monkeypatch, tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    diary.stage_pending_meal(
+        user_id=205,
+        source="vision",
+        record=_build_record(
+            meal_name="Суп",
+            calories_kcal=250,
+            protein_g=9,
+            fat_g=7,
+            carbs_g=31,
+        ),
+        image_ref="telegram:205:3",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    runner = object.__new__(GatewayRunner)
+    runner._healbite_nutrition_diary = diary
+
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.compute_nutrition_diary_summary",
+        lambda *args, **kwargs: {
+            "entries": [],
+            "entry_count": 0,
+            "calories_kcal": 0,
+            "protein_g": 0,
+            "fat_g": 0,
+            "carbs_g": 0,
+            "days": kwargs.get("days", 1),
+            "targets_available": False,
+            "progress": {},
+            "comparison_values": {},
+            "hints": [],
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.format_nutrition_diary_report",
+        lambda summary: "<b>Твой дневник за сегодня пока пуст.</b>",
+    )
+
+    event = SimpleNamespace(
+        text="/diary",
+        source=_telegram_source(205),
+    )
+    response = await runner._handle_healbite_nutrition_diary_command(event)
+
+    assert "Твой дневник" in response
+    assert diary.get_pending_meal(205) is None

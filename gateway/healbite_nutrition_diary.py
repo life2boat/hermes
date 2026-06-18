@@ -81,10 +81,20 @@ class NutritionRecord:
 class NutritionDiaryOutcome:
     available: bool
     record: NutritionRecord | None = None
+    pending: bool = False
     saved: bool = False
     duplicate: bool = False
     sqlite_id: int | None = None
     raw_analysis: str = ""
+
+
+@dataclass(slots=True)
+class PendingMealPayload:
+    user_id: int
+    source: str
+    record: NutritionRecord
+    image_ref: str | None = None
+    occurred_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -556,6 +566,8 @@ class HealBiteNutritionDiary:
         self.embedding_adapter = embedding_adapter or EmbeddingAdapter()
         self.qdrant_adapter = qdrant_adapter or QdrantMemoryAdapter(embedding_adapter=self.embedding_adapter)
         self.autosave_confidence_threshold = float(autosave_confidence_threshold)
+        self._pending_meals: dict[int, PendingMealPayload] = {}
+        self._pending_lock = threading.Lock()
         self._executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="healbite-diary-qdrant")
             if background_write and self.qdrant_adapter is not None
@@ -618,28 +630,77 @@ class HealBiteNutritionDiary:
             return NutritionDiaryOutcome(available=True, record=record, raw_analysis=raw_analysis)
 
         outcome = NutritionDiaryOutcome(available=True, record=record, raw_analysis=raw_analysis)
-        if self._should_autosave(record):
-            sqlite_id, duplicate = self.save_record(
+        if self._should_stage_pending(record):
+            self.stage_pending_meal(
                 user_id=user_id,
                 source=source,
                 record=record,
                 image_ref=image_ref,
                 occurred_at=occurred_at,
             )
-            outcome.saved = sqlite_id is not None and not duplicate
-            outcome.duplicate = duplicate
-            outcome.sqlite_id = sqlite_id
+            outcome.pending = True
         return outcome
 
-    def _should_autosave(self, record: NutritionRecord) -> bool:
+    def _should_stage_pending(self, record: NutritionRecord) -> bool:
         if not record.is_food:
-            return False
-        if record.confidence < self.autosave_confidence_threshold:
             return False
         return any(
             value is not None
             for value in (record.calories_kcal, record.protein_g, record.fat_g, record.carbs_g)
         ) or bool(record.items)
+
+    def stage_pending_meal(
+        self,
+        *,
+        user_id: int,
+        source: str,
+        record: NutritionRecord,
+        image_ref: str | None,
+        occurred_at: datetime | None,
+    ) -> PendingMealPayload:
+        payload = PendingMealPayload(
+            user_id=int(user_id),
+            source=source,
+            record=record,
+            image_ref=image_ref,
+            occurred_at=occurred_at,
+        )
+        with self._pending_lock:
+            self._pending_meals[payload.user_id] = payload
+        return payload
+
+    def get_pending_meal(self, user_id: str | int) -> PendingMealPayload | None:
+        with self._pending_lock:
+            return self._pending_meals.get(int(user_id))
+
+    def clear_pending_meal(self, user_id: str | int) -> bool:
+        with self._pending_lock:
+            return self._pending_meals.pop(int(user_id), None) is not None
+
+    def confirm_pending_meal(self, user_id: str | int) -> NutritionDiaryOutcome | None:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_meal(normalized_user_id)
+        if payload is None:
+            return None
+
+        sqlite_id, duplicate = self.save_record(
+            user_id=normalized_user_id,
+            source=payload.source,
+            record=payload.record,
+            image_ref=payload.image_ref,
+            occurred_at=payload.occurred_at,
+        )
+        with self._pending_lock:
+            current = self._pending_meals.get(normalized_user_id)
+            if current is payload:
+                self._pending_meals.pop(normalized_user_id, None)
+        return NutritionDiaryOutcome(
+            available=True,
+            record=payload.record,
+            saved=sqlite_id is not None and not duplicate,
+            duplicate=duplicate,
+            sqlite_id=sqlite_id,
+        )
 
     def save_record(
         self,
@@ -1128,6 +1189,33 @@ def format_undo_meal_report(result: UndoMealResult) -> str:
             "",
             "\u0412\u044b\u0437\u043e\u0432\u0438 /diary, \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d\u043d\u044b\u0439 \u0438\u0442\u043e\u0433.",
         ]
+    )
+
+
+def format_pending_meal_prompt(record: NutritionRecord) -> str:
+    meal_name = " ".join((record.meal_name or "Блюдо").strip().split()) or "Блюдо"
+    calories = (
+        _format_kcal(record.calories_kcal)
+        if record.calories_kcal is not None
+        else "без точной калорийности"
+    )
+    return (
+        f"🍽 Распознано приблизительно: {meal_name} — {calories}. "
+        "Сохранить в дневник? (Напиши Да или Нет)"
+    )
+
+
+def format_pending_meal_saved_reply(
+    summary: dict[str, Any],
+    *,
+    duplicate: bool = False,
+) -> str:
+    prefix = "ℹ️ Эта запись уже есть в дневнике." if duplicate else "✅ Сохранено."
+    return (
+        f"{prefix} Итог за день: {_format_kcal(summary.get('calories_kcal'))} · "
+        f"Б {_format_grams(summary.get('protein_g'))} · "
+        f"Ж {_format_grams(summary.get('fat_g'))} · "
+        f"У {_format_grams(summary.get('carbs_g'))}"
     )
 
 

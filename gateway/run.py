@@ -2692,6 +2692,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             if timeout <= 0:
                 await adapter.disconnect()
+            elif result.status == "expired":
+                final_response = format_pending_meal_expired_reply()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -12111,24 +12113,35 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         event: Optional[MessageEvent],
     ) -> Optional[Dict[str, Any]]:
-        from gateway.healbite_nutrition_diary import format_pending_meal_saved_reply
+        from gateway.healbite_nutrition_diary import (
+            format_pending_meal_cancelled_reply,
+            format_pending_meal_expired_reply,
+            format_pending_meal_saved_reply,
+            format_pending_meal_wait_reply,
+        )
 
         user_id = getattr(source, "user_id", None)
         if user_id is None:
             return None
 
         diary = self._get_healbite_nutrition_diary()
-        if diary.get_pending_meal(int(user_id)) is None:
+        pending = diary.get_pending_meal(int(user_id), include_expired=True)
+        if pending is None:
             return None
 
         choice = self._resolve_healbite_pending_meal_choice(message)
         if choice is None:
             return None
 
-        if choice == "confirm":
+        if diary.is_pending_meal_expired(pending):
+            diary.clear_pending_meal(int(user_id))
+            final_response = format_pending_meal_expired_reply()
+        elif choice == "confirm":
             result = diary.confirm_pending_meal(int(user_id))
-            if result is None:
+            if result.status == "missing":
                 final_response = "Не нашел ожидающую запись. Попробуй отправить фото еще раз."
+            elif result.status == "expired":
+                final_response = format_pending_meal_expired_reply()
             else:
                 summary = diary.get_daily_summary(user_id=int(user_id))
                 final_response = format_pending_meal_saved_reply(
@@ -12137,12 +12150,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
         elif choice == "cancel":
             diary.clear_pending_meal(int(user_id))
-            final_response = "❌ Отменено. Что исправить?"
+            final_response = format_pending_meal_cancelled_reply()
         else:
-            final_response = (
-                "Жду подтверждение записи. Напиши Да или Нет. "
-                "Если передумал, отправь новое фото или вызови /diary."
-            )
+            final_response = format_pending_meal_wait_reply()
 
         return {
             "final_response": final_response,

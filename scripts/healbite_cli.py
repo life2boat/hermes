@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,12 @@ if str(REPO_ROOT) not in sys.path:
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
     NUTRITION_LOG_TABLE,
+    PENDING_MEALS_TABLE,
     compute_nutrition_diary_summary,
+    format_pending_meal_cancelled_reply,
+    format_pending_meal_expired_reply,
+    format_pending_meal_saved_reply,
+    format_pending_meal_wait_reply,
     format_nutrition_diary_report,
     normalize_nutrition_payload,
     resolve_healbite_db_path,
@@ -52,6 +58,9 @@ AMBIGUOUS_DIARY_PHRASES = {
 CORRECTION_SMOKE_USER_ID = 999999
 CORRECTION_SMOKE_SOURCE = "cli_correction_smoke"
 CORRECTION_SMOKE_IMAGE_REF_PREFIX = "cli-correction-smoke-"
+PENDING_SMOKE_USER_ID = 999999
+PENDING_SMOKE_SOURCE = "cli_pending_smoke"
+PENDING_SMOKE_IMAGE_REF_PREFIX = "cli-pending-smoke-"
 IMPORTANT_LOG_PATTERN = re.compile(
     r"(traceback|exception|provider authentication|command approval|execute_code|terminal|readonly|permissionerror|"
     r"database is locked|nutrition_log|diary|stats|vision|gemini|qdrant)",
@@ -654,6 +663,278 @@ def run_local_correction_smoke(
     return markers
 
 
+def _count_pending_rows(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PENDING_SMOKE_USER_ID,
+) -> int:
+    resolved = resolve_healbite_db_path(db_path)
+    if not Path(resolved).exists():
+        return 0
+    with sqlite3.connect(resolved) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (PENDING_MEALS_TABLE,),
+        ).fetchone()
+        if row is None:
+            return 0
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+            (int(user_id),),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _count_synthetic_pending_nutrition_rows(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PENDING_SMOKE_USER_ID,
+    source: str = PENDING_SMOKE_SOURCE,
+) -> int:
+    resolved = resolve_healbite_db_path(db_path)
+    if not Path(resolved).exists():
+        return 0
+    with sqlite3.connect(resolved) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (NUTRITION_LOG_TABLE,),
+        ).fetchone()
+        if row is None:
+            return 0
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND source = ?",
+            (int(user_id), source),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def _cleanup_synthetic_pending_state(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PENDING_SMOKE_USER_ID,
+    source: str = PENDING_SMOKE_SOURCE,
+) -> tuple[int, int]:
+    resolved = resolve_healbite_db_path(db_path)
+    if Path(resolved).exists():
+        with sqlite3.connect(resolved) as conn:
+            conn.execute(
+                f"DELETE FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                (int(user_id),),
+            )
+            conn.execute(
+                f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND source = ?",
+                (int(user_id), source),
+            )
+            conn.commit()
+    return (
+        _count_pending_rows(db_path=resolved, user_id=user_id),
+        _count_synthetic_pending_nutrition_rows(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+        ),
+    )
+
+
+def _seed_synthetic_pending_row(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PENDING_SMOKE_USER_ID,
+    source: str = PENDING_SMOKE_SOURCE,
+    now: datetime | None = None,
+    expired: bool = False,
+) -> str:
+    resolved = resolve_healbite_db_path(db_path)
+    diary = HealBiteNutritionDiary(db_path=resolved, background_write=False)
+    base_now = now or datetime.now(timezone.utc)
+    image_ref = f"{PENDING_SMOKE_IMAGE_REF_PREFIX}{time.time_ns()}"
+    record = normalize_nutrition_payload(
+        json.dumps(
+            {
+                "is_food": True,
+                "meal_name": "CLI pending meal",
+                "raw_summary": "CLI pending meal summary",
+                "confidence": 0.9,
+                "totals": {
+                    "calories_kcal": 321,
+                    "protein_g": 22,
+                    "fat_g": 9,
+                    "carbs_g": 31,
+                },
+                "items": [{"name": "CLI pending meal"}],
+            },
+            ensure_ascii=False,
+        )
+    )
+    diary.stage_pending_meal(
+        user_id=int(user_id),
+        source=source,
+        record=record,
+        image_ref=image_ref,
+        occurred_at=base_now,
+        now=base_now,
+        expires_at=(base_now - timedelta(minutes=1)) if expired else None,
+    )
+    return image_ref
+
+
+def simulate_local_pending_reply(
+    reply: str,
+    *,
+    user_id: int,
+    db_path: str | Path | None = None,
+    now: datetime | None = None,
+) -> str:
+    diary = HealBiteNutritionDiary(
+        db_path=resolve_healbite_db_path(db_path),
+        background_write=False,
+    )
+    pending = diary.get_pending_meal(user_id, now=now, include_expired=True)
+    if pending is None:
+        return "Не нашел ожидающую запись. Попробуй отправить фото ещё раз."
+    normalized = normalize_simulation_text(reply).casefold()
+    if diary.is_pending_meal_expired(pending, now=now):
+        diary.clear_pending_meal(user_id)
+        return format_pending_meal_expired_reply()
+    if normalized in {"да", "ага", "ок", "окей", "yes", "y", "сохрани", "сохраняй"}:
+        result = diary.confirm_pending_meal(user_id, now=now)
+        if result.status == "missing":
+            return "Не нашел ожидающую запись. Попробуй отправить фото ещё раз."
+        if result.status == "expired":
+            return format_pending_meal_expired_reply()
+        summary = diary.get_daily_summary(user_id=user_id)
+        return format_pending_meal_saved_reply(
+            summary,
+            duplicate=bool(result.duplicate),
+        )
+    if normalized in {"нет", "неа", "отмена", "отмени", "cancel", "no", "n"}:
+        diary.clear_pending_meal(user_id)
+        return format_pending_meal_cancelled_reply()
+    return format_pending_meal_wait_reply()
+
+
+def run_local_pending_smoke(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PENDING_SMOKE_USER_ID,
+    source: str = PENDING_SMOKE_SOURCE,
+    fail_after_step: str | None = None,
+) -> list[str]:
+    resolved = resolve_healbite_db_path(db_path)
+    markers: list[str] = []
+    pending_error: Exception | None = None
+    base_now = datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+
+    _cleanup_synthetic_pending_state(
+        db_path=resolved,
+        user_id=user_id,
+        source=source,
+    )
+    try:
+        _seed_synthetic_pending_row(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+            now=base_now,
+            expired=False,
+        )
+        cancel_report = simulate_local_pending_reply(
+            "Нет",
+            user_id=user_id,
+            db_path=resolved,
+            now=base_now,
+        )
+        if (
+            "Отменено" not in cancel_report
+            or _count_pending_rows(db_path=resolved, user_id=user_id) != 0
+            or _count_synthetic_pending_nutrition_rows(
+                db_path=resolved,
+                user_id=user_id,
+                source=source,
+            ) != 0
+        ):
+            raise CLIError("Pending cancel smoke failed.")
+        markers.append("pending_cancel_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "cancel")
+
+        _seed_synthetic_pending_row(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+            now=base_now,
+            expired=False,
+        )
+        confirm_report = simulate_local_pending_reply(
+            "Да",
+            user_id=user_id,
+            db_path=resolved,
+            now=base_now + timedelta(minutes=5),
+        )
+        confirmed_summary = compute_nutrition_diary_summary(
+            db_path=resolved,
+            user_id=user_id,
+            days=1,
+        )
+        if (
+            "Сохранено" not in confirm_report
+            or _count_pending_rows(db_path=resolved, user_id=user_id) != 0
+            or _count_synthetic_pending_nutrition_rows(
+                db_path=resolved,
+                user_id=user_id,
+                source=source,
+            ) != 1
+            or float(confirmed_summary["entries"][-1]["calories_kcal"] or 0.0) != 321.0
+        ):
+            raise CLIError("Pending confirm smoke failed.")
+        markers.append("pending_confirm_ok")
+        _maybe_fail_correction_smoke(fail_after_step, "confirm")
+
+        _cleanup_synthetic_pending_state(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+        )
+        _seed_synthetic_pending_row(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+            now=base_now,
+            expired=True,
+        )
+        expired_report = simulate_local_pending_reply(
+            "Да",
+            user_id=user_id,
+            db_path=resolved,
+            now=base_now + timedelta(hours=3),
+        )
+        if (
+            "истекло" not in expired_report.casefold()
+            or _count_pending_rows(db_path=resolved, user_id=user_id) != 0
+            or _count_synthetic_pending_nutrition_rows(
+                db_path=resolved,
+                user_id=user_id,
+                source=source,
+            ) != 0
+        ):
+            raise CLIError("Pending TTL smoke failed.")
+        markers.append("pending_ttl_ok")
+    except Exception as exc:
+        pending_error = exc
+    finally:
+        pending_rows, nutrition_rows = _cleanup_synthetic_pending_state(
+            db_path=resolved,
+            user_id=user_id,
+            source=source,
+        )
+        if pending_rows != 0 or nutrition_rows != 0:
+            raise CLIError("Synthetic pending smoke cleanup failed.") from pending_error
+        markers.append("cleanup_ok")
+
+    if pending_error is not None:
+        raise pending_error
+    return markers
+
+
 def simulate_local_message(
     text: str,
     *,
@@ -1033,6 +1314,9 @@ class HealBiteCLI:
 
     def cmd_test_correction(self) -> str:
         return "\n".join(run_local_correction_smoke())
+
+    def cmd_test_pending(self) -> str:
+        return "\n".join(run_local_pending_smoke())
 
 
 _RUNTIME_STATUS_CODE = r"""
@@ -1436,6 +1720,10 @@ def build_parser() -> argparse.ArgumentParser:
         "test-correction",
         help="Run a deterministic synthetic smoke-test for diary correction UX",
     )
+    subparsers.add_parser(
+        "test-pending",
+        help="Run a deterministic synthetic smoke-test for pending meal confirmation",
+    )
     subparsers.add_parser("check-admins", help="Inspect effective admin ACL policy")
 
     inspect_parser = subparsers.add_parser(
@@ -1485,6 +1773,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "test-correction":
         print(cli.cmd_test_correction())
+        return 0
+    if args.command == "test-pending":
+        print(cli.cmd_test_pending())
         return 0
     if args.command == "check-admins":
         print(cli.cmd_check_admins())

@@ -14,6 +14,7 @@ from gateway.run import GatewayRunner, _classify_telegram_diary_turn, _exec_appr
 from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
     HealBiteNutritionDiary,
+    PENDING_MEALS_TABLE,
     UndoMealResult,
     compute_nutrition_diary_summary,
     format_nutrition_diary_report,
@@ -95,6 +96,15 @@ def _install_target_tables(db_path):
             );
             """
         )
+
+
+def _count_pending_rows(db_path: Path, *, user_id: int) -> int:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return int(row[0] if row else 0)
 
 
 def _seed_targets(
@@ -268,11 +278,17 @@ async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_savi
     assert outcome.record is not None
     assert pending is not None
     assert pending.record.meal_name == "Борщ"
+    assert _count_pending_rows(tmp_path / "healbite.db", user_id=11) == 1
+    reopened = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    reopened_pending = reopened.get_pending_meal(11)
+    assert reopened_pending is not None
+    assert reopened_pending.record.meal_name == "Борщ"
     assert summary["entry_count"] == 0
 
 
 def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):
-    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    db_path = tmp_path / "healbite.db"
+    diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
     record = _build_record(
         meal_name="Омлет",
         calories_kcal=320,
@@ -288,19 +304,20 @@ def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):
         occurred_at=datetime.now(timezone.utc),
     )
 
-    outcome = diary.confirm_pending_meal(15)
+    outcome = HealBiteNutritionDiary(db_path=db_path, background_write=False).confirm_pending_meal(15)
     summary = diary.get_daily_summary(user_id=15)
 
-    assert outcome is not None
-    assert outcome.saved is True
+    assert outcome.status == "saved"
     assert outcome.duplicate is False
     assert diary.get_pending_meal(15) is None
+    assert _count_pending_rows(db_path, user_id=15) == 0
     assert summary["entry_count"] == 1
     assert summary["calories_kcal"] == pytest.approx(320.0)
 
 
 def test_clear_pending_meal_discards_state_without_writing_to_db(tmp_path):
-    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    db_path = tmp_path / "healbite.db"
+    diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
     record = _build_record(
         meal_name="Салат",
         calories_kcal=150,
@@ -318,7 +335,38 @@ def test_clear_pending_meal_discards_state_without_writing_to_db(tmp_path):
 
     assert diary.clear_pending_meal(18) is True
     assert diary.get_pending_meal(18) is None
+    assert _count_pending_rows(db_path, user_id=18) == 0
     assert diary.get_daily_summary(user_id=18)["entry_count"] == 0
+
+
+def test_confirm_pending_meal_expired_rejects_and_clears_state(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    base_now = datetime(2026, 6, 18, 5, 0, tzinfo=timezone.utc)
+    diary.stage_pending_meal(
+        user_id=19,
+        source="vision",
+        record=_build_record(
+            meal_name="Суп",
+            calories_kcal=180,
+            protein_g=6,
+            fat_g=7,
+            carbs_g=24,
+        ),
+        image_ref="telegram:19:50",
+        occurred_at=base_now,
+        now=base_now,
+    )
+
+    result = diary.confirm_pending_meal(
+        19,
+        now=base_now + timedelta(hours=2, minutes=1),
+    )
+
+    assert result.status == "expired"
+    assert diary.get_pending_meal(19) is None
+    assert _count_pending_rows(db_path, user_id=19) == 0
+    assert diary.get_daily_summary(user_id=19)["entry_count"] == 0
 
 
 def test_sqlite_nutrition_log_save_and_read_works(tmp_path):

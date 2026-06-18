@@ -20,9 +20,11 @@ from utils import safe_json_loads
 logger = logging.getLogger(__name__)
 
 NUTRITION_LOG_TABLE = "nutrition_log"
+PENDING_MEALS_TABLE = "pending_meals"
 _PROFILES_TABLE = "profiles"
 _STRUCTURED_FACTS_TABLE = "structured_user_facts"
 _MEMORY_FACTS_TABLE = "memory_os_facts"
+PENDING_MEAL_TTL = timedelta(hours=2)
 
 _DEFAULT_DB_PATH = Path("/home/hermes/healbite.db")
 _GLOBAL_DIARY_LOCK = threading.Lock()
@@ -50,6 +52,14 @@ CREATE INDEX IF NOT EXISTS idx_{NUTRITION_LOG_TABLE}_user_occurred_at
     ON {NUTRITION_LOG_TABLE}(user_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_{NUTRITION_LOG_TABLE}_user_image_ref
     ON {NUTRITION_LOG_TABLE}(user_id, image_ref);
+CREATE TABLE IF NOT EXISTS {PENDING_MEALS_TABLE} (
+    user_id INTEGER PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_{PENDING_MEALS_TABLE}_expires_at
+    ON {PENDING_MEALS_TABLE}(expires_at);
 """
 
 _VISION_PROMPT = (
@@ -95,6 +105,16 @@ class PendingMealPayload:
     record: NutritionRecord
     image_ref: str | None = None
     occurred_at: datetime | None = None
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class ConfirmPendingMealResult:
+    status: str
+    record: NutritionRecord | None = None
+    sqlite_id: int | None = None
+    duplicate: bool = False
 
 
 @dataclass(slots=True)
@@ -231,6 +251,16 @@ def _normalize_timestamp(value: datetime | None = None) -> datetime:
 
 def _sqlite_timestamp(value: datetime | None = None) -> str:
     return _normalize_timestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_sqlite_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 def _local_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
@@ -566,8 +596,6 @@ class HealBiteNutritionDiary:
         self.embedding_adapter = embedding_adapter or EmbeddingAdapter()
         self.qdrant_adapter = qdrant_adapter or QdrantMemoryAdapter(embedding_adapter=self.embedding_adapter)
         self.autosave_confidence_threshold = float(autosave_confidence_threshold)
-        self._pending_meals: dict[int, PendingMealPayload] = {}
-        self._pending_lock = threading.Lock()
         self._executor = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="healbite-diary-qdrant")
             if background_write and self.qdrant_adapter is not None
@@ -657,31 +685,123 @@ class HealBiteNutritionDiary:
         record: NutritionRecord,
         image_ref: str | None,
         occurred_at: datetime | None,
+        now: datetime | None = None,
+        ttl: timedelta | None = None,
+        expires_at: datetime | None = None,
     ) -> PendingMealPayload:
+        created_at_dt = _normalize_timestamp(now)
+        expires_at_dt = _normalize_timestamp(expires_at) if expires_at is not None else (
+            created_at_dt + (ttl if ttl is not None else PENDING_MEAL_TTL)
+        )
         payload = PendingMealPayload(
             user_id=int(user_id),
             source=source,
             record=record,
             image_ref=image_ref,
             occurred_at=occurred_at,
+            created_at=created_at_dt,
+            expires_at=expires_at_dt,
         )
-        with self._pending_lock:
-            self._pending_meals[payload.user_id] = payload
+        payload_json = json.dumps(
+            {
+                "source": payload.source,
+                "image_ref": payload.image_ref,
+                "occurred_at": _sqlite_timestamp(payload.occurred_at) if payload.occurred_at is not None else None,
+                "record": {
+                    "is_food": payload.record.is_food,
+                    "meal_name": payload.record.meal_name,
+                    "items": payload.record.items,
+                    "calories_kcal": payload.record.calories_kcal,
+                    "protein_g": payload.record.protein_g,
+                    "fat_g": payload.record.fat_g,
+                    "carbs_g": payload.record.carbs_g,
+                    "confidence": payload.record.confidence,
+                    "raw_summary": payload.record.raw_summary,
+                },
+            },
+            ensure_ascii=False,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO {PENDING_MEALS_TABLE}(user_id, payload_json, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    payload.user_id,
+                    payload_json,
+                    _sqlite_timestamp(created_at_dt),
+                    _sqlite_timestamp(expires_at_dt),
+                ),
+            )
         return payload
 
-    def get_pending_meal(self, user_id: str | int) -> PendingMealPayload | None:
-        with self._pending_lock:
-            return self._pending_meals.get(int(user_id))
+    def get_pending_meal(
+        self,
+        user_id: str | int,
+        *,
+        now: datetime | None = None,
+        include_expired: bool = False,
+    ) -> PendingMealPayload | None:
+        normalized_user_id = int(user_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT payload_json, created_at, expires_at
+                FROM {PENDING_MEALS_TABLE}
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (normalized_user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+        payload = self._deserialize_pending_meal(
+            normalized_user_id,
+            payload_json=str(row["payload_json"] or ""),
+            created_at=str(row["created_at"] or ""),
+            expires_at=str(row["expires_at"] or ""),
+        )
+        if payload is None:
+            self.clear_pending_meal(normalized_user_id)
+            return None
+        if not include_expired and self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_meal(normalized_user_id)
+            return None
+        return payload
 
     def clear_pending_meal(self, user_id: str | int) -> bool:
-        with self._pending_lock:
-            return self._pending_meals.pop(int(user_id), None) is not None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                (int(user_id),),
+            )
+        return bool(cursor.rowcount)
 
-    def confirm_pending_meal(self, user_id: str | int) -> NutritionDiaryOutcome | None:
+    def confirm_pending_meal(
+        self,
+        user_id: str | int,
+        *,
+        now: datetime | None = None,
+    ) -> ConfirmPendingMealResult:
         normalized_user_id = int(user_id)
-        payload = self.get_pending_meal(normalized_user_id)
+        payload = self.get_pending_meal(
+            normalized_user_id,
+            now=now,
+            include_expired=True,
+        )
         if payload is None:
-            return None
+            return ConfirmPendingMealResult(status="missing")
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_meal(normalized_user_id)
+            return ConfirmPendingMealResult(
+                status="expired",
+                record=payload.record,
+            )
 
         sqlite_id, duplicate = self.save_record(
             user_id=normalized_user_id,
@@ -690,16 +810,57 @@ class HealBiteNutritionDiary:
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
         )
-        with self._pending_lock:
-            current = self._pending_meals.get(normalized_user_id)
-            if current is payload:
-                self._pending_meals.pop(normalized_user_id, None)
-        return NutritionDiaryOutcome(
-            available=True,
+        self.clear_pending_meal(normalized_user_id)
+        return ConfirmPendingMealResult(
+            status="duplicate" if duplicate else "saved",
             record=payload.record,
-            saved=sqlite_id is not None and not duplicate,
-            duplicate=duplicate,
             sqlite_id=sqlite_id,
+            duplicate=duplicate,
+        )
+
+    @staticmethod
+    def is_pending_meal_expired(
+        payload: PendingMealPayload,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        if payload.expires_at is None:
+            return False
+        return _normalize_timestamp(now) > _normalize_timestamp(payload.expires_at)
+
+    def _deserialize_pending_meal(
+        self,
+        user_id: int,
+        *,
+        payload_json: str,
+        created_at: str,
+        expires_at: str,
+    ) -> PendingMealPayload | None:
+        payload = safe_json_loads(payload_json, None)
+        if not isinstance(payload, dict):
+            return None
+        record_payload = payload.get("record")
+        if not isinstance(record_payload, dict):
+            return None
+        record = NutritionRecord(
+            is_food=bool(record_payload.get("is_food")),
+            meal_name=str(record_payload.get("meal_name") or "Meal"),
+            items=list(record_payload.get("items") or []),
+            calories_kcal=_to_float(record_payload.get("calories_kcal")),
+            protein_g=_to_float(record_payload.get("protein_g")),
+            fat_g=_to_float(record_payload.get("fat_g")),
+            carbs_g=_to_float(record_payload.get("carbs_g")),
+            confidence=_coerce_confidence(record_payload.get("confidence")),
+            raw_summary=str(record_payload.get("raw_summary") or record_payload.get("meal_name") or "Meal"),
+        )
+        return PendingMealPayload(
+            user_id=int(user_id),
+            source=str(payload.get("source") or "photo"),
+            record=record,
+            image_ref=str(payload.get("image_ref")) if payload.get("image_ref") is not None else None,
+            occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
+            created_at=_parse_sqlite_timestamp(created_at),
+            expires_at=_parse_sqlite_timestamp(expires_at),
         )
 
     def save_record(
@@ -1217,6 +1378,21 @@ def format_pending_meal_saved_reply(
         f"Ж {_format_grams(summary.get('fat_g'))} · "
         f"У {_format_grams(summary.get('carbs_g'))}"
     )
+
+
+def format_pending_meal_cancelled_reply() -> str:
+    return "❌ Отменено. Что исправить?"
+
+
+def format_pending_meal_wait_reply() -> str:
+    return (
+        "Жду подтверждение записи. Напиши Да или Нет. "
+        "Если передумал, отправь новое фото или вызови /diary."
+    )
+
+
+def format_pending_meal_expired_reply() -> str:
+    return "⌛ Подтверждение истекло. Отправь фото ещё раз."
 
 
 def compute_nutrition_diary_summary(

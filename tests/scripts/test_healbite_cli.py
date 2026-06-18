@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gateway.healbite_nutrition_diary import (
@@ -62,6 +63,46 @@ def _count_rows(db_path: Path, *, user_id: int, source: str) -> int:
     return int(row[0] if row else 0)
 
 
+def _seed_pending(
+    db_path: Path,
+    *,
+    user_id: int,
+    meal_name: str = "pending meal",
+    calories_kcal: float = 321,
+    source: str = "cli_pending_smoke",
+    expired: bool = False,
+):
+    diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    record = normalize_nutrition_payload(
+        healbite_cli.json.dumps(
+            {
+                "is_food": True,
+                "meal_name": meal_name,
+                "raw_summary": f"{meal_name} summary",
+                "confidence": 0.9,
+                "totals": {
+                    "calories_kcal": calories_kcal,
+                    "protein_g": 20,
+                    "fat_g": 10,
+                    "carbs_g": 30,
+                },
+                "items": [{"name": meal_name}],
+            },
+            ensure_ascii=False,
+        )
+    )
+    now = datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+    diary.stage_pending_meal(
+        user_id=user_id,
+        source=source,
+        record=record,
+        image_ref=f"pending:{user_id}:{meal_name}",
+        occurred_at=now,
+        now=now,
+        expires_at=(now - timedelta(minutes=1)) if expired else None,
+    )
+
+
 def test_build_parser_parses_logs_command():
     parser = healbite_cli.build_parser()
     args = parser.parse_args(["logs", "--last", "50"])
@@ -101,6 +142,12 @@ def test_build_parser_parses_test_correction():
     parser = healbite_cli.build_parser()
     args = parser.parse_args(["test-correction"])
     assert args.command == "test-correction"
+
+
+def test_build_parser_parses_test_pending():
+    parser = healbite_cli.build_parser()
+    args = parser.parse_args(["test-pending"])
+    assert args.command == "test-pending"
 
 
 def test_build_parser_parses_free_text_simulation_with_allow_write():
@@ -215,6 +262,23 @@ def test_cmd_test_correction_returns_marker_lines(monkeypatch):
     )
     report = cli.cmd_test_correction()
     assert "correction_guard_ok" in report
+    assert "cleanup_ok" in report
+
+
+def test_cmd_test_pending_returns_marker_lines(monkeypatch):
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=None)
+    monkeypatch.setattr(
+        healbite_cli,
+        "run_local_pending_smoke",
+        lambda **kwargs: [
+            "pending_cancel_ok",
+            "pending_confirm_ok",
+            "pending_ttl_ok",
+            "cleanup_ok",
+        ],
+    )
+    report = cli.cmd_test_pending()
+    assert "pending_confirm_ok" in report
     assert "cleanup_ok" in report
 
 
@@ -394,6 +458,112 @@ def test_run_local_correction_smoke_cleans_up_on_failure(tmp_path):
         db_path,
         user_id=healbite_cli.CORRECTION_SMOKE_USER_ID,
         source=healbite_cli.CORRECTION_SMOKE_SOURCE,
+    ) == 0
+
+
+def test_simulate_local_pending_reply_cancel_clears_state(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_pending(db_path, user_id=81)
+
+    report = healbite_cli.simulate_local_pending_reply(
+        "Нет",
+        user_id=81,
+        db_path=db_path,
+        now=datetime(2026, 6, 18, 12, 5, tzinfo=timezone.utc),
+    )
+
+    assert "Отменено" in report
+    assert healbite_cli._count_pending_rows(db_path=db_path, user_id=81) == 0
+    assert _count_rows(db_path, user_id=81, source="cli_pending_smoke") == 0
+
+
+def test_simulate_local_pending_reply_confirm_writes_to_nutrition_log(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_pending(db_path, user_id=82)
+
+    report = healbite_cli.simulate_local_pending_reply(
+        "Да",
+        user_id=82,
+        db_path=db_path,
+        now=datetime(2026, 6, 18, 12, 5, tzinfo=timezone.utc),
+    )
+
+    summary = compute_nutrition_diary_summary(db_path=db_path, user_id=82)
+    assert "Сохранено" in report
+    assert healbite_cli._count_pending_rows(db_path=db_path, user_id=82) == 0
+    assert _count_rows(db_path, user_id=82, source="cli_pending_smoke") == 1
+    assert summary["entries"][-1]["calories_kcal"] == 321
+
+
+def test_simulate_local_pending_reply_expired_rejects_without_write(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_pending(db_path, user_id=83, expired=True)
+
+    report = healbite_cli.simulate_local_pending_reply(
+        "Да",
+        user_id=83,
+        db_path=db_path,
+        now=datetime(2026, 6, 18, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert "истекло" in report.casefold()
+    assert healbite_cli._count_pending_rows(db_path=db_path, user_id=83) == 0
+    assert _count_rows(db_path, user_id=83, source="cli_pending_smoke") == 0
+
+
+def test_run_local_pending_smoke_outputs_all_markers_and_cleans_up(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_record(
+        db_path,
+        user_id=515151,
+        meal_name="real-user-meal",
+        calories_kcal=280,
+        image_ref="test:515151:real-user",
+    )
+
+    markers = healbite_cli.run_local_pending_smoke(db_path=db_path)
+
+    assert markers == [
+        "pending_cancel_ok",
+        "pending_confirm_ok",
+        "pending_ttl_ok",
+        "cleanup_ok",
+    ]
+    assert healbite_cli._count_pending_rows(
+        db_path=db_path,
+        user_id=healbite_cli.PENDING_SMOKE_USER_ID,
+    ) == 0
+    assert _count_rows(
+        db_path,
+        user_id=healbite_cli.PENDING_SMOKE_USER_ID,
+        source=healbite_cli.PENDING_SMOKE_SOURCE,
+    ) == 0
+    real_user_summary = compute_nutrition_diary_summary(db_path=db_path, user_id=515151)
+    assert real_user_summary["entries"][-1]["meal_name"] == "real-user-meal"
+    assert real_user_summary["entries"][-1]["calories_kcal"] == 280
+
+
+def test_run_local_pending_smoke_cleans_up_on_failure(tmp_path):
+    db_path = tmp_path / "healbite.db"
+
+    try:
+        healbite_cli.run_local_pending_smoke(
+            db_path=db_path,
+            fail_after_step="confirm",
+        )
+    except RuntimeError as exc:
+        assert "Injected failure after step: confirm" in str(exc)
+    else:
+        raise AssertionError("Expected injected pending smoke failure")
+
+    assert healbite_cli._count_pending_rows(
+        db_path=db_path,
+        user_id=healbite_cli.PENDING_SMOKE_USER_ID,
+    ) == 0
+    assert _count_rows(
+        db_path,
+        user_id=healbite_cli.PENDING_SMOKE_USER_ID,
+        source=healbite_cli.PENDING_SMOKE_SOURCE,
     ) == 0
 
 

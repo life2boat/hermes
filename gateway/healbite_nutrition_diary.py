@@ -65,11 +65,14 @@ CREATE INDEX IF NOT EXISTS idx_{PENDING_MEALS_TABLE}_expires_at
 _VISION_PROMPT = (
     "You are a nutrition analyst for HealBite. Analyze the meal or drink in this image and "
     "return STRICT JSON only with no markdown fences and no extra text. "
-    "Schema: {\"is_food\": bool, \"meal_name\": string, \"raw_summary\": string, "
+    "Schema: {\"is_food\": bool, \"meal_name\": string, \"display_name\": string, \"raw_summary\": string, "
     "\"confidence\": number, \"items\": [{\"name\": string, \"estimated_weight_g\": number|null, "
     "\"calories_kcal\": number|null, \"protein_g\": number|null, \"fat_g\": number|null, "
     "\"carbs_g\": number|null}], \"totals\": {\"calories_kcal\": number|null, "
     "\"protein_g\": number|null, \"fat_g\": number|null, \"carbs_g\": number|null}}. "
+    "Use natural Russian for all user-facing naming fields: meal_name, display_name, and item names. "
+    "If the dish is uncertain, use cautious Russian wording like \"похоже на ...\" instead of inventing specifics. "
+    "Avoid English dish names unless the image clearly shows a branded product name that cannot be translated naturally. "
     "If this is not a food or drink image, set is_food=false, use a short raw_summary, and keep items empty."
 )
 
@@ -85,6 +88,7 @@ class NutritionRecord:
     carbs_g: float | None
     confidence: float
     raw_summary: str
+    display_name: str = ""
 
 
 @dataclass(slots=True)
@@ -442,6 +446,15 @@ def _format_progress_line(
     )
 
 
+def _normalize_meal_name_text(value: Any, fallback: str = "Блюдо") -> str:
+    text = " ".join(str(value or "").split())
+    return text or fallback
+
+
+def _record_display_name(record: NutritionRecord) -> str:
+    return _normalize_meal_name_text(record.display_name or record.meal_name, "Блюдо")
+
+
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
     payload = safe_json_loads(payload_text, {})
     if not isinstance(payload, dict) or not payload:
@@ -479,7 +492,14 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
             item = {"name": raw_item.strip()}
         elif isinstance(raw_item, dict):
             item = {
-                "name": str(raw_item.get("name") or raw_item.get("item") or "").strip(),
+                "name": _normalize_meal_name_text(
+                    raw_item.get("display_name")
+                    or raw_item.get("meal_name_user")
+                    or raw_item.get("name")
+                    or raw_item.get("item")
+                    or "",
+                    "",
+                ),
                 "estimated_weight_g": _to_float(raw_item.get("estimated_weight_g") or raw_item.get("weight_g")),
                 "calories_kcal": _to_float(raw_item.get("calories_kcal") or raw_item.get("calories")),
                 "protein_g": _to_float(raw_item.get("protein_g") or raw_item.get("protein")),
@@ -513,15 +533,26 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
     if total_carbs is None and has_item_carbs:
         total_carbs = item_carbs_sum
 
-    meal_name = str(payload.get("meal_name") or payload.get("dish") or "").strip()
+    meal_name = _normalize_meal_name_text(payload.get("meal_name") or payload.get("dish") or "", "")
+    display_name = _normalize_meal_name_text(
+        payload.get("display_name")
+        or payload.get("meal_name_user")
+        or payload.get("meal_name_ru")
+        or meal_name,
+        "",
+    )
     if not meal_name and items:
         meal_name = ", ".join(item["name"] for item in items[:2])
     if not meal_name:
         meal_name = "Meal"
+    if not display_name and items:
+        display_name = ", ".join(item["name"] for item in items[:2])
+    if not display_name:
+        display_name = meal_name or "Блюдо"
 
     raw_summary = str(payload.get("raw_summary") or payload.get("summary") or payload.get("description") or "").strip()
     if not raw_summary:
-        raw_summary = meal_name
+        raw_summary = display_name or meal_name
 
     confidence = _coerce_confidence(payload.get("confidence"))
     is_food_value = payload.get("is_food")
@@ -546,6 +577,7 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
         carbs_g=total_carbs,
         confidence=confidence,
         raw_summary=raw_summary,
+        display_name=display_name,
     )
 
 
@@ -556,7 +588,8 @@ def format_nutrition_context(record: NutritionRecord, *, saved: bool, duplicate:
             f"Summary: {record.raw_summary}]"
         )
 
-    items_text = ", ".join(item.get("name", "") for item in record.items[:5] if item.get("name")) or record.meal_name
+    meal_label = _record_display_name(record)
+    items_text = ", ".join(item.get("name", "") for item in record.items[:5] if item.get("name")) or meal_label
     totals = []
     if record.calories_kcal is not None:
         totals.append(f"{record.calories_kcal:.0f} kcal")
@@ -573,7 +606,7 @@ def format_nutrition_context(record: NutritionRecord, *, saved: bool, duplicate:
         save_note = "not auto-saved because confidence was too low"
     return (
         "[HealBite structured nutrition analysis from the user's image:\n"
-        f"Meal: {record.meal_name}\n"
+        f"Meal: {meal_label}\n"
         f"Items: {items_text}\n"
         f"Estimated totals: {', '.join(totals) if totals else 'not enough structured macros'}\n"
         f"Confidence: {record.confidence:.2f}\n"
@@ -710,6 +743,7 @@ class HealBiteNutritionDiary:
                 "record": {
                     "is_food": payload.record.is_food,
                     "meal_name": payload.record.meal_name,
+                    "display_name": payload.record.display_name,
                     "items": payload.record.items,
                     "calories_kcal": payload.record.calories_kcal,
                     "protein_g": payload.record.protein_g,
@@ -844,7 +878,7 @@ class HealBiteNutritionDiary:
             return None
         record = NutritionRecord(
             is_food=bool(record_payload.get("is_food")),
-            meal_name=str(record_payload.get("meal_name") or "Meal"),
+            meal_name=_normalize_meal_name_text(record_payload.get("meal_name") or "Meal", "Meal"),
             items=list(record_payload.get("items") or []),
             calories_kcal=_to_float(record_payload.get("calories_kcal")),
             protein_g=_to_float(record_payload.get("protein_g")),
@@ -852,6 +886,10 @@ class HealBiteNutritionDiary:
             carbs_g=_to_float(record_payload.get("carbs_g")),
             confidence=_coerce_confidence(record_payload.get("confidence")),
             raw_summary=str(record_payload.get("raw_summary") or record_payload.get("meal_name") or "Meal"),
+            display_name=_normalize_meal_name_text(
+                record_payload.get("display_name") or record_payload.get("meal_name") or "Блюдо",
+                "Блюдо",
+            ),
         )
         return PendingMealPayload(
             user_id=int(user_id),
@@ -883,6 +921,7 @@ class HealBiteNutritionDiary:
                     return int(existing["id"]), True
 
         occurred_at_sql = _sqlite_timestamp(occurred_at)
+        stored_meal_name = _record_display_name(record)
         items_json = json.dumps(record.items, ensure_ascii=False)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -907,7 +946,7 @@ class HealBiteNutritionDiary:
                 (
                     normalized_user_id,
                     source,
-                    record.meal_name,
+                    stored_meal_name,
                     items_json,
                     record.calories_kcal,
                     record.protein_g,
@@ -1049,7 +1088,10 @@ class HealBiteNutritionDiary:
                 return UpdateMealResult(updated=False)
 
             sqlite_id = int(row["id"])
-            updated_meal_name = normalized_meal_name or str(row["meal_name"] or "\u0411\u043b\u044e\u0434\u043e")
+            updated_meal_name = _normalize_meal_name_text(
+                normalized_meal_name or str(row["meal_name"] or "\u0411\u043b\u044e\u0434\u043e"),
+                "\u0411\u043b\u044e\u0434\u043e",
+            )
             updated_calories = calories_value if calories_value is not None else _to_float(row["calories_kcal"])
             updated_protein = protein_value if protein_value is not None else _to_float(row["protein_g"])
             updated_fat = fat_value if fat_value is not None else _to_float(row["fat_g"])
@@ -1095,6 +1137,7 @@ class HealBiteNutritionDiary:
                 carbs_g=updated_carbs,
                 confidence=confidence,
                 raw_summary=raw_summary,
+                display_name=updated_meal_name,
             ),
             occurred_at=occurred_at_sql,
         )
@@ -1145,11 +1188,12 @@ class HealBiteNutritionDiary:
     ) -> bool:
         if self.qdrant_adapter is None:
             return False
-        text = f"{record.meal_name}. {record.raw_summary}".strip()
+        display_name = _record_display_name(record)
+        text = f"{display_name}. {record.raw_summary}".strip()
         payload = {
             "record_type": "nutrition_log",
             "occurred_at": occurred_at,
-            "meal_name": record.meal_name,
+            "meal_name": display_name,
             "calories_kcal": record.calories_kcal,
         }
         indexed = self.qdrant_adapter.upsert_fact(
@@ -1327,7 +1371,7 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
         lines.extend(f"\u2022 {html.escape(str(hint))}" for hint in hints)
     lines.extend(["", "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>"])
     for row in entries:
-        meal_name = html.escape(str(row.get("meal_name") or "\u0411\u043b\u044e\u0434\u043e"))
+        meal_name = html.escape(_normalize_meal_name_text(row.get("meal_name"), "\u0411\u043b\u044e\u0434\u043e"))
         kcal = _format_kcal(row.get("calories_kcal"))
         lines.append(f"\u2022 {meal_name} (~{kcal})")
     return "\n".join(lines)
@@ -1354,16 +1398,31 @@ def format_undo_meal_report(result: UndoMealResult) -> str:
 
 
 def format_pending_meal_prompt(record: NutritionRecord) -> str:
-    meal_name = " ".join((record.meal_name or "Блюдо").strip().split()) or "Блюдо"
+    meal_name = html.escape(_record_display_name(record))
     calories = (
         _format_kcal(record.calories_kcal)
         if record.calories_kcal is not None
-        else "без точной калорийности"
+        else "без точной оценки калорийности"
     )
-    return (
-        f"🍽 Распознано приблизительно: {meal_name} — {calories}. "
-        "Сохранить в дневник? (Напиши Да или Нет)"
-    )
+    macro_parts: list[str] = []
+    if record.protein_g is not None:
+        macro_parts.append(f"Б {_format_grams(record.protein_g)}")
+    if record.fat_g is not None:
+        macro_parts.append(f"Ж {_format_grams(record.fat_g)}")
+    if record.carbs_g is not None:
+        macro_parts.append(f"У {_format_grams(record.carbs_g)}")
+    lines = [
+        f"🍽 Я вижу: {meal_name}.",
+        f"Оценка: примерно {calories}",
+    ]
+    if macro_parts:
+        lines.append(" · ".join(macro_parts))
+    lines.extend([
+        "",
+        "Сохранить в дневник?",
+        "Ответьте: Да или Нет.",
+    ])
+    return "\n".join(lines)
 
 
 def format_pending_meal_saved_reply(

@@ -17,7 +17,9 @@ from gateway.healbite_nutrition_diary import (
     PENDING_MEALS_TABLE,
     UndoMealResult,
     compute_nutrition_diary_summary,
+    NutritionRecord,
     format_nutrition_diary_report,
+    format_pending_meal_prompt,
     format_undo_meal_report,
     normalize_nutrition_payload,
 )
@@ -1678,3 +1680,107 @@ async def test_pending_meal_does_not_block_diary_command(monkeypatch, tmp_path):
 
     assert "Твой дневник" in response
     assert diary.get_pending_meal(205) is None
+
+
+def test_format_pending_meal_prompt_localized_and_html_safe():
+    record = NutritionRecord(
+        is_food=True,
+        meal_name="Dried Fish and Meat Jerky Platter",
+        items=[],
+        calories_kcal=1170,
+        protein_g=60,
+        fat_g=85,
+        carbs_g=12,
+        confidence=0.9,
+        raw_summary="Snack platter",
+        display_name="Вяленая & рыба <снеки>",
+    )
+
+    prompt = format_pending_meal_prompt(record)
+
+    assert "🍽 Я вижу: Вяленая &amp; рыба &lt;снеки&gt;." in prompt
+    assert "Оценка: примерно 1170 ккал" in prompt
+    assert "Б 60 г · Ж 85 г · У 12 г" in prompt
+    assert "Сохранить в дневник?" in prompt
+    assert "Ответьте: Да или Нет." in prompt
+    assert "Распознано приблизительно" not in prompt
+    assert "????" not in prompt
+
+
+def test_format_pending_meal_prompt_handles_missing_macros():
+    record = NutritionRecord(
+        is_food=True,
+        meal_name="Meal",
+        items=[],
+        calories_kcal=315,
+        protein_g=None,
+        fat_g=11,
+        carbs_g=None,
+        confidence=0.8,
+        raw_summary="Meal summary",
+        display_name="Суп дня",
+    )
+
+    prompt = format_pending_meal_prompt(record)
+
+    assert "🍽 Я вижу: Суп дня." in prompt
+    assert "Оценка: примерно 315 ккал" in prompt
+    assert "Ж 11 г" in prompt
+    assert "Б " not in prompt
+    assert "У " not in prompt
+
+
+def test_normalize_nutrition_payload_prefers_russian_display_name():
+    record = normalize_nutrition_payload(
+        json.dumps(
+            {
+                "is_food": True,
+                "meal_name": "Dried Fish and Meat Jerky Platter",
+                "display_name": "Вяленая рыба и мясные снеки",
+                "raw_summary": "Russian-friendly title should win",
+                "totals": {"calories_kcal": 1170, "protein_g": 60, "fat_g": 85, "carbs_g": 12},
+                "items": [
+                    {"name": "Dried fish", "display_name": "Вяленая рыба"},
+                    {"name": "Meat jerky", "display_name": "Мясные снеки"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert record is not None
+    assert record.meal_name == "Dried Fish and Meat Jerky Platter"
+    assert record.display_name == "Вяленая рыба и мясные снеки"
+    assert record.items[0]["name"] == "Вяленая рыба"
+    assert "Dried Fish and Meat Jerky Platter" not in format_pending_meal_prompt(record)
+
+
+def test_diary_report_uses_display_name_for_new_vision_records(tmp_path):
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    record = normalize_nutrition_payload(
+        json.dumps(
+            {
+                "is_food": True,
+                "meal_name": "Dried Fish and Meat Jerky Platter",
+                "display_name": "Вяленая рыба и мясные снеки",
+                "raw_summary": "Snack platter",
+                "totals": {"calories_kcal": 1170, "protein_g": 60, "fat_g": 85, "carbs_g": 12},
+                "items": [{"name": "Dried fish", "display_name": "Вяленая рыба"}],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    diary.save_record(
+        user_id=501,
+        source="vision",
+        record=record,
+        image_ref="telegram:501:1",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    report = format_nutrition_diary_report(diary.get_daily_summary(user_id=501))
+
+    assert "Вяленая рыба и мясные снеки" in report
+    assert "Dried Fish and Meat Jerky Platter" not in report
+    assert "????" not in report

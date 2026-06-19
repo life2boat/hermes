@@ -27,6 +27,7 @@ except ModuleNotFoundError:
 import asyncio
 import dataclasses
 import inspect
+import hashlib
 import json
 import logging
 import os
@@ -1428,6 +1429,7 @@ _TELEGRAM_PHOTO_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "fil
 _TELEGRAM_DIARY_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "delegation"})
 _TELEGRAM_DIARY_CORRECTION_TOOLSETS = ("nutrition_diary",)
 _TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/diary_undo"})
+_HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 _TELEGRAM_DIARY_CONTEXT_HINTS = (
     "дневник",
     "статист",
@@ -1558,6 +1560,157 @@ def _telegram_diary_summary_days(text: str) -> int:
     if re.search(r"\b7d\b|\b7\s*(?:д|дн|дней)\b|недел", normalized):
         return 7
     return 1
+
+
+def _healbite_public_onboarding_enabled() -> bool:
+    raw = str(os.getenv(_HEALBITE_PUBLIC_ONBOARDING_ENV, "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _healbite_event_correlation_id(event: Optional[MessageEvent]) -> str:
+    if event is None:
+        seed = "missing"
+    else:
+        source = getattr(event, "source", None)
+        seed = ":".join(
+            [
+                str(getattr(getattr(source, "platform", None), "value", getattr(source, "platform", "")) or ""),
+                str(getattr(source, "chat_id", "") or ""),
+                str(getattr(source, "user_id", "") or ""),
+                str(getattr(event, "message_id", "") or ""),
+                str(getattr(event, "platform_update_id", "") or ""),
+            ]
+        )
+    return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _healbite_pending_choice(text: str) -> str | None:
+    normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
+    if not normalized or normalized.startswith("/"):
+        return None
+    if normalized in {"да", "ага", "ок", "окей", "yes", "y", "сохрани", "сохраняй"}:
+        return "confirm"
+    if normalized in {"нет", "неа", "отмена", "отмени", "cancel", "no", "n"}:
+        return "cancel"
+    return "wait"
+
+
+def _healbite_public_lane_reply(*, has_profile: bool, onboarding_active: bool) -> str:
+    if onboarding_active:
+        return "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+    if not has_profile:
+        return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
+    return (
+        "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, "
+        "фото еды и ответы Да/Нет для сохранения."
+    )
+
+
+def _healbite_public_lane_decision(
+    *,
+    source: SessionSource,
+    event: Optional[MessageEvent],
+    message: str = "",
+) -> Dict[str, Any]:
+    from gateway.config import Platform
+    from gateway.healbite_nutrition_diary import get_default_nutrition_diary
+    from gateway.healbite_user_profile import get_default_healbite_user_profile
+
+    if not _healbite_public_onboarding_enabled():
+        return {"enabled": False, "action": "disabled", "route": "disabled"}
+    if source.platform != Platform.TELEGRAM:
+        return {"enabled": False, "action": "disabled", "route": "wrong_platform"}
+    if str(getattr(source, "chat_type", "") or "").lower() not in {"dm", "direct", "private"}:
+        return {"enabled": False, "action": "disabled", "route": "wrong_chat_type"}
+
+    raw_user_id = getattr(source, "user_id", None)
+    if raw_user_id is None:
+        return {"enabled": False, "action": "disabled", "route": "missing_user"}
+    try:
+        user_id = int(raw_user_id)
+    except (TypeError, ValueError):
+        return {"enabled": False, "action": "disabled", "route": "invalid_user"}
+
+    profile_store = get_default_healbite_user_profile()
+    profile = profile_store.get_user_profile(user_id)
+    onboarding = profile_store.get_onboarding_state(user_id)
+    has_profile = profile is not None
+    onboarding_active = onboarding is not None
+
+    text_value = getattr(event, "text", None) or message or ""
+    normalized = _normalize_telegram_turn_text(text_value)
+
+    if onboarding_active:
+        if normalized and not normalized.startswith("/"):
+            return {
+                "enabled": True,
+                "action": "allow",
+                "route": "public_onboarding_reply",
+                "has_profile": has_profile,
+                "onboarding_active": True,
+            }
+        return {
+            "enabled": True,
+            "action": "reply",
+            "route": "public_onboarding_required",
+            "reply": _healbite_public_lane_reply(has_profile=has_profile, onboarding_active=True),
+            "has_profile": has_profile,
+            "onboarding_active": True,
+        }
+
+    if not has_profile:
+        return {
+            "enabled": True,
+            "action": "reply",
+            "route": "public_start_required",
+            "reply": _healbite_public_lane_reply(has_profile=False, onboarding_active=False),
+            "has_profile": False,
+            "onboarding_active": False,
+        }
+
+    if _event_has_image_context(event):
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": "public_photo_flow",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    pending = get_default_nutrition_diary().get_pending_meal(user_id, include_expired=True)
+    if pending is not None and _healbite_pending_choice(text_value) is not None:
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": "public_pending_confirmation",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    diary_turn = _classify_telegram_diary_turn(
+        source=source,
+        event=event,
+        message=text_value,
+        history=None,
+    )
+    if diary_turn in {"summary", "correction", "ambiguous"}:
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": f"public_diary_{diary_turn}",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    route = "public_blocked_command" if normalized.startswith("/") else "public_blocked_text"
+    return {
+        "enabled": True,
+        "action": "reply",
+        "route": route,
+        "reply": _healbite_public_lane_reply(has_profile=True, onboarding_active=False),
+        "has_profile": True,
+        "onboarding_active": False,
+    }
 
 
 def _filter_user_facing_toolsets_for_turn(
@@ -6662,39 +6815,76 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Ignoring message with no user_id from %s", source.platform.value)
                 return None
         elif not self._is_user_authorized(source):
-            logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
-            # In DMs: offer pairing code. In groups: silently ignore.
-            if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
-                platform_name = source.platform.value if source.platform else "unknown"
-                # Rate-limit ALL pairing responses (code or rejection) to
-                # prevent spamming the user with repeated messages when
-                # multiple DMs arrive in quick succession.
-                if self.pairing_store._is_rate_limited(platform_name, source.user_id):
-                    return None
-                code = self.pairing_store.generate_code(
-                    platform_name, source.user_id, source.user_name or ""
+            public_lane = _healbite_public_lane_decision(
+                source=source,
+                event=event,
+                message=getattr(event, "text", None) or "",
+            )
+            if public_lane.get("enabled"):
+                corr = _healbite_event_correlation_id(event)
+                logger.info(
+                    "[Gateway][telegram_access_decision] corr=%s action=%s route=%s profile=%s onboarding=%s",
+                    corr,
+                    public_lane.get("action"),
+                    public_lane.get("route"),
+                    public_lane.get("has_profile"),
+                    public_lane.get("onboarding_active"),
                 )
-                if code:
-                    adapter = self.adapters.get(source.platform)
-                    if adapter:
-                        await adapter.send(
-                            source.chat_id,
-                            f"Hi~ I don't recognize you yet!\n\n"
-                            f"Here's your pairing code: `{code}`\n\n"
-                            f"Ask the bot owner to run:\n"
-                            f"`hermes pairing approve {platform_name} {code}`"
-                        )
+                if public_lane.get("action") == "allow":
+                    logger.info(
+                        "[Gateway][healbite_route_selected] corr=%s route=%s",
+                        corr,
+                        public_lane.get("route"),
+                    )
                 else:
                     adapter = self.adapters.get(source.platform)
-                    if adapter:
+                    reply_text = str(public_lane.get("reply") or "").strip()
+                    if adapter and reply_text:
                         await adapter.send(
                             source.chat_id,
-                            "Too many pairing requests right now~ "
-                            "Please try again later!"
+                            reply_text,
+                            metadata=self._thread_metadata_for_source(source),
                         )
-                    # Record rate limit so subsequent messages are silently ignored
-                    self.pairing_store._record_rate_limit(platform_name, source.user_id)
-            return None
+                        logger.info(
+                            "[Gateway][healbite_reply_sent] corr=%s route=%s outcome=blocked_public_lane",
+                            corr,
+                            public_lane.get("route"),
+                        )
+                    return None
+            else:
+                logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+                # In DMs: offer pairing code. In groups: silently ignore.
+                if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
+                    platform_name = source.platform.value if source.platform else "unknown"
+                    # Rate-limit ALL pairing responses (code or rejection) to
+                    # prevent spamming the user with repeated messages when
+                    # multiple DMs arrive in quick succession.
+                    if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                        return None
+                    code = self.pairing_store.generate_code(
+                        platform_name, source.user_id, source.user_name or ""
+                    )
+                    if code:
+                        adapter = self.adapters.get(source.platform)
+                        if adapter:
+                            await adapter.send(
+                                source.chat_id,
+                                f"Hi~ I don't recognize you yet!\n\n"
+                                f"Here's your pairing code: `{code}`\n\n"
+                                f"Ask the bot owner to run:\n"
+                                f"`hermes pairing approve {platform_name} {code}`"
+                            )
+                    else:
+                        adapter = self.adapters.get(source.platform)
+                        if adapter:
+                            await adapter.send(
+                                source.chat_id,
+                                "Too many pairing requests right now~ "
+                                "Please try again later!"
+                            )
+                        # Record rate limit so subsequent messages are silently ignored
+                        self.pairing_store._record_rate_limit(platform_name, source.user_id)
+                return None
         
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher

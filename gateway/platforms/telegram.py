@@ -9,6 +9,7 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -153,6 +154,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "Настройки": "/profile",
     "Помощь": "/help",
 }
+_HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 
 
 def check_telegram_requirements() -> bool:
@@ -5591,11 +5593,53 @@ class TelegramAdapter(BasePlatformAdapter):
             return str(first_name).strip()
         return ""
 
+    @staticmethod
+    def _healbite_public_onboarding_enabled() -> bool:
+        raw = str(os.getenv(_HEALBITE_PUBLIC_ONBOARDING_ENV, "") or "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _healbite_correlation_id(msg: Optional[Message], update_id: Optional[int] = None) -> str:
+        if msg is None:
+            seed = f"missing:{update_id or ''}"
+        else:
+            seed = ":".join(
+                [
+                    str(getattr(getattr(msg, "chat", None), "id", "") or ""),
+                    str(getattr(getattr(msg, "from_user", None), "id", "") or ""),
+                    str(getattr(msg, "message_id", "") or ""),
+                    str(update_id or ""),
+                ]
+            )
+        return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+    def _log_healbite_marker(
+        self,
+        marker: str,
+        *,
+        msg: Optional[Message] = None,
+        update_id: Optional[int] = None,
+        **fields: Any,
+    ) -> None:
+        corr = self._healbite_correlation_id(msg, update_id=update_id)
+        parts = [f"corr={corr}"]
+        for key, value in fields.items():
+            if value is None or value == "":
+                continue
+            parts.append(f"{key}={value}")
+        logger.info("[Telegram][%s] %s", marker, " ".join(parts))
+
     async def _maybe_handle_healbite_start_command(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/start":
             return False
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=msg,
+            route="start_command",
+            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
+        )
 
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -5621,9 +5665,21 @@ class TelegramAdapter(BasePlatformAdapter):
                 text=onboarding_text,
                 message_thread_id=thread_id,
             )
+            self._log_healbite_marker(
+                "healbite_reply_sent",
+                msg=msg,
+                route="start_command",
+                outcome="onboarding_started",
+            )
             return True
 
         await self._send_healbite_menu_message(msg, command=command_token)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="start_command",
+            outcome="menu_returned",
+        )
         return True
 
     async def _maybe_handle_healbite_profile_command(self, msg: Message) -> bool:
@@ -5631,6 +5687,12 @@ class TelegramAdapter(BasePlatformAdapter):
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/profile":
             return False
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=msg,
+            route="profile_command",
+            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
+        )
 
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -5649,6 +5711,12 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             text=format_healbite_profile_report(profile),
             message_thread_id=thread_id,
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="profile_command",
+            outcome="profile_rendered",
         )
         return True
 
@@ -5679,6 +5747,12 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             text=reply.text,
             message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="onboarding_reply",
+            outcome=str(getattr(reply, "status", "completed") or "completed"),
         )
         return True
 
@@ -5714,6 +5788,13 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        self._log_healbite_marker(
+            "telegram_update_received",
+            msg=msg,
+            update_id=update.update_id,
+            kind="text",
+            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
+        )
         if await self._maybe_handle_healbite_menu_button(update, context):
             return
         if not self._should_process_message(msg):
@@ -5742,6 +5823,12 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         event = self._apply_telegram_group_observe_attribution(event)
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=msg,
+            update_id=update.update_id,
+            route="gateway_text_dispatch",
+        )
         self._enqueue_text_event(event)
 
     def _memory_stats_scope(self, chat_type: str | None) -> str:
@@ -5964,6 +6051,13 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        self._log_healbite_marker(
+            "telegram_update_received",
+            msg=msg,
+            update_id=update.update_id,
+            kind="command",
+            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
+        )
         if not self._should_process_message(msg, is_command=True):
             return
         command = self._healbite_command_from_text(msg.text)
@@ -5985,6 +6079,12 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
         event = self._apply_telegram_group_observe_attribution(event)
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=msg,
+            update_id=update.update_id,
+            route="gateway_command_dispatch",
+        )
         await self.handle_message(event)
 
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6174,6 +6274,14 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
             return
+        media_kind = "document" if getattr(update.message, "document", None) else "photo"
+        self._log_healbite_marker(
+            "telegram_update_received",
+            msg=update.message,
+            update_id=update.update_id,
+            kind=media_kind,
+            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
+        )
         if not self._should_process_message(update.message):
             if self._should_observe_unmentioned_group_message(update.message):
                 _m = update.message
@@ -6212,6 +6320,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # even after Telegram's ephemeral file URLs expire (~1 hour).
         if msg.photo:
             if await self._cache_photo_message_to_event(msg, event, context="photo"):
+                self._log_healbite_marker(
+                    "healbite_route_selected",
+                    msg=msg,
+                    update_id=update.update_id,
+                    route="gateway_photo_dispatch",
+                )
                 media_group_id = getattr(msg, "media_group_id", None)
                 if media_group_id:
                     await self._queue_media_group_event(str(media_group_id), event)

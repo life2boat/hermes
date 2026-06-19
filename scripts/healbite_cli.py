@@ -873,6 +873,7 @@ def run_local_pending_smoke(
         confirmed_summary = compute_nutrition_diary_summary(
             db_path=resolved,
             user_id=user_id,
+            now=base_now + timedelta(minutes=5),
             days=1,
         )
         if (

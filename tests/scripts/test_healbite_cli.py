@@ -488,7 +488,11 @@ def test_simulate_local_pending_reply_confirm_writes_to_nutrition_log(tmp_path):
         now=datetime(2026, 6, 18, 12, 5, tzinfo=timezone.utc),
     )
 
-    summary = compute_nutrition_diary_summary(db_path=db_path, user_id=82)
+    summary = compute_nutrition_diary_summary(
+        db_path=db_path,
+        user_id=82,
+        now=datetime(2026, 6, 18, 12, 5, tzinfo=timezone.utc),
+    )
     assert "Сохранено" in report
     assert healbite_cli._count_pending_rows(db_path=db_path, user_id=82) == 0
     assert _count_rows(db_path, user_id=82, source="cli_pending_smoke") == 1

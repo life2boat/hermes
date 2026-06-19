@@ -282,6 +282,23 @@ def test_cmd_test_pending_returns_marker_lines(monkeypatch):
     assert "cleanup_ok" in report
 
 
+def test_cmd_test_profile_returns_marker_lines(monkeypatch):
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=None)
+    monkeypatch.setattr(
+        healbite_cli,
+        "run_local_profile_smoke",
+        lambda **kwargs: [
+            "profile_onboarding_started_ok",
+            "profile_saved_ok",
+            "profile_render_ok",
+            "cleanup_ok",
+        ],
+    )
+    report = cli.cmd_test_profile()
+    assert "profile_saved_ok" in report
+    assert "cleanup_ok" in report
+
+
 def test_simulate_message_correction_requires_allow_write(tmp_path):
     db_path = tmp_path / "healbite.db"
     _seed_record(db_path, user_id=11, meal_name="omelet", calories_kcal=321)
@@ -609,3 +626,18 @@ def test_render_status_report_never_prints_secret_values():
     assert "super-secret-value" not in report
     assert "GEMINI_API_KEY: yes" in report
     assert "[REDACTED]" in report
+
+
+def test_simulate_profile_message_renders_local_profile(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    store = healbite_cli.HealBiteUserProfileStore(db_path=db_path)
+    store.upsert_user_profile(user_id=77, username="oleg", daily_kcal_target=2000)
+
+    report = healbite_cli.simulate_local_message(
+        "/profile",
+        user_id=77,
+        db_path=db_path,
+    )
+
+    assert "Профиль" in report
+    assert "2000 ккал" in report

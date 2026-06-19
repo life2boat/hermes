@@ -98,6 +98,10 @@ from gateway.healbite_nutrition_diary import (
     format_undo_meal_report,
     get_default_nutrition_diary,
 )
+from gateway.healbite_user_profile import (
+    format_healbite_profile_report,
+    get_default_healbite_user_profile,
+)
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -5576,6 +5580,108 @@ class TelegramAdapter(BasePlatformAdapter):
             kwargs["message_thread_id"] = thread_id
         await self._send_message_with_thread_fallback(**kwargs)
 
+    @staticmethod
+    def _healbite_sender_username(msg: Message) -> str:
+        from_user = getattr(msg, "from_user", None)
+        username = getattr(from_user, "username", None)
+        if username:
+            return str(username).strip()
+        first_name = getattr(from_user, "first_name", None)
+        if first_name:
+            return str(first_name).strip()
+        return ""
+
+    async def _maybe_handle_healbite_start_command(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/start":
+            return False
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не удалось определить пользователя для настройки профиля.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        profile_store = get_default_healbite_user_profile()
+        profile = profile_store.get_user_profile(int(user_id))
+        if profile is None or profile_store.get_onboarding_state(int(user_id)) is not None:
+            onboarding_text = profile_store.begin_onboarding(
+                user_id=int(user_id),
+                username=self._healbite_sender_username(msg),
+            )
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=onboarding_text,
+                message_thread_id=thread_id,
+            )
+            return True
+
+        await self._send_healbite_menu_message(msg, command=command_token)
+        return True
+
+    async def _maybe_handle_healbite_profile_command(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/profile":
+            return False
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не удалось определить пользователя для профиля.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=format_healbite_profile_report(profile),
+            message_thread_id=thread_id,
+        )
+        return True
+
+    async def _maybe_handle_healbite_onboarding_reply(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        if not text or text.startswith("/"):
+            return False
+
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+
+        profile_store = get_default_healbite_user_profile()
+        if profile_store.get_onboarding_state(int(user_id)) is None:
+            return False
+
+        reply = profile_store.handle_onboarding_reply(
+            user_id=int(user_id),
+            text=text,
+            username=self._healbite_sender_username(msg),
+        )
+        if reply is None:
+            return False
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=reply.text,
+            message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        return True
+
     async def _maybe_handle_healbite_menu_button(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> bool:
@@ -5613,6 +5719,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
+            return
+        if await self._maybe_handle_healbite_onboarding_reply(msg):
             return
         await self._ensure_forum_commands(update.message)
 
@@ -5859,8 +5967,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._should_process_message(msg, is_command=True):
             return
         command = self._healbite_command_from_text(msg.text)
-        if command in {"/start", "/menu"}:
+        if await self._maybe_handle_healbite_start_command(msg):
+            return
+        if command == "/menu":
             await self._send_healbite_menu_message(msg, command=command)
+            return
+        if await self._maybe_handle_healbite_profile_command(msg):
             return
         if await self._maybe_handle_memory_stats_command(msg):
             return

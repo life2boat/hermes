@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 NUTRITION_LOG_TABLE = "nutrition_log"
 PENDING_MEALS_TABLE = "pending_meals"
 _PROFILES_TABLE = "profiles"
+_USERS_TABLE = "users"
 _STRUCTURED_FACTS_TABLE = "structured_user_facts"
 _MEMORY_FACTS_TABLE = "memory_os_facts"
 PENDING_MEAL_TTL = timedelta(hours=2)
@@ -329,6 +330,36 @@ def _extract_target_from_value(metric: str, fact_key: str, fact_value: str) -> f
 
 def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> NutritionTargets:
     targets = NutritionTargets()
+
+    if _table_exists(conn, _USERS_TABLE):
+        columns = {
+            row[1]
+            for row in conn.execute(f"PRAGMA table_info({_USERS_TABLE})").fetchall()
+            if len(row) > 1
+        }
+        select_parts = []
+        if "daily_kcal_target" in columns:
+            select_parts.append("daily_kcal_target")
+        if "daily_protein_target" in columns:
+            select_parts.append("daily_protein_target")
+        if "daily_fat_target" in columns:
+            select_parts.append("daily_fat_target")
+        if "daily_carbs_target" in columns:
+            select_parts.append("daily_carbs_target")
+        if select_parts:
+            row = conn.execute(
+                f"SELECT {', '.join(select_parts)} FROM {_USERS_TABLE} WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchone()
+            if row is not None:
+                if "daily_kcal_target" in select_parts:
+                    _set_target_if_missing(targets, "calories_kcal", row["daily_kcal_target"])
+                if "daily_protein_target" in select_parts:
+                    _set_target_if_missing(targets, "protein_g", row["daily_protein_target"])
+                if "daily_fat_target" in select_parts:
+                    _set_target_if_missing(targets, "fat_g", row["daily_fat_target"])
+                if "daily_carbs_target" in select_parts:
+                    _set_target_if_missing(targets, "carbs_g", row["daily_carbs_target"])
 
     if _table_exists(conn, _PROFILES_TABLE):
         columns = {

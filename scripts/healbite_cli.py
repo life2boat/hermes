@@ -30,6 +30,10 @@ from gateway.healbite_nutrition_diary import (
     normalize_nutrition_payload,
     resolve_healbite_db_path,
 )
+from gateway.healbite_user_profile import (
+    HealBiteUserProfileStore,
+    format_healbite_profile_report,
+)
 
 CONTAINER_NAME = "hermes-bot"
 DEFAULT_LOG_TAIL = 80
@@ -42,6 +46,7 @@ SUPPORTED_SIMULATION_COMMANDS = {
     "/diary_undo",
     "/memory_stats",
     "/menu",
+    "/profile",
 }
 STATE_CHANGING_SIMULATION_COMMANDS = {
     "/undo_meal",
@@ -61,6 +66,7 @@ CORRECTION_SMOKE_IMAGE_REF_PREFIX = "cli-correction-smoke-"
 PENDING_SMOKE_USER_ID = 999999
 PENDING_SMOKE_SOURCE = "cli_pending_smoke"
 PENDING_SMOKE_IMAGE_REF_PREFIX = "cli-pending-smoke-"
+PROFILE_SMOKE_USER_ID = 999998
 IMPORTANT_LOG_PATTERN = re.compile(
     r"(traceback|exception|provider authentication|command approval|execute_code|terminal|readonly|permissionerror|"
     r"database is locked|nutrition_log|diary|stats|vision|gemini|qdrant)",
@@ -936,6 +942,51 @@ def run_local_pending_smoke(
     return markers
 
 
+def run_local_profile_smoke(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = PROFILE_SMOKE_USER_ID,
+) -> list[str]:
+    resolved = resolve_healbite_db_path(db_path)
+    store = HealBiteUserProfileStore(db_path=resolved)
+    markers: list[str] = []
+
+    store.delete_user_profile(int(user_id))
+    try:
+        if store.get_user_profile(int(user_id)) is not None:
+            raise CLIError("Synthetic profile cleanup failed before smoke.")
+
+        prompt = store.begin_onboarding(
+            user_id=int(user_id),
+            username="cli-profile",
+        )
+        if "норму калорий" not in prompt.casefold():
+            raise CLIError("Profile onboarding start smoke failed.")
+        markers.append("profile_onboarding_started_ok")
+
+        reply = store.handle_onboarding_reply(
+            user_id=int(user_id),
+            text="2000 ккал",
+            username="cli-profile",
+        )
+        if reply is None or reply.status != "completed":
+            raise CLIError("Profile onboarding completion smoke failed.")
+        markers.append("profile_saved_ok")
+
+        profile = store.get_user_profile(int(user_id))
+        report = format_healbite_profile_report(profile)
+        if profile is None or profile.daily_kcal_target != 2000 or "2000 ккал" not in report:
+            raise CLIError("Profile render smoke failed.")
+        markers.append("profile_render_ok")
+    finally:
+        store.delete_user_profile(int(user_id))
+        if store.get_user_profile(int(user_id)) is not None or store.get_onboarding_state(int(user_id)) is not None:
+            raise CLIError("Synthetic profile smoke cleanup failed.")
+        markers.append("cleanup_ok")
+
+    return markers
+
+
 def simulate_local_message(
     text: str,
     *,
@@ -998,6 +1049,17 @@ def simulate_local_message(
             "Simulated /memory_stats\n"
             "This command is admin-gated. Run ./scripts/healbite check-admins to verify allow_admin_from "
             "and group_allow_admin_from before debugging routing."
+        )
+    if lowered == "/profile":
+        if user_id is None:
+            return (
+                "Simulated /profile\n"
+                "No DB-backed user profile was rendered because --user-id was not provided."
+            )
+        profile = HealBiteUserProfileStore(db_path=db_path).get_user_profile(int(user_id))
+        return (
+            f"Simulated {normalized} for user_id={user_id}\n"
+            f"{format_healbite_profile_report(profile)}"
         )
     scope = "7 days" if lowered.endswith("7d") else "today"
     if user_id is None:
@@ -1318,6 +1380,9 @@ class HealBiteCLI:
 
     def cmd_test_pending(self) -> str:
         return "\n".join(run_local_pending_smoke())
+
+    def cmd_test_profile(self) -> str:
+        return "\n".join(run_local_profile_smoke())
 
 
 _RUNTIME_STATUS_CODE = r"""
@@ -1725,6 +1790,10 @@ def build_parser() -> argparse.ArgumentParser:
         "test-pending",
         help="Run a deterministic synthetic smoke-test for pending meal confirmation",
     )
+    subparsers.add_parser(
+        "test-profile",
+        help="Run a deterministic synthetic smoke-test for HealBite onboarding/profile flow",
+    )
     subparsers.add_parser("check-admins", help="Inspect effective admin ACL policy")
 
     inspect_parser = subparsers.add_parser(
@@ -1777,6 +1846,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "test-pending":
         print(cli.cmd_test_pending())
+        return 0
+    if args.command == "test-profile":
+        print(cli.cmd_test_profile())
         return 0
     if args.command == "check-admins":
         print(cli.cmd_check_admins())

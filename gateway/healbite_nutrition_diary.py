@@ -306,6 +306,23 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if len(row) > 1
+    }
+
+
+def _users_identity_column(conn: sqlite3.Connection) -> str | None:
+    columns = _table_columns(conn, _USERS_TABLE)
+    if "user_id" in columns:
+        return "user_id"
+    if "telegram_id" in columns:
+        return "telegram_id"
+    return None
+
+
 def _set_target_if_missing(targets: NutritionTargets, metric: str, raw_value: Any) -> None:
     current_value = getattr(targets, metric)
     if current_value is not None:
@@ -332,11 +349,8 @@ def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> Nutrit
     targets = NutritionTargets()
 
     if _table_exists(conn, _USERS_TABLE):
-        columns = {
-            row[1]
-            for row in conn.execute(f"PRAGMA table_info({_USERS_TABLE})").fetchall()
-            if len(row) > 1
-        }
+        columns = _table_columns(conn, _USERS_TABLE)
+        identity_column = _users_identity_column(conn)
         select_parts = []
         if "daily_kcal_target" in columns:
             select_parts.append("daily_kcal_target")
@@ -346,9 +360,9 @@ def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> Nutrit
             select_parts.append("daily_fat_target")
         if "daily_carbs_target" in columns:
             select_parts.append("daily_carbs_target")
-        if select_parts:
+        if select_parts and identity_column:
             row = conn.execute(
-                f"SELECT {', '.join(select_parts)} FROM {_USERS_TABLE} WHERE user_id = ?",
+                f"SELECT {', '.join(select_parts)} FROM {_USERS_TABLE} WHERE {identity_column} = ?",
                 (int(user_id),),
             ).fetchone()
             if row is not None:

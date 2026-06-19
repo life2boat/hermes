@@ -141,6 +141,58 @@ def test_diary_reads_targets_from_users_table(tmp_path):
     assert "45 г / 60 г" in report
 
 
+def test_diary_reads_targets_from_legacy_users_identity_column(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO users (
+                telegram_id,
+                username,
+                daily_kcal_target,
+                daily_protein_target,
+                daily_fat_target,
+                daily_carbs_target
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (777, "legacy-target-user", 1700, 110, 60, 180),
+        )
+
+    diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    diary.save_record(
+        user_id=777,
+        source="vision",
+        record=_build_record(
+            meal_name="Семга",
+            calories_kcal=1450,
+            protein_g=95,
+            fat_g=45,
+            carbs_g=120,
+        ),
+        image_ref="telegram:777:1",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    report = format_nutrition_diary_report(diary.get_daily_summary(user_id=777))
+
+    assert "1450 ккал / 1700 ккал" in report
+    assert "95 г / 110 г" in report
+    assert "45 г / 60 г" in report
+
+
 def _make_adapter() -> TelegramAdapter:
     adapter = object.__new__(TelegramAdapter)
     adapter._send_message_with_thread_fallback = AsyncMock()

@@ -164,6 +164,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "❓ Помощь": "__placeholder__:help",
 }
 HEALBITE_PLACEHOLDER_REPLY = "В разработке"
+HEALBITE_SINGLE_ACTION_REPLY = "Отправьте одну команду или нажмите одну кнопку за раз."
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 
 
@@ -5569,6 +5570,17 @@ class TelegramAdapter(BasePlatformAdapter):
             return command_token if command_token.startswith("/") else f"/{command_token}"
         return HEALBITE_REPLY_KEYBOARD_ACTIONS.get(stripped, "")
 
+    @staticmethod
+    def _healbite_nonempty_lines(text: str) -> list[str]:
+        return [line.strip() for line in re.split(r"[\r\n]+", text or "") if line.strip()]
+
+    @classmethod
+    def _is_healbite_compound_local_input(cls, text: str) -> bool:
+        lines = cls._healbite_nonempty_lines(text)
+        if len(lines) <= 1:
+            return False
+        return all(line.startswith("/") or line in HEALBITE_REPLY_KEYBOARD_ACTIONS for line in lines)
+
     async def _send_healbite_menu_message(self, msg: Message, *, command: str) -> None:
         chat = getattr(msg, "chat", None)
         chat_id = getattr(chat, "id", None)
@@ -5665,7 +5677,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
         profile_store = get_default_healbite_user_profile()
         profile = profile_store.get_user_profile(int(user_id))
-        if profile is None or profile_store.get_onboarding_state(int(user_id)) is not None:
+        if (
+            profile is None
+            or profile.daily_kcal_target is None
+            or profile_store.get_onboarding_state(int(user_id)) is not None
+        ):
             onboarding_text = profile_store.begin_onboarding(
                 user_id=int(user_id),
                 username=self._healbite_sender_username(msg),
@@ -5771,6 +5787,25 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    async def _maybe_reject_healbite_compound_input(self, msg: Message) -> bool:
+        text = getattr(msg, "text", None) or ""
+        if not self._is_healbite_compound_local_input(text):
+            return False
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=HEALBITE_SINGLE_ACTION_REPLY,
+            message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="compound_input_rejected",
+            outcome="single_action_required",
+        )
+        return True
+
     async def _send_healbite_placeholder_reply(self, msg: Message) -> None:
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -5794,17 +5829,18 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> bool:
         if not action:
             return False
+        normalized_action = action.split(maxsplit=1)[0].split("@", 1)[0].lower()
         if action.startswith("__placeholder__:"):
             await self._send_healbite_placeholder_reply(msg)
             return True
-        if action == "/menu":
-            await self._send_healbite_menu_message(msg, command=action)
+        if normalized_action == "/menu":
+            await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
-        if action == "/profile":
+        if normalized_action == "/profile":
             return await self._maybe_handle_healbite_profile_command(msg, text_override=action)
-        if action in {"/diary", "/stats", "/stats 7d"}:
+        if normalized_action in {"/diary", "/stats"}:
             return await self._maybe_handle_nutrition_diary_command(msg, text_override=action)
-        if action in {"/undo_meal", "/diary_undo"}:
+        if normalized_action in {"/undo_meal", "/diary_undo"}:
             return await self._maybe_handle_nutrition_diary_undo_command(msg, text_override=action)
         return False
 
@@ -5842,6 +5878,8 @@ class TelegramAdapter(BasePlatformAdapter):
             kind="text",
             public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
         )
+        if await self._maybe_reject_healbite_compound_input(msg):
+            return
         if await self._maybe_handle_healbite_menu_button(update, context):
             return
         if not self._should_process_message(msg):
@@ -6001,11 +6039,16 @@ class TelegramAdapter(BasePlatformAdapter):
     @staticmethod
     def _parse_nutrition_diary_args(text: str) -> tuple[int | None, str | None]:
         parts = text.split()
+        if not parts:
+            return None, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /diary [7d] \u0438\u043b\u0438 /stats [7d]"
+        command_token = parts[0].split("@", 1)[0].lower()
+        default_days = 7 if command_token == "/stats" else 1
+        usage = "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /stats [7d]" if command_token == "/stats" else "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /diary [7d]"
         if len(parts) <= 1:
-            return 1, None
+            return default_days, None
         if len(parts) == 2 and parts[1].lower() == "7d":
             return 7, None
-        return None, "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /diary [7d] \u0438\u043b\u0438 /stats [7d]"
+        return None, usage
 
     @staticmethod
     def _parse_nutrition_diary_undo_args(text: str) -> str | None:
@@ -6115,12 +6158,15 @@ class TelegramAdapter(BasePlatformAdapter):
             kind="command",
             public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
         )
+        if await self._maybe_reject_healbite_compound_input(msg):
+            return
         if not self._should_process_message(msg, is_command=True):
             return
         command = self._healbite_command_from_text(msg.text)
         if await self._maybe_handle_healbite_start_command(msg):
             return
-        if await self._dispatch_healbite_keyboard_action(msg, action=command):
+        dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
+        if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
             return
         if await self._maybe_handle_memory_stats_command(msg):
             return

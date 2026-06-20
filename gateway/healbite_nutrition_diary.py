@@ -504,6 +504,8 @@ _LEGACY_MEAL_NAME_ALIASES = {
     "dried fish and meat jerky platter": "\u0412\u044f\u043b\u0435\u043d\u0430\u044f \u0440\u044b\u0431\u0430 \u0438 \u043c\u044f\u0441\u043d\u044b\u0435 \u0441\u043d\u0435\u043a\u0438",
     "vegetable crudites platter with crackers and olives": "\u041e\u0432\u043e\u0449\u043d\u0430\u044f \u0442\u0430\u0440\u0435\u043b\u043a\u0430 \u0441 \u043a\u0440\u0435\u043a\u0435\u0440\u0430\u043c\u0438 \u0438 \u043e\u043b\u0438\u0432\u043a\u0430\u043c\u0438",
     "assorted dried meat and fish platter": "\u0410\u0441\u0441\u043e\u0440\u0442\u0438 \u0438\u0437 \u0432\u044f\u043b\u0435\u043d\u043e\u0433\u043e \u043c\u044f\u0441\u0430 \u0438 \u0440\u044b\u0431\u044b",
+    "traditional yeast (100g)": "\u0422\u0440\u0430\u0434\u0438\u0446\u0438\u043e\u043d\u043d\u044b\u0435 \u0434\u0440\u043e\u0436\u0436\u0438 (100 \u0433)",
+    "asian beef salad": "\u0410\u0437\u0438\u0430\u0442\u0441\u043a\u0438\u0439 \u0441\u0430\u043b\u0430\u0442 \u0441 \u0433\u043e\u0432\u044f\u0434\u0438\u043d\u043e\u0439",
 }
 
 
@@ -1570,6 +1572,20 @@ def format_pending_meal_wait_reply() -> str:
 
 def format_pending_meal_expired_reply() -> str:
     return "⌛ Подтверждение истекло. Отправь фото ещё раз."
+
+
+def load_nutrition_targets(
+    db_path: str | Path | None = None,
+    *,
+    user_id: int,
+) -> NutritionTargets:
+    resolved_db_path = resolve_healbite_db_path(db_path)
+    conn = sqlite3.connect(resolved_db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        return _load_nutrition_targets(conn, user_id=int(user_id))
+    finally:
+        conn.close()
 
 
 def compute_nutrition_diary_summary(

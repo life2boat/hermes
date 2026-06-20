@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from gateway.healbite_nutrition_diary import resolve_healbite_db_path
+from gateway.healbite_nutrition_diary import load_nutrition_targets, resolve_healbite_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +212,7 @@ class HealBiteUserProfileStore:
             ).fetchone()
         if row is None:
             return None
-        return HealBiteUserProfile(
+        profile = HealBiteUserProfile(
             user_id=int(row["user_id"]),
             username=str(row["username"] or ""),
             daily_kcal_target=_to_float(row["daily_kcal_target"]),
@@ -221,6 +221,12 @@ class HealBiteUserProfileStore:
             daily_carbs_target=_to_float(row["daily_carbs_target"]),
             created_at=str(row["created_at"] or ""),
         )
+        effective_targets = load_nutrition_targets(self.db_path, user_id=int(user_id))
+        profile.daily_kcal_target = effective_targets.calories_kcal
+        profile.daily_protein_target = effective_targets.protein_g
+        profile.daily_fat_target = effective_targets.fat_g
+        profile.daily_carbs_target = effective_targets.carbs_g
+        return profile
 
     def upsert_user_profile(
         self,

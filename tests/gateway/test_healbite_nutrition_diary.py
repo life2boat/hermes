@@ -492,6 +492,8 @@ def test_localized_meal_display_name_uses_legacy_alias_map():
     assert localized_meal_display_name("Borscht with Sour Cream and Dill") == "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c"
     assert localized_meal_display_name("  Buckwheat with Tomatoes and Herbs  ") == "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e"
     assert localized_meal_display_name("Buckwheat Kasha with Tomatoes and Herbs") == "\u0413\u0440\u0435\u0447\u043d\u0435\u0432\u0430\u044f \u043a\u0430\u0448\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e"
+    assert localized_meal_display_name("Traditional Yeast (100g)") == "\u0422\u0440\u0430\u0434\u0438\u0446\u0438\u043e\u043d\u043d\u044b\u0435 \u0434\u0440\u043e\u0436\u0436\u0438 (100 \u0433)"
+    assert localized_meal_display_name("Asian Beef Salad") == "\u0410\u0437\u0438\u0430\u0442\u0441\u043a\u0438\u0439 \u0441\u0430\u043b\u0430\u0442 \u0441 \u0433\u043e\u0432\u044f\u0434\u0438\u043d\u043e\u0439"
 
 
 def test_localized_meal_display_name_prefers_explicit_user_facing_fields():
@@ -523,10 +525,12 @@ def test_diary_report_localizes_legacy_names_without_touching_unknown_english():
         "entries": [
             {"meal_name": "Borscht with Sour Cream and Dill", "calories_kcal": 251},
             {"meal_name": "Buckwheat with Tomatoes and Herbs", "calories_kcal": 236},
+            {"meal_name": "Traditional Yeast (100g)", "calories_kcal": 110},
+            {"meal_name": "Asian Beef Salad", "calories_kcal": 320},
             {"meal_name": "Unknown Bowl Deluxe", "calories_kcal": 199},
         ],
-        "entry_count": 3,
-        "calories_kcal": 686,
+        "entry_count": 5,
+        "calories_kcal": 1116,
         "protein_g": 0,
         "fat_g": 0,
         "carbs_g": 0,
@@ -537,9 +541,13 @@ def test_diary_report_localizes_legacy_names_without_touching_unknown_english():
 
     assert "\u0411\u043e\u0440\u0449 \u0441\u043e \u0441\u043c\u0435\u0442\u0430\u043d\u043e\u0439 \u0438 \u0443\u043a\u0440\u043e\u043f\u043e\u043c" in report
     assert "\u0413\u0440\u0435\u0447\u043a\u0430 \u0441 \u043f\u043e\u043c\u0438\u0434\u043e\u0440\u0430\u043c\u0438 \u0438 \u0437\u0435\u043b\u0435\u043d\u044c\u044e" in report
+    assert "\u0422\u0440\u0430\u0434\u0438\u0446\u0438\u043e\u043d\u043d\u044b\u0435 \u0434\u0440\u043e\u0436\u0436\u0438 (100 \u0433)" in report
+    assert "\u0410\u0437\u0438\u0430\u0442\u0441\u043a\u0438\u0439 \u0441\u0430\u043b\u0430\u0442 \u0441 \u0433\u043e\u0432\u044f\u0434\u0438\u043d\u043e\u0439" in report
     assert "Unknown Bowl Deluxe" in report
     assert "Borscht with Sour Cream and Dill" not in report
     assert "Buckwheat with Tomatoes and Herbs" not in report
+    assert "Traditional Yeast (100g)" not in report
+    assert "Asian Beef Salad" not in report
     assert "????" not in report
 
 
@@ -1279,6 +1287,78 @@ async def test_telegram_diary_command_routes_correctly(monkeypatch):
     assert "\u041a\u0430\u043b\u043e\u0440\u0438\u0438" in kwargs["text"]
     assert "????" not in kwargs["text"]
     assert kwargs["parse_mode"] is not None
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_stats_command_defaults_to_7d(monkeypatch):
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_message_with_thread_fallback = AsyncMock()
+    adapter._ensure_forum_commands = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    captured_days: list[int] = []
+
+    def _fake_summary(*args, **kwargs):
+        captured_days.append(kwargs.get("days", 1))
+        return {
+            "entries": [{"meal_name": "Суп", "calories_kcal": 300, "protein_g": 12, "fat_g": 8, "carbs_g": 40}],
+            "entry_count": 1,
+            "calories_kcal": 2100,
+            "protein_g": 84,
+            "fat_g": 56,
+            "carbs_g": 280,
+            "days": kwargs.get("days", 1),
+        }
+
+    monkeypatch.setattr("gateway.platforms.telegram.compute_nutrition_diary_summary", _fake_summary)
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_nutrition_diary_report",
+        lambda summary: f"📊 <b>Твоя статистика за {summary['days']} дней:</b>\n📈 <b>В среднем за день:</b>",
+    )
+
+    msg = SimpleNamespace(
+        text="/stats",
+        chat=SimpleNamespace(id=221, type="private"),
+        from_user=SimpleNamespace(id=221),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=21, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "В среднем за день" in kwargs["text"]
+    assert captured_days == [7]
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_stats_invalid_argument_returns_usage(monkeypatch):
+    adapter = object.__new__(TelegramAdapter)
+    adapter._send_message_with_thread_fallback = AsyncMock()
+    adapter._ensure_forum_commands = AsyncMock()
+    adapter.handle_message = AsyncMock()
+    adapter._should_process_message = lambda msg, is_command=False: True
+
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.compute_nutrition_diary_summary",
+        lambda *args, **kwargs: pytest.fail("stats summary should not run for invalid args"),
+    )
+
+    msg = SimpleNamespace(
+        text="/stats abc",
+        chat=SimpleNamespace(id=223, type="private"),
+        from_user=SimpleNamespace(id=223),
+        message_thread_id=None,
+    )
+    update = SimpleNamespace(update_id=22, message=msg, effective_message=None)
+
+    await adapter._handle_command(update, SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Использование: /stats [7d]" == kwargs["text"]
     adapter.handle_message.assert_not_awaited()
 
 

@@ -144,6 +144,38 @@ def test_user_profile_store_updates_existing_legacy_user_target_from_prefixed_re
     assert saved == (1950.0,)
 
 
+def test_user_profile_store_uses_profile_table_target_fallback(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE profiles (
+                telegram_id INTEGER PRIMARY KEY,
+                calories_limit REAL
+            );
+            INSERT INTO users (telegram_id, username, daily_kcal_target)
+            VALUES (104, 'legacy-user', NULL);
+            INSERT INTO profiles (telegram_id, calories_limit)
+            VALUES (104, 1950);
+            """
+        )
+
+    store = HealBiteUserProfileStore(db_path=db_path)
+    profile = store.get_user_profile(104)
+
+    assert profile is not None
+    assert profile.daily_kcal_target == 1950
+
+
 def test_format_healbite_profile_report_handles_missing_profile():
     report = format_healbite_profile_report(None)
 
@@ -290,6 +322,42 @@ async def test_telegram_start_for_new_user_starts_onboarding(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_telegram_start_for_existing_user_without_target_starts_onboarding(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO users (telegram_id, username, daily_kcal_target)
+            VALUES (709, 'oleg', NULL);
+            """
+        )
+
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    store = HealBiteUserProfileStore(db_path=db_path)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    await adapter._handle_command(_make_update("/start", user_id=709), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "норму калорий" in kwargs["text"].casefold()
+    assert store.get_onboarding_state(709) is not None
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_telegram_profile_command_renders_saved_profile(tmp_path, monkeypatch):
     adapter = _make_adapter()
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
@@ -358,6 +426,53 @@ async def test_telegram_rich_menu_profile_button_routes_to_profile(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_telegram_profile_button_and_slash_use_same_effective_target_fallback(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE profiles (
+                telegram_id INTEGER PRIMARY KEY,
+                calories_limit REAL
+            );
+            INSERT INTO users (telegram_id, username, daily_kcal_target)
+            VALUES (715, 'oleg', NULL);
+            INSERT INTO profiles (telegram_id, calories_limit)
+            VALUES (715, 1950);
+            """
+        )
+
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    store = HealBiteUserProfileStore(db_path=db_path)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    await adapter._handle_command(_make_update("/profile", user_id=715), SimpleNamespace())
+    slash_text = adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+
+    adapter._send_message_with_thread_fallback.reset_mock()
+    await adapter._handle_text_message(_make_update("👤 Мой профиль", user_id=715), SimpleNamespace())
+    button_text = adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+
+    assert "1950 ккал" in slash_text
+    assert button_text == slash_text
+    adapter.handle_message.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_telegram_rich_menu_weekly_stats_button_routes_to_stats_7d(monkeypatch):
     adapter = _make_adapter()
     adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
@@ -403,6 +518,43 @@ async def test_telegram_rich_menu_placeholder_button_returns_stub():
     assert kwargs["text"] == "В разработке"
     adapter.handle_message.assert_not_awaited()
     adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_multiline_button_input_gets_local_single_action_reply():
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+
+    await adapter._handle_text_message(
+        _make_update("👤 Мой профиль\n📋 Меню на неделю", user_id=716),
+        SimpleNamespace(),
+    )
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "одну команду" in kwargs["text"]
+    adapter.handle_message.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_multiline_command_input_gets_local_single_action_reply():
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+
+    await adapter._handle_command(
+        _make_update("/start\n/profile", user_id=717),
+        SimpleNamespace(),
+    )
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "одну команду" in kwargs["text"]
+    adapter.handle_message.assert_not_awaited()
 
 
 def test_healbite_reply_keyboard_rows_match_rich_layout():

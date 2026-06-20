@@ -4,7 +4,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -289,6 +289,9 @@ def _make_adapter() -> TelegramAdapter:
     adapter._cache_image_document_message_to_event = AsyncMock()
     adapter._link_preview_kwargs = lambda: {}
     adapter._healbite_main_menu_keyboard = lambda: None
+    adapter._should_observe_unmentioned_group_message = lambda msg: False
+    adapter._observe_unmentioned_group_message = Mock()
+    adapter.config = SimpleNamespace(extra={})
     return adapter
 
 
@@ -565,3 +568,122 @@ def test_healbite_reply_keyboard_rows_match_rich_layout():
         ["👨‍👩‍👧 Семья", "📈 Отчет за неделю"],
         ["⚙️ Ограничения", "❓ Помощь"],
     ]
+
+
+
+@pytest.mark.asyncio
+async def test_telegram_profile_command_logs_profile_route(tmp_path, monkeypatch, caplog):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.upsert_user_profile(user_id=720, username="oleg", daily_kcal_target=1950)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    with caplog.at_level("DEBUG", logger="gateway.platforms.telegram"):
+        await adapter._handle_command(_make_update("/profile", user_id=720), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "healbite_route_selected" in joined
+    assert "route=profile" in joined
+    assert "720" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_stats_command_logs_stats_route(monkeypatch, caplog):
+    adapter = _make_adapter()
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.compute_nutrition_diary_summary",
+        lambda **kwargs: {"entries": [], "entry_count": 0, "calories_kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "days": kwargs.get("days", 7)},
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_nutrition_diary_report",
+        lambda summary: "weekly report" if summary["days"] == 7 else "daily report",
+    )
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_command(_make_update("/stats 7d", user_id=721), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "healbite_route_selected" in joined
+    assert "route=stats" in joined
+    assert "721" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_keyboard_action_logs_safe_button_label(tmp_path, monkeypatch, caplog):
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.upsert_user_profile(user_id=722, username="oleg", daily_kcal_target=1950)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update("👤 Мой профиль", user_id=722), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "healbite_route_selected" in joined
+    assert "route=keyboard_action" in joined
+    assert "action=👤 Мой профиль" in joined
+    assert "722" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_multiline_rejection_logs_marker(caplog):
+    adapter = _make_adapter()
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update("/profile\n/diary", user_id=723), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "route=multiline_rejection" in joined
+    assert "/profile" not in joined
+    assert "/diary" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_onboarding_reply_logs_marker(tmp_path, monkeypatch, caplog):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=724, username="oleg")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update("2000", user_id=724), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "route=onboarding_reply" in joined
+    assert "724" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_generic_lane_text_logs_marker(caplog):
+    adapter = _make_adapter()
+
+    with caplog.at_level("DEBUG", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update("привет", user_id=725), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "route=generic_lane" in joined
+    assert "lane=text" in joined
+    assert "привет" not in joined
+
+
+@pytest.mark.asyncio
+async def test_telegram_public_lane_blocked_logs_marker_for_new_user(tmp_path, monkeypatch, caplog):
+    adapter = _make_adapter()
+    adapter._should_process_message = lambda msg, is_command=False: False
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update("что дальше", user_id=726), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "route=public_lane_blocked" in joined
+    assert "lane=healbite_public" in joined
+    assert "result=missing_profile" in joined
+    assert "что дальше" not in joined
+    assert "726" not in joined

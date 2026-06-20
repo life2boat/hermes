@@ -17,7 +17,10 @@ from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
     format_healbite_profile_report,
 )
-from gateway.platforms.telegram import TelegramAdapter
+from gateway.platforms.telegram import (
+    HEALBITE_REPLY_KEYBOARD_ROWS,
+    TelegramAdapter,
+)
 
 
 def _build_record(*, meal_name: str, calories_kcal: float, protein_g: float, fat_g: float, carbs_g: float):
@@ -98,6 +101,47 @@ def test_user_profile_store_reuses_legacy_users_table_schema(tmp_path):
 
     assert "daily_kcal_target" in columns
     assert saved == (102, 1850.0)
+
+
+def test_user_profile_store_updates_existing_legacy_user_target_from_prefixed_reply(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                name TEXT,
+                access_status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL
+            );
+            INSERT INTO users (telegram_id, username, daily_kcal_target)
+            VALUES (103, 'legacy-user', NULL);
+            """
+        )
+
+    store = HealBiteUserProfileStore(db_path=db_path)
+    store.begin_onboarding(user_id=103, username="legacy-user")
+    completed = store.handle_onboarding_reply(user_id=103, text="б 1950", username="legacy-user")
+
+    assert completed is not None
+    assert completed.status == "completed"
+    profile = store.get_user_profile(103)
+    assert profile is not None
+    assert profile.daily_kcal_target == 1950
+    with sqlite3.connect(db_path) as conn:
+        saved = conn.execute(
+            "SELECT daily_kcal_target FROM users WHERE telegram_id = ?",
+            (103,),
+        ).fetchone()
+    assert saved == (1950.0,)
 
 
 def test_format_healbite_profile_report_handles_missing_profile():
@@ -230,6 +274,10 @@ def _make_update(text: str, *, user_id: int = 1, username: str = "oleg") -> Simp
 @pytest.mark.asyncio
 async def test_telegram_start_for_new_user_starts_onboarding(tmp_path, monkeypatch):
     adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
 
@@ -270,3 +318,98 @@ async def test_telegram_onboarding_reply_saves_profile_and_short_circuits(tmp_pa
     assert store.get_user_profile(703) is not None
     assert store.get_onboarding_state(703) is None
     adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_onboarding_reply_accepts_prefixed_kcal_input(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=704, username="oleg")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    await adapter._handle_text_message(_make_update("б 1950", user_id=704), SimpleNamespace())
+
+    profile = store.get_user_profile(704)
+    assert profile is not None
+    assert profile.daily_kcal_target == 1950
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "1950 ккал" in kwargs["text"]
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_rich_menu_profile_button_routes_to_profile(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.upsert_user_profile(user_id=705, username="oleg", daily_kcal_target=2000)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    await adapter._handle_text_message(_make_update("👤 Мой профиль", user_id=705), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "👤 Профиль" in kwargs["text"]
+    assert "2000 ккал" in kwargs["text"]
+    adapter.handle_message.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_rich_menu_weekly_stats_button_routes_to_stats_7d(monkeypatch):
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    captured: dict[str, int] = {}
+
+    def fake_compute_nutrition_diary_summary(*, user_id: int, days: int):
+        captured["user_id"] = user_id
+        captured["days"] = days
+        return object()
+
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.compute_nutrition_diary_summary",
+        fake_compute_nutrition_diary_summary,
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.format_nutrition_diary_report",
+        lambda summary: "weekly-report",
+    )
+
+    await adapter._handle_text_message(_make_update("📈 Отчет за неделю", user_id=706), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert kwargs["text"] == "weekly-report"
+    assert captured == {"user_id": 706, "days": 7}
+    adapter.handle_message.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_telegram_rich_menu_placeholder_button_returns_stub():
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+
+    await adapter._handle_text_message(_make_update("💧 Трекер воды", user_id=707), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert kwargs["text"] == "В разработке"
+    adapter.handle_message.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_awaited()
+
+
+def test_healbite_reply_keyboard_rows_match_rich_layout():
+    assert HEALBITE_REPLY_KEYBOARD_ROWS == [
+        ["👤 Мой профиль", "🍎 Дневник еды"],
+        ["📋 Меню на неделю", "🛒 Список покупок"],
+        ["⚖️ Трекер веса", "💧 Трекер воды"],
+        ["👨‍👩‍👧 Семья", "📈 Отчет за неделю"],
+        ["⚙️ Ограничения", "❓ Помощь"],
+    ]

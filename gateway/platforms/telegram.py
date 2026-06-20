@@ -145,15 +145,25 @@ def _vision_size_bucket(size_bytes: Any) -> str:
 
 MAX_COMMANDS_PER_SCOPE = 30
 HEALBITE_REPLY_KEYBOARD_ROWS = [
-    ["Дневник", "Статистика"],
-    ["Настройки", "Помощь"],
+    ["👤 Мой профиль", "🍎 Дневник еды"],
+    ["📋 Меню на неделю", "🛒 Список покупок"],
+    ["⚖️ Трекер веса", "💧 Трекер воды"],
+    ["👨‍👩‍👧 Семья", "📈 Отчет за неделю"],
+    ["⚙️ Ограничения", "❓ Помощь"],
 ]
 HEALBITE_REPLY_KEYBOARD_ACTIONS = {
-    "Дневник": "/menu",
-    "Статистика": "/status",
-    "Настройки": "/profile",
-    "Помощь": "/help",
+    "👤 Мой профиль": "/profile",
+    "🍎 Дневник еды": "/diary",
+    "📋 Меню на неделю": "__placeholder__:weekly_menu",
+    "🛒 Список покупок": "__placeholder__:shopping_list",
+    "⚖️ Трекер веса": "__placeholder__:weight_tracker",
+    "💧 Трекер воды": "__placeholder__:water_tracker",
+    "👨‍👩‍👧 Семья": "__placeholder__:family",
+    "📈 Отчет за неделю": "/stats 7d",
+    "⚙️ Ограничения": "__placeholder__:restrictions",
+    "❓ Помощь": "__placeholder__:help",
 }
+HEALBITE_PLACEHOLDER_REPLY = "В разработке"
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 
 
@@ -5682,8 +5692,13 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
-    async def _maybe_handle_healbite_profile_command(self, msg: Message) -> bool:
-        text = (getattr(msg, "text", None) or "").strip()
+    async def _maybe_handle_healbite_profile_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/profile":
             return False
@@ -5756,6 +5771,43 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    async def _send_healbite_placeholder_reply(self, msg: Message) -> None:
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=HEALBITE_PLACEHOLDER_REPLY,
+            message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="menu_placeholder",
+            outcome="coming_soon",
+        )
+
+    async def _dispatch_healbite_keyboard_action(
+        self,
+        msg: Message,
+        *,
+        action: str,
+    ) -> bool:
+        if not action:
+            return False
+        if action.startswith("__placeholder__:"):
+            await self._send_healbite_placeholder_reply(msg)
+            return True
+        if action == "/menu":
+            await self._send_healbite_menu_message(msg, command=action)
+            return True
+        if action == "/profile":
+            return await self._maybe_handle_healbite_profile_command(msg, text_override=action)
+        if action in {"/diary", "/stats", "/stats 7d"}:
+            return await self._maybe_handle_nutrition_diary_command(msg, text_override=action)
+        if action in {"/undo_meal", "/diary_undo"}:
+            return await self._maybe_handle_nutrition_diary_undo_command(msg, text_override=action)
+        return False
+
     async def _maybe_handle_healbite_menu_button(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> bool:
@@ -5763,20 +5815,15 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return False
-        command = self._healbite_command_from_text(msg.text)
-        if command not in HEALBITE_REPLY_KEYBOARD_ACTIONS.values():
+        action = self._healbite_command_from_text(msg.text)
+        if not action:
             return False
-        if command == "/menu":
-            await self._send_healbite_menu_message(msg, command=command)
+        if action.startswith("__placeholder__:"):
+            await self._send_healbite_placeholder_reply(msg)
             return True
         if not self._should_process_message(msg, is_command=True):
             return True
-        await self._ensure_forum_commands(msg)
-        event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
-        event.text = self._clean_bot_trigger_text(command)
-        event = self._apply_telegram_group_observe_attribution(event)
-        await self.handle_message(event)
-        return True
+        return await self._dispatch_healbite_keyboard_action(msg, action=action)
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
@@ -5967,8 +6014,13 @@ class TelegramAdapter(BasePlatformAdapter):
             return None
         return "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /undo_meal \u0438\u043b\u0438 /diary_undo"
 
-    async def _maybe_handle_nutrition_diary_command(self, msg: Message) -> bool:
-        text = (getattr(msg, "text", None) or "").strip()
+    async def _maybe_handle_nutrition_diary_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {"/diary", "/stats"}:
             return False
@@ -6006,8 +6058,13 @@ class TelegramAdapter(BasePlatformAdapter):
         await self._send_message_with_thread_fallback(**kwargs)
         return True
 
-    async def _maybe_handle_nutrition_diary_undo_command(self, msg: Message) -> bool:
-        text = (getattr(msg, "text", None) or "").strip()
+    async def _maybe_handle_nutrition_diary_undo_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {"/undo_meal", "/diary_undo"}:
             return False
@@ -6063,12 +6120,11 @@ class TelegramAdapter(BasePlatformAdapter):
         command = self._healbite_command_from_text(msg.text)
         if await self._maybe_handle_healbite_start_command(msg):
             return
-        if command == "/menu":
-            await self._send_healbite_menu_message(msg, command=command)
-            return
-        if await self._maybe_handle_healbite_profile_command(msg):
+        if await self._dispatch_healbite_keyboard_action(msg, action=command):
             return
         if await self._maybe_handle_memory_stats_command(msg):
+            return
+        if await self._maybe_handle_healbite_profile_command(msg):
             return
         if await self._maybe_handle_nutrition_diary_undo_command(msg):
             return

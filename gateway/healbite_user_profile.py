@@ -234,46 +234,63 @@ class HealBiteUserProfileStore:
         created_at: str | None = None,
     ) -> HealBiteUserProfile:
         timestamp = created_at or _sqlite_timestamp()
+        normalized_user_id = int(user_id)
+        normalized_username = (username or "").strip()
         with self._connect() as conn:
             identity_column = self._users_identity_column(conn)
             user_columns = self._user_columns(conn)
-            insert_columns = [identity_column]
-            insert_values: list[Any] = [int(user_id)]
-            update_clauses: list[str] = []
+            existing_row = conn.execute(
+                f"SELECT 1 FROM {USERS_TABLE} WHERE {identity_column} = ? LIMIT 1",
+                (normalized_user_id,),
+            ).fetchone()
 
-            if "username" in user_columns:
-                insert_columns.append("username")
-                insert_values.append((username or "").strip())
-                update_clauses.append("username = excluded.username")
-            for field_name, field_value in (
-                ("daily_kcal_target", daily_kcal_target),
-                ("daily_protein_target", daily_protein_target),
-                ("daily_fat_target", daily_fat_target),
-                ("daily_carbs_target", daily_carbs_target),
-            ):
-                if field_name in user_columns:
-                    insert_columns.append(field_name)
-                    insert_values.append(field_value)
-                    update_clauses.append(
-                        f"{field_name} = COALESCE(excluded.{field_name}, {USERS_TABLE}.{field_name})"
+            if existing_row is not None:
+                update_clauses: list[str] = []
+                update_values: list[Any] = []
+                if "username" in user_columns and normalized_username:
+                    update_clauses.append("username = ?")
+                    update_values.append(normalized_username)
+                for field_name, field_value in (
+                    ("daily_kcal_target", daily_kcal_target),
+                    ("daily_protein_target", daily_protein_target),
+                    ("daily_fat_target", daily_fat_target),
+                    ("daily_carbs_target", daily_carbs_target),
+                ):
+                    if field_name in user_columns and field_value is not None:
+                        update_clauses.append(f"{field_name} = ?")
+                        update_values.append(field_value)
+                if "updated_at" in user_columns:
+                    update_clauses.append("updated_at = CURRENT_TIMESTAMP")
+                if update_clauses:
+                    update_values.append(normalized_user_id)
+                    conn.execute(
+                        f"UPDATE {USERS_TABLE} SET {', '.join(update_clauses)} WHERE {identity_column} = ?",
+                        tuple(update_values),
                     )
-            if "created_at" in user_columns:
-                insert_columns.append("created_at")
-                insert_values.append(timestamp)
-            if "updated_at" in user_columns:
-                update_clauses.append("updated_at = CURRENT_TIMESTAMP")
+            else:
+                insert_columns = [identity_column]
+                insert_values: list[Any] = [normalized_user_id]
 
-            placeholders = ", ".join("?" for _ in insert_columns)
-            conn.execute(
-                f"""
-                INSERT INTO {USERS_TABLE} (
-                    {", ".join(insert_columns)}
-                ) VALUES ({placeholders})
-                ON CONFLICT({identity_column}) DO UPDATE SET
-                    {", ".join(update_clauses)}
-                """,
-                tuple(insert_values),
-            )
+                if "username" in user_columns:
+                    insert_columns.append("username")
+                    insert_values.append(normalized_username)
+                for field_name, field_value in (
+                    ("daily_kcal_target", daily_kcal_target),
+                    ("daily_protein_target", daily_protein_target),
+                    ("daily_fat_target", daily_fat_target),
+                    ("daily_carbs_target", daily_carbs_target),
+                ):
+                    if field_name in user_columns:
+                        insert_columns.append(field_name)
+                        insert_values.append(field_value)
+                if "created_at" in user_columns:
+                    insert_columns.append("created_at")
+                    insert_values.append(timestamp)
+                placeholders = ", ".join("?" for _ in insert_columns)
+                conn.execute(
+                    f"INSERT INTO {USERS_TABLE} ({', '.join(insert_columns)}) VALUES ({placeholders})",
+                    tuple(insert_values),
+                )
         profile = self.get_user_profile(int(user_id))
         if profile is None:
             raise RuntimeError("Could not load saved HealBite user profile.")

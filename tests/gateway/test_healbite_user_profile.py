@@ -630,6 +630,32 @@ async def test_telegram_keyboard_action_logs_safe_button_label(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_telegram_placeholder_keyboard_action_logs_sanitized_marker(tmp_path, monkeypatch, caplog):
+    adapter = _make_adapter()
+    adapter._maybe_handle_healbite_menu_button = TelegramAdapter._maybe_handle_healbite_menu_button.__get__(
+        adapter,
+        TelegramAdapter,
+    )
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.upsert_user_profile(user_id=723, username="oleg", daily_kcal_target=1950)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+
+    placeholder_label = "\U0001f4cb \u041c\u0435\u043d\u044e \u043d\u0430 \u043d\u0435\u0434\u0435\u043b\u044e"
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._handle_text_message(_make_update(placeholder_label, user_id=723), SimpleNamespace())
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "healbite_route_selected" in joined
+    assert "route=keyboard_action" in joined
+    assert "action=placeholder" in joined
+    assert "lane=healbite_public" in joined
+    assert "result=allowed" in joined
+    assert placeholder_label not in joined
+    assert "723" not in joined
+
+
+@pytest.mark.asyncio
 async def test_telegram_multiline_rejection_logs_marker(caplog):
     adapter = _make_adapter()
 
@@ -654,6 +680,8 @@ async def test_telegram_onboarding_reply_logs_marker(tmp_path, monkeypatch, capl
 
     joined = "\n".join(record.getMessage() for record in caplog.records)
     assert "route=onboarding_reply" in joined
+    assert "result=completed" in joined
+    assert "2000" not in joined
     assert "724" not in joined
 
 

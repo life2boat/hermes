@@ -5876,15 +5876,22 @@ class TelegramAdapter(BasePlatformAdapter):
         normalized_action = action.split(maxsplit=1)[0].split("@", 1)[0].lower()
         original_text = (getattr(msg, "text", None) or "").strip()
         is_keyboard_action = bool(original_text and not original_text.startswith("/"))
+        if action.startswith("__placeholder__:"):
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="keyboard_action",
+                action="placeholder",
+                lane="healbite_public",
+                result="allowed",
+            )
+            await self._send_healbite_placeholder_reply(msg)
+            return True
         if is_keyboard_action:
             self._log_healbite_route_selected(
                 msg=msg,
                 route="keyboard_action",
                 action=self._healbite_safe_action_label(original_text),
             )
-        if action.startswith("__placeholder__:"):
-            await self._send_healbite_placeholder_reply(msg)
-            return True
         if normalized_action == "/menu":
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
@@ -5919,6 +5926,13 @@ class TelegramAdapter(BasePlatformAdapter):
         if not action:
             return False
         if action.startswith("__placeholder__:"):
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="keyboard_action",
+                action="placeholder",
+                lane="healbite_public",
+                result="allowed",
+            )
             await self._send_healbite_placeholder_reply(msg)
             return True
         if not self._should_process_message(msg, is_command=True):

@@ -274,7 +274,7 @@ def _make_adapter() -> TelegramAdapter:
     adapter._send_message_with_thread_fallback = AsyncMock()
     adapter._ensure_forum_commands = AsyncMock()
     adapter.handle_message = AsyncMock()
-    adapter._enqueue_text_event = AsyncMock()
+    adapter._enqueue_text_event = Mock()
     adapter._should_process_message = lambda msg, is_command=False: True
     adapter._maybe_handle_healbite_menu_button = AsyncMock(return_value=False)
     adapter._apply_telegram_group_observe_attribution = lambda event: event
@@ -321,7 +321,7 @@ async def test_telegram_start_for_new_user_starts_onboarding(tmp_path, monkeypat
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "норму калорий" in kwargs["text"].casefold()
     assert store.get_onboarding_state(701) is not None
-    adapter.handle_message.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -357,7 +357,7 @@ async def test_telegram_start_for_existing_user_without_target_starts_onboarding
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "норму калорий" in kwargs["text"].casefold()
     assert store.get_onboarding_state(709) is not None
-    adapter.handle_message.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -372,7 +372,7 @@ async def test_telegram_profile_command_renders_saved_profile(tmp_path, monkeypa
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "👤 Профиль" in kwargs["text"]
     assert "2000 ккал" in kwargs["text"]
-    adapter.handle_message.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -388,7 +388,7 @@ async def test_telegram_onboarding_reply_saves_profile_and_short_circuits(tmp_pa
     assert "Базовый профиль сохранён" in kwargs["text"]
     assert store.get_user_profile(703) is not None
     assert store.get_onboarding_state(703) is None
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -405,7 +405,7 @@ async def test_telegram_onboarding_reply_accepts_prefixed_kcal_input(tmp_path, m
     assert profile.daily_kcal_target == 1950
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "1950 ккал" in kwargs["text"]
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -424,8 +424,8 @@ async def test_telegram_rich_menu_profile_button_routes_to_profile(tmp_path, mon
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "👤 Профиль" in kwargs["text"]
     assert "2000 ккал" in kwargs["text"]
-    adapter.handle_message.assert_not_awaited()
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -471,8 +471,8 @@ async def test_telegram_profile_button_and_slash_use_same_effective_target_fallb
 
     assert "1950 ккал" in slash_text
     assert button_text == slash_text
-    adapter.handle_message.assert_not_awaited()
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -503,8 +503,8 @@ async def test_telegram_rich_menu_weekly_stats_button_routes_to_stats_7d(monkeyp
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert kwargs["text"] == "weekly-report"
     assert captured == {"user_id": 706, "days": 7}
-    adapter.handle_message.assert_not_awaited()
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -519,8 +519,8 @@ async def test_telegram_rich_menu_placeholder_button_returns_stub():
 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert kwargs["text"] == "В разработке"
-    adapter.handle_message.assert_not_awaited()
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -538,8 +538,8 @@ async def test_telegram_multiline_button_input_gets_local_single_action_reply():
 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "одну команду" in kwargs["text"]
-    adapter.handle_message.assert_not_awaited()
-    adapter._enqueue_text_event.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -557,7 +557,7 @@ async def test_telegram_multiline_command_input_gets_local_single_action_reply()
 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "одну команду" in kwargs["text"]
-    adapter.handle_message.assert_not_awaited()
+    adapter.handle_message.assert_not_called()
 
 
 def test_healbite_reply_keyboard_rows_match_rich_layout():

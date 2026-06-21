@@ -5621,6 +5621,27 @@ class TelegramAdapter(BasePlatformAdapter):
         return raw in {"1", "true", "yes", "on"}
 
     @staticmethod
+    def _healbite_public_lane_block_reason(msg: Message) -> str | None:
+        if not TelegramAdapter._healbite_public_onboarding_enabled():
+            return None
+        chat = getattr(msg, "chat", None)
+        chat_type = str(getattr(chat, "type", "") or "").strip().lower()
+        if chat_type not in {"private", "dm", "direct"}:
+            return None
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return "missing_user"
+        profile_store = get_default_healbite_user_profile()
+        if profile_store.get_onboarding_state(int(user_id)) is not None:
+            return "active_onboarding"
+        profile = profile_store.get_user_profile(int(user_id))
+        if profile is None:
+            return "missing_profile"
+        if profile.daily_kcal_target is None:
+            return "incomplete_profile"
+        return None
+
+    @staticmethod
     def _healbite_correlation_id(msg: Optional[Message], update_id: Optional[int] = None) -> str:
         if msg is None:
             seed = f"missing:{update_id or ''}"
@@ -5641,6 +5662,7 @@ class TelegramAdapter(BasePlatformAdapter):
         *,
         msg: Optional[Message] = None,
         update_id: Optional[int] = None,
+        level: int = logging.INFO,
         **fields: Any,
     ) -> None:
         corr = self._healbite_correlation_id(msg, update_id=update_id)
@@ -5649,18 +5671,42 @@ class TelegramAdapter(BasePlatformAdapter):
             if value is None or value == "":
                 continue
             parts.append(f"{key}={value}")
-        logger.info("[Telegram][%s] %s", marker, " ".join(parts))
+        logger.log(level, "[Telegram][%s] %s", marker, " ".join(parts))
+
+    def _log_healbite_route_selected(
+        self,
+        *,
+        route: str,
+        msg: Optional[Message] = None,
+        update_id: Optional[int] = None,
+        action: str | None = None,
+        lane: str | None = None,
+        result: str | None = None,
+        level: int = logging.INFO,
+    ) -> None:
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=msg,
+            update_id=update_id,
+            level=level,
+            route=route,
+            action=action,
+            lane=lane,
+            result=result,
+        )
+
+    @staticmethod
+    def _healbite_safe_action_label(text: str) -> str:
+        return " ".join((text or "").split())
 
     async def _maybe_handle_healbite_start_command(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/start":
             return False
-        self._log_healbite_marker(
-            "healbite_route_selected",
+        self._log_healbite_route_selected(
             msg=msg,
             route="start_command",
-            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
         )
 
         chat = getattr(msg, "chat", None)
@@ -5713,17 +5759,17 @@ class TelegramAdapter(BasePlatformAdapter):
         msg: Message,
         *,
         text_override: str | None = None,
+        emit_route_marker: bool = True,
     ) -> bool:
         text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/profile":
             return False
-        self._log_healbite_marker(
-            "healbite_route_selected",
-            msg=msg,
-            route="profile_command",
-            public_onboarding=str(self._healbite_public_onboarding_enabled()).lower(),
-        )
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="profile",
+            )
 
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -5779,11 +5825,10 @@ class TelegramAdapter(BasePlatformAdapter):
             text=reply.text,
             message_thread_id=getattr(msg, "message_thread_id", None),
         )
-        self._log_healbite_marker(
-            "healbite_reply_sent",
+        self._log_healbite_route_selected(
             msg=msg,
             route="onboarding_reply",
-            outcome=str(getattr(reply, "status", "completed") or "completed"),
+            result=str(getattr(reply, "status", "completed") or "completed"),
         )
         return True
 
@@ -5798,11 +5843,10 @@ class TelegramAdapter(BasePlatformAdapter):
             text=HEALBITE_SINGLE_ACTION_REPLY,
             message_thread_id=getattr(msg, "message_thread_id", None),
         )
-        self._log_healbite_marker(
-            "healbite_reply_sent",
+        self._log_healbite_route_selected(
             msg=msg,
-            route="compound_input_rejected",
-            outcome="single_action_required",
+            route="multiline_rejection",
+            result="single_action_required",
         )
         return True
 
@@ -5830,6 +5874,14 @@ class TelegramAdapter(BasePlatformAdapter):
         if not action:
             return False
         normalized_action = action.split(maxsplit=1)[0].split("@", 1)[0].lower()
+        original_text = (getattr(msg, "text", None) or "").strip()
+        is_keyboard_action = bool(original_text and not original_text.startswith("/"))
+        if is_keyboard_action:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="keyboard_action",
+                action=self._healbite_safe_action_label(original_text),
+            )
         if action.startswith("__placeholder__:"):
             await self._send_healbite_placeholder_reply(msg)
             return True
@@ -5837,11 +5889,23 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
         if normalized_action == "/profile":
-            return await self._maybe_handle_healbite_profile_command(msg, text_override=action)
+            return await self._maybe_handle_healbite_profile_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action in {"/diary", "/stats"}:
-            return await self._maybe_handle_nutrition_diary_command(msg, text_override=action)
+            return await self._maybe_handle_nutrition_diary_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action in {"/undo_meal", "/diary_undo"}:
-            return await self._maybe_handle_nutrition_diary_undo_command(msg, text_override=action)
+            return await self._maybe_handle_nutrition_diary_undo_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         return False
 
     async def _maybe_handle_healbite_menu_button(
@@ -5883,6 +5947,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if await self._maybe_handle_healbite_menu_button(update, context):
             return
         if not self._should_process_message(msg):
+            reason = self._healbite_public_lane_block_reason(msg)
+            if reason is not None:
+                self._log_healbite_route_selected(
+                    msg=msg,
+                    update_id=update.update_id,
+                    route="public_lane_blocked",
+                    lane="healbite_public",
+                    result=reason,
+                )
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
@@ -5908,11 +5981,12 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         event = self._apply_telegram_group_observe_attribution(event)
-        self._log_healbite_marker(
-            "healbite_route_selected",
+        self._log_healbite_route_selected(
             msg=msg,
             update_id=update.update_id,
-            route="gateway_text_dispatch",
+            route="generic_lane",
+            lane="text",
+            level=logging.DEBUG,
         )
         self._enqueue_text_event(event)
 
@@ -6062,11 +6136,17 @@ class TelegramAdapter(BasePlatformAdapter):
         msg: Message,
         *,
         text_override: str | None = None,
+        emit_route_marker: bool = True,
     ) -> bool:
         text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {"/diary", "/stats"}:
             return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="stats" if command_token == "/stats" else "diary",
+            )
 
         thread_id = getattr(msg, "message_thread_id", None)
         chat = getattr(msg, "chat", None)
@@ -6106,11 +6186,17 @@ class TelegramAdapter(BasePlatformAdapter):
         msg: Message,
         *,
         text_override: str | None = None,
+        emit_route_marker: bool = True,
     ) -> bool:
         text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {"/undo_meal", "/diary_undo"}:
             return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="diary_undo",
+            )
 
         thread_id = getattr(msg, "message_thread_id", None)
         chat = getattr(msg, "chat", None)
@@ -6161,6 +6247,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if await self._maybe_reject_healbite_compound_input(msg):
             return
         if not self._should_process_message(msg, is_command=True):
+            reason = self._healbite_public_lane_block_reason(msg)
+            if reason is not None:
+                self._log_healbite_route_selected(
+                    msg=msg,
+                    update_id=update.update_id,
+                    route="public_lane_blocked",
+                    lane="healbite_public",
+                    result=reason,
+                )
             return
         command = self._healbite_command_from_text(msg.text)
         if await self._maybe_handle_healbite_start_command(msg):
@@ -6181,11 +6276,12 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
         event = self._apply_telegram_group_observe_attribution(event)
-        self._log_healbite_marker(
-            "healbite_route_selected",
+        self._log_healbite_route_selected(
             msg=msg,
             update_id=update.update_id,
-            route="gateway_command_dispatch",
+            route="generic_lane",
+            lane="command",
+            level=logging.DEBUG,
         )
         await self.handle_message(event)
 

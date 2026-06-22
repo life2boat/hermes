@@ -42,9 +42,11 @@ def _mock_client_returning(content: str):
 
 def _patch_aux_client(content: str, *, model: str = "test-model"):
     client = _mock_client_returning(content)
-    return patch(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        return_value=(client, model),
+    response = _fake_aux_response(content)
+    return patch.multiple(
+        "agent.auxiliary_client",
+        get_text_auxiliary_client=MagicMock(return_value=(client, model)),
+        safe_call_llm=MagicMock(return_value=response),
     )
 
 

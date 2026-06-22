@@ -22,12 +22,32 @@ from collections.abc import Iterator
 import pytest
 
 IMAGE_TAG = os.environ.get("HERMES_TEST_IMAGE", "hermes-agent-harness:latest")
+_DOCKER_BUILD_TIMEOUT_SECONDS = max(300, int(os.environ.get("HERMES_DOCKER_BUILD_TIMEOUT", "1200")))
+_DOCKER_SUITE_TIMEOUT_SECONDS = max(_DOCKER_BUILD_TIMEOUT_SECONDS + 120, 180)
 
 
 def _docker_build_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("DOCKER_BUILDKIT", "1")
     return env
+
+
+def _docker_buildkit_probe() -> tuple[bool, str]:
+    if shutil.which("docker") is None:
+        return False, "docker CLI not found"
+    try:
+        version = subprocess.run(
+            ["docker", "buildx", "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, f"docker buildx probe failed: {exc}"
+    if version.returncode != 0:
+        detail = (version.stderr or version.stdout).strip()
+        return False, detail or "docker buildx unavailable"
+    return True, (version.stdout or version.stderr).strip()
 
 
 def _docker_available() -> bool:
@@ -49,7 +69,7 @@ def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
     skip_docker = pytest.mark.skip(
         reason="Docker not available or daemon not running",
     )
-    extend_timeout = pytest.mark.timeout(180)
+    extend_timeout = pytest.mark.timeout(_DOCKER_SUITE_TIMEOUT_SECONDS)
     for item in items:
         if "tests/docker/" not in str(item.fspath).replace(os.sep, "/"):
             continue
@@ -70,15 +90,31 @@ def built_image() -> str:
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", ".."),
     )
-    result = subprocess.run(
-        ["docker", "build", "-t", IMAGE_TAG, repo_root],
-        capture_output=True, text=True, timeout=1200, env=_docker_build_env(),
-    )
+    buildkit_ok, buildkit_detail = _docker_buildkit_probe()
+    if not buildkit_ok:
+        pytest.skip(f"Docker BuildKit unavailable for integration tests: {buildkit_detail}")
+    try:
+        result = subprocess.run(
+            ["docker", "build", "--progress=plain", "-t", IMAGE_TAG, repo_root],
+            capture_output=True,
+            text=True,
+            timeout=_DOCKER_BUILD_TIMEOUT_SECONDS,
+            env=_docker_build_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout_tail = (exc.stdout or "")[-2000:]
+        stderr_tail = (exc.stderr or "")[-2000:]
+        pytest.fail(
+            "docker build timed out after "
+            f"{_DOCKER_BUILD_TIMEOUT_SECONDS}s with BuildKit available. "
+            f"stdout_tail={stdout_tail!r} stderr_tail={stderr_tail!r}"
+        )
     if result.returncode != 0:
         stderr_tail = result.stderr[-2000:]
         buildkit_missing = (
             "requires BuildKit" in stderr_tail
             or "Install the buildx component" in stderr_tail
+            or "unknown command: docker buildx" in stderr_tail
         )
         if buildkit_missing:
             pytest.skip("Docker BuildKit unavailable for integration tests")

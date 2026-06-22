@@ -24,6 +24,12 @@ import pytest
 IMAGE_TAG = os.environ.get("HERMES_TEST_IMAGE", "hermes-agent-harness:latest")
 
 
+def _docker_build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("DOCKER_BUILDKIT", "1")
+    return env
+
+
 def _docker_available() -> bool:
     """Return True iff a docker CLI is on PATH and the daemon answers."""
     if shutil.which("docker") is None:
@@ -66,8 +72,16 @@ def built_image() -> str:
     )
     result = subprocess.run(
         ["docker", "build", "-t", IMAGE_TAG, repo_root],
-        capture_output=True, text=True, timeout=1200,
+        capture_output=True, text=True, timeout=1200, env=_docker_build_env(),
     )
+    if result.returncode != 0:
+        stderr_tail = result.stderr[-2000:]
+        buildkit_missing = (
+            "requires BuildKit" in stderr_tail
+            or "Install the buildx component" in stderr_tail
+        )
+        if buildkit_missing:
+            pytest.skip("Docker BuildKit unavailable for integration tests")
     assert result.returncode == 0, (
         f"docker build failed:\n{result.stderr[-2000:]}"
     )

@@ -101,6 +101,37 @@ def _redirect_image_cache(tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "image_cache")
 
 
+
+@pytest.fixture(autouse=True)
+def _isolate_healbite_diary_db(tmp_path, monkeypatch):
+    from gateway import healbite_nutrition_diary as diary_module
+
+    db_path = tmp_path / "healbite.db"
+    monkeypatch.setenv("HEALBITE_DB_PATH", str(db_path))
+    previous = diary_module._GLOBAL_DIARY
+    if previous is not None:
+        previous.close()
+    diary_module._GLOBAL_DIARY = None
+    try:
+        yield db_path
+    finally:
+        current = diary_module._GLOBAL_DIARY
+        if current is not None:
+            current.close()
+        diary_module._GLOBAL_DIARY = None
+
+
+
+
+def test_default_diary_db_path_is_isolated_to_tmp(_isolate_healbite_diary_db):
+    from gateway import healbite_nutrition_diary as diary_module
+
+    diary = diary_module.get_default_nutrition_diary()
+    assert str(diary.db_path).startswith(str(_isolate_healbite_diary_db.parent))
+    assert "/home/hermes" not in str(diary.db_path)
+
+
+
 @pytest.mark.asyncio
 async def test_photo_only_routes_to_vision_image_flow(adapter):
     msg = _make_message(photo=[_make_photo()])

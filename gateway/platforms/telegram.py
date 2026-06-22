@@ -102,6 +102,7 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import (
     format_healbite_profile_report,
     get_default_healbite_user_profile,
+    onboarding_keyboard_rows,
 )
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
@@ -5546,19 +5547,22 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
-    def _healbite_main_menu_keyboard(self) -> Optional[Any]:
-        if not TELEGRAM_AVAILABLE:
+    def _healbite_reply_keyboard(self, rows: list[list[str]] | None) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not rows:
             return None
-        rows = [
+        keyboard_rows = [
             [KeyboardButton(label) for label in button_row]
-            for button_row in HEALBITE_REPLY_KEYBOARD_ROWS
+            for button_row in rows
         ]
         return ReplyKeyboardMarkup(
-            rows,
+            keyboard_rows,
             resize_keyboard=True,
             one_time_keyboard=False,
             is_persistent=False,
         )
+
+    def _healbite_main_menu_keyboard(self) -> Optional[Any]:
+        return self._healbite_reply_keyboard(HEALBITE_REPLY_KEYBOARD_ROWS)
 
     @staticmethod
     def _healbite_command_from_text(text: str) -> str:
@@ -5723,19 +5727,30 @@ class TelegramAdapter(BasePlatformAdapter):
 
         profile_store = get_default_healbite_user_profile()
         profile = profile_store.get_user_profile(int(user_id))
+        edit_mode = text.casefold().startswith("/start edit")
         if (
             profile is None
             or profile.daily_kcal_target is None
             or profile_store.get_onboarding_state(int(user_id)) is not None
+            or edit_mode
         ):
             onboarding_text = profile_store.begin_onboarding(
                 user_id=int(user_id),
                 username=self._healbite_sender_username(msg),
+                edit_mode=edit_mode,
             )
+            current_profile = profile_store.get_user_profile(int(user_id))
+            current_state = profile_store.get_onboarding_state(int(user_id))
             await self._send_message_with_thread_fallback(
                 chat_id=chat_id,
                 text=onboarding_text,
                 message_thread_id=thread_id,
+                reply_markup=self._healbite_reply_keyboard(
+                    onboarding_keyboard_rows(
+                        current_state.step if current_state is not None else "",
+                        current_profile,
+                    )
+                ),
             )
             self._log_healbite_marker(
                 "healbite_reply_sent",
@@ -5820,10 +5835,19 @@ class TelegramAdapter(BasePlatformAdapter):
 
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
+        next_state = profile_store.get_onboarding_state(int(user_id))
+        next_profile = profile_store.get_user_profile(int(user_id))
+        keyboard_rows = onboarding_keyboard_rows(
+            next_state.step if next_state is not None else "",
+            next_profile,
+        )
+        if reply.status == "completed":
+            keyboard_rows = HEALBITE_REPLY_KEYBOARD_ROWS
         await self._send_message_with_thread_fallback(
             chat_id=chat_id,
             text=reply.text,
             message_thread_id=getattr(msg, "message_thread_id", None),
+            reply_markup=self._healbite_reply_keyboard(keyboard_rows),
         )
         self._log_healbite_route_selected(
             msg=msg,

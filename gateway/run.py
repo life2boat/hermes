@@ -2845,8 +2845,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             if timeout <= 0:
                 await adapter.disconnect()
-            elif result.status == "expired":
-                final_response = format_pending_meal_expired_reply()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
         except asyncio.TimeoutError:

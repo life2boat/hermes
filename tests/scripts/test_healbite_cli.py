@@ -641,3 +641,4 @@ def test_simulate_profile_message_renders_local_profile(tmp_path):
 
     assert "Ваш профиль" in report
     assert "2000 ккал" in report
+    assert "справочный характер" in report

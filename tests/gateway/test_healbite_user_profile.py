@@ -175,8 +175,8 @@ def test_format_healbite_profile_report_handles_missing_profile():
     assert "не настроена" in report
 
 
-def test_format_healbite_profile_report_renders_extended_profile():
-    store = HealBiteUserProfileStore(db_path=":memory:")
+def test_format_healbite_profile_report_renders_extended_profile(tmp_path):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=105, username="oleg")
     _complete_onboarding(store, user_id=105, username="oleg", manual_target="2000")
     report = format_healbite_profile_report(store.get_user_profile(105))
@@ -188,6 +188,102 @@ def test_format_healbite_profile_report_renders_extended_profile():
     assert "2000 ккал" in report
     assert "Белки" in report
     assert "Расчёт: Mifflin v1" in report
+    assert "справочный характер" in report
+
+
+
+def test_manual_target_survives_profile_change_and_recalculates_macros(tmp_path):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=106, username="oleg")
+    _complete_onboarding(store, user_id=106, username="oleg", manual_target="2000")
+
+    store.upsert_user_profile(user_id=106, username="oleg", weight_kg=90)
+    updated = store.recalculate_profile_targets(
+        user_id=106,
+        username="oleg",
+        target_source="manual",
+        manual_kcal_target=2000,
+    )
+
+    assert updated.manual_kcal_target == 2000
+    assert updated.target_source == "manual"
+    assert updated.daily_kcal_target == 2000
+    assert updated.daily_protein_g == 144
+    assert updated.daily_fat_g == 72
+    assert updated.daily_carbs_g == 194
+
+
+def test_manual_target_can_explicitly_return_to_calculated(tmp_path):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=107, username="oleg")
+    _complete_onboarding(store, user_id=107, username="oleg", manual_target="2000")
+
+    prompt = store.begin_onboarding(user_id=107, username="oleg", edit_mode=True)
+    assert "обновим профиль" in prompt.casefold()
+    for answer in (
+        "Мужской",
+        "35",
+        "180",
+        "85",
+        "Поддержание веса",
+        "Умеренная активность",
+        "Рассчитать автоматически",
+    ):
+        reply = store.handle_onboarding_reply(user_id=107, text=answer, username="oleg")
+        assert reply is not None
+
+    profile = store.get_user_profile(107)
+    assert profile is not None
+    assert profile.target_source == "calculated"
+    assert profile.daily_kcal_target == 2798
+    assert profile.daily_protein_g == 136
+    assert profile.daily_fat_g == 68
+    assert profile.daily_carbs_g == 410
+
+
+def test_incomplete_profile_keeps_manual_target_when_calculated_restore_fails(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            '''
+            CREATE TABLE users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                daily_kcal_target REAL,
+                daily_protein_target REAL,
+                daily_fat_target REAL,
+                daily_carbs_target REAL,
+                daily_protein_g REAL,
+                daily_fat_g REAL,
+                daily_carbs_g REAL,
+                target_source TEXT,
+                nutrition_calculation_version TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE profiles (
+                telegram_id INTEGER PRIMARY KEY,
+                calories_limit REAL,
+                goal TEXT,
+                activity TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO users (user_id, username, daily_kcal_target, target_source)
+            VALUES (108, 'oleg', 1950, 'manual');
+            INSERT INTO profiles (telegram_id, calories_limit, goal, activity)
+            VALUES (108, 1950, 'maintain', 'moderate');
+            '''
+        )
+
+    store = HealBiteUserProfileStore(db_path=db_path)
+    with pytest.raises(Exception):
+        store.recalculate_profile_targets(user_id=108, username="oleg", target_source="calculated")
+
+    profile = store.get_user_profile(108)
+    assert profile is not None
+    assert profile.manual_kcal_target == 1950
+    assert profile.daily_kcal_target == 1950
+    assert profile.target_source == "manual"
 
 
 def test_diary_reads_targets_from_new_macro_columns(tmp_path):
@@ -221,6 +317,32 @@ def test_diary_reads_targets_from_new_macro_columns(tmp_path):
     assert "1450 ккал / 1700 ккал" in report
     assert "95 г / 110 г" in report
     assert "45 г / 60 г" in report
+
+
+
+def test_profile_recalculation_log_is_pii_safe(tmp_path, caplog):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=109, username="secret-user")
+    _complete_onboarding(store, user_id=109, username="secret-user", manual_target="2000")
+
+    with caplog.at_level("INFO", logger="gateway.healbite_user_profile"):
+        store.recalculate_profile_targets(
+            user_id=109,
+            username="secret-user",
+            target_source="manual",
+            manual_kcal_target=2000,
+        )
+
+    assert "nutrition_profile_recalculated" in caplog.text
+    assert "target_source=manual" in caplog.text
+    assert "goal=maintain" in caplog.text
+    assert "activity_level=moderate" in caplog.text
+    assert "secret-user" not in caplog.text
+    assert "109" not in caplog.text
+    assert "35" not in caplog.text
+    assert "180" not in caplog.text
+    assert "85" not in caplog.text
+    assert "2000" not in caplog.text
 
 
 def _make_adapter() -> TelegramAdapter:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +23,8 @@ from gateway.healbite_nutrition_targets import (
 )
 
 logger = logging.getLogger(__name__)
+
+PROFILE_CALCULATION_DISCLAIMER = "Расчёт носит справочный характер и не заменяет консультацию врача или специалиста по питанию."
 
 USERS_TABLE = "users"
 PROFILES_TABLE = "profiles"
@@ -300,6 +301,12 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
             )
         if profile.target_source == "manual":
             lines.append("Источник цели: ручная калорийность сохранена.")
+        lines.extend(
+            [
+                "",
+                PROFILE_CALCULATION_DISCLAIMER,
+            ]
+        )
     else:
         lines.append("🔥 Суточная норма: —")
 
@@ -371,13 +378,8 @@ def profile_missing_fields(profile: HealBiteUserProfile | None) -> list[str]:
 
 class HealBiteUserProfileStore:
     def __init__(self, db_path: str | Path | None = None) -> None:
-        self._temp_db_dir: Path | None = None
-        if str(db_path) == ":memory:":
-            self._temp_db_dir = Path(tempfile.mkdtemp(prefix="healbite_profile_store_"))
-            self.db_path = self._temp_db_dir / "healbite.db"
-        else:
-            self.db_path = resolve_healbite_db_path(db_path)
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = resolve_healbite_db_path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:

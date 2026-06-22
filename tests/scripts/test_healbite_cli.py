@@ -639,5 +639,5 @@ def test_simulate_profile_message_renders_local_profile(tmp_path):
         db_path=db_path,
     )
 
-    assert "Профиль" in report
+    assert "Ваш профиль" in report
     assert "2000 ккал" in report

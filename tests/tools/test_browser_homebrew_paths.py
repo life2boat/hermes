@@ -187,6 +187,26 @@ class TestFindAgentBrowser:
             result = _find_agent_browser()
             assert result == "npx agent-browser"
 
+    def test_raises_when_not_found_without_lazy_install(self):
+        """Pure discovery mode must not invoke the lazy installer."""
+        original_path_exists = Path.exists
+
+        def mock_path_exists(self):
+            if "node_modules" in str(self) and "agent-browser" in str(self):
+                return False
+            return original_path_exists(self)
+
+        with patch("shutil.which", return_value=None), \
+             patch("os.path.isdir", return_value=False), \
+             patch.object(Path, "exists", mock_path_exists), \
+             patch(
+                 "tools.browser_tool._discover_homebrew_node_dirs",
+                 return_value=[],
+             ), \
+             patch("hermes_cli.dep_ensure.ensure_dependency", side_effect=AssertionError("lazy install should not run")):
+            with pytest.raises(FileNotFoundError, match="agent-browser CLI not found"):
+                _find_agent_browser(allow_install=False)
+
     def test_raises_when_not_found(self):
         """Should raise FileNotFoundError when nothing works."""
         original_path_exists = Path.exists
@@ -208,6 +228,16 @@ class TestFindAgentBrowser:
 
 
 class TestBrowserRequirements:
+    def test_check_browser_requirements_does_not_trigger_lazy_install(self, monkeypatch):
+        monkeypatch.setattr("tools.browser_tool._is_camofox_mode", lambda: False)
+        monkeypatch.setattr("tools.browser_tool._get_cdp_override", lambda: None)
+        monkeypatch.setattr(
+            "tools.browser_tool._find_agent_browser",
+            lambda *, allow_install=True: (_ for _ in ()).throw(FileNotFoundError("not found")),
+        )
+
+        assert check_browser_requirements() is False
+
     def test_cdp_override_does_not_require_agent_browser_cli(self, monkeypatch):
         monkeypatch.setenv("BROWSER_CDP_URL", "ws://127.0.0.1:9222/devtools/browser/test")
         monkeypatch.setattr("tools.browser_tool._is_camofox_mode", lambda: False)

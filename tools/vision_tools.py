@@ -646,8 +646,8 @@ def _safe_vision_failure_analysis(error: Exception) -> str:
         )
     if expected_kind == "request_rejected":
         return (
-            "The vision request could not be processed right now. "
-            "Please try again later or describe the meal in text."
+            "The provider rejected the image request. "
+            "Try sending a smaller, clearer image, or describe the meal in text."
         )
     return (
         "There was a problem with the request and the image could not be analyzed."

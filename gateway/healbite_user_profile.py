@@ -388,6 +388,11 @@ class HealBiteUserProfileStore:
             conn.execute(f"DELETE FROM {USER_ONBOARDING_TABLE} WHERE user_id = ?", (int(user_id),))
 
 
+def get_existing_healbite_user_profile() -> HealBiteUserProfileStore | None:
+    with _GLOBAL_PROFILE_LOCK:
+        return _GLOBAL_PROFILE_STORE
+
+
 def get_default_healbite_user_profile() -> HealBiteUserProfileStore:
     global _GLOBAL_PROFILE_STORE
     with _GLOBAL_PROFILE_LOCK:

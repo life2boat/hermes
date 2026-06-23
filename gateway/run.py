@@ -12320,13 +12320,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except (TypeError, ValueError):
             return None
 
+        choice = self._resolve_healbite_pending_meal_choice(message)
+        if choice is None:
+            return None
+
         diary = self._get_healbite_nutrition_diary()
         pending = diary.get_pending_meal(normalized_user_id, include_expired=True)
         if pending is None:
-            return None
-
-        choice = self._resolve_healbite_pending_meal_choice(message)
-        if choice is None:
             return None
 
         if diary.is_pending_meal_expired(pending):

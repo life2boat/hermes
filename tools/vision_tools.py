@@ -1564,7 +1564,7 @@ async def video_analyze_tool(
         if model:
             call_kwargs["model"] = model
 
-        response = await safe_async_call_llm(**call_kwargs)
+        response = await async_call_llm(**call_kwargs)
         analysis = extract_content_or_reasoning(response)
 
         if not analysis:

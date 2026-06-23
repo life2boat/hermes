@@ -406,7 +406,7 @@ def judge_goal(
             extract_content_or_reasoning,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
-            safe_call_llm,
+            safe_chat_completion_create,
         )
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
@@ -442,7 +442,8 @@ def judge_goal(
         )
 
     try:
-        resp = safe_call_llm(
+        resp = safe_chat_completion_create(
+            client,
             task="goal_judge",
             model=model,
             messages=[

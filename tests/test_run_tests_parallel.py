@@ -293,3 +293,36 @@ def test_file_present_reports_truly_missing(tmp_path, monkeypatch):
     f = tmp_path / "nope.py"
     monkeypatch.setattr(rtp.Path, "exists", lambda self: False)
     assert rtp._file_present(f, attempts=3, delay=0.0) is False
+
+
+
+def test_discover_files_skips_docker_subtree_by_default(tmp_path):
+    """Default discovery must keep tests/docker out of the sharded workflow."""
+    rtp = _load_runner_module()
+    root = tmp_path / "tests"
+    docker_dir = root / "docker"
+    unit_dir = root / "gateway"
+    docker_dir.mkdir(parents=True)
+    unit_dir.mkdir(parents=True)
+    docker_file = docker_dir / "test_skip_me.py"
+    keep_file = unit_dir / "test_keep_me.py"
+    docker_file.write_text("def test_skip():\n    assert True\n")
+    keep_file.write_text("def test_keep():\n    assert True\n")
+
+    files = rtp._discover_files([root])
+
+    assert keep_file in files
+    assert docker_file not in files
+
+
+def test_discover_files_allows_explicit_docker_root(tmp_path):
+    """Explicit tests/docker runs must still work for dedicated Docker workflows."""
+    rtp = _load_runner_module()
+    docker_dir = tmp_path / "tests" / "docker"
+    docker_dir.mkdir(parents=True)
+    docker_file = docker_dir / "test_docker_only.py"
+    docker_file.write_text("def test_docker_only():\n    assert True\n")
+
+    files = rtp._discover_files([docker_dir])
+
+    assert files == [docker_file]

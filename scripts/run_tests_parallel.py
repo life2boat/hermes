@@ -92,7 +92,6 @@ _LEGACY_PIPELINE_IGNORES = {
     "tests/tools/test_search_error_guard.py",
 }
 
-
 def _is_legacy_ignored(path: Path) -> bool:
     try:
         rel = path.resolve().relative_to(Path(__file__).resolve().parent.parent)
@@ -101,11 +100,6 @@ def _is_legacy_ignored(path: Path) -> bool:
     return rel.as_posix() in _LEGACY_PIPELINE_IGNORES
 
 
-#                        setup. The dedicated job sidesteps both costs.
-_SKIP_PARTS = {"integration", "e2e", "docker"    "tests/agent/test_model_metadata_ssl.py",
-    "tests/tools/test_managed_browserbase_and_modal.py",
-    "tests/tools/test_search_error_guard.py",
-}
 
 # Per-file wall-clock cap. Generous default — pytest-timeout still
 # enforces per-test caps inside each subprocess; this is just an outer

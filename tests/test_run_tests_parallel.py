@@ -326,3 +326,29 @@ def test_discover_files_allows_explicit_docker_root(tmp_path):
     files = rtp._discover_files([docker_dir])
 
     assert files == [docker_file]
+
+
+def test_load_durations_prunes_missing_files(tmp_path):
+    """Stale cache entries for deleted tests should be ignored on read."""
+    rtp = _load_runner_module()
+    cache_path = tmp_path / rtp._DURATIONS_FILE
+    tests_dir = tmp_path / "tests" / "plugins" / "web"
+    tests_dir.mkdir(parents=True)
+    existing = tests_dir / "test_web_search_provider_plugins.py"
+    existing.write_text("def test_ok():\n    assert True\n")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "tests/plugins/web/test_parallel_keyless_mcp.py": 1.276,
+                "tests/plugins/web/test_web_search_provider_plugins.py": 9.598,
+                "tests/plugins/web/not-a-number.py": "oops",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = rtp._load_durations(tmp_path)
+
+    assert loaded == {
+        "tests/plugins/web/test_web_search_provider_plugins.py": 9.598,
+    }

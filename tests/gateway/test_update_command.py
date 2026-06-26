@@ -37,6 +37,24 @@ def _make_runner():
     return runner
 
 
+def _patch_update_launch(monkeypatch, tmp_path):
+    """Prevent /update tests from launching the real detached updater."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    launched = []
+
+    class FakeProcess:
+        pid = None
+
+    def fake_popen(*args, **kwargs):
+        launched.append((args, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr("gateway.run._hermes_home", hermes_home)
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    return launched
+
+
 # ---------------------------------------------------------------------------
 # _handle_update_command
 # ---------------------------------------------------------------------------
@@ -413,7 +431,7 @@ class TestUpdateCommandPlatformGate:
         assert "only available from messaging platforms" in result
 
     @pytest.mark.asyncio
-    async def test_allows_plugin_platform_via_registry_fallback(self, monkeypatch):
+    async def test_allows_plugin_platform_via_registry_fallback(self, monkeypatch, tmp_path):
         """A plugin-migrated platform (DISCORD) is no longer in
         ``_UPDATE_ALLOWED_PLATFORMS`` but must still pass the gate via
         the registry's ``allow_update_command=True`` flag.
@@ -438,6 +456,7 @@ class TestUpdateCommandPlatformGate:
         runner = _make_runner()
         event = _make_event(platform=Platform.DISCORD)
         monkeypatch.setenv("HERMES_MANAGED", "")
+        launched = _patch_update_launch(monkeypatch, tmp_path)
 
         result = await runner._handle_update_command(event)
 
@@ -446,9 +465,11 @@ class TestUpdateCommandPlatformGate:
         # Later steps may legitimately return success ("Starting Hermes
         # update…") or fail for environment reasons.
         assert "only available from messaging platforms" not in result
+        assert "Starting Hermes update" in result
+        assert len(launched) == 1
 
     @pytest.mark.asyncio
-    async def test_allows_mattermost_via_registry_fallback(self, monkeypatch):
+    async def test_allows_mattermost_via_registry_fallback(self, monkeypatch, tmp_path):
         """Same as DISCORD: MATTERMOST is now plugin-migrated and not in
         the hardcoded frozenset; the registry must keep /update working.
         """
@@ -466,13 +487,16 @@ class TestUpdateCommandPlatformGate:
         runner = _make_runner()
         event = _make_event(platform=Platform.MATTERMOST)
         monkeypatch.setenv("HERMES_MANAGED", "")
+        launched = _patch_update_launch(monkeypatch, tmp_path)
 
         result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert "Starting Hermes update" in result
+        assert len(launched) == 1
 
     @pytest.mark.asyncio
-    async def test_allows_homeassistant_via_registry_fallback(self, monkeypatch):
+    async def test_allows_homeassistant_via_registry_fallback(self, monkeypatch, tmp_path):
         """Same as DISCORD/MATTERMOST: HOMEASSISTANT is now plugin-migrated
         (PR #40709) and not in the hardcoded frozenset; the registry must
         keep /update working via ``allow_update_command=True``.
@@ -491,13 +515,16 @@ class TestUpdateCommandPlatformGate:
         runner = _make_runner()
         event = _make_event(platform=Platform.HOMEASSISTANT)
         monkeypatch.setenv("HERMES_MANAGED", "")
+        launched = _patch_update_launch(monkeypatch, tmp_path)
 
         result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert "Starting Hermes update" in result
+        assert len(launched) == 1
 
     @pytest.mark.asyncio
-    async def test_allows_builtin_platform_in_allowlist(self, monkeypatch):
+    async def test_allows_builtin_platform_in_allowlist(self, monkeypatch, tmp_path):
         """``Platform.TELEGRAM`` is in the hardcoded allowlist — gate
         must pass without consulting the registry.
         """
@@ -508,10 +535,13 @@ class TestUpdateCommandPlatformGate:
         runner = _make_runner()
         event = _make_event(platform=Platform.TELEGRAM)
         monkeypatch.setenv("HERMES_MANAGED", "")
+        launched = _patch_update_launch(monkeypatch, tmp_path)
 
         result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert "Starting Hermes update" in result
+        assert len(launched) == 1
 
 
 # ---------------------------------------------------------------------------

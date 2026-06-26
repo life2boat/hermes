@@ -1677,7 +1677,10 @@ def _healbite_public_lane_decision(
             "onboarding_active": False,
         }
 
-    pending = get_default_nutrition_diary().get_pending_meal(user_id, include_expired=True)
+    try:
+        pending = get_default_nutrition_diary().get_pending_meal(user_id, include_expired=True)
+    except PermissionError:
+        pending = None
     if pending is not None and _healbite_pending_choice(text_value) is not None:
         return {
             "enabled": True,
@@ -2845,8 +2848,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             if timeout <= 0:
                 await adapter.disconnect()
-            elif result.status == "expired":
-                final_response = format_pending_meal_expired_reply()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -12146,8 +12147,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if user_id is None:
             return "Не удалось определить пользователя для дневника питания."
 
-        self._get_healbite_nutrition_diary().clear_pending_meal(int(user_id))
-        days, error = self._parse_healbite_nutrition_diary_command_args(event.text or "")
+        from gateway.healbite_nutrition_diary import get_existing_nutrition_diary
+
+        diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
+        if diary is not None:
+            diary.clear_pending_meal(int(user_id))
+        days, error = self._parse_healbite_nutrition_diary_command_args(event.text or '')
         if error:
             return error
 
@@ -12182,8 +12187,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if user_id is None:
             return "Не удалось определить пользователя для удаления записи."
 
-        self._get_healbite_nutrition_diary().clear_pending_meal(int(user_id))
-        error = self._parse_healbite_undo_meal_command_args(event.text or "")
+        from gateway.healbite_nutrition_diary import get_existing_nutrition_diary
+
+        diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
+        if diary is not None:
+            diary.clear_pending_meal(int(user_id))
+        error = self._parse_healbite_undo_meal_command_args(event.text or '')
         if error:
             return error
 
@@ -12312,38 +12321,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             format_pending_meal_expired_reply,
             format_pending_meal_saved_reply,
             format_pending_meal_wait_reply,
+            get_existing_nutrition_diary,
         )
 
         user_id = getattr(source, "user_id", None)
         if user_id is None:
             return None
-
-        diary = self._get_healbite_nutrition_diary()
-        pending = diary.get_pending_meal(int(user_id), include_expired=True)
-        if pending is None:
+        try:
+            normalized_user_id = int(user_id)
+        except (TypeError, ValueError):
             return None
 
         choice = self._resolve_healbite_pending_meal_choice(message)
         if choice is None:
             return None
 
+        diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
+        if diary is None:
+            return None
+        pending = diary.get_pending_meal(normalized_user_id, include_expired=True)
+        if pending is None:
+            return None
+
         if diary.is_pending_meal_expired(pending):
-            diary.clear_pending_meal(int(user_id))
+            diary.clear_pending_meal(normalized_user_id)
             final_response = format_pending_meal_expired_reply()
         elif choice == "confirm":
-            result = diary.confirm_pending_meal(int(user_id))
+            result = diary.confirm_pending_meal(normalized_user_id)
             if result.status == "missing":
                 final_response = "Не нашел ожидающую запись. Попробуй отправить фото еще раз."
             elif result.status == "expired":
                 final_response = format_pending_meal_expired_reply()
             else:
-                summary = diary.get_daily_summary(user_id=int(user_id))
+                summary = diary.get_daily_summary(user_id=normalized_user_id)
                 final_response = format_pending_meal_saved_reply(
                     summary,
                     duplicate=bool(result.duplicate),
                 )
         elif choice == "cancel":
-            diary.clear_pending_meal(int(user_id))
+            diary.clear_pending_meal(normalized_user_id)
             final_response = format_pending_meal_cancelled_reply()
         else:
             final_response = format_pending_meal_wait_reply()

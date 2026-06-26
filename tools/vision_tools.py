@@ -49,6 +49,13 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+# Backward-compatible test seam: several regression tests still patch
+# tools.vision_tools.async_call_llm directly, while others patch
+# safe_async_call_llm. Keep a thin wrapper so both monkeypatch points remain
+# valid instead of binding a one-time alias at import time.
+async def async_call_llm(*args, **kwargs):
+    return await safe_async_call_llm(*args, **kwargs)
+
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
 # Configurable HTTP download timeout for _download_image().
@@ -639,8 +646,8 @@ def _safe_vision_failure_analysis(error: Exception) -> str:
         )
     if expected_kind == "request_rejected":
         return (
-            "The vision request could not be processed right now. "
-            "Please try again later or describe the meal in text."
+            "The provider rejected the image request. "
+            "Try sending a smaller, clearer image, or describe the meal in text."
         )
     return (
         "There was a problem with the request and the image could not be analyzed."
@@ -1080,7 +1087,7 @@ async def vision_analyze_tool(
             provider_model,
         )
         try:
-            response = await safe_async_call_llm(**call_kwargs)
+            response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
             if (_is_image_size_error(_api_err)
                     and len(image_data_url) > _RESIZE_TARGET_BYTES):
@@ -1093,7 +1100,7 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                response = await safe_async_call_llm(**call_kwargs)
+                response = await async_call_llm(**call_kwargs)
             else:
                 raise
         
@@ -1103,7 +1110,7 @@ async def vision_analyze_tool(
         # Retry once on empty content (reasoning-only response)
         if not analysis:
             logger.warning("Vision LLM returned empty content, retrying once")
-            response = await safe_async_call_llm(**call_kwargs)
+            response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis)
@@ -1557,12 +1564,12 @@ async def video_analyze_tool(
         if model:
             call_kwargs["model"] = model
 
-        response = await safe_async_call_llm(**call_kwargs)
+        response = await async_call_llm(**call_kwargs)
         analysis = extract_content_or_reasoning(response)
 
         if not analysis:
             logger.warning("Empty video response, retrying once")
-            response = await safe_async_call_llm(**call_kwargs)
+            response = await async_call_llm(**call_kwargs)
             analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis) if analysis else 0

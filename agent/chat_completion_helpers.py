@@ -1848,6 +1848,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             request_client,
             task="chat_completion_stream_request",
             user_safe=False,
+            on_retry_check=lambda: agent._interrupt_requested,
             **stream_kwargs,
         )
 

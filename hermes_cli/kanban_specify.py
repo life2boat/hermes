@@ -151,7 +151,7 @@ def specify_task(
             extract_content_or_reasoning,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
-            safe_call_llm,
+            safe_chat_completion_create,
         )
     except Exception as exc:  # pragma: no cover — import smoke test
         logger.debug("specify: auxiliary client import failed: %s", exc)
@@ -175,7 +175,8 @@ def specify_task(
     )
 
     try:
-        resp = safe_call_llm(
+        resp = safe_chat_completion_create(
+            client,
             task="triage_specifier",
             model=model,
             messages=[

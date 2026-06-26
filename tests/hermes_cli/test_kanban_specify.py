@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json as jsonlib
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,31 +34,39 @@ def kanban_home(tmp_path, monkeypatch):
 def _fake_aux_response(content: str):
     """Build a minimal object shaped like an OpenAI chat.completions result.
 
-    The specifier only reads ``resp.choices[0].message.content``, so we
-    avoid importing the openai SDK and build the tree with MagicMock.
+    The specifier only reads ``resp.choices[0].message.content``, so a
+    lightweight namespace keeps the tests deterministic across Python versions.
     """
-    resp = MagicMock()
-    resp.choices = [MagicMock()]
-    resp.choices[0].message.content = content
-    return resp
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
 
 
-def _mock_client_returning(content: str):
+def _mock_client_returning() -> MagicMock:
     client = MagicMock()
-    client.chat.completions.create = MagicMock(return_value=_fake_aux_response(content))
+    client.chat.completions.create = MagicMock()
     return client
 
 
 def _patch_aux_client(content: str, *, model: str = "test-model"):
-    """Patch get_text_auxiliary_client at its source + at the module that
-    imported it lazily inside specify_task. Both patches are needed
-    because kanban_specify imports the function inside the function body.
-    """
-    client = _mock_client_returning(content)
-    return patch(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        return_value=(client, model),
-    ), client
+    """Patch the specifier's stable auxiliary seams."""
+    client = _mock_client_returning()
+
+    @contextmanager
+    def _ctx():
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(client, model),
+        ), patch(
+            "agent.auxiliary_client.get_auxiliary_extra_body",
+            return_value=None,
+        ), patch(
+            "agent.auxiliary_client.safe_chat_completion_create",
+            return_value=_fake_aux_response(content),
+        ):
+            yield
+
+    return _ctx(), client
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +185,16 @@ def test_specify_task_llm_api_error_keeps_task_in_triage(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="rough", triage=True)
 
-    client = MagicMock()
-    client.chat.completions.create = MagicMock(side_effect=RuntimeError("429 rate limited"))
+    client = _mock_client_returning()
     with patch(
         "agent.auxiliary_client.get_text_auxiliary_client",
         return_value=(client, "test-model"),
+    ), patch(
+        "agent.auxiliary_client.get_auxiliary_extra_body",
+        return_value=None,
+    ), patch(
+        "agent.auxiliary_client.safe_chat_completion_create",
+        side_effect=RuntimeError("429 rate limited"),
     ):
         outcome = spec.specify_task(tid)
 

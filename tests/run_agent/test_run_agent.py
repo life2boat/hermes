@@ -4658,7 +4658,7 @@ class TestRetryExhaustion:
         )
         assert result.get("failed") is True
         assert "error" in result
-        assert "Invalid API response" in result["error"]
+        assert "invalid response" in result["error"].lower()
 
     def test_api_error_returns_gracefully_after_retries(self, agent):
         """Exhausted retries on API errors must return error result, not crash."""

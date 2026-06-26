@@ -960,17 +960,27 @@ def run_local_profile_smoke(
             user_id=int(user_id),
             username="cli-profile",
         )
-        if "норму калорий" not in prompt.casefold():
+        if "настроим профиль" not in prompt.casefold():
             raise CLIError("Profile onboarding start smoke failed.")
         markers.append("profile_onboarding_started_ok")
 
-        reply = store.handle_onboarding_reply(
-            user_id=int(user_id),
-            text="2000 ккал",
-            username="cli-profile",
-        )
-        if reply is None or reply.status != "completed":
-            raise CLIError("Profile onboarding completion smoke failed.")
+        replies = [
+            ("Мужской", "next"),
+            ("35", "next"),
+            ("180", "next"),
+            ("85", "next"),
+            ("Поддержание веса", "next"),
+            ("Умеренная активность", "next"),
+            ("2000", "completed"),
+        ]
+        for answer, expected_status in replies:
+            reply = store.handle_onboarding_reply(
+                user_id=int(user_id),
+                text=answer,
+                username="cli-profile",
+            )
+            if reply is None or reply.status != expected_status:
+                raise CLIError("Profile onboarding completion smoke failed.")
         markers.append("profile_saved_ok")
 
         profile = store.get_user_profile(int(user_id))

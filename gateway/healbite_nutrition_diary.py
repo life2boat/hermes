@@ -354,6 +354,12 @@ def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> Nutrit
         select_parts = []
         if "daily_kcal_target" in columns:
             select_parts.append("daily_kcal_target")
+        if "daily_protein_g" in columns:
+            select_parts.append("daily_protein_g")
+        if "daily_fat_g" in columns:
+            select_parts.append("daily_fat_g")
+        if "daily_carbs_g" in columns:
+            select_parts.append("daily_carbs_g")
         if "daily_protein_target" in columns:
             select_parts.append("daily_protein_target")
         if "daily_fat_target" in columns:
@@ -368,6 +374,12 @@ def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> Nutrit
             if row is not None:
                 if "daily_kcal_target" in select_parts:
                     _set_target_if_missing(targets, "calories_kcal", row["daily_kcal_target"])
+                if "daily_protein_g" in select_parts:
+                    _set_target_if_missing(targets, "protein_g", row["daily_protein_g"])
+                if "daily_fat_g" in select_parts:
+                    _set_target_if_missing(targets, "fat_g", row["daily_fat_g"])
+                if "daily_carbs_g" in select_parts:
+                    _set_target_if_missing(targets, "carbs_g", row["daily_carbs_g"])
                 if "daily_protein_target" in select_parts:
                     _set_target_if_missing(targets, "protein_g", row["daily_protein_target"])
                 if "daily_fat_target" in select_parts:

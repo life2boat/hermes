@@ -342,6 +342,96 @@ jobs:
             -type f -name '*test_run_agent*.pyc' -print
           find .venv -type f -name '*test_run_agent*.pyc' -print || true
 
+          cat > "$RUNNER_TEMP/shard3_mutation_watcher.py" <<'PY'
+          import hashlib
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import time
+          from datetime import datetime, timezone
+
+          FILES = [
+              "tests/run_agent/test_run_agent.py",
+              "tests/hermes_cli/test_goals.py",
+              "tests/hermes_cli/test_kanban_specify.py",
+              "tests/hermes_cli/test_commands.py",
+              "utils.py",
+              "hermes_cli/auth.py",
+          ]
+          ROOT = pathlib.Path.cwd()
+          TEMP = pathlib.Path(os.environ["RUNNER_TEMP"])
+          LOG = TEMP / "shard3-mutation-watcher.log"
+          SNAP = TEMP / "shard3-mutation-snapshots"
+          STOP = TEMP / "shard3-mutation-watcher.stop"
+          SNAP.mkdir(parents=True, exist_ok=True)
+
+          def ts():
+              return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+          def write(line):
+              with LOG.open("a", encoding="utf-8") as fh:
+                  fh.write(line + "\n")
+
+          def digest(path):
+              try:
+                  return hashlib.sha256(path.read_bytes()).hexdigest()
+              except FileNotFoundError:
+                  return "MISSING"
+              except OSError as exc:
+                  return f"ERROR:{type(exc).__name__}:{exc}"
+
+          def stat_line(path):
+              try:
+                  st = path.stat()
+                  return f"size={st.st_size} mtime_ns={st.st_mtime_ns}"
+              except OSError as exc:
+                  return f"stat_error={type(exc).__name__}:{exc}"
+
+          def git(args):
+              try:
+                  result = subprocess.run(
+                      ["git", *args],
+                      cwd=ROOT,
+                      capture_output=True,
+                      text=True,
+                      timeout=10,
+                  )
+                  return (result.stdout + result.stderr).strip()
+              except Exception as exc:
+                  return f"git_error={type(exc).__name__}:{exc}"
+
+          previous = {name: digest(ROOT / name) for name in FILES}
+          write(f"WATCHER START ts={ts()} pid={os.getpid()} baseline={previous}")
+          while not STOP.exists():
+              for name in FILES:
+                  path = ROOT / name
+                  current = digest(path)
+                  old = previous.get(name)
+                  if current != old:
+                      safe = name.replace("/", "__")
+                      stamp = ts().replace(":", "").replace(".", "_")
+                      snapshot = SNAP / f"{stamp}__{safe}"
+                      write(
+                          "WATCHER MUTATION "
+                          f"ts={ts()} target={name} old={old} new={current} "
+                          f"present={path.exists()} {stat_line(path)}"
+                      )
+                      if path.exists():
+                          try:
+                              shutil.copy2(path, snapshot)
+                              write(f"WATCHER SNAPSHOT target={name} path={snapshot} sha256={digest(snapshot)}")
+                          except OSError as exc:
+                              write(f"WATCHER SNAPSHOT_ERROR target={name} error={type(exc).__name__}:{exc}")
+                      write(f"WATCHER GIT_STATUS {git(['status', '--porcelain=v1'])!r}")
+                      write("WATCHER GIT_DIFF_BEGIN")
+                      write(git(["diff", "--", name]))
+                      write("WATCHER GIT_DIFF_END")
+                      previous[name] = current
+              time.sleep(0.075)
+          write(f"WATCHER STOP ts={ts()}")
+          PY
+
       - name: Run tests (slice ${{ matrix.slice }}/6)
         # Per-file isolation via scripts/run_tests_parallel.py: discovers
         # every test_*.py file under tests/ (excluding integration/ + e2e/),
@@ -367,6 +457,12 @@ jobs:
         # estimate and get split roughly evenly by count — still correct,
         # just not perfectly balanced.
         run: |
+          if [ "${HERMES_CI_SHARD_MUTATION_DIAG:-}" = "1" ]; then
+            rm -f "$RUNNER_TEMP/shard3-mutation-watcher.stop"
+            python "$RUNNER_TEMP/shard3_mutation_watcher.py" &
+            SHARD3_WATCHER_PID="$!"
+            trap 'touch "$RUNNER_TEMP/shard3-mutation-watcher.stop"; wait "$SHARD3_WATCHER_PID" 2>/dev/null || true' EXIT
+          fi
           source .venv/bin/activate
           python scripts/run_tests_parallel.py --slice ${{ matrix.slice }}/6
         env:
@@ -376,6 +472,7 @@ jobs:
           NOUS_API_KEY: ""
           PYTHONPATH: ${{ matrix.slice == 3 && runner.temp || '' }}
           PYTEST_PLUGINS: ${{ matrix.slice == 3 && 'ci_runtime_probe' || '' }}
+          HERMES_CI_SHARD_MUTATION_DIAG: ${{ matrix.slice == 3 && '1' || '' }}
       - name: Shard 3 post-run bytecode diagnostics
         if: ${{ always() && matrix.slice == 3 }}
         run: |
@@ -387,6 +484,28 @@ jobs:
           find .venv \
             -type f -name '*test_run_agent*.pyc' \
             -print -exec stat {} \; -exec sha256sum {} \; || true
+
+          echo "== shard 3 final git state =="
+          git rev-parse HEAD
+          git status --porcelain=v1
+          git diff --stat
+          git diff -- \
+            tests/run_agent/test_run_agent.py \
+            tests/hermes_cli/test_goals.py \
+            tests/hermes_cli/test_kanban_specify.py \
+            tests/hermes_cli/test_commands.py \
+            utils.py \
+            hermes_cli/auth.py
+
+          echo "== shard 3 active processes log =="
+          cat "$RUNNER_TEMP/shard3-active-processes.log" 2>/dev/null || true
+
+          echo "== shard 3 mutation watcher log =="
+          cat "$RUNNER_TEMP/shard3-mutation-watcher.log" 2>/dev/null || true
+
+          echo "== shard 3 mutation snapshots =="
+          find "$RUNNER_TEMP/shard3-mutation-snapshots" -type f \
+            -print -exec sha256sum {} \; 2>/dev/null || true
 
 
       - name: Upload per-slice durations

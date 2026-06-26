@@ -38,6 +38,7 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -45,6 +46,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -111,6 +113,204 @@ _DEFAULT_FILE_TIMEOUT_SECONDS = 600.0  # 10 minutes
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+_MUTATION_DIAG_ENABLED = os.environ.get("HERMES_CI_SHARD_MUTATION_DIAG") == "1"
+_MUTATION_DIAG_FILES = [
+    "tests/run_agent/test_run_agent.py",
+    "tests/hermes_cli/test_goals.py",
+    "tests/hermes_cli/test_kanban_specify.py",
+    "tests/hermes_cli/test_commands.py",
+    "utils.py",
+    "hermes_cli/auth.py",
+]
+_MUTATION_DIAG_BASELINE: dict[str, str] = {}
+_MUTATION_DIAG_FIRST_REPORTED = False
+_MUTATION_DIAG_LOCK = threading.Lock()
+
+
+def _diag_ts() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _diag_rel(path: Path, repo_root: Path) -> str:
+    try:
+        return path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _diag_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return "MISSING"
+    except OSError as exc:
+        return f"ERROR:{type(exc).__name__}:{exc}"
+
+
+def _diag_stat(path: Path) -> str:
+    try:
+        st = path.stat()
+        return f"size={st.st_size} mtime_ns={st.st_mtime_ns}"
+    except OSError as exc:
+        return f"stat_error={type(exc).__name__}:{exc}"
+
+
+def _diag_run_git(repo_root: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return (result.stdout + result.stderr).strip()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not affect tests
+        return f"git_error={type(exc).__name__}:{exc}"
+
+
+def _diag_relevant_lines(path: Path) -> list[str]:
+    needles = (
+        "Invalid API response",
+        "invalid response",
+        "def env_float",
+        "env_float",
+    )
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not affect tests
+        return [f"read_error={type(exc).__name__}:{exc}"]
+    out: list[str] = []
+    for i, line in enumerate(lines, start=1):
+        if any(needle in line for needle in needles):
+            out.append(f"{i}: {line}")
+    return out[:40]
+
+
+def _diag_active_log_path() -> Path | None:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if not runner_temp:
+        return None
+    return Path(runner_temp) / "shard3-active-processes.log"
+
+
+def _diag_append_active(message: str) -> None:
+    if not _MUTATION_DIAG_ENABLED:
+        return
+    path = _diag_active_log_path()
+    if path is None:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(message + "\n")
+    except OSError:
+        pass
+
+
+def _diag_init(repo_root: Path) -> None:
+    if not _MUTATION_DIAG_ENABLED:
+        return
+    print(f"SHARD_DIAG INIT ts={_diag_ts()} runner_pid={os.getpid()}", flush=True)
+    print(
+        f"SHARD_DIAG HEAD ts={_diag_ts()} value={_diag_run_git(repo_root, ['rev-parse', 'HEAD'])}",
+        flush=True,
+    )
+    print(
+        f"SHARD_DIAG STATUS ts={_diag_ts()} value={_diag_run_git(repo_root, ['status', '--porcelain=v1'])!r}",
+        flush=True,
+    )
+    for rel in _MUTATION_DIAG_FILES:
+        path = repo_root / rel
+        sha = _diag_hash(path)
+        _MUTATION_DIAG_BASELINE[rel] = sha
+        print(
+            f"SHARD_DIAG BASELINE ts={_diag_ts()} target={rel} sha256={sha} {_diag_stat(path)}",
+            flush=True,
+        )
+
+
+def _diag_report_first_mutation(
+    repo_root: Path,
+    *,
+    active_file: Path,
+    target_rel: str,
+    baseline: str,
+    current: str,
+    phase: str,
+    child_pid: int | None,
+) -> None:
+    global _MUTATION_DIAG_FIRST_REPORTED
+    if _MUTATION_DIAG_FIRST_REPORTED:
+        return
+    _MUTATION_DIAG_FIRST_REPORTED = True
+    target = repo_root / target_rel
+    active = _diag_rel(active_file, repo_root)
+    print(
+        "SHARD_DIAG FIRST_MUTATION "
+        f"ts={_diag_ts()} phase={phase} runner_pid={os.getpid()} "
+        f"child={child_pid} active={active} target={target_rel} "
+        f"baseline={baseline} current={current} {_diag_stat(target)}",
+        flush=True,
+    )
+    print("SHARD_DIAG FIRST_MUTATION_LINES_BEGIN", flush=True)
+    for line in _diag_relevant_lines(target):
+        print(f"SHARD_DIAG FIRST_MUTATION_LINE target={target_rel} {line}", flush=True)
+    print("SHARD_DIAG FIRST_MUTATION_LINES_END", flush=True)
+    status = _diag_run_git(repo_root, ["status", "--porcelain=v1"])
+    print(f"SHARD_DIAG FIRST_MUTATION_GIT_STATUS {status!r}", flush=True)
+    print("SHARD_DIAG FIRST_MUTATION_GIT_DIFF_BEGIN", flush=True)
+    print(_diag_run_git(repo_root, ["diff", "--", target_rel]), flush=True)
+    print("SHARD_DIAG FIRST_MUTATION_GIT_DIFF_END", flush=True)
+
+
+def _diag_check_files(
+    repo_root: Path,
+    *,
+    active_file: Path,
+    phase: str,
+    child_pid: int | None = None,
+    rc: int | str | None = None,
+) -> None:
+    if not _MUTATION_DIAG_ENABLED:
+        return
+    active = _diag_rel(active_file, repo_root)
+    with _MUTATION_DIAG_LOCK:
+        print(
+            f"SHARD_DIAG {phase} ts={_diag_ts()} pid={os.getpid()} "
+            f"child={child_pid} file={active} rc={rc}",
+            flush=True,
+        )
+        _diag_append_active(
+            f"SHARD_DIAG {phase} ts={_diag_ts()} pid={os.getpid()} "
+            f"child={child_pid} file={active} rc={rc}"
+        )
+        for rel in _MUTATION_DIAG_FILES:
+            current = _diag_hash(repo_root / rel)
+            baseline = _MUTATION_DIAG_BASELINE.get(rel)
+            changed = baseline is not None and current != baseline
+            print(
+                "SHARD_DIAG HASH "
+                f"ts={_diag_ts()} phase={phase} active={active} "
+                f"target={rel} sha256={current} baseline={baseline} "
+                f"changed={changed}",
+                flush=True,
+            )
+            if changed:
+                _diag_report_first_mutation(
+                    repo_root,
+                    active_file=active_file,
+                    target_rel=rel,
+                    baseline=baseline,
+                    current=current,
+                    phase=phase,
+                    child_pid=child_pid,
+                )
+        status = _diag_run_git(repo_root, ["status", "--porcelain=v1"])
+        print(f"SHARD_DIAG STATUS ts={_diag_ts()} phase={phase} value={status!r}", flush=True)
+
 
 
 def _count_tests(
@@ -286,6 +486,7 @@ def _spawn_pytest_once(
     file_timeout: float,
     *,
     timeout_note: str = "per-file timeout",
+    diag_file: Path | None = None,
 ) -> Tuple[int, str]:
     """Run one ``pytest`` subprocess to completion and return ``(rc, output)``.
 
@@ -307,6 +508,8 @@ def _spawn_pytest_once(
         # _kill_tree handles the Windows path via taskkill /F /T.
         start_new_session=True,
     )
+    if diag_file is not None:
+        _diag_check_files(repo_root, active_file=diag_file, phase="START", child_pid=proc.pid)
 
     # Capture the pgid NOW, before the leader can exit and be reaped. Once
     # the leader is reaped, os.getpgid(proc.pid) raises ProcessLookupError
@@ -337,11 +540,28 @@ def _spawn_pytest_once(
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
         _kill_tree(proc, pgid=pgid)
+        if diag_file is not None:
+            _diag_check_files(
+                repo_root,
+                active_file=diag_file,
+                phase="END",
+                child_pid=proc.pid,
+                rc="EXC",
+            )
         raise
     else:
         # Happy path: pytest exited on its own. Kill the group anyway in
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
+
+    if diag_file is not None:
+        _diag_check_files(
+            repo_root,
+            active_file=diag_file,
+            phase="END",
+            child_pid=proc.pid,
+            rc=rc,
+        )
 
     return rc, output
 
@@ -406,7 +626,12 @@ def _run_one_file(
     """
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
     subproc_start = time.monotonic()
-    rc, output = _spawn_pytest_once(cmd, repo_root, file_timeout)
+    if _MUTATION_DIAG_ENABLED:
+        rc, output = _spawn_pytest_once(
+            cmd, repo_root, file_timeout, diag_file=file
+        )
+    else:
+        rc, output = _spawn_pytest_once(cmd, repo_root, file_timeout)
 
     # pytest exit 4 = "file or directory not found" at exec time. On loaded
     # shared CI runners we have seen the planner enumerate a file (its tests
@@ -424,10 +649,19 @@ def _run_one_file(
     while rc == 4 and attempt < _EXIT4_RETRY_ATTEMPTS and _file_present(file):
         attempt += 1
         time.sleep(_EXIT4_RETRY_BACKOFF_SECONDS * attempt)
-        rc, output = _spawn_pytest_once(
-            cmd, repo_root, file_timeout,
-            timeout_note=f"per-file timeout on exit-4 retry {attempt}",
-        )
+        if _MUTATION_DIAG_ENABLED:
+            rc, output = _spawn_pytest_once(
+                cmd,
+                repo_root,
+                file_timeout,
+                timeout_note=f"per-file timeout on exit-4 retry {attempt}",
+                diag_file=file,
+            )
+        else:
+            rc, output = _spawn_pytest_once(
+                cmd, repo_root, file_timeout,
+                timeout_note=f"per-file timeout on exit-4 retry {attempt}",
+            )
 
     if rc == 4:
         # Exit-4 survived the retries (or the file was judged absent).
@@ -859,6 +1093,8 @@ def main() -> int:
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
         total_tests = sum(test_counts.values())
+
+    _diag_init(repo_root)
 
     print(
         f"Discovered {len(files)} test files ({total_tests} tests) under "

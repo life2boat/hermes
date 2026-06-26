@@ -81,6 +81,124 @@ jobs:
         # re-download, keeping the persisted cache small and fast to restore.
         run: uv cache prune --ci
 
+      - name: Diagnose shard 3 source state
+        if: ${{ matrix.slice == 3 }}
+        run: |
+          set +e
+
+          echo "== GitHub context =="
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_HEAD_REF=$GITHUB_HEAD_REF"
+          echo "GITHUB_BASE_REF=$GITHUB_BASE_REF"
+          echo "GITHUB_RUN_ID=$GITHUB_RUN_ID"
+          echo "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+
+          echo "== Checkout state =="
+          pwd
+          git rev-parse HEAD
+          git log -1 --oneline
+          git status --porcelain=v1
+
+          echo "== Tracked source comparisons =="
+          for file in \
+            tests/run_agent/test_run_agent.py \
+            tests/hermes_cli/test_goals.py \
+            tests/hermes_cli/test_kanban_specify.py \
+            tests/hermes_cli/test_commands.py
+          do
+            echo "-- $file --"
+            git rev-parse "HEAD:$file" || true
+            git hash-object "$file" || true
+            sha256sum "$file" || true
+            stat "$file" || true
+            tmp_head="$RUNNER_TEMP/head-$(basename "$file")"
+            git show "HEAD:$file" > "$tmp_head" 2>/dev/null || true
+            cmp -s "$file" "$tmp_head" \
+              && echo "$file: matches HEAD" \
+              || echo "$file: DOES NOT MATCH HEAD"
+          done
+
+          echo "== test_run_agent assertion context =="
+          grep -n -C 4 -E \
+            'Invalid API response|invalid response|test_invalid_response_returns_error_not_crash' \
+            tests/run_agent/test_run_agent.py || true
+
+          echo "== Python paths and versions =="
+          source .venv/bin/activate
+          command -v python || true
+          command -v pytest || true
+          readlink -f "$(command -v python)" || true
+          readlink -f "$(command -v pytest)" || true
+          python --version || true
+          python -m pytest --version || true
+          uv --version || true
+          echo "PYTHONPATH=${PYTHONPATH-}"
+          echo "PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE-}"
+          echo "VIRTUAL_ENV=${VIRTUAL_ENV-}"
+          echo "HOME=${HOME-}"
+          echo "TMPDIR=${TMPDIR-}"
+
+          echo "== Python import diagnostics =="
+          python - <<'PY' || true
+          import importlib
+          import importlib.util
+          import site
+          import sys
+
+          print("sys.executable:", sys.executable)
+          print("sys.version:", sys.version)
+          print("sys.prefix:", sys.prefix)
+          print("sys.base_prefix:", sys.base_prefix)
+          print("sys.path:")
+          for entry in sys.path:
+              print("  ", entry)
+
+          print("sitepackages:", site.getsitepackages())
+          print("usersite:", site.getusersitepackages())
+
+          names = [
+              "utils",
+              "hermes_cli.auth",
+              "gateway.run",
+              "agent.account_usage",
+          ]
+
+          for name in names:
+              print(f"\nMODULE {name}")
+              try:
+                  spec = importlib.util.find_spec(name)
+                  print("spec.origin:", getattr(spec, "origin", None))
+                  module = importlib.import_module(name)
+                  print("__file__:", getattr(module, "__file__", None))
+                  print("__cached__:", getattr(module, "__cached__", None))
+                  if name == "utils":
+                      print("has env_float:", hasattr(module, "env_float"))
+              except Exception as exc:
+                  print("IMPORT ERROR:", type(exc).__name__, repr(exc))
+          PY
+
+          echo "== Bytecode and cache diagnostics =="
+          echo "Repo pyc count:"
+          find . \
+            -path './.venv' -prune -o \
+            -type f \( -name '*.pyc' -o -name '*.pyo' \) -print \
+            | tee "$RUNNER_TEMP/repo-pyc.txt" \
+            | wc -l
+
+          echo "Relevant repo bytecode:"
+          grep -E \
+            'utils|hermes_cli|gateway|account_usage|test_run_agent|test_goals|test_kanban_specify|test_commands' \
+            "$RUNNER_TEMP/repo-pyc.txt" || true
+
+          echo "Relevant venv bytecode:"
+          find .venv -type f \( -name '*.pyc' -o -name '*.pyo' \) \
+            | grep -E 'utils|hermes_cli|gateway|account_usage' \
+            | head -200 || true
+
+          echo "Ignored working-tree files:"
+          git status --short --ignored | head -200
+
       - name: Run tests (slice ${{ matrix.slice }}/6)
         # Per-file isolation via scripts/run_tests_parallel.py: discovers
         # every test_*.py file under tests/ (excluding integration/ + e2e/),

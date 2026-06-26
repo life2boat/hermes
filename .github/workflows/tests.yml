@@ -199,6 +199,149 @@ jobs:
           echo "Ignored working-tree files:"
           git status --short --ignored | head -200
 
+      - name: Create shard 3 runtime pytest probe
+        if: ${{ matrix.slice == 3 }}
+        run: |
+          cat > "$RUNNER_TEMP/ci_runtime_probe.py" <<'PY'
+          import dis
+          import hashlib
+          import importlib.util
+          import inspect
+          import linecache
+          import os
+          import pathlib
+          import sys
+
+          TARGET = (
+              "tests/run_agent/test_run_agent.py::"
+              "TestRetryExhaustion::"
+              "test_invalid_response_returns_error_not_crash"
+          )
+
+          def _hash_file(path):
+              try:
+                  data = pathlib.Path(path).read_bytes()
+                  return hashlib.sha256(data).hexdigest()
+              except Exception as exc:
+                  return f"ERROR: {type(exc).__name__}: {exc!r}"
+
+          def pytest_collection_modifyitems(session, config, items):
+              for item in items:
+                  if item.nodeid != TARGET:
+                      continue
+
+                  print("\n=== CI RUNTIME PROBE BEGIN ===")
+
+                  func = getattr(item, "function", None)
+                  module = getattr(item, "module", None)
+                  code = getattr(func, "__code__", None)
+
+                  print("nodeid:", item.nodeid)
+                  print("cwd:", os.getcwd())
+                  print("sys.executable:", sys.executable)
+                  print("module:", getattr(module, "__name__", None))
+                  print("module.__file__:", getattr(module, "__file__", None))
+                  print("module.__cached__:", getattr(module, "__cached__", None))
+                  print("function:", repr(func))
+
+                  loaded_utils = sys.modules.get("utils")
+                  if loaded_utils is not None:
+                      utils_file = getattr(loaded_utils, "__file__", None)
+                      print("utils.__file__:", utils_file)
+                      print("utils.__cached__:", getattr(loaded_utils, "__cached__", None))
+                      print("utils sha256:", _hash_file(utils_file or ""))
+                      print("utils has env_float:", hasattr(loaded_utils, "env_float"))
+                      print(
+                          "utils env names:",
+                          sorted(
+                              name
+                              for name in vars(loaded_utils)
+                              if name.startswith("env_")
+                          ),
+                      )
+
+                  if code is not None:
+                      filename = code.co_filename
+                      first_line = code.co_firstlineno
+
+                      print("co_filename:", filename)
+                      print("co_firstlineno:", first_line)
+                      print("co_name:", code.co_name)
+                      print("co_consts:", repr(code.co_consts))
+                      print("source sha256:", _hash_file(filename))
+
+                      try:
+                          print(
+                              "standard cache path:",
+                              importlib.util.cache_from_source(code.co_filename),
+                          )
+                      except Exception as exc:
+                          print("cache path error:", repr(exc))
+
+                      print("--- open() source around function ---")
+                      try:
+                          lines = pathlib.Path(filename).read_text(
+                              encoding="utf-8"
+                          ).splitlines()
+                          start = max(0, first_line - 3)
+                          end = min(len(lines), first_line + 25)
+                          for number in range(start, end):
+                              print(f"{number + 1}: {lines[number]}")
+                      except Exception as exc:
+                          print("open source error:", type(exc).__name__, repr(exc))
+
+                      print("--- linecache source around function ---")
+                      for number in range(
+                          max(1, first_line - 2),
+                          first_line + 25,
+                      ):
+                          print(
+                              f"{number}: "
+                              f"{linecache.getline(filename, number).rstrip()}"
+                          )
+
+                      print("--- inspect.getsource ---")
+                      try:
+                          print(inspect.getsource(func))
+                      except Exception as exc:
+                          print("inspect error:", type(exc).__name__, repr(exc))
+
+                      print("--- disassembly ---")
+                      try:
+                          dis.dis(func)
+                      except Exception as exc:
+                          print("dis error:", type(exc).__name__, repr(exc))
+
+                  print("--- relevant sys.modules ---")
+                  for name, loaded in sorted(sys.modules.items()):
+                      if any(
+                          token in name
+                          for token in (
+                              "test_run_agent",
+                              "run_agent",
+                              "utils",
+                              "hermes_cli.auth",
+                          )
+                      ):
+                          print(
+                              name,
+                              "file=",
+                              getattr(loaded, "__file__", None),
+                              "cached=",
+                              getattr(loaded, "__cached__", None),
+                          )
+
+                  print("=== CI RUNTIME PROBE END ===\n")
+          PY
+
+          echo "== pre-shard utils diagnostics =="
+          grep -n -C 3 'def env_float' utils.py || true
+          sha256sum utils.py
+          find . \
+            -path './.venv' -prune -o \
+            -type f -name '*test_run_agent*.pyc' -print
+          find .venv -type f -name '*test_run_agent*.pyc' -print || true
+
       - name: Run tests (slice ${{ matrix.slice }}/6)
         # Per-file isolation via scripts/run_tests_parallel.py: discovers
         # every test_*.py file under tests/ (excluding integration/ + e2e/),
@@ -231,6 +374,20 @@ jobs:
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+          PYTHONPATH: ${{ matrix.slice == 3 && runner.temp || '' }}
+          PYTEST_PLUGINS: ${{ matrix.slice == 3 && 'ci_runtime_probe' || '' }}
+      - name: Shard 3 post-run bytecode diagnostics
+        if: ${{ always() && matrix.slice == 3 }}
+        run: |
+          find . \
+            -path './.venv' -prune -o \
+            -type f -name '*test_run_agent*.pyc' \
+            -print -exec stat {} \; -exec sha256sum {} \;
+
+          find .venv \
+            -type f -name '*test_run_agent*.pyc' \
+            -print -exec stat {} \; -exec sha256sum {} \; || true
+
 
       - name: Upload per-slice durations
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

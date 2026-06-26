@@ -372,6 +372,11 @@ def _make_adapter() -> TelegramAdapter:
     return adapter
 
 
+def _patch_telegram_profile_store(monkeypatch, store: HealBiteUserProfileStore) -> None:
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setattr("gateway.platforms.telegram.get_existing_healbite_user_profile", lambda: store)
+
+
 def _make_update(text: str, *, user_id: int = 1, username: str = "oleg") -> SimpleNamespace:
     msg = SimpleNamespace(
         text=text,
@@ -387,7 +392,7 @@ def _make_update(text: str, *, user_id: int = 1, username: str = "oleg") -> Simp
 async def test_telegram_start_for_new_user_starts_extended_onboarding(tmp_path, monkeypatch):
     adapter = _make_adapter()
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
-    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    _patch_telegram_profile_store(monkeypatch, store)
 
     await adapter._handle_command(_make_update("/start", user_id=701), SimpleNamespace())
 
@@ -404,7 +409,7 @@ async def test_telegram_start_for_existing_user_returns_menu_without_reset(tmp_p
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=702, username="oleg")
     _complete_onboarding(store, user_id=702, username="oleg", manual_target="2000")
-    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    _patch_telegram_profile_store(monkeypatch, store)
 
     await adapter._handle_command(_make_update("/start", user_id=702), SimpleNamespace())
 
@@ -420,7 +425,7 @@ async def test_telegram_start_edit_opens_safe_reconfiguration_flow(tmp_path, mon
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=703, username="oleg")
     _complete_onboarding(store, user_id=703, username="oleg", manual_target="2000")
-    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    _patch_telegram_profile_store(monkeypatch, store)
 
     await adapter._handle_command(_make_update("/start edit", user_id=703), SimpleNamespace())
 
@@ -437,7 +442,7 @@ async def test_telegram_profile_command_renders_extended_profile(tmp_path, monke
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=704, username="oleg")
     _complete_onboarding(store, user_id=704, username="oleg", manual_target="2000")
-    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    _patch_telegram_profile_store(monkeypatch, store)
 
     await adapter._handle_command(_make_update("/profile", user_id=704), SimpleNamespace())
 
@@ -453,7 +458,7 @@ async def test_telegram_onboarding_reply_short_circuits_and_advances(tmp_path, m
     adapter = _make_adapter()
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=705, username="oleg")
-    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    _patch_telegram_profile_store(monkeypatch, store)
 
     await adapter._handle_text_message(_make_update("Мужской", user_id=705), SimpleNamespace())
 

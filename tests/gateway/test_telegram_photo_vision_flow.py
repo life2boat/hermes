@@ -99,6 +99,10 @@ def adapter():
 @pytest.fixture(autouse=True)
 def _redirect_image_cache(tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "image_cache")
+    monkeypatch.setenv("HEALBITE_DB_PATH", str(tmp_path / "healbite.db"))
+    monkeypatch.setattr("gateway.healbite_nutrition_diary._GLOBAL_DIARY", None)
+    yield
+    monkeypatch.setattr("gateway.healbite_nutrition_diary._GLOBAL_DIARY", None)
 
 
 @pytest.mark.asyncio

@@ -167,6 +167,7 @@ def _perform_llm_request_sync(
     task: Optional[str] = None,
     retry_context: str = "Auxiliary",
     validate_response: bool = True,
+    on_retry_check=None,
 ):
     for attempt in range(1, _AUX_RETRY_MAX_ATTEMPTS + 1):
         try:
@@ -203,6 +204,8 @@ def _perform_llm_request_sync(
                 _AUX_RETRY_MAX_ATTEMPTS,
                 delay,
             )
+            if on_retry_check and on_retry_check():
+                raise InterruptedError("Agent interrupted before retry") from exc
             time.sleep(delay)
 
 
@@ -274,6 +277,7 @@ def safe_chat_completion_create(
     *,
     task: str = None,
     user_safe: bool = True,
+    on_retry_check=None,
     **kwargs,
 ) -> Any:
     validate_response = not bool(kwargs.get("stream"))
@@ -283,6 +287,7 @@ def safe_chat_completion_create(
             task=task,
             retry_context="Direct LLM",
             validate_response=validate_response,
+            on_retry_check=on_retry_check,
         )
     except Exception as exc:
         if not user_safe:

@@ -102,6 +102,7 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import (
     format_healbite_profile_report,
     get_default_healbite_user_profile,
+    get_existing_healbite_user_profile,
 )
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
@@ -5806,7 +5807,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if user_id is None:
             return False
 
-        profile_store = get_default_healbite_user_profile()
+        profile_store = get_existing_healbite_user_profile()
+        if profile_store is None:
+            try:
+                profile_store = get_default_healbite_user_profile()
+            except PermissionError:
+                return False
         if profile_store.get_onboarding_state(int(user_id)) is None:
             return False
 

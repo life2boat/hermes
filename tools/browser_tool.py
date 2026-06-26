@@ -1750,7 +1750,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
 
 
 
-def _find_agent_browser() -> str:
+def _find_agent_browser(*, allow_install: bool = True) -> str:
     """
     Find the agent-browser CLI executable.
 
@@ -1759,6 +1759,12 @@ def _find_agent_browser() -> str:
 
     Returns:
         Path to agent-browser executable
+
+    Args:
+        allow_install: Whether the final fallback may run Hermes dependency
+            bootstrap to install the browser CLI. Pure availability checks
+            should pass False so tool-definition discovery stays side-effect
+            free and cheap.
 
     Raises:
         FileNotFoundError: If agent-browser is not installed
@@ -1822,27 +1828,28 @@ def _find_agent_browser() -> str:
         return _cached_agent_browser
 
     # Nothing found — try lazy installation before giving up.
-    try:
-        from hermes_cli.dep_ensure import ensure_dependency
-        if ensure_dependency("browser"):
-            recheck = shutil.which("agent-browser")
-            if not recheck and extended_path:
-                recheck = shutil.which("agent-browser", path=extended_path)
-            if not recheck:
-                hermes_nm = str(get_hermes_home() / "node_modules" / ".bin")
-                recheck = shutil.which("agent-browser", path=hermes_nm)
-            if not recheck:
-                hermes_node_bin = str(get_hermes_home() / "node" / "bin")
-                recheck = shutil.which("agent-browser", path=hermes_node_bin)
-            if not recheck:
-                hermes_node_root = str(get_hermes_home() / "node")
-                recheck = shutil.which("agent-browser", path=hermes_node_root)
-            if recheck:
-                _cached_agent_browser = recheck
-                _agent_browser_resolved = True
-                return recheck
-    except Exception:
-        pass
+    if allow_install:
+        try:
+            from hermes_cli.dep_ensure import ensure_dependency
+            if ensure_dependency("browser"):
+                recheck = shutil.which("agent-browser")
+                if not recheck and extended_path:
+                    recheck = shutil.which("agent-browser", path=extended_path)
+                if not recheck:
+                    hermes_nm = str(get_hermes_home() / "node_modules" / ".bin")
+                    recheck = shutil.which("agent-browser", path=hermes_nm)
+                if not recheck:
+                    hermes_node_bin = str(get_hermes_home() / "node" / "bin")
+                    recheck = shutil.which("agent-browser", path=hermes_node_bin)
+                if not recheck:
+                    hermes_node_root = str(get_hermes_home() / "node")
+                    recheck = shutil.which("agent-browser", path=hermes_node_root)
+                if recheck:
+                    _cached_agent_browser = recheck
+                    _agent_browser_resolved = True
+                    return recheck
+        except Exception:
+            pass
 
     _agent_browser_resolved = True
     raise FileNotFoundError(
@@ -3677,6 +3684,10 @@ def check_browser_requirements() -> bool:
 
     # The agent-browser CLI is required for local launch and cloud-provider flows.
     try:
+        browser_cmd = _find_agent_browser(allow_install=False)
+    except TypeError as exc:
+        if "allow_install" not in str(exc):
+            raise
         browser_cmd = _find_agent_browser()
     except FileNotFoundError:
         return False

@@ -471,6 +471,10 @@ def test_run_slash_specify_end_to_end(kanban_home, monkeypatch):
         "agent.auxiliary_client.get_text_auxiliary_client",
         lambda *a, **kw: (fake_client, "test-model"),
     )
+    monkeypatch.setattr(
+        "agent.auxiliary_client.safe_call_llm",
+        lambda *a, **kw: resp,
+    )
 
     # Specify via slash.
     out = kc.run_slash(f"specify {tid}")

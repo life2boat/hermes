@@ -5228,14 +5228,13 @@ def cmd_gui(args: argparse.Namespace):
 
     packaged_executable = _desktop_packaged_executable(desktop_dir)
 
-    if source_mode or not skip_build:
+    npm = None
+    if source_mode:
         npm = shutil.which("npm")
         if not npm:
             print("Desktop GUI requires Node.js/npm, but npm was not found on PATH.")
             print("Install Node.js, then run:  hermes gui")
             sys.exit(1)
-    else:
-        npm = None
 
     if skip_build:
         if source_mode:
@@ -5269,6 +5268,12 @@ def cmd_gui(args: argparse.Namespace):
             build_label = "source build" if source_mode else "packaged app"
             print(f"✓ Desktop {build_label} is up to date (content stamp matches)")
         else:
+            if not npm:
+                npm = shutil.which("npm")
+                if not npm:
+                    print("Desktop GUI requires Node.js/npm, but npm was not found on PATH.")
+                    print("Install Node.js, then run:  hermes gui")
+                    sys.exit(1)
             print("→ Installing desktop workspace dependencies...")
             nixos_env = _nixos_build_env()
             install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)

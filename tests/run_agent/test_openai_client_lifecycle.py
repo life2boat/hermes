@@ -15,6 +15,12 @@ sys.modules.setdefault("fal_client", types.SimpleNamespace())
 import run_agent
 
 
+def _fake_openai_response(content):
+    message = SimpleNamespace(content=content)
+    choice = SimpleNamespace(message=message)
+    return SimpleNamespace(choices=[choice])
+
+
 class FakeRequestClient:
     def __init__(self, responder):
         self._responder = responder
@@ -61,7 +67,7 @@ def _build_agent(shared_client=None):
     agent._interrupt_message = None
     agent._client_lock = threading.RLock()
     agent._client_kwargs = {"api_key": "***", "base_url": agent.base_url}
-    agent.client = shared_client or FakeSharedClient(lambda **kwargs: {"shared": True})
+    agent.client = shared_client or FakeSharedClient(lambda **kwargs: _fake_openai_response('{"shared": true}'))
     agent.stream_delta_callback = None
     agent._stream_callback = None
     agent.reasoning_callback = None
@@ -78,7 +84,8 @@ def _connection_error():
 
 def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
     first_request = FakeRequestClient(lambda **kwargs: (_ for _ in ()).throw(_connection_error()))
-    second_request = FakeRequestClient(lambda **kwargs: {"ok": True})
+    second_response = _fake_openai_response('{"ok": true}')
+    second_request = FakeRequestClient(lambda **kwargs: second_response)
     factory = OpenAIFactory([first_request, second_request])
     monkeypatch.setattr(run_agent, "OpenAI", factory)
 
@@ -89,7 +96,8 @@ def test_retry_after_api_connection_error_recreates_request_client(monkeypatch):
 
     result = agent._interruptible_api_call({"model": agent.model, "messages": []})
 
-    assert result == {"ok": True}
+    assert result is second_response
+    assert result.choices[0].message.content == '{"ok": true}'
     assert len(factory.calls) == 2
     assert first_request.close_calls >= 1
     assert second_request.close_calls >= 1
@@ -117,15 +125,17 @@ def test_closed_shared_client_is_recreated_before_request(monkeypatch):
     stale_shared = FakeSharedClient(lambda **kwargs: (_ for _ in ()).throw(AssertionError("stale shared client used")))
     stale_shared._client.is_closed = True
 
-    replacement_shared = FakeSharedClient(lambda **kwargs: {"replacement": True})
-    request_client = FakeRequestClient(lambda **kwargs: {"ok": "fresh-request-client"})
+    replacement_shared = FakeSharedClient(lambda **kwargs: _fake_openai_response('{"replacement": true}'))
+    request_response = _fake_openai_response('{"ok": "fresh-request-client"}')
+    request_client = FakeRequestClient(lambda **kwargs: request_response)
     factory = OpenAIFactory([replacement_shared, request_client])
     monkeypatch.setattr(run_agent, "OpenAI", factory)
 
     agent = _build_agent(shared_client=stale_shared)
     result = agent._interruptible_api_call({"model": agent.model, "messages": []})
 
-    assert result == {"ok": "fresh-request-client"}
+    assert result is request_response
+    assert result.choices[0].message.content == '{"ok": "fresh-request-client"}'
     assert agent.client is replacement_shared
     assert stale_shared.close_calls >= 1
     assert replacement_shared.close_calls == 0
@@ -145,8 +155,9 @@ def test_concurrent_requests_do_not_break_each_other_when_one_client_closes(monk
     def second_responder(**kwargs):
         assert first_started.wait(timeout=2)
         assert first_closed.wait(timeout=2)
-        return {"ok": "second"}
+        return second_response
 
+    second_response = _fake_openai_response('{"ok": "second"}')
     first_client = FakeRequestClient(first_responder)
     second_client = FakeRequestClient(second_responder)
     factory = OpenAIFactory([first_client, second_client])
@@ -170,7 +181,7 @@ def test_concurrent_requests_do_not_break_each_other_when_one_client_closes(monk
 
     values = list(results.values())
     assert sum(isinstance(value, APIConnectionError) for value in values) == 1
-    assert values.count({"ok": "second"}) == 1
+    assert sum(value is second_response for value in values) == 1
     assert len(factory.calls) == 2
 
 

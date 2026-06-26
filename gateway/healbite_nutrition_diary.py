@@ -1599,6 +1599,11 @@ def compute_nutrition_diary_summary(
     return diary.get_summary(user_id=user_id, now=now, days=days)
 
 
+def get_existing_nutrition_diary() -> HealBiteNutritionDiary | None:
+    with _GLOBAL_DIARY_LOCK:
+        return _GLOBAL_DIARY
+
+
 def get_default_nutrition_diary() -> HealBiteNutritionDiary:
     global _GLOBAL_DIARY
     with _GLOBAL_DIARY_LOCK:

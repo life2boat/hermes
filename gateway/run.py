@@ -1464,6 +1464,7 @@ _TELEGRAM_PHOTO_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "fil
 _TELEGRAM_DIARY_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "delegation"})
 _TELEGRAM_DIARY_CORRECTION_TOOLSETS = ("nutrition_diary",)
 _TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/diary_undo"})
+_TELEGRAM_WATER_SLASH_COMMANDS = frozenset({"/water"})
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 _TELEGRAM_DIARY_CONTEXT_HINTS = (
     "дневник",
@@ -1636,7 +1637,7 @@ def _healbite_public_lane_reply(*, has_profile: bool, onboarding_active: bool) -
     if not has_profile:
         return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
     return (
-        "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, "
+        "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, "
         "фото еды и ответы Да/Нет для сохранения."
     )
 
@@ -1731,6 +1732,16 @@ def _healbite_public_lane_decision(
         message=text_value,
         history=None,
     )
+    first_token = normalized.split()[0] if normalized else ""
+    if first_token in _TELEGRAM_WATER_SLASH_COMMANDS:
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": "public_water_tracker",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
     if diary_turn in {"summary", "correction", "ambiguous"}:
         return {
             "enabled": True,

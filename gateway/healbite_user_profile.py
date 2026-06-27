@@ -148,6 +148,7 @@ class HealBiteUserProfile:
     nutrition_calculation_version: str | None = None
     nutrition_calculated_at: str = ""
     target_source: str | None = None
+    water_target_ml: int | None = None
     created_at: str = ""
 
     @property
@@ -477,6 +478,11 @@ class HealBiteUserProfileStore:
             nutrition_calculation_version=str((user_row["nutrition_calculation_version"] if user_row is not None and "nutrition_calculation_version" in user_row.keys() else "") or "") or None,
             nutrition_calculated_at=str((user_row["nutrition_calculated_at"] if user_row is not None and "nutrition_calculated_at" in user_row.keys() else "") or ""),
             target_source=str((user_row["target_source"] if user_row is not None and "target_source" in user_row.keys() else "") or "") or None,
+            water_target_ml=(
+                _to_int(profile_row["water_target_ml"])
+                if profile_row is not None and "water_target_ml" in profile_row.keys()
+                else None
+            ),
             created_at=str(
                 (
                     user_row["created_at"]
@@ -489,6 +495,13 @@ class HealBiteUserProfileStore:
             ),
         )
         return profile
+
+    def get_water_target_ml(self, user_id: int) -> int | None:
+        profile = self.get_user_profile(int(user_id))
+        if profile is None:
+            return None
+        target = profile.water_target_ml
+        return int(target) if target is not None and int(target) > 0 else None
 
     def _ensure_user_row(self, conn: sqlite3.Connection, *, user_id: int, username: str = "") -> None:
         identity_column = self._users_identity_column(conn)

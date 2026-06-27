@@ -105,6 +105,13 @@ from gateway.healbite_user_profile import (
     get_existing_healbite_user_profile,
     onboarding_keyboard_rows,
 )
+from gateway.healbite_water_tracker import (
+    WATER_CUSTOM_AMOUNT_STATE,
+    format_water_custom_prompt,
+    format_water_tracker_report,
+    get_default_water_tracker,
+    parse_water_amount,
+)
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -159,7 +166,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "📋 Меню на неделю": "__placeholder__:weekly_menu",
     "🛒 Список покупок": "__placeholder__:shopping_list",
     "⚖️ Трекер веса": "__placeholder__:weight_tracker",
-    "💧 Трекер воды": "__placeholder__:water_tracker",
+    "💧 Трекер воды": "/water",
     "👨‍👩‍👧 Семья": "__placeholder__:family",
     "📈 Отчет за неделю": "/stats 7d",
     "⚙️ Ограничения": "__placeholder__:restrictions",
@@ -3445,6 +3452,11 @@ class TelegramAdapter(BasePlatformAdapter):
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
 
+        # --- HealBite water tracker callbacks ---
+        if data.startswith("water:"):
+            await self._handle_healbite_water_callback(query, data)
+            return
+
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
@@ -5880,6 +5892,207 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    def _healbite_water_keyboard(self) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("+250 мл", callback_data="water:add:250"),
+                InlineKeyboardButton("+500 мл", callback_data="water:add:500"),
+            ],
+            [InlineKeyboardButton("Другой объём", callback_data="water:custom")],
+            [InlineKeyboardButton("Отменить последнюю", callback_data="water:undo")],
+            [
+                InlineKeyboardButton("Обновить", callback_data="water:refresh"),
+                InlineKeyboardButton("Назад", callback_data="water:back"),
+            ],
+        ])
+
+    async def _send_healbite_water_screen(
+        self,
+        msg: Message,
+        *,
+        user_id: int,
+        notice: str | None = None,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        summary = get_default_water_tracker().get_water_summary(int(user_id))
+        kwargs: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": format_water_tracker_report(summary, notice=notice),
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_water_keyboard(),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _edit_healbite_water_screen(
+        self,
+        query: Any,
+        *,
+        user_id: int,
+        notice: str | None = None,
+    ) -> None:
+        summary = get_default_water_tracker().get_water_summary(int(user_id))
+        kwargs: Dict[str, Any] = {
+            "text": format_water_tracker_report(summary, notice=notice),
+            "reply_markup": self._healbite_water_keyboard(),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            message = getattr(query, "message", None)
+            if message is not None:
+                await self._send_healbite_water_screen(message, user_id=user_id, notice=notice)
+
+    async def _maybe_handle_healbite_water_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/water":
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(msg=msg, route="water", lane="healbite_public", result="allowed")
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не удалось определить пользователя для трекера воды.",
+                message_thread_id=getattr(msg, "message_thread_id", None),
+            )
+            return True
+        await self._send_healbite_water_screen(msg, user_id=int(user_id))
+        return True
+
+    async def _maybe_handle_healbite_water_pending_reply(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        if not text:
+            return False
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+        tracker = get_default_water_tracker()
+        if tracker.get_pending_state(int(user_id)) != WATER_CUSTOM_AMOUNT_STATE:
+            return False
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        if text.lower() == "/cancel":
+            tracker.clear_pending_state(int(user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Ввод воды отменён.",
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_route_selected(msg=msg, route="water", lane="healbite_public", result="custom_cancelled")
+            return True
+        if text.startswith("/"):
+            return False
+        amount_ml = parse_water_amount(text)
+        if amount_ml is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не понял объём. Напишите, например: 300 мл или 0,5 л. /cancel — отменить.",
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_route_selected(msg=msg, route="water", lane="healbite_public", result="custom_invalid")
+            return True
+        message_id = getattr(msg, "message_id", None)
+        key = f"telegram_message:{message_id}:water:custom" if message_id is not None else None
+        tracker.add_water_intake(
+            int(user_id),
+            amount_ml,
+            source="telegram_custom",
+            idempotency_key=key,
+        )
+        tracker.clear_pending_state(int(user_id))
+        await self._send_healbite_water_screen(msg, user_id=int(user_id), notice=f"Добавил {amount_ml} мл.")
+        self._log_healbite_route_selected(msg=msg, route="water", lane="healbite_public", result="custom_added")
+        return True
+
+    async def _handle_healbite_water_callback(self, query: Any, data: str) -> None:
+        user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if user_id is None:
+            await query.answer(text="Не удалось определить пользователя.")
+            return
+        tracker = get_default_water_tracker()
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else "open"
+        query_id = str(getattr(query, "id", "") or "")
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=getattr(query, "message", None),
+            route="water",
+            lane="healbite_public",
+            result=action,
+        )
+        if action == "add" and len(parts) == 3:
+            amount_ml = parse_water_amount(parts[2])
+            if amount_ml is None:
+                await query.answer(text="Неверный объём.")
+                return
+            key = f"telegram_callback:{query_id}:{data}" if query_id else None
+            result = tracker.add_water_intake(
+                int(user_id),
+                amount_ml,
+                source="telegram_callback",
+                idempotency_key=key,
+            )
+            await query.answer(text="Уже записано." if result.duplicate else f"Добавил {amount_ml} мл.")
+            await self._edit_healbite_water_screen(query, user_id=int(user_id))
+            return
+        if action == "custom":
+            tracker.stage_custom_amount(int(user_id))
+            await query.answer(text="Введите объём сообщением.")
+            try:
+                await query.edit_message_text(
+                    text=format_water_custom_prompt(),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="water:refresh")]]),
+                )
+            except Exception:
+                message = getattr(query, "message", None)
+                if message is not None:
+                    await self._send_message_with_thread_fallback(
+                        chat_id=str(getattr(message, "chat_id", "")),
+                        text=format_water_custom_prompt(),
+                        message_thread_id=getattr(message, "message_thread_id", None),
+                    )
+            return
+        if action == "undo":
+            result = tracker.undo_last_water_intake_today(int(user_id))
+            notice = f"Удалил последнюю запись: {result.entry.amount_ml} мл." if result.deleted and result.entry else "Сегодня пока нечего отменять."
+            await query.answer(text="Готово." if result.deleted else "Записей за сегодня нет.")
+            await self._edit_healbite_water_screen(query, user_id=int(user_id), notice=notice)
+            return
+        if action == "back":
+            tracker.clear_pending_state(int(user_id))
+            await query.answer(text="Главное меню.")
+            message = getattr(query, "message", None)
+            if message is not None:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await self._send_healbite_menu_message(message, command="/menu")
+            return
+        if action in {"open", "refresh"}:
+            tracker.clear_pending_state(int(user_id))
+            await query.answer(text="Обновлено.")
+            await self._edit_healbite_water_screen(query, user_id=int(user_id))
+            return
+        await query.answer(text="Неизвестное действие.")
+
     async def _send_healbite_placeholder_reply(self, msg: Message) -> None:
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -5925,6 +6138,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if normalized_action == "/menu":
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
+        if normalized_action == "/water":
+            return await self._maybe_handle_healbite_water_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action == "/profile":
             return await self._maybe_handle_healbite_profile_command(
                 msg,
@@ -6004,6 +6223,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
+            return
+        if await self._maybe_handle_healbite_water_pending_reply(msg):
             return
         await self._ensure_forum_commands(update.message)
 

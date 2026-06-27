@@ -110,6 +110,20 @@ def test_public_lane_onboarded_photo_is_allowed(tmp_path, monkeypatch):
     assert decision["route"] == "public_photo_flow"
 
 
+def test_public_lane_water_command_is_allowed_after_onboarding(tmp_path, monkeypatch):
+    store = _seed_profile(tmp_path, user_id=121)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+
+    decision = _healbite_public_lane_decision(
+        source=_source(121),
+        event=_event(user_id=121, text="/water"),
+    )
+
+    assert decision["action"] == "allow"
+    assert decision["route"] == "public_water_tracker"
+
+
 def test_public_lane_diary_summary_text_is_allowed(tmp_path, monkeypatch):
     store = _seed_profile(tmp_path, user_id=116)
     monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)

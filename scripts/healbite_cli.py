@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,11 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
     format_healbite_profile_report,
+)
+from gateway.healbite_water_tracker import (
+    HealBiteWaterTracker,
+    format_water_tracker_report,
+    parse_water_amount,
 )
 
 CONTAINER_NAME = "hermes-bot"
@@ -997,6 +1003,72 @@ def run_local_profile_smoke(
     return markers
 
 
+def _seed_water_profile_target(db_path: Path, *, user_id: int, target_ml: int) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profiles (
+                telegram_id INTEGER PRIMARY KEY,
+                water_target_ml INTEGER,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO profiles(telegram_id, water_target_ml)
+            VALUES (?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET water_target_ml = excluded.water_target_ml
+            """,
+            (int(user_id), int(target_ml)),
+        )
+        conn.commit()
+
+
+def run_local_water_smoke(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = 999997,
+) -> list[str]:
+    if db_path is None:
+        with tempfile.TemporaryDirectory(prefix="healbite-water-smoke-") as tmp_dir:
+            return run_local_water_smoke(db_path=Path(tmp_dir) / "healbite.db", user_id=user_id)
+
+    resolved = Path(db_path)
+    _seed_water_profile_target(resolved, user_id=int(user_id), target_ml=2200)
+    tracker = HealBiteWaterTracker(db_path=resolved)
+    markers: list[str] = []
+
+    if parse_water_amount("300") != 300 or parse_water_amount("0,5 л") != 500:
+        raise CLIError("Water parser smoke failed.")
+    markers.append("water_parser_ok")
+
+    first = tracker.add_water_intake(int(user_id), 250, idempotency_key="cli-water-250")
+    duplicate = tracker.add_water_intake(int(user_id), 250, idempotency_key="cli-water-250")
+    tracker.add_water_intake(int(user_id), 500, idempotency_key="cli-water-500")
+    if not first.added or not duplicate.duplicate:
+        raise CLIError("Water idempotency smoke failed.")
+    markers.append("water_idempotency_ok")
+
+    summary = tracker.get_water_summary(int(user_id))
+    report = format_water_tracker_report(summary)
+    if summary.consumed_ml != 750 or summary.target_ml != 2200 or "750 мл" not in report:
+        raise CLIError("Water summary smoke failed.")
+    markers.append("water_summary_ok")
+
+    undo = tracker.undo_last_water_intake_today(int(user_id))
+    if not undo.deleted or tracker.get_water_intake_today(int(user_id)) != 250:
+        raise CLIError("Water undo smoke failed.")
+    markers.append("water_undo_ok")
+
+    reloaded = HealBiteWaterTracker(db_path=resolved)
+    if reloaded.get_water_intake_today(int(user_id)) != 250:
+        raise CLIError("Water persistence smoke failed.")
+    markers.append("water_persistence_ok")
+    return markers
+
+
 def simulate_local_message(
     text: str,
     *,
@@ -1393,6 +1465,9 @@ class HealBiteCLI:
 
     def cmd_test_profile(self) -> str:
         return "\n".join(run_local_profile_smoke())
+
+    def cmd_test_water(self) -> str:
+        return "\n".join(run_local_water_smoke())
 
 
 _RUNTIME_STATUS_CODE = r"""
@@ -1804,6 +1879,10 @@ def build_parser() -> argparse.ArgumentParser:
         "test-profile",
         help="Run a deterministic synthetic smoke-test for HealBite onboarding/profile flow",
     )
+    subparsers.add_parser(
+        "test-water",
+        help="Run a deterministic synthetic smoke-test for HealBite water tracker",
+    )
     subparsers.add_parser("check-admins", help="Inspect effective admin ACL policy")
 
     inspect_parser = subparsers.add_parser(
@@ -1859,6 +1938,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "test-profile":
         print(cli.cmd_test_profile())
+        return 0
+    if args.command == "test-water":
+        print(cli.cmd_test_water())
         return 0
     if args.command == "check-admins":
         print(cli.cmd_check_admins())

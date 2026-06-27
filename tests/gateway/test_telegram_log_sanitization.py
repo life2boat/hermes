@@ -192,3 +192,87 @@ async def test_sticker_logs_do_not_include_file_unique_id(caplog, monkeypatch):
 
     assert "Sticker cache hit" in caplog.text
     _assert_no_canaries(caplog.text)
+
+
+
+def _corr_values(log_text: str) -> list[str]:
+    values: list[str] = []
+    for token in log_text.split():
+        if token.startswith("corr="):
+            values.append(token.split("=", 1)[1])
+    return values
+
+
+def test_correlation_id_is_stable_within_one_turn_and_random_across_turns(caplog):
+    adapter = _adapter()
+    msg = _message()
+    other_msg = _message()
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        adapter._log_healbite_marker("telegram_update_received", msg=msg, update_id=12345, route="profile")
+        adapter._log_healbite_marker("healbite_reply_sent", msg=msg, update_id=12345, route="profile")
+        adapter._log_healbite_marker("telegram_update_received", msg=other_msg, update_id=12346, route="diary")
+
+    corr_values = _corr_values(caplog.text)
+    assert len(corr_values) == 3
+    assert corr_values[0] == corr_values[1]
+    assert corr_values[2] != corr_values[0]
+    assert corr_values[0] != "3131313131"
+    assert corr_values[0] != "4242424242"
+    _assert_no_canaries(caplog.text)
+
+
+def test_malformed_update_without_message_gets_safe_correlation_id(caplog):
+    adapter = _adapter()
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        adapter._log_healbite_marker("telegram_update_received", route="unknown")
+
+    corr_values = _corr_values(caplog.text)
+    assert len(corr_values) == 1
+    assert len(corr_values[0]) == 12
+    assert corr_values[0] != "3131313131"
+    assert corr_values[0] != "4242424242"
+
+
+def test_all_dynamic_allowlisted_fields_redact_pii_canaries(caplog):
+    adapter = _adapter()
+    dynamic_fields = {
+        "source": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "route": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "action": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "lane": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "outcome": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "result": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "content_type": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "command": "/water PII_MESSAGE_TEXT_SHOULD_NOT_APPEAR",
+        "error_type": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "kind": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "context": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "mime": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+        "size_bucket": "PII_CALLBACK_SECRET_SHOULD_NOT_APPEAR",
+    }
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        adapter._log_healbite_marker("telegram_update_received", **dynamic_fields)
+
+    assert "telegram_update_received" in caplog.text
+    assert "redacted" in caplog.text
+    _assert_no_canaries(caplog.text)
+
+
+def test_unknown_fields_are_dropped_not_logged(caplog):
+    adapter = _adapter()
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        adapter._log_healbite_marker(
+            "telegram_update_received",
+            route="profile",
+            raw_text="PII_MESSAGE_TEXT_SHOULD_NOT_APPEAR",
+            chat_id="4242424242",
+        )
+
+    assert "route=profile" in caplog.text
+    assert "raw_text" not in caplog.text
+    assert "chat_id" not in caplog.text
+    _assert_no_canaries(caplog.text)

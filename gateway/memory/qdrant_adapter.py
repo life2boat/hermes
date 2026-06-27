@@ -145,7 +145,7 @@ class QdrantMemoryAdapter:
         try:
             self._client = self._build_client()
         except Exception as exc:
-            logger.warning("failed to initialize Qdrant client: %s", exc)
+            logger.warning("failed to initialize Qdrant client: error_type=%s", exc.__class__.__name__)
             self._client_failed = True
             return None
         if self._client is None:
@@ -190,7 +190,11 @@ class QdrantMemoryAdapter:
             self._collection_ready = True
             return True
         except Exception as exc:
-            logger.warning("failed to ensure Qdrant collection %s: %s", self.collection_name, exc)
+            logger.warning(
+                "failed to ensure Qdrant collection: collection=%s error_type=%s",
+                self.collection_name,
+                exc.__class__.__name__,
+            )
             return False
 
     def upsert_fact(
@@ -226,10 +230,10 @@ class QdrantMemoryAdapter:
                 client.upsert(collection_name=self.collection_name, points=[point])
                 return True
             except Exception as exc:
-                logger.warning("failed to upsert semantic memory point %s: %s", point["id"], exc)
+                logger.warning("failed to upsert semantic memory point: error_type=%s", exc.__class__.__name__)
                 return False
         except Exception as exc:
-            logger.warning("failed to upsert semantic memory point %s: %s", point["id"], exc)
+            logger.warning("failed to upsert semantic memory point: error_type=%s", exc.__class__.__name__)
             return False
 
     def search(self, *, query_text: str, user_id: int, limit: int = 5) -> list[QdrantMemoryHit]:

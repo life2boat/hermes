@@ -5694,7 +5694,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not text:
             return None
         if key == "error_type" and re.fullmatch(r"[A-Za-z0-9_.]+", text):
-            return text[:80]
+            if text.endswith(("Error", "Exception", "Warning", "Timeout")):
+                return text[:80]
+            return "redacted"
         if key == "mime" and re.fullmatch(r"[a-z0-9.+/-]+", text):
             return text[:80]
         if not re.fullmatch(r"[a-z0-9_.:/<>=+-]+", text):

@@ -11,7 +11,7 @@ from gateway.slash_access import policy_for_source
 SAFE_PROVIDER_REPLY = "Сервис временно перегружен, попробуйте через минуту."
 
 
-def _memory_stats_message(*, user_id: int = 968323641, chat_id: int = 100, chat_type: str = "private"):
+def _memory_stats_message(*, user_id: int = 123456789, chat_id: int = 100, chat_type: str = "private"):
     return SimpleNamespace(
         chat=SimpleNamespace(id=chat_id, type=chat_type),
         from_user=SimpleNamespace(id=user_id),
@@ -41,7 +41,7 @@ def test_policy_for_source_marks_telegram_admin_from_allow_admin_from():
             Platform.TELEGRAM: PlatformConfig(
                 enabled=True,
                 token="fake-token",
-                extra={"allow_admin_from": ["968323641"]},
+                extra={"allow_admin_from": ["123456789"]},
             )
         }
     )
@@ -49,12 +49,12 @@ def test_policy_for_source_marks_telegram_admin_from_allow_admin_from():
         platform=Platform.TELEGRAM,
         chat_id="100",
         chat_type="dm",
-        user_id="968323641",
+        user_id="123456789",
     )
 
     policy = policy_for_source(config, source)
 
-    assert policy.is_admin("968323641") is True
+    assert policy.is_admin("123456789") is True
 
 
 def test_memory_stats_admin_reads_allow_admin_from_from_physical_config_file(tmp_path, monkeypatch):
@@ -66,9 +66,9 @@ platforms:
   telegram:
     extra:
       allow_admin_from:
-        - 968323641
+        - 123456789
       group_allow_admin_from:
-        - 248875361
+        - 987654321
 """.strip(),
         encoding="utf-8",
     )

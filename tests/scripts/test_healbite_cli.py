@@ -150,6 +150,19 @@ def test_build_parser_parses_test_pending():
     assert args.command == "test-pending"
 
 
+def test_build_parser_parses_test_water():
+    parser = healbite_cli.build_parser()
+    args = parser.parse_args(["test-water"])
+    assert args.command == "test-water"
+
+
+def test_run_local_water_smoke_uses_temp_db(tmp_path):
+    markers = healbite_cli.run_local_water_smoke(db_path=tmp_path / "water.db")
+    assert "water_parser_ok" in markers
+    assert "water_summary_ok" in markers
+    assert "water_undo_ok" in markers
+
+
 def test_build_parser_parses_free_text_simulation_with_allow_write():
     parser = healbite_cli.build_parser()
     args = parser.parse_args(

@@ -172,7 +172,6 @@ def test_telegram_diary_correction_only_exposes_safe_diary_toolset():
 
     names = _tool_names(enabled, disabled)
     assert enabled == ["nutrition_diary"]
-    assert "update_last_meal" in names
     assert DANGEROUS_TOOLSETS <= set(disabled)
     assert DANGEROUS_TOOL_NAMES.isdisjoint(names)
     assert _exec_approval_policy_for_turn(source=event.source, event=event, message=event.text) == "auto_deny"

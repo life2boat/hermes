@@ -9,10 +9,10 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
-import hashlib
 import json
 import logging
 import os
+import secrets
 import tempfile
 import html as _html
 import re
@@ -517,6 +517,7 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+        self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
@@ -3742,8 +3743,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 if resolved:
                     logger.info(
-                        "Telegram clarify button resolved (id=%s, choice=%r, user=%s)",
-                        clarify_id, resolved_text, user_display,
+                        "Telegram clarify button resolved: outcome=success"
                     )
                 else:
                     logger.warning(
@@ -3785,8 +3785,7 @@ class TelegramAdapter(BasePlatformAdapter):
             tmp = response_path.with_suffix(".tmp")
             tmp.write_text(answer)
             tmp.replace(response_path)
-            logger.info("Telegram update prompt answered '%s' by user %s",
-                        answer, getattr(query.from_user, "id", "unknown"))
+            logger.info("Telegram update prompt answered: outcome=success")
         except Exception as exc:
             logger.error("Failed to write update response from callback: %s", exc)
 
@@ -5438,10 +5437,8 @@ class TelegramAdapter(BasePlatformAdapter):
             store.append_to_transcript(session_entry.session_id, entry)
             adapter_name = getattr(self, "name", "telegram")
             logger.info(
-                "[%s] Telegram group message observed (no bot trigger): chat=%s from=%s",
+                "[%s] Telegram group message observed (no bot trigger): outcome=stored",
                 adapter_name,
-                getattr(getattr(message, "chat", None), "id", "unknown"),
-                event.source.user_id or "unknown",
             )
         except Exception as exc:
             adapter_name = getattr(self, "name", "telegram")
@@ -5485,7 +5482,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if int(thread_id) in self._telegram_ignored_threads():
                     return False
             except (TypeError, ValueError):
-                logger.warning("[%s] Ignoring non-numeric Telegram message_thread_id: %r", self.name, thread_id)
+                logger.warning("[%s] Ignoring non-numeric Telegram message_thread_id", self.name)
 
         if not self._is_group_chat(message):
             # Root DM (non-topic): ignore if ignore_root_dm is configured
@@ -5546,7 +5543,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
                 await self._bot.set_my_commands(bot_commands, scope=BotCommandScopeChat(chat_id=chat_id))
                 self._forum_command_registered.add(chat_id)
-                logger.info("[%s] Lazy-registered %d commands for forum chat %s", self.name, len(bot_commands), chat_id)
+                logger.info("[%s] Lazy-registered %d forum commands", self.name, len(bot_commands))
             except Exception as e:
                 logger.warning("[%s] Forum command lazy-registration failed: %s", self.name, e)
 
@@ -5658,20 +5655,75 @@ class TelegramAdapter(BasePlatformAdapter):
             return "incomplete_profile"
         return None
 
+    _HEALBITE_LOG_FIELD_ALLOWLIST = {
+        "action",
+        "amount_ml",
+        "command",
+        "content_type",
+        "context",
+        "duration_ms",
+        "error_type",
+        "has_caption",
+        "has_photo",
+        "has_text",
+        "kind",
+        "lane",
+        "media_count",
+        "mime",
+        "ok",
+        "outcome",
+        "public_onboarding",
+        "result",
+        "retryable",
+        "route",
+        "size_bucket",
+        "source",
+        "status_code",
+        "text_length",
+    }
+
     @staticmethod
-    def _healbite_correlation_id(msg: Optional[Message], update_id: Optional[int] = None) -> str:
-        if msg is None:
-            seed = f"missing:{update_id or ''}"
+    def _safe_log_scalar(key: str, value: Any) -> str | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            return str(value).lower()
+        if isinstance(value, (int, float)):
+            return str(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        if key == "error_type" and re.fullmatch(r"[A-Za-z0-9_.]+", text):
+            return text[:80]
+        if key == "mime" and re.fullmatch(r"[a-z0-9.+/-]+", text):
+            return text[:80]
+        if not re.fullmatch(r"[a-z0-9_.:/<>=+-]+", text):
+            return "redacted"
+        return text[:80]
+
+    def _healbite_correlation_id(self, msg: Optional[Message], update_id: Optional[int] = None) -> str:
+        if update_id is not None:
+            key: tuple[str, Any] = ("update", update_id)
+        elif msg is not None:
+            key = ("message_object", id(msg))
         else:
-            seed = ":".join(
-                [
-                    str(getattr(getattr(msg, "chat", None), "id", "") or ""),
-                    str(getattr(getattr(msg, "from_user", None), "id", "") or ""),
-                    str(getattr(msg, "message_id", "") or ""),
-                    str(update_id or ""),
-                ]
-            )
-        return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+            return secrets.token_hex(6)
+
+        cache = getattr(self, "_healbite_log_correlations", None)
+        if cache is None:
+            cache = {}
+            try:
+                self._healbite_log_correlations = cache
+            except Exception:
+                return secrets.token_hex(6)
+        corr = cache.get(key)
+        if corr is None:
+            corr = secrets.token_hex(6)
+            cache[key] = corr
+            if len(cache) > 1024:
+                for old_key in list(cache)[:256]:
+                    cache.pop(old_key, None)
+        return corr
 
     def _log_healbite_marker(
         self,
@@ -5685,9 +5737,12 @@ class TelegramAdapter(BasePlatformAdapter):
         corr = self._healbite_correlation_id(msg, update_id=update_id)
         parts = [f"corr={corr}"]
         for key, value in fields.items():
-            if value is None or value == "":
+            if key not in self._HEALBITE_LOG_FIELD_ALLOWLIST:
                 continue
-            parts.append(f"{key}={value}")
+            safe_value = self._safe_log_scalar(key, value)
+            if safe_value is None:
+                continue
+            parts.append(f"{key}={safe_value}")
         logger.log(level, "[Telegram][%s] %s", marker, " ".join(parts))
 
     def _log_healbite_route_selected(
@@ -6769,10 +6824,7 @@ class TelegramAdapter(BasePlatformAdapter):
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
-            logger.info(
-                "[Telegram] Flushing text batch %s (%d chars)",
-                key, len(event.text or ""),
-            )
+            logger.info("[Telegram] Flushing text batch text_length=%d", len(event.text or ""))
             await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
@@ -6803,7 +6855,7 @@ class TelegramAdapter(BasePlatformAdapter):
             event = self._pending_photo_batches.pop(batch_key, None)
             if not event:
                 return
-            logger.info("[Telegram] Flushing photo batch %s with %d image(s)", batch_key, len(event.media_urls))
+            logger.info("[Telegram] Flushing photo batch media_count=%d", len(event.media_urls))
             await self.handle_message(event)
         finally:
             if self._pending_photo_batch_tasks.get(batch_key) is current_task:
@@ -6896,7 +6948,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 allowed, note = self._telegram_media_size_allowed(msg.voice, "voice message")
                 if not allowed:
                     event.text = self._append_observed_note(event.text, note or "")
-                    logger.info("[Telegram] Skipped oversized user voice (size=%s)", getattr(msg.voice, "file_size", None))
+                    logger.info("[Telegram] Skipped oversized user voice size_bucket=%s", _vision_size_bucket(getattr(msg.voice, "file_size", None)))
                     await self.handle_message(event)
                     return
                 file_obj = await msg.voice.get_file()
@@ -6904,15 +6956,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 cached_path = cache_audio_from_bytes(bytes(audio_bytes), ext=".ogg")
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/ogg"]
-                logger.info("[Telegram] Cached user voice at %s", cached_path)
+                logger.info("[Telegram] Cached user voice content_type=audio")
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache voice: %s", e, exc_info=True)
+                logger.warning("[Telegram] Failed to cache voice error_type=%s", e.__class__.__name__)
         elif msg.audio:
             try:
                 allowed, note = self._telegram_media_size_allowed(msg.audio, "audio file")
                 if not allowed:
                     event.text = self._append_observed_note(event.text, note or "")
-                    logger.info("[Telegram] Skipped oversized user audio (size=%s)", getattr(msg.audio, "file_size", None))
+                    logger.info("[Telegram] Skipped oversized user audio size_bucket=%s", _vision_size_bucket(getattr(msg.audio, "file_size", None)))
                     await self.handle_message(event)
                     return
                 file_obj = await msg.audio.get_file()
@@ -6920,9 +6972,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 cached_path = cache_audio_from_bytes(bytes(audio_bytes), ext=".mp3")
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/mp3"]
-                logger.info("[Telegram] Cached user audio at %s", cached_path)
+                logger.info("[Telegram] Cached user audio content_type=audio")
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache audio: %s", e, exc_info=True)
+                logger.warning("[Telegram] Failed to cache audio error_type=%s", e.__class__.__name__)
 
         elif msg.video:
             try:
@@ -6937,9 +6989,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 cached_path = cache_video_from_bytes(bytes(video_bytes), ext=ext)
                 event.media_urls = [cached_path]
                 event.media_types = [SUPPORTED_VIDEO_TYPES.get(ext, "video/mp4")]
-                logger.info("[Telegram] Cached user video at %s", cached_path)
+                logger.info("[Telegram] Cached user video content_type=video")
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache video: %s", e, exc_info=True)
+                logger.warning("[Telegram] Failed to cache video error_type=%s", e.__class__.__name__)
 
         # Download document files to cache for agent processing
         elif msg.document:
@@ -6971,7 +7023,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         "The document is too large or its size could not be verified. "
                         f"Maximum: {limit_mb} MB."
                     )
-                    logger.info("[Telegram] Document too large: %s bytes", doc.file_size)
+                    logger.info("[Telegram] Document too large size_bucket=%s", _vision_size_bucket(doc.file_size))
                     await self.handle_message(event)
                     return
 
@@ -6992,7 +7044,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         await self.handle_message(event)
                         return
                     if attached:
-                        logger.info("[Telegram] Cached user image-document at %s", event.media_urls[0])
+                        logger.info("[Telegram] Cached user image-document content_type=image")
 
                         media_group_id = getattr(msg, "media_group_id", None)
                         if media_group_id:
@@ -7021,7 +7073,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     event.media_urls = [cached_path]
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
                     event.message_type = MessageType.VIDEO
-                    logger.info("[Telegram] Cached user video document at %s", cached_path)
+                    logger.info("[Telegram] Cached user video document content_type=video")
                     await self.handle_message(event)
                     return
 
@@ -7050,7 +7102,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 mime_type = SUPPORTED_DOCUMENT_TYPES[ext]
                 event.media_urls = [cached_path]
                 event.media_types = [mime_type]
-                logger.info("[Telegram] Cached user document at %s", cached_path)
+                logger.info("[Telegram] Cached user document content_type=%s", mime_type)
 
                 # For text files, inject content into event.text (capped at 100 KB)
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
@@ -7071,7 +7123,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         )
 
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
+                logger.warning("[Telegram] Failed to cache document error_type=%s", e.__class__.__name__)
 
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
@@ -7147,7 +7199,7 @@ class TelegramAdapter(BasePlatformAdapter):
             event.text = build_sticker_injection(
                 cached["description"], cached.get("emoji", emoji), cached.get("set_name", set_name)
             )
-            logger.info("[Telegram] Sticker cache hit: %s", sticker.file_unique_id)
+            logger.info("[Telegram] Sticker cache hit")
             return
 
         # Cache miss -- download and analyze
@@ -7155,7 +7207,7 @@ class TelegramAdapter(BasePlatformAdapter):
             file_obj = await sticker.get_file()
             image_bytes = await file_obj.download_as_bytearray()
             cached_path = cache_image_from_bytes(bytes(image_bytes), ext=".webp")
-            logger.info("[Telegram] Analyzing sticker at %s", cached_path)
+            logger.info("[Telegram] Analyzing sticker content_type=image")
 
             from tools.vision_tools import vision_analyze_tool
             result_json = await vision_analyze_tool(
@@ -7175,7 +7227,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     emoji, set_name,
                 )
         except Exception as e:
-            logger.warning("[Telegram] Sticker analysis error: %s", e, exc_info=True)
+            logger.warning("[Telegram] Sticker analysis error_type=%s", e.__class__.__name__)
             event.text = build_sticker_injection(
                 f"a sticker with emoji {emoji}" if emoji else "a sticker",
                 emoji, set_name,
@@ -7226,10 +7278,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         cache_key = f"{cid}:{name}"
                         if cache_key not in self._dm_topics:
                             self._dm_topics[cache_key] = int(tid)
-                            logger.info(
-                                "[%s] Hot-loaded DM topic from config: %s -> thread_id=%s",
-                                self.name, cache_key, tid,
-                            )
+                            logger.info("[%s] Hot-loaded DM topic from config", self.name)
         except Exception as e:
             logger.debug("[%s] Failed to reload dm_topics from config: %s", self.name, e)
 
@@ -7277,10 +7326,7 @@ class TelegramAdapter(BasePlatformAdapter):
         cache_key = f"{chat_id}:{topic_name}"
         if cache_key not in self._dm_topics:
             self._dm_topics[cache_key] = int(thread_id)
-            logger.info(
-                "[%s] Cached DM topic from message: %s -> thread_id=%s",
-                self.name, cache_key, thread_id,
-            )
+            logger.info("[%s] Cached DM topic from message", self.name)
 
     def _build_message_event(
         self,

@@ -6913,7 +6913,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                     return None
             else:
-                logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+                logger.warning("Unauthorized user on %s", source.platform.value)
                 # In DMs: offer pairing code. In groups: silently ignore.
                 if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
                     platform_name = source.platform.value if source.platform else "unknown"

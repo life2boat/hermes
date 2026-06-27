@@ -4137,7 +4137,7 @@ class BasePlatformAdapter(ABC):
                 )
                 response = None
             if not response:
-                logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
+                logger.debug("[%s] Handler returned empty/None response", self.name)
             if response:
                 # Capture [[as_document]] before extract_media strips it, so the
                 # dispatch partition below can route image-extension files
@@ -4187,8 +4187,8 @@ class BasePlatformAdapter(ABC):
                         logger.warning(
                             "[%s] response_delivery_recovered: extract pipeline "
                             "reduced a non-empty response (%d chars) to empty with "
-                            "no attachment; delivering recovered original to %s",
-                            self.name, len(_response_pre_extract), event.source.chat_id,
+                            "no attachment; delivering recovered original",
+                            self.name, len(_response_pre_extract),
                         )
                         text_content = _recovered
 
@@ -4244,7 +4244,7 @@ class BasePlatformAdapter(ABC):
 
                 # Send the text portion
                 if text_content and not _tts_caption_delivered:
-                    logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                    logger.info("[%s] Sending response (%d chars)", self.name, len(text_content))
                     _reply_anchor = _reply_anchor_for_event(event)
                     # Mark final response messages for notification delivery.
                     # Platform adapters that support per-message notification

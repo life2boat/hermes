@@ -261,7 +261,7 @@ class QdrantMemoryAdapter:
                 limit=limit,
             )
         except Exception as exc:
-            logger.warning("Qdrant semantic search failed for user_id=%s: %s", user_id, exc)
+            logger.warning("Qdrant semantic search failed: %s", exc.__class__.__name__)
             return []
 
         hits: list[QdrantMemoryHit] = []

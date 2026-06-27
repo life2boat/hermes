@@ -284,27 +284,60 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
     redacted = str(text or "")
     for pattern in _GATEWAY_SECRET_PATTERNS:
         redacted = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?i)\bauthorization\s*:\s*bearer\s+[A-Za-z0-9._\-]+",
+        "[REDACTED]",
+        redacted,
+    )
     return redacted
 
 
-def _gateway_provider_error_reply(text: str) -> str:
-    """Map raw provider/API errors to a short user-safe Telegram reply."""
-    lowered = str(text or "").lower()
-    if "llmserviceunavailableerror" in lowered or "llm service temporarily unavailable" in lowered:
-        return "Сервис временно перегружен, попробуйте через минуту."
-    if _GATEWAY_AUTH_ERROR_RE.search(text):
-        return "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443."
-    if _GATEWAY_PROVIDER_POLICY_RE.search(text):
-        return (
-            "⚠️ The model provider rejected the request. I kept the raw provider "
-            "error out of chat; check gateway logs for details or try rephrasing."
-        )
-    if _GATEWAY_RATE_LIMIT_RE.search(text):
-        return "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
-    return (
-        "⚠️ The model provider failed after retries. I kept raw provider details "
-        "out of chat; check gateway logs for diagnostics."
+_GATEWAY_SAFE_PROVIDER_REPLY = "Сервис временно перегружен, попробуйте через минуту."
+
+
+def _gateway_error_text(payload: Any) -> str:
+    """Render gateway/provider failures to text for detection and safe logging."""
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, (dict, list, tuple, set)):
+        try:
+            return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            return str(payload)
+    return str(payload)
+
+
+def _is_gateway_provider_failure(payload: Any) -> bool:
+    """Return True when payload looks like provider/infra failure text."""
+    text = _redact_gateway_user_facing_secrets(_gateway_error_text(payload))
+    if not text:
+        return False
+    return bool(
+        _GATEWAY_PROVIDER_ERROR_RE.search(text)
+        or _GATEWAY_PROVIDER_POLICY_RE.search(text)
+        or _GATEWAY_RATE_LIMIT_RE.search(text)
+        or _looks_like_gateway_provider_error(text)
     )
+
+
+def _log_gateway_provider_failure(payload: Any, *, surface: str) -> None:
+    """Keep masked provider diagnostics in backend logs, never in chat."""
+    detail = _redact_gateway_user_facing_secrets(_gateway_error_text(payload)).strip()
+    if detail:
+        logger.warning(
+            "Gateway provider failure masked from %s: %s",
+            surface,
+            detail[:500],
+        )
+    else:
+        logger.warning("Gateway provider failure masked from %s", surface)
+
+
+def _gateway_provider_error_reply(text: str) -> str:
+    """Map raw provider/API errors to the single safe user-visible reply."""
+    return _GATEWAY_SAFE_PROVIDER_REPLY
 
 
 _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
@@ -357,8 +390,9 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if _gateway_platform_value(platform) != "telegram":
         return text
 
-    redacted = _redact_gateway_user_facing_secrets(str(text))
-    if _looks_like_gateway_provider_error(redacted):
+    redacted = _redact_gateway_user_facing_secrets(_gateway_error_text(text))
+    if _is_gateway_provider_failure(redacted):
+        _log_gateway_provider_failure(redacted, surface="final_response")
         return _gateway_provider_error_reply(redacted)
     return redacted
 
@@ -374,7 +408,8 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         return None
-    if _looks_like_gateway_provider_error(text):
+    if _is_gateway_provider_failure(text):
+        _log_gateway_provider_failure(text, surface=f"status:{event_type or 'unknown'}")
         return _gateway_provider_error_reply(text)
     return text
 
@@ -2223,7 +2258,13 @@ def _normalize_empty_agent_response(
 
     if agent_result.get("failed"):
         error_detail = agent_result.get("error", "unknown error")
-        error_str = str(error_detail).lower()
+        redacted_error = _redact_gateway_user_facing_secrets(
+            _gateway_error_text(error_detail)
+        )
+        if _is_gateway_provider_failure(redacted_error):
+            _log_gateway_provider_failure(redacted_error, surface="empty_agent_response")
+            return _gateway_provider_error_reply(redacted_error)
+        error_str = redacted_error.lower()
         is_context_failure = any(
             p in error_str
             for p in ("context", "token", "too large", "too long", "exceed", "payload")
@@ -2235,15 +2276,20 @@ def _normalize_empty_agent_response(
                 "/reset to start fresh."
             )
         return (
-            f"The request failed: {str(error_detail)[:300]}\n"
+            f"The request failed: {redacted_error[:300]}\n"
             "Try again or use /reset to start a fresh session."
         )
 
     api_calls = int(agent_result.get("api_calls", 0) or 0)
     if api_calls > 0 and not agent_result.get("interrupted"):
         if agent_result.get("partial"):
-            err = agent_result.get("error", "processing incomplete")
-            return f"⚠️ Processing stopped: {str(err)[:200]}. Try again."
+            err = _redact_gateway_user_facing_secrets(
+                _gateway_error_text(agent_result.get("error", "processing incomplete"))
+            )
+            if _is_gateway_provider_failure(err):
+                _log_gateway_provider_failure(err, surface="partial_agent_response")
+                return _gateway_provider_error_reply(err)
+            return f"⚠️ Processing stopped: {err[:200]}. Try again."
         return (
             "⚠️ Processing completed but no response was generated. "
             "This may be a transient error — try sending your message again."
@@ -15444,7 +15490,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             if not final_response:
-                error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
+                error_msg = ""
+                if result.get("error"):
+                    redacted_error = _redact_gateway_user_facing_secrets(
+                        _gateway_error_text(result["error"])
+                    )
+                    if _is_gateway_provider_failure(redacted_error):
+                        _log_gateway_provider_failure(redacted_error, surface="agent_result_error")
+                        error_msg = _gateway_provider_error_reply(redacted_error)
+                    else:
+                        error_msg = f"⚠️ {redacted_error}"
                 return {
                     "final_response": error_msg,
                     "messages": result.get("messages", []),

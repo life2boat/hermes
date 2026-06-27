@@ -41,7 +41,7 @@ def test_telegram_status_sanitizes_raw_provider_security_errors():
     sanitized = _prepare_gateway_status_message(Platform.TELEGRAM, "lifecycle", raw)
 
     assert sanitized is not None
-    assert "provider rejected" in sanitized.lower()
+    assert sanitized == "Сервис временно перегружен, попробуйте через минуту."
     assert "cybersecurity risk" not in sanitized.lower()
     assert "HTTP 400" not in sanitized
     assert "req_123" not in sanitized
@@ -56,7 +56,7 @@ def test_telegram_final_response_sanitizes_raw_provider_errors():
 
     sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, raw)
 
-    assert "provider rejected" in sanitized.lower()
+    assert sanitized == "Сервис временно перегружен, попробуйте через минуту."
     assert "cybersecurity risk" not in sanitized.lower()
     assert "HTTP 400" not in sanitized
     assert "req_abc" not in sanitized

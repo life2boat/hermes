@@ -1037,7 +1037,11 @@ def run_local_water_smoke(
 
     resolved = Path(db_path)
     _seed_water_profile_target(resolved, user_id=int(user_id), target_ml=2200)
-    tracker = HealBiteWaterTracker(db_path=resolved)
+    profile_store = HealBiteUserProfileStore(db_path=resolved)
+    tracker = HealBiteWaterTracker(
+        db_path=resolved,
+        water_target_resolver=profile_store.get_water_target_ml,
+    )
     markers: list[str] = []
 
     if parse_water_amount("300") != 300 or parse_water_amount("0,5 л") != 500:
@@ -1062,7 +1066,10 @@ def run_local_water_smoke(
         raise CLIError("Water undo smoke failed.")
     markers.append("water_undo_ok")
 
-    reloaded = HealBiteWaterTracker(db_path=resolved)
+    reloaded = HealBiteWaterTracker(
+        db_path=resolved,
+        water_target_resolver=profile_store.get_water_target_ml,
+    )
     if reloaded.get_water_intake_today(int(user_id)) != 250:
         raise CLIError("Water persistence smoke failed.")
     markers.append("water_persistence_ok")

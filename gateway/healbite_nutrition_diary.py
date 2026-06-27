@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway.memory.embedding_adapter import EmbeddingAdapter
+from gateway.healbite_time import local_day_window_utc
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 from utils import safe_json_loads
 
@@ -270,10 +271,7 @@ def _parse_sqlite_timestamp(value: str | None) -> datetime | None:
 
 
 def _local_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
-    local_now = now.astimezone() if now is not None else datetime.now().astimezone()
-    start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + timedelta(days=1)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+    return local_day_window_utc(now)
 
 
 def _rolling_window(days: int, now: datetime | None = None) -> tuple[datetime, datetime]:

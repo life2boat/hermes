@@ -166,7 +166,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "📋 Меню на неделю": "__placeholder__:weekly_menu",
     "🛒 Список покупок": "__placeholder__:shopping_list",
     "⚖️ Трекер веса": "__placeholder__:weight_tracker",
-    "💧 Трекер воды": "__placeholder__:water_tracker",
+    "💧 Трекер воды": "/water",
     "👨‍👩‍👧 Семья": "__placeholder__:family",
     "📈 Отчет за неделю": "/stats 7d",
     "⚙️ Ограничения": "__placeholder__:restrictions",
@@ -6222,9 +6222,9 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
-        if await self._maybe_handle_healbite_water_pending_reply(msg):
-            return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
+            return
+        if await self._maybe_handle_healbite_water_pending_reply(msg):
             return
         await self._ensure_forum_commands(update.message)
 

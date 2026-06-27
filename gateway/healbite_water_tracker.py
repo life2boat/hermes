@@ -4,12 +4,12 @@ import html
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any, Callable
 
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
+from gateway.healbite_time import local_day_window_utc
 
 WATER_INTAKE_TABLE = "water_intake_events"
 WATER_PENDING_TABLE = "water_pending_inputs"
@@ -92,25 +92,6 @@ def _parse_sqlite_timestamp(value: str) -> datetime:
     return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
 
 
-def _local_timezone(timezone_name: str | None = None) -> timezone | ZoneInfo:
-    if timezone_name:
-        try:
-            return ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError:
-            pass
-    return datetime.now().astimezone().tzinfo or timezone.utc
-
-
-def local_day_window_utc(now: datetime | None = None, timezone_name: str | None = None) -> tuple[datetime, datetime]:
-    tzinfo = _local_timezone(timezone_name)
-    current = now or datetime.now(tzinfo)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=tzinfo)
-    local_now = current.astimezone(tzinfo)
-    local_start = datetime.combine(local_now.date(), time.min, tzinfo=tzinfo)
-    local_end = local_start + timedelta(days=1)
-    return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
-
 
 def _format_ml(value: int | None) -> str:
     if value is None:
@@ -154,8 +135,14 @@ def parse_water_amount(text: str) -> int | None:
 
 
 class HealBiteWaterTracker:
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        water_target_resolver: Callable[[int], int | None] | None = None,
+    ) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
+        self._water_target_resolver = water_target_resolver
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
@@ -272,29 +259,19 @@ class HealBiteWaterTracker:
             return UndoWaterResult(deleted=True, entry=entry)
 
     def get_water_target_ml(self, user_id: int) -> int | None:
-        with self._connect() as conn:
-            profile_row = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'profiles'"
-            ).fetchone()
-            if profile_row is None:
-                return None
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
-            if "water_target_ml" not in columns:
-                return None
-            identity = "telegram_id" if "telegram_id" in columns else "user_id" if "user_id" in columns else ""
-            if not identity:
-                return None
-            row = conn.execute(
-                f"SELECT water_target_ml FROM profiles WHERE {identity} = ? LIMIT 1",
-                (int(user_id),),
-            ).fetchone()
-        if row is None or row["water_target_ml"] in (None, ""):
+        if self._water_target_resolver is None:
             return None
         try:
-            target = int(row["water_target_ml"])
+            target = self._water_target_resolver(int(user_id))
+        except Exception:
+            return None
+        if target in (None, ""):
+            return None
+        try:
+            normalized = int(target)
         except (TypeError, ValueError):
             return None
-        return target if target > 0 else None
+        return normalized if normalized > 0 else None
 
     def get_water_summary(
         self,
@@ -390,5 +367,11 @@ def format_water_custom_prompt() -> str:
     return "Введите объём воды: например 300 мл или 0,5 л.\n/cancel — отменить."
 
 
+def _default_water_target_resolver(user_id: int) -> int | None:
+    from gateway.healbite_user_profile import get_default_healbite_user_profile
+
+    return get_default_healbite_user_profile().get_water_target_ml(int(user_id))
+
+
 def get_default_water_tracker() -> HealBiteWaterTracker:
-    return HealBiteWaterTracker()
+    return HealBiteWaterTracker(water_target_resolver=_default_water_target_resolver)

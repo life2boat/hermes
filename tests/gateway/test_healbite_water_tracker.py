@@ -1,10 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
+from gateway.healbite_nutrition_diary import _local_day_window
+from gateway.healbite_time import local_day_window_utc
+from gateway.healbite_user_profile import HealBiteUserProfileStore
 from gateway.healbite_water_tracker import (
     HealBiteWaterTracker,
     WATER_INTAKE_TABLE,
@@ -14,21 +17,16 @@ from gateway.healbite_water_tracker import (
 )
 
 
-def _seed_water_target(db_path, *, user_id: int, target_ml: int = 2200) -> None:
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE profiles (
-                telegram_id INTEGER PRIMARY KEY,
-                water_target_ml INTEGER
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO profiles(telegram_id, water_target_ml) VALUES (?, ?)",
-            (user_id, target_ml),
-        )
-        conn.commit()
+def _water_target_resolver(*, user_id: int = 101, target_ml: int = 2200):
+    return lambda requested_user_id: target_ml if int(requested_user_id) == int(user_id) else None
+
+
+def _profile_store_with_water_target(db_path, *, user_id: int = 101, target_ml: int = 2200) -> HealBiteUserProfileStore:
+    store = HealBiteUserProfileStore(db_path=db_path)
+    store.upsert_user_profile(user_id=user_id, username="tester", weight_kg=80)
+    with store._connect() as conn:
+        conn.execute("UPDATE profiles SET water_target_ml = ? WHERE telegram_id = ?", (target_ml, user_id))
+    return store
 
 
 @pytest.mark.parametrize(
@@ -51,8 +49,7 @@ def test_parse_water_amount_rejects_invalid_or_ambiguous_values(raw):
 
 def test_water_tracker_schema_add_sum_idempotency_and_persistence(tmp_path):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path, user_id=101, target_ml=2200)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
 
     first = tracker.add_water_intake(101, 250, idempotency_key="callback-1")
     duplicate = tracker.add_water_intake(101, 250, idempotency_key="callback-1")
@@ -60,7 +57,7 @@ def test_water_tracker_schema_add_sum_idempotency_and_persistence(tmp_path):
     tracker.add_water_intake(202, 1000, idempotency_key="other-user")
 
     summary = tracker.get_water_summary(101)
-    reloaded = HealBiteWaterTracker(db_path=db_path)
+    reloaded = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
 
     assert first.added is True
     assert duplicate.duplicate is True
@@ -70,6 +67,7 @@ def test_water_tracker_schema_add_sum_idempotency_and_persistence(tmp_path):
     assert summary.progress_percent == 34
     assert reloaded.get_water_intake_today(101) == 750
     assert reloaded.get_water_intake_today(202) == 1000
+    import sqlite3
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
@@ -117,3 +115,29 @@ def test_water_tracker_custom_pending_state_expires_and_clears(tmp_path):
     tracker.stage_custom_amount(101, now=now)
     tracker.clear_pending_state(101)
     assert tracker.get_pending_state(101, now=now) is None
+
+
+def test_water_target_comes_from_canonical_profile_store(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    profile_store = _profile_store_with_water_target(db_path, user_id=101, target_ml=2300)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=profile_store.get_water_target_ml)
+    tracker.add_water_intake(101, 300)
+
+    summary = tracker.get_water_summary(101)
+
+    assert profile_store.get_water_target_ml(101) == 2300
+    assert summary.target_ml == 2300
+    assert summary.remaining_ml == 2000
+
+
+def test_water_tracker_does_not_query_profile_tables_directly():
+    source = Path("gateway/healbite_water_tracker.py").read_text(encoding="utf-8")
+
+    assert "FROM profiles" not in source
+    assert "PRAGMA table_info(profiles)" not in source
+
+
+def test_water_and_diary_share_today_window_contract():
+    now = datetime(2026, 6, 27, 23, 59, tzinfo=timezone.utc)
+
+    assert local_day_window_utc(now) == _local_day_window(now)

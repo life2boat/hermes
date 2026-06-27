@@ -459,6 +459,8 @@ async def test_telegram_onboarding_reply_short_circuits_and_advances(tmp_path, m
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     store.begin_onboarding(user_id=705, username="oleg")
     _patch_telegram_profile_store(monkeypatch, store)
+    water_factory = Mock(side_effect=AssertionError("water tracker must not be created during onboarding"))
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", water_factory)
 
     await adapter._handle_text_message(_make_update("Мужской", user_id=705), SimpleNamespace())
 
@@ -467,6 +469,7 @@ async def test_telegram_onboarding_reply_short_circuits_and_advances(tmp_path, m
     assert kwargs["reply_markup"] is None
     assert store.get_onboarding_state(705).step == "age"
     adapter._enqueue_text_event.assert_not_called()
+    water_factory.assert_not_called()
 
 
 def test_route_marker_log_is_pii_safe(caplog):

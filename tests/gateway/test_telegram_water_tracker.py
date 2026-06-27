@@ -1,6 +1,5 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -11,21 +10,8 @@ from gateway.healbite_water_tracker import HealBiteWaterTracker
 from gateway.platforms.telegram import TelegramAdapter
 
 
-def _seed_water_target(db_path, *, user_id: int = 101, target_ml: int = 2200) -> None:
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE profiles (
-                telegram_id INTEGER PRIMARY KEY,
-                water_target_ml INTEGER
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO profiles(telegram_id, water_target_ml) VALUES (?, ?)",
-            (user_id, target_ml),
-        )
-        conn.commit()
+def _water_target_resolver(*, user_id: int = 101, target_ml: int = 2200):
+    return lambda requested_user_id: target_ml if int(requested_user_id) == int(user_id) else None
 
 
 def _message(*, text: str = "💧 Трекер воды", user_id: int = 101):
@@ -64,12 +50,13 @@ def _adapter():
 @pytest.mark.asyncio
 async def test_water_keyboard_routes_to_local_tracker_without_generic_dispatch(tmp_path, monkeypatch):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
     monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
     adapter = _adapter()
+    update = SimpleNamespace(update_id=1, message=_message(), effective_message=None)
+    adapter._should_process_message = lambda msg, is_command=False: True
 
-    handled = await adapter._dispatch_healbite_keyboard_action(_message(), action="/water")
+    handled = await adapter._maybe_handle_healbite_menu_button(update, SimpleNamespace())
 
     assert handled is True
     adapter._enqueue_text_event.assert_not_called()
@@ -82,8 +69,7 @@ async def test_water_keyboard_routes_to_local_tracker_without_generic_dispatch(t
 @pytest.mark.asyncio
 async def test_water_callback_add_is_idempotent_and_answers_callback(tmp_path, monkeypatch):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
     monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
     adapter = _adapter()
     query = _query(query_id="same-callback")
@@ -100,8 +86,7 @@ async def test_water_callback_add_is_idempotent_and_answers_callback(tmp_path, m
 @pytest.mark.asyncio
 async def test_water_custom_pending_text_saves_locally_and_clears_state(tmp_path, monkeypatch):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
     monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
     adapter = _adapter()
 
@@ -119,8 +104,7 @@ async def test_water_custom_pending_text_saves_locally_and_clears_state(tmp_path
 @pytest.mark.asyncio
 async def test_water_custom_invalid_input_stays_local_and_writes_nothing(tmp_path, monkeypatch):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
     monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
     adapter = _adapter()
     tracker.stage_custom_amount(101)
@@ -137,8 +121,7 @@ async def test_water_custom_invalid_input_stays_local_and_writes_nothing(tmp_pat
 @pytest.mark.asyncio
 async def test_water_undo_callback_removes_only_latest_current_user_entry(tmp_path, monkeypatch):
     db_path = tmp_path / "healbite.db"
-    _seed_water_target(db_path)
-    tracker = HealBiteWaterTracker(db_path=db_path)
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
     tracker.add_water_intake(101, 250, idempotency_key="one")
     tracker.add_water_intake(101, 500, idempotency_key="two")
     tracker.add_water_intake(202, 700, idempotency_key="other")
@@ -149,3 +132,18 @@ async def test_water_undo_callback_removes_only_latest_current_user_entry(tmp_pa
 
     assert tracker.get_water_intake_today(101) == 250
     assert tracker.get_water_intake_today(202) == 700
+
+
+@pytest.mark.asyncio
+async def test_water_open_callback_alias_renders_same_screen(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    tracker = HealBiteWaterTracker(db_path=db_path, water_target_resolver=_water_target_resolver())
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
+    adapter = _adapter()
+    query = _query(query_id="open-1")
+
+    await adapter._handle_healbite_water_callback(query, "water:open")
+
+    query.answer.assert_awaited_once()
+    query.edit_message_text.assert_awaited_once()
+    assert "Вода сегодня" in query.edit_message_text.await_args.kwargs["text"]

@@ -6261,6 +6261,88 @@ class TelegramAdapter(BasePlatformAdapter):
             return "dm"
         return "group"
 
+    @staticmethod
+    def _normalize_admin_id_values(values: Any) -> list[str]:
+        """Normalize admin-id config values to a stable list[str]."""
+        if values is None:
+            return []
+        if isinstance(values, (str, int)):
+            values = [values]
+        elif not isinstance(values, (list, tuple, set)):
+            return []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
+
+    def _memory_stats_extra_from_config_file(self) -> dict[str, Any]:
+        """Load Telegram extra config from physical config.yaml with path fallback."""
+        from hermes_constants import get_hermes_home
+
+        candidates: list[_Path] = []
+        seen: set[str] = set()
+
+        def _push_config_path(raw: Any) -> None:
+            if not raw:
+                return
+            path = _Path(raw).expanduser()
+            if path.name != "config.yaml":
+                path = path / "config.yaml"
+            key = str(path)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(path)
+
+        try:
+            _push_config_path(get_hermes_home())
+        except Exception:
+            pass
+        _push_config_path(os.getenv("HERMES_HOME"))
+        home_env = os.getenv("HOME")
+        if home_env:
+            _push_config_path(_Path(home_env) / ".hermes")
+        _push_config_path("/opt/data/.hermes")
+
+        for config_path in candidates:
+            if not config_path.exists():
+                continue
+            try:
+                import yaml as _yaml
+
+                data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except Exception as exc:
+                logger.debug(
+                    "[%s] Failed to read %s for /memory_stats admin policy: %s",
+                    self.name,
+                    config_path,
+                    exc,
+                )
+                continue
+
+            platforms = data.get("platforms", {}) if isinstance(data, dict) else {}
+            telegram_cfg = platforms.get("telegram", {}) if isinstance(platforms, dict) else {}
+            extra = telegram_cfg.get("extra", {}) if isinstance(telegram_cfg, dict) else {}
+            if not isinstance(extra, dict):
+                return {}
+
+            normalized_extra = dict(extra)
+            normalized_extra["allow_admin_from"] = self._normalize_admin_id_values(
+                extra.get("allow_admin_from")
+            )
+            normalized_extra["group_allow_admin_from"] = self._normalize_admin_id_values(
+                extra.get("group_allow_admin_from")
+            )
+            return normalized_extra
+
+        return {}
+
     def _memory_stats_is_admin(self, msg: Message) -> bool:
         from gateway.config import Platform, load_gateway_config
         from gateway.session import SessionSource
@@ -6270,7 +6352,15 @@ class TelegramAdapter(BasePlatformAdapter):
         user_id = getattr(getattr(msg, "from_user", None), "id", None)
         user_id_str = str(user_id) if user_id is not None else None
         scope = self._memory_stats_scope(getattr(chat, "type", None))
-        fallback_policy = policy_from_extra(getattr(self.config, "extra", {}) or {}, scope)
+        adapter_extra = dict(getattr(self.config, "extra", {}) or {})
+        adapter_extra["allow_admin_from"] = self._normalize_admin_id_values(
+            adapter_extra.get("allow_admin_from")
+        )
+        adapter_extra["group_allow_admin_from"] = self._normalize_admin_id_values(
+            adapter_extra.get("group_allow_admin_from")
+        )
+        fallback_policy = policy_from_extra(adapter_extra, scope)
+        file_policy = policy_from_extra(self._memory_stats_extra_from_config_file(), scope)
 
         try:
             gateway_cfg = load_gateway_config()
@@ -6283,10 +6373,13 @@ class TelegramAdapter(BasePlatformAdapter):
             runtime_policy = policy_for_source(gateway_cfg, source)
             if runtime_policy.admin_user_ids:
                 return runtime_policy.is_admin(user_id_str)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[%s] /memory_stats runtime admin policy lookup failed: %s", self.name, exc)
 
-        return bool(fallback_policy.admin_user_ids) and fallback_policy.is_admin(user_id_str)
+        for policy in (file_policy, fallback_policy):
+            if policy.admin_user_ids:
+                return policy.is_admin(user_id_str)
+        return False
 
     def _parse_memory_stats_args(self, text: str) -> tuple[float | None, int | None, str | None]:
         tokens = (text or "").strip().split()

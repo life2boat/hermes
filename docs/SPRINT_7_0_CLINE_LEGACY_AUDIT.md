@@ -1,4 +1,4 @@
-# Sprint 7.0A Cline Legacy Audit
+﻿# Sprint 7.0A Cline Legacy Audit
 
 Status: design-only audit. No feature code, migrations, scheduler changes, production DB changes, deploy, merge, or canonical checkout edits were performed.
 
@@ -386,3 +386,16 @@ Missing coverage for Sprint 7.0:
 7. Add deterministic weekly reminder state only after store/service tests pass.
 8. Add diagnostic CLI commands: `test-water`, `test-weight`, `test-reminder`.
 9. Deploy only after isolated tests, headless diagnostics, and manual Telegram smoke.
+## 15. Confirmed Audit Outcome
+
+The following audit conclusions are now treated as the source of truth for Sprint 7.0 design:
+
+- Current `main` has only placeholder buttons for water and weight.
+- There is no full Water Tracker in current `main`.
+- There is no weight measurement history or reminder flow in current `main`.
+- No confirmed HealBite-specific Cline legacy implementation for water or weight was found.
+- `origin/cline-port/*` does not apply to HealBite Water/Weight.
+- Backup/config files must not be transferred automatically.
+- Reuse is limited to the current profile store, nutrition target calculator, Telegram local routing, keyboard patterns, pending-input patterns, SQLite isolation via `HEALBITE_DB_PATH`, scheduler infrastructure, PII-safe logging, and CLI smoke patterns.
+
+Anything else remains unconfirmed legacy and must not be copied into implementation branches without a separate provenance review.

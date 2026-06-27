@@ -1,6 +1,27 @@
-# Sprint 7.0 Water, Weight, And Reminder Architecture
+﻿# Sprint 7.0 Water, Weight, And Reminder Architecture
 
 Status: design only. This document intentionally does not create tables, migrations, handlers, callbacks, FSM code, cron jobs, service classes, or production configuration.
+
+## 0. Architecture Decision Log
+
+These decisions finalize the Sprint 7.0B/7.0C design unless explicitly superseded before implementation:
+
+| Area | Decision | Rationale |
+| --- | --- | --- |
+| Water table | `water_intake_events` event log with `user_id INTEGER`, `amount_ml INTEGER`, UTC timestamps, source, optional idempotency key, and partial unique idempotency index | Matches current SQLite source-of-truth model and avoids mutable daily counters |
+| Water idempotency | Store `idempotency_key TEXT`; for Telegram callbacks use a deterministic key derived from callback/update context; partial unique index on `(user_id, idempotency_key)` | `telegram_update_id` is useful but not enough for all callback/edit flows; the service should accept a generic key |
+| Water undo | Hard delete only the latest current-day row for the same user | Existing diary undo physically deletes rows; soft delete is unnecessary for MVP and complicates totals |
+| Weight representation | Store historical measurements as `weight_grams INTEGER`; convert to/from profile `weight_kg REAL` at API boundaries | Avoids floating-point ambiguity in history while staying compatible with current profile store and calculator |
+| Initial weight | The initial weight is the earliest valid row in `weight_measurements`; before Sprint 7.0C history exists, fallback to current profile `weight_kg` for display only | Avoids backfill while preserving current profile semantics |
+| Current weight | Canonical current weight remains `profiles.weight_kg` | Current profile formatter and nutrition calculator already read this field |
+| Atomic recalculation | Weight service should own a single SQLite transaction and call the pure nutrition calculator directly; do not call `HealBiteUserProfileStore.recalculate_profile_targets()` as an opaque nested transaction | Current profile store opens its own connection, so one-transaction safety needs a store helper or service-owned connection |
+| Reminder semantics | First reminder is due 7 days after profile completion or latest valid measurement; each valid measurement pushes the next reminder 7 days out | User-specific and simpler than fixed weekday semantics |
+| Reminder state | Add minimal SQLite `weight_reminder_state`; generic `cron/jobs.json` state is job-level, not per-user | Needed for restart-safe per-user idempotency and snooze state |
+| Snooze/skip | MVP uses buttons `Записать вес` and `Не сейчас`; `Не сейчас` snoozes for 24 hours but does not create more than one reminder in the same due period | Keeps UX simple while preventing repeated spam after restarts |
+| Timezone | No user timezone exists today; store UTC and use the current diary fallback: runtime local timezone via `datetime.now().astimezone()` for local-day boundaries | Matches current `/diary` behavior without inventing a profile field |
+| Pending state | Add one tracker pending table/state namespace, not parallel ad-hoc FSMs; states: `water_custom_amount`, `weight_input` | Reuses the project pending-input pattern while keeping tracker text out of generic Hermes dispatch |
+| Callback namespace | Use `water:*` and `weight:*` callback prefixes | Human-readable, short enough for Telegram, and distinct from existing `mp:`, `cl:`, `ea:`, `sc:` prefixes |
+| Implementation split | Merge docs PR first; then PR 7.0B for water; then PR 7.0C for weight/reminders | Reduces blast radius and allows water UX to stabilize before reminder scheduling |
 
 ## 1. Scope
 
@@ -75,16 +96,16 @@ CREATE TABLE IF NOT EXISTS water_intake_events (
     amount_ml INTEGER NOT NULL CHECK (amount_ml > 0),
     consumed_at TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'telegram',
-    telegram_update_id TEXT,
+    idempotency_key TEXT,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_water_intake_user_time
 ON water_intake_events (user_id, consumed_at);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_water_intake_user_update
-ON water_intake_events (user_id, telegram_update_id)
-WHERE telegram_update_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_water_intake_user_idempotency
+ON water_intake_events (user_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
 ```
 
 Notes:
@@ -210,22 +231,22 @@ Weekly reminder:
 CREATE TABLE IF NOT EXISTS weight_measurements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
-    weight_kg REAL NOT NULL CHECK (weight_kg > 0),
+    weight_grams INTEGER NOT NULL CHECK (weight_grams > 0),
     measured_at TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'telegram',
-    telegram_update_id TEXT,
+    idempotency_key TEXT,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_weight_measurements_user_time
 ON weight_measurements (user_id, measured_at);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_weight_measurements_user_update
-ON weight_measurements (user_id, telegram_update_id)
-WHERE telegram_update_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weight_measurements_user_idempotency
+ON weight_measurements (user_id, idempotency_key)
+WHERE idempotency_key IS NOT NULL;
 ```
 
-Reminder state if generic scheduler state is insufficient:
+Reminder state is required because the existing scheduler stores job-level state in `cron/jobs.json`, not per-user due/snooze state:
 
 ```sql
 CREATE TABLE IF NOT EXISTS weight_reminder_state (
@@ -255,6 +276,8 @@ Validation:
 
 ### Macro Recalculation Contract
 
+Current code note: `HealBiteUserProfileStore.recalculate_profile_targets()` opens its own connection. To keep the measurement insert, profile update, and target update atomic, Sprint 7.0C should either add a transaction-aware profile helper or let the weight service own one SQLite connection and call the pure `calculate_nutrition_targets()` function directly.
+
 For valid weight entry:
 
 1. Start SQLite transaction.
@@ -270,7 +293,7 @@ If recalculation fails:
 - rollback profile and measurement mutation if all steps are in one transaction; or
 - use a carefully documented two-phase approach that keeps history but marks recalculation failure.
 
-Recommendation: use one transaction for MVP.
+Recommendation: use one service-owned transaction for MVP; rollback the measurement/profile/target update together on validation or calculation failure.
 
 ### Service API
 
@@ -281,11 +304,11 @@ Suggested module:
 Suggested API:
 
 ```python
-record_weight_measurement(user_id, weight_kg, measured_at=None, source="telegram", telegram_update_id=None)
+record_weight_measurement(user_id, weight_grams, measured_at=None, source="telegram", idempotency_key=None)
 get_latest_weight_measurement(user_id)
 list_weight_measurements(user_id, limit=None)
 get_weight_change(user_id)
-apply_weight_to_profile_and_recalculate(user_id, weight_kg, measured_at=None, telegram_update_id=None)
+apply_weight_to_profile_and_recalculate(user_id, weight_grams, measured_at=None, idempotency_key=None)
 parse_weight_kg(text)
 format_weight_update_report(result)
 ```
@@ -294,7 +317,7 @@ format_weight_update_report(result)
 
 ### Recommended Semantics
 
-Use "7 days after the last valid weight measurement" for MVP.
+Use "7 days after profile completion or the last valid weight measurement" for MVP.
 
 Reasons:
 
@@ -302,7 +325,7 @@ Reasons:
 - avoids fixed weekday/product preference
 - naturally suppresses reminders after a recent measurement
 - easier to make idempotent
-- works with missing timezone by using UTC plus profile fallback
+- works with missing user timezone by using UTC plus the existing runtime-local fallback
 
 ### Scheduler Integration
 
@@ -310,8 +333,10 @@ Do not create a generic LLM cron prompt.
 
 Acceptable implementation options:
 
-1. Deterministic no-agent cron/script job that calls a local service and sends messages through the existing Telegram adapter/delivery path.
-2. Gateway-local deterministic periodic task that checks due users and sends via Telegram adapter.
+1. Gateway-local deterministic periodic task that checks due users and sends via the live Telegram adapter.
+2. Deterministic no-agent cron/script job only if the gateway-local path proves impractical.
+
+Recommendation: prefer the gateway-local deterministic task for MVP so no shell/script execution is needed for user-facing reminders.
 
 Either option must:
 
@@ -328,6 +353,7 @@ should_send_weight_reminder(user_id, now=None)
 mark_weight_reminder_sent(user_id, sent_at=None)
 get_users_due_for_weight_reminder(now=None)
 record_weight_reminder_decision(user_id, decision, now=None)
+snooze_weight_reminder(user_id, until=None)
 ```
 
 ## 7. Timezone Semantics
@@ -357,8 +383,8 @@ Water and weight callbacks can be duplicated by Telegram retries or user double 
 
 Recommended protections:
 
-- store `telegram_update_id` when available
-- unique partial index `(user_id, telegram_update_id)`
+- store a generic `idempotency_key` when available; for Telegram callbacks derive it from the callback/update context
+- unique partial index `(user_id, idempotency_key)`
 - service returns duplicate/no-op result instead of raising
 - undo only deletes the latest row for the current user and current local day
 - never undo another user's row
@@ -544,3 +570,58 @@ If weight recalculation adds no new columns and reuses Sprint 5.0 fields, rollba
 5. PR 7.0C-2: profile update and macro recalculation integration.
 6. PR 7.0C-3: deterministic reminder state and scheduler integration.
 7. Controlled deploy only after green CI, headless diagnostics, DB backup, and manual Telegram smoke plan.
+
+## 16. Required Test Files
+
+Recommended test layout for implementation PRs:
+
+| File | Purpose |
+| --- | --- |
+| `tests/gateway/test_healbite_water_store.py` | water schema, event writes, sums, undo, idempotency, user isolation, day boundary |
+| `tests/gateway/test_healbite_water_service.py` | parser, validation messages, target loading, report formatting, no production DB path |
+| `tests/gateway/test_telegram_water_tracker.py` | rich keyboard route, callbacks, custom input FSM, cancel/back, no generic dispatch/tools |
+| `tests/gateway/test_healbite_weight_store.py` | measurement schema, integer grams, latest/history, idempotency, user isolation |
+| `tests/gateway/test_healbite_weight_service.py` | parser, validation, atomic profile update, macro recalculation, rollback on failure |
+| `tests/gateway/test_telegram_weight_tracker.py` | weight entry route, invalid input, confirmation/report, no generic dispatch/tools |
+| `tests/cron/test_healbite_weight_reminders.py` | due selection, snooze, skip, restart-safe state, incomplete profile exclusion, duplicate prevention |
+| `tests/scripts/test_healbite_cli.py` additions | `test-water`, `test-weight`, `test-reminder` diagnostic smoke commands |
+
+Regression tests must also cover `/menu`, `/profile`, `/diary`, `/stats`, `/stats 7d`, photo flow, profile onboarding, current nutrition target calculation, update-command isolation, and the parallel test runner.
+
+## 17. Acceptance Criteria Checklist
+
+### Water Tracker
+
+- Placeholder `💧 Трекер воды` opens a real local screen.
+- Quick-add 250/500 ml persists one event per action.
+- Custom input accepts ml and liter forms.
+- Invalid input writes nothing.
+- SQLite persists all water events.
+- Totals are isolated by user.
+- Today's total uses the local-day window.
+- History is not deleted at midnight.
+- Undo removes only the current user's latest event for the current local day.
+- Duplicate callback/update does not create a duplicate event.
+- `water_target_ml` is read only from the profile store.
+- Flow does not use LLM/provider APIs or general tools.
+
+### Weight And Reminders
+
+- Measurement history is stored as integer grams.
+- Current profile weight remains `profiles.weight_kg`.
+- Initial weight is derived from earliest measurement, or profile weight until history exists.
+- Parser accepts dot and comma decimal input.
+- Valid input updates profile and targets.
+- Existing nutrition calculator is reused.
+- Transaction/failure safety prevents partial updates.
+- Duplicate Telegram update/callback is idempotent.
+- Reminder state is restart-safe.
+- Incomplete profiles are excluded.
+- User data is never leaked in logs or cross-user results.
+
+## 18. Implementation PR Split
+
+1. Merge Draft PR #10 after design approval.
+2. Create implementation PR 7.0B for Water Tracker only.
+3. After 7.0B is merged and smoke-tested, create implementation PR 7.0C for weight history, macro recalculation, and reminders.
+4. Do not combine reminders with water in the same implementation PR unless explicitly approved.

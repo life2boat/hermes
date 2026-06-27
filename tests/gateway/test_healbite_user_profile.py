@@ -474,13 +474,13 @@ async def test_telegram_onboarding_reply_short_circuits_and_advances(tmp_path, m
 
 def test_route_marker_log_is_pii_safe(caplog):
     adapter = object.__new__(TelegramAdapter)
-    update = _make_update("/profile", user_id=968323641, username="secret-user")
+    update = _make_update("/profile", user_id=3131313131, username="secret-user")
 
     with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
         adapter._log_healbite_route_selected(route="profile", msg=update.message, update_id=11)
 
     assert "healbite_route_selected" in caplog.text
     assert "route=profile" in caplog.text
-    assert "968323641" not in caplog.text
+    assert "3131313131" not in caplog.text
     assert "secret-user" not in caplog.text
     assert "/profile" not in caplog.text

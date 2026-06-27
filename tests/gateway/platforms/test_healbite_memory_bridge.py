@@ -530,3 +530,30 @@ def test_memory_analytics_logger_swallow_db_errors(tmp_path):
     logger._connect = broken_connect
     logger.log_search(user_id=1, source="like", found_count=1, processing_time_ms=12.5)
     logger.close()
+
+
+def test_qdrant_failure_logs_do_not_include_user_or_memory_payload(tmp_path, caplog):
+    pii_text = "PII_MEMORY_TEXT_SHOULD_NOT_APPEAR"
+    pii_error = "PII_QDRANT_ERROR_SHOULD_NOT_APPEAR"
+    mock_client = MagicMock()
+    mock_client.search.side_effect = RuntimeError(pii_error)
+    bridge = _build_bridge(tmp_path, mock_client)
+    bridge._fts_enabled = False
+    bridge.upsert_fact(
+        user_id=909090,
+        entity="profile",
+        key="note",
+        value=pii_text,
+        source="user",
+        trust_score=0.8,
+    )
+
+    with caplog.at_level("WARNING", logger="gateway.memory.qdrant_adapter"):
+        results = bridge.search_relevant_facts(user_id=909090, query=pii_text, limit=2)
+
+    assert len(results) == 1
+    assert "Qdrant semantic search failed: RuntimeError" in caplog.text
+    assert pii_text not in caplog.text
+    assert pii_error not in caplog.text
+    assert "909090" not in caplog.text
+    bridge.close()

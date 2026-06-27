@@ -121,7 +121,7 @@ def test_telegram_admin_identity_does_not_expand_end_user_tool_surface():
         platform=Platform.TELEGRAM,
         chat_id="admin-chat",
         chat_type="dm",
-        user_id="968323641",
+        user_id="synthetic-admin",
         user_name="admin",
     )
     event = _text_event("покажи статус дневника", source=source)

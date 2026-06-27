@@ -1460,8 +1460,9 @@ def _vision_safe_fallback_prompt() -> str:
     )
 
 
-_TELEGRAM_PHOTO_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file"})
-_TELEGRAM_DIARY_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "delegation"})
+_TELEGRAM_END_USER_BLOCKED_TOOLSETS = frozenset({"terminal", "code_execution", "file", "delegation"})
+_TELEGRAM_PHOTO_BLOCKED_TOOLSETS = _TELEGRAM_END_USER_BLOCKED_TOOLSETS
+_TELEGRAM_DIARY_BLOCKED_TOOLSETS = _TELEGRAM_END_USER_BLOCKED_TOOLSETS
 _TELEGRAM_DIARY_CORRECTION_TOOLSETS = ("nutrition_diary",)
 _TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/diary_undo"})
 _TELEGRAM_WATER_SLASH_COMMANDS = frozenset({"/water"})
@@ -1795,11 +1796,13 @@ def _filter_user_facing_toolsets_for_turn(
         )
         return list(_TELEGRAM_DIARY_CORRECTION_TOOLSETS), merged_disabled
 
+    merged_disabled = sorted(set(disabled) | _TELEGRAM_END_USER_BLOCKED_TOOLSETS)
+
     if not _event_has_image_context(event):
-        return enabled, disabled
+        filtered_enabled = [toolset for toolset in enabled if toolset not in _TELEGRAM_END_USER_BLOCKED_TOOLSETS]
+        return filtered_enabled, merged_disabled
 
     filtered_enabled = [toolset for toolset in enabled if toolset not in _TELEGRAM_PHOTO_BLOCKED_TOOLSETS]
-    merged_disabled = sorted(set(disabled) | _TELEGRAM_PHOTO_BLOCKED_TOOLSETS)
     removed = sorted(set(enabled) & _TELEGRAM_PHOTO_BLOCKED_TOOLSETS)
     if removed:
         logger.info(

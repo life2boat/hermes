@@ -2683,15 +2683,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 # on the plain-text attempt — propagates to the caller, which
                 # treats it as "fall back to edit-based for this response".
                 if use_markdown and self._is_bad_request_error(e):
-                    logger.debug(
-                        "[%s] sendMessageDraft MarkdownV2 rejected, retrying "
-                        "as plain text (chat=%s draft_id=%s): %s",
-                        self.name, chat_id, draft_id, e,
+                    self._log_telegram_draft_diagnostic(
+                        operation="draft_update",
+                        outcome="markdown_retry",
+                        error=e,
                     )
                     continue
-                logger.debug(
-                    "[%s] sendMessageDraft failed (chat=%s draft_id=%s): %s",
-                    self.name, chat_id, draft_id, e,
+                self._log_telegram_draft_diagnostic(
+                    operation="draft_update",
+                    outcome="failed",
+                    error=e,
                 )
                 return SendResult(success=False, error=str(e))
 
@@ -3531,12 +3532,21 @@ class TelegramAdapter(BasePlatformAdapter):
                 try:
                     from tools.approval import resolve_gateway_approval
                     count = resolve_gateway_approval(session_key, choice)
-                    logger.info(
-                        "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                        count, session_key, choice, user_display,
+                    self._log_telegram_approval_resolution(
+                        choice=choice,
+                        count=count,
+                        msg=getattr(query, "message", None),
+                        update_id=getattr(update, "update_id", None),
                     )
                 except Exception as exc:
-                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                    self._log_telegram_approval_resolution(
+                        choice=choice,
+                        count=0,
+                        msg=getattr(query, "message", None),
+                        update_id=getattr(update, "update_id", None),
+                        outcome="failed",
+                        error=exc,
+                    )
                     count = 0
 
                 # Resume the typing indicator — paused when the approval was
@@ -5658,24 +5668,30 @@ class TelegramAdapter(BasePlatformAdapter):
     _HEALBITE_LOG_FIELD_ALLOWLIST = {
         "action",
         "amount_ml",
+        "choice_type",
         "command",
         "content_type",
         "context",
         "duration_ms",
         "error_type",
         "has_caption",
+        "has_choice",
+        "has_draft",
         "has_photo",
+        "has_session",
         "has_text",
         "kind",
         "lane",
         "media_count",
         "mime",
         "ok",
+        "operation",
         "outcome",
         "public_onboarding",
         "result",
         "retryable",
         "route",
+        "session_scope",
         "size_bucket",
         "source",
         "status_code",
@@ -5772,6 +5788,64 @@ class TelegramAdapter(BasePlatformAdapter):
     @staticmethod
     def _healbite_safe_action_label(text: str) -> str:
         return " ".join((text or "").split())
+
+    @staticmethod
+    def _safe_choice_type(choice: Any) -> str:
+        value = str(choice or "").strip().lower()
+        if value in {"once", "session", "always", "deny", "cancel"}:
+            return value
+        return "dynamic"
+
+    def _log_telegram_draft_diagnostic(
+        self,
+        *,
+        operation: str,
+        outcome: str,
+        error: Exception | None = None,
+        msg: Optional[Message] = None,
+        update_id: Optional[int] = None,
+        has_draft: bool = True,
+        level: int = logging.DEBUG,
+    ) -> None:
+        self._log_healbite_marker(
+            "telegram_draft_diagnostic",
+            msg=msg,
+            update_id=update_id,
+            level=level,
+            source="telegram",
+            operation=operation,
+            outcome=outcome,
+            has_draft=has_draft,
+            error_type=type(error).__name__ if error is not None else None,
+        )
+
+    def _log_telegram_approval_resolution(
+        self,
+        *,
+        choice: Any,
+        count: int,
+        msg: Optional[Message] = None,
+        update_id: Optional[int] = None,
+        outcome: str = "resolved",
+        error: Exception | None = None,
+    ) -> None:
+        choice_type = self._safe_choice_type(choice)
+        action = choice_type if choice_type != "dynamic" else None
+        self._log_healbite_marker(
+            "telegram_approval_resolution",
+            msg=msg,
+            update_id=update_id,
+            source="telegram",
+            route="approval_callback",
+            action=action,
+            outcome=outcome,
+            has_session=True,
+            session_scope="approval_callback",
+            has_choice=True,
+            choice_type=choice_type,
+            result="matched" if count else "empty",
+            error_type=type(error).__name__ if error is not None else None,
+        )
 
     async def _maybe_handle_healbite_start_command(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()

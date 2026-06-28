@@ -1312,6 +1312,156 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _log_inbound_message_event(event: Any, source: Any) -> None:
+    text = getattr(event, "text", None) or ""
+    media_urls = getattr(event, "media_urls", None) or []
+    media_count = len(media_urls)
+    content_type = "media" if media_count else "text"
+    platform_value = getattr(getattr(source, "platform", None), "value", None)
+    platform = platform_value or str(getattr(source, "platform", "unknown"))
+    logger.info(
+        "inbound message: platform=%s content_type=%s has_text=%s text_length=%d media_count=%d",
+        platform,
+        content_type,
+        bool(text),
+        len(text),
+        media_count,
+    )
+
+
+
+def _safe_log_bool(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
+def _safe_platform_name(value: Any) -> str:
+    platform_value = getattr(value, "value", None)
+    if platform_value:
+        return str(platform_value)
+    if value in {None, ""}:
+        return "unknown"
+    return str(value)
+
+
+def _log_pre_gateway_dispatch_skip(*, platform: Any, reason: Any, has_chat: bool) -> None:
+    logger.info(
+        "pre_gateway_dispatch_skip platform=%s reason=%s has_chat=%s",
+        _safe_platform_name(platform),
+        "provided" if str(reason or "").strip() else "unspecified",
+        _safe_log_bool(has_chat),
+    )
+
+
+def _log_telegram_topic_recovery(previous_topic: Any, recovered_topic: Any) -> None:
+    logger.info(
+        "telegram_topic_recovery action=recover outcome=success has_previous_topic=%s has_recovered_topic=%s recovery_strategy=topic_binding_lookup",
+        _safe_log_bool(previous_topic is not None),
+        _safe_log_bool(recovered_topic is not None),
+    )
+
+
+def _log_telegram_notification_injected(*, notification_type: str, platform: Any, has_thread: bool, outcome: str) -> None:
+    safe_type = notification_type if notification_type in {"watch", "process"} else "other"
+    safe_outcome = outcome if outcome in {"queued", "sent", "skipped", "error"} else "unknown"
+    logger.info(
+        "telegram_notification_injected notification_type=%s platform=%s has_thread=%s outcome=%s",
+        safe_type,
+        _safe_platform_name(platform),
+        _safe_log_bool(has_thread),
+        safe_outcome,
+    )
+
+
+def _log_telegram_notification_failure(*, notification_type: str, platform: Any, has_thread: bool, exc: Exception) -> None:
+    safe_type = notification_type if notification_type in {"watch", "process"} else "other"
+    logger.error(
+        "telegram_notification_injected notification_type=%s platform=%s has_thread=%s outcome=error error_type=%s",
+        safe_type,
+        _safe_platform_name(platform),
+        _safe_log_bool(has_thread),
+        type(exc).__name__,
+    )
+
+
+def _log_healbite_diary_command_failure(command_name: str, exc: Exception) -> None:
+    logger.warning(
+        "healbite_diary_command_failed command=%s error_type=%s",
+        command_name,
+        type(exc).__name__,
+    )
+
+
+def _log_voice_transcript_rejected(*, reason: str) -> None:
+    logger.debug("voice_transcript_rejected reason=%s", reason)
+
+
+def _log_voice_duplicate_transcript(*, transcript: str) -> None:
+    logger.info(
+        "voice_transcript_suppressed reason=duplicate has_text=%s text_length=%d",
+        _safe_log_bool(bool(transcript)),
+        len(transcript or ""),
+    )
+
+
+
+_SAFE_SESSION_SCOPES = frozenset(
+    {
+        "model_override",
+        "busy_turn",
+        "shutdown",
+        "restart",
+        "active_turn",
+        "agent_turn",
+        "approval",
+        "update_watch",
+        "notification",
+        "process_watch",
+        "session_boundary",
+        "agent_cache",
+        "proxy",
+        "goal",
+        "interrupt",
+        "followup",
+        "stream_delivery",
+        "telegram_recovery",
+    }
+)
+
+
+def _safe_session_scope(scope: str) -> str:
+    scope = str(scope or "").strip().lower()
+    return scope if scope in _SAFE_SESSION_SCOPES else "other"
+
+
+def _safe_session_state(session_value: Any, scope: str) -> tuple[str, str]:
+    return _safe_log_bool(bool(session_value)), _safe_session_scope(scope)
+
+
+def _safe_text_shape_fields(*, text: Any, prefix: str = "text") -> dict[str, Any]:
+    normalized = str(text or "")
+    safe_prefix = str(prefix or "text").strip().lower() or "text"
+    return {
+        f"has_{safe_prefix}": _safe_log_bool(bool(normalized)),
+        f"{safe_prefix}_length": len(normalized),
+    }
+
+
+def _log_safe_session_event(
+    event_name: str,
+    *,
+    session_value: Any,
+    session_scope: str,
+    level: int = logging.INFO,
+    fields: dict[str, Any] | None = None,
+) -> None:
+    parts = [f"{event_name} has_session=%s session_scope=%s"]
+    args: list[Any] = [*_safe_session_state(session_value, session_scope)]
+    for key, value in (fields or {}).items():
+        parts.append(f"{key}=%s")
+        args.append(value)
+    logger.log(level, " ".join(parts), *args)
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -3247,23 +3397,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "max_tokens": override.get("max_tokens"),
             }
             if override_runtime.get("api_key"):
-                logger.debug(
-                    "Session model override (fast): session=%s config_model=%s -> override_model=%s provider=%s",
-                    resolved_session_key or "", model, override_model,
-                    override_runtime.get("provider"),
+                _log_safe_session_event(
+                    "session_model_override_fast",
+                    session_value=resolved_session_key,
+                    session_scope="model_override",
+                    level=logging.DEBUG,
+                    fields={
+                        "config_model": model,
+                        "override_model": override_model,
+                        "provider": override_runtime.get("provider"),
+                    },
                 )
                 return override_model, override_runtime
             # Override exists but has no api_key — fall through to env-based
             # resolution and apply model/provider from the override on top.
-            logger.debug(
-                "Session model override (no api_key, fallback): session=%s config_model=%s override_model=%s",
-                resolved_session_key or "", model, override_model,
+            _log_safe_session_event(
+                "session_model_override_fallback",
+                session_value=resolved_session_key,
+                session_scope="model_override",
+                level=logging.DEBUG,
+                fields={
+                    "config_model": model,
+                    "override_model": override_model,
+                },
             )
         else:
-            logger.debug(
-                "No session model override: session=%s config_model=%s override_keys=%s",
-                resolved_session_key or "", model,
-                list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
+            _log_safe_session_event(
+                "session_model_override_missing",
+                session_value=resolved_session_key,
+                session_scope="model_override",
+                level=logging.DEBUG,
+                fields={
+                    "config_model": model,
+                    "override_keys": list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
+                },
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
@@ -3309,11 +3476,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not model:
                 _recovered = _last_good.get(resolved_session_key or "") or _last_good.get("*")
                 if _recovered:
-                    logger.warning(
-                        "Empty model resolved for session=%s — recovering "
-                        "last-known-good model %s (config read likely returned "
-                        "empty; see #35314)",
-                        resolved_session_key or "", _recovered,
+                    _log_safe_session_event(
+                        "session_model_recovered",
+                        session_value=resolved_session_key,
+                        session_scope="model_override",
+                        level=logging.WARNING,
+                        fields={"recovered_model": _recovered},
                     )
                     model = _recovered
             elif model:
@@ -4085,10 +4253,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         if self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING:
-            logger.warning(
-                "Dropping busy-mode follow-up for session %s — pending queue at cap (%d).",
-                session_key,
-                self._BUSY_QUEUE_MAX_PENDING,
+            _log_safe_session_event(
+                "busy_followup_dropped",
+                session_value=session_key,
+                session_scope="busy_turn",
+                level=logging.WARNING,
+                fields={"queue_cap": self._BUSY_QUEUE_MAX_PENDING},
             )
             return
 
@@ -4102,12 +4272,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # can inject messages into an active session they don't own.
         if not self._is_user_authorized(event.source):
             logger.warning(
-                "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s",
-                event.source.user_id,
-                event.source.user_name,
+                "active_session_message_dropped reason=unauthorized_user platform=%s has_user_name=%s has_session=%s",
                 event.source.platform.value if event.source.platform else "unknown",
-                session_key,
+                _safe_log_bool(bool(event.source.user_name)),
+                _safe_log_bool(bool(session_key)),
             )
             return True  # handled (silently dropped); do not fall through
 
@@ -4172,10 +4340,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
-            logger.info(
-                "Demoting busy_input_mode 'interrupt' to 'queue' for session %s "
-                "because the running agent has active subagents (#30170)",
-                session_key,
+            _log_safe_session_event(
+                "busy_interrupt_demoted",
+                session_value=session_key,
+                session_scope="busy_turn",
+                fields={"reason": "active_subagents"},
             )
             effective_mode = "queue"
         steered = False
@@ -4191,7 +4360,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 try:
                     steered = bool(running_agent.steer(steer_text))
                 except Exception as exc:
-                    logger.warning("Gateway steer failed for session %s: %s", session_key, exc)
+                    _log_safe_session_event(
+                        "gateway_steer_failed",
+                        session_value=session_key,
+                        session_scope="busy_turn",
+                        level=logging.WARNING,
+                        fields={"error_type": type(exc).__name__},
+                    )
                     steered = False
             if not steered:
                 # Fall back to queue (merge into pending messages, no interrupt)
@@ -4226,7 +4401,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # never actually delivered.
         busy_ack_enabled = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
         if not busy_ack_enabled:
-            logger.debug("Busy ack suppressed for session %s", session_key)
+            _log_safe_session_event(
+                "busy_ack_suppressed",
+                session_value=session_key,
+                session_scope="busy_turn",
+                level=logging.DEBUG,
+            )
             return True  # input still processed, just no ack sent
 
         # Debounce: only send an acknowledgment once every 30 seconds per session
@@ -4379,7 +4559,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
             try:
                 agent.interrupt(reason)
-                logger.debug("Interrupted running agent for session %s during shutdown", session_key)
+                _log_safe_session_event(
+                    "shutdown_interrupt_sent",
+                    session_value=session_key,
+                    session_scope="shutdown",
+                    level=logging.DEBUG,
+                )
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
 
@@ -4411,10 +4596,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     entry = self.session_store._entries.get(session_key)
                     source = getattr(entry, "origin", None) if entry else None
             except Exception as e:
-                logger.debug(
-                    "Failed to load session origin for shutdown notification %s: %s",
-                    session_key,
-                    e,
+                _log_safe_session_event(
+                    "shutdown_notification_origin_lookup_failed",
+                    session_value=session_key,
+                    session_scope="shutdown",
+                    level=logging.DEBUG,
+                    fields={"error_type": type(e).__name__},
                 )
 
             if source is None:
@@ -4668,10 +4855,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if entry and not entry.suspended:
                     entry.suspended = True
                     suspended += 1
-                    logger.warning(
-                        "Auto-suspended stuck session %s (active across %d "
-                        "consecutive restarts — likely a stuck loop)",
-                        session_key, counts[session_key],
+                    _log_safe_session_event(
+                        "stuck_session_auto_suspended",
+                        session_value=session_key,
+                        session_scope="restart",
+                        level=logging.WARNING,
+                        fields={"restart_count": counts[session_key]},
                     )
             except Exception:
                 pass
@@ -5752,10 +5941,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
         logger.info(
-            "Handoff: dispatching synthetic turn for CLI session %s → %s "
-            "(home=%s, thread=%s, session_key=%s)",
-            cli_session_id, platform_name, home.chat_id, effective_thread_id,
-            session_key,
+            "handoff_synthetic_dispatch cli_session=%s platform=%s has_home_channel=%s has_thread=%s has_session=%s",
+            cli_session_id,
+            platform_name,
+            _safe_log_bool(bool(home.chat_id)),
+            _safe_log_bool(bool(effective_thread_id)),
+            _safe_log_bool(bool(session_key)),
         )
 
         # Dispatch through the runner directly. Going through
@@ -6847,11 +7038,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     continue
                 _action = _result.get("action")
                 if _action == "skip":
-                    logger.info(
-                        "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
-                        _result.get("reason"),
-                        source.platform.value if source.platform else "unknown",
-                        source.chat_id or "unknown",
+                    _log_pre_gateway_dispatch_skip(
+                        platform=source.platform.value if source.platform else "unknown",
+                        reason=_result.get("reason"),
+                        has_chat=bool(source.chat_id),
                     )
                     return None
                 if _action == "rewrite":
@@ -7045,9 +7235,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _pending_clarify.clarify_id, _raw_clarify_reply,
                 )
                 if _resolved:
-                    logger.info(
-                        "Gateway intercepted clarify text response (session=%s, id=%s)",
-                        _quick_key, _pending_clarify.clarify_id,
+                    _log_safe_session_event(
+                        "clarify_text_intercepted",
+                        session_value=_quick_key,
+                        session_scope="active_turn",
+                        fields={"has_clarify_id": _safe_log_bool(bool(_pending_clarify.clarify_id))},
                     )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
@@ -7191,7 +7383,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # platform ping, not a user command: no help dump, no agent
             # interrupt, no queued text.
             if _cmd_def_inner and _cmd_def_inner.name == "start":
-                logger.info("Ignoring /start platform ping for active session %s", _quick_key)
+                _log_safe_session_event(
+                    "start_ping_ignored",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                )
                 return ""
 
             if _cmd_def_inner and _cmd_def_inner.name == "restart":
@@ -7209,7 +7405,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     interrupt_reason=_INTERRUPT_REASON_STOP,
                     invalidation_reason="stop_command",
                 )
-                logger.info("STOP for session %s — agent interrupted, session lock released", _quick_key)
+                _log_safe_session_event(
+                    "stop_completed",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    fields={"outcome": "lock_released"},
+                )
                 return EphemeralReply(t("gateway.stop.stopped"))
 
             # /reset and /new must bypass the running-agent guard so they
@@ -7281,7 +7482,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     try:
                         accepted = running_agent.steer(steer_text)
                     except Exception as exc:
-                        logger.warning("Steer failed for session %s: %s", _quick_key, exc)
+                        _log_safe_session_event(
+                            "steer_failed",
+                            session_value=_quick_key,
+                            session_scope="active_turn",
+                            level=logging.WARNING,
+                            fields={"error_type": type(exc).__name__},
+                        )
                         return f"⚠️ Steer failed: {exc}"
                     if accepted:
                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
@@ -7405,7 +7612,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
 
             if event.message_type == MessageType.PHOTO:
-                logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
+                _log_safe_session_event(
+                    "priority_photo_queued",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    level=logging.DEBUG,
+                    fields={"outcome": "queued"},
+                )
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     merge_pending_message_event(adapter._pending_messages, _quick_key, event)
@@ -7422,10 +7635,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and _started_at
                 and (time.time() - _started_at) <= _telegram_followup_grace
             ):
-                logger.debug(
-                    "Telegram follow-up arrived %.2fs after run start for %s — queueing without interrupt",
-                    time.time() - _started_at,
-                    _quick_key,
+                _log_safe_session_event(
+                    "telegram_followup_queued",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    level=logging.DEBUG,
+                    fields={"seconds_since_start": round(time.time() - _started_at, 2)},
                 )
                 adapter = self.adapters.get(source.platform)
                 if adapter:
@@ -7446,7 +7661,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if event.get_command() == "stop":
                     # Force-clean the sentinel so the session is unlocked.
                     self._release_running_agent_state(_quick_key)
-                    logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
+                    _log_safe_session_event(
+                        "pending_session_hard_stop",
+                        session_value=_quick_key,
+                        session_scope="active_turn",
+                        fields={"outcome": "sentinel_cleared"},
+                    )
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 # Queue the message so it will be picked up after the
                 # agent starts.
@@ -7468,7 +7688,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
             if self._busy_input_mode == "queue":
-                logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
+                _log_safe_session_event(
+                    "priority_followup_queued",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    level=logging.DEBUG,
+                )
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
             if self._busy_input_mode == "steer":
@@ -7481,12 +7706,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     try:
                         steered = bool(running_agent.steer(steer_text))
                     except Exception as exc:
-                        logger.warning("PRIORITY steer failed for session %s: %s", _quick_key, exc)
+                        _log_safe_session_event(
+                            "priority_steer_failed",
+                            session_value=_quick_key,
+                            session_scope="active_turn",
+                            level=logging.WARNING,
+                            fields={"error_type": type(exc).__name__},
+                        )
                         steered = False
                 if steered:
-                    logger.debug("PRIORITY steer for session %s", _quick_key)
+                    _log_safe_session_event(
+                        "priority_steer_applied",
+                        session_value=_quick_key,
+                        session_scope="active_turn",
+                        level=logging.DEBUG,
+                    )
                     return None
-                logger.debug("PRIORITY steer-fallback-to-queue for session %s", _quick_key)
+                _log_safe_session_event(
+                    "priority_steer_fallback",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    level=logging.DEBUG,
+                    fields={"outcome": "queued"},
+                )
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
             # #30170 — Subagent protection (PRIORITY path). Same rationale
@@ -7498,14 +7740,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # /stop reaches its dedicated handler above, so the operator
             # still has a clean escape hatch.
             if self._agent_has_active_subagents(running_agent):
-                logger.info(
-                    "PRIORITY interrupt demoted to queue for session %s "
-                    "because the running agent has active subagents (#30170)",
-                    _quick_key,
+                _log_safe_session_event(
+                    "priority_interrupt_demoted",
+                    session_value=_quick_key,
+                    session_scope="active_turn",
+                    fields={"reason": "active_subagents"},
                 )
                 self._queue_or_replace_pending_event(_quick_key, event)
                 return None
-            logger.debug("PRIORITY interrupt for session %s", _quick_key)
+            _log_safe_session_event(
+                "priority_interrupt_sent",
+                session_value=_quick_key,
+                session_scope="active_turn",
+                level=logging.DEBUG,
+            )
             running_agent.interrupt(event.text)
             # NOTE: self._pending_messages was write-only (never consumed).
             # The actual interrupt message is delivered via adapter._pending_messages
@@ -7637,7 +7885,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_help_command(event)
 
         if canonical == "start":
-            logger.info("Ignoring /start platform ping for session %s", _quick_key)
+            _log_safe_session_event(
+                "start_ping_ignored",
+                session_value=_quick_key,
+                session_scope="active_turn",
+            )
             return ""
 
         if canonical == "commands":
@@ -8025,9 +8277,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source,
         )
         if _limit_message is not None:
-            logger.info(
-                "Rejecting new active session %s: max_concurrent_sessions reached",
-                _quick_key,
+            _log_safe_session_event(
+                "active_session_rejected",
+                session_value=_quick_key,
+                session_scope="active_turn",
+                fields={"reason": "max_concurrent_sessions"},
             )
             return _limit_message
         if _active_session_lease is not None:
@@ -8387,7 +8641,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             cached_sources[session_key] = dataclasses.replace(source)
         except Exception:
-            logger.debug("Failed to cache live session source for %s", session_key, exc_info=True)
+            _log_safe_session_event(
+                "live_session_source_cache_failed",
+                session_value=session_key,
+                session_scope="active_turn",
+                level=logging.DEBUG,
+            )
             return
         # LRU: mark as most-recently-used and trim to max size.
         try:
@@ -8416,12 +8675,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        _msg_preview = (event.text or "")[:80].replace("\n", " ")
-        logger.info(
-            "inbound message: platform=%s user=%s chat=%s msg=%r",
-            _platform_name, source.user_name or source.user_id or "unknown",
-            source.chat_id or "unknown", _msg_preview,
-        )
+        _log_inbound_message_event(event, source)
 
         # Get or create session
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's
@@ -8429,10 +8683,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # doesn't fragment the conversation across sessions.
         recovered = self._recover_telegram_topic_thread_id(source)
         if recovered is not None:
-            logger.info(
-                "telegram topic recovery: chat=%s user=%s %r -> %s",
-                source.chat_id, source.user_id, source.thread_id, recovered,
-            )
+            _log_telegram_topic_recovery(source.thread_id, recovered)
             source = dataclasses.replace(source, thread_id=recovered)
             try:
                 event.source = source
@@ -8636,9 +8887,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Append the user's original text after all skill payloads
                     _combined_parts.append(event.text)
                     event.text = "\n\n".join(_combined_parts)
-                    logger.info(
-                        "[Gateway] Auto-loaded skill(s) %s for session %s",
-                        _loaded_names, session_key,
+                    _log_safe_session_event(
+                        "auto_skills_loaded",
+                        session_value=session_key,
+                        session_scope="agent_turn",
+                        fields={"skill_count": len(_loaded_names)},
                     )
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
@@ -9136,9 +9389,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
             logger.info(
-                "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
-                _platform_name, source.chat_id or "unknown",
-                _response_time, _api_calls, _resp_len,
+                "response ready: platform=%s time=%.1fs api_calls=%d response=%d chars",
+                _platform_name,
+                _response_time,
+                _api_calls,
+                _resp_len,
             )
 
             # Successful turn — clear any stuck-loop counter for this session.
@@ -9485,7 +9740,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await _err_adapter.stop_typing(source.chat_id)
             except Exception:
                 pass
-            logger.exception("Agent error in session %s", session_key)
+            _log_safe_session_event(
+                "agent_error",
+                session_value=session_key,
+                session_scope="agent_turn",
+                level=logging.ERROR,
+            )
+            logger.exception("Agent error while handling the current turn")
             # Crash-resilience for failures that happen before AIAgent enters
             # run_conversation() (for example: provider/httpx client init
             # failures). In that path the agent cannot persist the current
@@ -10266,16 +10527,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Check authorization before processing voice input
         if not self._is_user_authorized(source):
-            logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
+            _log_voice_transcript_rejected(reason="unauthorized_user")
             return
 
         if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
-            logger.info(
-                "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
-                guild_id,
-                user_id,
-                transcript[:100],
-            )
+            _log_voice_duplicate_transcript(transcript=transcript)
             return
 
         # Show transcript in text channel (after auth, with mention sanitization)
@@ -11363,9 +11619,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 try:
                     from cli import save_config_value
                     save_config_value("approvals.destructive_slash_confirm", False)
-                    logger.info(
-                        "User opted out of destructive slash confirm (session=%s)",
-                        session_key,
+                    _log_safe_session_event(
+                        "destructive_slash_confirm_opt_out",
+                        session_value=session_key,
+                        session_scope="approval",
                     )
                 except Exception as exc:
                     logger.warning(
@@ -11733,7 +11990,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "❌ Hermes update failed (exit code {}).".format(exit_code),
                             metadata=metadata,
                         )
-                    logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
+                    _log_safe_session_event(
+                        "update_finished_notified",
+                        session_value=session_key,
+                        session_scope="update_watch",
+                        fields={"exit_code": exit_code},
+                    )
                 except Exception as e:
                     logger.warning("Update final notification failed: %s", e)
 
@@ -11805,7 +12067,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # still suppressed by _update_prompt_pending.
                         self._update_prompt_pending[session_key] = True
                         # .update_response to continue — it doesn't re-check
-                        logger.info("Forwarded update prompt to %s: %s", session_key, prompt_text[:80])
+                        _log_safe_session_event(
+                            "update_prompt_forwarded",
+                            session_value=session_key,
+                            session_scope="update_watch",
+                            fields=_safe_text_shape_fields(text=prompt_text, prefix="prompt"),
+                        )
                 except (json.JSONDecodeError, OSError) as e:
                     logger.debug("Failed to read update prompt: %s", e)
 
@@ -12221,12 +12488,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=int(user_id),
                 days=int(days or 1),
             )
-        except Exception:
-            logger.warning(
-                "Failed to compute HealBite nutrition diary slash command for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("slash_diary", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
         report = format_nutrition_diary_report(summary)
@@ -12260,12 +12523,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             result = self._get_healbite_nutrition_diary().delete_last_meal(
                 user_id=int(user_id),
             )
-        except Exception:
-            logger.warning(
-                "Failed to delete the last HealBite meal for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("undo_meal", exc)
             return "Не удалось удалить последнюю запись. Попробуйте еще раз чуть позже."
 
         report = format_undo_meal_report(result)
@@ -12292,12 +12551,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=int(user_id),
                 days=days,
             )
-        except Exception:
-            logger.warning(
-                "Failed to compute HealBite nutrition diary text query for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("text_query", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
         report = format_nutrition_diary_report(summary)
@@ -12773,10 +13028,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if entry and getattr(entry, "origin", None):
                     return entry.origin
             except Exception as exc:
-                logger.debug(
-                    "Synthetic process-event session-store lookup failed for %s: %s",
-                    session_key,
-                    exc,
+                _log_safe_session_event(
+                    "process_event_session_lookup_failed",
+                    session_value=session_key,
+                    session_scope="process_watch",
+                    level=logging.DEBUG,
+                    fields={"error_type": type(exc).__name__},
                 )
 
             cached_source = self._get_cached_session_source(session_key)
@@ -12852,15 +13109,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None,
             )
-            logger.info(
-                "Watch pattern notification — injecting for %s chat=%s thread=%s",
-                platform_name,
-                source.chat_id,
-                source.thread_id,
+            _log_telegram_notification_injected(
+                notification_type="watch",
+                platform=platform_name,
+                has_thread=bool(source.thread_id),
+                outcome="queued",
             )
             await adapter.handle_message(synth_event)
         except Exception as e:
-            logger.error("Watch notification injection error: %s", e)
+            _log_telegram_notification_failure(
+                notification_type="watch",
+                platform=platform_name,
+                has_thread=bool(getattr(source, "thread_id", None)),
+                exc=e,
+            )
 
     async def _run_process_watcher(self, watcher: dict) -> None:
         """
@@ -12970,16 +13232,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 internal=True,
                                 message_id=message_id,
                             )
-                            logger.info(
-                                "Process %s finished — injecting agent notification for session %s chat=%s thread=%s",
-                                session_id,
-                                session_key,
-                                source.chat_id,
-                                source.thread_id,
+                            _log_telegram_notification_injected(
+                                notification_type="process",
+                                platform=platform_name,
+                                has_thread=bool(source.thread_id),
+                                outcome="queued",
                             )
                             await adapter.handle_message(synth_event)
                         except Exception as e:
-                            logger.error("Agent notify injection error: %s", e)
+                            _log_telegram_notification_failure(
+                                notification_type="process",
+                                platform=platform_name,
+                                has_thread=bool(getattr(source, "thread_id", None)),
+                                exc=e,
+                            )
                     break
 
                 # --- Normal text-only notification ---
@@ -13300,10 +13566,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 _slash_confirm_mod.clear(session_key)
             except Exception as e:
-                logger.debug(
-                    "Failed to clear slash-confirm state for session boundary %s: %s",
-                    session_key,
-                    e,
+                _log_safe_session_event(
+                    "slash_confirm_state_clear_failed",
+                    session_value=session_key,
+                    session_scope="session_boundary",
+                    level=logging.DEBUG,
+                    fields={"error_type": type(e).__name__},
                 )
 
         try:
@@ -13314,10 +13582,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             _clear_approval_session(session_key)
         except Exception as e:
-            logger.debug(
-                "Failed to clear approval state for session boundary %s: %s",
-                session_key,
-                e,
+            _log_safe_session_event(
+                "approval_state_clear_failed",
+                session_value=session_key,
+                session_scope="session_boundary",
+                level=logging.DEBUG,
+                fields={"error_type": type(e).__name__},
             )
 
     def _begin_session_run_generation(self, session_key: str) -> int:
@@ -13342,11 +13612,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Invalidate any in-flight run token for ``session_key``."""
         generation = self._begin_session_run_generation(session_key)
         if reason:
-            logger.info(
-                "Invalidated run generation for %s → %d (%s)",
-                session_key,
-                generation,
-                reason,
+            _log_safe_session_event(
+                "run_generation_invalidated",
+                session_value=session_key,
+                session_scope="session_boundary",
+                fields={"generation": generation, "reason": reason},
             )
         return generation
 
@@ -13578,9 +13848,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
         for key, agent in evict_plan:
-            logger.info(
-                "Agent cache at cap; evicting LRU session=%s (cache_size=%d)",
-                key, len(_cache),
+            _log_safe_session_event(
+                "agent_cache_evicted",
+                session_value=key,
+                session_scope="agent_cache",
+                fields={"cache_size": len(_cache)},
             )
             if agent is not None:
                 threading.Thread(
@@ -13627,9 +13899,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             for key, _ in to_evict:
                 _cache.pop(key, None)
         for key, agent in to_evict:
-            logger.info(
-                "Agent cache idle-TTL evict: session=%s (idle=%.0fs)",
-                key, now - getattr(agent, "_last_activity_ts", now),
+            _log_safe_session_event(
+                "agent_cache_idle_evict",
+                session_value=key,
+                session_scope="agent_cache",
+                fields={"idle_seconds": round(now - getattr(agent, "_last_activity_ts", now))},
             )
             threading.Thread(
                 target=self._release_evicted_agent_soft,
@@ -13846,10 +14120,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     buffer = ""
                     async for chunk in resp.content.iter_any():
                         if not _run_still_current():
-                            logger.info(
-                                "Discarding stale proxy stream for %s — generation %d is no longer current",
-                                session_key or "?",
-                                run_generation or 0,
+                            _log_safe_session_event(
+                                "proxy_stream_discarded",
+                                session_value=session_key,
+                                session_scope="proxy",
+                                fields={"generation": run_generation or 0},
                             )
                             return {
                                 "final_response": "",
@@ -13910,10 +14185,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         _elapsed = time.time() - _start
         if not _run_still_current():
-            logger.info(
-                "Discarding stale proxy result for %s — generation %d is no longer current",
-                session_key or "?",
-                run_generation or 0,
+            _log_safe_session_event(
+                "proxy_result_discarded",
+                session_value=session_key,
+                session_scope="proxy",
+                fields={"generation": run_generation or 0},
             )
             return {
                 "final_response": "",
@@ -14806,15 +15082,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_key=session_key,
                     user_config=user_config,
                 )
-                logger.debug(
-                    "run_agent resolved: model=%s provider=%s session=%s",
-                    model, runtime_kwargs.get("provider"), session_key or "",
+                _log_safe_session_event(
+                    "run_agent_resolved",
+                    session_value=session_key,
+                    session_scope="agent_turn",
+                    level=logging.DEBUG,
+                    fields={"model": model, "provider": runtime_kwargs.get("provider")},
                 )
             except Exception:
-                logger.exception(
-                    "run_agent failed to resolve provider runtime for session %s",
-                    session_key or "",
+                _log_safe_session_event(
+                    "run_agent_runtime_resolve_failed",
+                    session_value=session_key,
+                    session_scope="agent_turn",
+                    level=logging.ERROR,
                 )
+                logger.exception("run_agent failed to resolve provider runtime")
                 return {
                     "final_response": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d, \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
                     "messages": [],
@@ -14963,7 +15245,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             except KeyError:
                                 pass
                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
-                        logger.debug("Reusing cached agent for session %s", session_key)
+                        _log_safe_session_event(
+                            "cached_agent_reused",
+                            session_value=session_key,
+                            session_scope="agent_cache",
+                            level=logging.DEBUG,
+                        )
 
             if agent is None:
                 # Config changed or first message — create fresh agent
@@ -15003,7 +15290,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     with _cache_lock:
                         _cache[session_key] = (agent, _sig)
                         self._enforce_agent_cache_cap()
-                logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+                _log_safe_session_event(
+                    "cached_agent_created",
+                    session_value=session_key,
+                    session_scope="agent_cache",
+                    level=logging.DEBUG,
+                    fields={"signature": _sig},
+                )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -15260,18 +15553,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         from tools.approval import resolve_gateway_approval
 
                         resolved = resolve_gateway_approval(_approval_session_key, "deny")
-                        logger.warning(
-                            "[Gateway][approval_suppressed] platform=%s session=%s resolved=%d description=%s",
-                            source.platform.value if source.platform else "unknown",
-                            _approval_session_key,
-                            resolved,
-                            desc,
+                        _log_safe_session_event(
+                            "approval_suppressed",
+                            session_value=_approval_session_key,
+                            session_scope="approval",
+                            level=logging.WARNING,
+                            fields={
+                                "platform": source.platform.value if source.platform else "unknown",
+                                "resolved": resolved,
+                                **_safe_text_shape_fields(text=desc, prefix="description"),
+                            },
                         )
                     except Exception as _deny_exc:
-                        logger.error(
-                            "Failed to auto-deny suppressed approval for session %s: %s",
-                            _approval_session_key,
-                            _deny_exc,
+                        _log_safe_session_event(
+                            "approval_auto_deny_failed",
+                            session_value=_approval_session_key,
+                            session_scope="approval",
+                            level=logging.ERROR,
+                            fields={"error_type": type(_deny_exc).__name__},
                         )
                     return
 
@@ -15609,10 +15908,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if _binding and _binding.get("thread_id"):
                             source.thread_id = str(_binding["thread_id"])
                             logger.debug(
-                                "Restored source.thread_id=%s from binding after session split %s → %s",
-                                source.thread_id,
-                                session_id,
-                                agent.session_id,
+                                "telegram_session_split_thread_restore has_thread=%s has_previous_session=%s has_new_session=%s",
+                                _safe_log_bool(bool(source.thread_id)),
+                                _safe_log_bool(bool(session_id)),
+                                _safe_log_bool(bool(agent.session_id)),
                             )
                     except Exception:
                         logger.debug(
@@ -15967,11 +16266,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 and _backup_adapter.has_pending_interrupt(session_key)):
                             _bp_event = _backup_adapter._pending_messages.get(session_key)
                             _bp_text = _bp_event.text if _bp_event else None
-                            logger.info(
-                                "Backup interrupt detected for session %s "
-                                "(monitor task state: %s)",
-                                session_key,
-                                "done" if interrupt_monitor.done() else "running",
+                            _log_safe_session_event(
+                                "backup_interrupt_detected",
+                                session_value=session_key,
+                                session_scope="interrupt",
+                                fields={"monitor_state": "done" if interrupt_monitor.done() else "running"},
                             )
                             _backup_agent.interrupt(_bp_text)
                             _interrupt_detected.set()
@@ -16027,11 +16326,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 and _backup_adapter.has_pending_interrupt(session_key)):
                             _bp_event = _backup_adapter._pending_messages.get(session_key)
                             _bp_text = _bp_event.text if _bp_event else None
-                            logger.info(
-                                "Backup interrupt detected for session %s "
-                                "(monitor task state: %s)",
-                                session_key,
-                                "done" if interrupt_monitor.done() else "running",
+                            _log_safe_session_event(
+                                "backup_interrupt_detected",
+                                session_value=session_key,
+                                session_scope="interrupt",
+                                fields={"monitor_state": "done" if interrupt_monitor.done() else "running"},
                             )
                             _backup_agent.interrupt(_bp_text)
                             _interrupt_detected.set()
@@ -16052,12 +16351,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _iter_n = _activity.get("api_call_count", 0)
                 _iter_max = _activity.get("max_iterations", 0)
 
-                logger.error(
-                    "Agent idle for %.0fs (timeout %.0fs) in session %s "
-                    "| last_activity=%s | iteration=%s/%s | tool=%s",
-                    _secs_ago, _agent_timeout, session_key,
-                    _last_desc, _iter_n, _iter_max,
-                    _cur_tool or "none",
+                _log_safe_session_event(
+                    "agent_idle_timeout",
+                    session_value=session_key,
+                    session_scope="agent_turn",
+                    level=logging.ERROR,
+                    fields={
+                        "idle_seconds": round(_secs_ago),
+                        "timeout_seconds": round(_agent_timeout),
+                        "last_activity": _last_desc,
+                        "iteration": _iter_n,
+                        "max_iterations": _iter_max,
+                        "tool": _cur_tool or "none",
+                    },
                 )
 
                 # Interrupt the agent if it's still running so the thread
@@ -16137,10 +16443,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):
-                        logger.info(
-                            "Ignoring control interrupt message for session %s: %s",
-                            session_key or "?",
-                            interrupt_message,
+                        _log_safe_session_event(
+                            "control_interrupt_ignored",
+                            session_value=session_key,
+                            session_scope="interrupt",
+                            fields=_safe_text_shape_fields(text=interrupt_message),
                         )
                     else:
                         pending = interrupt_message
@@ -16190,7 +16497,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else:
                         pending = _pending_text or _build_media_placeholder(pending_event)
                     if pending:
-                        logger.debug("Processing queued message after agent completion: '%s...'", pending[:40])
+                        logger.debug(
+                            "processing_queued_message_after_completion has_text=%s text_length=%d",
+                            *_safe_text_shape_fields(text=pending).values(),
+                        )
 
             # Leftover /steer: if a steer arrived after the last tool batch
             # (e.g. during the final API call), the agent couldn't inject it
@@ -16200,7 +16510,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _leftover_steer = result.get("pending_steer")
                 if _leftover_steer:
                     pending = _leftover_steer
-                    logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
+                    logger.debug(
+                        "leftover_steer_requeued has_text=%s text_length=%d",
+                        *_safe_text_shape_fields(text=pending).values(),
+                    )
 
             # Safety net: if the pending text is a slash command (e.g. "/stop",
             # "/new"), discard it — commands should never be passed to the agent
@@ -16225,16 +16538,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         pass
 
             if self._draining and (pending_event or pending):
-                logger.info(
-                    "Discarding pending follow-up for session %s during gateway %s",
-                    session_key or "?",
-                    self._status_action_label(),
+                _log_safe_session_event(
+                    "pending_followup_discarded",
+                    session_value=session_key,
+                    session_scope="followup",
+                    fields={"gateway_state": self._status_action_label()},
                 )
                 pending_event = None
                 pending = None
 
             if pending_event or pending:
-                logger.debug("Processing pending message: '%s...'", pending[:40])
+                logger.debug(
+                    "processing_pending_message has_text=%s text_length=%d",
+                    *_safe_text_shape_fields(text=pending).values(),
+                )
 
                 # Clear the adapter's interrupt event so the next _run_agent call
                 # doesn't immediately re-trigger the interrupt before the new agent
@@ -16245,10 +16562,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Cap recursion depth to prevent resource exhaustion when the
                 # user sends multiple messages while the agent keeps failing. (#816)
                 if _interrupt_depth >= self._MAX_INTERRUPT_DEPTH:
-                    logger.warning(
-                        "Interrupt recursion depth %d reached for session %s — "
-                        "queueing message instead of recursing.",
-                        _interrupt_depth, session_key,
+                    _log_safe_session_event(
+                        "interrupt_recursion_capped",
+                        session_value=session_key,
+                        session_scope="interrupt",
+                        level=logging.WARNING,
+                        fields={"interrupt_depth": _interrupt_depth},
                     )
                     adapter = self.adapters.get(source.platform)
                     if adapter and pending_event:
@@ -16283,9 +16602,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
-                            logger.info(
-                                "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
-                                session_key or "?",
+                            _log_safe_session_event(
+                                "queued_followup_resend_required",
+                                session_value=session_key,
+                                session_scope="followup",
                             )
                             await adapter.send(
                                 source.chat_id,
@@ -16295,9 +16615,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
                     elif first_response:
-                        logger.info(
-                            "Queued follow-up for session %s: skipping resend because final streamed delivery was confirmed.",
-                            session_key or "?",
+                        _log_safe_session_event(
+                            "queued_followup_resend_skipped",
+                            session_value=session_key,
+                            session_scope="followup",
                         )
                     # Release deferred bg-review notifications now that the
                     # first response has been delivered.  Pop from the
@@ -16336,9 +16657,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
                     if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
-                        logger.info(
-                            "Discarding stale goal continuation for session %s — goal is no longer active",
-                            session_key or "?",
+                        _log_safe_session_event(
+                            "goal_continuation_discarded",
+                            session_value=session_key,
+                            session_scope="goal",
                         )
                         return result
                     next_message = await self._prepare_inbound_message_text(
@@ -16466,12 +16788,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # send the final version so the appended content reaches the client.
             _transformed = bool(response.get("response_transformed"))
             if not _is_empty_sentinel and not _transformed and (_streamed or _previewed or _content_delivered):
-                logger.info(
-                    "Suppressing normal final send for session %s: final delivery already confirmed (streamed=%s previewed=%s content_delivered=%s).",
-                    session_key or "?",
-                    _streamed,
-                    _previewed,
-                    _content_delivered,
+                _log_safe_session_event(
+                    "final_send_suppressed",
+                    session_value=session_key,
+                    session_scope="stream_delivery",
+                    fields={
+                        "streamed": _streamed,
+                        "previewed": _previewed,
+                        "content_delivered": _content_delivered,
+                    },
                 )
                 response["already_sent"] = True
             elif not _is_empty_sentinel and _transformed and _sc is not None:
@@ -16487,14 +16812,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             finalize=True,
                         )
                         response["already_sent"] = True
-                        logger.info(
-                            "Edited streamed message %s for session %s to include plugin-transformed content.",
-                            _sc_msg_id, session_key or "?",
+                        _log_safe_session_event(
+                            "streamed_message_edited",
+                            session_value=session_key,
+                            session_scope="stream_delivery",
+                            fields={"outcome": "plugin_transform"},
                         )
                     except Exception as _edit_err:
-                        logger.warning(
-                            "Failed to edit streamed message for session %s: %s",
-                            session_key or "?", _edit_err,
+                        _log_safe_session_event(
+                            "streamed_message_edit_failed",
+                            session_value=session_key,
+                            session_scope="stream_delivery",
+                            level=logging.WARNING,
+                            fields={"error_type": type(_edit_err).__name__},
                         )
 
         # Schedule deletion of tracked temporary progress bubbles after the

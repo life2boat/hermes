@@ -1134,10 +1134,6 @@ def run_local_weight_smoke(
         tracker.clear_pending_state(int(user_id))
         markers.append("weight_pending_ok")
 
-        tracker.set_weekly_reminder(int(user_id), enabled=True)
-        if not tracker.get_weekly_reminder(int(user_id)).enabled:
-            raise CLIError("Weight reminder smoke failed.")
-        markers.append("weight_reminder_ok")
         return markers
     finally:
         profile_module._GLOBAL_PROFILE_STORE = previous_default

@@ -9,6 +9,9 @@ from gateway.healbite_weight_tracker import (
     HealBiteWeightTracker,
     WEIGHT_CUSTOM_STATE,
     WEIGHT_ENTRIES_TABLE,
+    WeightAddResult,
+    WeightEntry,
+    format_weight_saved_notice,
     format_weight_tracker_report,
     parse_weight_kg,
 )
@@ -106,6 +109,15 @@ def test_incomplete_profile_weight_update_does_not_force_macro_recalculation(tmp
     assert result.targets_recalculated is False
     assert profile.weight_kg == 82.4
     assert profile.daily_kcal_target is None
+
+
+def test_weight_saved_notice_distinguishes_profile_gap_from_recalculation_error():
+    now = "2026-06-29 00:00:00"
+    entry = WeightEntry(id=1, user_id=101, recorded_at_utc=now, local_date="2026-06-29", weight_grams=82400, created_at=now)
+
+    assert format_weight_saved_notice(WeightAddResult(entry, True, True, False)) == "Вес записан. КБЖУ пересчитаны."
+    assert format_weight_saved_notice(WeightAddResult(entry, True, False, False)) == "Вес записан. Для пересчёта КБЖУ заполните /profile."
+    assert format_weight_saved_notice(WeightAddResult(entry, True, False, True)) == "Вес записан. Пересчитать КБЖУ сейчас не удалось."
 
 
 def test_weight_report_and_pending_state(tmp_path):

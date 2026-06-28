@@ -12555,6 +12555,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _handle_healbite_weight_command(self, event: MessageEvent) -> str:
         from gateway.healbite_weight_tracker import (
+            format_weight_saved_notice,
             format_weight_tracker_report,
             get_default_weight_tracker,
             parse_weight_kg,
@@ -12577,7 +12578,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("[Gateway][weight_command_failed] error_type=%s", type(exc).__name__)
                 return "Не удалось записать вес. Попробуйте ещё раз чуть позже."
             summary = tracker.get_summary(int(user_id))
-            notice = "Вес записан. КБЖУ пересчитаны." if result.targets_recalculated else "Вес записан. Для пересчёта КБЖУ заполните /profile."
+            notice = format_weight_saved_notice(result)
             return self._plain_healbite_nutrition_diary_report(format_weight_tracker_report(summary, notice=notice))
         summary = tracker.get_summary(int(user_id))
         return self._plain_healbite_nutrition_diary_report(format_weight_tracker_report(summary))

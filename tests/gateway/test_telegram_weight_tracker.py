@@ -83,6 +83,8 @@ async def test_weight_keyboard_routes_to_local_tracker_without_generic_dispatch(
     sent = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "Вес" in sent["text"]
     assert sent.get("reply_markup") is not None
+    buttons = [button.text for row in sent["reply_markup"].inline_keyboard for button in row]
+    assert "Напоминание" not in buttons
     assert tracker.get_summary(101).latest is None
 
 
@@ -133,7 +135,7 @@ async def test_weight_custom_invalid_input_stays_local_and_writes_nothing(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_weight_reminder_callback_toggles_without_logging_payload(tmp_path, monkeypatch, caplog):
+async def test_weight_reminder_callback_stays_placeholder_without_logging_payload(tmp_path, monkeypatch, caplog):
     tracker, _store = _patch_weight(monkeypatch, tmp_path / "healbite.db")
     adapter = _adapter()
     query = _query(query_id="PII_S70C_CALLBACK")
@@ -141,7 +143,8 @@ async def test_weight_reminder_callback_toggles_without_logging_payload(tmp_path
     with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
         await adapter._handle_healbite_weight_callback(query, "weight:reminder")
 
-    assert tracker.get_weekly_reminder(101).enabled is True
+    assert tracker.get_weekly_reminder(101) is None
     assert "route=weight" in caplog.text
     assert "PII_S70C_CALLBACK" not in caplog.text
+    assert "Напоминания о весе появятся позже." in query.edit_message_text.await_args.kwargs["text"]
     query.answer.assert_awaited_once()

@@ -115,7 +115,7 @@ from gateway.healbite_water_tracker import (
 from gateway.healbite_weight_tracker import (
     WEIGHT_CUSTOM_STATE,
     format_weight_custom_prompt,
-    format_weight_reminder_report,
+    format_weight_saved_notice,
     format_weight_tracker_report,
     get_default_weight_tracker,
     parse_weight_kg,
@@ -6041,7 +6041,6 @@ class TelegramAdapter(BasePlatformAdapter):
             return None
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("Записать вес", callback_data="weight:custom")],
-            [InlineKeyboardButton("Напоминание", callback_data="weight:reminder")],
             [
                 InlineKeyboardButton("Обновить", callback_data="weight:refresh"),
                 InlineKeyboardButton("Назад", callback_data="weight:back"),
@@ -6124,7 +6123,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="invalid")
                 return True
             result = get_default_weight_tracker().add_weight_entry(int(user_id), weight_kg, source="telegram_command")
-            notice = "Вес записан. КБЖУ пересчитаны." if result.targets_recalculated else "Вес записан. Для пересчёта КБЖУ заполните /profile."
+            notice = format_weight_saved_notice(result)
             await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)
             self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="added")
             return True
@@ -6166,7 +6165,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         result = tracker.add_weight_entry(int(user_id), weight_kg, source="telegram_custom")
         tracker.clear_pending_state(int(user_id))
-        notice = "Вес записан. КБЖУ пересчитаны." if result.targets_recalculated else "Вес записан. Для пересчёта КБЖУ заполните /profile."
+        notice = format_weight_saved_notice(result)
         await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)
         self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="custom_added")
         return True
@@ -6204,10 +6203,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
         if action == "reminder":
-            current = tracker.get_weekly_reminder(int(user_id))
-            setting = tracker.set_weekly_reminder(int(user_id), enabled=not (current.enabled if current else False))
-            await query.answer(text="Готово.")
-            await self._edit_healbite_weight_screen(query, user_id=int(user_id), notice=format_weight_reminder_report(setting))
+            await query.answer(text="Скоро.")
+            await self._edit_healbite_weight_screen(
+                query,
+                user_id=int(user_id),
+                notice="Напоминания о весе появятся позже.",
+            )
             return
         if action == "back":
             tracker.clear_pending_state(int(user_id))

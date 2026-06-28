@@ -502,6 +502,14 @@ def format_weight_custom_prompt() -> str:
     return "Введите вес в килограммах: например 82,4 или 82.4 кг.\n/cancel — отменить."
 
 
+def format_weight_saved_notice(result: WeightAddResult) -> str:
+    if result.targets_recalculated:
+        return "Вес записан. КБЖУ пересчитаны."
+    if result.recalculation_error:
+        return "Вес записан. Пересчитать КБЖУ сейчас не удалось."
+    return "Вес записан. Для пересчёта КБЖУ заполните /profile."
+
+
 def format_weight_reminder_report(setting: WeightReminderSetting | None) -> str:
     if setting is not None and setting.enabled:
         return "🔔 Еженедельное напоминание о весе включено."

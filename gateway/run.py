@@ -1329,6 +1329,80 @@ def _log_inbound_message_event(event: Any, source: Any) -> None:
     )
 
 
+
+def _safe_log_bool(value: Any) -> str:
+    return "true" if bool(value) else "false"
+
+
+def _safe_platform_name(value: Any) -> str:
+    platform_value = getattr(value, "value", None)
+    if platform_value:
+        return str(platform_value)
+    if value in {None, ""}:
+        return "unknown"
+    return str(value)
+
+
+def _log_pre_gateway_dispatch_skip(*, platform: Any, reason: Any, has_chat: bool) -> None:
+    logger.info(
+        "pre_gateway_dispatch_skip platform=%s reason=%s has_chat=%s",
+        _safe_platform_name(platform),
+        "provided" if str(reason or "").strip() else "unspecified",
+        _safe_log_bool(has_chat),
+    )
+
+
+def _log_telegram_topic_recovery(previous_topic: Any, recovered_topic: Any) -> None:
+    logger.info(
+        "telegram_topic_recovery action=recover outcome=success has_previous_topic=%s has_recovered_topic=%s recovery_strategy=topic_binding_lookup",
+        _safe_log_bool(previous_topic is not None),
+        _safe_log_bool(recovered_topic is not None),
+    )
+
+
+def _log_telegram_notification_injected(*, notification_type: str, platform: Any, has_thread: bool, outcome: str) -> None:
+    safe_type = notification_type if notification_type in {"watch", "process"} else "other"
+    safe_outcome = outcome if outcome in {"queued", "sent", "skipped", "error"} else "unknown"
+    logger.info(
+        "telegram_notification_injected notification_type=%s platform=%s has_thread=%s outcome=%s",
+        safe_type,
+        _safe_platform_name(platform),
+        _safe_log_bool(has_thread),
+        safe_outcome,
+    )
+
+
+def _log_telegram_notification_failure(*, notification_type: str, platform: Any, has_thread: bool, exc: Exception) -> None:
+    safe_type = notification_type if notification_type in {"watch", "process"} else "other"
+    logger.error(
+        "telegram_notification_injected notification_type=%s platform=%s has_thread=%s outcome=error error_type=%s",
+        safe_type,
+        _safe_platform_name(platform),
+        _safe_log_bool(has_thread),
+        type(exc).__name__,
+    )
+
+
+def _log_healbite_diary_command_failure(command_name: str, exc: Exception) -> None:
+    logger.warning(
+        "healbite_diary_command_failed command=%s error_type=%s",
+        command_name,
+        type(exc).__name__,
+    )
+
+
+def _log_voice_transcript_rejected(*, reason: str) -> None:
+    logger.debug("voice_transcript_rejected reason=%s", reason)
+
+
+def _log_voice_duplicate_transcript(*, transcript: str) -> None:
+    logger.info(
+        "voice_transcript_suppressed reason=duplicate has_text=%s text_length=%d",
+        _safe_log_bool(bool(transcript)),
+        len(transcript or ""),
+    )
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -4119,12 +4193,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # can inject messages into an active session they don't own.
         if not self._is_user_authorized(event.source):
             logger.warning(
-                "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s",
-                event.source.user_id,
-                event.source.user_name,
+                "active_session_message_dropped reason=unauthorized_user platform=%s has_user_name=%s has_session=%s",
                 event.source.platform.value if event.source.platform else "unknown",
-                session_key,
+                _safe_log_bool(bool(event.source.user_name)),
+                _safe_log_bool(bool(session_key)),
             )
             return True  # handled (silently dropped); do not fall through
 
@@ -5769,10 +5841,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
         logger.info(
-            "Handoff: dispatching synthetic turn for CLI session %s → %s "
-            "(home=%s, thread=%s, session_key=%s)",
-            cli_session_id, platform_name, home.chat_id, effective_thread_id,
-            session_key,
+            "handoff_synthetic_dispatch cli_session=%s platform=%s has_home_channel=%s has_thread=%s has_session=%s",
+            cli_session_id,
+            platform_name,
+            _safe_log_bool(bool(home.chat_id)),
+            _safe_log_bool(bool(effective_thread_id)),
+            _safe_log_bool(bool(session_key)),
         )
 
         # Dispatch through the runner directly. Going through
@@ -6864,11 +6938,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     continue
                 _action = _result.get("action")
                 if _action == "skip":
-                    logger.info(
-                        "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
-                        _result.get("reason"),
-                        source.platform.value if source.platform else "unknown",
-                        source.chat_id or "unknown",
+                    _log_pre_gateway_dispatch_skip(
+                        platform=source.platform.value if source.platform else "unknown",
+                        reason=_result.get("reason"),
+                        has_chat=bool(source.chat_id),
                     )
                     return None
                 if _action == "rewrite":
@@ -8441,10 +8514,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # doesn't fragment the conversation across sessions.
         recovered = self._recover_telegram_topic_thread_id(source)
         if recovered is not None:
-            logger.info(
-                "telegram topic recovery: chat=%s user=%s %r -> %s",
-                source.chat_id, source.user_id, source.thread_id, recovered,
-            )
+            _log_telegram_topic_recovery(source.thread_id, recovered)
             source = dataclasses.replace(source, thread_id=recovered)
             try:
                 event.source = source
@@ -10280,16 +10350,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Check authorization before processing voice input
         if not self._is_user_authorized(source):
-            logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
+            _log_voice_transcript_rejected(reason="unauthorized_user")
             return
 
         if self._is_duplicate_voice_transcript(guild_id, user_id, transcript):
-            logger.info(
-                "Suppressing duplicate voice transcript for guild=%s user=%s: %s",
-                guild_id,
-                user_id,
-                transcript[:100],
-            )
+            _log_voice_duplicate_transcript(transcript=transcript)
             return
 
         # Show transcript in text channel (after auth, with mention sanitization)
@@ -12235,12 +12300,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=int(user_id),
                 days=int(days or 1),
             )
-        except Exception:
-            logger.warning(
-                "Failed to compute HealBite nutrition diary slash command for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("slash_diary", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
         report = format_nutrition_diary_report(summary)
@@ -12274,12 +12335,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             result = self._get_healbite_nutrition_diary().delete_last_meal(
                 user_id=int(user_id),
             )
-        except Exception:
-            logger.warning(
-                "Failed to delete the last HealBite meal for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("undo_meal", exc)
             return "Не удалось удалить последнюю запись. Попробуйте еще раз чуть позже."
 
         report = format_undo_meal_report(result)
@@ -12306,12 +12363,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 user_id=int(user_id),
                 days=days,
             )
-        except Exception:
-            logger.warning(
-                "Failed to compute HealBite nutrition diary text query for user=%s",
-                user_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            _log_healbite_diary_command_failure("text_query", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
         report = format_nutrition_diary_report(summary)
@@ -12866,15 +12919,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None,
             )
-            logger.info(
-                "Watch pattern notification — injecting for %s chat=%s thread=%s",
-                platform_name,
-                source.chat_id,
-                source.thread_id,
+            _log_telegram_notification_injected(
+                notification_type="watch",
+                platform=platform_name,
+                has_thread=bool(source.thread_id),
+                outcome="queued",
             )
             await adapter.handle_message(synth_event)
         except Exception as e:
-            logger.error("Watch notification injection error: %s", e)
+            _log_telegram_notification_failure(
+                notification_type="watch",
+                platform=platform_name,
+                has_thread=bool(getattr(source, "thread_id", None)),
+                exc=e,
+            )
 
     async def _run_process_watcher(self, watcher: dict) -> None:
         """
@@ -12984,16 +13042,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 internal=True,
                                 message_id=message_id,
                             )
-                            logger.info(
-                                "Process %s finished — injecting agent notification for session %s chat=%s thread=%s",
-                                session_id,
-                                session_key,
-                                source.chat_id,
-                                source.thread_id,
+                            _log_telegram_notification_injected(
+                                notification_type="process",
+                                platform=platform_name,
+                                has_thread=bool(source.thread_id),
+                                outcome="queued",
                             )
                             await adapter.handle_message(synth_event)
                         except Exception as e:
-                            logger.error("Agent notify injection error: %s", e)
+                            _log_telegram_notification_failure(
+                                notification_type="process",
+                                platform=platform_name,
+                                has_thread=bool(getattr(source, "thread_id", None)),
+                                exc=e,
+                            )
                     break
 
                 # --- Normal text-only notification ---

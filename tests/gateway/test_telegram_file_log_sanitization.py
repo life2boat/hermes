@@ -9,7 +9,14 @@ import hermes_logging
 from agent.turn_context import build_turn_context
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import _log_inbound_message_event
+from gateway.run import (
+    _log_healbite_diary_command_failure,
+    _log_inbound_message_event,
+    _log_pre_gateway_dispatch_skip,
+    _log_telegram_notification_failure,
+    _log_telegram_notification_injected,
+    _log_telegram_topic_recovery,
+)
 from gateway.session import SessionSource
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 from gateway.platforms.telegram import TelegramAdapter
@@ -24,6 +31,12 @@ PII_CANARIES = {
     "3131313131",
     "4242424242",
     "PII_USERNAME_SHOULD_NOT_APPEAR",
+    "PII_CHAT_ID_731000001",
+    "PII_USER_ID_731000002",
+    "PII_THREAD_ID_731000003",
+    "PII_MESSAGE_ID_731000004",
+    "PII_TOPIC_ID_731000005",
+    "PII_WATCH_PATTERN_SHOULD_NOT_APPEAR",
 }
 
 
@@ -228,6 +241,71 @@ def test_telegram_route_markers_in_file_logs_keep_shape_and_redact_callbacks(tmp
         assert "result=allowed" in logs
         assert "corr=" in logs
         assert "action=redacted" in logs
+        _assert_no_canaries(logs)
+    finally:
+        cleanup()
+
+
+def test_telegram_recovery_and_notification_logs_redact_identifier_canaries(tmp_path):
+    cleanup = _install_file_logging(tmp_path)
+    try:
+        _log_pre_gateway_dispatch_skip(
+            platform="telegram",
+            reason="PII_WATCH_PATTERN_SHOULD_NOT_APPEAR",
+            has_chat=True,
+        )
+        _log_telegram_topic_recovery(
+            "PII_TOPIC_ID_731000005",
+            "PII_THREAD_ID_731000003",
+        )
+        _log_telegram_notification_injected(
+            notification_type="watch",
+            platform="telegram",
+            has_thread=True,
+            outcome="queued",
+        )
+        _log_telegram_notification_failure(
+            notification_type="watch",
+            platform="telegram",
+            has_thread=True,
+            exc=RuntimeError(
+                "PII_CHAT_ID_731000001 PII_USER_ID_731000002 "
+                "PII_WATCH_PATTERN_SHOULD_NOT_APPEAR"
+            ),
+        )
+        _log_telegram_notification_injected(
+            notification_type="process",
+            platform="telegram",
+            has_thread=False,
+            outcome="queued",
+        )
+        _log_telegram_notification_failure(
+            notification_type="process",
+            platform="telegram",
+            has_thread=False,
+            exc=RuntimeError(
+                "PII_MESSAGE_ID_731000004 PII_TOPIC_ID_731000005"
+            ),
+        )
+        _log_healbite_diary_command_failure(
+            "slash_diary",
+            RuntimeError("PII_USER_ID_731000002"),
+        )
+
+        logs = _read_file_logs(tmp_path)
+        assert "pre_gateway_dispatch_skip" in logs
+        assert "telegram_topic_recovery" in logs
+        assert "telegram_notification_injected notification_type=watch" in logs
+        assert "telegram_notification_injected notification_type=process" in logs
+        assert "recovery_strategy=topic_binding_lookup" in logs
+        assert "has_previous_topic=true" in logs
+        assert "has_recovered_topic=true" in logs
+        assert "has_thread=true" in logs
+        assert "has_thread=false" in logs
+        assert "outcome=queued" in logs
+        assert "outcome=error" in logs
+        assert "error_type=RuntimeError" in logs
+        assert "command=slash_diary" in logs
         _assert_no_canaries(logs)
     finally:
         cleanup()

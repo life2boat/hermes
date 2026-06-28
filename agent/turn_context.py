@@ -34,6 +34,35 @@ from agent.model_metadata import estimate_request_tokens_rough
 logger = logging.getLogger(__name__)
 
 
+def _message_log_shape(content: Any) -> tuple[str, int, int]:
+    if content is None:
+        return "empty", 0, 0
+    if isinstance(content, str):
+        return "text", len(content), 0
+    if isinstance(content, list):
+        text_length = 0
+        image_count = 0
+        for part in content:
+            if isinstance(part, str):
+                text_length += len(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "")
+            if part_type in {"image", "image_url", "input_image"}:
+                image_count += 1
+            elif part_type in {"text", "input_text"}:
+                text_value = part.get("text")
+                if isinstance(text_value, str):
+                    text_length += len(text_value)
+        if image_count and text_length:
+            return "multimodal", text_length, image_count
+        if image_count:
+            return "image", 0, image_count
+        return "text", text_length, 0
+    return "other", len(str(content)), 0
+
+
 @dataclass
 class TurnContext:
     """Values produced by the turn prologue and consumed by the turn loop."""
@@ -163,15 +192,13 @@ def build_turn_context(
     # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
     agent.iteration_budget = IterationBudget(agent.max_iterations)
 
-    # Log conversation turn start for debugging/observability.
-    _preview_text = summarize_user_message_for_log(user_message)
-    _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
-    _msg_preview = _msg_preview.replace("\n", " ")
+    # Log conversation turn start for debugging/observability without user text.
+    _content_type, _text_length, _image_count = _message_log_shape(user_message)
     logger.info(
-        "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
+        "conversation turn: session=%s model=%s provider=%s platform=%s history=%d content_type=%s text_length=%d image_count=%d",
         agent.session_id or "none", agent.model, agent.provider or "unknown",
         agent.platform or "unknown", len(conversation_history or []),
-        _msg_preview,
+        _content_type, _text_length, _image_count,
     )
 
     # Initialize conversation (copy to avoid mutating the caller's list).
@@ -223,13 +250,19 @@ def build_turn_context(
     agent._persist_user_message_idx = current_turn_user_idx
 
     if not agent.quiet_mode:
-        _print_preview = summarize_user_message_for_log(user_message)
-        agent._safe_print(
-            f"💬 Starting conversation: '{_print_preview[:60]}"
-            f"{'...' if len(_print_preview) > 60 else ''}'"
-        )
+        if str(getattr(agent, "platform", "")).lower() == "telegram":
+            agent._safe_print(
+                "Starting conversation: "
+                f"content_type={_content_type} text_length={_text_length} image_count={_image_count}"
+            )
+        else:
+            _print_preview = summarize_user_message_for_log(user_message)
+            agent._safe_print(
+                f"Starting conversation: '{_print_preview[:60]}"
+                f"{'...' if len(_print_preview) > 60 else ''}'"
+            )
 
-    # ── System prompt (cached per session for prefix caching) ──
+    # -- System prompt (cached per session for prefix caching) ──
     if agent._cached_system_prompt is None:
         restore_or_build_system_prompt(agent, system_message, conversation_history)
 

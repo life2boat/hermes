@@ -1312,6 +1312,23 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _log_inbound_message_event(event: Any, source: Any) -> None:
+    text = getattr(event, "text", None) or ""
+    media_urls = getattr(event, "media_urls", None) or []
+    media_count = len(media_urls)
+    content_type = "media" if media_count else "text"
+    platform_value = getattr(getattr(source, "platform", None), "value", None)
+    platform = platform_value or str(getattr(source, "platform", "unknown"))
+    logger.info(
+        "inbound message: platform=%s content_type=%s has_text=%s text_length=%d media_count=%d",
+        platform,
+        content_type,
+        bool(text),
+        len(text),
+        media_count,
+    )
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -8415,13 +8432,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
-        _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
-        _msg_preview = (event.text or "")[:80].replace("\n", " ")
-        logger.info(
-            "inbound message: platform=%s user=%s chat=%s msg=%r",
-            _platform_name, source.user_name or source.user_id or "unknown",
-            source.chat_id or "unknown", _msg_preview,
-        )
+        _log_inbound_message_event(event, source)
 
         # Get or create session
         # Topic-mode DMs: rewrite a stale/foreign thread_id to the user's

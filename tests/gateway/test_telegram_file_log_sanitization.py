@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, patch
 import hermes_logging
 from agent.turn_context import build_turn_context
 from gateway.config import Platform
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.base import (
+    MessageEvent,
+    MessageType,
+    _log_safe_base_session_event,
+)
 from gateway.run import (
     _log_healbite_diary_command_failure,
     _log_inbound_message_event,
@@ -42,6 +46,22 @@ PII_CANARIES = {
     "PII_SESSION_USER_741000002",
     "PII_SESSION_THREAD_741000003",
     "telegram:741000001:741000002",
+    "PII_V2_TEXT_28JUNE",
+    "PII_V2_CAPTION_28JUNE",
+    "PII_V2_TOOL_ARGUMENT_28JUNE",
+    "PII_V2_CALLBACK_SECRET_28JUNE",
+    "PII_V2_SESSION_CHAT_751000001",
+    "PII_V2_SESSION_USER_751000002",
+    "PII_V2_SESSION_THREAD_751000003",
+    "PII_V2_EXCEPTION_28JUNE",
+    "PII_V2_QDRANT_PAYLOAD_28JUNE",
+    "PII_V3_CHAT_761000001",
+    "PII_V3_USER_761000002",
+    "PII_V3_DRAFT_761000003",
+    "PII_V3_SESSION_761000004",
+    "PII_V3_CHOICE_SHOULD_NOT_APPEAR",
+    "PII_V3_EXCEPTION_BODY_SHOULD_NOT_APPEAR",
+    "PII_V3_HANDOFF_EXCEPTION_SHOULD_NOT_APPEAR",
 }
 
 
@@ -116,7 +136,7 @@ class _FakeAgent:
         self._persist_calls += 1
 
 
-def _install_file_logging(tmp_path: Path):
+def _install_file_logging(tmp_path: Path, *, log_level: str = "INFO"):
     root = logging.getLogger()
     existing = list(root.handlers)
     previous_initialized = hermes_logging._logging_initialized
@@ -124,7 +144,7 @@ def _install_file_logging(tmp_path: Path):
         hermes_home=tmp_path,
         mode="gateway",
         force=True,
-        log_level="INFO",
+        log_level=log_level,
     )
 
     def cleanup():
@@ -453,5 +473,94 @@ def test_telegram_multimodal_turn_file_log_uses_shape_only(tmp_path):
         assert "image_count=1" in logs
         _assert_no_canaries(logs)
         _assert_no_canaries("\n".join(agent.safe_print_calls))
+    finally:
+        cleanup()
+
+
+def test_remaining_telegram_file_log_blockers_emit_safe_markers_only(tmp_path):
+    cleanup = _install_file_logging(tmp_path, log_level="DEBUG")
+    try:
+        adapter = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token"))
+        adapter._log_telegram_draft_diagnostic(
+            operation="draft_update",
+            outcome="failed",
+            error=RuntimeError(
+                "PII_V3_CHAT_761000001 PII_V3_DRAFT_761000003 "
+                "PII_V3_EXCEPTION_BODY_SHOULD_NOT_APPEAR"
+            ),
+        )
+        adapter._log_telegram_draft_diagnostic(
+            operation="draft_lookup",
+            outcome="miss",
+            has_draft=False,
+        )
+        adapter._log_telegram_approval_resolution(
+            choice="PII_V3_CHOICE_SHOULD_NOT_APPEAR",
+            count=1,
+            outcome="resolved",
+        )
+        adapter._log_telegram_approval_resolution(
+            choice="once",
+            count=0,
+            outcome="failed",
+            error=RuntimeError(
+                "PII_V3_USER_761000002 PII_V3_EXCEPTION_BODY_SHOULD_NOT_APPEAR"
+            ),
+        )
+        _log_safe_session_event(
+            "handoff_processing_result",
+            session_value="PII_V3_SESSION_761000004",
+            session_scope="handoff_dispatch",
+            fields={
+                "operation": "handoff",
+                "outcome": "failed",
+                "error_type": "RuntimeError",
+            },
+        )
+
+        _log_safe_base_session_event(
+            "telegram",
+            operation="debounce_candidate",
+            outcome="accepted",
+            session_value="PII_V3_SESSION_761000004",
+            session_scope="queue_text_debounce",
+            fields={"text_len": len("PII_V3_SESSION_761000004")},
+        )
+        _log_safe_base_session_event(
+            "telegram",
+            operation="cancel_active_processing",
+            outcome="started",
+            session_value="PII_V3_SESSION_761000004",
+            session_scope="cancel_active_processing",
+        )
+        _log_safe_base_session_event(
+            "telegram",
+            operation="photo_followup",
+            outcome="queued",
+            session_value="PII_V3_SESSION_761000004",
+            session_scope="photo_followup_queue",
+        )
+
+        logs = _read_file_logs(tmp_path)
+        assert "telegram_draft_diagnostic" in logs
+        assert "telegram_approval_resolution" in logs
+        assert "operation=draft_update" in logs
+        assert "operation=draft_lookup" in logs
+        assert "has_draft=true" in logs
+        assert "has_draft=false" in logs
+        assert "route=approval_callback" in logs
+        assert "choice_type=dynamic" in logs
+        assert "action=once" in logs
+        assert "has_choice=true" in logs
+        assert "has_session=true" in logs
+        assert "session_scope=approval_callback" in logs
+        assert "session_scope=handoff_dispatch" in logs
+        assert "operation=handoff" in logs
+        assert "base_session_event" in logs
+        assert "session_scope=queue_text_debounce" in logs
+        assert "session_scope=cancel_active_processing" in logs
+        assert "session_scope=photo_followup_queue" in logs
+        assert "error_type=RuntimeError" in logs
+        _assert_no_canaries(logs)
     finally:
         cleanup()

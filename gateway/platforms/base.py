@@ -52,6 +52,48 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _safe_log_bool(value) -> str:
+    return "true" if bool(value) else "false"
+
+
+_BASE_SAFE_SESSION_SCOPES = {
+    "queue_text_debounce",
+    "cancel_active_processing",
+    "photo_followup_queue",
+}
+
+
+def _safe_session_scope(scope: str) -> str:
+    normalized = str(scope or "").strip().lower()
+    return normalized if normalized in _BASE_SAFE_SESSION_SCOPES else "other"
+
+
+def _log_safe_base_session_event(
+    adapter_name: str,
+    *,
+    operation: str,
+    outcome: str,
+    session_value,
+    session_scope: str,
+    level: int = logging.DEBUG,
+    fields: dict[str, object] | None = None,
+) -> None:
+    parts = [
+        "[%s] base_session_event has_session=%s session_scope=%s operation=%s outcome=%s"
+    ]
+    args: list[object] = [
+        adapter_name,
+        _safe_log_bool(session_value),
+        _safe_session_scope(session_scope),
+        operation,
+        outcome,
+    ]
+    for key, value in (fields or {}).items():
+        parts.append(f"{key}=%s")
+        args.append(value)
+    logger.log(level, " ".join(parts), *args)
+
+
 def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) -> dict | None:
     """Build platform-aware thread metadata for adapter sends.
 
@@ -3448,11 +3490,13 @@ class BasePlatformAdapter(ABC):
             and bool((event.text or "").strip())
         )
         if result:
-            logger.debug(
-                "[%s] Queue-text debounce candidate accepted: session=%s text_len=%d",
+            _log_safe_base_session_event(
                 self.name,
-                getattr(event, "session_key", "?"),
-                len(event.text or ""),
+                operation="debounce_candidate",
+                outcome="accepted",
+                session_value=getattr(event, "session_key", None),
+                session_scope="queue_text_debounce",
+                fields={"text_len": len(event.text or "")},
             )
         return result
 
@@ -3711,10 +3755,12 @@ class BasePlatformAdapter(ABC):
         """
         task = self._session_tasks.pop(session_key, None)
         if task is not None and not task.done():
-            logger.debug(
-                "[%s] Cancelling active processing for session %s",
+            _log_safe_base_session_event(
                 self.name,
-                session_key,
+                operation="cancel_active_processing",
+                outcome="started",
+                session_value=session_key,
+                session_scope="cancel_active_processing",
             )
             self._expected_cancelled_tasks.add(task)
             task.cancel()
@@ -3991,7 +4037,13 @@ class BasePlatformAdapter(ABC):
             # simultaneous messages. Queue them without interrupting the active run,
             # then process them immediately after the current task finishes.
             if event.message_type == MessageType.PHOTO:
-                logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
+                _log_safe_base_session_event(
+                    self.name,
+                    operation="photo_followup",
+                    outcome="queued",
+                    session_value=session_key,
+                    session_scope="photo_followup_queue",
+                )
                 merge_pending_message_event(self._pending_messages, session_key, event)
                 return  # Don't interrupt now - will run after current task completes
 

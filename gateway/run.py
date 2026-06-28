@@ -1424,6 +1424,7 @@ _SAFE_SESSION_SCOPES = frozenset(
         "followup",
         "stream_delivery",
         "telegram_recovery",
+        "handoff_dispatch",
     }
 )
 
@@ -5797,9 +5798,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         await self._process_handoff(row)
                         self._session_db.complete_handoff(session_id)
                     except Exception as exc:
-                        logger.warning(
-                            "Handoff for session %s failed: %s",
-                            session_id, exc, exc_info=True,
+                        _log_safe_session_event(
+                            "handoff_processing_result",
+                            session_value=session_id,
+                            session_scope="handoff_dispatch",
+                            level=logging.WARNING,
+                            fields={
+                                "operation": "handoff",
+                                "outcome": "failed",
+                                "error_type": type(exc).__name__,
+                            },
                         )
                         self._session_db.fail_handoff(session_id, str(exc))
             except asyncio.CancelledError:

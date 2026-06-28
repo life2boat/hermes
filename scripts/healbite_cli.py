@@ -40,6 +40,11 @@ from gateway.healbite_water_tracker import (
     format_water_tracker_report,
     parse_water_amount,
 )
+from gateway.healbite_weight_tracker import (
+    HealBiteWeightTracker,
+    format_weight_tracker_report,
+    parse_weight_kg,
+)
 
 CONTAINER_NAME = "hermes-bot"
 DEFAULT_LOG_TAIL = 80
@@ -53,6 +58,7 @@ SUPPORTED_SIMULATION_COMMANDS = {
     "/memory_stats",
     "/menu",
     "/profile",
+    "/weight",
 }
 STATE_CHANGING_SIMULATION_COMMANDS = {
     "/undo_meal",
@@ -1076,6 +1082,67 @@ def run_local_water_smoke(
     return markers
 
 
+def run_local_weight_smoke(
+    *,
+    db_path: str | Path | None = None,
+    user_id: int = 999996,
+) -> list[str]:
+    if db_path is None:
+        with tempfile.TemporaryDirectory(prefix="healbite-weight-smoke-") as tmp_dir:
+            return run_local_weight_smoke(db_path=Path(tmp_dir) / "healbite.db", user_id=user_id)
+
+    resolved = Path(db_path)
+    profile_store = HealBiteUserProfileStore(db_path=resolved)
+    profile_store.upsert_user_profile(
+        user_id=int(user_id),
+        username="cli-weight",
+        sex="male",
+        age=35,
+        height_cm=180,
+        weight_kg=80,
+        goal="maintain",
+        activity_level="moderate",
+        manual_kcal_target=2000,
+    )
+    profile_store.recalculate_profile_targets(user_id=int(user_id), target_source="manual", manual_kcal_target=2000)
+
+    import gateway.healbite_user_profile as profile_module
+
+    previous_default = profile_module._GLOBAL_PROFILE_STORE
+    profile_module._GLOBAL_PROFILE_STORE = profile_store
+    try:
+        tracker = HealBiteWeightTracker(db_path=resolved)
+        markers: list[str] = []
+        if parse_weight_kg("82,4 кг") != 82.4:
+            raise CLIError("Weight parser smoke failed.")
+        markers.append("weight_parser_ok")
+
+        result = tracker.add_weight_entry(int(user_id), 82.4, source="cli_weight_smoke")
+        profile = profile_store.get_user_profile(int(user_id))
+        if not result.profile_updated or not result.targets_recalculated or profile is None or profile.weight_kg != 82.4:
+            raise CLIError("Weight profile recalculation smoke failed.")
+        markers.append("weight_profile_recalc_ok")
+
+        report = format_weight_tracker_report(tracker.get_summary(int(user_id)))
+        if "82,4 кг" not in report or "Вес" not in report:
+            raise CLIError("Weight report smoke failed.")
+        markers.append("weight_report_ok")
+
+        tracker.stage_custom_weight(int(user_id))
+        if tracker.get_pending_state(int(user_id)) != "weight_custom_amount":
+            raise CLIError("Weight pending smoke failed.")
+        tracker.clear_pending_state(int(user_id))
+        markers.append("weight_pending_ok")
+
+        tracker.set_weekly_reminder(int(user_id), enabled=True)
+        if not tracker.get_weekly_reminder(int(user_id)).enabled:
+            raise CLIError("Weight reminder smoke failed.")
+        markers.append("weight_reminder_ok")
+        return markers
+    finally:
+        profile_module._GLOBAL_PROFILE_STORE = previous_default
+
+
 def simulate_local_message(
     text: str,
     *,
@@ -1475,6 +1542,9 @@ class HealBiteCLI:
 
     def cmd_test_water(self) -> str:
         return "\n".join(run_local_water_smoke())
+
+    def cmd_test_weight(self) -> str:
+        return "\n".join(run_local_weight_smoke())
 
 
 _RUNTIME_STATUS_CODE = r"""
@@ -1890,6 +1960,10 @@ def build_parser() -> argparse.ArgumentParser:
         "test-water",
         help="Run a deterministic synthetic smoke-test for HealBite water tracker",
     )
+    subparsers.add_parser(
+        "test-weight",
+        help="Run a deterministic synthetic smoke-test for HealBite weight tracker",
+    )
     subparsers.add_parser("check-admins", help="Inspect effective admin ACL policy")
 
     inspect_parser = subparsers.add_parser(
@@ -1948,6 +2022,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "test-water":
         print(cli.cmd_test_water())
+        return 0
+    if args.command == "test-weight":
+        print(cli.cmd_test_weight())
         return 0
     if args.command == "check-admins":
         print(cli.cmd_check_admins())

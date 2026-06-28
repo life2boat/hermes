@@ -1617,6 +1617,7 @@ _TELEGRAM_DIARY_BLOCKED_TOOLSETS = _TELEGRAM_END_USER_BLOCKED_TOOLSETS
 _TELEGRAM_DIARY_CORRECTION_TOOLSETS = ("nutrition_diary",)
 _TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/diary_undo"})
 _TELEGRAM_WATER_SLASH_COMMANDS = frozenset({"/water"})
+_TELEGRAM_WEIGHT_SLASH_COMMANDS = frozenset({"/weight"})
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
 _TELEGRAM_DIARY_CONTEXT_HINTS = (
     "дневник",
@@ -1789,7 +1790,7 @@ def _healbite_public_lane_reply(*, has_profile: bool, onboarding_active: bool) -
     if not has_profile:
         return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
     return (
-        "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, "
+        "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, /weight, "
         "фото еды и ответы Да/Нет для сохранения."
     )
 
@@ -1890,6 +1891,15 @@ def _healbite_public_lane_decision(
             "enabled": True,
             "action": "allow",
             "route": "public_water_tracker",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    if first_token in _TELEGRAM_WEIGHT_SLASH_COMMANDS:
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": "public_weight_tracker",
             "has_profile": True,
             "onboarding_active": False,
         }
@@ -7597,6 +7607,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_healbite_nutrition_diary_command(event)
                 if _cmd_def_inner.name == "undo_meal":
                     return await self._handle_healbite_undo_meal_command(event)
+                if _cmd_def_inner.name == "weight":
+                    return await self._handle_healbite_weight_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
@@ -7908,6 +7920,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "undo_meal":
             return await self._handle_healbite_undo_meal_command(event)
+
+        if canonical == "weight":
+            return await self._handle_healbite_weight_command(event)
         
         if canonical == "profile":
             return await self._handle_profile_command(event)
@@ -12537,6 +12552,35 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         report = format_undo_meal_report(result)
         return self._plain_healbite_nutrition_diary_report(report)
+
+    async def _handle_healbite_weight_command(self, event: MessageEvent) -> str:
+        from gateway.healbite_weight_tracker import (
+            format_weight_tracker_report,
+            get_default_weight_tracker,
+            parse_weight_kg,
+        )
+
+        source = event.source
+        user_id = getattr(source, "user_id", None)
+        if user_id is None:
+            return "Не удалось определить пользователя для трекера веса."
+        text = event.text or ""
+        parts = text.split(maxsplit=1)
+        tracker = get_default_weight_tracker()
+        if len(parts) == 2:
+            weight_kg = parse_weight_kg(parts[1])
+            if weight_kg is None:
+                return "Не понял вес. Напишите, например: /weight 82,4"
+            try:
+                result = tracker.add_weight_entry(int(user_id), weight_kg, source="telegram_command")
+            except Exception as exc:
+                logger.info("[Gateway][weight_command_failed] error_type=%s", type(exc).__name__)
+                return "Не удалось записать вес. Попробуйте ещё раз чуть позже."
+            summary = tracker.get_summary(int(user_id))
+            notice = "Вес записан. КБЖУ пересчитаны." if result.targets_recalculated else "Вес записан. Для пересчёта КБЖУ заполните /profile."
+            return self._plain_healbite_nutrition_diary_report(format_weight_tracker_report(summary, notice=notice))
+        summary = tracker.get_summary(int(user_id))
+        return self._plain_healbite_nutrition_diary_report(format_weight_tracker_report(summary))
 
     def _handle_healbite_nutrition_diary_text_query(
         self,

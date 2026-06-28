@@ -13,6 +13,7 @@ from gateway.run import (
     _log_healbite_diary_command_failure,
     _log_inbound_message_event,
     _log_pre_gateway_dispatch_skip,
+    _log_safe_session_event,
     _log_telegram_notification_failure,
     _log_telegram_notification_injected,
     _log_telegram_topic_recovery,
@@ -37,6 +38,10 @@ PII_CANARIES = {
     "PII_MESSAGE_ID_731000004",
     "PII_TOPIC_ID_731000005",
     "PII_WATCH_PATTERN_SHOULD_NOT_APPEAR",
+    "PII_SESSION_CHAT_741000001",
+    "PII_SESSION_USER_741000002",
+    "PII_SESSION_THREAD_741000003",
+    "telegram:741000001:741000002",
 }
 
 
@@ -309,6 +314,64 @@ def test_telegram_recovery_and_notification_logs_redact_identifier_canaries(tmp_
         _assert_no_canaries(logs)
     finally:
         cleanup()
+
+
+def test_session_diagnostics_use_safe_markers_without_session_canaries(tmp_path):
+    cleanup = _install_file_logging(tmp_path)
+    try:
+        _log_safe_session_event(
+            "session_diag_test",
+            session_value="telegram:741000001:741000002",
+            session_scope="update_watch",
+            fields={
+                "notification_type": "watch",
+                "route": "process",
+                "outcome": "queued",
+                "has_thread": "true",
+                "has_prompt": "true",
+                "prompt_length": len("PII_SESSION_THREAD_741000003"),
+            },
+        )
+        _log_safe_session_event(
+            "session_diag_text_test",
+            session_value="PII_SESSION_CHAT_741000001",
+            session_scope="interrupt",
+            level=logging.WARNING,
+            fields={
+                "has_text": "true",
+                "text_length": len("PII_SESSION_USER_741000002"),
+            },
+        )
+
+        logs = _read_file_logs(tmp_path)
+        assert "session_diag_test" in logs
+        assert "session_diag_text_test" in logs
+        assert "has_session=true" in logs
+        assert "session_scope=update_watch" in logs
+        assert "session_scope=interrupt" in logs
+        assert "notification_type=watch" in logs
+        assert "route=process" in logs
+        assert "outcome=queued" in logs
+        assert "has_text=true" in logs
+        assert "text_length=" in logs
+        _assert_no_canaries(logs)
+    finally:
+        cleanup()
+
+
+
+def test_gateway_run_source_omits_known_raw_session_log_formats():
+    source = Path("gateway/run.py").read_text(encoding="utf-8")
+    banned_formats = [
+        "Gateway intercepted clarify text response (session=%s, id=%s)",
+        "Ignoring /start platform ping for session %s",
+        "Rejecting new active session %s: max_concurrent_sessions reached",
+        "[Gateway] Auto-loaded skill(s) %s for session %s",
+        "Backup interrupt detected for session %s",
+        "Agent idle for %.0fs (timeout %.0fs) in session %s",
+    ]
+    for banned in banned_formats:
+        assert banned not in source
 
 
 def test_qdrant_file_log_failure_does_not_emit_payload_values(tmp_path):

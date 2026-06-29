@@ -198,6 +198,8 @@ class HealBiteWeightTracker:
     def _profile_store(self):
         from gateway.healbite_user_profile import HealBiteUserProfileStore, get_default_healbite_user_profile
 
+        if not self._uses_default_db_path:
+            return HealBiteUserProfileStore(db_path=self.db_path)
         store = get_default_healbite_user_profile()
         store_path = Path(getattr(store, "db_path", self.db_path))
         try:

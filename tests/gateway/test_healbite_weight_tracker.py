@@ -268,16 +268,15 @@ def test_target_update_failure_keeps_old_targets_fully_intact(tmp_path, monkeypa
     store = HealBiteUserProfileStore(db_path=db_path)
     _complete_profile(store, user_id=101)
     before = store.get_user_profile(101)
-    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
     tracker = HealBiteWeightTracker(db_path=db_path)
-    original_upsert = store.upsert_user_profile
+    original_upsert = HealBiteUserProfileStore.upsert_user_profile
 
-    def _patched_upsert(**kwargs):
+    def _patched_upsert(self, **kwargs):
         if kwargs.get("daily_kcal_target") is not None:
             raise RuntimeError("PII_S70C_TARGET_UPDATE")
-        return original_upsert(**kwargs)
+        return original_upsert(self, **kwargs)
 
-    monkeypatch.setattr(store, "upsert_user_profile", _patched_upsert)
+    monkeypatch.setattr(HealBiteUserProfileStore, "upsert_user_profile", _patched_upsert)
 
     with caplog.at_level("INFO", logger="gateway.healbite_weight_tracker"):
         result = tracker.add_weight_entry(101, 82.4, source="test")

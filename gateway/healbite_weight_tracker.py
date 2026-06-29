@@ -4,7 +4,6 @@ import html
 import logging
 import re
 import sqlite3
-from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +14,6 @@ from gateway.healbite_time import local_day_window_utc
 
 logger = logging.getLogger(__name__)
 
-_WEIGHT_LOG_CORRELATION: ContextVar[str | None] = ContextVar("healbite_weight_log_corr", default=None)
 
 WEIGHT_ENTRIES_TABLE = "weight_entries"
 WEIGHT_PENDING_TABLE = "weight_pending_inputs"
@@ -144,13 +142,6 @@ def _target_snapshot(profile: object | None) -> tuple[float | None, float | None
         getattr(profile, "daily_carbs_g", None),
     )
 
-
-def set_weight_log_correlation(value: str | None) -> object:
-    return _WEIGHT_LOG_CORRELATION.set(value or None)
-
-
-def reset_weight_log_correlation(token: object) -> None:
-    _WEIGHT_LOG_CORRELATION.reset(token)
 
 
 def parse_weight_kg(text: str) -> float | None:
@@ -306,8 +297,7 @@ class HealBiteWeightTracker:
         error_type: str | None = None,
         corr: str | None = None,
     ) -> None:
-        effective_corr = corr if corr is not None else _WEIGHT_LOG_CORRELATION.get()
-        corr_present = effective_corr is not None
+        corr_present = corr is not None
         logger.info(
             "[HealBite][weight_record] route=weight action=record outcome=%s weight_saved=%s has_previous_weight=%s profile_weight_updated=%s recalculation_attempted=%s recalculation_completed=%s targets_changed=%s error_type=%s corr_present=%s corr=%s",
             outcome,
@@ -319,7 +309,7 @@ class HealBiteWeightTracker:
             str(result.targets_changed).lower() if result is not None else "false",
             error_type or "none",
             str(corr_present).lower(),
-            effective_corr or "none",
+            corr or "none",
         )
 
     def add_weight_entry(

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -54,6 +54,18 @@ def _adapter():
     return adapter
 
 
+def _inline_button_texts(markup) -> list[str]:
+    if markup is None:
+        return []
+    rows = getattr(markup, "inline_keyboard", None)
+    if rows:
+        return [button.text for row in rows for button in row]
+    if hasattr(markup, "to_dict"):
+        data = markup.to_dict()
+        return [button.get("text", "") for row in data.get("inline_keyboard", []) for button in row]
+    return []
+
+
 def _profile_store(db_path, *, user_id: int = 101) -> HealBiteUserProfileStore:
     store = HealBiteUserProfileStore(db_path=db_path)
     store.upsert_user_profile(
@@ -92,9 +104,28 @@ async def test_weight_keyboard_routes_to_local_tracker_without_generic_dispatch(
     adapter._enqueue_text_event.assert_not_called()
     sent = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert sent.get("reply_markup") is not None
-    buttons = [button.text for row in sent["reply_markup"].inline_keyboard for button in row]
-    assert "Напоминание" not in " ".join(buttons)
     assert tracker.get_summary(101).latest is None
+
+
+def test_weight_keyboard_contains_history_button_and_hides_reminder_toggle(monkeypatch):
+    class _FakeButton:
+        def __init__(self, text, callback_data):
+            self.text = text
+            self.callback_data = callback_data
+
+    class _FakeMarkup:
+        def __init__(self, rows):
+            self.inline_keyboard = rows
+
+    monkeypatch.setattr("gateway.platforms.telegram.TELEGRAM_AVAILABLE", True)
+    monkeypatch.setattr("gateway.platforms.telegram.InlineKeyboardButton", _FakeButton)
+    monkeypatch.setattr("gateway.platforms.telegram.InlineKeyboardMarkup", _FakeMarkup)
+    adapter = _adapter()
+
+    buttons = _inline_button_texts(adapter._healbite_weight_keyboard())
+
+    assert "История веса" in buttons
+    assert all("Напоминание" not in button for button in buttons)
 
 
 @pytest.mark.asyncio
@@ -141,6 +172,37 @@ async def test_weight_custom_invalid_input_stays_local_and_writes_nothing(tmp_pa
     assert tracker.get_pending_state(101) == "weight_custom_amount"
     adapter._enqueue_text_event.assert_not_called()
     assert "/cancel" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_weight_history_callback_uses_canonical_history_screen_without_mutation(tmp_path, monkeypatch, caplog):
+    tracker, _store = _patch_weight(monkeypatch, tmp_path / "healbite.db")
+    tracker.add_weight_entry(101, 80.0)
+    tracker.add_weight_entry(101, 82.4)
+    tracker.stage_custom_weight(101)
+    adapter = _adapter()
+    query = _query(query_id="PII_S70C_HISTORY_CALLBACK")
+
+    with tracker._connect() as conn:
+        before_entries = conn.execute("SELECT COUNT(*) FROM weight_entries").fetchone()[0]
+        before_pending = conn.execute("SELECT COUNT(*) FROM weight_pending_inputs").fetchone()[0]
+
+    with caplog.at_level(logging.INFO, logger="gateway.platforms.telegram"):
+        await adapter._handle_healbite_weight_callback(query, "weight:history")
+
+    with tracker._connect() as conn:
+        after_entries = conn.execute("SELECT COUNT(*) FROM weight_entries").fetchone()[0]
+        after_pending = conn.execute("SELECT COUNT(*) FROM weight_pending_inputs").fetchone()[0]
+
+    assert before_entries == after_entries
+    assert before_pending == after_pending == 1
+    assert "PII_S70C_HISTORY_CALLBACK" not in caplog.text
+    assert "82,4" not in caplog.text
+    assert "action=history" in caplog.text
+    assert "history_count_bucket=2-3" in caplog.text
+    assert "История веса" in query.edit_message_text.await_args.kwargs["text"]
+    assert query.edit_message_text.await_args.kwargs["reply_markup"] is not None
+    adapter._enqueue_text_event.assert_not_called()
 
 
 @pytest.mark.asyncio

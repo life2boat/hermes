@@ -116,6 +116,7 @@ from gateway.healbite_weight_tracker import (
     WEIGHT_CUSTOM_STATE,
     format_weight_custom_prompt,
     format_weight_saved_notice,
+    format_weight_history_report,
     format_weight_tracker_report,
     get_default_weight_tracker,
     parse_weight_kg,
@@ -5691,6 +5692,8 @@ class TelegramAdapter(BasePlatformAdapter):
         "has_choice",
         "has_draft",
         "has_photo",
+        "history_count_bucket",
+        "history_present",
         "has_session",
         "has_text",
         "kind",
@@ -6040,7 +6043,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if not TELEGRAM_AVAILABLE:
             return None
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("Записать вес", callback_data="weight:custom")],
+            [
+                InlineKeyboardButton("Записать вес", callback_data="weight:custom"),
+                InlineKeyboardButton("История веса", callback_data="weight:history"),
+            ],
             [
                 InlineKeyboardButton("Обновить", callback_data="weight:refresh"),
                 InlineKeyboardButton("Назад", callback_data="weight:back"),
@@ -6087,6 +6093,54 @@ class TelegramAdapter(BasePlatformAdapter):
             message = getattr(query, "message", None)
             if message is not None:
                 await self._send_healbite_weight_screen(message, user_id=user_id, notice=notice)
+
+    def _healbite_weight_history_keyboard(self) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("Записать вес", callback_data="weight:custom")],
+            [
+                InlineKeyboardButton("Обновить", callback_data="weight:history"),
+                InlineKeyboardButton("Назад", callback_data="weight:refresh"),
+            ],
+        ])
+
+    @staticmethod
+    def _healbite_weight_history_count_bucket(count: int) -> str:
+        if count <= 0:
+            return "0"
+        if count == 1:
+            return "1"
+        if count <= 3:
+            return "2-3"
+        if count <= 7:
+            return "4-7"
+        return "8+"
+
+    async def _edit_healbite_weight_history_screen(
+        self,
+        query: Any,
+        *,
+        user_id: int,
+    ) -> None:
+        summary = get_default_weight_tracker().get_summary(int(user_id))
+        history_present = bool(summary.entries)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=getattr(query, "message", None),
+            route="weight",
+            action="history",
+            outcome="shown" if history_present else "empty",
+            history_present=history_present,
+            history_count_bucket=self._healbite_weight_history_count_bucket(len(summary.entries)),
+        )
+        kwargs: Dict[str, Any] = {
+            "text": format_weight_history_report(summary),
+            "reply_markup": self._healbite_weight_history_keyboard(),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await query.edit_message_text(**kwargs)
 
     async def _maybe_handle_healbite_weight_command(
         self,
@@ -6193,8 +6247,19 @@ class TelegramAdapter(BasePlatformAdapter):
             msg=getattr(query, "message", None),
             route="weight",
             lane="healbite_public",
-            result=action if action in {"open", "custom", "reminder", "refresh", "back"} else "dynamic",
+            result=action if action in {"open", "custom", "history", "reminder", "refresh", "back"} else "dynamic",
         )
+        if action == "history":
+            self._log_healbite_route_selected(
+                msg=getattr(query, "message", None),
+                route="weight",
+                action="history",
+                lane="healbite_public",
+                result="allowed",
+            )
+            await query.answer(text="История веса.")
+            await self._edit_healbite_weight_history_screen(query, user_id=int(user_id))
+            return
         if action == "custom":
             tracker.stage_custom_weight(int(user_id))
             await query.answer(text="Введите вес сообщением.")

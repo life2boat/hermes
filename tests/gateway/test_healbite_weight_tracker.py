@@ -14,6 +14,7 @@ from gateway.healbite_weight_tracker import (
     WeightAddResult,
     WeightEntry,
     format_weight_saved_notice,
+    format_weight_history_report,
     format_weight_tracker_report,
     parse_weight_kg,
 )
@@ -144,6 +145,29 @@ def test_weight_report_and_pending_state(tmp_path):
     assert tracker.get_pending_state(101) == WEIGHT_CUSTOM_STATE
     tracker.clear_pending_state(101)
     assert tracker.get_pending_state(101) is None
+
+
+def test_weight_history_report_formats_entries_in_reverse_chronological_order(tmp_path):
+    tracker = HealBiteWeightTracker(db_path=tmp_path / "healbite.db")
+    now = datetime(2026, 6, 29, 12, 0, tzinfo=timezone.utc)
+    tracker.add_weight_entry(101, 80.0, recorded_at=now - timedelta(days=2))
+    tracker.add_weight_entry(101, 81.0, recorded_at=now - timedelta(days=1))
+    tracker.add_weight_entry(101, 82.4, recorded_at=now)
+
+    report = format_weight_history_report(tracker.get_summary(101, now=now))
+
+    assert "История веса" in report
+    assert report.index("2026-06-29") < report.index("2026-06-28") < report.index("2026-06-27")
+    assert "Записей за 30 дней: 2-3" in report
+
+
+def test_weight_history_report_for_empty_state_is_safe(tmp_path):
+    tracker = HealBiteWeightTracker(db_path=tmp_path / "healbite.db")
+
+    report = format_weight_history_report(tracker.get_summary(101))
+
+    assert "Пока нет записей веса." in report
+    assert "Нажмите «Записать вес»" in report
 
 
 def test_history_insert_failure_does_not_update_profile_or_targets(tmp_path, monkeypatch, caplog):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
+import sqlite3
 
 import pytest
 
@@ -329,3 +331,123 @@ def test_multiple_entries_same_day_remain_append_only_and_profile_tracks_latest(
     assert [entry.weight_grams for entry in summary.entries] == [80000, 81000, 82000]
     assert summary.latest is not None and summary.latest.weight_grams == 82000
     assert profile is not None and profile.weight_kg == 82.0
+
+
+
+def _weight_record_messages(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "[HealBite][weight_record]" in record.getMessage()]
+
+
+def test_pristine_pre_c1_init_adds_weight_tables_without_touching_other_tables(tmp_path):
+    db_path = tmp_path / "healbite_pre_c1.db"
+    profile_store = HealBiteUserProfileStore(db_path=db_path)
+    profile_store.upsert_user_profile(user_id=101, username="tester")
+
+    from gateway.healbite_nutrition_diary import HealBiteNutritionDiary
+    from gateway.healbite_water_tracker import HealBiteWaterTracker
+
+    HealBiteNutritionDiary(db_path=db_path)
+    HealBiteWaterTracker(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        pre_tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "users" in pre_tables
+        assert "profiles" in pre_tables
+        assert "nutrition_log" in pre_tables
+        assert "pending_meals" in pre_tables
+        assert "water_intake_events" in pre_tables
+        assert "water_pending_inputs" in pre_tables
+        assert "weight_entries" not in pre_tables
+        assert "weight_pending_inputs" not in pre_tables
+
+    HealBiteWeightTracker(db_path=db_path)
+    HealBiteWeightTracker(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        post_tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (WEIGHT_ENTRIES_TABLE,),
+        ).fetchone()[0]
+
+    assert "weight_entries" in post_tables
+    assert "weight_pending_inputs" in post_tables
+    assert "weight_reminders" not in post_tables
+    assert "weight_reminder_events" not in post_tables
+    assert "users" in post_tables
+    assert "profiles" in post_tables
+    assert "nutrition_log" in post_tables
+    assert "pending_meals" in post_tables
+    assert "water_intake_events" in post_tables
+    assert "water_pending_inputs" in post_tables
+    assert "idx_weight_entries_user_recorded_at" in indexes
+    assert "idx_weight_entries_user_local_date" in indexes
+    assert "idx_weight_pending_expires_at" in indexes
+    assert "CHECK (weight_grams > 0)" in schema
+
+
+def test_first_weight_record_logs_has_previous_weight_false(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "healbite.db"
+    store = HealBiteUserProfileStore(db_path=db_path)
+    store.upsert_user_profile(user_id=101, username="tester")
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    tracker = HealBiteWeightTracker(db_path=db_path)
+
+    with caplog.at_level(logging.INFO, logger="gateway.healbite_weight_tracker"):
+        tracker.add_weight_entry(101, 82.4, source="test")
+
+    messages = _weight_record_messages(caplog)
+    assert messages
+    assert "has_previous_weight=false" in messages[-1]
+    assert "weight_saved=true" in messages[-1]
+    assert "corr_present=false" in messages[-1]
+
+
+def test_profile_baseline_weight_logs_has_previous_weight_true(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "healbite.db"
+    store = HealBiteUserProfileStore(db_path=db_path)
+    store.upsert_user_profile(user_id=101, username="tester", weight_kg=80)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    tracker = HealBiteWeightTracker(db_path=db_path)
+
+    with caplog.at_level(logging.INFO, logger="gateway.healbite_weight_tracker"):
+        tracker.add_weight_entry(101, 82.4, source="test")
+
+    messages = _weight_record_messages(caplog)
+    assert messages
+    assert "has_previous_weight=true" in messages[-1]
+    assert "corr_present=false" in messages[-1]
+
+
+def test_subsequent_weight_record_logs_has_previous_weight_true(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "healbite.db"
+    store = HealBiteUserProfileStore(db_path=db_path)
+    _complete_profile(store, user_id=101)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    tracker = HealBiteWeightTracker(db_path=db_path)
+    tracker.add_weight_entry(101, 80.0, source="test")
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO, logger="gateway.healbite_weight_tracker"):
+        tracker.add_weight_entry(101, 82.4, source="test")
+
+    messages = _weight_record_messages(caplog)
+    assert messages
+    assert "has_previous_weight=true" in messages[-1]
+
+
+def test_cli_invocation_without_correlation_does_not_fail(tmp_path, monkeypatch, caplog):
+    db_path = tmp_path / "healbite.db"
+    store = HealBiteUserProfileStore(db_path=db_path)
+    _complete_profile(store, user_id=101)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    tracker = HealBiteWeightTracker(db_path=db_path)
+
+    with caplog.at_level(logging.INFO, logger="gateway.healbite_weight_tracker"):
+        tracker.add_weight_entry(101, 82.4, source="cli_weight_smoke")
+
+    messages = _weight_record_messages(caplog)
+    assert messages
+    assert "corr_present=false" in messages[-1]
+    assert "corr=none" in messages[-1]

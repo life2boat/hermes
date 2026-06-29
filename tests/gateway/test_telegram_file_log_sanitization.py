@@ -23,6 +23,8 @@ from gateway.run import (
     _log_telegram_topic_recovery,
 )
 from gateway.session import SessionSource
+from gateway.healbite_user_profile import HealBiteUserProfileStore
+from gateway.healbite_weight_tracker import HealBiteWeightTracker
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 from gateway.platforms.telegram import TelegramAdapter
 from gateway.config import PlatformConfig
@@ -69,6 +71,14 @@ PII_CANARIES = {
     "PII_S70C_CALLBACK",
     "PII_S70C_EXCEPTION_BODY",
     "PII_S70C_SESSION_KEY",
+    "PII_S70C_OBS_WEIGHT_831",
+    "PII_S70C_OBS_PREVIOUS_WEIGHT",
+    "PII_S70C_OBS_MACROS",
+    "PII_S70C_OBS_PROFILE",
+    "PII_S70C_OBS_DB_PATH",
+    "PII_S70C_OBS_SESSION_KEY",
+    "PII_S70C_OBS_EXCEPTION_BODY",
+    "PII_S70C_OBS_TELEGRAM_ID",
 }
 
 
@@ -568,6 +578,60 @@ def test_remaining_telegram_file_log_blockers_emit_safe_markers_only(tmp_path):
         assert "session_scope=cancel_active_processing" in logs
         assert "session_scope=photo_followup_queue" in logs
         assert "error_type=RuntimeError" in logs
+        _assert_no_canaries(logs)
+    finally:
+        cleanup()
+
+
+
+def test_weight_record_file_logs_keep_safe_markers_without_health_values_or_canaries(tmp_path, monkeypatch):
+    cleanup = _install_file_logging(tmp_path)
+    try:
+        db_path = tmp_path / "PII_S70C_OBS_DB_PATH.db"
+        store = HealBiteUserProfileStore(db_path=db_path)
+        store.upsert_user_profile(
+            user_id=101,
+            username="PII_S70C_OBS_PROFILE",
+            sex="male",
+            age=35,
+            height_cm=180,
+            weight_kg=80,
+            goal="maintain",
+            activity_level="moderate",
+            manual_kcal_target=2000,
+        )
+        store.recalculate_profile_targets(user_id=101, target_source="manual", manual_kcal_target=2000)
+        tracker = HealBiteWeightTracker(db_path=db_path)
+        monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError(
+                "PII_S70C_OBS_WEIGHT_831 "
+                "PII_S70C_OBS_PREVIOUS_WEIGHT "
+                "PII_S70C_OBS_MACROS "
+                "PII_S70C_OBS_PROFILE "
+                "PII_S70C_OBS_DB_PATH "
+                "PII_S70C_OBS_SESSION_KEY "
+                "PII_S70C_OBS_EXCEPTION_BODY "
+                "PII_S70C_OBS_TELEGRAM_ID"
+            )
+
+        with patch("gateway.healbite_user_profile.calculate_nutrition_targets", _boom):
+            tracker.add_weight_entry(101, 82.4, source="telegram_command", corr="abc123def456")
+
+        logs = _read_file_logs(tmp_path)
+        assert "[HealBite][weight_record]" in logs
+        assert "route=weight" in logs
+        assert "action=record" in logs
+        assert "outcome=recalculation_failed" in logs
+        assert "weight_saved=true" in logs
+        assert "has_previous_weight=true" in logs
+        assert "recalculation_attempted=true" in logs
+        assert "recalculation_completed=false" in logs
+        assert "targets_changed=false" in logs
+        assert "error_type=RuntimeError" in logs
+        assert "corr_present=true" in logs
+        assert "corr=abc123def456" in logs
         _assert_no_canaries(logs)
     finally:
         cleanup()

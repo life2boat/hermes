@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+import logging
+import re
 
 import pytest
 
@@ -156,3 +158,41 @@ async def test_weight_stale_reminder_callback_stays_placeholder_without_logging_
     assert "PII_S70C_CALLBACK" not in caplog.text
     assert query.edit_message_text.await_args.kwargs["text"]
     query.answer.assert_awaited_once()
+
+
+
+@pytest.mark.asyncio
+async def test_weight_command_core_marker_uses_same_correlation_as_route_marker(tmp_path, monkeypatch, caplog):
+    _patch_weight(monkeypatch, tmp_path / "healbite.db")
+    adapter = _adapter()
+    message = _message(text="/weight 82,4")
+
+    with caplog.at_level(logging.INFO):
+        await adapter._maybe_handle_healbite_weight_command(message)
+
+    route_log = next(record.getMessage() for record in caplog.records if "[Telegram][healbite_route_selected]" in record.getMessage() and "route=weight" in record.getMessage())
+    weight_log = next(record.getMessage() for record in caplog.records if "[HealBite][weight_record]" in record.getMessage())
+    route_corr = re.search(r"corr=([0-9a-f]+)", route_log)
+    weight_corr = re.search(r"corr=([0-9a-f]+)", weight_log)
+
+    assert route_corr is not None
+    assert weight_corr is not None
+    assert route_corr.group(1) == weight_corr.group(1)
+    assert "corr_present=true" in weight_log
+
+
+@pytest.mark.asyncio
+async def test_weight_command_correlation_differs_between_turns(tmp_path, monkeypatch, caplog):
+    _patch_weight(monkeypatch, tmp_path / "healbite.db")
+    adapter = _adapter()
+
+    with caplog.at_level(logging.INFO):
+        await adapter._maybe_handle_healbite_weight_command(_message(text="/weight 82,4"))
+        await adapter._maybe_handle_healbite_weight_command(_message(text="/weight 82,5"))
+
+    weight_logs = [record.getMessage() for record in caplog.records if "[HealBite][weight_record]" in record.getMessage()]
+    assert len(weight_logs) >= 2
+    first_corr = re.search(r"corr=([0-9a-f]+)", weight_logs[0])
+    second_corr = re.search(r"corr=([0-9a-f]+)", weight_logs[1])
+    assert first_corr is not None and second_corr is not None
+    assert first_corr.group(1) != second_corr.group(1)

@@ -181,6 +181,7 @@ def _format_delta(value: int | None) -> str:
 
 class HealBiteWeightTracker:
     def __init__(self, db_path: str | Path | None = None) -> None:
+        self._uses_default_db_path = db_path is None
         self.db_path = resolve_healbite_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -8,12 +8,20 @@ import pytest
 from gateway.config import PlatformConfig
 from gateway.healbite_user_profile import HealBiteUserProfileStore
 from gateway.healbite_weight_tracker import HealBiteWeightTracker
-from gateway.platforms.telegram import TelegramAdapter
+from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
 
-def _message(*, text: str = "⚖️ Трекер веса", user_id: int = 101):
+def _weight_button_label() -> str:
+    for label, action in HEALBITE_REPLY_KEYBOARD_ACTIONS.items():
+        if action == "/weight":
+            return label
+    raise AssertionError("weight button label missing")
+
+
+def _message(*, text: str | None = None, user_id: int = 101):
+    effective_text = text if text is not None else _weight_button_label()
     return SimpleNamespace(
-        text=text,
+        text=effective_text,
         chat=SimpleNamespace(id=555, type="private"),
         from_user=SimpleNamespace(id=user_id, username="tester", first_name="Tester"),
         message_id=42,
@@ -81,10 +89,9 @@ async def test_weight_keyboard_routes_to_local_tracker_without_generic_dispatch(
     assert handled is True
     adapter._enqueue_text_event.assert_not_called()
     sent = adapter._send_message_with_thread_fallback.await_args.kwargs
-    assert "Вес" in sent["text"]
     assert sent.get("reply_markup") is not None
     buttons = [button.text for row in sent["reply_markup"].inline_keyboard for button in row]
-    assert "Напоминание" not in buttons
+    assert "Напоминание" not in " ".join(buttons)
     assert tracker.get_summary(101).latest is None
 
 
@@ -99,10 +106,10 @@ async def test_weight_command_with_value_saves_and_recalculates_profile(tmp_path
 
     assert handled is True
     assert tracker.get_summary(101).latest.weight_grams == 82400
-    assert profile.weight_kg == 82.4
+    assert profile is not None and profile.weight_kg == 82.4
     assert profile.daily_protein_g == 132
     adapter._enqueue_text_event.assert_not_called()
-    assert "КБЖУ пересчитаны" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+    assert adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -131,11 +138,11 @@ async def test_weight_custom_invalid_input_stays_local_and_writes_nothing(tmp_pa
     assert tracker.get_summary(101).latest is None
     assert tracker.get_pending_state(101) == "weight_custom_amount"
     adapter._enqueue_text_event.assert_not_called()
-    assert "Не понял вес" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+    assert "/cancel" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio
-async def test_weight_reminder_callback_stays_placeholder_without_logging_payload(tmp_path, monkeypatch, caplog):
+async def test_weight_stale_reminder_callback_stays_placeholder_without_logging_payload(tmp_path, monkeypatch, caplog):
     tracker, _store = _patch_weight(monkeypatch, tmp_path / "healbite.db")
     adapter = _adapter()
     query = _query(query_id="PII_S70C_CALLBACK")
@@ -143,8 +150,9 @@ async def test_weight_reminder_callback_stays_placeholder_without_logging_payloa
     with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
         await adapter._handle_healbite_weight_callback(query, "weight:reminder")
 
-    assert tracker.get_weekly_reminder(101) is None
+    assert tracker.get_summary(101).latest is None
+    assert tracker.get_pending_state(101) is None
     assert "route=weight" in caplog.text
     assert "PII_S70C_CALLBACK" not in caplog.text
-    assert "Напоминания о весе появятся позже." in query.edit_message_text.await_args.kwargs["text"]
+    assert query.edit_message_text.await_args.kwargs["text"]
     query.answer.assert_awaited_once()

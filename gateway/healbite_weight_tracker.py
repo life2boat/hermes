@@ -5,7 +5,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,14 +16,11 @@ logger = logging.getLogger(__name__)
 
 WEIGHT_ENTRIES_TABLE = "weight_entries"
 WEIGHT_PENDING_TABLE = "weight_pending_inputs"
-WEIGHT_REMINDER_TABLE = "weight_reminder_settings"
 WEIGHT_CUSTOM_STATE = "weight_custom_amount"
 WEIGHT_PENDING_TTL = timedelta(minutes=10)
 MIN_WEIGHT_KG = 35.0
 MAX_WEIGHT_KG = 300.0
-DEFAULT_REMINDER_WEEKDAY = 0
-DEFAULT_REMINDER_TIME = "09:00"
-DEFAULT_REMINDER_TZ = "UTC"
+DEFAULT_TIMEZONE_NAME = "UTC"
 
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {WEIGHT_ENTRIES_TABLE} (
@@ -47,16 +44,6 @@ CREATE TABLE IF NOT EXISTS {WEIGHT_PENDING_TABLE} (
 );
 CREATE INDEX IF NOT EXISTS idx_weight_pending_expires_at
     ON {WEIGHT_PENDING_TABLE} (expires_at);
-CREATE TABLE IF NOT EXISTS {WEIGHT_REMINDER_TABLE} (
-    user_id INTEGER PRIMARY KEY,
-    enabled INTEGER NOT NULL DEFAULT 0,
-    weekday INTEGER NOT NULL DEFAULT 0,
-    time_local TEXT NOT NULL DEFAULT '09:00',
-    timezone_name TEXT NOT NULL DEFAULT 'UTC',
-    last_sent_local_date TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
 """
 
 
@@ -74,9 +61,25 @@ class WeightEntry:
 @dataclass(slots=True)
 class WeightAddResult:
     entry: WeightEntry
-    profile_updated: bool
-    targets_recalculated: bool
-    recalculation_error: bool = False
+    weight_saved: bool
+    profile_weight_updated: bool
+    recalculation_attempted: bool
+    recalculation_completed: bool
+    targets_changed: bool
+    profile_incomplete: bool
+    recalculation_failed: bool = False
+
+    @property
+    def profile_updated(self) -> bool:
+        return self.profile_weight_updated
+
+    @property
+    def targets_recalculated(self) -> bool:
+        return self.recalculation_completed
+
+    @property
+    def recalculation_error(self) -> bool:
+        return self.recalculation_failed
 
 
 @dataclass(slots=True)
@@ -87,16 +90,6 @@ class WeightSummary:
     delta_7d_grams: int | None
     delta_30d_grams: int | None
     entries: list[WeightEntry]
-
-
-@dataclass(slots=True)
-class WeightReminderSetting:
-    user_id: int
-    enabled: bool
-    weekday: int
-    time_local: str
-    timezone_name: str
-    last_sent_local_date: str | None = None
 
 
 def _sqlite_timestamp(value: datetime | None = None) -> str:
@@ -113,11 +106,11 @@ def _parse_sqlite_timestamp(value: str) -> datetime:
 
 
 def _normalize_timezone_name(value: str | None) -> str:
-    name = (value or DEFAULT_REMINDER_TZ).strip() or DEFAULT_REMINDER_TZ
+    name = (value or DEFAULT_TIMEZONE_NAME).strip() or DEFAULT_TIMEZONE_NAME
     try:
         ZoneInfo(name)
     except ZoneInfoNotFoundError:
-        return DEFAULT_REMINDER_TZ
+        return DEFAULT_TIMEZONE_NAME
     return name
 
 
@@ -138,14 +131,14 @@ def _row_to_entry(row: sqlite3.Row) -> WeightEntry:
     )
 
 
-def _row_to_reminder(row: sqlite3.Row) -> WeightReminderSetting:
-    return WeightReminderSetting(
-        user_id=int(row["user_id"]),
-        enabled=bool(int(row["enabled"] or 0)),
-        weekday=int(row["weekday"] or 0),
-        time_local=str(row["time_local"] or DEFAULT_REMINDER_TIME),
-        timezone_name=str(row["timezone_name"] or DEFAULT_REMINDER_TZ),
-        last_sent_local_date=str(row["last_sent_local_date"]) if row["last_sent_local_date"] else None,
+def _target_snapshot(profile: object | None) -> tuple[float | None, float | None, float | None, float | None]:
+    if profile is None:
+        return (None, None, None, None)
+    return (
+        getattr(profile, "daily_kcal_target", None),
+        getattr(profile, "daily_protein_g", None),
+        getattr(profile, "daily_fat_g", None),
+        getattr(profile, "daily_carbs_g", None),
     )
 
 
@@ -186,13 +179,6 @@ def _format_delta(value: int | None) -> str:
     return f"{sign}{_format_weight_grams(value)}"
 
 
-def _safe_source(value: str) -> str:
-    token = (value or "").strip().lower()
-    if re.fullmatch(r"[a-z0-9_.:-]{1,40}", token):
-        return token
-    return "redacted"
-
-
 class HealBiteWeightTracker:
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
@@ -208,6 +194,113 @@ class HealBiteWeightTracker:
         with self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
 
+    def _profile_store(self):
+        from gateway.healbite_user_profile import HealBiteUserProfileStore, get_default_healbite_user_profile
+
+        store = get_default_healbite_user_profile()
+        store_path = Path(getattr(store, "db_path", self.db_path))
+        try:
+            same_db = store_path.resolve() == self.db_path.resolve()
+        except OSError:
+            same_db = str(store_path) == str(self.db_path)
+        if same_db:
+            return store
+        return HealBiteUserProfileStore(db_path=self.db_path)
+
+    def _insert_weight_entry(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        user_id: int,
+        parsed_weight_kg: float,
+        recorded: datetime,
+        source: str,
+        timezone_name: str | None,
+    ) -> sqlite3.Row:
+        cursor = conn.execute(
+            f"""
+            INSERT INTO {WEIGHT_ENTRIES_TABLE}
+                (user_id, recorded_at_utc, local_date, weight_grams, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(user_id),
+                _sqlite_timestamp(recorded),
+                _local_date(recorded, timezone_name=timezone_name),
+                _kg_to_grams(parsed_weight_kg),
+                source,
+                _sqlite_timestamp(),
+            ),
+        )
+        row = conn.execute(
+            f"SELECT * FROM {WEIGHT_ENTRIES_TABLE} WHERE id = ? LIMIT 1",
+            (int(cursor.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Could not load saved weight entry.")
+        return row
+
+    def _update_canonical_profile_weight(self, conn: sqlite3.Connection, *, user_id: int, weight_kg: float) -> None:
+        from gateway.healbite_user_profile import PROFILES_TABLE
+
+        store = self._profile_store()
+        store._ensure_profile_row(conn, user_id=int(user_id))
+        identity_column = store._profiles_identity_column(conn)
+        conn.execute(
+            f"UPDATE {PROFILES_TABLE} SET weight_kg = ?, updated_at = ? WHERE {identity_column} = ?",
+            (_kg_to_grams(weight_kg) / 1000.0, _sqlite_timestamp(), int(user_id)),
+        )
+
+    def _commit_weight_write(self, conn: sqlite3.Connection) -> None:
+        conn.commit()
+
+    def _persist_weight_and_profile_weight(
+        self,
+        *,
+        user_id: int,
+        parsed_weight_kg: float,
+        recorded: datetime,
+        source: str,
+        timezone_name: str | None,
+    ) -> WeightEntry:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            row = self._insert_weight_entry(
+                conn,
+                user_id=int(user_id),
+                parsed_weight_kg=parsed_weight_kg,
+                recorded=recorded,
+                source=source,
+                timezone_name=timezone_name,
+            )
+            self._update_canonical_profile_weight(conn, user_id=int(user_id), weight_kg=parsed_weight_kg)
+            self._commit_weight_write(conn)
+            return _row_to_entry(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _log_weight_outcome(
+        self,
+        *,
+        outcome: str,
+        result: WeightAddResult | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        logger.info(
+            "[HealBite][weight_record] route=weight action=record outcome=%s weight_saved=%s profile_weight_updated=%s recalculation_attempted=%s recalculation_completed=%s targets_changed=%s error_type=%s",
+            outcome,
+            str(result.weight_saved).lower() if result is not None else "false",
+            str(result.profile_weight_updated).lower() if result is not None else "false",
+            str(result.recalculation_attempted).lower() if result is not None else "false",
+            str(result.recalculation_completed).lower() if result is not None else "false",
+            str(result.targets_changed).lower() if result is not None else "false",
+            error_type or "none",
+        )
+
     def add_weight_entry(
         self,
         user_id: int,
@@ -217,6 +310,9 @@ class HealBiteWeightTracker:
         source: str = "telegram",
         timezone_name: str | None = None,
     ) -> WeightAddResult:
+        from gateway.healbite_nutrition_targets import NutritionTargetValidationError
+        from gateway.healbite_user_profile import profile_missing_fields
+
         parsed = parse_weight_kg(str(weight_kg))
         if parsed is None:
             raise ValueError("weight_kg must be between 35 and 300")
@@ -225,69 +321,88 @@ class HealBiteWeightTracker:
             recorded = recorded.replace(tzinfo=timezone.utc)
         else:
             recorded = recorded.astimezone(timezone.utc)
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"""
-                INSERT INTO {WEIGHT_ENTRIES_TABLE}
-                    (user_id, recorded_at_utc, local_date, weight_grams, source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(user_id),
-                    _sqlite_timestamp(recorded),
-                    _local_date(recorded, timezone_name=timezone_name),
-                    _kg_to_grams(parsed),
-                    source,
-                    _sqlite_timestamp(),
-                ),
-            )
-            row = conn.execute(
-                f"SELECT * FROM {WEIGHT_ENTRIES_TABLE} WHERE id = ? LIMIT 1",
-                (int(cursor.lastrowid),),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("Could not load saved weight entry.")
-        entry = _row_to_entry(row)
-        profile_updated, targets_recalculated, recalculation_error = self._update_profile_weight(int(user_id), parsed)
-        logger.info(
-            "[HealBite][weight_entry_saved] result=ok source=%s profile_updated=%s targets_recalculated=%s recalculation_error=%s",
-            _safe_source(source),
-            str(profile_updated).lower(),
-            str(targets_recalculated).lower(),
-            str(recalculation_error).lower(),
-        )
-        return WeightAddResult(entry, profile_updated, targets_recalculated, recalculation_error)
 
-    def _update_profile_weight(self, user_id: int, weight_kg: float) -> tuple[bool, bool, bool]:
+        store = self._profile_store()
+        targets_before = _target_snapshot(store.get_user_profile(int(user_id)))
         try:
-            from gateway.healbite_nutrition_targets import NutritionTargetValidationError
-            from gateway.healbite_user_profile import get_default_healbite_user_profile, profile_missing_fields
-
-            store = get_default_healbite_user_profile()
-            profile = store.upsert_user_profile(user_id=int(user_id), weight_kg=float(weight_kg))
-            if profile_missing_fields(profile):
-                return True, False, False
-            target_source = profile.target_source or ("manual" if profile.manual_kcal_target is not None else "calculated")
-            try:
-                store.recalculate_profile_targets(
-                    user_id=int(user_id),
-                    username=profile.username,
-                    target_source=target_source,
-                    manual_kcal_target=profile.manual_kcal_target if target_source == "manual" else None,
-                )
-            except NutritionTargetValidationError:
-                logger.info(
-                    "[HealBite][weight_profile_recalculation] result=validation_error target_source=%s",
-                    _safe_source(target_source),
-                )
-                return True, False, True
-            return True, True, False
-        except Exception as exc:
-            logger.info(
-                "[HealBite][weight_profile_recalculation] result=error error_type=%s",
-                type(exc).__name__,
+            entry = self._persist_weight_and_profile_weight(
+                user_id=int(user_id),
+                parsed_weight_kg=parsed,
+                recorded=recorded,
+                source=source,
+                timezone_name=timezone_name,
             )
-            return False, False, True
+        except Exception as exc:
+            self._log_weight_outcome(outcome="failed", error_type=type(exc).__name__)
+            raise
+
+        profile = store.get_user_profile(int(user_id))
+        if profile is None:
+            raise RuntimeError("Could not load saved HealBite profile after weight update.")
+
+        missing_fields = profile_missing_fields(profile)
+        if missing_fields:
+            result = WeightAddResult(
+                entry=entry,
+                weight_saved=True,
+                profile_weight_updated=True,
+                recalculation_attempted=False,
+                recalculation_completed=False,
+                targets_changed=False,
+                profile_incomplete=True,
+                recalculation_failed=False,
+            )
+            self._log_weight_outcome(outcome="profile_incomplete", result=result)
+            return result
+
+        target_source = profile.target_source or ("manual" if profile.manual_kcal_target is not None else "calculated")
+        try:
+            recalculated = store.recalculate_profile_targets(
+                user_id=int(user_id),
+                username=profile.username,
+                target_source=target_source,
+                manual_kcal_target=profile.manual_kcal_target if target_source == "manual" else None,
+            )
+        except NutritionTargetValidationError:
+            result = WeightAddResult(
+                entry=entry,
+                weight_saved=True,
+                profile_weight_updated=True,
+                recalculation_attempted=True,
+                recalculation_completed=False,
+                targets_changed=False,
+                profile_incomplete=False,
+                recalculation_failed=True,
+            )
+            self._log_weight_outcome(outcome="recalculation_failed", result=result, error_type="NutritionTargetValidationError")
+            return result
+        except Exception as exc:
+            result = WeightAddResult(
+                entry=entry,
+                weight_saved=True,
+                profile_weight_updated=True,
+                recalculation_attempted=True,
+                recalculation_completed=False,
+                targets_changed=False,
+                profile_incomplete=False,
+                recalculation_failed=True,
+            )
+            self._log_weight_outcome(outcome="recalculation_failed", result=result, error_type=type(exc).__name__)
+            return result
+
+        targets_changed = _target_snapshot(recalculated) != targets_before
+        result = WeightAddResult(
+            entry=entry,
+            weight_saved=True,
+            profile_weight_updated=True,
+            recalculation_attempted=True,
+            recalculation_completed=True,
+            targets_changed=targets_changed,
+            profile_incomplete=False,
+            recalculation_failed=False,
+        )
+        self._log_weight_outcome(outcome="success", result=result)
+        return result
 
     def latest_weight(self, user_id: int) -> WeightEntry | None:
         with self._connect() as conn:
@@ -374,74 +489,6 @@ class HealBiteWeightTracker:
         with self._connect() as conn:
             conn.execute(f"DELETE FROM {WEIGHT_PENDING_TABLE} WHERE user_id = ?", (int(user_id),))
 
-    def set_weekly_reminder(
-        self,
-        user_id: int,
-        *,
-        enabled: bool,
-        weekday: int = DEFAULT_REMINDER_WEEKDAY,
-        time_local: str = DEFAULT_REMINDER_TIME,
-        timezone_name: str = DEFAULT_REMINDER_TZ,
-    ) -> WeightReminderSetting:
-        normalized_weekday = int(weekday) % 7
-        normalized_time = _normalize_time_local(time_local)
-        normalized_tz = _normalize_timezone_name(timezone_name)
-        timestamp = _sqlite_timestamp()
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                INSERT INTO {WEIGHT_REMINDER_TABLE}
-                    (user_id, enabled, weekday, time_local, timezone_name, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    enabled = excluded.enabled,
-                    weekday = excluded.weekday,
-                    time_local = excluded.time_local,
-                    timezone_name = excluded.timezone_name,
-                    updated_at = excluded.updated_at
-                """,
-                (int(user_id), 1 if enabled else 0, normalized_weekday, normalized_time, normalized_tz, timestamp, timestamp),
-            )
-        logger.info("[HealBite][weight_reminder_updated] enabled=%s", str(bool(enabled)).lower())
-        return self.get_weekly_reminder(int(user_id)) or WeightReminderSetting(
-            int(user_id), bool(enabled), normalized_weekday, normalized_time, normalized_tz
-        )
-
-    def get_weekly_reminder(self, user_id: int) -> WeightReminderSetting | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                f"SELECT * FROM {WEIGHT_REMINDER_TABLE} WHERE user_id = ? LIMIT 1",
-                (int(user_id),),
-            ).fetchone()
-        return _row_to_reminder(row) if row is not None else None
-
-    def due_weekly_reminders(self, *, now: datetime | None = None, limit: int = 50) -> list[WeightReminderSetting]:
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        due: list[WeightReminderSetting] = []
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT * FROM {WEIGHT_REMINDER_TABLE} WHERE enabled = 1 ORDER BY user_id ASC LIMIT ?",
-                (max(int(limit), 1),),
-            ).fetchall()
-        for row in rows:
-            setting = _row_to_reminder(row)
-            if _is_reminder_due(setting, current):
-                due.append(setting)
-        return due
-
-    def mark_reminder_sent(self, user_id: int, *, local_date: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                f"""
-                UPDATE {WEIGHT_REMINDER_TABLE}
-                SET last_sent_local_date = ?, updated_at = ?
-                WHERE user_id = ?
-                """,
-                (local_date, _sqlite_timestamp(), int(user_id)),
-            )
-
 
 def _delta_since(entries: list[WeightEntry], latest: WeightEntry | None, *, days: int, now: datetime) -> int | None:
     if latest is None:
@@ -451,30 +498,6 @@ def _delta_since(entries: list[WeightEntry], latest: WeightEntry | None, *, days
     if len(candidates) < 2:
         return None
     return int(latest.weight_grams) - int(candidates[0].weight_grams)
-
-
-def _normalize_time_local(value: str) -> str:
-    text = (value or DEFAULT_REMINDER_TIME).strip()
-    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
-    if match is None:
-        return DEFAULT_REMINDER_TIME
-    hour = int(match.group(1))
-    minute = int(match.group(2))
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return DEFAULT_REMINDER_TIME
-    return f"{hour:02d}:{minute:02d}"
-
-
-def _is_reminder_due(setting: WeightReminderSetting, now: datetime) -> bool:
-    tz = ZoneInfo(_normalize_timezone_name(setting.timezone_name))
-    local_now = now.astimezone(tz)
-    if local_now.weekday() != int(setting.weekday):
-        return False
-    hour, minute = [int(part) for part in _normalize_time_local(setting.time_local).split(":")]
-    local_date = local_now.date().isoformat()
-    if setting.last_sent_local_date == local_date:
-        return False
-    return local_now.time() >= time(hour=hour, minute=minute)
 
 
 def format_weight_tracker_report(summary: WeightSummary, *, notice: str | None = None) -> str:
@@ -503,17 +526,15 @@ def format_weight_custom_prompt() -> str:
 
 
 def format_weight_saved_notice(result: WeightAddResult) -> str:
-    if result.targets_recalculated:
+    if result.recalculation_failed:
+        return "Вес сохранён, но пересчитать нормы сейчас не удалось."
+    if result.profile_incomplete:
+        return "Вес записан. Для пересчёта КБЖУ заполните /profile."
+    if result.recalculation_completed and result.targets_changed:
         return "Вес записан. КБЖУ пересчитаны."
-    if result.recalculation_error:
-        return "Вес записан. Пересчитать КБЖУ сейчас не удалось."
-    return "Вес записан. Для пересчёта КБЖУ заполните /profile."
-
-
-def format_weight_reminder_report(setting: WeightReminderSetting | None) -> str:
-    if setting is not None and setting.enabled:
-        return "🔔 Еженедельное напоминание о весе включено."
-    return "🔕 Еженедельное напоминание о весе выключено."
+    if result.recalculation_completed:
+        return "Вес записан. Нормы КБЖУ не изменились."
+    return "Вес записан."
 
 
 def get_default_weight_tracker() -> HealBiteWeightTracker:

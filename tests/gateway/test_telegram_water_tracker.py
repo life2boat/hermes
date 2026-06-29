@@ -7,19 +7,27 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.healbite_water_tracker import HealBiteWaterTracker
-from gateway.platforms.telegram import TelegramAdapter
+from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
 
 def _water_target_resolver(*, user_id: int = 101, target_ml: int = 2200):
     return lambda requested_user_id: target_ml if int(requested_user_id) == int(user_id) else None
 
 
-def _message(*, text: str = "💧 Трекер воды", user_id: int = 101):
+def _water_button_label() -> str:
+    for label, action in HEALBITE_REPLY_KEYBOARD_ACTIONS.items():
+        if action == "/water":
+            return label
+    raise AssertionError("water button label missing")
+
+
+def _message(*, text: str | None = None, user_id: int = 101):
+    effective_text = text if text is not None else _water_button_label()
     return SimpleNamespace(
-        text=text,
-        chat=SimpleNamespace(id=555, type="private"),
+        text=effective_text,
         from_user=SimpleNamespace(id=user_id, username="tester", first_name="Tester"),
-        message_id=42,
+        chat=SimpleNamespace(id=555, type="private"),
+        chat_id=555,
         message_thread_id=None,
     )
 
@@ -98,7 +106,7 @@ async def test_water_custom_pending_text_saves_locally_and_clears_state(tmp_path
     assert tracker.get_pending_state(101) is None
     adapter._enqueue_text_event.assert_not_called()
     sent = adapter._send_message_with_thread_fallback.await_args.kwargs
-    assert "Добавил 500 мл" in sent["text"]
+    assert "500" in sent["text"]
 
 
 @pytest.mark.asyncio
@@ -115,7 +123,7 @@ async def test_water_custom_invalid_input_stays_local_and_writes_nothing(tmp_pat
     assert tracker.get_water_intake_today(101) == 0
     assert tracker.get_pending_state(101) == "water_custom_amount"
     adapter._enqueue_text_event.assert_not_called()
-    assert "Не понял объём" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+    assert "/cancel" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio

@@ -6203,11 +6203,11 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
         if action == "reminder":
-            await query.answer(text="Скоро.")
+            await query.answer(text="Недоступно.")
             await self._edit_healbite_weight_screen(
                 query,
                 user_id=int(user_id),
-                notice="Напоминания о весе появятся позже.",
+                notice="Функция ещё в разработке.",
             )
             return
         if action == "back":

@@ -4,6 +4,7 @@ import html
 import logging
 import re
 import sqlite3
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,8 @@ from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_time import local_day_window_utc
 
 logger = logging.getLogger(__name__)
+
+_WEIGHT_LOG_CORRELATION: ContextVar[str | None] = ContextVar("healbite_weight_log_corr", default=None)
 
 WEIGHT_ENTRIES_TABLE = "weight_entries"
 WEIGHT_PENDING_TABLE = "weight_pending_inputs"
@@ -140,6 +143,14 @@ def _target_snapshot(profile: object | None) -> tuple[float | None, float | None
         getattr(profile, "daily_fat_g", None),
         getattr(profile, "daily_carbs_g", None),
     )
+
+
+def set_weight_log_correlation(value: str | None) -> object:
+    return _WEIGHT_LOG_CORRELATION.set(value or None)
+
+
+def reset_weight_log_correlation(token: object) -> None:
+    _WEIGHT_LOG_CORRELATION.reset(token)
 
 
 def parse_weight_kg(text: str) -> float | None:
@@ -290,18 +301,25 @@ class HealBiteWeightTracker:
         self,
         *,
         outcome: str,
+        has_previous_weight: bool,
         result: WeightAddResult | None = None,
         error_type: str | None = None,
+        corr: str | None = None,
     ) -> None:
+        effective_corr = corr if corr is not None else _WEIGHT_LOG_CORRELATION.get()
+        corr_present = effective_corr is not None
         logger.info(
-            "[HealBite][weight_record] route=weight action=record outcome=%s weight_saved=%s profile_weight_updated=%s recalculation_attempted=%s recalculation_completed=%s targets_changed=%s error_type=%s",
+            "[HealBite][weight_record] route=weight action=record outcome=%s weight_saved=%s has_previous_weight=%s profile_weight_updated=%s recalculation_attempted=%s recalculation_completed=%s targets_changed=%s error_type=%s corr_present=%s corr=%s",
             outcome,
             str(result.weight_saved).lower() if result is not None else "false",
+            str(bool(has_previous_weight)).lower(),
             str(result.profile_weight_updated).lower() if result is not None else "false",
             str(result.recalculation_attempted).lower() if result is not None else "false",
             str(result.recalculation_completed).lower() if result is not None else "false",
             str(result.targets_changed).lower() if result is not None else "false",
             error_type or "none",
+            str(corr_present).lower(),
+            effective_corr or "none",
         )
 
     def add_weight_entry(
@@ -312,6 +330,7 @@ class HealBiteWeightTracker:
         recorded_at: datetime | None = None,
         source: str = "telegram",
         timezone_name: str | None = None,
+        corr: str | None = None,
     ) -> WeightAddResult:
         from gateway.healbite_nutrition_targets import NutritionTargetValidationError
         from gateway.healbite_user_profile import profile_missing_fields
@@ -326,7 +345,9 @@ class HealBiteWeightTracker:
             recorded = recorded.astimezone(timezone.utc)
 
         store = self._profile_store()
-        targets_before = _target_snapshot(store.get_user_profile(int(user_id)))
+        profile_before = store.get_user_profile(int(user_id))
+        has_previous_weight = profile_before is not None and getattr(profile_before, "weight_kg", None) is not None
+        targets_before = _target_snapshot(profile_before)
         try:
             entry = self._persist_weight_and_profile_weight(
                 user_id=int(user_id),
@@ -336,7 +357,12 @@ class HealBiteWeightTracker:
                 timezone_name=timezone_name,
             )
         except Exception as exc:
-            self._log_weight_outcome(outcome="failed", error_type=type(exc).__name__)
+            self._log_weight_outcome(
+                outcome="failed",
+                has_previous_weight=has_previous_weight,
+                error_type=type(exc).__name__,
+                corr=corr,
+            )
             raise
 
         profile = store.get_user_profile(int(user_id))
@@ -355,7 +381,12 @@ class HealBiteWeightTracker:
                 profile_incomplete=True,
                 recalculation_failed=False,
             )
-            self._log_weight_outcome(outcome="profile_incomplete", result=result)
+            self._log_weight_outcome(
+                outcome="profile_incomplete",
+                has_previous_weight=has_previous_weight,
+                result=result,
+                corr=corr,
+            )
             return result
 
         target_source = profile.target_source or ("manual" if profile.manual_kcal_target is not None else "calculated")
@@ -377,7 +408,13 @@ class HealBiteWeightTracker:
                 profile_incomplete=False,
                 recalculation_failed=True,
             )
-            self._log_weight_outcome(outcome="recalculation_failed", result=result, error_type="NutritionTargetValidationError")
+            self._log_weight_outcome(
+                outcome="recalculation_failed",
+                has_previous_weight=has_previous_weight,
+                result=result,
+                error_type="NutritionTargetValidationError",
+                corr=corr,
+            )
             return result
         except Exception as exc:
             result = WeightAddResult(
@@ -390,7 +427,13 @@ class HealBiteWeightTracker:
                 profile_incomplete=False,
                 recalculation_failed=True,
             )
-            self._log_weight_outcome(outcome="recalculation_failed", result=result, error_type=type(exc).__name__)
+            self._log_weight_outcome(
+                outcome="recalculation_failed",
+                has_previous_weight=has_previous_weight,
+                result=result,
+                error_type=type(exc).__name__,
+                corr=corr,
+            )
             return result
 
         targets_changed = _target_snapshot(recalculated) != targets_before
@@ -404,7 +447,12 @@ class HealBiteWeightTracker:
             profile_incomplete=False,
             recalculation_failed=False,
         )
-        self._log_weight_outcome(outcome="success", result=result)
+        self._log_weight_outcome(
+            outcome="success",
+            has_previous_weight=has_previous_weight,
+            result=result,
+            corr=corr,
+        )
         return result
 
     def latest_weight(self, user_id: int) -> WeightEntry | None:

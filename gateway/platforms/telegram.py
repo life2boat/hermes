@@ -6122,7 +6122,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="invalid")
                 return True
-            result = get_default_weight_tracker().add_weight_entry(int(user_id), weight_kg, source="telegram_command")
+            result = get_default_weight_tracker().add_weight_entry(
+                int(user_id),
+                weight_kg,
+                source="telegram_command",
+                corr=self._healbite_correlation_id(msg),
+            )
             notice = format_weight_saved_notice(result)
             await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)
             self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="added")
@@ -6163,7 +6168,12 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="custom_invalid")
             return True
-        result = tracker.add_weight_entry(int(user_id), weight_kg, source="telegram_custom")
+        result = tracker.add_weight_entry(
+            int(user_id),
+            weight_kg,
+            source="telegram_custom",
+            corr=self._healbite_correlation_id(msg),
+        )
         tracker.clear_pending_state(int(user_id))
         notice = format_weight_saved_notice(result)
         await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)

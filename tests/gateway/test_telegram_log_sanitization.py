@@ -22,6 +22,13 @@ PII_CANARIES = {
     "PII_FILE_UNIQUE_ID_SHOULD_NOT_APPEAR",
     "4242424242",
     "3131313131",
+    "PII_S70C_WEIGHT_VALUE_821",
+    "PII_S70C_PROFILE_FIELD",
+    "PII_S70C_REMINDER_TIME",
+    "PII_S70C_RECIPIENT",
+    "PII_S70C_CALLBACK",
+    "PII_S70C_EXCEPTION_BODY",
+    "PII_S70C_SESSION_KEY",
 }
 
 
@@ -275,4 +282,27 @@ def test_unknown_fields_are_dropped_not_logged(caplog):
     assert "route=profile" in caplog.text
     assert "raw_text" not in caplog.text
     assert "chat_id" not in caplog.text
+    _assert_no_canaries(caplog.text)
+
+
+def test_weight_tracker_marker_drops_sensitive_health_fields(caplog):
+    adapter = _adapter()
+
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        adapter._log_healbite_marker(
+            "healbite_route_selected",
+            route="weight",
+            action="reminder",
+            outcome="allowed",
+            weight_kg="PII_S70C_WEIGHT_VALUE_821",
+            profile_field="PII_S70C_PROFILE_FIELD",
+            reminder_time="PII_S70C_REMINDER_TIME",
+            recipient="PII_S70C_RECIPIENT",
+            callback_data="PII_S70C_CALLBACK",
+            exception_body="PII_S70C_EXCEPTION_BODY",
+            session_key="PII_S70C_SESSION_KEY",
+        )
+
+    assert "route=weight" in caplog.text
+    assert "action=reminder" in caplog.text
     _assert_no_canaries(caplog.text)

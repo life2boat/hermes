@@ -117,6 +117,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[7d]"),
     CommandDef("undo_meal", "Delete your latest HealBite meal from today's diary", "Info",
                gateway_only=True, aliases=("diary_undo",)),
+    CommandDef("weight", "Show or record your HealBite weight", "Info",
+               gateway_only=True, args_hint="[kg]"),
     CommandDef("status", "Show session info", "Session"),
     CommandDef("whoami", "Show your slash command access (admin / user)", "Info"),
     CommandDef("profile", "Show active profile name and home directory", "Info"),
@@ -365,6 +367,7 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "help",
         "new",
         "undo_meal",
+        "weight",
         "profile",
         "queue",
         "restart",
@@ -1067,7 +1070,8 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 # the telegram-parity test reads it so an entry here is a deliberate
 # "Slack-via-/hermes" decision, not a silent clamp.
 #   - credits: the billing/top-up surface; reached via /hermes credits on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "debug", "platform", "update", "version"})
+#   - insights: analytics/reporting surface; reached via /hermes insights on Slack.
+_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "debug", "insights", "platform", "update", "version"})
 
 
 def _sanitize_slack_name(raw: str) -> str:

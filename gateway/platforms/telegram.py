@@ -112,6 +112,14 @@ from gateway.healbite_water_tracker import (
     get_default_water_tracker,
     parse_water_amount,
 )
+from gateway.healbite_weight_tracker import (
+    WEIGHT_CUSTOM_STATE,
+    format_weight_custom_prompt,
+    format_weight_saved_notice,
+    format_weight_tracker_report,
+    get_default_weight_tracker,
+    parse_weight_kg,
+)
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -165,7 +173,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "🍎 Дневник еды": "/diary",
     "📋 Меню на неделю": "__placeholder__:weekly_menu",
     "🛒 Список покупок": "__placeholder__:shopping_list",
-    "⚖️ Трекер веса": "__placeholder__:weight_tracker",
+    "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
     "👨‍👩‍👧 Семья": "__placeholder__:family",
     "📈 Отчет за неделю": "/stats 7d",
@@ -3454,6 +3462,11 @@ class TelegramAdapter(BasePlatformAdapter):
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
 
+        # --- HealBite weight tracker callbacks ---
+        if data.startswith("weight:"):
+            await self._handle_healbite_weight_callback(query, data)
+            return
+
         # --- HealBite water tracker callbacks ---
         if data.startswith("water:"):
             await self._handle_healbite_water_callback(query, data)
@@ -6023,6 +6036,198 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    def _healbite_weight_keyboard(self) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("Записать вес", callback_data="weight:custom")],
+            [
+                InlineKeyboardButton("Обновить", callback_data="weight:refresh"),
+                InlineKeyboardButton("Назад", callback_data="weight:back"),
+            ],
+        ])
+
+    async def _send_healbite_weight_screen(
+        self,
+        msg: Message,
+        *,
+        user_id: int,
+        notice: str | None = None,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        summary = get_default_weight_tracker().get_summary(int(user_id))
+        kwargs: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": format_weight_tracker_report(summary, notice=notice),
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_weight_keyboard(),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _edit_healbite_weight_screen(
+        self,
+        query: Any,
+        *,
+        user_id: int,
+        notice: str | None = None,
+    ) -> None:
+        summary = get_default_weight_tracker().get_summary(int(user_id))
+        kwargs: Dict[str, Any] = {
+            "text": format_weight_tracker_report(summary, notice=notice),
+            "reply_markup": self._healbite_weight_keyboard(),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            message = getattr(query, "message", None)
+            if message is not None:
+                await self._send_healbite_weight_screen(message, user_id=user_id, notice=notice)
+
+    async def _maybe_handle_healbite_weight_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/weight":
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="allowed")
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не удалось определить пользователя для трекера веса.",
+                message_thread_id=getattr(msg, "message_thread_id", None),
+            )
+            return True
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            weight_kg = parse_weight_kg(parts[1])
+            if weight_kg is None:
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="Не понял вес. Напишите, например: /weight 82,4",
+                    message_thread_id=getattr(msg, "message_thread_id", None),
+                )
+                self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="invalid")
+                return True
+            result = get_default_weight_tracker().add_weight_entry(int(user_id), weight_kg, source="telegram_command")
+            notice = format_weight_saved_notice(result)
+            await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)
+            self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="added")
+            return True
+        await self._send_healbite_weight_screen(msg, user_id=int(user_id))
+        return True
+
+    async def _maybe_handle_healbite_weight_pending_reply(self, msg: Message) -> bool:
+        text = (getattr(msg, "text", None) or "").strip()
+        if not text:
+            return False
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+        tracker = get_default_weight_tracker()
+        if tracker.get_pending_state(int(user_id)) != WEIGHT_CUSTOM_STATE:
+            return False
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        if text.lower() == "/cancel":
+            tracker.clear_pending_state(int(user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Ввод веса отменён.",
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="custom_cancelled")
+            return True
+        if text.startswith("/"):
+            return False
+        weight_kg = parse_weight_kg(text)
+        if weight_kg is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не понял вес. Напишите, например: 82,4 или 82.4 кг. /cancel — отменить.",
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="custom_invalid")
+            return True
+        result = tracker.add_weight_entry(int(user_id), weight_kg, source="telegram_custom")
+        tracker.clear_pending_state(int(user_id))
+        notice = format_weight_saved_notice(result)
+        await self._send_healbite_weight_screen(msg, user_id=int(user_id), notice=notice)
+        self._log_healbite_route_selected(msg=msg, route="weight", lane="healbite_public", result="custom_added")
+        return True
+
+    async def _handle_healbite_weight_callback(self, query: Any, data: str) -> None:
+        user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if user_id is None:
+            await query.answer(text="Не удалось определить пользователя.")
+            return
+        tracker = get_default_weight_tracker()
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else "open"
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=getattr(query, "message", None),
+            route="weight",
+            lane="healbite_public",
+            result=action if action in {"open", "custom", "reminder", "refresh", "back"} else "dynamic",
+        )
+        if action == "custom":
+            tracker.stage_custom_weight(int(user_id))
+            await query.answer(text="Введите вес сообщением.")
+            try:
+                await query.edit_message_text(
+                    text=format_weight_custom_prompt(),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="weight:refresh")]]),
+                )
+            except Exception:
+                message = getattr(query, "message", None)
+                if message is not None:
+                    await self._send_message_with_thread_fallback(
+                        chat_id=str(getattr(message, "chat_id", "")),
+                        text=format_weight_custom_prompt(),
+                        message_thread_id=getattr(message, "message_thread_id", None),
+                    )
+            return
+        if action == "reminder":
+            await query.answer(text="Недоступно.")
+            await self._edit_healbite_weight_screen(
+                query,
+                user_id=int(user_id),
+                notice="Функция ещё в разработке.",
+            )
+            return
+        if action == "back":
+            tracker.clear_pending_state(int(user_id))
+            await query.answer(text="Главное меню.")
+            message = getattr(query, "message", None)
+            if message is not None:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await self._send_healbite_menu_message(message, command="/menu")
+            return
+        if action in {"open", "refresh"}:
+            tracker.clear_pending_state(int(user_id))
+            await query.answer(text="Обновлено.")
+            await self._edit_healbite_weight_screen(query, user_id=int(user_id))
+            return
+        await query.answer(text="Неизвестное действие.")
+
     def _healbite_water_keyboard(self) -> Optional[Any]:
         if not TELEGRAM_AVAILABLE:
             return None
@@ -6269,6 +6474,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if normalized_action == "/menu":
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
+        if normalized_action == "/weight":
+            return await self._maybe_handle_healbite_weight_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action == "/water":
             return await self._maybe_handle_healbite_water_command(
                 msg,
@@ -6354,6 +6565,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
+            return
+        if await self._maybe_handle_healbite_weight_pending_reply(msg):
             return
         if await self._maybe_handle_healbite_water_pending_reply(msg):
             return
@@ -6753,6 +6966,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
             return
         if await self._maybe_handle_memory_stats_command(msg):
+            return
+        if await self._maybe_handle_healbite_weight_command(msg):
             return
         if await self._maybe_handle_healbite_profile_command(msg):
             return

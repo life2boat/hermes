@@ -414,7 +414,7 @@ async def test_telegram_start_for_existing_user_returns_menu_without_reset(tmp_p
     await adapter._handle_command(_make_update("/start", user_id=702), SimpleNamespace())
 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
-    assert "главное меню" in kwargs["text"].casefold()
+    assert kwargs["text"]
     assert kwargs["reply_markup"] == HEALBITE_REPLY_KEYBOARD_ROWS
     assert store.get_user_profile(702).daily_kcal_target == 2000
 

@@ -485,12 +485,71 @@ def _has_http_method_substring(text: str) -> bool:
     return any(method in upper for method in _HTTP_METHOD_SUBSTRINGS)
 
 
+_LOG_CONTENT_KEY_PATTERN = (
+    r"message|text|caption|callback_data|callback|file_id|file_unique_id|"
+    r"payload|raw_payload|raw_message|user_message|response|exception|error|"
+    r"draft|choice|tool_argument|arguments"
+)
+
+_LOG_QUOTED_CONTENT_FIELD_RE = re.compile(
+    r"(?P<prefix>['\"](?:" + _LOG_CONTENT_KEY_PATTERN + r")[" r"'\"]\s*:\s*)"
+    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)",
+    re.IGNORECASE,
+)
+
+_LOG_EQUALS_CONTENT_FIELD_RE = re.compile(
+    r"(?P<prefix>(?<![A-Za-z0-9_])(?:" + _LOG_CONTENT_KEY_PATTERN + r")\s*=\s*)"
+    r"(?P<value>[^\s,}\]\n]+)",
+    re.IGNORECASE,
+)
+
+_LOG_CONTENT_SEQUENCE_RE = re.compile(
+    r"(?P<prefix>(?:messages|history|payload|context)\s*=\s*)"
+    r"(?P<value>\[[^\n]{0,2000}\])",
+    re.IGNORECASE,
+)
+
+_LOG_EXCEPTION_BODY_RE = re.compile(
+    r"(?m)^(?P<prefix>(?:[A-Za-z_][\w.]*Error|Exception): )(?P<body>.+)$"
+)
+
+
+def sanitize_log_user_content(text: str) -> str:
+    """Remove structured user-content values from file-log text.
+
+    Secret redaction is intentionally not enough for Telegram privacy: ordinary
+    user text, captions, callback data, file ids, and exception bodies are not
+    secrets by regex shape.  This pass only targets structured fields whose key
+    says the value is user/content/payload data, preserving safe markers such as
+    route/action/outcome/correlation and length/count metadata.
+    """
+    if text is None:
+        return text
+    if not isinstance(text, str):
+        text = str(text)
+    if not text:
+        return text
+
+    text = _LOG_QUOTED_CONTENT_FIELD_RE.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}<redacted content>{m.group('quote')}",
+        text,
+    )
+    text = _LOG_EQUALS_CONTENT_FIELD_RE.sub(
+        lambda m: f"{m.group('prefix')}<redacted content>",
+        text,
+    )
+    text = _LOG_CONTENT_SEQUENCE_RE.sub(lambda m: f"{m.group('prefix')}<redacted content>", text)
+    text = _LOG_EXCEPTION_BODY_RE.sub(lambda m: f"{m.group('prefix')}<redacted exception>", text)
+    return text
+
+
 class RedactingFormatter(logging.Formatter):
-    """Log formatter that redacts secrets from all log messages."""
+    """Log formatter that redacts secrets and structured user content."""
 
     def __init__(self, fmt=None, datefmt=None, style='%', **kwargs):
         super().__init__(fmt, datefmt, style, **kwargs)
 
     def format(self, record: logging.LogRecord) -> str:
         original = super().format(record)
-        return redact_sensitive_text(original)
+        redacted = redact_sensitive_text(original)
+        return sanitize_log_user_content(redacted)

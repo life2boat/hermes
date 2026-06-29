@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import hermes_logging
+from agent.redact import RedactingFormatter
 from agent.turn_context import build_turn_context
 from gateway.config import Platform
 from gateway.platforms.base import (
@@ -16,6 +17,7 @@ from gateway.platforms.base import (
 from gateway.run import (
     _log_healbite_diary_command_failure,
     _log_inbound_message_event,
+    _safe_agent_hook_content_fields,
     _log_pre_gateway_dispatch_skip,
     _log_safe_session_event,
     _log_telegram_notification_failure,
@@ -79,7 +81,18 @@ PII_CANARIES = {
     "PII_S70C_OBS_SESSION_KEY",
     "PII_S70C_OBS_EXCEPTION_BODY",
     "PII_S70C_OBS_TELEGRAM_ID",
+    "PII_S70C1_TEXT_LOG_CANARY",
+    "PII_S70C1_OUTBOUND_CANARY",
+    "PII_S70C1_COMMAND_CANARY",
+    "PII_S70C1_TOOL_PROMPT_CANARY",
+    "PII_S70C1_CAPTION_CANARY",
+    "PII_S70C1_CALLBACK_CANARY",
+    "PII_S70C1_FILE_ID_CANARY",
+    "PII_S70C1_EXCEPTION_CANARY",
+    "PII_S70C1_NESTED_EXTRA_CANARY",
+    "PII_S70C1_FORMAT_ARG_CANARY",
 }
+
 
 
 class _FakeTodoStore:
@@ -632,6 +645,86 @@ def test_weight_record_file_logs_keep_safe_markers_without_health_values_or_cana
         assert "error_type=RuntimeError" in logs
         assert "corr_present=true" in logs
         assert "corr=abc123def456" in logs
+        _assert_no_canaries(logs)
+    finally:
+        cleanup()
+
+
+
+def test_telegram_agent_hook_content_fields_use_shape_without_raw_text():
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="4242424242",
+        chat_type="dm",
+        user_id="3131313131",
+        user_name="PII_USERNAME_SHOULD_NOT_APPEAR",
+    )
+
+    fields = _safe_agent_hook_content_fields(
+        source=source,
+        field="message",
+        content="PII_S70C1_TEXT_LOG_CANARY",
+    )
+
+    assert fields["message"] == ""
+    assert fields["message_content_type"] == "text"
+    assert fields["message_text_length"] == len("PII_S70C1_TEXT_LOG_CANARY")
+    assert fields["message_image_count"] == 0
+    _assert_no_canaries(str(fields))
+
+
+def test_file_log_formatter_redacts_structured_telegram_text_args_and_exceptions(tmp_path):
+    cleanup = _install_file_logging(tmp_path, log_level="DEBUG")
+    try:
+        logger = logging.getLogger("agent.privacy_regression")
+        logger.info(
+            "telegram turn message=%s caption=%s callback_data=%s file_id=%s response=%s",
+            "PII_S70C1_TEXT_LOG_CANARY",
+            "PII_S70C1_CAPTION_CANARY",
+            "PII_S70C1_CALLBACK_CANARY",
+            "PII_S70C1_FILE_ID_CANARY",
+            "PII_S70C1_OUTBOUND_CANARY",
+        )
+        logger.info(
+            "hook context %s",
+            {
+                "message": "PII_S70C1_FORMAT_ARG_CANARY",
+                "payload": {"text": "PII_S70C1_NESTED_EXTRA_CANARY"},
+                "route": "profile",
+                "outcome": "allowed",
+            },
+        )
+        extra_record = logging.LogRecord(
+            name="gateway.privacy_extra",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="extra fields route=profile outcome=allowed",
+            args=(),
+            exc_info=None,
+        )
+        extra_record.payload = "PII_S70C1_NESTED_EXTRA_CANARY"
+        formatter = RedactingFormatter("%(message)s payload=%(payload)s")
+        rendered_extra = formatter.format(extra_record)
+        assert "route=profile" in rendered_extra
+        assert "outcome=allowed" in rendered_extra
+        assert "PII_S70C1_NESTED_EXTRA_CANARY" not in rendered_extra
+
+        exception_canary = "PII_S70C1_EXCEPTION_CANARY"
+        try:
+            raise RuntimeError(exception_canary)
+        except RuntimeError as exc:
+            logger.warning("telegram processing exception=%s", exc, exc_info=True)
+
+        logs = _read_file_logs(tmp_path)
+        assert "hook context" in logs
+        assert "message=<redacted content>" in logs
+        assert "caption=<redacted content>" in logs
+        assert "callback_data=<redacted content>" in logs
+        assert "file_id=<redacted content>" in logs
+        assert "response=<redacted content>" in logs
+        assert "RuntimeError: <redacted exception>" in logs
+        assert logs.strip()
         _assert_no_canaries(logs)
     finally:
         cleanup()

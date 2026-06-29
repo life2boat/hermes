@@ -91,6 +91,12 @@ PII_CANARIES = {
     "PII_S70C1_EXCEPTION_CANARY",
     "PII_S70C1_NESTED_EXTRA_CANARY",
     "PII_S70C1_FORMAT_ARG_CANARY",
+    "PII_EXTENDED_PROMPT_KEY",
+    "PII_EXTENDED_QUERY_KEY",
+    "PII_EXTENDED_INPUT_TEXT_KEY",
+    "PII_EXTENDED_USER_TEXT_KEY",
+    "PII_EXTENDED_CONTENT_KEY",
+    "PII_EXTENDED_TOOL_ARGUMENTS_KEY",
 }
 
 
@@ -725,6 +731,133 @@ def test_file_log_formatter_redacts_structured_telegram_text_args_and_exceptions
         assert "response=<redacted content>" in logs
         assert "RuntimeError: <redacted exception>" in logs
         assert logs.strip()
+        _assert_no_canaries(logs)
+    finally:
+        cleanup()
+
+
+
+def test_file_log_formatter_redacts_extended_user_content_keys_without_neighbor_false_positives(tmp_path):
+    cleanup = _install_file_logging(tmp_path, log_level="DEBUG")
+    try:
+        logger = logging.getLogger("gateway.extended_privacy_regression")
+        logger.info(
+            "extended direct prompt=%s query=%s input_text=%s user_text=%s content=%s tool_arguments=%s "
+            "content_type=text content_length=42 query_count=2 query_present=true "
+            "prompt_present=true prompt_length=64 input_text_present=true "
+            "tool_arguments_present=true message_kind=text has_previous_weight=true "
+            "history_count_bucket=nonempty corr=abc123",
+            "PII_EXTENDED_PROMPT_KEY",
+            "PII_EXTENDED_QUERY_KEY",
+            "PII_EXTENDED_INPUT_TEXT_KEY",
+            "PII_EXTENDED_USER_TEXT_KEY",
+            "PII_EXTENDED_CONTENT_KEY",
+            "PII_EXTENDED_TOOL_ARGUMENTS_KEY",
+        )
+        logger.info(
+            "extended quoted prompt=\"PII_EXTENDED_PROMPT_KEY with spaces\" "
+            "query='PII_EXTENDED_QUERY_KEY with punctuation!' "
+            "content=PII_EXTENDED_CONTENT_KEY"
+        )
+        logger.info(
+            "extended mapping prompt=%(prompt)s query=%(query)s input_text=%(input_text)s "
+            "user_text=%(user_text)s content=%(content)s tool_arguments=%(tool_arguments)s",
+            {
+                "prompt": "PII_EXTENDED_PROMPT_KEY",
+                "query": "PII_EXTENDED_QUERY_KEY",
+                "input_text": "PII_EXTENDED_INPUT_TEXT_KEY",
+                "user_text": "PII_EXTENDED_USER_TEXT_KEY",
+                "content": "PII_EXTENDED_CONTENT_KEY",
+                "tool_arguments": "PII_EXTENDED_TOOL_ARGUMENTS_KEY",
+            },
+        )
+        logger.info(
+            "extended nested %s",
+            {
+                "prompt": "PII_EXTENDED_PROMPT_KEY",
+                "query": "PII_EXTENDED_QUERY_KEY",
+                "items": [
+                    {"input_text": "PII_EXTENDED_INPUT_TEXT_KEY"},
+                    {"user_text": "PII_EXTENDED_USER_TEXT_KEY"},
+                    {"content": "PII_EXTENDED_CONTENT_KEY"},
+                    {"tool_arguments": "PII_EXTENDED_TOOL_ARGUMENTS_KEY"},
+                ],
+                "route": "weight",
+                "action": "history",
+                "outcome": "ok",
+                "content_type": "text",
+            },
+        )
+
+        extra_record = logging.LogRecord(
+            name="gateway.extended_privacy_extra",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="extra extended route=weight action=history outcome=ok",
+            args=(),
+            exc_info=None,
+        )
+        extra_record.prompt = "PII_EXTENDED_PROMPT_KEY"
+        extra_record.query = "PII_EXTENDED_QUERY_KEY"
+        extra_record.input_text = "PII_EXTENDED_INPUT_TEXT_KEY"
+        extra_record.user_text = "PII_EXTENDED_USER_TEXT_KEY"
+        extra_record.content = "PII_EXTENDED_CONTENT_KEY"
+        extra_record.tool_arguments = "PII_EXTENDED_TOOL_ARGUMENTS_KEY"
+        extra_record.content_type = "text"
+        extra_record.query_count = 2
+        extra_record.prompt_length = 64
+        extra_record.corr = "abc123"
+        formatter = RedactingFormatter(
+            "%(message)s prompt=%(prompt)s query=%(query)s input_text=%(input_text)s "
+            "user_text=%(user_text)s content=%(content)s tool_arguments=%(tool_arguments)s "
+            "content_type=%(content_type)s query_count=%(query_count)s "
+            "prompt_length=%(prompt_length)s corr=%(corr)s"
+        )
+        rendered_extra = formatter.format(extra_record)
+        assert "prompt=<redacted content>" in rendered_extra
+        assert "query=<redacted content>" in rendered_extra
+        assert "input_text=<redacted content>" in rendered_extra
+        assert "user_text=<redacted content>" in rendered_extra
+        assert "content=<redacted content>" in rendered_extra
+        assert "tool_arguments=<redacted content>" in rendered_extra
+        assert "content_type=text" in rendered_extra
+        assert "query_count=2" in rendered_extra
+        assert "prompt_length=64" in rendered_extra
+        assert "corr=abc123" in rendered_extra
+        _assert_no_canaries(rendered_extra)
+
+        exception_canary = "PII_EXTENDED_CONTENT_KEY"
+        try:
+            raise RuntimeError(exception_canary)
+        except RuntimeError as exc:
+            logger.warning("extended exception content=%s", exc, exc_info=True)
+
+        logs = _read_file_logs(tmp_path)
+        assert logs.strip()
+        assert "extended direct" in logs
+        assert "extended quoted" in logs
+        assert "extended mapping" in logs
+        assert "extended nested" in logs
+        assert "prompt=<redacted content>" in logs
+        assert "query=<redacted content>" in logs
+        assert "input_text=<redacted content>" in logs
+        assert "user_text=<redacted content>" in logs
+        assert "content=<redacted content>" in logs
+        assert "tool_arguments=<redacted content>" in logs
+        assert "content_type=text" in logs
+        assert "content_length=42" in logs
+        assert "query_count=2" in logs
+        assert "query_present=true" in logs
+        assert "prompt_present=true" in logs
+        assert "prompt_length=64" in logs
+        assert "input_text_present=true" in logs
+        assert "tool_arguments_present=true" in logs
+        assert "message_kind=text" in logs
+        assert "has_previous_weight=true" in logs
+        assert "history_count_bucket=nonempty" in logs
+        assert "corr=abc123" in logs
+        assert "RuntimeError: <redacted exception>" in logs
         _assert_no_canaries(logs)
     finally:
         cleanup()

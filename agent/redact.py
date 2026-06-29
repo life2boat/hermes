@@ -488,7 +488,8 @@ def _has_http_method_substring(text: str) -> bool:
 _LOG_CONTENT_KEY_PATTERN = (
     r"message|text|caption|callback_data|callback|file_id|file_unique_id|"
     r"payload|raw_payload|raw_message|user_message|response|exception|error|"
-    r"draft|choice|tool_argument|arguments"
+    r"draft|choice|tool_argument|tool_arguments|arguments|"
+    r"prompt|query|input_text|user_text|content"
 )
 
 _LOG_QUOTED_CONTENT_FIELD_RE = re.compile(
@@ -499,7 +500,7 @@ _LOG_QUOTED_CONTENT_FIELD_RE = re.compile(
 
 _LOG_EQUALS_CONTENT_FIELD_RE = re.compile(
     r"(?P<prefix>(?<![A-Za-z0-9_])(?:" + _LOG_CONTENT_KEY_PATTERN + r")\s*=\s*)"
-    r"(?P<value>[^\s,}\]\n]+)",
+    r"(?:(?P<quote>['\"])(?P<quoted_value>.*?)(?P=quote)|(?P<bare_value>[^\s,}\]\n]+))",
     re.IGNORECASE,
 )
 
@@ -535,7 +536,11 @@ def sanitize_log_user_content(text: str) -> str:
         text,
     )
     text = _LOG_EQUALS_CONTENT_FIELD_RE.sub(
-        lambda m: f"{m.group('prefix')}<redacted content>",
+        lambda m: (
+            f"{m.group('prefix')}{m.group('quote')}<redacted content>{m.group('quote')}"
+            if m.group("quote")
+            else f"{m.group('prefix')}<redacted content>"
+        ),
         text,
     )
     text = _LOG_CONTENT_SEQUENCE_RE.sub(lambda m: f"{m.group('prefix')}<redacted content>", text)

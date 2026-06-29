@@ -93,6 +93,18 @@ class WeightSummary:
     entries: list[WeightEntry]
 
 
+def _history_count_bucket(count: int) -> str:
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count <= 3:
+        return "2-3"
+    if count <= 7:
+        return "4-7"
+    return "8+"
+
+
 def _sqlite_timestamp(value: datetime | None = None) -> str:
     current = value or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -559,6 +571,31 @@ def format_weight_tracker_report(summary: WeightSummary, *, notice: str | None =
     if notice:
         lines.extend(["", html.escape(notice)])
     lines.extend(["", "Запись веса обновляет профиль и пересчитывает КБЖУ, если профиль заполнен."])
+    return "\n".join(lines)
+
+
+def format_weight_history_report(summary: WeightSummary, *, limit: int = 10) -> str:
+    lines = ["\u2696\ufe0f <b>\u0418\u0441\u0442\u043e\u0440\u0438\u044f \u0432\u0435\u0441\u0430</b>", ""]
+    entries = list(summary.entries)
+    if not entries:
+        lines.extend([
+            "\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0432\u0435\u0441\u0430.",
+            "\u041d\u0430\u0436\u043c\u0438\u0442\u0435 \xab\u0417\u0430\u043f\u0438\u0441\u0430\u0442\u044c \u0432\u0435\u0441\xbb \u0438\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 /weight 82,4.",
+        ])
+        return "\n".join(lines)
+
+    lines.append("\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0437\u0430\u043f\u0438\u0441\u0438:")
+    for entry in reversed(entries[-max(int(limit), 1):]):
+        local_date = html.escape(entry.local_date)
+        lines.append(f"\u2022 {local_date} \u2014 {_format_weight_grams(entry.weight_grams)}")
+    lines.extend(
+        [
+            "",
+            f"\u0417\u0430\u043f\u0438\u0441\u0435\u0439 \u0437\u0430 30 \u0434\u043d\u0435\u0439: {_history_count_bucket(len(entries))}",
+            f"7 \u0434\u043d\u0435\u0439: {_format_delta(summary.delta_7d_grams)}",
+            f"30 \u0434\u043d\u0435\u0439: {_format_delta(summary.delta_30d_grams)}",
+        ]
+    )
     return "\n".join(lines)
 
 

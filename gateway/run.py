@@ -1329,6 +1329,57 @@ def _log_inbound_message_event(event: Any, source: Any) -> None:
     )
 
 
+def _content_shape_fields(prefix: str, content: Any) -> Dict[str, Any]:
+    text_length = 0
+    image_count = 0
+    content_type = "empty"
+    if isinstance(content, str):
+        text_length = len(content)
+        content_type = "text" if content else "empty"
+    elif isinstance(content, list):
+        content_type = "text"
+        for part in content:
+            if isinstance(part, str):
+                text_length += len(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip().lower()
+            if part_type in {"image", "image_url", "input_image"}:
+                image_count += 1
+            elif part_type in {"text", "input_text", "output_text"}:
+                text_value = part.get("text")
+                if isinstance(text_value, str):
+                    text_length += len(text_value)
+        if image_count and text_length:
+            content_type = "multimodal"
+        elif image_count:
+            content_type = "image"
+    elif content is not None:
+        content_type = "other"
+        text_length = len(str(content))
+    return {
+        f"{prefix}_content_type": content_type,
+        f"{prefix}_text_length": text_length,
+        f"{prefix}_image_count": image_count,
+    }
+
+
+def _safe_agent_hook_content_fields(
+    *,
+    source: Any,
+    field: str,
+    content: Any,
+) -> Dict[str, Any]:
+    platform_value = getattr(getattr(source, "platform", None), "value", None)
+    platform = platform_value or str(getattr(source, "platform", ""))
+    if platform == "telegram":
+        fields = {field: ""}
+        fields.update(_content_shape_fields(field, content))
+        return fields
+    return {field: (content or "")[:500] if isinstance(content, str) else content}
+
+
 
 def _safe_log_bool(value: Any) -> str:
     return "true" if bool(value) else "false"
@@ -9352,7 +9403,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "thread_id": str(getattr(source, "thread_id", None)) if getattr(source, "thread_id", None) else "",
                 "chat_type": getattr(source, "chat_type", "") or "",
                 "session_id": session_entry.session_id,
-                "message": message_text[:500],
+                **_safe_agent_hook_content_fields(
+                    source=source,
+                    field="message",
+                    content=message_text,
+                ),
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
@@ -9502,7 +9557,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
-                "response": (response or "")[:500],
+                **_safe_agent_hook_content_fields(
+                    source=source,
+                    field="response",
+                    content=response or "",
+                ),
             })
             
             # Check for pending process watchers (check_interval on background processes)

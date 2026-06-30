@@ -121,6 +121,8 @@ from gateway.healbite_weight_tracker import (
     get_default_weight_tracker,
     parse_weight_kg,
 )
+from gateway.healbite_weight_reminders import get_default_weight_reminder_store
+from gateway import healbite_weight_reminder_ui as weight_reminder_ui
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -527,6 +529,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
+        self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
@@ -5696,6 +5699,9 @@ class TelegramAdapter(BasePlatformAdapter):
         "history_present",
         "has_session",
         "has_text",
+        "confirmation_required",
+        "draft_present",
+        "enabled",
         "kind",
         "lane",
         "media_count",
@@ -5712,6 +5718,13 @@ class TelegramAdapter(BasePlatformAdapter):
         "source",
         "status_code",
         "text_length",
+        "delivery_state",
+        "schedule_version_changed",
+        "session_scope",
+        "time_bucket",
+        "timezone_present",
+        "timezone_region_bucket",
+        "weekday_bucket",
     }
 
     @staticmethod
@@ -6039,19 +6052,295 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
-    def _healbite_weight_keyboard(self) -> Optional[Any]:
+    def _healbite_weight_keyboard(self, *, user_id: int | None = None) -> Optional[Any]:
         if not TELEGRAM_AVAILABLE:
             return None
-        return InlineKeyboardMarkup([
+        rows = [
             [
                 InlineKeyboardButton("Записать вес", callback_data="weight:custom"),
                 InlineKeyboardButton("История веса", callback_data="weight:history"),
             ],
-            [
-                InlineKeyboardButton("Обновить", callback_data="weight:refresh"),
-                InlineKeyboardButton("Назад", callback_data="weight:back"),
-            ],
+        ]
+        if user_id is not None and weight_reminder_ui.reminder_ui_enabled_for_user(int(user_id)):
+            rows.append([InlineKeyboardButton("Напоминание", callback_data="weight:reminder")])
+        rows.append([
+            InlineKeyboardButton("Обновить", callback_data="weight:refresh"),
+            InlineKeyboardButton("Назад", callback_data="weight:back"),
         ])
+        return InlineKeyboardMarkup(rows)
+
+    def _healbite_weight_reminder_keyboard(self, rows: list[list[tuple[str, str]]]) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(text, callback_data=callback_data) for text, callback_data in row]
+            for row in rows
+        ])
+
+    def _log_weight_reminder_marker(
+        self,
+        query: Any,
+        *,
+        action: str,
+        outcome: str,
+        draft: weight_reminder_ui.WeightReminderDraft | None = None,
+        setting: Any = None,
+        confirmation_required: bool = False,
+        error_type: str | None = None,
+    ) -> None:
+        effective_timezone = None
+        effective_weekday = None
+        effective_time = None
+        if draft is not None:
+            effective_timezone = draft.timezone_name
+            effective_weekday = draft.weekday
+            effective_time = draft.local_time
+        elif setting is not None:
+            effective_timezone = getattr(setting, "timezone_name", None)
+            effective_weekday = getattr(setting, "weekday", None)
+            effective_time = getattr(setting, "local_time", None)
+        weekday_bucket = None
+        if effective_weekday is not None:
+            try:
+                weekday_bucket = f"weekday_{int(effective_weekday)}"
+            except (TypeError, ValueError):
+                weekday_bucket = "unknown"
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=getattr(query, "message", None),
+            route="weight_reminder",
+            action=action,
+            lane="healbite_public",
+            result=outcome,
+            has_draft=draft is not None,
+            draft_present=draft is not None,
+            enabled=bool(getattr(setting, "enabled", False)) if setting is not None else None,
+            delivery_state=(getattr(setting, "delivery_state", None).value if setting is not None and getattr(setting, "delivery_state", None) is not None else None),
+            timezone_present=effective_timezone is not None,
+            timezone_region_bucket=weight_reminder_ui.timezone_region_bucket(effective_timezone),
+            weekday_bucket=weekday_bucket,
+            time_bucket=weight_reminder_ui.time_bucket(effective_time),
+            confirmation_required=confirmation_required,
+            error_type=error_type,
+        )
+
+    async def _edit_weight_reminder_screen(
+        self,
+        query: Any,
+        *,
+        text: str,
+        rows: list[list[tuple[str, str]]],
+    ) -> None:
+        kwargs: Dict[str, Any] = {
+            "text": text,
+            "reply_markup": self._healbite_weight_reminder_keyboard(rows),
+        }
+        if ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await query.edit_message_text(**kwargs)
+
+    async def _show_weight_reminder_main(self, query: Any, *, user_id: int, notice: str | None = None) -> None:
+        setting = get_default_weight_reminder_store().get_settings(int(user_id))
+        text, rows = weight_reminder_ui.main_screen(setting)
+        if notice:
+            text = f"{notice}\n\n{text}"
+        self._log_weight_reminder_marker(query, action="main", outcome="shown", setting=setting)
+        await self._edit_weight_reminder_screen(query, text=text, rows=rows)
+
+    async def _show_weight_reminder_draft_step(
+        self,
+        query: Any,
+        *,
+        user_id: int,
+        draft: weight_reminder_ui.WeightReminderDraft,
+    ) -> None:
+        if draft.step == "timezone":
+            text, rows = weight_reminder_ui.timezone_screen(draft)
+        elif draft.step == "weekday":
+            text, rows = weight_reminder_ui.weekday_screen(draft)
+        elif draft.step == "hour":
+            text, rows = weight_reminder_ui.hour_screen(draft)
+        elif draft.step == "minute":
+            text, rows = weight_reminder_ui.minute_screen(draft)
+        elif draft.step == "review":
+            text, rows = weight_reminder_ui.review_screen(draft)
+        else:
+            self._weight_reminder_drafts.pop(int(user_id), None)
+            await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка устарела. Откройте её снова.")
+            return
+        self._log_weight_reminder_marker(query, action=draft.step, outcome="shown", draft=draft, confirmation_required=draft.step == "review")
+        await self._edit_weight_reminder_screen(query, text=text, rows=rows)
+
+    def _weight_reminder_current_draft(
+        self,
+        user_id: int,
+        *,
+        setting: Any = None,
+        mode: str = "create",
+    ) -> weight_reminder_ui.WeightReminderDraft:
+        draft = self._weight_reminder_drafts.get(int(user_id))
+        if draft is None:
+            profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
+            profile_timezone = getattr(profile, "timezone", None) if profile is not None else None
+            draft = weight_reminder_ui.draft_from_profile_timezone(setting, profile_timezone, mode=mode)
+            self._weight_reminder_drafts[int(user_id)] = draft
+        return draft
+
+    async def _handle_healbite_weight_reminder_callback(self, query: Any, data: str, *, user_id: int) -> None:
+        if not weight_reminder_ui.reminder_ui_enabled_for_user(int(user_id)):
+            self._log_weight_reminder_marker(query, action="blocked", outcome="not_allowed")
+            await query.answer(text="Настройки недоступны.")
+            await self._edit_healbite_weight_screen(
+                query,
+                user_id=int(user_id),
+                notice="Настройки напоминаний недоступны.",
+            )
+            return
+        parts = data.split(":")
+        subaction = parts[2] if len(parts) > 2 else "main"
+        store = get_default_weight_reminder_store()
+        setting = store.get_settings(int(user_id))
+
+        if subaction in {"main", "reminder"}:
+            await query.answer(text="Настройки напоминания.")
+            await self._show_weight_reminder_main(query, user_id=int(user_id))
+            return
+        if subaction in {"start", "edit"}:
+            self._weight_reminder_drafts[int(user_id)] = self._weight_reminder_current_draft(
+                int(user_id),
+                setting=setting,
+                mode="edit" if setting is not None else "create",
+            )
+            self._weight_reminder_drafts[int(user_id)].step = "timezone"
+            await query.answer(text="Выберите параметры.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=self._weight_reminder_drafts[int(user_id)])
+            return
+        if subaction == "cancel":
+            self._weight_reminder_drafts.pop(int(user_id), None)
+            await query.answer(text="Настройка отменена.")
+            self._log_weight_reminder_marker(query, action="cancel", outcome="cancelled")
+            await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка отменена.")
+            return
+        if subaction == "back":
+            draft = self._weight_reminder_drafts.get(int(user_id))
+            if draft is None:
+                await query.answer(text="Настройка устарела.")
+                await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка устарела. Откройте её снова.")
+                return
+            order = ["timezone", "weekday", "hour", "minute", "review"]
+            try:
+                index = order.index(draft.step)
+            except ValueError:
+                index = 0
+            draft.step = order[max(0, index - 1)]
+            await query.answer(text="Назад.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction == "tz" and len(parts) == 4:
+            tz_name = weight_reminder_ui.timezone_name_for_alias(parts[3])
+            if tz_name is None:
+                await query.answer(text="Недоступный часовой пояс.")
+                self._log_weight_reminder_marker(query, action="tz", outcome="invalid", error_type="invalid_timezone")
+                return
+            draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
+            draft.timezone_name = tz_name
+            draft.step = "weekday"
+            await query.answer(text="Часовой пояс выбран.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction == "day" and len(parts) == 4:
+            try:
+                day = int(parts[3])
+            except ValueError:
+                day = -1
+            if day < 0 or day > 6:
+                await query.answer(text="Недоступный день.")
+                self._log_weight_reminder_marker(query, action="day", outcome="invalid", error_type="invalid_weekday")
+                return
+            draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
+            draft.weekday = day
+            draft.step = "hour"
+            await query.answer(text="День выбран.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction == "hour" and len(parts) == 4:
+            if parts[3] not in weight_reminder_ui.REMINDER_HOURS:
+                await query.answer(text="Недоступный час.")
+                self._log_weight_reminder_marker(query, action="hour", outcome="invalid", error_type="invalid_hour")
+                return
+            draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
+            draft.hour = parts[3]
+            draft.step = "minute"
+            await query.answer(text="Час выбран.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction == "minute" and len(parts) == 4:
+            if parts[3] not in weight_reminder_ui.REMINDER_MINUTES:
+                await query.answer(text="Недоступные минуты.")
+                self._log_weight_reminder_marker(query, action="minute", outcome="invalid", error_type="invalid_minute")
+                return
+            draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
+            draft.minute = parts[3]
+            draft.step = "review"
+            await query.answer(text="Проверьте настройку.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction == "confirm":
+            draft = self._weight_reminder_drafts.get(int(user_id))
+            parsed = weight_reminder_ui.validate_draft(draft) if draft is not None else None
+            if draft is None or parsed is None:
+                await query.answer(text="Настройка устарела.")
+                self._log_weight_reminder_marker(query, action="confirm", outcome="invalid", error_type="stale_draft")
+                await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка устарела. Откройте её снова.")
+                return
+            tz_name, weekday, local_time = parsed
+            ok, updated = store.create_or_update_settings_if_current(
+                user_id=int(user_id),
+                timezone_name=tz_name,
+                weekday=weekday,
+                local_time=local_time,
+                enabled=True,
+                source_schedule_version=draft.source_schedule_version,
+            )
+            self._weight_reminder_drafts.pop(int(user_id), None)
+            if not ok or updated is None:
+                await query.answer(text="Настройка уже изменилась.")
+                self._log_weight_reminder_marker(query, action="confirm", outcome="stale", draft=draft, error_type="schedule_version_mismatch")
+                await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка уже изменилась. Проверьте расписание ещё раз.")
+                return
+            await query.answer(text="Напоминание включено.")
+            self._log_weight_reminder_marker(query, action="confirm", outcome="saved", setting=updated)
+            await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Напоминание включено.")
+            return
+        if subaction == "disable":
+            text, rows = weight_reminder_ui.disable_screen(setting)
+            await query.answer(text="Подтвердите отключение.")
+            self._log_weight_reminder_marker(query, action="disable", outcome="confirm_requested", setting=setting, confirmation_required=True)
+            await self._edit_weight_reminder_screen(query, text=text, rows=rows)
+            return
+        if subaction == "disable_confirm":
+            updated = store.disable_settings(int(user_id))
+            self._weight_reminder_drafts.pop(int(user_id), None)
+            await query.answer(text="Напоминание отключено.")
+            self._log_weight_reminder_marker(query, action="disable_confirm", outcome="disabled", setting=updated)
+            await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Напоминание отключено.")
+            return
+        if subaction == "resume":
+            text, rows = weight_reminder_ui.resume_screen(setting)
+            await query.answer(text="Подтвердите включение.")
+            self._log_weight_reminder_marker(query, action="resume", outcome="confirm_requested", setting=setting, confirmation_required=True)
+            await self._edit_weight_reminder_screen(query, text=text, rows=rows)
+            return
+        if subaction == "resume_confirm":
+            updated = store.resume_delivery(int(user_id))
+            await query.answer(text="Напоминание включено." if updated is not None else "Настройка не найдена.")
+            self._log_weight_reminder_marker(query, action="resume_confirm", outcome="resumed" if updated is not None else "missing", setting=updated)
+            await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Напоминание включено." if updated is not None else "Настройка не найдена.")
+            return
+
+        await query.answer(text="Неизвестное действие.")
+        self._log_weight_reminder_marker(query, action="unknown", outcome="invalid", error_type="unknown_callback")
+
 
     async def _send_healbite_weight_screen(
         self,
@@ -6067,7 +6356,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "text": format_weight_tracker_report(summary, notice=notice),
             "message_thread_id": getattr(msg, "message_thread_id", None),
-            "reply_markup": self._healbite_weight_keyboard(),
+            "reply_markup": self._healbite_weight_keyboard(user_id=int(user_id)),
         }
         if ParseMode is not None:
             kwargs["parse_mode"] = ParseMode.HTML
@@ -6083,7 +6372,7 @@ class TelegramAdapter(BasePlatformAdapter):
         summary = get_default_weight_tracker().get_summary(int(user_id))
         kwargs: Dict[str, Any] = {
             "text": format_weight_tracker_report(summary, notice=notice),
-            "reply_markup": self._healbite_weight_keyboard(),
+            "reply_markup": self._healbite_weight_keyboard(user_id=int(user_id)),
         }
         if ParseMode is not None:
             kwargs["parse_mode"] = ParseMode.HTML
@@ -6278,12 +6567,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
         if action == "reminder":
-            await query.answer(text="Недоступно.")
-            await self._edit_healbite_weight_screen(
-                query,
-                user_id=int(user_id),
-                notice="Функция ещё в разработке.",
-            )
+            await self._handle_healbite_weight_reminder_callback(query, data, user_id=int(user_id))
             return
         if action == "back":
             tracker.clear_pending_state(int(user_id))

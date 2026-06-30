@@ -6678,9 +6678,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     self._cleanup_agent_resources(_agent)
 
-            if self._weight_reminder_scheduler is not None:
+            weight_reminder_scheduler = getattr(self, "_weight_reminder_scheduler", None)
+            if weight_reminder_scheduler is not None:
                 try:
-                    await self._weight_reminder_scheduler.stop()
+                    await weight_reminder_scheduler.stop()
                 except Exception as e:
                     logger.debug("weight reminder scheduler stop error: %s", e)
                 self._weight_reminder_scheduler = None

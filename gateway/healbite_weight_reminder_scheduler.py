@@ -137,10 +137,15 @@ def classify_send_exception(exc: Exception) -> WeightReminderDeliveryError:
             error_type="rate_limited",
             retry_after_seconds=int(retry_after) if retry_after else None,
         )
-    if status in {401, 403} and ("auth" in name or "forbidden" in name or "unauthorized" in name):
-        return WeightReminderDeliveryError(WeightReminderFailureKind.GLOBAL_AUTH, error_type="bot_auth_failed")
-    if "blocked" in name or "chatnotfound" in name or "forbidden" in name:
+    recipient_forbidden = (
+        "blocked" in name
+        or "chatnotfound" in name
+        or ("forbidden" in name and "auth" not in name and "token" not in name and "unauthorized" not in name)
+    )
+    if recipient_forbidden:
         return WeightReminderDeliveryError(WeightReminderFailureKind.PERMANENT, error_type="recipient_unavailable")
+    if status == 401 or (status == 403 and ("auth" in name or "token" in name or "unauthorized" in name)):
+        return WeightReminderDeliveryError(WeightReminderFailureKind.GLOBAL_AUTH, error_type="bot_auth_failed")
     if "timeout" in name or "timedout" in name:
         return WeightReminderDeliveryError(WeightReminderFailureKind.AMBIGUOUS, error_type="send_timeout")
     if "network" in name or "connection" in name:
@@ -210,14 +215,20 @@ class WeightReminderScheduler:
         _log_marker("weight_reminder_scheduler", route="weight_reminder", action="stop", outcome="stopped")
 
     async def run(self) -> None:
-        try:
-            while not self._stopping:
+        while not self._stopping:
+            try:
                 await self.run_once()
-                await self.sleep_fn(float(self.config.scan_interval_seconds))
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("[HealBite][weight_reminder_scheduler] route=weight_reminder action=run outcome=failed error_type=unexpected")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log_marker(
+                    "weight_reminder_scheduler",
+                    route="weight_reminder",
+                    action="scan",
+                    outcome="failed",
+                    error_type=_safe_error_type(exc.__class__.__name__),
+                )
+            await self.sleep_fn(float(self.config.scan_interval_seconds))
 
     async def run_once(self) -> WeightReminderSchedulerStats:
         stats = WeightReminderSchedulerStats(circuit_open=self._circuit_open)

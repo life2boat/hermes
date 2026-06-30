@@ -12,6 +12,7 @@ from gateway.healbite_weight_reminder_scheduler import (
     WeightReminderDeliveryError,
     WeightReminderFailureKind,
     WeightReminderScheduler,
+    classify_send_exception,
 )
 from gateway.healbite_weight_reminders import (
     ReminderDeliveryState,
@@ -392,6 +393,41 @@ def test_safe_markers_do_not_emit_identifiers_or_payloads(tmp_path, caplog):
     assert "UTC" not in combined
     assert WEIGHT_REMINDER_TEXT not in combined
     assert "delivery_key" not in combined
+
+
+def test_telegram_forbidden_is_per_user_failure_not_global_auth():
+    class TelegramForbiddenError(Exception):
+        status_code = 403
+
+    error = classify_send_exception(TelegramForbiddenError("blocked canary body"))
+
+    assert error.kind is WeightReminderFailureKind.PERMANENT
+    assert error.error_type == "recipient_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_unexpected_scan_error_logs_safe_type_without_body(tmp_path, caplog):
+    store = _store(tmp_path)
+
+    def explode(*, now_utc):
+        raise RuntimeError("PII_EXCEPTION_CANARY")
+
+    store.recover_expired_claims = explode  # type: ignore[method-assign]
+
+    scheduler = WeightReminderScheduler(store=store, config=_config(), send_reminder=lambda *_: None, now_fn=Clock())
+
+    async def stop_after_tick(_seconds):
+        scheduler._stopping = True
+
+    scheduler.sleep_fn = stop_after_tick
+    caplog.set_level(logging.INFO)
+
+    await scheduler.run()
+
+    combined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "[HealBite][weight_reminder_scheduler]" in combined
+    assert "error_type=runtimeerror" in combined
+    assert "PII_EXCEPTION_CANARY" not in combined
 
 
 def test_schema_migration_adds_retry_columns_idempotently(tmp_path):

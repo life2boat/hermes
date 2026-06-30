@@ -559,6 +559,124 @@ class HealBiteWeightReminderStore:
                     or int(existing["weekday"]) != day
                     or str(existing["local_time"]) != normalized_time
                 )
+                existing_active = str(existing["delivery_state"]) == ReminderDeliveryState.ACTIVE.value
+                next_due_changed = (
+                    schedule_changed
+                    or not bool(int(existing["enabled"]))
+                    or not existing_active
+                    or existing["next_due_at_utc"] is None
+                )
+                next_due_value = (
+                    _sqlite_timestamp(next_due.scheduled_utc)
+                    if next_due_changed
+                    else str(existing["next_due_at_utc"])
+                )
+                version = int(existing["schedule_version"]) + (1 if schedule_changed else 0)
+                conn.execute(
+                    f"""
+                    UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    SET enabled = ?,
+                        timezone = ?,
+                        weekday = ?,
+                        local_time = ?,
+                        next_due_at_utc = ?,
+                        schedule_version = ?,
+                        delivery_state = ?,
+                        suspended_at_utc = NULL,
+                        suspension_reason = NULL,
+                        updated_at = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        1 if enabled else 0,
+                        tz_name,
+                        day,
+                        normalized_time,
+                        next_due_value,
+                        version,
+                        ReminderDeliveryState.ACTIVE.value,
+                        timestamp,
+                        int(user_id),
+                    ),
+                )
+            row = conn.execute(
+                f"SELECT * FROM {WEIGHT_REMINDER_SETTINGS_TABLE} WHERE user_id = ? LIMIT 1",
+                (int(user_id),),
+            ).fetchone()
+            conn.commit()
+        if row is None:
+            raise RuntimeError("Could not load saved reminder settings.")
+        return _setting_from_row(row)
+
+    def create_or_update_settings_if_current(
+        self,
+        *,
+        user_id: int,
+        timezone_name: str,
+        weekday: int,
+        local_time: str,
+        enabled: bool,
+        source_schedule_version: int | None,
+        now_utc: datetime | None = None,
+    ) -> tuple[bool, WeightReminderSetting | None]:
+        current = _require_aware_utc(now_utc or datetime.now(timezone.utc))
+        tz_name = validate_timezone(timezone_name)
+        day = validate_weekday(weekday)
+        normalized_time = normalize_local_time(local_time)
+        next_due = calculate_next_occurrence_utc(current, tz_name, day, normalized_time)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                f"SELECT * FROM {WEIGHT_REMINDER_SETTINGS_TABLE} WHERE user_id = ? LIMIT 1",
+                (int(user_id),),
+            ).fetchone()
+            if existing is not None:
+                current_version = int(existing["schedule_version"])
+                if source_schedule_version is None or current_version != int(source_schedule_version):
+                    conn.commit()
+                    return False, _setting_from_row(existing)
+            timestamp = _sqlite_timestamp(current)
+            if existing is None:
+                if source_schedule_version is not None:
+                    conn.commit()
+                    return False, None
+                conn.execute(
+                    f"""
+                    INSERT INTO {WEIGHT_REMINDER_SETTINGS_TABLE}
+                        (user_id, enabled, timezone, weekday, local_time, next_due_at_utc,
+                         schedule_version, delivery_state, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (
+                        int(user_id),
+                        1 if enabled else 0,
+                        tz_name,
+                        day,
+                        normalized_time,
+                        _sqlite_timestamp(next_due.scheduled_utc),
+                        ReminderDeliveryState.ACTIVE.value,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                schedule_changed = (
+                    str(existing["timezone"]) != tz_name
+                    or int(existing["weekday"]) != day
+                    or str(existing["local_time"]) != normalized_time
+                )
+                existing_active = str(existing["delivery_state"]) == ReminderDeliveryState.ACTIVE.value
+                next_due_changed = (
+                    schedule_changed
+                    or not bool(int(existing["enabled"]))
+                    or not existing_active
+                    or existing["next_due_at_utc"] is None
+                )
+                next_due_value = (
+                    _sqlite_timestamp(next_due.scheduled_utc)
+                    if next_due_changed
+                    else str(existing["next_due_at_utc"])
+                )
                 version = int(existing["schedule_version"]) + (1 if schedule_changed else 0)
                 conn.execute(
                     f"""
@@ -592,9 +710,7 @@ class HealBiteWeightReminderStore:
                 (int(user_id),),
             ).fetchone()
             conn.commit()
-        if row is None:
-            raise RuntimeError("Could not load saved reminder settings.")
-        return _setting_from_row(row)
+        return True, _setting_from_row(row) if row is not None else None
 
     def disable_settings(self, user_id: int, *, now_utc: datetime | None = None) -> WeightReminderSetting | None:
         current = _require_aware_utc(now_utc or datetime.now(timezone.utc))
@@ -666,7 +782,8 @@ class HealBiteWeightReminderStore:
             conn.execute(
                 f"""
                 UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
-                SET delivery_state = ?,
+                SET enabled = 1,
+                    delivery_state = ?,
                     suspended_at_utc = NULL,
                     suspension_reason = NULL,
                     next_due_at_utc = ?,

@@ -18,6 +18,8 @@ DEFAULT_SCAN_INTERVAL_SECONDS = 60
 DEFAULT_CLAIM_LEASE_SECONDS = 300
 DEFAULT_MISSED_GRACE_HOURS = 12
 DEFAULT_BATCH_SIZE = 50
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_BASE_BACKOFF_SECONDS = 30
 _SQLITE_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -42,6 +44,13 @@ class ReminderScheduleAction(str, Enum):
     WAIT = "wait"
     DELIVER = "deliver"
     SKIP_EXPIRED = "skip_expired"
+
+
+class ReminderClaimOutcome(str, Enum):
+    CLAIMED = "claimed"
+    WAIT = "wait"
+    SKIPPED_EXPIRED = "skipped_expired"
+    NOT_ELIGIBLE = "not_eligible"
 
 
 class ReminderSchedulingError(ValueError):
@@ -93,6 +102,8 @@ class WeightReminderDelivery:
     claimed_at_utc: str | None
     claim_expires_at_utc: str | None
     last_error_type: str | None
+    next_attempt_at_utc: str | None
+    schedule_version: int
     sent_at_utc: str | None
     created_at: str
     updated_at: str
@@ -104,6 +115,19 @@ class WeightReminderConfig:
     allowlist: frozenset[int] = frozenset()
     scan_interval_seconds: int = DEFAULT_SCAN_INTERVAL_SECONDS
     missed_grace_hours: int = DEFAULT_MISSED_GRACE_HOURS
+    claim_lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS
+    batch_size: int = DEFAULT_BATCH_SIZE
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    base_backoff_seconds: int = DEFAULT_BASE_BACKOFF_SECONDS
+
+
+@dataclass(slots=True)
+class WeightReminderClaim:
+    outcome: ReminderClaimOutcome
+    setting: WeightReminderSetting | None = None
+    delivery: WeightReminderDelivery | None = None
+    occurrence: ReminderOccurrence | None = None
+    error_type: str = ""
 
 
 _SCHEMA_SQL = f"""
@@ -157,12 +181,16 @@ CREATE TABLE IF NOT EXISTS {WEIGHT_REMINDER_DELIVERIES_TABLE} (
     claimed_at_utc TEXT,
     claim_expires_at_utc TEXT,
     last_error_type TEXT,
+    next_attempt_at_utc TEXT,
+    schedule_version INTEGER NOT NULL DEFAULT 0 CHECK (schedule_version >= 0),
     sent_at_utc TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_weight_reminder_deliveries_status_claim
     ON {WEIGHT_REMINDER_DELIVERIES_TABLE}(status, claim_expires_at_utc);
+CREATE INDEX IF NOT EXISTS idx_weight_reminder_deliveries_retry
+    ON {WEIGHT_REMINDER_DELIVERIES_TABLE}(status, next_attempt_at_utc);
 CREATE INDEX IF NOT EXISTS idx_weight_reminder_deliveries_user_scheduled
     ON {WEIGHT_REMINDER_DELIVERIES_TABLE}(user_id, scheduled_for_utc);
 """
@@ -364,6 +392,22 @@ def load_weight_reminder_config(env: dict[str, str] | None = None) -> WeightRemi
             source.get("WEIGHT_REMINDER_MISSED_GRACE_HOURS"),
             DEFAULT_MISSED_GRACE_HOURS,
         ),
+        claim_lease_seconds=_positive_int(
+            source.get("WEIGHT_REMINDER_CLAIM_LEASE_SECONDS"),
+            DEFAULT_CLAIM_LEASE_SECONDS,
+        ),
+        batch_size=_positive_int(
+            source.get("WEIGHT_REMINDER_BATCH_SIZE"),
+            DEFAULT_BATCH_SIZE,
+        ),
+        max_attempts=_positive_int(
+            source.get("WEIGHT_REMINDER_MAX_ATTEMPTS"),
+            DEFAULT_MAX_ATTEMPTS,
+        ),
+        base_backoff_seconds=_positive_int(
+            source.get("WEIGHT_REMINDER_BASE_BACKOFF_SECONDS"),
+            DEFAULT_BASE_BACKOFF_SECONDS,
+        ),
     )
 
 
@@ -421,6 +465,8 @@ def _delivery_from_row(row: sqlite3.Row) -> WeightReminderDelivery:
         claimed_at_utc=str(row["claimed_at_utc"]) if row["claimed_at_utc"] is not None else None,
         claim_expires_at_utc=str(row["claim_expires_at_utc"]) if row["claim_expires_at_utc"] is not None else None,
         last_error_type=str(row["last_error_type"]) if row["last_error_type"] is not None else None,
+        next_attempt_at_utc=str(row["next_attempt_at_utc"]) if "next_attempt_at_utc" in row.keys() and row["next_attempt_at_utc"] is not None else None,
+        schedule_version=int(row["schedule_version"]) if "schedule_version" in row.keys() else 0,
         sent_at_utc=str(row["sent_at_utc"]) if row["sent_at_utc"] is not None else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
@@ -441,6 +487,21 @@ class HealBiteWeightReminderStore:
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
+            columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({WEIGHT_REMINDER_DELIVERIES_TABLE})")
+            }
+            if "next_attempt_at_utc" not in columns:
+                conn.execute(f"ALTER TABLE {WEIGHT_REMINDER_DELIVERIES_TABLE} ADD COLUMN next_attempt_at_utc TEXT")
+            if "schedule_version" not in columns:
+                conn.execute(
+                    f"ALTER TABLE {WEIGHT_REMINDER_DELIVERIES_TABLE} "
+                    "ADD COLUMN schedule_version INTEGER NOT NULL DEFAULT 0 CHECK (schedule_version >= 0)"
+                )
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_weight_reminder_deliveries_retry "
+                f"ON {WEIGHT_REMINDER_DELIVERIES_TABLE}(status, next_attempt_at_utc)"
+            )
 
     def get_settings(self, user_id: int) -> WeightReminderSetting | None:
         with self._connect() as conn:
@@ -625,6 +686,511 @@ class HealBiteWeightReminderStore:
             ).fetchone()
         return _setting_from_row(updated) if updated is not None else None
 
+
+    def list_due_settings(
+        self,
+        *,
+        now_utc: datetime,
+        allowlist: frozenset[int],
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ) -> list[WeightReminderSetting]:
+        current = _sqlite_timestamp(now_utc)
+        if not allowlist:
+            return []
+        placeholders = ",".join("?" for _ in allowlist)
+        params: list[object] = [current, *sorted(int(v) for v in allowlist), max(1, int(batch_size))]
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {WEIGHT_REMINDER_SETTINGS_TABLE}
+                WHERE enabled = 1
+                  AND delivery_state = ?
+                  AND next_due_at_utc IS NOT NULL
+                  AND next_due_at_utc <= ?
+                  AND user_id IN ({placeholders})
+                ORDER BY next_due_at_utc ASC, user_id ASC
+                LIMIT ?
+                """,
+                (ReminderDeliveryState.ACTIVE.value, *params),
+            ).fetchall()
+        return [_setting_from_row(row) for row in rows]
+
+    def recover_expired_claims(self, *, now_utc: datetime) -> dict[str, int]:
+        current = _sqlite_timestamp(now_utc)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            claimed = conn.execute(
+                f"""
+                UPDATE {WEIGHT_REMINDER_DELIVERIES_TABLE}
+                SET status = ?, claimed_at_utc = NULL, claim_expires_at_utc = NULL, updated_at = ?
+                WHERE status = ?
+                  AND claim_expires_at_utc IS NOT NULL
+                  AND claim_expires_at_utc <= ?
+                """,
+                (
+                    ReminderDeliveryStatus.PENDING.value,
+                    current,
+                    ReminderDeliveryStatus.CLAIMED.value,
+                    current,
+                ),
+            ).rowcount
+            sending = conn.execute(
+                f"""
+                UPDATE {WEIGHT_REMINDER_DELIVERIES_TABLE}
+                SET status = ?, last_error_type = ?, updated_at = ?
+                WHERE status = ?
+                  AND claim_expires_at_utc IS NOT NULL
+                  AND claim_expires_at_utc <= ?
+                """,
+                (
+                    ReminderDeliveryStatus.DELIVERY_UNKNOWN.value,
+                    "expired_sending_claim",
+                    current,
+                    ReminderDeliveryStatus.SENDING.value,
+                    current,
+                ),
+            ).rowcount
+            conn.commit()
+        return {"claimed": int(claimed), "sending": int(sending)}
+
+    def claim_due_setting(
+        self,
+        setting: WeightReminderSetting,
+        *,
+        now_utc: datetime,
+        claim_lease_seconds: int = DEFAULT_CLAIM_LEASE_SECONDS,
+        missed_grace_hours: int = DEFAULT_MISSED_GRACE_HOURS,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> WeightReminderClaim:
+        current_dt = _require_aware_utc(now_utc)
+        current = _sqlite_timestamp(current_dt)
+        lease_until = _sqlite_timestamp(current_dt + timedelta(seconds=int(claim_lease_seconds)))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                f"""
+                SELECT * FROM {WEIGHT_REMINDER_SETTINGS_TABLE}
+                WHERE user_id = ? AND enabled = 1 AND delivery_state = ? LIMIT 1
+                """,
+                (int(setting.user_id), ReminderDeliveryState.ACTIVE.value),
+            ).fetchone()
+            if row is None or row["next_due_at_utc"] is None:
+                conn.commit()
+                return WeightReminderClaim(ReminderClaimOutcome.NOT_ELIGIBLE)
+            fresh = _setting_from_row(row)
+            scheduled = _parse_sqlite_timestamp(str(row["next_due_at_utc"]))
+            decision = classify_missed_reminder(
+                now_utc=current_dt,
+                scheduled_utc=scheduled,
+                timezone_name=fresh.timezone_name,
+                weekday=fresh.weekday,
+                local_time=fresh.local_time,
+                grace_hours=missed_grace_hours,
+            )
+            if decision.action is ReminderScheduleAction.WAIT or decision.occurrence is None:
+                conn.commit()
+                return WeightReminderClaim(ReminderClaimOutcome.WAIT, setting=fresh)
+            key = make_delivery_key(
+                user_id=fresh.user_id,
+                occurrence=decision.occurrence,
+                schedule_version=fresh.schedule_version,
+            )
+            if decision.action is ReminderScheduleAction.SKIP_EXPIRED:
+                conn.execute(
+                    f"""
+                    INSERT OR IGNORE INTO {WEIGHT_REMINDER_DELIVERIES_TABLE}
+                        (user_id, scheduled_for_utc, delivery_key, status, attempt_count,
+                         schedule_version, last_error_type, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        fresh.user_id,
+                        _sqlite_timestamp(decision.occurrence.scheduled_utc),
+                        key,
+                        ReminderDeliveryStatus.SKIPPED.value,
+                        fresh.schedule_version,
+                        "missed_window",
+                        current,
+                        current,
+                    ),
+                )
+                conn.execute(
+                    f"""
+                    UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    SET next_due_at_utc = ?, updated_at = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        _sqlite_timestamp(decision.next_occurrence.scheduled_utc),
+                        current,
+                        fresh.user_id,
+                    ),
+                )
+                conn.commit()
+                return WeightReminderClaim(
+                    ReminderClaimOutcome.SKIPPED_EXPIRED,
+                    setting=fresh,
+                    occurrence=decision.occurrence,
+                    error_type="missed_window",
+                )
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO {WEIGHT_REMINDER_DELIVERIES_TABLE}
+                    (user_id, scheduled_for_utc, delivery_key, status, attempt_count,
+                     schedule_version, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    fresh.user_id,
+                    _sqlite_timestamp(decision.occurrence.scheduled_utc),
+                    key,
+                    ReminderDeliveryStatus.PENDING.value,
+                    fresh.schedule_version,
+                    current,
+                    current,
+                ),
+            )
+            delivery = conn.execute(
+                f"SELECT * FROM {WEIGHT_REMINDER_DELIVERIES_TABLE} WHERE delivery_key = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+            if delivery is None:
+                conn.rollback()
+                raise RuntimeError("Could not load reminder delivery row.")
+            status = ReminderDeliveryStatus(str(delivery["status"]))
+            attempts = int(delivery["attempt_count"])
+            next_attempt_raw = delivery["next_attempt_at_utc"]
+            next_attempt_due = next_attempt_raw is None or str(next_attempt_raw) <= current
+            reclaim_claimed = (
+                status is ReminderDeliveryStatus.CLAIMED
+                and delivery["claim_expires_at_utc"] is not None
+                and str(delivery["claim_expires_at_utc"]) <= current
+            )
+            claimable = (
+                status is ReminderDeliveryStatus.PENDING
+                or (status is ReminderDeliveryStatus.RETRY_WAIT and next_attempt_due)
+                or reclaim_claimed
+            )
+            if not claimable or attempts >= int(max_attempts):
+                conn.commit()
+                return WeightReminderClaim(ReminderClaimOutcome.NOT_ELIGIBLE, setting=fresh)
+            conn.execute(
+                f"""
+                UPDATE {WEIGHT_REMINDER_DELIVERIES_TABLE}
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    claimed_at_utc = ?,
+                    claim_expires_at_utc = ?,
+                    next_attempt_at_utc = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    ReminderDeliveryStatus.CLAIMED.value,
+                    current,
+                    lease_until,
+                    current,
+                    int(delivery["id"]),
+                ),
+            )
+            claimed = conn.execute(
+                f"SELECT * FROM {WEIGHT_REMINDER_DELIVERIES_TABLE} WHERE id = ? LIMIT 1",
+                (int(delivery["id"]),),
+            ).fetchone()
+            conn.commit()
+        return WeightReminderClaim(
+            ReminderClaimOutcome.CLAIMED,
+            setting=fresh,
+            delivery=_delivery_from_row(claimed),
+            occurrence=decision.occurrence,
+        )
+
+    def mark_delivery_sending(self, delivery_id: int, *, now_utc: datetime) -> WeightReminderDelivery:
+        return self._transition_delivery(
+            delivery_id,
+            from_status={ReminderDeliveryStatus.CLAIMED},
+            to_status=ReminderDeliveryStatus.SENDING,
+            now_utc=now_utc,
+        )
+
+    def mark_delivery_retry_wait(
+        self,
+        delivery_id: int,
+        *,
+        error_type: str,
+        next_attempt_at_utc: datetime,
+        now_utc: datetime,
+    ) -> WeightReminderDelivery:
+        return self._transition_delivery(
+            delivery_id,
+            from_status={ReminderDeliveryStatus.CLAIMED, ReminderDeliveryStatus.SENDING},
+            to_status=ReminderDeliveryStatus.RETRY_WAIT,
+            now_utc=now_utc,
+            error_type=error_type,
+            next_attempt_at_utc=next_attempt_at_utc,
+            clear_claim=True,
+        )
+
+    def mark_delivery_unknown_and_advance(
+        self,
+        delivery_id: int,
+        *,
+        setting: WeightReminderSetting,
+        now_utc: datetime,
+        error_type: str = "ambiguous_delivery",
+    ) -> WeightReminderDelivery:
+        current = _require_aware_utc(now_utc)
+        next_due = calculate_next_occurrence_utc(
+            current,
+            setting.timezone_name,
+            setting.weekday,
+            setting.local_time,
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = self._transition_delivery_conn(
+                conn,
+                delivery_id,
+                from_status={ReminderDeliveryStatus.SENDING},
+                to_status=ReminderDeliveryStatus.DELIVERY_UNKNOWN,
+                now_utc=current,
+                error_type=error_type,
+                clear_claim=True,
+            )
+            conn.execute(
+                f"""
+                UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                SET next_due_at_utc = ?, updated_at = ?
+                WHERE user_id = ? AND schedule_version = ?
+                """,
+                (
+                    _sqlite_timestamp(next_due.scheduled_utc),
+                    _sqlite_timestamp(current),
+                    setting.user_id,
+                    setting.schedule_version,
+                ),
+            )
+            conn.commit()
+        return updated
+
+    def mark_delivery_sent_and_advance(
+        self,
+        delivery_id: int,
+        *,
+        setting: WeightReminderSetting,
+        now_utc: datetime,
+    ) -> WeightReminderDelivery:
+        current = _require_aware_utc(now_utc)
+        next_due = calculate_next_occurrence_utc(
+            current,
+            setting.timezone_name,
+            setting.weekday,
+            setting.local_time,
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = self._transition_delivery_conn(
+                conn,
+                delivery_id,
+                from_status={ReminderDeliveryStatus.SENDING},
+                to_status=ReminderDeliveryStatus.SENT,
+                now_utc=current,
+                clear_claim=True,
+                sent_at_utc=current,
+            )
+            conn.execute(
+                f"""
+                UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                SET last_delivered_at_utc = ?, next_due_at_utc = ?, updated_at = ?
+                WHERE user_id = ? AND schedule_version = ?
+                """,
+                (
+                    _sqlite_timestamp(current),
+                    _sqlite_timestamp(next_due.scheduled_utc),
+                    _sqlite_timestamp(current),
+                    setting.user_id,
+                    setting.schedule_version,
+                ),
+            )
+            conn.commit()
+        return updated
+
+    def mark_delivery_permanent_failed(
+        self,
+        delivery_id: int,
+        *,
+        setting: WeightReminderSetting,
+        now_utc: datetime,
+        error_type: str,
+        suspend_user: bool,
+    ) -> WeightReminderDelivery:
+        current = _require_aware_utc(now_utc)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = self._transition_delivery_conn(
+                conn,
+                delivery_id,
+                from_status={ReminderDeliveryStatus.CLAIMED, ReminderDeliveryStatus.SENDING, ReminderDeliveryStatus.RETRY_WAIT},
+                to_status=ReminderDeliveryStatus.PERMANENT_FAILED,
+                now_utc=current,
+                error_type=error_type,
+                clear_claim=True,
+            )
+            if suspend_user:
+                conn.execute(
+                    f"""
+                    UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    SET delivery_state = ?, suspended_at_utc = ?, suspension_reason = ?, updated_at = ?
+                    WHERE user_id = ? AND schedule_version = ?
+                    """,
+                    (
+                        ReminderDeliveryState.SUSPENDED.value,
+                        _sqlite_timestamp(current),
+                        _safe_reason(error_type),
+                        _sqlite_timestamp(current),
+                        setting.user_id,
+                        setting.schedule_version,
+                    ),
+                )
+            conn.commit()
+        return updated
+
+    def mark_delivery_skipped_stale_and_advance(
+        self,
+        delivery_id: int,
+        *,
+        setting: WeightReminderSetting | None,
+        now_utc: datetime,
+        error_type: str = "stale_schedule",
+    ) -> WeightReminderDelivery:
+        current = _require_aware_utc(now_utc)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = self._transition_delivery_conn(
+                conn,
+                delivery_id,
+                from_status={ReminderDeliveryStatus.CLAIMED},
+                to_status=ReminderDeliveryStatus.SKIPPED_STALE,
+                now_utc=current,
+                error_type=error_type,
+                clear_claim=True,
+            )
+            if setting is not None and setting.enabled and setting.delivery_state is ReminderDeliveryState.ACTIVE:
+                next_due = calculate_next_occurrence_utc(
+                    current,
+                    setting.timezone_name,
+                    setting.weekday,
+                    setting.local_time,
+                )
+                conn.execute(
+                    f"""
+                    UPDATE {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    SET next_due_at_utc = ?, updated_at = ?
+                    WHERE user_id = ? AND schedule_version = ?
+                    """,
+                    (
+                        _sqlite_timestamp(next_due.scheduled_utc),
+                        _sqlite_timestamp(current),
+                        setting.user_id,
+                        setting.schedule_version,
+                    ),
+                )
+            conn.commit()
+        return updated
+
+    def _transition_delivery(
+        self,
+        delivery_id: int,
+        *,
+        from_status: set[ReminderDeliveryStatus],
+        to_status: ReminderDeliveryStatus,
+        now_utc: datetime,
+        error_type: str | None = None,
+        next_attempt_at_utc: datetime | None = None,
+        clear_claim: bool = False,
+    ) -> WeightReminderDelivery:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = self._transition_delivery_conn(
+                conn,
+                delivery_id,
+                from_status=from_status,
+                to_status=to_status,
+                now_utc=now_utc,
+                error_type=error_type,
+                next_attempt_at_utc=next_attempt_at_utc,
+                clear_claim=clear_claim,
+            )
+            conn.commit()
+        return updated
+
+    def _transition_delivery_conn(
+        self,
+        conn: sqlite3.Connection,
+        delivery_id: int,
+        *,
+        from_status: set[ReminderDeliveryStatus],
+        to_status: ReminderDeliveryStatus,
+        now_utc: datetime,
+        error_type: str | None = None,
+        next_attempt_at_utc: datetime | None = None,
+        clear_claim: bool = False,
+        sent_at_utc: datetime | None = None,
+    ) -> WeightReminderDelivery:
+        current = _sqlite_timestamp(now_utc)
+        allowed = tuple(status.value for status in from_status)
+        placeholders = ",".join("?" for _ in allowed)
+        claimed_at_sql = "NULL" if clear_claim else "claimed_at_utc"
+        claim_expires_sql = "NULL" if clear_claim else "claim_expires_at_utc"
+        conn.execute(
+            f"""
+            UPDATE {WEIGHT_REMINDER_DELIVERIES_TABLE}
+            SET status = ?,
+                last_error_type = COALESCE(?, last_error_type),
+                next_attempt_at_utc = ?,
+                claimed_at_utc = {claimed_at_sql},
+                claim_expires_at_utc = {claim_expires_sql},
+                sent_at_utc = COALESCE(?, sent_at_utc),
+                updated_at = ?
+            WHERE id = ? AND status IN ({placeholders})
+            """,
+            (
+                to_status.value,
+                _safe_error_type(error_type) if error_type else None,
+                _sqlite_timestamp(next_attempt_at_utc) if next_attempt_at_utc else None,
+                _sqlite_timestamp(sent_at_utc) if sent_at_utc else None,
+                current,
+                int(delivery_id),
+                *allowed,
+            ),
+        )
+        row = conn.execute(
+            f"SELECT * FROM {WEIGHT_REMINDER_DELIVERIES_TABLE} WHERE id = ? LIMIT 1",
+            (int(delivery_id),),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Reminder delivery row disappeared.")
+        if ReminderDeliveryStatus(str(row["status"])) is not to_status:
+            raise ReminderSchedulingError("illegal reminder delivery transition")
+        return _delivery_from_row(row)
+
+    def get_active_setting_if_current(
+        self,
+        *,
+        user_id: int,
+        schedule_version: int,
+    ) -> WeightReminderSetting | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM {WEIGHT_REMINDER_SETTINGS_TABLE}
+                WHERE user_id = ? AND schedule_version = ? LIMIT 1
+                """,
+                (int(user_id), int(schedule_version)),
+            ).fetchone()
+        return _setting_from_row(row) if row is not None else None
+
+
     def insert_delivery_if_absent(
         self,
         *,
@@ -699,6 +1265,11 @@ def _safe_reason(value: str) -> str:
         "unknown",
     }
     return normalized if normalized in allowed else "unknown"
+
+
+def _safe_error_type(value: str | None) -> str:
+    normalized = re.sub(r"[^a-z0-9_:-]+", "_", (value or "unknown").strip().lower()).strip("_")
+    return normalized[:64] or "unknown"
 
 
 def get_default_weight_reminder_store() -> HealBiteWeightReminderStore:

@@ -2706,6 +2706,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._restart_via_service = False
         self._restart_command_source: Optional[SessionSource] = None
         self._stop_task: Optional[asyncio.Task] = None
+        self._weight_reminder_scheduler = None
+        self._weight_reminder_scheduler_task: Optional[asyncio.Task] = None
         
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
@@ -5787,6 +5789,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
+        await self._start_weight_reminder_scheduler_if_configured()
+
         # Start background session expiry watcher to finalize expired sessions
         asyncio.create_task(self._session_expiry_watcher())
 
@@ -5819,6 +5823,56 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         logger.info("Press Ctrl+C to stop")
         
         return True
+
+
+    async def _start_weight_reminder_scheduler_if_configured(self) -> None:
+        try:
+            from gateway.healbite_weight_reminder_scheduler import build_weight_reminder_scheduler
+            from gateway.healbite_weight_reminders import load_weight_reminder_config
+        except Exception:
+            logger.debug("weight reminder scheduler import failed", exc_info=True)
+            return
+        config = load_weight_reminder_config()
+        if not config.enabled or not config.allowlist:
+            logger.info(
+                "[HealBite][weight_reminder_scheduler] route=weight_reminder action=start outcome=disabled enabled=%s",
+                bool(config.enabled),
+            )
+            return
+        telegram_adapter = self.adapters.get(Platform.TELEGRAM)
+        if telegram_adapter is None:
+            logger.info(
+                "[HealBite][weight_reminder_scheduler] route=weight_reminder action=start outcome=no_telegram_adapter enabled=true"
+            )
+            return
+
+        async def _send_reminder(user_id: int, text: str) -> None:
+            result = await telegram_adapter.send(
+                str(int(user_id)),
+                text,
+                metadata={"notification_type": "weight_reminder"},
+            )
+            if getattr(result, "success", False):
+                return
+            from gateway.healbite_weight_reminder_scheduler import (
+                WeightReminderDeliveryError,
+                WeightReminderFailureKind,
+            )
+            retryable = bool(getattr(result, "retryable", False))
+            raise WeightReminderDeliveryError(
+                WeightReminderFailureKind.TRANSIENT if retryable else WeightReminderFailureKind.PERMANENT,
+                error_type="telegram_send_failed",
+            )
+
+        scheduler = build_weight_reminder_scheduler(send_reminder=_send_reminder)
+        if scheduler is None:
+            return
+        self._weight_reminder_scheduler = scheduler
+        self._weight_reminder_scheduler_task = scheduler.start()
+        if self._weight_reminder_scheduler_task is not None:
+            self._background_tasks.add(self._weight_reminder_scheduler_task)
+            self._weight_reminder_scheduler_task.add_done_callback(self._background_tasks.discard)
+
 
     async def _handoff_watcher(self, interval: float = 2.0) -> None:
         """Background task that processes pending CLI→gateway session handoffs.
@@ -6623,6 +6677,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _entry[0] if isinstance(_entry, tuple) else _entry
                     )
                     self._cleanup_agent_resources(_agent)
+
+            if self._weight_reminder_scheduler is not None:
+                try:
+                    await self._weight_reminder_scheduler.stop()
+                except Exception as e:
+                    logger.debug("weight reminder scheduler stop error: %s", e)
+                self._weight_reminder_scheduler = None
+                self._weight_reminder_scheduler_task = None
 
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()

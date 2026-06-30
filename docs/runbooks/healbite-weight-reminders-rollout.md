@@ -243,3 +243,82 @@ sqlite_integrity=ok
 qdrant_unchanged=true
 reminder_delivery_count_after_rollback=0
 ```
+
+## Merge-Gate Operational Contract
+
+The design review fixes these operational defaults:
+
+```text
+WEIGHT_REMINDER_SCAN_INTERVAL_SECONDS=60
+WEIGHT_REMINDER_CLAIM_LEASE_SECONDS=300
+WEIGHT_REMINDER_BATCH_SIZE=50
+WEIGHT_REMINDER_MISSED_GRACE_HOURS=12
+```
+
+Delivery state names expected in implementation:
+
+```text
+pending
+claimed
+sending
+retry_wait
+sent
+delivery_unknown
+permanent_failed
+skipped
+skipped_stale
+```
+
+Per-user permanent delivery failures must suspend delivery without clearing the
+user's opt-in:
+
+```text
+blocked user / chat not found
+-> delivery_state=suspended
+-> enabled remains true
+-> automatic deliveries stop
+-> UI shows suspended state
+```
+
+Global bot auth failures must not mutate per-user settings:
+
+```text
+401/403 bot authentication failure
+-> global scheduler circuit breaker
+-> no per-user setting changes
+-> safe critical marker only
+```
+
+Ambiguous delivery outcome:
+
+```text
+Telegram send may have been accepted
+but sent_at_utc was not committed
+-> status=delivery_unknown
+-> no automatic retry for same occurrence
+-> next scheduled occurrence continues normally
+```
+
+Before each send, implementation must verify:
+
+```text
+setting still enabled
+delivery_state=active
+schedule_version matches claimed occurrence
+```
+
+Mismatch means:
+
+```text
+status=skipped_stale
+message not sent
+next_due_at_utc recalculated
+```
+
+DST behavior:
+
+```text
+spring-forward nonexistent local time -> first valid instant after requested wall time
+fall-back repeated local time -> first occurrence / fold=0
+timezone change -> increment schedule_version and recalculate next_due_at_utc
+```

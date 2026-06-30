@@ -126,3 +126,65 @@ Costs:
 - requires timezone and DST tests;
 - requires duplicate-delivery smoke;
 - requires privacy tests for scheduler, callbacks, and delivery markers.
+
+## Merge-Gate Decision Addendum
+
+The implementation contract is narrowed as follows.
+
+Runtime defaults:
+
+```text
+scan_interval=60 seconds
+claim_lease_duration=5 minutes
+batch_size=50
+missed_grace_window=12 hours
+```
+
+Settings distinguish user intent from operational deliverability:
+
+```text
+enabled = explicit user opt-in
+delivery_state = active | suspended
+```
+
+Per-user permanent failures suspend delivery but preserve opt-in:
+
+```text
+blocked user / chat not found
+-> delivery_state=suspended
+-> enabled remains true
+```
+
+Global bot authentication failure activates a scheduler circuit breaker and
+does not mutate per-user settings.
+
+Delivery states are:
+
+```text
+pending
+claimed
+sending
+retry_wait
+sent
+delivery_unknown
+permanent_failed
+skipped
+skipped_stale
+```
+
+Ambiguous Telegram send outcomes are not retried automatically:
+
+```text
+Telegram accepted message but process crashed before sent_at_utc commit
+-> delivery_unknown
+-> no retry for same occurrence
+```
+
+This chooses avoiding duplicate reminders over guaranteeing every ambiguous
+occurrence is delivered.
+
+Before send, the worker must confirm `enabled=true`, `delivery_state=active`,
+and matching `schedule_version`; otherwise the occurrence becomes
+`skipped_stale`.
+
+Fall-back DST repeated local time uses the first occurrence (`fold=0`).

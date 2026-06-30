@@ -571,3 +571,197 @@ Privacy:
   input in MVP?
 - Should local time be arbitrary minute or fixed 15-minute slots?
 - Where should reminder allowlist administration live for production operators?
+
+## Merge-Gate Design Review Resolution
+
+This section resolves the Sprint 7.0C2 merge-gate acceptance matrix and is
+normative for implementation.
+
+### Fixed Runtime Defaults
+
+```text
+scan_interval=60 seconds
+claim_lease_duration=5 minutes
+batch_size=50 due occurrences per tick
+missed_grace_window=12 hours
+```
+
+The batch size is intentionally bounded so reminder delivery cannot monopolize
+the Telegram polling loop.
+
+### Settings State Contract
+
+`weight_reminder_settings` must include:
+
+```text
+user_id
+enabled
+timezone
+weekday
+local_time
+next_due_at_utc
+schedule_version
+delivery_state
+suspended_at_utc nullable
+suspension_reason nullable
+last_delivered_at_utc nullable
+created_at
+updated_at
+```
+
+`enabled` means explicit user opt-in. `delivery_state` is operational state and
+must be one of:
+
+```text
+active
+suspended
+```
+
+`enabled=true` and `delivery_state=suspended` means the user opted in, but
+automatic delivery is paused because the platform returned a permanent
+per-user delivery failure.
+
+### Delivery State Machine
+
+`weight_reminder_deliveries.status` must be one of:
+
+```text
+pending
+claimed
+sending
+retry_wait
+sent
+delivery_unknown
+permanent_failed
+skipped
+skipped_stale
+```
+
+State meanings:
+
+- `pending`: outbox row exists but is not claimed.
+- `claimed`: a scheduler owns the occurrence before send starts.
+- `sending`: Telegram send was started and outcome may become ambiguous.
+- `retry_wait`: definite transient failure before confirmed delivery.
+- `sent`: Telegram send succeeded and `sent_at_utc` was committed.
+- `delivery_unknown`: Telegram may have accepted the message but the process
+  crashed or DB commit failed before `sent_at_utc`.
+- `permanent_failed`: permanent per-user failure.
+- `skipped`: occurrence skipped by missed-window or disabled-setting policy.
+- `skipped_stale`: settings changed after claim and before send.
+
+### Permanent Failure Policy
+
+Per-user permanent delivery failures use suspension, not opt-out mutation:
+
+```text
+blocked user / chat not found
+-> delivery_state=suspended
+-> enabled remains true
+-> automatic deliveries stop
+-> retry storm is prevented
+-> UI shows suspended state
+-> user can explicitly re-enable or repair settings
+```
+
+Global bot authentication failures use a circuit breaker:
+
+```text
+401/403 bot authentication failure
+-> global scheduler circuit breaker
+-> per-user settings are not changed
+-> further sends stop temporarily
+-> safe critical observability event is emitted
+```
+
+### Ambiguous Send Policy
+
+The implementation must not claim absolute Telegram exactly-once delivery.
+
+Enforceable:
+
+```text
+DB occurrence uniqueness
+at-most-one recorded successful delivery
+```
+
+Not fully enforceable:
+
+```text
+Telegram network delivery exactly once
+```
+
+Ambiguous window:
+
+```text
+Telegram accepted message
+-> process crashes before sent_at_utc commit
+```
+
+Recovery policy:
+
+```text
+status=delivery_unknown
+no automatic retry for the same occurrence
+proceed to next scheduled occurrence
+```
+
+For reminder UX, skipping one ambiguous occurrence is safer than sending a
+duplicate reminder.
+
+Expired claim recovery is state-specific:
+
+```text
+claimed before send:
+  may be reclaimed after claim lease expires
+
+sending with ambiguous outcome:
+  must not be blindly retried
+  becomes delivery_unknown after recovery audit
+```
+
+### Schedule Version Contract
+
+Before sending, the scheduler must re-read settings and confirm:
+
+```text
+setting still enabled
+delivery_state=active
+schedule_version matches claimed occurrence
+```
+
+If this check fails:
+
+```text
+status=skipped_stale
+message not sent
+next_due_at_utc recalculated from current settings
+```
+
+Any timezone, weekday, local-time, enable/disable, or suspension-state change
+increments `schedule_version`.
+
+### DST Fold Contract
+
+Spring-forward:
+
+```text
+nonexistent local time
+-> shift to first valid local instant after requested wall time
+```
+
+Fall-back:
+
+```text
+ambiguous repeated local time
+-> use the first occurrence (fold=0)
+-> delivery_key still guarantees one occurrence
+```
+
+Timezone change:
+
+```text
+schedule_version increments
+next_due_at_utc recalculated
+old claimed occurrence becomes stale
+```

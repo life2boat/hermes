@@ -324,14 +324,17 @@ def test_disable_suspend_and_resume_contracts(tmp_path):
         now_utc=now,
     )
 
-    suspended = store.suspend_delivery(101, safe_reason="blocked user PII_SHOULD_NOT_SURVIVE", now_utc=now)
+    suspended = store.suspend_delivery(101, safe_reason="blocked_user", now_utc=now)
+    unsafe = store.suspend_delivery(101, safe_reason="blocked user PII_SHOULD_NOT_SURVIVE", now_utc=now)
     disabled = store.disable_settings(101, now_utc=now)
     resumed = store.resume_delivery(101, now_utc=now)
 
     assert suspended is not None
     assert suspended.enabled is True
     assert suspended.delivery_state is ReminderDeliveryState.SUSPENDED
-    assert suspended.suspension_reason == "blocked_user_pii_should_not_survive"
+    assert suspended.suspension_reason == "blocked_user"
+    assert unsafe is not None
+    assert unsafe.suspension_reason == "unknown"
     assert disabled is not None
     assert disabled.enabled is False
     assert disabled.next_due_at_utc is None
@@ -378,6 +381,37 @@ def test_outbox_insert_is_idempotent_and_constraints_are_enforced(tmp_path):
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (101, "2026-06-29 09:00:00", "bad-attempt", "pending", -1, "2026-06-29 00:00:00", "2026-06-29 00:00:00"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                f"""
+                INSERT INTO {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    (user_id, enabled, timezone, weekday, local_time, schedule_version,
+                     delivery_state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (303, 1, "UTC", 0, "24:00", 1, "active", "2026-06-29 00:00:00", "2026-06-29 00:00:00"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                f"""
+                INSERT INTO {WEIGHT_REMINDER_SETTINGS_TABLE}
+                    (user_id, enabled, timezone, weekday, local_time, schedule_version,
+                     delivery_state, suspension_reason, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    404,
+                    1,
+                    "UTC",
+                    0,
+                    "09:00",
+                    1,
+                    "suspended",
+                    "raw_user_text_should_not_store",
+                    "2026-06-29 00:00:00",
+                    "2026-06-29 00:00:00",
+                ),
             )
 
 

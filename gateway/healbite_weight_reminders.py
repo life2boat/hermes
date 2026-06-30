@@ -112,13 +112,22 @@ CREATE TABLE IF NOT EXISTS {WEIGHT_REMINDER_SETTINGS_TABLE} (
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
     timezone TEXT NOT NULL,
     weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
-    local_time TEXT NOT NULL,
+    local_time TEXT NOT NULL
+        CHECK (local_time GLOB '[0-2][0-9]:[0-5][0-9]' AND substr(local_time, 1, 2) BETWEEN '00' AND '23'),
     next_due_at_utc TEXT,
     schedule_version INTEGER NOT NULL DEFAULT 1 CHECK (schedule_version >= 0),
     delivery_state TEXT NOT NULL DEFAULT 'active'
         CHECK (delivery_state IN ('active', 'suspended')),
     suspended_at_utc TEXT,
-    suspension_reason TEXT,
+    suspension_reason TEXT
+        CHECK (suspension_reason IS NULL OR suspension_reason IN (
+            'blocked_user',
+            'chat_not_found',
+            'bot_blocked',
+            'delivery_permanent_failure',
+            'manual_suspend',
+            'unknown'
+        )),
     last_delivered_at_utc TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -680,9 +689,16 @@ class HealBiteWeightReminderStore:
 
 
 def _safe_reason(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_:-]+", "_", (value or "").strip().lower())
-    normalized = normalized.strip("_")
-    return normalized[:64] or "unknown"
+    normalized = re.sub(r"[^a-z0-9_:-]+", "_", (value or "").strip().lower()).strip("_")
+    allowed = {
+        "blocked_user",
+        "chat_not_found",
+        "bot_blocked",
+        "delivery_permanent_failure",
+        "manual_suspend",
+        "unknown",
+    }
+    return normalized if normalized in allowed else "unknown"
 
 
 def get_default_weight_reminder_store() -> HealBiteWeightReminderStore:

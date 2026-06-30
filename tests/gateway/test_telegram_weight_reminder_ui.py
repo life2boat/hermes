@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -171,7 +173,11 @@ async def test_first_opt_in_uses_draft_and_writes_only_on_confirm(tmp_path, monk
 
     assert _counts(db_path) == (0, 0)
     assert USER_ID in adapter._weight_reminder_drafts
-    assert "Включить" in _button_texts(query.edit_message_text.await_args.kwargs["reply_markup"])
+    review_buttons = _button_texts(query.edit_message_text.await_args.kwargs["reply_markup"])
+    assert "Включить" in review_buttons
+    assert "Изменить день" in review_buttons
+    assert "Изменить время" in review_buttons
+    assert "Изменить часовой пояс" in review_buttons
 
     await adapter._handle_healbite_weight_callback(query, "weight:reminder:confirm")
 
@@ -186,6 +192,40 @@ async def test_first_opt_in_uses_draft_and_writes_only_on_confirm(tmp_path, monk
     assert _counts(db_path) == (1, 0)
     assert USER_ID not in adapter._weight_reminder_drafts
     adapter._enqueue_text_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_expired_draft_is_rejected_without_write(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    _setup_stores(monkeypatch, db_path)
+    _enable(monkeypatch)
+    adapter = _adapter(monkeypatch)
+    query = _query()
+
+    await _select_default_schedule(adapter, query)
+    adapter._weight_reminder_drafts[USER_ID].updated_at_utc = datetime.now(timezone.utc) - timedelta(minutes=31)
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:confirm")
+
+    assert USER_ID not in adapter._weight_reminder_drafts
+    assert _counts(db_path) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_review_edit_actions_preserve_draft_without_write(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    _setup_stores(monkeypatch, db_path)
+    _enable(monkeypatch)
+    adapter = _adapter(monkeypatch)
+    query = _query()
+
+    await _select_default_schedule(adapter, query)
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:weekday")
+    assert adapter._weight_reminder_drafts[USER_ID].step == "weekday"
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:time")
+    assert adapter._weight_reminder_drafts[USER_ID].step == "hour"
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:timezone")
+    assert adapter._weight_reminder_drafts[USER_ID].step == "timezone"
+    assert _counts(db_path) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -347,3 +387,40 @@ def test_callback_payloads_are_short_and_do_not_contain_private_values():
     assert all(len(payload.encode("utf-8")) <= 64 for payload in payloads)
     assert all("Europe/" not in payload and "Asia/" not in payload and "America/" not in payload for payload in payloads)
     assert all("101" not in payload for payload in payloads)
+
+
+@pytest.mark.asyncio
+async def test_identical_save_preserves_next_due_and_schedule_version(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    _profile, _tracker, store = _setup_stores(monkeypatch, db_path)
+    _enable(monkeypatch)
+    original = store.create_or_update_settings(
+        user_id=USER_ID,
+        timezone_name="UTC",
+        weekday=0,
+        local_time="09:00",
+        enabled=True,
+    )
+    adapter = _adapter(monkeypatch)
+    query = _query()
+
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:edit")
+    await adapter._handle_healbite_weight_callback(query, "weight:reminder:confirm")
+
+    setting = store.get_settings(USER_ID)
+    assert setting is not None
+    assert setting.schedule_version == original.schedule_version
+    assert setting.next_due_at_utc == original.next_due_at_utc
+
+
+def test_all_supported_timezone_aliases_are_unique_valid_and_private():
+    aliases = list(reminder_ui.SUPPORTED_WEIGHT_REMINDER_TIMEZONES)
+    values = [entry[1] for entry in reminder_ui.SUPPORTED_WEIGHT_REMINDER_TIMEZONES.values()]
+
+    assert len(aliases) == len(set(aliases))
+    assert len(values) == len(set(values))
+    for alias, (_label, timezone_name) in reminder_ui.SUPPORTED_WEIGHT_REMINDER_TIMEZONES.items():
+        assert alias == alias.lower()
+        assert reminder_ui.timezone_name_for_alias(alias) == timezone_name
+        assert ZoneInfo(timezone_name)
+        assert "101" not in alias

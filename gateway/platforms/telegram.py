@@ -6171,6 +6171,22 @@ class TelegramAdapter(BasePlatformAdapter):
         self._log_weight_reminder_marker(query, action=draft.step, outcome="shown", draft=draft, confirmation_required=draft.step == "review")
         await self._edit_weight_reminder_screen(query, text=text, rows=rows)
 
+    def _prune_weight_reminder_drafts(self) -> None:
+        expired_keys = [
+            key for key, draft in self._weight_reminder_drafts.items()
+            if draft.expired()
+        ]
+        for key in expired_keys:
+            self._weight_reminder_drafts.pop(key, None)
+        if len(self._weight_reminder_drafts) <= 512:
+            return
+        oldest = sorted(
+            self._weight_reminder_drafts.items(),
+            key=lambda item: item[1].updated_at_utc,
+        )[:128]
+        for key, _draft in oldest:
+            self._weight_reminder_drafts.pop(key, None)
+
     def _weight_reminder_current_draft(
         self,
         user_id: int,
@@ -6178,12 +6194,18 @@ class TelegramAdapter(BasePlatformAdapter):
         setting: Any = None,
         mode: str = "create",
     ) -> weight_reminder_ui.WeightReminderDraft:
+        self._prune_weight_reminder_drafts()
         draft = self._weight_reminder_drafts.get(int(user_id))
+        if draft is not None and draft.expired():
+            self._weight_reminder_drafts.pop(int(user_id), None)
+            draft = None
         if draft is None:
             profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
             profile_timezone = getattr(profile, "timezone", None) if profile is not None else None
             draft = weight_reminder_ui.draft_from_profile_timezone(setting, profile_timezone, mode=mode)
             self._weight_reminder_drafts[int(user_id)] = draft
+        else:
+            draft.touch()
         return draft
 
     async def _handle_healbite_weight_reminder_callback(self, query: Any, data: str, *, user_id: int) -> None:
@@ -6196,6 +6218,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 notice="Настройки напоминаний недоступны.",
             )
             return
+        self._prune_weight_reminder_drafts()
         parts = data.split(":")
         subaction = parts[2] if len(parts) > 2 else "main"
         store = get_default_weight_reminder_store()
@@ -6223,6 +6246,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if subaction == "back":
             draft = self._weight_reminder_drafts.get(int(user_id))
+            if draft is not None and draft.expired():
+                self._weight_reminder_drafts.pop(int(user_id), None)
+                draft = None
             if draft is None:
                 await query.answer(text="Настройка устарела.")
                 await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка устарела. Откройте её снова.")
@@ -6233,7 +6259,20 @@ class TelegramAdapter(BasePlatformAdapter):
             except ValueError:
                 index = 0
             draft.step = order[max(0, index - 1)]
+            draft.touch()
             await query.answer(text="Назад.")
+            await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
+            return
+        if subaction in {"timezone", "weekday", "time", "review"}:
+            draft = self._weight_reminder_drafts.get(int(user_id))
+            if draft is None or draft.expired():
+                self._weight_reminder_drafts.pop(int(user_id), None)
+                await query.answer(text="Настройка устарела.")
+                await self._show_weight_reminder_main(query, user_id=int(user_id), notice="Настройка устарела. Откройте её снова.")
+                return
+            draft.step = "hour" if subaction == "time" else subaction
+            draft.touch()
+            await query.answer(text="Измените параметр.")
             await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
             return
         if subaction == "tz" and len(parts) == 4:
@@ -6244,6 +6283,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
             draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
             draft.timezone_name = tz_name
+            draft.touch()
             draft.step = "weekday"
             await query.answer(text="Часовой пояс выбран.")
             await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
@@ -6259,6 +6299,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
             draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
             draft.weekday = day
+            draft.touch()
             draft.step = "hour"
             await query.answer(text="День выбран.")
             await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
@@ -6270,6 +6311,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
             draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
             draft.hour = parts[3]
+            draft.touch()
             draft.step = "minute"
             await query.answer(text="Час выбран.")
             await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
@@ -6281,12 +6323,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
             draft = self._weight_reminder_current_draft(int(user_id), setting=setting)
             draft.minute = parts[3]
+            draft.touch()
             draft.step = "review"
             await query.answer(text="Проверьте настройку.")
             await self._show_weight_reminder_draft_step(query, user_id=int(user_id), draft=draft)
             return
         if subaction == "confirm":
             draft = self._weight_reminder_drafts.get(int(user_id))
+            if draft is not None and draft.expired():
+                self._weight_reminder_drafts.pop(int(user_id), None)
+                draft = None
             parsed = weight_reminder_ui.validate_draft(draft) if draft is not None else None
             if draft is None or parsed is None:
                 await query.answer(text="Настройка устарела.")
@@ -6332,6 +6378,7 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._edit_weight_reminder_screen(query, text=text, rows=rows)
             return
         if subaction == "resume_confirm":
+            self._weight_reminder_drafts.pop(int(user_id), None)
             updated = store.resume_delivery(int(user_id))
             await query.answer(text="Напоминание включено." if updated is not None else "Настройка не найдена.")
             self._log_weight_reminder_marker(query, action="resume_confirm", outcome="resumed" if updated is not None else "missing", setting=updated)

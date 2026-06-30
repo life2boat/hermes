@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from gateway.healbite_weight_reminders import (
@@ -46,6 +46,7 @@ REMINDER_HOURS = tuple(f"{hour:02d}" for hour in range(24))
 DEFAULT_REMINDER_WEEKDAY = 6
 DEFAULT_REMINDER_TIME = "09:00"
 DEFAULT_REMINDER_TIMEZONE = "UTC"
+WEIGHT_REMINDER_DRAFT_TTL = timedelta(minutes=30)
 
 
 @dataclass(slots=True)
@@ -57,6 +58,14 @@ class WeightReminderDraft:
     hour: str | None = None
     minute: str | None = None
     source_schedule_version: int | None = None
+    updated_at_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def touch(self, *, now_utc: datetime | None = None) -> None:
+        self.updated_at_utc = now_utc or datetime.now(timezone.utc)
+
+    def expired(self, *, now_utc: datetime | None = None) -> bool:
+        current = now_utc or datetime.now(timezone.utc)
+        return current - self.updated_at_utc > WEIGHT_REMINDER_DRAFT_TTL
 
     @property
     def local_time(self) -> str | None:
@@ -253,7 +262,16 @@ def review_screen(draft: WeightReminderDraft) -> tuple[str, list[list[tuple[str,
         f"Время: {local_time}\n"
         f"Часовой пояс: {html.escape(timezone_name)}"
     )
-    return text, rows(("Включить", "weight:reminder:confirm"), ("Назад", "weight:reminder:back"), ("Отмена", "weight:reminder:cancel"))
+    action_label = "Сохранить" if draft.source_schedule_version is not None else "Включить"
+    return text, rows(
+        (action_label, "weight:reminder:confirm"),
+        [
+            ("Изменить день", "weight:reminder:weekday"),
+            ("Изменить время", "weight:reminder:time"),
+        ],
+        ("Изменить часовой пояс", "weight:reminder:timezone"),
+        ("Отмена", "weight:reminder:cancel"),
+    )
 
 
 def disable_screen(setting: WeightReminderSetting | None) -> tuple[str, list[list[tuple[str, str]]]]:

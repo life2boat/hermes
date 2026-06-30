@@ -559,6 +559,18 @@ class HealBiteWeightReminderStore:
                     or int(existing["weekday"]) != day
                     or str(existing["local_time"]) != normalized_time
                 )
+                existing_active = str(existing["delivery_state"]) == ReminderDeliveryState.ACTIVE.value
+                next_due_changed = (
+                    schedule_changed
+                    or not bool(int(existing["enabled"]))
+                    or not existing_active
+                    or existing["next_due_at_utc"] is None
+                )
+                next_due_value = (
+                    _sqlite_timestamp(next_due.scheduled_utc)
+                    if next_due_changed
+                    else str(existing["next_due_at_utc"])
+                )
                 version = int(existing["schedule_version"]) + (1 if schedule_changed else 0)
                 conn.execute(
                     f"""
@@ -580,7 +592,7 @@ class HealBiteWeightReminderStore:
                         tz_name,
                         day,
                         normalized_time,
-                        _sqlite_timestamp(next_due.scheduled_utc),
+                        next_due_value,
                         version,
                         ReminderDeliveryState.ACTIVE.value,
                         timestamp,
@@ -652,6 +664,18 @@ class HealBiteWeightReminderStore:
                     str(existing["timezone"]) != tz_name
                     or int(existing["weekday"]) != day
                     or str(existing["local_time"]) != normalized_time
+                )
+                existing_active = str(existing["delivery_state"]) == ReminderDeliveryState.ACTIVE.value
+                next_due_changed = (
+                    schedule_changed
+                    or not bool(int(existing["enabled"]))
+                    or not existing_active
+                    or existing["next_due_at_utc"] is None
+                )
+                next_due_value = (
+                    _sqlite_timestamp(next_due.scheduled_utc)
+                    if next_due_changed
+                    else str(existing["next_due_at_utc"])
                 )
                 version = int(existing["schedule_version"]) + (1 if schedule_changed else 0)
                 conn.execute(

@@ -80,6 +80,9 @@ def audit_db_path(db_path: str | Path) -> dict[str, Any]:
             if not reminder_tables:
                 result.update({"schema_state": "not_initialized", "audit_status": "pass"})
                 return result
+            if settings_present != deliveries_present:
+                result.update({"schema_state": "partial_canonical", "audit_status": "failed"})
+                return result
             if not (settings_present and deliveries_present):
                 result.update({"schema_state": "unexpected_reminder_schema", "audit_status": "failed"})
                 return result

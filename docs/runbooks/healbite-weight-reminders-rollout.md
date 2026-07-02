@@ -122,7 +122,8 @@ Production DB audit rules:
   strings, weight values, profile values, or exception bodies.
 
 `schema_state=not_initialized` is valid only when no `weight_reminder_%` tables
-exist. Unknown reminder tables are not equivalent to `not_initialized`.
+exist. A database with only one canonical table is `partial_canonical` and must
+fail audit. Unknown reminder tables are not equivalent to `not_initialized`.
 After a controlled allowlisted rollout, nonzero disabled settings and sent
 delivery counts are expected append-only history and must not be deleted to get a
 clean baseline.

@@ -107,6 +107,49 @@ def test_controlled_rollout_like_state_reports_safe_aggregates(tmp_path):
     assert result["deliveries_permanent_failed"] == 0
 
 
+
+def test_partial_canonical_schema_fails_explicitly(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"""
+            CREATE TABLE {WEIGHT_REMINDER_SETTINGS_TABLE} (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                delivery_state TEXT NOT NULL
+            )
+            """
+        )
+
+    result = _audit(db_path)
+
+    assert result["audit_status"] == "failed"
+    assert result["schema_state"] == "partial_canonical"
+    assert result["settings_table_present"] is True
+    assert result["deliveries_table_present"] is False
+
+
+def test_permission_denied_fails_safely_without_raw_exception(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY)")
+    db_path.chmod(0)
+    try:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = weight_reminder_db_audit.main([str(db_path)])
+    finally:
+        db_path.chmod(0o600)
+
+    if exit_code == 0:
+        pytest.skip("current user can still read chmod 000 file")
+    payload = output.getvalue()
+    result = json.loads(payload)
+    assert result["audit_status"] == "failed"
+    assert result["error_type"] == "SQLITE_DATABASE_ERROR"
+    assert str(db_path) not in payload
+    assert "permission" not in payload.lower()
+
 def test_legacy_names_only_fails_as_unexpected_schema(tmp_path):
     db_path = tmp_path / "healbite.db"
     with sqlite3.connect(db_path) as conn:

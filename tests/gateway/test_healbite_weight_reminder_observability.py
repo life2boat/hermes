@@ -203,6 +203,63 @@ async def test_expired_and_stale_skip_markers_are_safe(tmp_path, caplog):
     _assert_private_values_absent(text)
 
 
+
+@pytest.mark.asyncio
+async def test_enabled_scheduler_emits_one_start_and_one_stop_marker(tmp_path, caplog):
+    scheduler = WeightReminderScheduler(
+        store=_store(tmp_path),
+        config=_config(interval=3600),
+        send_reminder=lambda *_: None,
+        sleep_fn=asyncio.sleep,
+        now_fn=Clock(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        task1 = scheduler.start()
+        task2 = scheduler.start()
+        await scheduler.stop()
+
+    assert task1 is task2
+    text = _messages(caplog)
+    assert text.count("action=start") == 1
+    assert text.count("outcome=started") == 1
+    assert text.count("action=stop") == 1
+    assert text.count("outcome=stopped") == 1
+
+
+@pytest.mark.asyncio
+async def test_marker_logging_failure_does_not_rollback_or_repeat_delivery(tmp_path, monkeypatch):
+    import gateway.healbite_weight_reminder_scheduler as scheduler_module
+
+    store = _store(tmp_path)
+    _due_setting(store)
+    calls = 0
+
+    async def send(_user_id, _text):
+        nonlocal calls
+        calls += 1
+
+    def fail_info(*_args, **_kwargs):
+        raise RuntimeError("PII_REMINDER_EXCEPTION_BODY")
+
+    monkeypatch.setattr(scheduler_module.logger, "info", fail_info)
+    scheduler = WeightReminderScheduler(store=store, config=_config(), send_reminder=send, now_fn=Clock())
+
+    stats = await scheduler.run_once()
+    delivery = store.list_deliveries(101)[0]
+    setting = store.get_settings(101)
+
+    assert calls == 1
+    assert stats.sent == 1
+    assert delivery.status is ReminderDeliveryStatus.SENT
+    assert setting is not None
+    assert setting.last_delivered_at_utc is not None
+    assert setting.next_due_at_utc == "2026-07-07 09:00:00"
+
+    await scheduler.run_once()
+    assert calls == 1
+    assert len(store.list_deliveries(101)) == 1
+
 def _install_file_logging(tmp_path: Path):
     root = logging.getLogger()
     existing = list(root.handlers)
@@ -295,11 +352,32 @@ def test_cross_sink_logical_event_counting_uses_signature_not_corr_only():
     ]
     assert logical_event_count(same_record_two_sinks) == 1
 
+    distinct_events_in_two_sinks = [
+        SafeLogEvent("agent.log", "delivery", "attempt_started", "attempt_started"),
+        SafeLogEvent("gateway.log", "delivery", "attempt_started", "attempt_started"),
+        SafeLogEvent("agent.log", "delivery", "send", "sent"),
+        SafeLogEvent("gateway.log", "delivery", "send", "sent"),
+    ]
+    assert logical_event_count(distinct_events_in_two_sinks) == 2
+
     distinct_events_same_corr = [
         SafeLogEvent("agent.log", "delivery", "attempt_started", "attempt_started", corr_present=True),
         SafeLogEvent("agent.log", "delivery", "send", "sent", corr_present=True),
     ]
     assert logical_event_count(distinct_events_same_corr) == 2
+
+    uneven_sink_duplicates = [
+        SafeLogEvent("agent.log", "delivery", "send", "sent"),
+        SafeLogEvent("agent.log", "delivery", "send", "sent"),
+        SafeLogEvent("gateway.log", "delivery", "send", "sent"),
+    ]
+    assert logical_event_count(uneven_sink_duplicates) == 2
+
+    identical_physical_duplicates_one_sink = [
+        SafeLogEvent("agent.log", "delivery", "send", "sent"),
+        SafeLogEvent("agent.log", "delivery", "send", "sent"),
+    ]
+    assert logical_event_count(identical_physical_duplicates_one_sink) == 2
 
 
 @pytest.mark.asyncio

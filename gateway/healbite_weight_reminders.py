@@ -11,9 +11,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
-
-WEIGHT_REMINDER_SETTINGS_TABLE = "weight_reminder_settings"
-WEIGHT_REMINDER_DELIVERIES_TABLE = "weight_reminder_deliveries"
+from gateway.healbite_weight_reminder_schema import (
+    WEIGHT_REMINDER_DELIVERIES_TABLE,
+    WEIGHT_REMINDER_SETTINGS_TABLE,
+)
 DEFAULT_SCAN_INTERVAL_SECONDS = 60
 DEFAULT_CLAIM_LEASE_SECONDS = 300
 DEFAULT_MISSED_GRACE_HOURS = 12

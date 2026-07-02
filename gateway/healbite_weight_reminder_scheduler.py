@@ -98,6 +98,18 @@ def _time_bucket(local_time: str) -> str:
     return "night"
 
 
+def _count_bucket(value: int) -> str:
+    if value <= 0:
+        return "0"
+    if value == 1:
+        return "1"
+    if value <= 5:
+        return "2-5"
+    if value <= 20:
+        return "6-20"
+    return "21+"
+
+
 def _log_marker(marker: str, **fields: object) -> None:
     allowed = {
         "route",
@@ -117,12 +129,18 @@ def _log_marker(marker: str, **fields: object) -> None:
         "weekday_bucket",
         "time_bucket",
         "attempt_count_bucket",
+        "batch_size_bucket",
+        "due_count_bucket",
         "error_type",
         "corr_present",
         "corr",
     }
-    parts = [f"{key}={fields[key]}" for key in sorted(fields) if key in allowed]
-    logger.info("[HealBite][%s] %s", marker, " ".join(parts))
+    try:
+        parts = [f"{key}={fields[key]}" for key in sorted(fields) if key in allowed]
+        logger.info("[HealBite][%s] %s", marker, " ".join(parts))
+    except Exception:
+        # Observability must never affect reminder delivery or scheduler health.
+        logger.debug("weight reminder marker emission failed", exc_info=False)
 
 
 def classify_send_exception(exc: Exception) -> WeightReminderDeliveryError:
@@ -181,13 +199,6 @@ class WeightReminderScheduler:
 
     def start(self) -> asyncio.Task | None:
         if not self.should_start():
-            _log_marker(
-                "weight_reminder_scheduler",
-                route="weight_reminder",
-                action="start",
-                outcome="disabled",
-                enabled=bool(self.config.enabled),
-            )
             return None
         if self._task is not None and not self._task.done():
             return self._task
@@ -238,11 +249,14 @@ class WeightReminderScheduler:
         recovered = self.store.recover_expired_claims(now_utc=now)
         if recovered.get("claimed") or recovered.get("sending"):
             _log_marker(
-                "weight_reminder_delivery",
+                "weight_reminder_due",
                 route="weight_reminder",
-                action="recover",
-                outcome="done",
+                action="claim_recovered",
+                outcome="recovered",
                 claim_recovered=True,
+                due_count_bucket=_count_bucket(
+                    int(recovered.get("claimed", 0)) + int(recovered.get("sending", 0))
+                ),
             )
         if self._circuit_open:
             _log_marker(
@@ -259,6 +273,15 @@ class WeightReminderScheduler:
             batch_size=self.config.batch_size,
         )
         stats.scanned = len(due)
+        if due:
+            _log_marker(
+                "weight_reminder_due",
+                route="weight_reminder",
+                action="due_detected",
+                outcome="detected",
+                due_count_bucket=_count_bucket(len(due)),
+                batch_size_bucket=_count_bucket(self.config.batch_size),
+            )
         for setting in due:
             if self._circuit_open:
                 break
@@ -271,16 +294,46 @@ class WeightReminderScheduler:
             )
             if claim.outcome is ReminderClaimOutcome.CLAIMED and claim.delivery is not None:
                 stats.claimed += 1
+                _log_marker(
+                    "weight_reminder_due",
+                    route="weight_reminder",
+                    action="claim_acquired",
+                    outcome="claimed",
+                    delivery_state=claim.delivery.status.value,
+                    attempt_count_bucket=_attempt_bucket(claim.delivery.attempt_count),
+                )
                 await self._process_claim(claim, stats)
             elif claim.outcome is ReminderClaimOutcome.SKIPPED_EXPIRED:
                 stats.skipped += 1
                 _log_marker(
                     "weight_reminder_skip",
                     route="weight_reminder",
-                    action="skip_expired",
+                    action="expired",
                     outcome="skipped",
                     delivery_attempted=False,
                 )
+            else:
+                _log_marker(
+                    "weight_reminder_due",
+                    route="weight_reminder",
+                    action="claim_not_acquired",
+                    outcome=claim.outcome.value,
+                    delivery_attempted=False,
+                )
+        if due:
+            _log_marker(
+                "weight_reminder_scheduler",
+                route="weight_reminder",
+                action="tick_complete",
+                outcome="completed",
+                due_count_bucket=_count_bucket(stats.scanned),
+                batch_size_bucket=_count_bucket(self.config.batch_size),
+                delivery_attempted=stats.claimed > 0,
+                delivery_completed=stats.sent > 0,
+                retry_scheduled=stats.retry_scheduled > 0,
+                permanent_failure=stats.permanent_failed > 0,
+                ambiguous_delivery=stats.ambiguous > 0,
+            )
         return stats
 
     async def _process_claim(self, claim: WeightReminderClaim, stats: WeightReminderSchedulerStats) -> None:
@@ -308,7 +361,7 @@ class WeightReminderScheduler:
             _log_marker(
                 "weight_reminder_skip",
                 route="weight_reminder",
-                action="pre_send_recheck",
+                action="stale",
                 outcome="skipped_stale",
                 stale_schedule=True,
                 delivery_attempted=False,
@@ -316,10 +369,10 @@ class WeightReminderScheduler:
             return
         sending = self.store.mark_delivery_sending(delivery.id, now_utc=self.now_fn())
         _log_marker(
-            "weight_reminder_due",
+            "weight_reminder_delivery",
             route="weight_reminder",
-            action="send",
-            outcome="attempt",
+            action="attempt_started",
+            outcome="attempt_started",
             delivery_attempted=True,
             timezone_present=bool(fresh.timezone_name),
             timezone_region_bucket=_timezone_region_bucket(fresh.timezone_name),
@@ -365,8 +418,8 @@ class WeightReminderScheduler:
             _log_marker(
                 "weight_reminder_scheduler",
                 route="weight_reminder",
-                action="send",
-                outcome="circuit_open",
+                action="circuit_breaker_open",
+                outcome="open",
                 error_type=error.error_type,
                 delivery_completed=False,
             )
@@ -415,6 +468,15 @@ class WeightReminderScheduler:
                 suspend_user=False,
             )
             stats.permanent_failed += 1
+            _log_marker(
+                "weight_reminder_delivery",
+                route="weight_reminder",
+                action="send",
+                outcome="permanent_failed",
+                permanent_failure=True,
+                error_type="max_attempts",
+                attempt_count_bucket=_attempt_bucket(delivery.attempt_count),
+            )
             return
         delay = error.retry_after_seconds or min(
             self.config.base_backoff_seconds * (2 ** max(0, delivery.attempt_count - 1)),
@@ -430,8 +492,8 @@ class WeightReminderScheduler:
         _log_marker(
             "weight_reminder_delivery",
             route="weight_reminder",
-            action="send",
-            outcome="retry_wait",
+            action="retry_scheduled",
+            outcome="retry_scheduled",
             retry_scheduled=True,
             error_type=error.error_type,
             attempt_count_bucket=_attempt_bucket(delivery.attempt_count),

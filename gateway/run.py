@@ -5834,15 +5834,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
         config = load_weight_reminder_config()
         if not config.enabled or not config.allowlist:
-            logger.info(
-                "[HealBite][weight_reminder_scheduler] route=weight_reminder action=start outcome=disabled enabled=%s",
-                bool(config.enabled),
-            )
             return
         telegram_adapter = self.adapters.get(Platform.TELEGRAM)
         if telegram_adapter is None:
             logger.info(
-                "[HealBite][weight_reminder_scheduler] route=weight_reminder action=start outcome=no_telegram_adapter enabled=true"
+                "[HealBite][weight_reminder_config] route=weight_reminder action=start outcome=no_telegram_adapter enabled=true"
             )
             return
 

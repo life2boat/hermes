@@ -200,3 +200,91 @@ build performed=false
 deploy performed=false
 restart performed=false
 ```
+## Implementation Gate Requirements By Sprint
+
+Each future implementation PR must include:
+
+```text
+implementation scope
+explicit exclusions
+test gate
+migration gate
+feature-disabled deployment plan
+rollback/disable plan
+privacy gate
+```
+
+### 7.1B Gate
+
+Scope: additive household schema, one-member bootstrap, permission store core.
+Exclusions: no LLM menu generation, no shopping generation, no family UI GA.
+Test gate: bootstrap idempotency, one-member household, cross-household deny.
+Migration gate: production-derived rehearsal and rollback-compatible schema.
+Feature-disabled deployment: required.
+
+### 7.1C Gate
+
+Scope: existing weekly menu button integration for single-user allowlist,
+generation, validation, persistence, view, one meal replacement.
+Exclusions: no household multi-member portions beyond primary member, no general
+availability, no diary auto-write.
+Test gate: route gating, double-click idempotency, provider timeout, hard
+restriction retry/failure, plan ready transaction.
+Migration gate: no destructive changes to profile, diary, weight, water.
+Feature-disabled deployment: required before allowlist enablement.
+
+### 7.1D Gate
+
+Scope: existing shopping button integration, generated list from ready plan,
+manual overlay, check/uncheck, refresh.
+Exclusions: no LLM for ordinary refresh, no fuzzy-only merges.
+Test gate: overlay preservation, stale source plan, low-confidence conversion,
+cross-household deny.
+Migration gate: additive shopping tables only.
+Feature-disabled deployment: required.
+
+### 7.1E Gate
+
+Scope: existing family button integration, dependent profiles, role matrix,
+restriction editing.
+Exclusions: no linked adult account sharing unless explicitly included.
+Test gate: dependent permissions, adult_member limits, owner transfer/disable
+contract, privacy log scan.
+Migration gate: additive member/restriction fields only.
+Feature-disabled deployment: required.
+
+### 7.1F Gate
+
+Scope: multi-member portions and per-member target comparison.
+Exclusions: no general beta expansion.
+Test gate: two-member household, different targets, conservation/leftover rule,
+plan validation conflicts.
+Migration gate: additive allocation extensions only.
+Feature-disabled deployment: required.
+
+### 7.1G Gate
+
+Scope: family shopping aggregation and limited beta rollout.
+Exclusions: no global rollout without separate approval.
+Test gate: multi-member aggregation, manual overlay, privacy, rollback, beta
+allowlist behavior.
+Migration gate: production-derived rehearsal if schema changes.
+Feature-disabled deployment: required before beta enablement.
+
+## Open Decision Impacts
+
+| Decision | Recommendation | Impact |
+| --- | --- | --- |
+| Plan length | default 7 days | drives unique week constraint and UI pagination |
+| Meal slots | breakfast, lunch, dinner; snacks optional | affects LLM schema and target distribution |
+| Snacks | defer to configurable option | avoids overfitting MVP |
+| Leftovers | defer; require explicit leftover fraction if used | affects portion conservation and shopping quantities |
+| Budget | capture as soft preference later | requires price data source before deterministic validation |
+| Pantry | defer; manual overlay first | avoids inventory schema in MVP |
+| Manual-only shopping list | yes | keeps shopping useful without ready plan |
+| Macro tolerances | configurable percent band | avoids hardcoded medical claims |
+| Nutrition database | deterministic local/canonical source first | required before ready-state validation |
+| Children age bands | broad bands only | minimizes dependent PII |
+| Adult permissions | self-edit plus shared list edit | keeps household admin model simple |
+| Plan-vs-actual report | future extension | requires linking planned meals to consumed diary actions |
+| LLM payload retention | do not retain raw prompts/responses | reduces privacy risk and storage burden |

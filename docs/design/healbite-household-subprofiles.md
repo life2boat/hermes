@@ -186,3 +186,23 @@ error_type
 | family plan default | include active members only |
 | member deletion | disable first, hard deletion deferred |
 | exact allergy language | structured categories plus optional user-facing note |
+## Permission Edge Cases
+
+Additional invariants for implementation:
+
+- `dependent` never receives administrative rights.
+- `adult_member` may edit own profile and targets but cannot edit another
+  member's medical restrictions without explicit role permission.
+- unlinking a Telegram account does not delete member history, plan allocations,
+  shopping contributions, or audit records.
+- disabling a member hides them from new plans by default but preserves history.
+- owner removal requires ownership transfer or explicit household closure.
+- service methods must reject cross-household IDs even if a callback payload is
+  forged or stale.
+
+## Medical and Age Privacy
+
+Exact age or medical-detail storage requires a future product decision and a
+validated nutrition source. Until then, use broad age bands and structured
+restriction categories. Do not claim medical correctness from LLM output or from
+unvalidated formulas.

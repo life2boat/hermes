@@ -206,3 +206,18 @@ no build
 no deploy
 no restart
 ```
+## Actual Button Layout Contract
+
+The verified current layout has five rows and two columns:
+
+```text
+[ 👤 Мой профиль ] [ 🍎 Дневник еды ]
+[ 📋 Меню на неделю ] [ 🛒 Список покупок ]
+[ ⚖️ Трекер веса ] [ 💧 Трекер воды ]
+[ 👨‍👩‍👧 Семья ] [ 📈 Отчет за неделю ]
+[ ⚙️ Ограничения ] [ ❓ Помощь ]
+```
+
+Sprint 7.1A focuses on weekly menu, shopping list, and family. The existing
+restrictions and help placeholders are documented as current UI facts but are
+not part of the Sprint 7.1A implementation roadmap.

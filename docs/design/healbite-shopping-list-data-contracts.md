@@ -199,3 +199,55 @@ ON shopping_list_item_contributions(shopping_list_item_id);
 | low confidence conversion | item not merged automatically |
 | forged item callback | rejected by household boundary |
 | cross-household list access | rejected |
+## Shopping Normalization Edge Cases
+
+Do not merge items only because display text is similar. Examples that must stay
+separate unless canonical food resolution and conversion data prove equivalence:
+
+- tomato / tomato paste / canned tomatoes;
+- dry rice / cooked rice;
+- chicken breast / ground chicken.
+
+`canonical_food_id` is the primary merge signal. Unit compatibility, density,
+edible fraction, preparation state, and conversion confidence must also allow the
+merge.
+
+## Overlay Refresh Addendum
+
+When a plan version changes substantially:
+
+- generated contributions from removed meals are subtracted or replaced;
+- manual additions remain;
+- manual overrides remain attached to their stable item identity;
+- excluded state remains only if the canonical item identity still matches;
+- checked state remains only if stable identity and normalized unit remain compatible.
+
+If canonical identity changes from one item to another, preserve the old item as
+manual or excluded history and create a new generated item rather than silently
+rewriting a user's manual choice.
+
+## Shopping State Semantics
+
+`ready` means the list matches its `source_plan_version` plus current manual
+overlay. If the source plan version changes, the list becomes `stale` until a
+refresh commits. The UI may still display a stale list, but it must label it as
+stale and must not describe it as freshly synchronized.
+
+A future `ready_stale` state is not recommended for MVP because it obscures the
+source-plan mismatch. Use explicit `stale` instead.
+
+## Shopping Constraints Addendum
+
+Future implementation should include or justify equivalents for:
+
+```text
+FOREIGN KEY shopping_lists.household_id -> households.id
+FOREIGN KEY shopping_lists.weekly_plan_id -> weekly_meal_plans.id
+FOREIGN KEY shopping_list_items.shopping_list_id -> shopping_lists.id
+FOREIGN KEY shopping_list_item_contributions.shopping_list_item_id -> shopping_list_items.id
+UNIQUE shopping list per household/source plan active version
+UNIQUE contribution per shopping item/source ingredient/member where applicable
+INDEX shopping_lists(household_id, status)
+INDEX shopping_list_items(shopping_list_id, canonical_food_id, category)
+INDEX shopping_list_item_contributions(planned_meal_id, recipe_ingredient_id)
+```

@@ -28,19 +28,21 @@ Never run the first migration execution against live production DB.
 6. validate source-user set by aggregates only;
 7. run additive schema initializer on rehearsal copy;
 8. verify schema and indexes;
-9. run bootstrap first pass;
-10. run integrity check;
-11. record household count;
-12. record member count;
-13. record orphan count;
-14. record duplicate count;
-15. run initializer second pass;
-16. run bootstrap second pass;
-17. compare idempotency aggregates;
-18. verify non-household table counts preserved;
-19. compare schema fingerprint after expected additive changes;
-20. run privacy scan of generated logs/evidence;
-21. produce GO/NO-GO rehearsal report.
+9. run bootstrap dry-run and compare `created + already_existing = eligible`;
+10. run bootstrap first pass;
+11. run integrity check;
+12. record household count;
+13. record member count;
+14. record orphan count;
+15. record duplicate count;
+16. record owner pointer mismatch count;
+17. run initializer second pass;
+18. run bootstrap second pass;
+19. compare idempotency aggregates;
+20. verify non-household table counts preserved;
+21. compare schema fingerprint after expected additive changes;
+22. run privacy scan of generated logs/evidence;
+23. produce GO/NO-GO rehearsal report.
 
 ## Expected Count Invariants
 
@@ -49,11 +51,12 @@ Let eligible application user count be `N`.
 After first bootstrap:
 
 ```text
-households_created=N
-primary_members_created=N
+households_created + households_already_existing = N
+primary_members_created + primary_members_already_existing = N
 active_owner_members=N
 duplicate_linked_users=0
 households_without_owner=0
+owner_pointer_mismatches=0
 orphan_members=0
 ```
 
@@ -99,6 +102,7 @@ invalid_actor_count
 duplicate_conflict_count
 orphan_count
 households_without_owner_count
+owner_pointer_mismatch_count
 duration_bucket
 error_type
 ```
@@ -136,7 +140,9 @@ owner_members
 linked_members
 unlinked_members
 households_without_owner
+owner_pointer_mismatches
 duplicate_active_linked_users
+invalid_actor_count
 orphan_members
 integrity
 ```
@@ -152,6 +158,7 @@ Stop and report safe aggregates on:
 - duplicate active linked user;
 - two active owners;
 - household without owner;
+- owner pointer mismatch;
 - orphan member;
 - disk full;
 - DB locked beyond retry budget;
@@ -169,7 +176,7 @@ corruption or data loss and explicitly authorizes restore.
 - rehearsal GO on production-derived copy;
 - feature disabled;
 - allowlist empty unless explicit rollout says otherwise;
-- dry-run aggregate matches expected count;
+- dry-run aggregate proves `created + already_existing = eligible`;
 - operator approves controlled bootstrap;
 - rollback plan documented;
 - post-bootstrap audit available.
@@ -180,10 +187,11 @@ Future rehearsal may report GO only if:
 
 ```text
 integrity=ok
-households_created=N
-primary_members_created=N
+households_created + households_already_existing = N
+primary_members_created + primary_members_already_existing = N
 duplicate_linked_users=0
 households_without_owner=0
+owner_pointer_mismatches=0
 orphan_members=0
 second_run_delta=0
 non_household_counts_preserved=true

@@ -53,11 +53,17 @@ Rationale:
 Eligibility:
 
 - positive integer application actor ID in `users`;
-- not a bot/system actor when such metadata is available;
+- not a bot/system/test actor when such metadata is available;
 - not deleted/disabled if future `access_status` semantics indicate deletion.
 
 Users with profile/history but no `users` row are handled by rehearsal conflict
 reporting and future lazy bootstrap, not silent broad union bootstrapping.
+Profiles without a valid `users` identity are not bootstrapped. Users without a
+profile may receive a personal household because `users` is authoritative and
+profile completion remains a separate product concern. If production does not
+have reliable bot/system/test actor metadata before production bootstrap, that is
+a release blocker for the controlled bootstrap PR, not for the additive schema
+and store PR.
 
 ## Identity Bridge
 
@@ -67,7 +73,8 @@ Telegram/private-chat identity -> legacy application actor ID -> linked_user_id
 
 `linked_user_id` references the application actor identity. In the current
 Telegram-only HealBite path this may equal a Telegram numeric ID, but household
-member identity is internal and stable.
+member identity is internal and stable. The link value is never used as a domain
+primary key, never logged, and never accepted from user-controlled input.
 
 ## Minimal Store API Contract
 
@@ -109,6 +116,7 @@ Service owns:
 
 - actor authorization;
 - bootstrap decisions;
+- household ownership invariant checks;
 - role checks;
 - status transitions;
 - business invariants.
@@ -134,8 +142,12 @@ household_status
 ```
 
 All household-aware operations must receive context from a trusted resolver.
-Never trust household/member IDs from callback data or user text as
-authorization proof.
+The resolver is created after Telegram/auth middleware has established the actor
+and before any household-aware store call. Missing, disabled, removed, or closed
+contexts fail closed with a local product response. If context is cached, cache
+keys must be scoped to the actor and invalidated after membership, status, or
+ownership updates. Never trust household/member IDs from callback data or user
+text as authorization proof.
 
 ## Cross-Household Protection
 
@@ -169,6 +181,7 @@ Requirements:
 - backed by unique active linked-user constraint;
 - retry lookup after `IntegrityError` from concurrent creation;
 - repeated call returns the same household/member;
+- `households.owner_user_id` equals the active owner member `linked_user_id`;
 - no correlation ID dependency.
 
 ## Compatibility Layer
@@ -195,8 +208,12 @@ breaking current tables.
 ## Nutrition Target Bridge
 
 7.1B does not create a new nutrition target table. The primary member resolves
-nutrition targets from existing profile/user target sources through a bridge
-API.
+nutrition targets from existing profile/user target sources through
+`get_effective_nutrition_target(member_id)`. For a linked primary member, the
+bridge resolves `member_id -> linked_user_id -> existing profile/user target
+loader`. Unlinked dependents have no nutrition target storage in 7.1B and must
+return an explicit unsupported/empty target result until a later target table or
+weekly-plan snapshot exists.
 
 Future 7.1C can add immutable target snapshots for weekly plan generation.
 Avoid duplicating current nutrition data before the weekly plan needs it.
@@ -227,6 +244,7 @@ Stop safely on:
 - corrupt DB;
 - partial migration batch;
 - missing authorization context;
+- owner pointer mismatch;
 - unknown member/household status.
 
 Requirements:
@@ -261,6 +279,7 @@ member_type
 household_status
 error_type
 duration_bucket
+owner_pointer_mismatch_count_bucket
 ```
 
 Forbidden fields:
@@ -337,8 +356,12 @@ Compatibility:
 
 Property/concurrency:
 
+- Strategy A for 7.1B: one linked user can have at most one active household
+  membership. Shared/multi-household membership is deferred to a future schema
+  migration and must not be inferred from current history tables.
 - one linked user cannot have two active personal households;
 - one household cannot have two active owners;
+- active household owner pointer matches the active owner member;
 - parallel get-or-create returns one household;
 - bootstrap order does not change final state;
 - second bootstrap produces zero semantic delta.

@@ -86,6 +86,47 @@ Checks:
 - back navigation works;
 - existing weight pending flow is reused.
 
+
+## Canonical Production DB Audit
+
+Use the repository audit helper before any beta enablement or production
+reminder validation:
+
+```bash
+python scripts/weight_reminder_db_audit.py /home/hermes/healbite.db --format json
+```
+
+Canonical reminder schema names are:
+
+```text
+settings table=weight_reminder_settings
+deliveries table=weight_reminder_deliveries
+```
+
+Audit tooling must import the shared schema constants from
+`gateway.healbite_weight_reminder_schema` or use `scripts/weight_reminder_db_audit.py`.
+Do not hardcode historical ad-hoc names such as `weight_reminder_outbox` or
+`weight_reminder_delivery_attempts` in production validation logic; those names
+are non-canonical and must fail as `unexpected_reminder_schema`, not as a clean
+`not_initialized` result.
+
+Production DB audit rules:
+
+- open SQLite with `mode=ro`;
+- execute `PRAGMA query_only=ON`;
+- run `PRAGMA integrity_check`;
+- inspect `sqlite_master` and aggregate counts only;
+- never run the initializer against production as part of an audit;
+- never create missing tables during audit;
+- never output user IDs, delivery keys, raw rows, Telegram identifiers, timezone
+  strings, weight values, profile values, or exception bodies.
+
+`schema_state=not_initialized` is valid only when no `weight_reminder_%` tables
+exist. Unknown reminder tables are not equivalent to `not_initialized`.
+After a controlled allowlisted rollout, nonzero disabled settings and sent
+delivery counts are expected append-only history and must not be deleted to get a
+clean baseline.
+
 ## Stage 4 - Production Deployment With Feature Disabled
 
 Preflight:

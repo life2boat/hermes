@@ -18,6 +18,10 @@ from gateway.healbite_household_schema import (
     HOUSEHOLD_STATUSES,
     is_canonical_uuid4,
 )
+from gateway.healbite_household_production_auth import (
+    ProductionAuthorizationError,
+    prepare_production_authorization,
+)
 from gateway.healbite_households import (
     HealBiteHouseholdStore,
     HouseholdError,
@@ -443,6 +447,7 @@ def bootstrap_households(
     initialize_schema: bool = False,
     eligible_users_file: str | Path | None = None,
     batch_size: int = 100,
+    production_authorization_file: str | Path | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     path = Path(db_path)
@@ -462,14 +467,48 @@ def bootstrap_households(
     if batch_size <= 0 or batch_size > 1000:
         result.update({"error_type": "INVALID_BATCH_SIZE", "exit_code": EXIT_INVALID_ARGUMENTS})
         return result
-    if (apply or initialize_schema) and _is_production_db_path(path):
-        result.update({"error_type": "PRODUCTION_PATH_APPLY_REFUSED", "exit_code": EXIT_APPLY_FAILURE})
-        return result
+    is_production_write = bool(apply or initialize_schema) and _is_production_db_path(path)
+    prepared_authorization = None
+    if is_production_write:
+        if apply and initialize_schema:
+            result.update({"error_type": "PRODUCTION_AUTHORIZATION_COMBINED_OPERATION_REFUSED", "exit_code": EXIT_APPLY_FAILURE})
+            return result
+        action = "household_schema_initialize" if initialize_schema else "household_bootstrap_apply"
+        try:
+            prepared_authorization = prepare_production_authorization(
+                production_authorization_file,
+                action=action,
+                db_path=path,
+            )
+        except ProductionAuthorizationError as exc:
+            result.update({"error_type": exc.error_type, "exit_code": EXIT_APPLY_FAILURE})
+            return result
     if not path.exists():
         result.update({"error_type": "DB_NOT_FOUND", "db_exists": False, "exit_code": EXIT_DB_UNAVAILABLE})
         return result
+    pre_schema_audit: dict[str, Any] | None = None
     if initialize_schema:
-        HealBiteHouseholdStore(db_path=path).ensure_schema()
+        pre_schema_audit = audit_household_db(path, eligible_users_file)
+        if pre_schema_audit.get("integrity") != "ok":
+            result.update({"error_type": pre_schema_audit.get("error_type", "SQLITE_INTEGRITY_CHECK_FAILED"), "exit_code": EXIT_INTEGRITY_FAILURE})
+            return result
+        if pre_schema_audit.get("schema_state") not in {"not_initialized", "canonical"}:
+            result.update({"error_type": "SCHEMA_NOT_CANONICAL", "exit_code": EXIT_SCHEMA_NOT_CANONICAL})
+            return result
+        claimed_authorization = None
+        if prepared_authorization is not None:
+            try:
+                claimed_authorization = prepared_authorization.claim()
+            except ProductionAuthorizationError as exc:
+                result.update({"error_type": exc.error_type, "exit_code": EXIT_APPLY_FAILURE})
+                return result
+        try:
+            HealBiteHouseholdStore(db_path=path).ensure_schema()
+        except (HouseholdError, sqlite3.Error):
+            result.update({"error_type": "INITIALIZER_EXECUTION_FAILED", "exit_code": EXIT_APPLY_FAILURE})
+            return result
+        if claimed_authorization is not None:
+            claimed_authorization.consume_success()
         result["initializer_called"] = True
     audit = audit_household_db(path, eligible_users_file)
     result.update({k: v for k, v in audit.items() if k not in {"mode", "result"}})
@@ -518,6 +557,13 @@ def bootstrap_households(
     if not apply:
         result.update({"result": "success", "exit_code": EXIT_SUCCESS, "duration_ms": int((time.monotonic() - started) * 1000)})
         return result
+    claimed_authorization = None
+    if prepared_authorization is not None:
+        try:
+            claimed_authorization = prepared_authorization.claim()
+        except ProductionAuthorizationError as exc:
+            result.update({"error_type": exc.error_type, "exit_code": EXIT_APPLY_FAILURE})
+            return result
     store = HealBiteHouseholdStore(db_path=path)
     created = 0
     already = 0
@@ -533,6 +579,8 @@ def bootstrap_households(
     except (HouseholdError, sqlite3.Error):
         result.update({"error_type": "APPLY_EXECUTION_FAILED", "exit_code": EXIT_APPLY_FAILURE})
         return result
+    if claimed_authorization is not None:
+        claimed_authorization.consume_success()
     result["created_count"] = created
     result["already_existing_count"] = already
     post = audit_household_db(path, eligible_users_file)

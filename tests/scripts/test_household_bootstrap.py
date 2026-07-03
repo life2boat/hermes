@@ -169,7 +169,7 @@ def test_missing_path_and_production_path_guard(tmp_path):
     missing = tmp_path / "missing.db"
     assert bootstrap_households(missing)["exit_code"] == 3
     guarded = bootstrap_households("/home/hermes/healbite.db", apply=True, eligible_users_file=tmp_path / "none")
-    assert guarded["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+    assert guarded["error_type"] == "PRODUCTION_AUTHORIZATION_REQUIRED"
 
 
 def test_production_path_guard_blocks_initializer_and_aliases(monkeypatch, tmp_path):
@@ -179,7 +179,7 @@ def test_production_path_guard_blocks_initializer_and_aliases(monkeypatch, tmp_p
     monkeypatch.setattr("gateway.healbite_household_bootstrap.PRODUCTION_DB_PATH", production)
 
     direct = bootstrap_households(production, initialize_schema=True)
-    assert direct["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+    assert direct["error_type"] == "PRODUCTION_AUTHORIZATION_REQUIRED"
 
     alias = tmp_path / "alias.db"
     try:
@@ -188,7 +188,7 @@ def test_production_path_guard_blocks_initializer_and_aliases(monkeypatch, tmp_p
         alias = None
     if alias is not None:
         result = bootstrap_households(alias, apply=True, eligible_users_file=_eligible_file(tmp_path, 101))
-        assert result["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+        assert result["error_type"] == "PRODUCTION_AUTHORIZATION_REQUIRED"
 
     hardlink = tmp_path / "hardlink.db"
     try:
@@ -197,7 +197,7 @@ def test_production_path_guard_blocks_initializer_and_aliases(monkeypatch, tmp_p
         hardlink = None
     if hardlink is not None:
         result = bootstrap_households(hardlink, apply=True, eligible_users_file=_eligible_file(tmp_path, 101))
-        assert result["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+        assert result["error_type"] == "PRODUCTION_AUTHORIZATION_REQUIRED"
 
 
 def test_cli_no_production_override_flag(tmp_path):

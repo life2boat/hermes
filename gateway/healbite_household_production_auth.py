@@ -161,7 +161,11 @@ def _validate_file_stat(path: Path, file_stat: os.stat_result) -> None:
         raise ProductionAuthorizationError("PRODUCTION_AUTHORIZATION_FILE_INVALID")
     if file_stat.st_nlink != 1:
         raise ProductionAuthorizationError("PRODUCTION_AUTHORIZATION_FILE_INVALID")
-    if file_stat.st_uid not in {0, os.geteuid()}:
+    allowed_owner_uids = {0}
+    get_effective_uid = getattr(os, "geteuid", None)
+    if get_effective_uid is not None:
+        allowed_owner_uids.add(int(get_effective_uid()))
+    if file_stat.st_uid not in allowed_owner_uids:
         raise ProductionAuthorizationError("PRODUCTION_AUTHORIZATION_FILE_INVALID")
     mode = stat.S_IMODE(file_stat.st_mode)
     if mode & ~0o600:

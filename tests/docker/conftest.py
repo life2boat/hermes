@@ -1,4 +1,4 @@
-"""Shared fixtures for docker-image integration tests.
+﻿"""Shared fixtures for docker-image integration tests.
 
 Tests in this directory build the image with the current ``Dockerfile``
 and exercise it via ``docker run``. They skip when Docker is unavailable
@@ -15,6 +15,7 @@ test under this directory is granted a 180s default via
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -24,6 +25,7 @@ import pytest
 IMAGE_TAG = os.environ.get("HERMES_TEST_IMAGE", "hermes-agent-harness:latest")
 _DOCKER_BUILD_TIMEOUT_SECONDS = max(300, int(os.environ.get("HERMES_DOCKER_BUILD_TIMEOUT", "1200")))
 _DOCKER_SUITE_TIMEOUT_SECONDS = max(_DOCKER_BUILD_TIMEOUT_SECONDS + 120, 180)
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _docker_build_env() -> dict[str, str]:
@@ -63,6 +65,22 @@ def _docker_available() -> bool:
         return False
 
 
+def _exact_git_sha(repo_root: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", repo_root, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, (
+        "unable to resolve exact Git SHA for docker build fixture: "
+        f"stderr={result.stderr[-500:]!r}"
+    )
+    sha = result.stdout.strip()
+    assert _FULL_SHA_RE.fullmatch(sha), f"expected full lowercase Git SHA, got {sha!r}"
+    return sha
+
+
 def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
     """Apply docker-suite policy: timeout bump + skip on missing docker."""
     docker_ok = _docker_available()
@@ -93,9 +111,15 @@ def built_image() -> str:
     buildkit_ok, buildkit_detail = _docker_buildkit_probe()
     if not buildkit_ok:
         pytest.skip(f"Docker BuildKit unavailable for integration tests: {buildkit_detail}")
+    exact_sha = _exact_git_sha(repo_root)
     try:
         result = subprocess.run(
-            ["docker", "build", "--progress=plain", "-t", IMAGE_TAG, repo_root],
+            [
+                "docker", "build", "--progress=plain",
+                "--build-arg", f"HERMES_GIT_SHA={exact_sha}",
+                "-t", IMAGE_TAG,
+                repo_root,
+            ],
             capture_output=True,
             text=True,
             timeout=_DOCKER_BUILD_TIMEOUT_SECONDS,
@@ -151,7 +175,7 @@ def container_name(request) -> Iterator[str]:
 # Tests in this directory MUST exercise the realistic user context. The
 # helpers below run every probe under ``-u hermes`` unless a specific
 # test explicitly opts into ``user="root"`` (rare — e.g. inspecting
-# /proc/1/exe itself, chowning a volume).
+# /proc/1/exe, manipulating ownership).
 # ---------------------------------------------------------------------------
 
 

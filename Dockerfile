@@ -217,28 +217,18 @@ RUN chmod -R a+rX /opt/hermes && \
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # ---------- Bake build-time git revision ----------
-# .dockerignore excludes .git, so `git rev-parse HEAD` from inside the
-# container always returns nothing — meaning `hermes dump` reports
-# "(unknown)" and the startup banner drops its `· upstream <sha>` suffix.
-# That makes support triage from container bug reports impossible:
-# we can't tell which commit the user is actually running.
-#
-# Fix: write the commit SHA passed via the HERMES_GIT_SHA build-arg to
-# /opt/hermes/.hermes_build_sha at build time, and have
-# hermes_cli/build_info.py read it at runtime.  Both `hermes dump` and
-# banner.get_git_banner_state() try the baked SHA first, then fall back
-# to live `git rev-parse` for source installs (unchanged behaviour).
-#
-# The arg is optional — local `docker build` without --build-arg simply
-# omits the file, and the runtime falls back to live-git lookup.  CI
-# (.github/workflows/docker-publish.yml) passes ${{ github.sha }} so
-# every published image has it.
-ARG HERMES_GIT_SHA=
-RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
-        printf '%s\n' "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha && \
-        chown hermes:hermes /opt/hermes/.hermes_build_sha; \
-    fi
-
+# Production bootstrap authorization binds to the exact running image
+# revision, so every supported image build must receive a full lowercase
+# 40-char Git SHA from the trusted outer build command. We deliberately
+# fail closed here instead of guessing from whatever checkout happened to
+# be present in the build context.
+ARG HERMES_GIT_SHA
+RUN printf '%s' "${HERMES_GIT_SHA:-}" | grep -Eq '^[0-9a-f]{40}$' && \
+    printf "%s\n" "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha && \
+    chown root:root /opt/hermes/.hermes_build_sha && \
+    chmod 0444 /opt/hermes/.hermes_build_sha || \
+    { echo "HERMES_GIT_SHA must be a full 40-character lowercase hex SHA" >&2; exit 1; }
+LABEL org.opencontainers.image.revision="${HERMES_GIT_SHA}"
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.
 # Per-profile gateway services are registered dynamically at runtime by

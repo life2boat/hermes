@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: healbite-hermes:latest
+      args:
+        HERMES_GIT_SHA: ${HERMES_GIT_SHA:?HERMES_GIT_SHA must be set to the exact 40-character lowercase Git SHA}
+    image: ${HERMES_IMAGE:-healbite-hermes:latest}
     container_name: hermes-bot
     restart: unless-stopped
     working_dir: /home/hermes

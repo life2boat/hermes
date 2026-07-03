@@ -235,6 +235,15 @@ def _parse_allowlist(value: str | None) -> tuple[frozenset[int], bool]:
     return frozenset(result), True
 
 
+def resolve_users_identity_column(conn: sqlite3.Connection) -> str:
+    columns = HealBiteHouseholdStore._table_columns(conn, "users")
+    if "user_id" in columns:
+        return "user_id"
+    if "telegram_id" in columns:
+        return "telegram_id"
+    raise HouseholdIntegrityError("unsupported users identity schema")
+
+
 def load_household_feature_config(env: Mapping[str, str] | None = None) -> HouseholdFeatureConfig:
     source = env if env is not None else os.environ
     enabled_raw = str(source.get("HEALBITE_HOUSEHOLDS_ENABLED", "")).strip().lower()
@@ -278,12 +287,7 @@ class HealBiteHouseholdStore:
         }
 
     def _users_identity_column(self, conn: sqlite3.Connection) -> str:
-        columns = self._table_columns(conn, "users")
-        if "user_id" in columns:
-            return "user_id"
-        if "telegram_id" in columns:
-            return "telegram_id"
-        raise HouseholdIntegrityError("unsupported users identity schema")
+        return resolve_users_identity_column(conn)
 
     def _actor_exists(self, conn: sqlite3.Connection, actor_user_id: int) -> bool:
         identity_column = self._users_identity_column(conn)

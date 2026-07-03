@@ -4,23 +4,52 @@ Status: runbook only. Do not execute from this document without a separate contr
 
 ## Scope
 
-This runbook covers the future Sprint 7.1B4B exact-image deployment and controlled production household schema/bootstrap. Sprint 7.1B4A only adds the one-time authorization mechanism and this runbook.
+This runbook defines the exact-image production execution contract for future Sprint 7.1B4B household rollout.
 
-Explicit exclusions for B4A:
+Explicit exclusions for B4A and B4A1:
 
 ```text
 no production schema initialization
 no production bootstrap
 no production DB writes
 no production config change
-no build
-no deploy
-no restart
+no build from dirty checkout
+no deploy from mutable :latest namespace
+no restart outside the controlled rollout playbook
 no Telegram UI change
 no weekly menu implementation
 no shopping list implementation
 no family editing implementation
 ```
+
+## Exact Image Contract
+
+All production write operations must run inside the exact deployed image namespace. Do not use the host checkout or host virtualenv for production writes.
+
+Required execution namespace:
+
+```bash
+EXACT_CONTAINER=hermes-bot
+IMAGE_ROOT=/opt/hermes
+IMAGE_PYTHON=/opt/hermes/.venv/bin/python
+CONTAINER_DB=/home/hermes/healbite.db
+AUTH_DIR=/run/hermes-household-bootstrap-auth
+ELIGIBLE_FILE=/run/hermes-household-bootstrap-eligible-users
+```
+
+Required pre-operation proof:
+
+```text
+container is running
+restart_count=0
+running image ref equals the immutable release tag selected for rollout
+/opt/hermes/.hermes_build_sha exists inside the container
+/opt/hermes/.hermes_build_sha equals the expected full lowercase 40-character Git SHA
+OCI label org.opencontainers.image.revision equals the same full SHA
+required scripts exist under /opt/hermes/scripts/
+```
+
+Do not use the host venv for production writes.
 
 ## Authorization Model
 
@@ -63,30 +92,6 @@ bound to exact running image revision
 ```
 
 Never commit, back up, print, or log capability content, nonce, DB inode/device, user IDs, Telegram IDs, household IDs, or member IDs.
-
-## Capability JSON Shape
-
-Schema initialization:
-
-```json
-{
-  "schema_version": 1,
-  "action": "household_schema_initialize",
-  "database_realpath": "/home/hermes/healbite.db",
-  "database_device": 0,
-  "database_inode": 0,
-  "expected_revision": "FULL_40_CHARACTER_LOWERCASE_GIT_SHA",
-  "issued_at_utc": "2026-07-03T00:00:00Z",
-  "expires_at_utc": "2026-07-03T00:15:00Z",
-  "nonce": "HIGH_ENTROPY_RANDOM_VALUE"
-}
-```
-
-Bootstrap apply uses the same shape with:
-
-```text
-action=household_bootstrap_apply
-```
 
 ## Stage 1: Baseline
 
@@ -159,16 +164,46 @@ scripts/agent_check.sh
 git diff --check
 ```
 
+Required worktree checks:
+
+```bash
+WORKTREE=/home/hermes/.hermes/worktrees/<exact-worktree>
+EXACT_SHA="$(git -C "$WORKTREE" rev-parse HEAD)"
+IMAGE_REF="healbite-hermes:s71b4b-${EXACT_SHA:0:12}"
+
+git -C "$WORKTREE" status --porcelain=v1
+git -C "$WORKTREE" diff --check
+```
+
+Build command:
+
+```bash
+docker build \
+  --build-arg HERMES_GIT_SHA="$EXACT_SHA" \
+  --label org.opencontainers.image.revision="$EXACT_SHA" \
+  --tag "$IMAGE_REF" \
+  "$WORKTREE"
+```
+
 Required image checks:
+
+```bash
+docker run --rm --entrypoint cat "$IMAGE_REF" /opt/hermes/.hermes_build_sha
+docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_REF"
+docker run --rm "$IMAGE_REF" --help
+```
+
+Required validation results:
 
 ```text
 revision source is available from /opt/hermes/.hermes_build_sha
+baked SHA matches the exact worktree SHA
+OCI revision label matches the same full SHA
 bootstrap CLI imports
-bootstrap help runs
 audit CLI imports
-audit help runs
 feature-disabled startup probe creates no household schema
 feature-disabled startup probe creates no household rows
+no host-only paths are required for production writes
 ```
 
 ## Stage 4: Deploy Feature-Disabled Image
@@ -180,6 +215,17 @@ Runtime environment must remain:
 ```text
 HEALBITE_HOUSEHOLDS_ENABLED=false
 HEALBITE_HOUSEHOLDS_ALLOWLIST=
+```
+
+Deploy command:
+
+```bash
+HERMES_IMAGE="$IMAGE_REF" docker compose \
+  -p hermes-agent \
+  --project-directory "$WORKTREE" \
+  --env-file /home/hermes/.hermes/.env \
+  -f "$WORKTREE/docker-compose.yml" \
+  up -d --no-build --no-deps --force-recreate hermes-bot
 ```
 
 After deploy verify:
@@ -197,10 +243,13 @@ existing HealBite features healthy
 
 ## Stage 5: Pre-Initialization Audit
 
-Run read-only canonical audit against production DB:
+Run read-only canonical audit against production DB from inside the exact container namespace:
 
 ```bash
-python scripts/household_db_audit.py --db /home/hermes/healbite.db --json
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_db_audit.py" \
+  --db "$CONTAINER_DB" \
+  --json
 ```
 
 Expected safe result:
@@ -220,10 +269,15 @@ Create one root-only capability:
 action=household_schema_initialize
 ```
 
-Run one production schema initialization command:
+Run one production schema initialization command from the exact container namespace:
 
 ```bash
-python scripts/household_bootstrap.py   --db /home/hermes/healbite.db   --initialize-schema   --production-authorization-file /run/hermes-household-bootstrap-auth/<schema-capability>   --json
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_bootstrap.py" \
+  --db "$CONTAINER_DB" \
+  --initialize-schema \
+  --production-authorization-file "$AUTH_DIR/<schema-capability>" \
+  --json
 ```
 
 Verify:
@@ -260,10 +314,14 @@ The operator must derive the set only from authoritative production users and ex
 
 ## Stage 8: Production Dry Run
 
-Run read-only dry-run with eligibility file:
+Run read-only dry-run with eligibility file from the exact container namespace:
 
 ```bash
-python scripts/household_bootstrap.py   --db /home/hermes/healbite.db   --eligible-users-file /run/hermes-household-bootstrap-eligible-users   --json
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_bootstrap.py" \
+  --db "$CONTAINER_DB" \
+  --eligible-users-file "$ELIGIBLE_FILE" \
+  --json
 ```
 
 Required safe result:
@@ -288,10 +346,16 @@ Create a new root-only capability:
 action=household_bootstrap_apply
 ```
 
-Run exactly one apply:
+Run exactly one apply from the exact container namespace:
 
 ```bash
-python scripts/household_bootstrap.py   --db /home/hermes/healbite.db   --apply   --eligible-users-file /run/hermes-household-bootstrap-eligible-users   --production-authorization-file /run/hermes-household-bootstrap-auth/<apply-capability-a>   --json
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_bootstrap.py" \
+  --db "$CONTAINER_DB" \
+  --apply \
+  --eligible-users-file "$ELIGIBLE_FILE" \
+  --production-authorization-file "$AUTH_DIR/<apply-capability-a>" \
+  --json
 ```
 
 Verify:
@@ -329,10 +393,14 @@ integrity=ok
 
 ## Stage 11: Canonical Audit
 
-Run:
+Run from the exact container namespace:
 
 ```bash
-python scripts/household_db_audit.py   --db /home/hermes/healbite.db   --eligible-users-file /run/hermes-household-bootstrap-eligible-users   --json
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_db_audit.py" \
+  --db "$CONTAINER_DB" \
+  --eligible-users-file "$ELIGIBLE_FILE" \
+  --json
 ```
 
 Required result:
@@ -469,5 +537,5 @@ raw exception bodies
 ## Final B4B Verdict Template
 
 ```text
-HOUSEHOLD PRODUCTION BOOTSTRAP COMPLETE ? FEATURE DISABLED ? EXISTING TELEGRAM UI UNCHANGED
+HOUSEHOLD PRODUCTION BOOTSTRAP COMPLETE - FEATURE DISABLED - EXISTING TELEGRAM UI UNCHANGED
 ```

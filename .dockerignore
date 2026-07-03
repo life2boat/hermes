@@ -4,8 +4,10 @@
 .gitmodules
 
 # Python
-__pycache__
+__pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyc
 *$py.class
 *.so
 .Python
@@ -15,27 +17,29 @@ build/
 
 # Virtual environments
 venv/
+.venv/
+**/.venv/
 env/
 ENV/
-
-# Dependencies
-node_modules
-**/node_modules
-.venv
-**/.venv
 .notebooklm-cli-venv/
 .notebooklm-playwright/
 .pip-cache/
 .uv-cache/
 
-# Built artifacts that are regenerated inside the image.  Excluded so local
-# rebuilds on the developer's machine don't invalidate the npm-install layer
-# that now depends on the full ui-tui/packages/hermes-ink/ tree being present.
+# Dependencies
+node_modules
+**/node_modules
+
+# Built artifacts regenerated inside the image
 ui-tui/dist/
 ui-tui/packages/hermes-ink/dist/
 
-# CI/CD
-.github
+# CI/CD and local tooling state
+.github/
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+htmlcov/
 
 # Environment files
 .env
@@ -47,53 +51,68 @@ ui-tui/packages/hermes-ink/dist/
 *.swp
 *.swo
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Documentation
-*.md
-
-# Runtime data (bind-mounted at /opt/data; must not leak into build context)
+# Runtime and database artifacts
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 data/
 .hermes-docker/
 .notebooklm-home/
-
-# Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
 hermes-config/
 runtime/
+backups/
+**/backups/
+private_backups/
+*_rehearsal/
+**/*_rehearsal/
+
+# Household rollout artifacts
+hermes-household-bootstrap-auth/
+**/hermes-household-bootstrap-auth/
+hermes-household-bootstrap-eligible-users
+**/hermes-household-bootstrap-eligible-users
+*.claimed
+
+# Credentials and private keys
+.ssh/
+**/.ssh/
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+
+# Detached worktrees and temporary artifacts
+worktrees/
+**/worktrees/
+tmp/
+*.tmp
 
 # ---------- Not needed inside the Docker image ----------
-
-# Desktop app source (Tauri/Electron); never installed in the container
 apps/
-
-# Test suite — not shipped in production images
 tests/
-
-# Documentation site (Docusaurus) and supplementary docs
 website/
 docs/
-
-# Assets only used by the GitHub README
 assets/
 infographic/
-
-# Plugin-level docs (hermes-achievements ships docs/ but the runtime doesn't read them)
 plugins/hermes-achievements/docs/
-
-# Nix / Homebrew / AUR packaging metadata — irrelevant to Docker
 nix/
 flake.nix
 flake.lock
 packaging/
-
-# Design and planning documents
 plans/
 .plans/
-
-# ACP registry manifest (icon + agent.json) — not consumed at runtime
 acp_registry/
 
 # Repo-level dotfiles that are git-only or dev-tooling config

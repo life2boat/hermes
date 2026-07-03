@@ -261,12 +261,14 @@ class HealBiteHouseholdStore:
         *,
         household_id_factory: Callable[[], str] = new_household_id,
         member_id_factory: Callable[[], str] = new_household_member_id,
+        ensure_schema_on_init: bool = True,
     ) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._household_id_factory = household_id_factory
         self._member_id_factory = member_id_factory
-        self.ensure_schema()
+        if ensure_schema_on_init:
+            self.ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
@@ -482,6 +484,24 @@ class HealBiteHouseholdStore:
                 household_status=household.status,
             )
 
+    def resolve_existing_actor_context(self, actor_user_id: int) -> HouseholdContext:
+        actor = _normalize_actor_user_id(actor_user_id)
+        with self._connect() as conn:
+            if not self._actor_exists(conn, actor):
+                raise HouseholdValidationError("unknown actor")
+            membership = self._load_any_membership_for_actor(conn, actor)
+            if membership is None:
+                raise HouseholdNotFoundError("household not found")
+            household, member = membership
+            return HouseholdContext(
+                actor_user_id=actor,
+                household_id=household.id,
+                household_member_id=member.id,
+                role=member.role,
+                member_status=member.status,
+                household_status=household.status,
+            )
+
     def _load_any_membership_for_actor(self, conn: sqlite3.Connection, actor_user_id: int) -> tuple[Household, HouseholdMember] | None:
         rows = conn.execute(
             f"""
@@ -563,6 +583,14 @@ class HealBiteHouseholdService:
 
     def resolve_actor_household_context(self, actor_user_id: int) -> HouseholdContext:
         context = self.store.resolve_actor_context(actor_user_id)
+        if context.member_status is not HouseholdMemberStatus.ACTIVE:
+            raise HouseholdAccessError("household access denied")
+        if context.household_status is not HouseholdStatus.ACTIVE:
+            raise HouseholdAccessError("household access denied")
+        return context
+
+    def resolve_existing_actor_household_context(self, actor_user_id: int) -> HouseholdContext:
+        context = self.store.resolve_existing_actor_context(actor_user_id)
         if context.member_status is not HouseholdMemberStatus.ACTIVE:
             raise HouseholdAccessError("household access denied")
         if context.household_status is not HouseholdStatus.ACTIVE:

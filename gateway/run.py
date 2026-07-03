@@ -1312,6 +1312,12 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _build_healbite_household_runtime_bridge():
+    from gateway.healbite_household_runtime import build_household_runtime_bridge
+
+    return build_household_runtime_bridge()
+
+
 def _log_inbound_message_event(event: Any, source: Any) -> None:
     text = getattr(event, "text", None) or ""
     media_urls = getattr(event, "media_urls", None) or []
@@ -2674,6 +2680,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
+        self._healbite_household_runtime = _build_healbite_household_runtime_bridge()
+        _household_state = self._healbite_household_runtime.feature_state
+        logger.info(
+            "[Gateway][household_runtime_config] enabled=%s allowlist_count=%s configuration_valid=%s",
+            _household_state.enabled,
+            _household_state.allowlist_count,
+            _household_state.configuration_valid,
+        )
 
         # Wire process registry into session store for reset protection
         from tools.process_registry import process_registry

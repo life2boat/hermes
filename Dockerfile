@@ -223,11 +223,19 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
 # fail closed here instead of guessing from whatever checkout happened to
 # be present in the build context.
 ARG HERMES_GIT_SHA
-RUN printf '%s' "${HERMES_GIT_SHA:-}" | grep -Eq '^[0-9a-f]{40}$' && \
-    printf "%s\n" "${HERMES_GIT_SHA}" > /opt/hermes/.hermes_build_sha && \
-    chown root:root /opt/hermes/.hermes_build_sha && \
-    chmod 0444 /opt/hermes/.hermes_build_sha || \
-    { echo "HERMES_GIT_SHA must be a full 40-character lowercase hex SHA" >&2; exit 1; }
+RUN sha="${HERMES_GIT_SHA:-}"; \
+    case "$sha" in \
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) \
+            printf "%s\n" "$sha" > /opt/hermes/.hermes_build_sha; \
+            chown root:root /opt/hermes/.hermes_build_sha; \
+            chmod 0444 /opt/hermes/.hermes_build_sha; \
+            ;; \
+        *) \
+            echo "HERMES_GIT_SHA must be a full 40-character lowercase hex SHA" >&2; \
+            exit 1; \
+            ;; \
+    esac
+LABEL org.opencontainers.image.revision="${HERMES_GIT_SHA}"
 LABEL org.opencontainers.image.revision="${HERMES_GIT_SHA}"
 # ---------- s6-overlay service wiring ----------
 # Static services declared at build time: main-hermes + dashboard.

@@ -81,10 +81,12 @@ test "$RUNTIME_ID_COUNT" = "1"
 RUNTIME_PID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $1}')"
 RUNTIME_UID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $2}')"
 RUNTIME_GID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $3}')"
+RUNTIME_GROUP_COUNT="$(docker exec "$EXACT_CONTAINER" sh -lc "awk '/^Groups:/ {print NF-1}' /proc/$RUNTIME_PID/status")"
 
 test -n "$RUNTIME_PID"
 test -n "$RUNTIME_UID"
 test -n "$RUNTIME_GID"
+test -n "$RUNTIME_GROUP_COUNT"
 ```
 
 Stop immediately if:
@@ -93,7 +95,8 @@ Stop immediately if:
 no Hermes runtime process is present;
 multiple ambiguous Hermes runtime processes are present;
 runtime UID/GID cannot be determined unambiguously;
-runtime UID/GID changes unexpectedly between pre-write and post-write gates.
+runtime UID/GID changes unexpectedly between pre-write and post-write gates;
+runtime supplementary group context changes unexpectedly between gates.
 ```
 
 Use reusable permission-gate helpers so every root-write stage is checked the same way:
@@ -115,16 +118,20 @@ capture_runtime_identity() {
   current_pid="$(printf '%s' "$line" | awk '{print $1}')"
   current_uid="$(printf '%s' "$line" | awk '{print $2}')"
   current_gid="$(printf '%s' "$line" | awk '{print $3}')"
+  current_group_count="$(docker exec "$EXACT_CONTAINER" sh -lc "awk '/^Groups:/ {print NF-1}' /proc/$current_pid/status")"
   test -n "$current_pid"
   test -n "$current_uid"
   test -n "$current_gid"
+  test -n "$current_group_count"
   if [ -n "${RUNTIME_UID:-}" ]; then
     test "$current_uid" = "$RUNTIME_UID"
     test "$current_gid" = "$RUNTIME_GID"
+    test "$current_group_count" = "$RUNTIME_GROUP_COUNT"
   fi
   RUNTIME_PID="$current_pid"
   RUNTIME_UID="$current_uid"
   RUNTIME_GID="$current_gid"
+  RUNTIME_GROUP_COUNT="$current_group_count"
 }
 
 capture_db_permission_state() {
@@ -239,6 +246,8 @@ run_db_permission_gate() {
 Permission gates must run inside the exact deployed container namespace. Do not use the host venv for authoritative permission checks. The runtime-user SQLite probe must remain read-only: `mode=ro`, `PRAGMA query_only=ON`, `PRAGMA quick_check`, then close. Do not perform business writes, artificial transactions, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP`, `VACUUM`, or `REINDEX` as part of the permission probe.
 
 SQLite sidecars are race-sensitive. `-wal` and `-shm` may appear or disappear while Hermes is live. Re-stat them immediately before each compatibility check. Treat `ENOENT` as `sidecar_absent`, not as a failure. The gate fails only when an existing sidecar is incompatible with the runtime UID/GID or when the runtime user can no longer create or access sidecars through the DB parent directory.
+
+Supplementary-group review is mandatory. Record `runtime_group_count` from the exact Hermes process before any root-write stage and re-check it at every later gate. The current observed production runtime uses a single primary group only, so `docker exec --user "${RUNTIME_UID}:${RUNTIME_GID}"` is an intentionally strict and sufficient probe today. If a future runtime process depends on supplementary groups (`runtime_group_count > 1`), stop and upgrade the runbook before continuing writes; do not silently assume the stricter UID:GID probe is equivalent.
 
 ## Authorization Model
 
@@ -463,6 +472,7 @@ Required safe result:
 ```text
 runtime_uid discovered
 runtime_gid discovered
+runtime_group_count recorded
 db_regular_file=true
 runtime_db_readable=true
 runtime_db_writable=true
@@ -530,6 +540,7 @@ schema_state=canonical
 integrity=ok
 runtime_uid unchanged
 runtime_gid unchanged
+runtime_group_count unchanged
 runtime_sqlite_ro_probe=pass
 sidecars_compatible=true
 restart_count unchanged
@@ -639,6 +650,7 @@ schema_state=canonical
 integrity=ok
 runtime_uid unchanged
 runtime_gid unchanged
+runtime_group_count unchanged
 runtime_sqlite_ro_probe=pass
 sidecars_compatible=true
 restart_count unchanged
@@ -705,6 +717,7 @@ Required safe result:
 ```text
 runtime_uid unchanged
 runtime_gid unchanged
+runtime_group_count unchanged
 runtime_sqlite_ro_probe=pass
 sidecars_compatible=true
 integrity=ok
@@ -787,6 +800,7 @@ Required safe result:
 ```text
 runtime_uid unchanged
 runtime_gid unchanged
+runtime_group_count unchanged
 runtime_db_readable=true
 runtime_db_writable=true
 runtime_parent_searchable=true
@@ -821,6 +835,7 @@ Qdrant change
 privacy leak
 runtime UID/GID cannot be determined
 runtime UID/GID changed unexpectedly
+runtime supplementary group context changed unexpectedly
 DB became unreadable to the runtime user
 DB became unwritable to the runtime user
 DB parent directory became unsearchable or unwritable to the runtime user
@@ -862,6 +877,7 @@ Safe evidence fields may include only:
 ```text
 runtime_uid
 runtime_gid
+runtime_group_count
 db_owner_uid
 db_owner_gid
 db_mode

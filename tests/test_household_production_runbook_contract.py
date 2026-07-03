@@ -30,6 +30,8 @@ def test_runbook_defines_runtime_identity_and_permission_gate_contract() -> None
         '[ "$comm" = "hermes" ]',
         'RUNTIME_UID',
         'RUNTIME_GID',
+        'RUNTIME_GROUP_COUNT',
+        'runtime_group_count',
         'capture_db_permission_state',
         'verify_runtime_db_access',
         'verify_sqlite_sidecars',
@@ -63,6 +65,13 @@ def test_runbook_orders_permission_gates_around_schema_and_bootstrap_steps() -> 
     ]
     indices = [_index(text, marker) for marker in order]
     assert indices == sorted(indices)
+
+    assert _index(text, '## Stage 5A: Pre-Root-Write DB Permission Gate') < _index(text, 'action=household_schema_initialize')
+    assert _index(text, '## Stage 6A: Post-Schema Audit and Permission Gate') < _index(text, '## Stage 7: Eligibility Policy')
+    assert _index(text, '## Stage 6A: Post-Schema Audit and Permission Gate') < _index(text, '## Stage 9: First Bootstrap Apply')
+    assert _index(text, '## Stage 9A: Post-First Audit and Permission Gate') < _index(text, '## Stage 10: Second Bootstrap Apply')
+    assert _index(text, '## Stage 11A: Post-Second Permission Gate') < _index(text, '## Stage 12: Feature-Disabled Runtime Proof')
+    assert _index(text, '## Stage 14A: Final Stability Permission Gate') > _index(text, '## Stage 14: Stability Window')
 
 
 def test_runbook_requires_container_only_permission_checks_and_exact_paths() -> None:
@@ -116,3 +125,16 @@ def test_runbook_requires_safe_evidence_and_sidecar_stop_triggers() -> None:
     ]
     for needle in required:
         assert needle in text, f"missing evidence or stop-trigger contract: {needle}"
+
+
+def test_runbook_documents_supplementary_group_handling() -> None:
+    text = _text()
+    required = [
+        'Supplementary-group review is mandatory.',
+        'runtime_group_count',
+        'runtime supplementary group context changed unexpectedly',
+        'If a future runtime process depends on supplementary groups',
+        'do not silently assume the stricter UID:GID probe is equivalent',
+    ]
+    for needle in required:
+        assert needle in text, f"missing supplementary-group contract: {needle}"

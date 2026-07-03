@@ -695,9 +695,7 @@ def test_privacy_no_ids_in_errors_or_logs(tmp_path, caplog, capsys):
     assert "synthetic" not in combined
 
 
-def test_no_nutrition_target_table_or_bootstrap_cli_present():
-    assert not Path("scripts/household_db_audit.py").exists()
-    assert not Path("scripts/household_bootstrap.py").exists()
+def test_no_nutrition_target_table_or_runtime_bootstrap_present():
     source = Path("gateway/healbite_households.py").read_text(encoding="utf-8")
     assert "nutrition" + "_targets" not in source
     assert "TELE" + "GRAM" not in source

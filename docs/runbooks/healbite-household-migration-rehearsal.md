@@ -213,3 +213,128 @@ no build
 no deploy
 no restart
 ```
+
+## Sprint 7.1B2 Implemented Tooling
+
+Status: tooling implemented for rehearsal and audit only. Do not run `--apply`
+against `/home/hermes/healbite.db`.
+
+### Read-Only Audit
+
+```bash
+python scripts/household_db_audit.py --db /path/to/healbite-copy.db --json
+```
+
+The audit opens SQLite in read-only mode and reports safe aggregates only. It
+never initializes schema and never creates a missing DB file.
+
+Key output fields:
+
+```text
+schema_state
+integrity
+identity_column
+eligibility_state
+households_total
+members_total
+owner_pointer_mismatches
+duplicate_active_linked_users
+households_without_owner
+orphan_members
+invalid_uuid
+invalid_version
+invalid_enum
+eligible_users_total
+eligible_users_covered
+eligible_users_missing
+```
+
+### Bootstrap Dry-Run
+
+Default mode is dry-run:
+
+```bash
+python scripts/household_bootstrap.py --db /path/to/healbite-copy.db --json
+```
+
+Dry-run does not create schema, does not create a missing DB, does not start a
+write transaction, and does not modify household rows.
+
+### Schema Initialization On Rehearsal Copy
+
+Schema initialization is explicit and must be run only on an isolated copy:
+
+```bash
+python scripts/household_bootstrap.py \
+  --db /path/to/healbite-copy.db \
+  --initialize-schema \
+  --dry-run \
+  --json
+```
+
+### Eligibility Policy
+
+If `users` does not contain reliable bot/system/test metadata, `--apply` is
+refused unless an operator-provided eligibility file is supplied:
+
+```bash
+python scripts/household_bootstrap.py \
+  --db /path/to/healbite-copy.db \
+  --apply \
+  --eligible-users-file /run/operator-approved-household-users \
+  --json
+```
+
+The eligibility file contains one positive integer application user ID per line.
+It is an allowlist over authoritative `users`, not an alternate identity source.
+Never commit the file, copy it into evidence, or print its contents.
+
+### Production Path Guard
+
+`--apply --db /home/hermes/healbite.db` is guarded and refused in Sprint 7.1B2.
+Production bootstrap requires a later controlled production task.
+
+### Exit Codes
+
+```text
+0 = success or dry-run completed
+2 = invalid arguments
+3 = DB unavailable or missing
+4 = schema not canonical / not initialized
+5 = integrity failure
+6 = eligibility policy missing or invalid
+7 = household conflict or partial state
+8 = apply execution failure
+```
+
+### Privacy Contract
+
+Human and JSON output must contain aggregates only. Forbidden output includes:
+
+```text
+user IDs
+Telegram IDs
+household UUIDs
+member UUIDs
+names
+raw SQL rows
+eligibility-file contents
+raw exception bodies
+```
+
+### Explicit Exclusions For Sprint 7.1B2
+
+```text
+no live production bootstrap
+no production schema initialization
+no Telegram UI
+no callback changes
+no runtime startup wiring
+no weekly menu
+no shopping list
+no family editing
+no LLM changes
+no build
+no deploy
+no restart
+```

@@ -51,6 +51,195 @@ required scripts exist under /opt/hermes/scripts/
 
 Do not use the host venv for production writes.
 
+## Runtime Identity and SQLite Permission Gate Contract
+
+The container starts as root so the stage2 hook can remap UID/GID and prepare writable paths, but the application runtime identity must be resolved from the exact running Hermes process inside the deployed container. `Config.User=root` is not authoritative for the application, and the static `main-hermes` s6 service is currently a no-op placeholder.
+
+Authoritative runtime identity discovery order:
+
+```text
+1. exact running Hermes application process inside the deployed container;
+2. an explicit future service-level runtime user contract, if the image changes and is revalidated;
+3. Dockerfile USER or container Config.User only if separately revalidated.
+```
+
+Resolve and store exactly one runtime identity before any root-executed schema or bootstrap step:
+
+```bash
+RUNTIME_ID_LINE="$(
+  docker exec "$EXACT_CONTAINER" sh -lc '
+    ps -eo pid=,comm=,uid=,gid= --sort=pid |
+    while read -r pid comm uid gid; do
+      [ "$comm" = "hermes" ] || continue
+      printf "%s %s %s\n" "$pid" "$uid" "$gid"
+    done
+  '
+)"
+RUNTIME_ID_COUNT="$(printf '%s\n' "$RUNTIME_ID_LINE" | sed '/^$/d' | wc -l)"
+test "$RUNTIME_ID_COUNT" = "1"
+
+RUNTIME_PID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $1}')"
+RUNTIME_UID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $2}')"
+RUNTIME_GID="$(printf '%s' "$RUNTIME_ID_LINE" | awk '{print $3}')"
+
+test -n "$RUNTIME_PID"
+test -n "$RUNTIME_UID"
+test -n "$RUNTIME_GID"
+```
+
+Stop immediately if:
+
+```text
+no Hermes runtime process is present;
+multiple ambiguous Hermes runtime processes are present;
+runtime UID/GID cannot be determined unambiguously;
+runtime UID/GID changes unexpectedly between pre-write and post-write gates.
+```
+
+Use reusable permission-gate helpers so every root-write stage is checked the same way:
+
+```bash
+DB_PARENT="$(dirname "$CONTAINER_DB")"
+
+capture_runtime_identity() {
+  local line count current_pid current_uid current_gid
+  line="$(docker exec "$EXACT_CONTAINER" sh -lc '
+    ps -eo pid=,comm=,uid=,gid= --sort=pid |
+    while read -r pid comm uid gid; do
+      [ "$comm" = "hermes" ] || continue
+      printf "%s %s %s\n" "$pid" "$uid" "$gid"
+    done
+  ')"
+  count="$(printf '%s\n' "$line" | sed '/^$/d' | wc -l)"
+  test "$count" = "1"
+  current_pid="$(printf '%s' "$line" | awk '{print $1}')"
+  current_uid="$(printf '%s' "$line" | awk '{print $2}')"
+  current_gid="$(printf '%s' "$line" | awk '{print $3}')"
+  test -n "$current_pid"
+  test -n "$current_uid"
+  test -n "$current_gid"
+  if [ -n "${RUNTIME_UID:-}" ]; then
+    test "$current_uid" = "$RUNTIME_UID"
+    test "$current_gid" = "$RUNTIME_GID"
+  fi
+  RUNTIME_PID="$current_pid"
+  RUNTIME_UID="$current_uid"
+  RUNTIME_GID="$current_gid"
+}
+
+capture_db_permission_state() {
+  docker exec --user 0 "$EXACT_CONTAINER" sh -lc '
+    db="$1"
+    parent="$2"
+    wal="${db}-wal"
+    shm="${db}-shm"
+    test -f "$db"
+    test -d "$parent"
+    printf "db_regular_file=%s\n" true
+    printf "db_owner_uid=%s\n" "$(stat -c %u "$db")"
+    printf "db_owner_gid=%s\n" "$(stat -c %g "$db")"
+    printf "db_mode=%s\n" "$(stat -c %a "$db")"
+    printf "db_parent_owner_uid=%s\n" "$(stat -c %u "$parent")"
+    printf "db_parent_owner_gid=%s\n" "$(stat -c %g "$parent")"
+    printf "db_parent_mode=%s\n" "$(stat -c %a "$parent")"
+    if [ -e "$wal" ]; then
+      test -f "$wal"
+      printf "wal_present=%s\n" true
+      printf "wal_regular_file=%s\n" true
+      printf "wal_owner_uid=%s\n" "$(stat -c %u "$wal")"
+      printf "wal_owner_gid=%s\n" "$(stat -c %g "$wal")"
+      printf "wal_mode=%s\n" "$(stat -c %a "$wal")"
+    else
+      printf "wal_present=%s\n" false
+    fi
+    if [ -e "$shm" ]; then
+      test -f "$shm"
+      printf "shm_present=%s\n" true
+      printf "shm_regular_file=%s\n" true
+      printf "shm_owner_uid=%s\n" "$(stat -c %u "$shm")"
+      printf "shm_owner_gid=%s\n" "$(stat -c %g "$shm")"
+      printf "shm_mode=%s\n" "$(stat -c %a "$shm")"
+    else
+      printf "shm_present=%s\n" false
+    fi
+  ' sh "$CONTAINER_DB" "$DB_PARENT"
+}
+
+verify_runtime_db_access() {
+  docker exec --user "${RUNTIME_UID}:${RUNTIME_GID}" "$EXACT_CONTAINER" sh -lc '
+    db="$1"
+    parent="$2"
+    test -r "$db"
+    test -w "$db"
+    test -x "$parent"
+    test -w "$parent"
+    printf "runtime_db_readable=%s\n" true
+    printf "runtime_db_writable=%s\n" true
+    printf "runtime_parent_searchable=%s\n" true
+    printf "runtime_parent_writable=%s\n" true
+  ' sh "$CONTAINER_DB" "$DB_PARENT"
+
+  docker exec --user "${RUNTIME_UID}:${RUNTIME_GID}" "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
+import sqlite3
+DB = "file:/home/hermes/healbite.db?mode=ro"
+con = sqlite3.connect(DB, uri=True)
+con.execute("PRAGMA query_only=ON")
+mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+con.execute("PRAGMA quick_check").fetchone()
+con.close()
+print(f"journal_mode={mode}")
+print("runtime_sqlite_ro_probe=pass")
+PY
+}
+
+verify_sqlite_sidecars() {
+  docker exec --user 0 "$EXACT_CONTAINER" sh -lc '
+    db="$1"
+    wal="${db}-wal"
+    shm="${db}-shm"
+    for sidecar in "$wal" "$shm"; do
+      if [ -e "$sidecar" ]; then
+        test -f "$sidecar"
+        test ! -L "$sidecar"
+        mode="$(stat -c %a "$sidecar")"
+        other="${mode#??}"
+        case "$other" in
+          2|3|6|7) exit 1 ;;
+        esac
+      fi
+    done
+  ' sh "$CONTAINER_DB"
+
+  docker exec --user "${RUNTIME_UID}:${RUNTIME_GID}" "$EXACT_CONTAINER" sh -lc '
+    db="$1"
+    wal="${db}-wal"
+    shm="${db}-shm"
+    for sidecar in "$wal" "$shm"; do
+      if [ -e "$sidecar" ]; then
+        test -r "$sidecar"
+        test -w "$sidecar"
+      fi
+    done
+    printf "sidecars_compatible=%s\n" true
+  ' sh "$CONTAINER_DB"
+}
+
+run_db_permission_gate() {
+  capture_runtime_identity
+  capture_db_permission_state
+  verify_runtime_db_access
+  verify_sqlite_sidecars
+  docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+    "$IMAGE_ROOT/scripts/household_db_audit.py" \
+    --db "$CONTAINER_DB" \
+    --json
+}
+```
+
+Permission gates must run inside the exact deployed container namespace. Do not use the host venv for authoritative permission checks. The runtime-user SQLite probe must remain read-only: `mode=ro`, `PRAGMA query_only=ON`, `PRAGMA quick_check`, then close. Do not perform business writes, artificial transactions, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `DROP`, `VACUUM`, or `REINDEX` as part of the permission probe.
+
+SQLite sidecars are race-sensitive. `-wal` and `-shm` may appear or disappear while Hermes is live. Re-stat them immediately before each compatibility check. Treat `ENOENT` as `sidecar_absent`, not as a failure. The gate fails only when an existing sidecar is incompatible with the runtime UID/GID or when the runtime user can no longer create or access sidecars through the DB parent directory.
+
 ## Authorization Model
 
 Production write operations remain denied by default. The bootstrap CLI accepts `--production-authorization-file PATH` only for production DB write operations and only when the capability file authorizes exactly one action:
@@ -261,6 +450,35 @@ integrity=ok
 
 If schema is already canonical, do not remove it; verify counts and conflicts. If schema is partial, unexpected, or corrupt, stop.
 
+## Stage 5A: Pre-Root-Write DB Permission Gate
+
+Before creating schema capability S, run the permission gate from inside the exact deployed container namespace:
+
+```bash
+run_db_permission_gate
+```
+
+Required safe result:
+
+```text
+runtime_uid discovered
+runtime_gid discovered
+db_regular_file=true
+runtime_db_readable=true
+runtime_db_writable=true
+runtime_parent_searchable=true
+runtime_parent_writable=true
+runtime_sqlite_ro_probe=pass
+journal_mode classified
+wal_present true/false
+shm_present true/false
+sidecars_compatible=true
+integrity=ok
+restart_count unchanged
+```
+
+If this gate fails, stop before creating schema capability S. Do not perform automatic permission repair.
+
 ## Stage 6: Schema Authorization and Initialization
 
 Create one root-only capability:
@@ -291,6 +509,33 @@ integrity=ok
 feature=false
 allowlist_count=0
 ```
+
+## Stage 6A: Post-Schema Audit and Permission Gate
+
+Before creating the eligibility file, rerun the canonical audit and DB permission gate:
+
+```bash
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_db_audit.py" \
+  --db "$CONTAINER_DB" \
+  --json
+
+run_db_permission_gate
+```
+
+Required safe result:
+
+```text
+schema_state=canonical
+integrity=ok
+runtime_uid unchanged
+runtime_gid unchanged
+runtime_sqlite_ro_probe=pass
+sidecars_compatible=true
+restart_count unchanged
+```
+
+If this gate fails, stop. Do not create the eligibility file. Do not create bootstrap capability A.
 
 ## Stage 7: Eligibility Policy
 
@@ -373,6 +618,34 @@ invalid_enum=0
 integrity=ok
 ```
 
+## Stage 9A: Post-First Audit and Permission Gate
+
+Before creating bootstrap capability B, rerun the canonical audit and DB permission gate:
+
+```bash
+docker exec --user 0 "$EXACT_CONTAINER" "$IMAGE_PYTHON" \
+  "$IMAGE_ROOT/scripts/household_db_audit.py" \
+  --db "$CONTAINER_DB" \
+  --eligible-users-file "$ELIGIBLE_FILE" \
+  --json
+
+run_db_permission_gate
+```
+
+Required safe result:
+
+```text
+schema_state=canonical
+integrity=ok
+runtime_uid unchanged
+runtime_gid unchanged
+runtime_sqlite_ro_probe=pass
+sidecars_compatible=true
+restart_count unchanged
+```
+
+If this gate fails, stop. Do not create bootstrap capability B. Do not perform the second apply.
+
 ## Stage 10: Second Bootstrap Apply
 
 Create a second, distinct bootstrap capability. Do not reuse the first capability.
@@ -418,6 +691,28 @@ invalid_uuid=0
 invalid_version=0
 invalid_enum=0
 ```
+
+## Stage 11A: Post-Second Permission Gate
+
+Before feature-disabled runtime proof, rerun the DB permission gate:
+
+```bash
+run_db_permission_gate
+```
+
+Required safe result:
+
+```text
+runtime_uid unchanged
+runtime_gid unchanged
+runtime_sqlite_ro_probe=pass
+sidecars_compatible=true
+integrity=ok
+created_delta=0 for second apply
+restart_count unchanged
+```
+
+If this gate fails, stop before feature-disabled runtime proof or stability checks.
 
 ## Stage 12: Feature-Disabled Runtime Proof
 
@@ -476,6 +771,32 @@ allowlist_count=0
 no household runtime create markers
 no privacy violations
 root free space safe
+sqlite permission error count=0
+```
+
+## Stage 14A: Final Stability Permission Gate
+
+At the end of the stability window, rerun the DB permission gate and a limited recent-log review:
+
+```bash
+run_db_permission_gate
+```
+
+Required safe result:
+
+```text
+runtime_uid unchanged
+runtime_gid unchanged
+runtime_db_readable=true
+runtime_db_writable=true
+runtime_parent_searchable=true
+runtime_parent_writable=true
+runtime_sqlite_ro_probe=pass
+sidecars_compatible=true
+integrity=ok
+restart_count unchanged
+qdrant unchanged
+sqlite_permission_error_count=0
 ```
 
 ## Stop Triggers
@@ -498,6 +819,86 @@ non-household count change
 container restart
 Qdrant change
 privacy leak
+runtime UID/GID cannot be determined
+runtime UID/GID changed unexpectedly
+DB became unreadable to the runtime user
+DB became unwritable to the runtime user
+DB parent directory became unsearchable or unwritable to the runtime user
+WAL or SHM became root-only or otherwise runtime-incompatible
+DB, WAL, or SHM became world-writable
+journal mode changed unexpectedly
+runtime SQLite read-only probe failed
+sqlite permission error count increased
+```
+
+## SQLite Permission Remediation Policy
+
+Do not perform automatic permission repair during the normal production flow. In particular, do not run:
+
+```text
+chown -R
+chmod -R
+chmod 777
+chmod 666
+```
+
+If the gate detects a permission mismatch:
+
+```text
+STOP
+preserve safe evidence only
+do not create the next capability
+do not continue schema/bootstrap writes
+do not change owner/group/mode automatically
+identify the exact incompatible DB or sidecar path
+obtain explicit operator approval for any narrow remediation
+rerun the audit and permission gate after the approved fix
+```
+
+## SQLite Permission Evidence Contract
+
+Safe evidence fields may include only:
+
+```text
+runtime_uid
+runtime_gid
+db_owner_uid
+db_owner_gid
+db_mode
+db_parent_owner_uid
+db_parent_owner_gid
+db_parent_mode
+journal_mode
+wal_present
+shm_present
+wal_mode
+shm_mode
+runtime_db_readable
+runtime_db_writable
+runtime_parent_searchable
+runtime_parent_writable
+runtime_sqlite_ro_probe
+sidecars_compatible
+integrity
+restart_count
+gate_result
+sqlite_permission_error_count
+```
+
+Never include:
+
+```text
+DB inode/device
+HealBite actor IDs
+Telegram IDs
+household/member UUIDs
+profile values
+meal data
+weight data
+water data
+raw rows
+raw logs
+raw exception bodies
 ```
 
 ## Rollback Policy

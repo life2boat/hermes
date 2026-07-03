@@ -49,6 +49,8 @@ Schema changes:
 
 - add `household_weekly_menus`
 - add `household_weekly_menu_entries`
+- store one immutable menu revision snapshot per menu row
+- add revision-ordering and partial-uniqueness constraints for one draft and one published revision per logical series
 - add indexes and checks for UUIDs, week_start, status, version, ordering
 
 Runtime changes:
@@ -63,6 +65,8 @@ Tests:
 - UUID validation
 - week-start validation
 - status and version validation
+- revision-number monotonicity and uniqueness
+- single-draft and single-published partial uniqueness
 - household isolation
 - atomic draft replacement contract at store level
 
@@ -115,9 +119,11 @@ Runtime changes:
 Tests:
 
 - item quantity representation
+- quantity precision, scale, and decimal normalization
 - unit compatibility refusal
 - manual item persistence model
 - list lifecycle and foreign-key safety
+- exact immutable menu-revision linkage
 - household isolation and optimistic concurrency
 
 Feature state:
@@ -267,6 +273,7 @@ Tests:
 - optimistic concurrency
 - idempotent retry
 - duplicate callback delivery
+- role-based publish and archive authorization
 - LLM malformed output rejection
 - LLM retry no-duplicate guarantee
 - publish snapshot immutability
@@ -320,8 +327,10 @@ Tests:
 
 - standalone list support
 - menu-linked derivation
+- exact immutable source-menu linkage
 - checked-state preservation
 - manual-item preservation
+- generated-item override semantics
 - unit incompatibility behavior
 - duplicate callback and idempotency behavior
 

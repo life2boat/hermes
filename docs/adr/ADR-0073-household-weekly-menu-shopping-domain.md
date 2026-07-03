@@ -44,13 +44,19 @@ Logical key:
 household_id + week_start
 ```
 
-Physical identifier:
+Physical revision identifier:
 
 ```text
 menu_id = opaque lowercase canonical UUIDv4
 ```
 
-There is one canonical menu lineage per household/week. Mutations create or advance revisions inside that lineage instead of creating unrelated parallel lineages.
+There is one canonical menu series per household/week. That logical series is identified by:
+
+```text
+household_id + week_start
+```
+
+Each physical `household_weekly_menus` row is one immutable menu revision snapshot inside that series. `menu_id` identifies that exact physical revision row and is the opaque identifier future callbacks and shopping-link rows must carry when they need an exact immutable snapshot reference.
 
 ### Shopping List
 
@@ -103,6 +109,34 @@ The future design must use `HouseholdAuthorizationContext` from the canonical ho
 
 The household domain must never trust raw `household_id`, `member_id`, `user_id`, or Telegram transport identifiers as proof of access.
 
+### Role Permissions
+
+Until a narrower future ADR changes the policy explicitly, the default mutation contract is:
+
+```text
+owner:
+  may create/replace draft menus
+  may publish/archive menus
+  may create/regenerate/archive shopping lists
+
+adult_admin:
+  may create/replace draft menus
+  may publish/archive menus
+  may create/regenerate/archive shopping lists
+
+adult_member:
+  may view menu and shopping
+  may propose or edit draft content only if the specific future surface explicitly enables it
+  may not publish/archive a menu revision
+  may not archive a shopping aggregate by default
+
+dependent:
+  read-only or no access, depending on future UI surface
+  no mutation rights
+```
+
+If an implementation stage cannot enforce those differentiated permissions safely, that stage must remain disabled instead of widening mutation access to every active member.
+
 ## Single-Member Compatibility
 
 Single-member households remain first-class citizens. A current solo HealBite user with one active personal household member gets the same functional UX as a classic single-user flow. The system does not introduce a separate legacy single-user menu domain.
@@ -143,11 +177,35 @@ archived
 
 ### Active Aggregate Contract
 
-- one canonical menu lineage exists per `household_id + week_start`;
-- revision is an integer and increases on every successful mutation;
+- one canonical menu series exists per `household_id + week_start`;
+- each physical revision snapshot has its own `menu_id`;
+- `revision_number` is an integer and increases monotonically within one logical series;
 - the latest published revision is a stable snapshot;
-- there may be at most one active draft revision per lineage;
+- there may be at most one active draft revision per logical series;
+- there may be at most one active published revision per logical series;
 - published revisions are immutable snapshots.
+
+### Revision Identity Contract
+
+The future implementation must keep the logical weekly-menu series and the physical immutable revision row distinct:
+
+```text
+logical menu series key = household_id + week_start
+physical revision row ID = menu_id
+human/comparison ordering = revision_number
+```
+
+`menu_id` is the identifier for exactly one immutable revision snapshot, not a mutable pointer to "whatever is current now". `revision_number` is not a substitute for `menu_id`; it is only the monotonic ordinal inside the same logical series.
+
+The future callback contract may carry:
+
+```text
+menu_id
+expected_version
+idempotency_token
+```
+
+and may include `revision_number` for display/debug safety, but server-side authorization and lookup must still resolve the exact revision row by trusted household scope.
 
 ### Editing Published Menus
 
@@ -156,7 +214,7 @@ Editing an already published menu must not mutate the published snapshot in plac
 - publish freezes the revision;
 - later changes create a new draft revision derived from the last published content or a new generated proposal;
 - a new explicit publish makes that later draft the new published revision;
-- previous published revisions become historical snapshots;
+- the previous published revision is retired from the active published slot in the same transaction and becomes a historical archived snapshot;
 - archive retires the lineage from active use but keeps history.
 
 This avoids ambiguous in-place edits and gives stable shopping linkage and auditability.
@@ -176,7 +234,7 @@ Each future menu entry must define:
 ```text
 entry_id
 menu_id
-menu_revision
+revision_number
 household_id
 local_date
 meal_slot
@@ -282,6 +340,8 @@ source_menu_revision
 
 or be standalone with no source menu linkage.
 
+`source_menu_id` references the exact immutable published menu revision snapshot row. `source_menu_revision` is optional denormalized metadata for diagnostics and human comparison; it must never replace the exact immutable `source_menu_id` reference.
+
 ### Lifecycle Decisions
 
 - standalone manual shopping list is allowed;
@@ -354,6 +414,21 @@ Decision:
 - keep display unit for user-facing text;
 - allow `unitless` and `unknown` explicitly;
 - never auto-merge incompatible units.
+
+Canonical quantity contract for the first implementation:
+
+```text
+syntax: ^[0-9]+(\.[0-9]{1,3})?$
+nonnegative only
+no exponent notation
+no sign prefix
+no NaN/Infinity
+locale-independent decimal point only
+maximum precision = 12 total digits
+maximum scale = 3 fractional digits
+```
+
+Normalization must remove insignificant trailing fractional zeroes and must reject locale-specific comma separators in persisted values.
 
 Examples of non-mergeable semantics:
 
@@ -433,6 +508,18 @@ archive aggregate
 
 Duplicate Telegram callback deliveries, timeout retries, job retries, or LLM retries must resolve to the same logical result and must not create duplicate menus, lists, or items.
 
+Idempotency scope must include at least:
+
+```text
+household_id
+authorized actor member
+operation type
+target aggregate identity
+opaque request token
+```
+
+If the same token is replayed with the same payload, the service returns the original logical result. If the same token is replayed with a different payload, the service must reject it as a conflict instead of silently reusing or overwriting prior state.
+
 ## Transaction Boundaries
 
 The following operations must be atomic:
@@ -505,7 +592,10 @@ Recommended supporting fields and constraints:
 
 - primary key: `id TEXT PRIMARY KEY`;
 - foreign key: `household_id -> households(id)`;
-- logical uniqueness: `(household_id, week_start)` per active lineage;
+- one row = one immutable revision snapshot;
+- logical series key: `(household_id, week_start)`;
+- revision ordering key: `(household_id, week_start, revision_number)` unique;
+- partial uniqueness for at most one draft and at most one published row per logical series;
 - status check;
 - version check `>= 1`;
 - week_start check enforced by helper plus weekday validation;
@@ -529,6 +619,7 @@ Recommended supporting fields and constraints:
 - primary key: `id TEXT PRIMARY KEY`;
 - foreign key: `household_id -> households(id)`;
 - optional `source_menu_id`, `source_menu_revision`;
+- `source_menu_id` references the exact immutable published revision row, not only the logical week series;
 - status check;
 - version and timestamps;
 - uniqueness rules for active-list semantics.

@@ -172,6 +172,44 @@ def test_missing_path_and_production_path_guard(tmp_path):
     assert guarded["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
 
 
+def test_production_path_guard_blocks_initializer_and_aliases(monkeypatch, tmp_path):
+    production = tmp_path / "prod.db"
+    _users(production)
+    HealBiteHouseholdStore(db_path=production)
+    monkeypatch.setattr("gateway.healbite_household_bootstrap.PRODUCTION_DB_PATH", production)
+
+    direct = bootstrap_households(production, initialize_schema=True)
+    assert direct["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+
+    alias = tmp_path / "alias.db"
+    try:
+        alias.symlink_to(production)
+    except (OSError, NotImplementedError):
+        alias = None
+    if alias is not None:
+        result = bootstrap_households(alias, apply=True, eligible_users_file=_eligible_file(tmp_path, 101))
+        assert result["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+
+    hardlink = tmp_path / "hardlink.db"
+    try:
+        hardlink.hardlink_to(production)
+    except (OSError, NotImplementedError):
+        hardlink = None
+    if hardlink is not None:
+        result = bootstrap_households(hardlink, apply=True, eligible_users_file=_eligible_file(tmp_path, 101))
+        assert result["error_type"] == "PRODUCTION_PATH_APPLY_REFUSED"
+
+
+def test_cli_no_production_override_flag(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _users(db_path)
+
+    with pytest.raises(SystemExit) as exc:
+        household_bootstrap.main(["--db", str(db_path), "--allow-production-path"])
+
+    assert exc.value.code == 2
+
+
 def test_invalid_batch_size_exit_code(tmp_path):
     db_path = tmp_path / "healbite.db"
     _users(db_path)
@@ -195,3 +233,41 @@ def test_cli_json_is_safe_and_hides_ids_file_and_uuids(tmp_path):
     result = json.loads(payload)
     assert result["created_count"] == 1
     assert result["result"] == "success"
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o777])
+def test_eligible_file_permissions_fail_closed(tmp_path, mode):
+    db_path = tmp_path / "healbite.db"
+    _users(db_path, ids=(101,))
+    HealBiteHouseholdStore(db_path=db_path)
+    eligible = _eligible_file(tmp_path, 101)
+    eligible.chmod(mode)
+
+    result = bootstrap_households(db_path, apply=True, eligible_users_file=eligible)
+
+    assert result["exit_code"] == 6
+    assert result["eligibility_state"] == "invalid"
+    assert result["eligible_file_security"] == "invalid"
+    assert _counts(db_path) == (0, 0)
+
+
+def test_eligible_file_symlink_and_directory_fail_closed(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _users(db_path, ids=(101,))
+    HealBiteHouseholdStore(db_path=db_path)
+    target = _eligible_file(tmp_path, 101)
+
+    symlink = tmp_path / "eligible-link.txt"
+    try:
+        symlink.symlink_to(target)
+    except (OSError, NotImplementedError):
+        symlink = None
+    if symlink is not None:
+        result = bootstrap_households(db_path, apply=True, eligible_users_file=symlink)
+        assert result["exit_code"] == 6
+        assert result["eligible_file_security"] == "invalid"
+        assert _counts(db_path) == (0, 0)
+
+    result = bootstrap_households(db_path, apply=True, eligible_users_file=tmp_path)
+    assert result["exit_code"] == 6
+    assert result["eligible_file_security"] == "invalid"
+    assert _counts(db_path) == (0, 0)

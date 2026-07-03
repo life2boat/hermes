@@ -21,7 +21,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--eligible-users-file")
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--initialize-schema", action="store_true")
-    parser.add_argument("--allow-production-path", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     result = bootstrap_households(
@@ -30,7 +29,6 @@ def main(argv: list[str] | None = None) -> int:
         initialize_schema=bool(args.initialize_schema),
         eligible_users_file=args.eligible_users_file,
         batch_size=args.batch_size,
-        allow_production_path=bool(args.allow_production_path),
     )
     if args.json:
         print(safe_json(result))

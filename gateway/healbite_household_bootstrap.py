@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 import time
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 from gateway.healbite_household_schema import (
     HOUSEHOLD_MEMBERS_TABLE,
@@ -48,8 +50,12 @@ EXIT_HOUSEHOLD_CONFLICT = 7
 EXIT_APPLY_FAILURE = 8
 
 
+def _sqlite_read_only_uri(db_path: Path) -> str:
+    return f"file:{quote(str(db_path.resolve()), safe='/')}?mode=ro"
+
+
 def _read_only_connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn = sqlite3.connect(_sqlite_read_only_uri(db_path), uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -140,6 +146,20 @@ def _metadata_eligibility_available(conn: sqlite3.Connection) -> bool:
     return {"is_bot", "is_system", "is_test", "status"}.issubset(columns)
 
 
+def _eligible_file_is_protected(path: Path) -> bool:
+    try:
+        file_stat = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(file_stat.st_mode):
+        return False
+    if not stat.S_ISREG(file_stat.st_mode):
+        return False
+    if file_stat.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        return False
+    return True
+
+
 def _load_eligible_file(path: str | Path | None, authoritative: set[int]) -> tuple[set[int], dict[str, Any]]:
     result = {
         "eligible_file_used": path is not None,
@@ -149,11 +169,17 @@ def _load_eligible_file(path: str | Path | None, authoritative: set[int]) -> tup
         "eligible_file_unknown": 0,
     }
     if path is None:
+        result["eligible_file_security"] = None
         return set(authoritative), result
     selected: set[int] = set()
     seen: set[int] = set()
+    eligible_path = Path(path)
+    if not _eligible_file_is_protected(eligible_path):
+        result.update({"eligible_file_valid": False, "eligible_file_invalid": 1, "eligible_file_security": "invalid"})
+        return set(), result
+    result["eligible_file_security"] = "valid"
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        lines = eligible_path.read_text(encoding="utf-8").splitlines()
     except OSError:
         result.update({"eligible_file_valid": False, "eligible_file_invalid": 1})
         return set(), result
@@ -338,6 +364,20 @@ def _non_household_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {f"{table}_count": _count(conn, table) for table in NON_HOUSEHOLD_TABLES if table in tables}
 
 
+def _is_production_db_path(path: Path) -> bool:
+    try:
+        if path.resolve(strict=False) == PRODUCTION_DB_PATH.resolve(strict=False):
+            return True
+    except OSError:
+        pass
+    try:
+        if path.exists() and PRODUCTION_DB_PATH.exists() and path.samefile(PRODUCTION_DB_PATH):
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def audit_household_db(db_path: str | Path, eligible_users_file: str | Path | None = None) -> dict[str, Any]:
     path = Path(db_path)
     result: dict[str, Any] = {
@@ -383,6 +423,10 @@ def audit_household_db(db_path: str | Path, eligible_users_file: str | Path | No
                 result["eligible_users_missing"] = None
             result["coverage_state"] = "verified" if result["eligible_users_total"] is not None else "unverified"
             result["result"] = "success" if schema_state in {"not_initialized", "canonical"} else "failed"
+            if not file_state["eligible_file_valid"]:
+                result.update({"result": "failed", "error_type": "ELIGIBILITY_INVALID"})
+            elif _has_conflicts(result):
+                result.update({"result": "failed", "error_type": "HOUSEHOLD_CONFLICT"})
             return result
     except sqlite3.Error:
         result.update({"error_type": "SQLITE_DATABASE_ERROR", "integrity": "failed"})
@@ -399,7 +443,6 @@ def bootstrap_households(
     initialize_schema: bool = False,
     eligible_users_file: str | Path | None = None,
     batch_size: int = 100,
-    allow_production_path: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     path = Path(db_path)
@@ -419,7 +462,7 @@ def bootstrap_households(
     if batch_size <= 0 or batch_size > 1000:
         result.update({"error_type": "INVALID_BATCH_SIZE", "exit_code": EXIT_INVALID_ARGUMENTS})
         return result
-    if apply and path.resolve() == PRODUCTION_DB_PATH and not allow_production_path:
+    if (apply or initialize_schema) and _is_production_db_path(path):
         result.update({"error_type": "PRODUCTION_PATH_APPLY_REFUSED", "exit_code": EXIT_APPLY_FAILURE})
         return result
     if not path.exists():

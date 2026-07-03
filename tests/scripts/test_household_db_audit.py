@@ -147,6 +147,30 @@ def test_audit_detects_conflicts_even_when_constraints_bypassed(tmp_path):
 
     assert result["owner_pointer_mismatches"] >= 1
     assert result["orphan_members"] >= 1
+    assert result["result"] == "failed"
+    assert result["error_type"] == "HOUSEHOLD_CONFLICT"
+
+
+def test_audit_cli_conflict_exits_nonzero(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _users(db_path, ids=(101, 202))
+    first = HealBiteHouseholdStore(db_path=db_path).get_or_create_personal_household(101)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE {HOUSEHOLDS_TABLE} SET owner_user_id=202 WHERE id=?", (first.household.id,))
+
+    assert household_db_audit.main(["--db", str(db_path), "--json"]) == 1
+
+
+def test_audit_uri_escapes_special_filename(tmp_path):
+    db_path = tmp_path / "heal bite #audit?.db"
+    _users(db_path)
+    before = _hash(db_path)
+
+    result = audit_household_db(db_path)
+
+    assert result["result"] == "success"
+    assert result["schema_state"] == "not_initialized"
+    assert _hash(db_path) == before
 
 
 def test_audit_corrupt_db_safe_failure(tmp_path):

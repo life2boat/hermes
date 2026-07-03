@@ -1,0 +1,488 @@
+﻿# HealBite Weekly Menu and Shopping Implementation Plan
+
+Status: design-only plan
+
+Base architecture:
+
+- ADR-0071 household-aware weekly menu and shopping domain
+- ADR-0072 household foundation bootstrap
+- ADR-0073 household weekly menu and shopping domain
+
+## Current Baseline
+
+Confirmed baseline at design lock:
+
+- production household foundation already exists and is canonical;
+- household feature remains disabled;
+- household allowlist remains empty;
+- Telegram placeholders for weekly menu, shopping list, and family stay unchanged;
+- no weekly menu or shopping business rows exist yet;
+- no startup path may create menu or shopping aggregates implicitly.
+
+## Design Rules That All Implementation PRs Must Preserve
+
+1. Weekly menu is household-scoped, not member-scoped.
+2. Shopping list is household-scoped, but separate from weekly menu.
+3. Profile, nutrition targets, diary, weight, water, and reports remain canonical in existing tables.
+4. Every mutation must require authorization context, expected version, and idempotency semantics.
+5. Feature flags default disabled and allowlists default empty.
+6. No implementation stage may auto-enable existing production households.
+7. No startup path may create menu or shopping aggregates.
+8. Production rollout always uses exact-image deployment and additive schema only.
+
+## PR Sequence
+
+### C1 - Weekly-Menu Schema and Store Core
+
+Goal:
+
+- introduce additive weekly-menu schema and store primitives only.
+
+Expected files:
+
+- `gateway/healbite_weekly_menu_schema.py`
+- `gateway/healbite_weekly_menus.py`
+- weekly-menu schema and store tests
+- audit and contract tests updated as needed
+
+Schema changes:
+
+- add `household_weekly_menus`
+- add `household_weekly_menu_entries`
+- store one immutable menu revision snapshot per menu row
+- add revision-ordering and partial-uniqueness constraints for one draft and one published revision per logical series
+- add indexes and checks for UUIDs, week_start, status, version, ordering
+
+Runtime changes:
+
+- none in Telegram routing
+- no startup writes
+- no lazy aggregate creation from user traffic
+
+Tests:
+
+- schema idempotency
+- UUID validation
+- week-start validation
+- status and version validation
+- revision-number monotonicity and uniqueness
+- single-draft and single-published partial uniqueness
+- household isolation
+- atomic draft replacement contract at store level
+
+Feature state:
+
+- disabled
+- allowlist empty
+
+Production impact:
+
+- exact-image deploy with feature disabled
+- additive schema initialization only
+- no business rows created
+
+Rollback:
+
+- image rollback if startup regressions occur
+- schema remains additive; no business-row cleanup required
+
+Stop conditions:
+
+- schema not canonical
+- startup writes detected
+- foreign-key or orphan violations
+- runtime permission gate failure
+
+### C2 - Shopping Schema and Store Core
+
+Goal:
+
+- introduce additive shopping schema and deterministic item and store primitives.
+
+Expected files:
+
+- `gateway/healbite_shopping_schema.py`
+- `gateway/healbite_shopping.py`
+- shopping schema and store tests
+
+Schema changes:
+
+- add `household_shopping_lists`
+- add `household_shopping_items`
+- add uniqueness, version, status, and ordering constraints
+
+Runtime changes:
+
+- none in Telegram routing
+- no automatic list derivation at startup
+
+Tests:
+
+- item quantity representation
+- quantity precision, scale, and decimal normalization
+- unit compatibility refusal
+- manual item persistence model
+- list lifecycle and foreign-key safety
+- exact immutable menu-revision linkage
+- household isolation and optimistic concurrency
+
+Feature state:
+
+- disabled
+- allowlist empty
+
+Production impact:
+
+- additive schema only
+- no menu or list business rows created
+
+Rollback:
+
+- image rollback only
+- additive schema retained
+
+Stop conditions:
+
+- incompatible unit merge behavior
+- orphan shopping rows
+- implicit business-row creation
+
+### C3 - Feature-Disabled Runtime Services
+
+Goal:
+
+- wire read-only service boundaries for weekly menu and shopping with strict feature gates.
+
+Expected files:
+
+- runtime resolver and service modules
+- gate helpers in runtime boundary
+- audit tests for disabled behavior
+
+Schema changes:
+
+- none
+
+Runtime changes:
+
+- internal services only
+- no Telegram UI changes yet
+- no callbacks yet
+- fail-closed feature gates
+
+Tests:
+
+- disabled feature returns no-op or not-available
+- allowlist empty blocks access
+- no startup aggregate creation
+- authorization context required for every store call
+
+Feature state:
+
+- disabled
+- allowlist empty
+
+Production impact:
+
+- exact-image deploy feature-disabled
+- runtime health and household rows audited
+
+Rollback:
+
+- image rollback
+
+Stop conditions:
+
+- service path creates business rows on read
+- disabled state leaks partial UI or callbacks
+
+### C4 - Telegram Read-Only Menu UI Behind Allowlist
+
+Goal:
+
+- expose read-only weekly menu entry point behind a dedicated allowlist.
+
+Expected files:
+
+- Telegram UI bridge for weekly menu only
+- read-only renderers and builders
+- observability markers for route selection
+
+Schema changes:
+
+- none
+
+Runtime changes:
+
+- `📋 Меню на неделю` may open a read-only screen behind allowlist
+- `🛒 Список покупок` and `👨‍👩‍👧‍👦 Семья` still stay `В разработке`
+- callback contract starts only with opaque IDs and expected version fields
+
+Tests:
+
+- placeholder unchanged when feature disabled
+- allowlisted read-only rendering
+- callback authorization fail-closed
+- no business-row creation from reads
+
+Feature state:
+
+- disabled by default
+- narrow allowlist canary only
+
+Production impact:
+
+- read-only canary
+- no mutations allowed
+
+Rollback:
+
+- feature disable or image rollback
+
+Stop conditions:
+
+- non-allowlisted access works
+- callback payload trusts raw IDs
+- read-only UI mutates DB
+
+### C5 - Controlled Menu Mutations and Generation
+
+Goal:
+
+- enable draft creation, draft replacement, publish, archive, and optional LLM-backed generation.
+
+Expected files:
+
+- mutation services
+- generation validator boundary
+- publish and archive APIs
+- menu concurrency and idempotency tests
+
+Schema changes:
+
+- none, unless a narrowly justified metadata column is missing
+
+Runtime changes:
+
+- controlled mutation handlers behind weekly-menu allowlist
+- explicit publish flow
+- explicit regenerate flow
+
+Tests:
+
+- optimistic concurrency
+- idempotent retry
+- duplicate callback delivery
+- role-based publish and archive authorization
+- LLM malformed output rejection
+- LLM retry no-duplicate guarantee
+- publish snapshot immutability
+
+Feature state:
+
+- disabled by default
+- controlled canary only
+
+Production impact:
+
+- mutation canary on explicit approved users only
+- no automatic diary writes
+
+Rollback:
+
+- disable feature
+- image rollback
+- preserve created menu history
+
+Stop conditions:
+
+- duplicate menu lineage
+- last-write-wins behavior
+- partial writes
+- raw prompt or output privacy leak
+
+### C6 - Shopping UI and Mutations
+
+Goal:
+
+- expose shopping list views and controlled mutations, including manual items and regeneration.
+
+Expected files:
+
+- shopping UI renderers
+- callback handlers
+- manual item, toggle, and regenerate services
+
+Schema changes:
+
+- none expected
+
+Runtime changes:
+
+- `🛒 Список покупок` becomes functional behind shopping allowlist
+- deterministic regenerate behavior
+- manual item preservation contract enforced
+
+Tests:
+
+- standalone list support
+- menu-linked derivation
+- exact immutable source-menu linkage
+- checked-state preservation
+- manual-item preservation
+- generated-item override semantics
+- unit incompatibility behavior
+- duplicate callback and idempotency behavior
+
+Feature state:
+
+- disabled by default
+- controlled shopping allowlist only
+
+Production impact:
+
+- limited mutation canary
+- no effect on diary, profile, weight, water, or reminder tables
+
+Rollback:
+
+- disable shopping feature
+- image rollback
+- preserve append-only history
+
+Stop conditions:
+
+- manual items disappear
+- checked state silently resets
+- incompatible units merge incorrectly
+
+### C7 - Family UI
+
+Goal:
+
+- expose household member-oriented family management on top of the existing household foundation.
+
+Expected files:
+
+- family UI service layer
+- authorization-aware handlers
+- member read and update flows within approved scope
+
+Schema changes:
+
+- only if required by approved family-specific design
+
+Runtime changes:
+
+- `👨‍👩‍👧‍👦 Семья` becomes functional behind its own feature gate
+- family UI must reuse canonical household authorization context
+
+Tests:
+
+- member authorization
+- inactive member refusal
+- owner and admin scope differences
+- cross-household refusal
+
+Feature state:
+
+- disabled by default
+- separate allowlist from menu and shopping
+
+Production impact:
+
+- narrow canary only
+
+Rollback:
+
+- disable family UI feature
+- image rollback
+
+Stop conditions:
+
+- cross-household access
+- member scope confusion
+- accidental coupling to Telegram identity
+
+## Migration and Runbook Planning
+
+Every future stage that touches schema or production rollout must follow this sequence:
+
+1. schema rehearsal on non-production copy
+2. production backup
+3. exact-image deployment with feature disabled
+4. additive schema initialization
+5. canonical audit
+6. feature-disabled proof
+7. allowlist canary
+8. rollback-ready validation
+
+No stage in this plan authorizes an executable production migration script today.
+
+## Feature Flag Matrix
+
+```text
+HEALBITE_WEEKLY_MENU_ENABLED=false
+HEALBITE_WEEKLY_MENU_ALLOWLIST=
+
+HEALBITE_SHOPPING_LIST_ENABLED=false
+HEALBITE_SHOPPING_LIST_ALLOWLIST=
+
+HEALBITE_FAMILY_UI_ENABLED=false
+HEALBITE_FAMILY_UI_ALLOWLIST=
+```
+
+Household foundation eligibility is necessary but not sufficient. Future access requires:
+
+```text
+resolved household authorization context
++
+feature-specific enablement
++
+feature-specific allowlist approval
+```
+
+## Rollout Safety Contract
+
+For each future implementation PR, record:
+
+- goal
+- expected files
+- schema changes
+- runtime changes
+- tests
+- feature state
+- production impact
+- rollback
+- stop conditions
+
+No implementation stage may skip those headings in its rollout or review document.
+
+## Threat Review by Stage
+
+Across C1-C7, the following must be rechecked:
+
+- cross-household access
+- forged callback IDs
+- stale callbacks
+- duplicate Telegram delivery
+- LLM malformed output
+- LLM duplicate retry
+- partial DB transaction
+- incorrect shopping dedup
+- PII leakage
+- raw IDs in logs
+- feature misconfiguration
+- startup side effects
+
+## Explicit Non-Goals for This Plan
+
+This plan does not authorize implementation of:
+
+- recipe catalog or pantry
+- inventory or store integrations
+- delivery ordering or pricing
+- shared medical profile
+- automatic diary recording from plans
+- automatic purchase workflows
+- real-time collaboration

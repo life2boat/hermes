@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 import sqlite3
 import threading
 from pathlib import Path
@@ -102,6 +103,11 @@ def test_uuid_helpers_return_canonical_lowercase_uuid4():
 @pytest.mark.parametrize("bad", ["", "ABCDEF00-0000-4000-8000-000000000000", "1", "not-a-uuid"])
 def test_uuid_validation_rejects_noncanonical_values(bad):
     assert not is_canonical_uuid4(bad)
+
+
+def test_uuid_validation_rejects_non_v4_and_whitespace():
+    assert not is_canonical_uuid4(str(uuid.uuid1()))
+    assert not is_canonical_uuid4(f" {new_household_id()}")
 
 
 def test_schema_initializes_idempotently_without_business_rows(tmp_path):
@@ -215,6 +221,23 @@ def test_member_linked_unlinked_consistency(tmp_path):
                 """,
                 (new_household_member_id(), result.household.id),
             )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                f"""
+                INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                    (id, household_id, linked_user_id, member_type, role, status, created_at, updated_at)
+                VALUES (?, ?, 202, 'linked_adult', 'adult_member', 'unlinked', 't', 't')
+                """,
+                (new_household_member_id(), result.household.id),
+            )
+        conn.execute(
+            f"""
+            INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                (id, household_id, linked_user_id, member_type, role, status, created_at, updated_at)
+            VALUES (?, ?, NULL, 'unlinked_adult', 'adult_member', 'unlinked', 't', 't')
+            """,
+            (new_household_member_id(), result.household.id),
+        )
 
 
 def test_household_delete_restricted_by_member(tmp_path):
@@ -224,6 +247,23 @@ def test_household_delete_restricted_by_member(tmp_path):
     with _connect(db_path) as conn:
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(f"DELETE FROM {HOUSEHOLDS_TABLE} WHERE id = ?", (result.household.id,))
+
+
+def test_member_cannot_reference_missing_household(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _create_users_table(db_path)
+    HealBiteHouseholdStore(db_path=db_path)
+
+    with _connect(db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                f"""
+                INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                    (id, household_id, linked_user_id, member_type, role, status, created_at, updated_at)
+                VALUES (?, ?, 101, 'primary', 'owner', 'active', 't', 't')
+                """,
+                (new_household_member_id(), new_household_id()),
+            )
 
 
 def test_active_linked_user_unique_index_ignores_null_and_removed(tmp_path):
@@ -349,14 +389,55 @@ def test_telegram_id_users_schema_supported_without_user_fk(tmp_path):
         assert [row for row in foreign_keys if row[2] == "users"] == []
 
 
+def test_users_identity_column_prefers_user_id_when_both_columns_exist(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE users (
+                user_id INTEGER PRIMARY KEY,
+                telegram_id INTEGER UNIQUE,
+                username TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("INSERT INTO users (user_id, telegram_id, username) VALUES (101, 202, 'synthetic')")
+    store = HealBiteHouseholdStore(db_path=db_path)
+
+    result = store.get_or_create_personal_household(101)
+
+    assert result.household.owner_user_id == 101
+    with pytest.raises(HouseholdValidationError):
+        store.get_or_create_personal_household(202)
+
+
+def test_missing_users_identity_column_fails_without_creating_household(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    with _connect(db_path) as conn:
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+        conn.execute("INSERT INTO users (id, username) VALUES (101, 'synthetic')")
+    store = HealBiteHouseholdStore(db_path=db_path)
+
+    with pytest.raises(HouseholdIntegrityError, match="unsupported users identity schema"):
+        store.get_or_create_personal_household(101)
+
+    with _connect(db_path) as conn:
+        assert _count(conn, HOUSEHOLDS_TABLE) == 0
+        assert _count(conn, HOUSEHOLD_MEMBERS_TABLE) == 0
+
+
 def test_owner_pointer_mismatch_detected(tmp_path):
     db_path = tmp_path / "healbite.db"
     result = _first_personal(db_path)
     with _connect(db_path) as conn:
         conn.execute(f"UPDATE {HOUSEHOLDS_TABLE} SET owner_user_id = 202 WHERE id = ?", (result.household.id,))
 
+    store = HealBiteHouseholdStore(db_path=db_path)
     with pytest.raises(HouseholdIntegrityError, match="owner pointer mismatch"):
-        HealBiteHouseholdStore(db_path=db_path).get_household_by_id(result.household.id)
+        store.get_household_by_id(result.household.id)
+    with pytest.raises(HouseholdIntegrityError, match="owner pointer mismatch"):
+        store.get_primary_member_for_user(101)
 
 
 def test_partial_household_detected(tmp_path):
@@ -422,6 +503,28 @@ def test_duplicate_owner_detected_when_index_missing_in_corrupt_db(tmp_path):
 
     with pytest.raises(HouseholdIntegrityError, match="invalid active owner count"):
         store.get_household_by_id(result.household.id)
+    with pytest.raises(HouseholdIntegrityError, match="invalid active owner count"):
+        store.get_primary_member_for_user(101)
+
+
+def test_orphaned_primary_member_detected_when_foreign_keys_were_bypassed(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _create_users_table(db_path)
+    _insert_user(db_path, 101)
+    store = HealBiteHouseholdStore(db_path=db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            f"""
+            INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                (id, household_id, linked_user_id, member_type, role, status, created_at, updated_at)
+            VALUES (?, ?, 101, 'primary', 'owner', 'active', 't', 't')
+            """,
+            (new_household_member_id(), new_household_id()),
+        )
+
+    with pytest.raises(HouseholdIntegrityError, match="member references missing household"):
+        store.get_primary_member_for_user(101)
 
 
 def test_member_insert_failure_rolls_back_household_insert(tmp_path):
@@ -542,13 +645,8 @@ def test_authorization_rejects_inactive_context(household_status, member_status,
         conn.execute(f"UPDATE {HOUSEHOLD_MEMBERS_TABLE} SET status = ? WHERE id = ?", (member_status, result.member.id))
     service = HealBiteHouseholdService(store)
 
-    if household_status == HouseholdStatus.ACTIVE.value:
-        context = service.resolve_actor_household_context(101)
-    else:
-        context = service.resolve_actor_household_context(101)
-
     with pytest.raises(HouseholdAccessError):
-        service.assert_household_access(context, context.household_id)
+        service.resolve_actor_household_context(101)
 
 
 def test_feature_config_defaults_and_allowlist_semantics():
@@ -565,7 +663,7 @@ def test_feature_config_defaults_and_allowlist_semantics():
     assert load_household_feature_config({"HEALBITE_HOUSEHOLDS_ALLOWLIST": ""}).allowlist == frozenset()
 
 
-@pytest.mark.parametrize("raw", ["abc", "101,bad", "-1", "0", "true"])
+@pytest.mark.parametrize("raw", ["abc", "101,bad", "-1", "0", "true", "9223372036854775808"])
 def test_feature_config_malformed_allowlist_fails_closed(raw):
     config = load_household_feature_config(
         {"HEALBITE_HOUSEHOLDS_ENABLED": "true", "HEALBITE_HOUSEHOLDS_ALLOWLIST": raw}

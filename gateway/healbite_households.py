@@ -27,6 +27,7 @@ from gateway.healbite_household_schema import (
 
 _SQLITE_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 _MAX_ID_REGENERATION_ATTEMPTS = 5
+_SQLITE_MAX_INTEGER = 9223372036854775807
 
 
 def _quoted_values(values: tuple[str, ...]) -> str:
@@ -57,6 +58,10 @@ CREATE TABLE IF NOT EXISTS {HOUSEHOLD_MEMBERS_TABLE} (
     updated_at TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
     FOREIGN KEY (household_id) REFERENCES {HOUSEHOLDS_TABLE}(id) ON DELETE RESTRICT,
+    CHECK (
+        (status = 'unlinked' AND linked_user_id IS NULL)
+        OR status IN ('active', 'disabled', 'removed')
+    ),
     CHECK (
         (member_type IN ('primary', 'linked_adult') AND linked_user_id IS NOT NULL)
         OR (member_type IN ('unlinked_adult', 'dependent') AND linked_user_id IS NULL)
@@ -163,32 +168,55 @@ def _normalize_actor_user_id(value: int) -> int:
     return parsed
 
 
+def _validated_version(raw: object) -> int:
+    try:
+        version = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise HouseholdIntegrityError("invalid household row") from exc
+    if version < 1:
+        raise HouseholdIntegrityError("invalid household row")
+    return version
+
+
 def _row_to_household(row: sqlite3.Row) -> Household:
+    try:
+        household_id = require_canonical_uuid4(str(row["id"]))
+        status = HouseholdStatus(str(row["status"]))
+    except (TypeError, ValueError) as exc:
+        raise HouseholdIntegrityError("invalid household row") from exc
     return Household(
-        id=str(row["id"]),
+        id=household_id,
         owner_user_id=int(row["owner_user_id"]),
         name=str(row["name"]) if row["name"] is not None else None,
-        status=HouseholdStatus(str(row["status"])),
+        status=status,
         default_timezone=str(row["default_timezone"]) if row["default_timezone"] is not None else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
-        version=int(row["version"]),
+        version=_validated_version(row["version"]),
     )
 
 
 def _row_to_member(row: sqlite3.Row) -> HouseholdMember:
+    try:
+        member_id = require_canonical_uuid4(str(row["id"]))
+        household_id = require_canonical_uuid4(str(row["household_id"]))
+        member_type = HouseholdMemberType(str(row["member_type"]))
+        role = HouseholdRole(str(row["role"]))
+        status = HouseholdMemberStatus(str(row["status"]))
+    except (TypeError, ValueError) as exc:
+        raise HouseholdIntegrityError("invalid household member row") from exc
     return HouseholdMember(
-        id=str(row["id"]),
-        household_id=str(row["household_id"]),
+        id=member_id,
+        household_id=household_id,
         linked_user_id=int(row["linked_user_id"]) if row["linked_user_id"] is not None else None,
         display_name=str(row["display_name"]) if row["display_name"] is not None else None,
-        member_type=HouseholdMemberType(str(row["member_type"])),
-        role=HouseholdRole(str(row["role"])),
-        status=HouseholdMemberStatus(str(row["status"])),
+        member_type=member_type,
+        role=role,
+        status=status,
         age_band=str(row["age_band"]) if row["age_band"] is not None else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
-        version=int(row["version"]),
+        version=_validated_version(row["version"]),
     )
 
 
@@ -201,7 +229,7 @@ def _parse_allowlist(value: str | None) -> tuple[frozenset[int], bool]:
         if not token.isdigit():
             return frozenset(), False
         parsed = int(token)
-        if parsed <= 0:
+        if parsed <= 0 or parsed > _SQLITE_MAX_INTEGER:
             return frozenset(), False
         result.add(parsed)
     return frozenset(result), True
@@ -321,7 +349,16 @@ class HealBiteHouseholdStore:
             ).fetchall()
             if len(rows) > 1:
                 raise HouseholdIntegrityError("duplicate active primary membership")
-            return _row_to_member(rows[0]) if rows else None
+            if not rows:
+                return None
+            member = _row_to_member(rows[0])
+            household = self._get_household_by_id(conn, member.household_id)
+            if household is None:
+                raise HouseholdIntegrityError("member references missing household")
+            self._validate_owner_invariant(conn, household)
+            if member.role is not HouseholdRole.OWNER:
+                raise HouseholdIntegrityError("actor membership is not primary owner")
+            return member
 
     def list_household_members(self, household_id: str) -> list[HouseholdMember]:
         require_canonical_uuid4(household_id)
@@ -402,6 +439,12 @@ class HealBiteHouseholdStore:
                     if attempt == _MAX_ID_REGENERATION_ATTEMPTS - 1:
                         raise HouseholdIntegrityError("household id collision budget exhausted") from None
                     time.sleep(0.01)
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    message = str(exc).lower()
+                    if "locked" in message or "busy" in message:
+                        raise HouseholdIntegrityError("household database busy") from None
+                    raise
                 except Exception:
                     conn.rollback()
                     raise
@@ -515,7 +558,12 @@ class HealBiteHouseholdService:
         return self.store.get_or_create_personal_household(actor_user_id)
 
     def resolve_actor_household_context(self, actor_user_id: int) -> HouseholdContext:
-        return self.store.resolve_actor_context(actor_user_id)
+        context = self.store.resolve_actor_context(actor_user_id)
+        if context.member_status is not HouseholdMemberStatus.ACTIVE:
+            raise HouseholdAccessError("household access denied")
+        if context.household_status is not HouseholdStatus.ACTIVE:
+            raise HouseholdAccessError("household access denied")
+        return context
 
     def assert_household_access(self, context: HouseholdContext, requested_household_id: str) -> None:
         require_canonical_uuid4(requested_household_id)

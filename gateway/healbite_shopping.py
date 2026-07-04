@@ -927,7 +927,13 @@ class HealBiteShoppingStore:
                             now,
                         ),
                     )
-                    self._normalize_positions(conn, shopping_list_id=list_id)
+                    reordered_ids = self._ordered_item_ids_with_insert(
+                        conn,
+                        shopping_list_id=list_id,
+                        inserted_item_id=item_id,
+                        requested_position=normalized_item["position"],
+                    )
+                    self._rewrite_positions(conn, shopping_list_id=list_id, ordered_item_ids=reordered_ids)
                     self._bump_list(conn, list_id, now)
                     self._store_idempotency(
                         conn=conn,
@@ -1081,7 +1087,7 @@ class HealBiteShoppingStore:
                         next_unit.value,
                         next_display_unit,
                         next_category,
-                        next_position,
+                        item_row.position,
                         next_override_state.value,
                         _NORMALIZATION_VERSION,
                         next_fingerprint,
@@ -1089,7 +1095,16 @@ class HealBiteShoppingStore:
                         item_row.id,
                     ),
                 )
-                self._normalize_positions(conn, shopping_list_id=shopping_list.id)
+                if next_position != item_row.position:
+                    reordered_ids = self._ordered_item_ids_with_move(
+                        conn,
+                        shopping_list_id=shopping_list.id,
+                        moving_item_id=item_row.id,
+                        requested_position=next_position,
+                    )
+                    self._rewrite_positions(conn, shopping_list_id=shopping_list.id, ordered_item_ids=reordered_ids)
+                else:
+                    self._normalize_positions(conn, shopping_list_id=shopping_list.id)
                 self._bump_list(conn, shopping_list.id, now)
                 self._store_idempotency(
                     conn=conn,
@@ -1684,23 +1699,70 @@ class HealBiteShoppingStore:
 
     def _normalize_positions(self, conn: sqlite3.Connection, *, shopping_list_id: str) -> None:
         ordered = list(self._list_items_for_list(conn, shopping_list_id))
-        if not ordered:
+        self._rewrite_positions(conn, shopping_list_id=shopping_list_id, ordered_item_ids=[item.id for item in ordered])
+
+    def _rewrite_positions(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        shopping_list_id: str,
+        ordered_item_ids: Sequence[str],
+    ) -> None:
+        ordered_ids = [require_shopping_item_id(item_id) for item_id in ordered_item_ids]
+        id_set = set(ordered_ids)
+        if not ordered_ids:
             return
         current_rows = conn.execute(
             f"SELECT id, position FROM {SHOPPING_ITEMS_TABLE} WHERE shopping_list_id = ? ORDER BY position ASC, id ASC",
             (shopping_list_id,),
         ).fetchall()
+        if len(current_rows) != len(ordered_ids):
+            raise ShoppingStateError("shopping item ordering mismatch")
+        current_ids = {str(row["id"]) for row in current_rows}
+        if current_ids != id_set:
+            raise ShoppingStateError("shopping item ordering mismatch")
         max_position = max(int(row["position"]) for row in current_rows)
         for index, row in enumerate(current_rows, start=1):
             conn.execute(
                 f"UPDATE {SHOPPING_ITEMS_TABLE} SET position = ? WHERE id = ?",
                 (max_position + index, str(row["id"])),
             )
-        for index, item in enumerate(ordered, start=1):
+        for index, item_id in enumerate(ordered_ids, start=1):
             conn.execute(
                 f"UPDATE {SHOPPING_ITEMS_TABLE} SET position = ? WHERE id = ?",
-                (index, item.id),
+                (index, item_id),
             )
+
+    def _ordered_item_ids_with_insert(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        shopping_list_id: str,
+        inserted_item_id: str,
+        requested_position: int | None,
+    ) -> list[str]:
+        normalized_item_id = require_shopping_item_id(inserted_item_id)
+        ordered_ids = [item.id for item in self._list_items_for_list(conn, shopping_list_id) if item.id != normalized_item_id]
+        insert_at = len(ordered_ids) if requested_position is None else min(max(requested_position - 1, 0), len(ordered_ids))
+        ordered_ids.insert(insert_at, normalized_item_id)
+        return ordered_ids
+
+    def _ordered_item_ids_with_move(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        shopping_list_id: str,
+        moving_item_id: str,
+        requested_position: int,
+    ) -> list[str]:
+        normalized_item_id = require_shopping_item_id(moving_item_id)
+        ordered_ids = [item.id for item in self._list_items_for_list(conn, shopping_list_id)]
+        if normalized_item_id not in ordered_ids:
+            raise ShoppingStateError("shopping item ordering mismatch")
+        ordered_ids.remove(normalized_item_id)
+        insert_at = min(max(requested_position - 1, 0), len(ordered_ids))
+        ordered_ids.insert(insert_at, normalized_item_id)
+        return ordered_ids
 
     def _insert_position(
         self,
@@ -1715,9 +1777,9 @@ class HealBiteShoppingStore:
                 (shopping_list_id,),
             ).fetchone()[0]
         )
-        if requested_position is None or requested_position > current_count + 1:
-            return current_count + 1
-        return requested_position
+        if requested_position is not None and requested_position < 1:
+            raise ShoppingValidationError("invalid position")
+        return current_count + 1
 
     def _bump_list(self, conn: sqlite3.Connection, shopping_list_id: str, now: str) -> None:
         conn.execute(

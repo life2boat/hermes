@@ -195,6 +195,91 @@ def test_create_standalone_shopping_list_and_manual_item(tmp_path):
     assert with_item.items[0].display_name == "Томаты"
 
 
+
+def test_manual_insert_at_requested_position_reorders_without_conflict(tmp_path):
+    db_path = tmp_path / "manual-reorder.db"
+    _, _, store, personal, context = _seed_personal_household(db_path)
+
+    created = store.create_shopping_list(
+        context,
+        personal.household.id,
+        week_start="2026-07-06",
+        idempotency_key="list-1",
+    )
+    first = store.add_manual_item(
+        context,
+        created.shopping_list.id,
+        ManualShoppingItemInput(display_name="A", quantity_value="1", quantity_unit_normalized="piece"),
+        expected_list_version=created.shopping_list.version,
+        idempotency_key="manual-1",
+    )
+    second = store.add_manual_item(
+        context,
+        first.shopping_list.id,
+        ManualShoppingItemInput(display_name="B", quantity_value="1", quantity_unit_normalized="piece"),
+        expected_list_version=first.shopping_list.version,
+        idempotency_key="manual-2",
+    )
+    reordered = store.add_manual_item(
+        context,
+        second.shopping_list.id,
+        ManualShoppingItemInput(display_name="C", quantity_value="1", quantity_unit_normalized="piece", position=1),
+        expected_list_version=second.shopping_list.version,
+        idempotency_key="manual-3",
+    )
+
+    assert [(item.display_name, item.position) for item in reordered.items] == [
+        ("C", 1),
+        ("A", 2),
+        ("B", 3),
+    ]
+
+
+def test_update_item_position_reorders_without_unique_conflict(tmp_path):
+    db_path = tmp_path / "update-reorder.db"
+    _, _, store, personal, context = _seed_personal_household(db_path)
+
+    created = store.create_shopping_list(
+        context,
+        personal.household.id,
+        week_start="2026-07-06",
+        idempotency_key="list-1",
+    )
+    first = store.add_manual_item(
+        context,
+        created.shopping_list.id,
+        ManualShoppingItemInput(display_name="A", quantity_value="1", quantity_unit_normalized="piece"),
+        expected_list_version=created.shopping_list.version,
+        idempotency_key="manual-1",
+    )
+    second = store.add_manual_item(
+        context,
+        first.shopping_list.id,
+        ManualShoppingItemInput(display_name="B", quantity_value="1", quantity_unit_normalized="piece"),
+        expected_list_version=first.shopping_list.version,
+        idempotency_key="manual-2",
+    )
+    third = store.add_manual_item(
+        context,
+        second.shopping_list.id,
+        ManualShoppingItemInput(display_name="C", quantity_value="1", quantity_unit_normalized="piece"),
+        expected_list_version=second.shopping_list.version,
+        idempotency_key="manual-3",
+    )
+
+    moved = store.update_item(
+        context,
+        third.items[2].id,
+        expected_list_version=third.shopping_list.version,
+        idempotency_key="update-1",
+        position=1,
+    )
+
+    assert [(item.display_name, item.position) for item in moved.items] == [
+        ("C", 1),
+        ("A", 2),
+        ("B", 3),
+    ]
 def test_create_derived_list_retains_exact_source_revision_after_new_menu_publish(tmp_path):
     db_path = tmp_path / "derived.db"
     weekly_store, published, context, household_id = _publish_menu_revision(db_path)

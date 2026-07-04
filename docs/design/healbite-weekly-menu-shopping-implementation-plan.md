@@ -273,13 +273,23 @@ Runtime changes:
 
 - `📋 Меню на неделю` may open a read-only screen behind allowlist
 - `🛒 Список покупок` and `👨‍👩‍👧‍👦 Семья` still stay `В разработке`
-- callback contract starts only with opaque IDs and expected version fields
+- no callbacks or inline keyboards are introduced in C4
+- one Telegram click performs one weekly runtime read flow
+- only the active published revision is visible
+- draft-only and archived-only states resolve to the same safe empty-state
+- feature-disabled, malformed, invalid-actor, and not-allowlisted states keep returning `В разработке`
+- household or schema unavailability returns `Функция временно недоступна. Попробуйте позже.`
+- current week uses Monday `week_start` with documented fallback timezone `UTC`
+- no startup DB open and no schema initialization happen at import or handler registration time
 
 Tests:
 
 - placeholder unchanged when feature disabled
 - allowlisted read-only rendering
-- callback authorization fail-closed
+- safe formatter and chunker coverage
+- no draft or archived leakage
+- parallel actor isolation
+- import-time side-effect guard
 - no business-row creation from reads
 
 Feature state:

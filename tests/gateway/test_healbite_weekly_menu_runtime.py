@@ -221,6 +221,7 @@ def test_runtime_reads_week_and_revisions_when_feature_ready(tmp_path):
 
     availability = runtime.get_availability(101)
     week = runtime.get_weekly_menu_for_week(101, "2026-07-06")
+    active_published = runtime.get_active_published_weekly_menu_for_week(101, "2026-07-06")
     revisions = runtime.list_weekly_menu_revisions(101, "2026-07-06")
     revision = runtime.get_weekly_menu_revision(101, published.revision.id)
 
@@ -228,6 +229,8 @@ def test_runtime_reads_week_and_revisions_when_feature_ready(tmp_path):
     assert week is not None
     assert week.series.id == series.id
     assert len(week.revisions) == 1
+    assert active_published is not None
+    assert active_published.revision.id == published.revision.id
     assert len(revisions) == 1
     assert revision.revision.id == published.revision.id
     assert len(revision.entries) == 2
@@ -274,6 +277,31 @@ def test_disallowed_runtime_call_raises_unavailable_error(tmp_path):
         runtime.get_weekly_menu_for_week(101, "2026-07-06")
 
     assert excinfo.value.availability.status is FeatureAvailabilityStatus.NOT_ALLOWLISTED
+
+
+def test_active_published_week_view_returns_none_for_draft_only_week(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    weekly_store, context = _seed_runtime(db_path)
+    series = weekly_store.create_or_get_weekly_menu_series(context, context.household_id, "2026-07-06")
+    draft = weekly_store.create_draft_revision(
+        context,
+        series.id,
+        expected_series_version=series.version,
+        idempotency_key="draft-only",
+    )
+    weekly_store.replace_draft_entries(
+        context,
+        draft.revision.id,
+        _sample_entries(),
+        expected_revision_version=draft.revision.version,
+        idempotency_key="replace-draft-only",
+    )
+    runtime = HealBiteWeeklyMenuRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+    )
+
+    assert runtime.get_active_published_weekly_menu_for_week(101, "2026-07-06") is None
 
 
 

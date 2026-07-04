@@ -105,6 +105,12 @@ from gateway.healbite_user_profile import (
     get_existing_healbite_user_profile,
     onboarding_keyboard_rows,
 )
+from gateway.healbite_weekly_menu_telegram import (
+    WEEKLY_MENU_COMMAND,
+    WEEKLY_MENU_UNAVAILABLE_REPLY,
+    build_weekly_menu_presentation_for_now,
+)
+from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
 from gateway.healbite_water_tracker import (
     WATER_CUSTOM_AMOUNT_STATE,
     format_water_custom_prompt,
@@ -174,7 +180,7 @@ HEALBITE_REPLY_KEYBOARD_ROWS = [
 HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "👤 Мой профиль": "/profile",
     "🍎 Дневник еды": "/diary",
-    "📋 Меню на неделю": "__placeholder__:weekly_menu",
+    "📋 Меню на неделю": WEEKLY_MENU_COMMAND,
     "🛒 Список покупок": "__placeholder__:shopping_list",
     "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
@@ -5657,6 +5663,10 @@ class TelegramAdapter(BasePlatformAdapter):
         return ""
 
     @staticmethod
+    def _healbite_now_utc() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
     def _healbite_public_onboarding_enabled() -> bool:
         raw = str(os.getenv(_HEALBITE_PUBLIC_ONBOARDING_ENV, "") or "").strip().lower()
         return raw in {"1", "true", "yes", "on"}
@@ -5686,11 +5696,13 @@ class TelegramAdapter(BasePlatformAdapter):
         "action",
         "amount_ml",
         "choice_type",
+        "chunk_count",
         "command",
         "content_type",
         "context",
         "duration_ms",
         "error_type",
+        "entry_count",
         "has_caption",
         "has_choice",
         "has_draft",
@@ -6898,6 +6910,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,
             )
+        if normalized_action == WEEKLY_MENU_COMMAND:
+            return await self._maybe_handle_healbite_weekly_menu_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action in {"/diary", "/stats"}:
             return await self._maybe_handle_nutrition_diary_command(
                 msg,
@@ -7287,6 +7305,72 @@ class TelegramAdapter(BasePlatformAdapter):
         if ParseMode is not None:
             kwargs["parse_mode"] = ParseMode.HTML
         await self._send_message_with_thread_fallback(**kwargs)
+        return True
+
+    async def _maybe_handle_healbite_weekly_menu_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != WEEKLY_MENU_COMMAND:
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="weekly_menu",
+            )
+
+        thread_id = getattr(msg, "message_thread_id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        try:
+            presentation = build_weekly_menu_presentation_for_now(
+                actor_user_id=actor_user_id,
+                runtime_factory=build_weekly_menu_runtime_service,
+                now=self._healbite_now_utc(),
+            )
+        except Exception:
+            presentation = None
+        if presentation is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=WEEKLY_MENU_UNAVAILABLE_REPLY,
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_marker(
+                "healbite_reply_sent",
+                msg=msg,
+                route="weekly_menu",
+                outcome="unavailable",
+                chunk_count=1,
+                entry_count=0,
+                content_type="text",
+            )
+            return True
+        for chunk in presentation.chunks:
+            kwargs = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "message_thread_id": thread_id,
+            }
+            if presentation.parse_mode == "HTML" and ParseMode is not None:
+                kwargs["parse_mode"] = ParseMode.HTML
+            await self._send_message_with_thread_fallback(**kwargs)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="weekly_menu",
+            outcome=presentation.state,
+            chunk_count=len(presentation.chunks),
+            entry_count=presentation.entry_count,
+            duration_ms=presentation.duration_ms,
+            content_type="text",
+        )
         return True
 
     async def _maybe_handle_nutrition_diary_undo_command(

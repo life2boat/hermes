@@ -304,6 +304,10 @@ class HealBiteWeeklyMenuStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @staticmethod
+    def _schema_statements() -> tuple[str, ...]:
+        return tuple(statement.strip() for statement in WEEKLY_MENU_SCHEMA_SQL.split(";") if statement.strip())
+
     def _read_only_connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(_sqlite_read_only_uri(self.db_path), uri=True, timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
@@ -326,9 +330,14 @@ class HealBiteWeeklyMenuStore:
         if state is WeeklyMenuSchemaState.INCOMPATIBLE:
             raise WeeklyMenuSchemaError("weekly menu schema is incompatible")
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.executescript(WEEKLY_MENU_SCHEMA_SQL)
-            conn.commit()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for statement in self._schema_statements():
+                    conn.execute(statement)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         final = self.schema_state()
         if final is not WeeklyMenuSchemaState.CANONICAL:
             raise WeeklyMenuSchemaError("weekly menu schema initialization failed")

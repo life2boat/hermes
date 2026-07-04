@@ -23,6 +23,7 @@ WEEKLY_MENU_EMPTY_REPLY = "Меню на эту неделю пока не со�
 WEEKLY_MENU_DEFAULT_TIMEZONE = "UTC"
 WEEKLY_MENU_PARSE_MODE = "HTML"
 WEEKLY_MENU_MAX_CHUNK_LENGTH = 3500
+WEEKLY_MENU_MAX_ENTRY_TITLE_LENGTH = 240
 
 _RUSSIAN_MONTHS = {
     1: "января",
@@ -120,6 +121,9 @@ def _day_label(day: date) -> str:
 
 def _safe_entry_title(value: object) -> str:
     collapsed = " ".join(str(value or "").split())
+    if len(collapsed) > WEEKLY_MENU_MAX_ENTRY_TITLE_LENGTH:
+        collapsed = collapsed[: WEEKLY_MENU_MAX_ENTRY_TITLE_LENGTH - 1].rstrip()
+        collapsed = f"{collapsed}…"
     return escape(collapsed or "Блюдо")
 
 
@@ -127,7 +131,7 @@ def _render_day_block(view: WeeklyMenuRevisionView, *, day: date) -> str:
     lines = [f"<b>{_day_label(day)}</b>"]
     day_entries = [entry for entry in view.entries if entry.local_date == day.isoformat()]
     if not day_entries:
-        lines.append("Пока ничего не запланировано.")
+        lines.append("—")
         return "\n".join(lines)
 
     for meal_slot in _MEAL_SLOT_ORDER:
@@ -151,15 +155,17 @@ def _header_lines(week_start: str) -> list[str]:
     ]
 
 
-def _split_long_block(block: str, *, header: str) -> list[str]:
-    if len(header) + 2 + len(block) <= WEEKLY_MENU_MAX_CHUNK_LENGTH:
+def _split_long_block(block: str, *, max_length: int) -> list[str]:
+    if len(block) <= max_length:
         return [block]
     parts: list[str] = []
     current_lines: list[str] = []
     current_length = 0
     for line in block.splitlines():
+        if len(line) > max_length:
+            line = f"{line[: max(1, max_length - 1)].rstrip()}…"
         line_length = len(line) + (1 if current_lines else 0)
-        if current_lines and len(header) + 2 + current_length + line_length > WEEKLY_MENU_MAX_CHUNK_LENGTH:
+        if current_lines and current_length + line_length > max_length:
             parts.append("\n".join(current_lines))
             current_lines = [line]
             current_length = len(line)
@@ -177,22 +183,30 @@ def chunk_weekly_menu_text(
     day_blocks: list[str],
 ) -> tuple[str, ...]:
     header = "\n".join(_header_lines(week_start))
+    block_limit_with_header = WEEKLY_MENU_MAX_CHUNK_LENGTH - len(header) - 2
     chunks: list[str] = []
     current = header
+    first_chunk = True
     for block in day_blocks:
-        block_parts = _split_long_block(block, header=header)
+        block_parts = _split_long_block(
+            block,
+            max_length=block_limit_with_header if first_chunk else WEEKLY_MENU_MAX_CHUNK_LENGTH,
+        )
         for block_part in block_parts:
-            addition = f"\n\n{block_part}"
-            if len(current) + len(addition) > WEEKLY_MENU_MAX_CHUNK_LENGTH and current != header:
+            addition = f"\n\n{block_part}" if current else block_part
+            if len(current) + len(addition) > WEEKLY_MENU_MAX_CHUNK_LENGTH and current:
                 chunks.append(current)
-                current = header
-            if len(current) + len(addition) > WEEKLY_MENU_MAX_CHUNK_LENGTH and current == header:
-                chunks.append(f"{header}\n\n{block_part}")
-                current = header
+                current = ""
+                first_chunk = False
+                addition = block_part
+            if len(current) + len(addition) > WEEKLY_MENU_MAX_CHUNK_LENGTH and not current:
+                chunks.append(block_part)
                 continue
             current += addition
-    if current != header or not chunks:
-        chunks.append(current if current != header else f"{header}\n\nПока ничего не запланировано.")
+    if current:
+        chunks.append(current)
+    elif not chunks:
+        chunks.append(header)
     return tuple(chunks)
 
 
@@ -239,16 +253,6 @@ def resolve_weekly_menu_presentation(
             timezone_name=safe_timezone,
             duration_ms=int((monotonic() - started) * 1000),
         )
-    except Exception:
-        return WeeklyMenuTelegramPresentation(
-            state="unavailable",
-            chunks=(WEEKLY_MENU_UNAVAILABLE_REPLY,),
-            parse_mode=None,
-            week_start=week_start,
-            timezone_name=safe_timezone,
-            duration_ms=int((monotonic() - started) * 1000),
-        )
-
     if view is None:
         return WeeklyMenuTelegramPresentation(
             state="empty",

@@ -21,6 +21,7 @@ from gateway.healbite_weekly_menu_telegram import (
     WEEKLY_MENU_EMPTY_REPLY,
     WEEKLY_MENU_PLACEHOLDER_REPLY,
     WEEKLY_MENU_UNAVAILABLE_REPLY,
+    WEEKLY_MENU_MAX_CHUNK_LENGTH,
     current_week_start,
     render_weekly_menu,
     resolve_weekly_menu_presentation,
@@ -208,7 +209,7 @@ def test_render_weekly_menu_formats_full_week_and_escapes_dynamic_titles(tmp_pat
     assert "Овсяная &lt;каша&gt;" in text
     assert "Салат &amp; суп" in text
     assert "Рыба 😋" in text
-    assert "Пока ничего не запланировано." in text
+    assert "—" in text
 
 
 def test_render_weekly_menu_chunks_long_output(tmp_path):
@@ -232,7 +233,30 @@ def test_render_weekly_menu_chunks_long_output(tmp_path):
     chunks = render_weekly_menu(view)
 
     assert len(chunks) >= 2
-    assert all(len(chunk) <= 3500 for chunk in chunks)
+    assert all(len(chunk) <= WEEKLY_MENU_MAX_CHUNK_LENGTH for chunk in chunks)
+    assert sum(chunk.count("📋 Меню на неделю") for chunk in chunks) == 1
+
+
+def test_render_weekly_menu_truncates_oversized_single_entry_and_keeps_chunk_bounded(tmp_path):
+    oversized_title = ("<очень длинное блюдо> & " * 400).strip()
+    view = SimpleNamespace(
+        series=SimpleNamespace(week_start="2026-07-06"),
+        entries=[
+            SimpleNamespace(
+                local_date="2026-07-06",
+                meal_slot=SimpleNamespace(value=WeeklyMenuMealSlot.BREAKFAST.value),
+                position=1,
+                title=oversized_title,
+            ),
+        ],
+    )
+
+    chunks = render_weekly_menu(view)
+    text = "\n".join(chunks)
+
+    assert all(len(chunk) <= WEEKLY_MENU_MAX_CHUNK_LENGTH for chunk in chunks)
+    assert "…" in text
+    assert "&lt;очень длинное блюдо&gt;" in text
 
 
 def test_resolve_weekly_menu_presentation_returns_placeholder_for_disabled_feature(tmp_path):
@@ -334,6 +358,20 @@ async def test_weekly_menu_unavailable_schema_returns_safe_message(tmp_path, mon
     monkeypatch.setattr(
         "gateway.platforms.telegram.build_weekly_menu_runtime_service",
         lambda: _runtime(db_path, allowlist={101}),
+    )
+    adapter = _adapter()
+
+    handled = await adapter._maybe_handle_healbite_weekly_menu_command(_message(text=WEEKLY_MENU_COMMAND))
+
+    assert handled is True
+    assert adapter._send_message_with_thread_fallback.await_args.kwargs["text"] == WEEKLY_MENU_UNAVAILABLE_REPLY
+
+
+@pytest.mark.asyncio
+async def test_weekly_menu_transport_edge_returns_safe_unavailable_on_unexpected_exception(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.build_weekly_menu_presentation_for_now",
+        Mock(side_effect=RuntimeError("boom")),
     )
     adapter = _adapter()
 

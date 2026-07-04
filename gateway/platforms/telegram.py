@@ -107,6 +107,7 @@ from gateway.healbite_user_profile import (
 )
 from gateway.healbite_weekly_menu_telegram import (
     WEEKLY_MENU_COMMAND,
+    WEEKLY_MENU_UNAVAILABLE_REPLY,
     build_weekly_menu_presentation_for_now,
 )
 from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
@@ -7327,11 +7328,30 @@ class TelegramAdapter(BasePlatformAdapter):
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
-        presentation = build_weekly_menu_presentation_for_now(
-            actor_user_id=actor_user_id,
-            runtime_factory=build_weekly_menu_runtime_service,
-            now=self._healbite_now_utc(),
-        )
+        try:
+            presentation = build_weekly_menu_presentation_for_now(
+                actor_user_id=actor_user_id,
+                runtime_factory=build_weekly_menu_runtime_service,
+                now=self._healbite_now_utc(),
+            )
+        except Exception:
+            presentation = None
+        if presentation is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=WEEKLY_MENU_UNAVAILABLE_REPLY,
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_marker(
+                "healbite_reply_sent",
+                msg=msg,
+                route="weekly_menu",
+                outcome="unavailable",
+                chunk_count=1,
+                entry_count=0,
+                content_type="text",
+            )
+            return True
         for chunk in presentation.chunks:
             kwargs = {
                 "chat_id": chat_id,

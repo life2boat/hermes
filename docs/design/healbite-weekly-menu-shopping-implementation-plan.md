@@ -19,6 +19,15 @@ Confirmed baseline at design lock:
 - no weekly menu or shopping business rows exist yet;
 - no startup path may create menu or shopping aggregates implicitly.
 
+Confirmed post-C5A merge baseline:
+
+- C5A merged in `main` at `31f2594d2de352db3c0c6c78513770bdf5c606ab`;
+- production remains on old revision `04566a0dd2b79f60748194cc3d318c5a5e75f3d3`;
+- production weekly-menu schema remains uninitialized;
+- production shopping schema remains uninitialized;
+- Telegram mutation UI is still undeployed;
+- feature enablement remains a separate future canary stage.
+
 ## Design Rules That All Implementation PRs Must Preserve
 
 1. Weekly menu is household-scoped, not member-scoped.
@@ -523,6 +532,102 @@ Every future stage that touches schema or production rollout must follow this se
 8. rollback-ready validation
 
 No stage in this plan authorizes an executable production migration script today.
+
+## Production Readiness Stages After C5A
+
+The post-C5A rollout path is intentionally split into separate approved stages:
+
+### D0 - Feature-Disabled Production Readiness Audit and Rollout Plan
+
+Scope:
+
+- read-only source and config audit;
+- exact-image contract documentation;
+- feature-disabled rollout runbook;
+- rollback taxonomy;
+- production-readiness contract test.
+
+Explicit exclusions:
+
+- no build;
+- no deploy;
+- no production DB open;
+- no schema initialization;
+- no feature enablement;
+- no allowlist population.
+
+### D1 - Exact Image Build and Offline Validation
+
+Scope:
+
+- build exact approved SHA only;
+- verify embedded full Git SHA and image ID;
+- run focused tests and agent check before build;
+- prove startup/import paths stay side-effect free.
+
+Explicit exclusions:
+
+- no production deploy;
+- no Qdrant change;
+- no schema initialization;
+- no feature enablement.
+
+### D2 - Feature-Disabled Hermes-Only Deployment
+
+Scope:
+
+- deploy exact validated image;
+- recreate Hermes only;
+- keep weekly and shopping features disabled;
+- keep allowlists empty;
+- prove placeholders and existing product surface remain healthy.
+
+Explicit exclusions:
+
+- no Qdrant recreate;
+- no schema initialization;
+- no weekly/shopping business-row creation;
+- no feature canary.
+
+### D3 - Explicit Weekly/Shopping Production Schema Initialization
+
+Scope:
+
+- production backup before first DDL;
+- explicit weekly schema initialization first;
+- explicit shopping schema initialization second;
+- zero business-row verification;
+- existing data preservation proof.
+
+Explicit exclusions:
+
+- no feature enablement;
+- no Telegram mutation UI rollout;
+- no allowlist canary.
+
+### D4 - Disabled-State Observation and Rollback Verification
+
+Scope:
+
+- observe feature-disabled runtime after schema init;
+- verify no provider calls, no unexpected writes, and stable placeholders;
+- verify image-only rollback and post-schema rollback logic.
+
+Explicit exclusions:
+
+- no canary enablement;
+- no shopping or weekly mutations from Telegram.
+
+### D5 - Later Allowlist Canary
+
+Scope:
+
+- weekly/shopping allowlist canary only after D1-D4 complete and are separately approved.
+
+Explicit exclusions:
+
+- not part of D0, D1, D2, D3, or D4;
+- not bundled with Telegram mutation UI rollout by default.
 
 ## Feature Flag Matrix
 

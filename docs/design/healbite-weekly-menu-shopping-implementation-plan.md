@@ -195,6 +195,38 @@ Runtime changes:
 - no callbacks yet
 - fail-closed feature gates
 
+Implemented runtime surface:
+
+- `gateway/healbite_feature_gates.py`
+  - immutable feature-gate config
+  - strict boolean and allowlist parsing
+  - fail-closed malformed-config behavior
+  - canonical actor normalization for application user IDs only
+- `gateway/healbite_weekly_menu_runtime.py`
+  - `get_availability(actor_id)`
+  - `get_weekly_menu_for_week(actor_id, week_start)`
+  - `get_weekly_menu_revision(actor_id, revision_id)`
+  - `list_weekly_menu_revisions(actor_id, week_start)`
+- `gateway/healbite_shopping_runtime.py`
+  - `get_availability(actor_id)`
+  - `get_shopping_list(actor_id, shopping_list_id)`
+  - `list_shopping_lists(actor_id, filters)`
+  - `list_shopping_items(actor_id, shopping_list_id)`
+
+Locked C3 invariants:
+
+- menu and shopping feature gates are independent from household bootstrap enablement;
+- malformed boolean or allowlist config disables the feature and marks configuration invalid;
+- empty allowlists deny access without opening menu or shopping stores;
+- feature gate order is config -> enabled -> canonical actor -> allowlist -> household auth -> runtime store -> schema state -> read;
+- runtime store factories return explicit resource contexts rather than bare stores;
+- owned runtime resources always finalize on every exit path and roll back any open transaction before close;
+- borrowed runtime resources are never closed, committed, or rolled back by the runtime;
+- runtime never caches live store resources between calls and treats the default C1/C2 stores as stateless method-scoped adapters only;
+- cleanup failure is fail-closed and never returns a normal success result;
+- C3 runtime never mutates menu, shopping, diary, profile, or household business rows;
+- C3 runtime returns safe availability states only and does not expose DB paths, raw allowlists, or raw exception text.
+
 Tests:
 
 - disabled feature returns no-op or not-available

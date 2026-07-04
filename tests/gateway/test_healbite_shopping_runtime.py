@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from gateway.healbite_feature_gates import FeatureAvailabilityStatus, FeatureGateConfig
 from gateway.healbite_households import HealBiteHouseholdStore
-from gateway.healbite_shopping import HealBiteShoppingStore, ManualShoppingItemInput
+from gateway.healbite_runtime_resources import borrowed_runtime_resource
+from gateway.healbite_shopping import (
+    HealBiteShoppingStore,
+    ManualShoppingItemInput,
+    ShoppingAccessError,
+    ShoppingListView,
+    ShoppingNotFoundError,
+)
 from gateway.healbite_shopping_runtime import (
     HealBiteShoppingRuntimeService,
     ShoppingListFilters,
+    ShoppingRuntimeCleanupError,
     ShoppingRuntimeNotFoundError,
+    ShoppingRuntimeStateError,
     ShoppingRuntimeUnavailableError,
 )
+from gateway.healbite_shopping_schema import ShoppingSchemaState
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore, WeeklyMenuEntryInput, WeeklyMenuMealSlot
 
 
@@ -28,7 +39,7 @@ def _create_users_table(db_path: Path, *, identity_column: str = "user_id") -> N
     with _connect(db_path) as conn:
         conn.execute(
             f"""
-            CREATE TABLE users (
+            CREATE TABLE IF NOT EXISTS users (
                 {identity_column} INTEGER PRIMARY KEY,
                 username TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -40,7 +51,7 @@ def _create_users_table(db_path: Path, *, identity_column: str = "user_id") -> N
 def _insert_user(db_path: Path, user_id: int, *, identity_column: str = "user_id") -> None:
     with _connect(db_path) as conn:
         conn.execute(
-            f"INSERT INTO users ({identity_column}, username) VALUES (?, ?)",
+            f"INSERT OR IGNORE INTO users ({identity_column}, username) VALUES (?, ?)",
             (int(user_id), f"user-{user_id}"),
         )
 
@@ -50,9 +61,9 @@ class _CountingHouseholdStoreFactory:
         self.db_path = db_path
         self.calls = 0
 
-    def __call__(self) -> HealBiteHouseholdStore:
+    def __call__(self):
         self.calls += 1
-        return HealBiteHouseholdStore(db_path=self.db_path, ensure_schema_on_init=False)
+        return borrowed_runtime_resource(HealBiteHouseholdStore(db_path=self.db_path, ensure_schema_on_init=False))
 
 
 class _CountingShoppingStoreFactory:
@@ -60,9 +71,9 @@ class _CountingShoppingStoreFactory:
         self.db_path = db_path
         self.calls = 0
 
-    def __call__(self) -> HealBiteShoppingStore:
+    def __call__(self):
         self.calls += 1
-        return HealBiteShoppingStore(db_path=self.db_path)
+        return borrowed_runtime_resource(HealBiteShoppingStore(db_path=self.db_path))
 
 
 def _seed_runtime(db_path: Path, actor_user_id: int = 101):
@@ -299,7 +310,7 @@ def test_allowed_actor_opens_shopping_store_only_after_gate_success(tmp_path):
     runtime = HealBiteShoppingRuntimeService(
         config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
         db_path=db_path,
-        shopping_store_factory=lambda: _SpyShoppingStore(db_path=db_path),
+        shopping_store_factory=lambda: borrowed_runtime_resource(_SpyShoppingStore(db_path=db_path)),
     )
 
     availability = runtime.get_availability(101)
@@ -375,7 +386,287 @@ def test_cross_household_shopping_access_does_not_leak_existence(tmp_path):
         db_path=db_path,
     )
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(ShoppingRuntimeNotFoundError) as excinfo:
         runtime.get_shopping_list(202, created.shopping_list.id)
 
-    assert type(excinfo.value).__name__ == 'ShoppingRuntimeStateError'
+    assert type(excinfo.value).__name__ == "ShoppingRuntimeNotFoundError"
+
+
+@dataclass
+class _ShoppingResourceStats:
+    factory_calls: int = 0
+    entered_count: int = 0
+    exited_count: int = 0
+    opened_count: int = 0
+    closed_count: int = 0
+    rollback_count: int = 0
+    active_count: int = 0
+    double_close_count: int = 0
+    operation_calls: int = 0
+    schema_state_calls: int = 0
+    in_transaction_before_cleanup: bool = False
+    in_transaction_after_cleanup: bool = False
+
+
+class _OwnedShoppingStore:
+    def __init__(
+        self,
+        stats: _ShoppingResourceStats,
+        *,
+        schema_state: ShoppingSchemaState = ShoppingSchemaState.CANONICAL,
+        shopping_view: ShoppingListView | None = None,
+        shopping_lists=(),
+        operation_error: Exception | None = None,
+        list_not_found: bool = False,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        self._stats = stats
+        self._schema_state = schema_state
+        self._shopping_view = shopping_view
+        self._shopping_lists = shopping_lists
+        self._operation_error = operation_error
+        self._list_not_found = list_not_found
+        self._connection = connection
+
+    def schema_state(self):
+        self._stats.schema_state_calls += 1
+        return self._schema_state
+
+    def get_shopping_list(self, _context, _shopping_list_id: str):
+        self._stats.operation_calls += 1
+        if self._operation_error is not None:
+            raise self._operation_error
+        if self._list_not_found:
+            raise ShoppingNotFoundError("hidden")
+        assert self._shopping_view is not None
+        return self._shopping_view
+
+    def list_shopping_lists(self, _context, _household_id: str, *, week_start: str | None = None):
+        self._stats.operation_calls += 1
+        if self._operation_error is not None:
+            raise self._operation_error
+        return self._shopping_lists
+
+    def rollback_owned(self) -> None:
+        if self._connection is not None and self._connection.in_transaction:
+            self._stats.in_transaction_before_cleanup = True
+            self._connection.rollback()
+            self._stats.rollback_count += 1
+            self._stats.in_transaction_after_cleanup = self._connection.in_transaction
+
+    def close_owned(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+
+
+class _ShoppingResourceLease:
+    def __init__(
+        self,
+        store: _OwnedShoppingStore,
+        stats: _ShoppingResourceStats,
+        *,
+        owned: bool,
+        close_error: Exception | None = None,
+    ) -> None:
+        self._store = store
+        self._stats = stats
+        self._owned = owned
+        self._close_error = close_error
+        self._closed = False
+        self.cleanup_error: Exception | None = None
+        self._stats.opened_count += 1
+        self._stats.active_count += 1
+
+    def __enter__(self):
+        self._stats.entered_count += 1
+        return self._store
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._stats.exited_count += 1
+        if not self._owned:
+            return False
+        if self._closed:
+            self._stats.double_close_count += 1
+            return False
+        self._closed = True
+        self._store.rollback_owned()
+        self._store.close_owned()
+        self._stats.closed_count += 1
+        self._stats.active_count -= 1
+        if self._close_error is not None:
+            self.cleanup_error = self._close_error
+        return False
+
+
+class _ShoppingResourceFactory:
+    def __init__(self, builder, stats: _ShoppingResourceStats, *, owned: bool, close_error: Exception | None = None) -> None:
+        self._builder = builder
+        self._stats = stats
+        self._owned = owned
+        self._close_error = close_error
+
+    def __call__(self):
+        self._stats.factory_calls += 1
+        return _ShoppingResourceLease(
+            self._builder(),
+            self._stats,
+            owned=self._owned,
+            close_error=self._close_error,
+        )
+
+
+def _shopping_view_artifact(db_path: Path):
+    personal, context, _published = _publish_menu_revision(db_path)
+    shopping_store = HealBiteShoppingStore(db_path=db_path)
+    created = shopping_store.create_shopping_list(
+        context,
+        personal.household.id,
+        week_start="2026-07-06",
+        idempotency_key="list-lifecycle",
+    )
+    with_item = shopping_store.add_manual_item(
+        context,
+        created.shopping_list.id,
+        ManualShoppingItemInput(display_name="Tomatoes", quantity_value="2", quantity_unit_normalized="piece"),
+        expected_list_version=created.shopping_list.version,
+        idempotency_key="manual-lifecycle",
+    )
+    return shopping_store.get_shopping_list(context, with_item.shopping_list.id)
+
+
+def test_owned_shopping_resource_closes_after_successful_read(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    shopping_view = _shopping_view_artifact(db_path)
+    stats = _ShoppingResourceStats()
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(
+            lambda: _OwnedShoppingStore(stats, shopping_view=shopping_view, shopping_lists=(shopping_view.shopping_list,)),
+            stats,
+            owned=True,
+        ),
+    )
+
+    view = runtime.get_shopping_list(101, shopping_view.shopping_list.id)
+
+    assert view.shopping_list.id == shopping_view.shopping_list.id
+    assert stats.entered_count == 1
+    assert stats.exited_count == 1
+    assert stats.closed_count == 1
+    assert stats.active_count == 0
+
+
+def test_owned_shopping_resource_closes_after_schema_unavailable(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    _seed_runtime(db_path)
+    stats = _ShoppingResourceStats()
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(
+            lambda: _OwnedShoppingStore(stats, schema_state=ShoppingSchemaState.PARTIAL),
+            stats,
+            owned=True,
+        ),
+    )
+
+    availability = runtime.get_availability(101)
+
+    assert availability.status is FeatureAvailabilityStatus.SCHEMA_UNAVAILABLE
+    assert stats.closed_count == 1
+    assert stats.operation_calls == 0
+
+
+def test_shopping_runtime_maps_unexpected_store_error_and_closes_owned_resource(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    _seed_runtime(db_path)
+    stats = _ShoppingResourceStats()
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(
+            lambda: _OwnedShoppingStore(stats, operation_error=RuntimeError("boom")),
+            stats,
+            owned=True,
+        ),
+    )
+
+    with pytest.raises(ShoppingRuntimeStateError):
+        runtime.list_shopping_lists(101)
+
+    assert stats.closed_count == 1
+
+
+def test_shopping_runtime_cleanup_failure_after_success_is_typed(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    shopping_view = _shopping_view_artifact(db_path)
+    stats = _ShoppingResourceStats()
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(
+            lambda: _OwnedShoppingStore(stats, shopping_view=shopping_view, shopping_lists=(shopping_view.shopping_list,)),
+            stats,
+            owned=True,
+            close_error=RuntimeError("synthetic close failure"),
+        ),
+    )
+
+    with pytest.raises(ShoppingRuntimeCleanupError):
+        runtime.get_shopping_list(101, shopping_view.shopping_list.id)
+
+    assert stats.closed_count == 1
+
+
+def test_borrowed_shopping_resource_is_not_closed_and_remains_usable(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    shopping_view = _shopping_view_artifact(db_path)
+    stats = _ShoppingResourceStats()
+    borrowed_store = _OwnedShoppingStore(stats, shopping_view=shopping_view, shopping_lists=(shopping_view.shopping_list,))
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(lambda: borrowed_store, stats, owned=False),
+    )
+
+    view = runtime.get_shopping_list(101, shopping_view.shopping_list.id)
+
+    assert view.shopping_list.id == shopping_view.shopping_list.id
+    assert stats.closed_count == 0
+    assert borrowed_store.get_shopping_list(None, shopping_view.shopping_list.id).shopping_list.id == shopping_view.shopping_list.id
+
+
+def test_shopping_runtime_owned_resource_rolls_back_and_releases_sqlite_lock(tmp_path):
+    db_path = tmp_path / "runtime.db"
+    shopping_view = _shopping_view_artifact(db_path)
+    lock_conn = sqlite3.connect(db_path, timeout=0.5, check_same_thread=False)
+    lock_conn.execute("BEGIN IMMEDIATE")
+    stats = _ShoppingResourceStats()
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True),
+        db_path=db_path,
+        shopping_store_factory=_ShoppingResourceFactory(
+            lambda: _OwnedShoppingStore(
+                stats,
+                shopping_view=shopping_view,
+                shopping_lists=(shopping_view.shopping_list,),
+                connection=lock_conn,
+            ),
+            stats,
+            owned=True,
+        ),
+    )
+
+    view = runtime.get_shopping_list(101, shopping_view.shopping_list.id)
+
+    assert view.shopping_list.id == shopping_view.shopping_list.id
+    assert stats.in_transaction_before_cleanup is True
+    assert stats.rollback_count == 1
+    assert stats.in_transaction_after_cleanup is False
+    second = sqlite3.connect(db_path, timeout=0.5, check_same_thread=False)
+    try:
+        second.execute("BEGIN EXCLUSIVE")
+        second.rollback()
+    finally:
+        second.close()

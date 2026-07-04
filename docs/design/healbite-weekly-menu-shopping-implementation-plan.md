@@ -219,6 +219,11 @@ Locked C3 invariants:
 - malformed boolean or allowlist config disables the feature and marks configuration invalid;
 - empty allowlists deny access without opening menu or shopping stores;
 - feature gate order is config -> enabled -> canonical actor -> allowlist -> household auth -> runtime store -> schema state -> read;
+- runtime store factories return explicit resource contexts rather than bare stores;
+- owned runtime resources always finalize on every exit path and roll back any open transaction before close;
+- borrowed runtime resources are never closed, committed, or rolled back by the runtime;
+- runtime never caches live store resources between calls and treats the default C1/C2 stores as stateless method-scoped adapters only;
+- cleanup failure is fail-closed and never returns a normal success result;
 - C3 runtime never mutates menu, shopping, diary, profile, or household business rows;
 - C3 runtime returns safe availability states only and does not expose DB paths, raw allowlists, or raw exception text.
 

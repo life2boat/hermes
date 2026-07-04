@@ -109,12 +109,37 @@ Schema changes:
 
 - add `household_shopping_lists`
 - add `household_shopping_items`
+- add `household_shopping_idempotency`
 - add uniqueness, version, status, and ordering constraints
 
 Runtime changes:
 
 - none in Telegram routing
 - no automatic list derivation at startup
+- no household bootstrap side effects
+
+Implemented public surface:
+
+- `gateway/healbite_shopping_schema.py`
+  - `initialize_shopping_schema(...)`
+  - `detect_shopping_schema_state(...)`
+  - quantity/unit normalization helpers and enum contracts
+- `gateway/healbite_shopping.py`
+  - `HealBiteShoppingStore.initialize_schema()`
+  - `HealBiteShoppingStore.audit_schema()`
+  - `create_shopping_list(...)`, `get_shopping_list(...)`, `list_shopping_lists(...)`
+  - `add_manual_item(...)`, `update_item(...)`, `set_item_checked(...)`
+  - `replace_or_regenerate_generated_items(...)`
+  - `activate_shopping_list(...)`, `complete_shopping_list(...)`, `archive_shopping_list(...)`
+
+Deterministic contracts locked in C2:
+
+- standalone shopping lists are allowed with `source_menu_id = NULL`
+- menu-derived lists retain exact immutable `source_menu_id` linkage
+- generated-item regeneration preserves existing item identity for matched rows
+- checked unmatched generated rows are promoted to manualized overrides instead of being dropped
+- deduplication is fingerprint-based and refuses ambiguous `unknown`-unit merges
+- no Telegram or runtime bridge is introduced before C3
 
 Tests:
 

@@ -302,7 +302,7 @@ def test_gateway_composition_builder_does_not_initialize_household_schema(tmp_pa
     assert HOUSEHOLD_MEMBERS_TABLE not in _tables(db_path)
 
 
-def test_existing_telegram_keyboard_contract_remains_placeholder_only():
+def test_existing_telegram_keyboard_contract_keeps_read_only_weekly_menu_and_placeholder_shopping_family():
     profile = "\U0001f464 \u041c\u043e\u0439 \u043f\u0440\u043e\u0444\u0438\u043b\u044c"
     diary = "\U0001f34e \u0414\u043d\u0435\u0432\u043d\u0438\u043a \u0435\u0434\u044b"
     weekly_menu = "\U0001f4cb \u041c\u0435\u043d\u044e \u043d\u0430 \u043d\u0435\u0434\u0435\u043b\u044e"
@@ -321,7 +321,7 @@ def test_existing_telegram_keyboard_contract_remains_placeholder_only():
         [family, weekly_report],
         [restrictions, help_button],
     ]
-    assert HEALBITE_REPLY_KEYBOARD_ACTIONS[weekly_menu] == "__placeholder__:weekly_menu"
+    assert HEALBITE_REPLY_KEYBOARD_ACTIONS[weekly_menu] == "/weekly_menu"
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[shopping] == "__placeholder__:shopping_list"
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[family] == "__placeholder__:family"
     assert HEALBITE_PLACEHOLDER_REPLY == "\u0412 \u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u043a\u0435"

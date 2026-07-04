@@ -28,6 +28,7 @@ from gateway.healbite_weekly_menus import (
     HouseholdAuthorizationContext,
     WeeklyMenuAccessError,
     WeeklyMenuNotFoundError,
+    WeeklyMenuRevisionStatus,
     WeeklyMenuRevision,
     WeeklyMenuRevisionView,
     WeeklyMenuSchemaError,
@@ -218,6 +219,40 @@ class HealBiteWeeklyMenuRuntimeService:
         except (WeeklyMenuAccessError, WeeklyMenuValidationError):
             raise WeeklyMenuRuntimeStateError("weekly menu read rejected") from None
         except (WeeklyMenuSchemaError, WeeklyMenuStateError, sqlite3.Error):
+            raise WeeklyMenuRuntimeStateError("weekly menu runtime failure") from None
+        except Exception:
+            raise WeeklyMenuRuntimeStateError("weekly menu runtime failure") from None
+
+    def get_active_published_weekly_menu_for_week(
+        self,
+        actor_user_id: object,
+        week_start: str,
+    ) -> WeeklyMenuRevisionView | None:
+        try:
+            def _read(context: HouseholdAuthorizationContext, store: HealBiteWeeklyMenuStore) -> WeeklyMenuRevisionView | None:
+                series = store.get_weekly_menu_series(context, context.household_id, week_start)
+                if series is None:
+                    return None
+                revisions = store.list_weekly_menu_revisions(context, series.id)
+                published: WeeklyMenuRevision | None = None
+                for revision in revisions:
+                    if revision.status is not WeeklyMenuRevisionStatus.PUBLISHED:
+                        continue
+                    if published is not None:
+                        raise WeeklyMenuStateError("multiple active published revisions")
+                    published = revision
+                if published is None:
+                    return None
+                return store.get_weekly_menu_revision(context, published.id)
+
+            return self._with_store(actor_user_id, _read)
+        except WeeklyMenuRuntimeUnavailableError:
+            raise
+        except WeeklyMenuRuntimeCleanupError:
+            raise
+        except (WeeklyMenuAccessError, WeeklyMenuValidationError):
+            raise WeeklyMenuRuntimeStateError("weekly menu read rejected") from None
+        except (WeeklyMenuNotFoundError, WeeklyMenuSchemaError, WeeklyMenuStateError, sqlite3.Error):
             raise WeeklyMenuRuntimeStateError("weekly menu runtime failure") from None
         except Exception:
             raise WeeklyMenuRuntimeStateError("weekly menu runtime failure") from None

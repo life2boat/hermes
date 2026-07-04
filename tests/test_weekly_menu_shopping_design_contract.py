@@ -162,15 +162,15 @@ def test_plan_defines_staged_rollout_and_default_disabled_flags() -> None:
     )
 
 
-def test_telegram_placeholders_remain_in_development_until_ui_sprints() -> None:
+def test_telegram_weekly_menu_c4_contract_keeps_shopping_and_family_placeholders() -> None:
     text = _read(TELEGRAM)
     _require(
         text,
         [
-            '"📋 Меню на неделю": "__placeholder__:weekly_menu"',
+            '"📋 Меню на неделю": WEEKLY_MENU_COMMAND',
             '"🛒 Список покупок": "__placeholder__:shopping_list"',
             '"👨‍👩‍👧 Семья": "__placeholder__:family"',
             'HEALBITE_PLACEHOLDER_REPLY = "В разработке"',
         ],
-        label="telegram placeholder contract",
+        label="telegram weekly menu contract",
     )

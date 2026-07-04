@@ -1019,6 +1019,202 @@ class HealBiteWeeklyMenuStore:
                 conn.rollback()
                 raise
 
+    def lookup_generated_draft_replay(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        *,
+        idempotency_key: str,
+        payload_hash: str,
+    ) -> WeeklyMenuRevisionView | None:
+        auth = self._authorize(context, household_id=None, mutation=True)
+        self._require_canonical_schema()
+        normalized_key = _normalize_idempotency_key(idempotency_key)
+        with self._read_only_connect() as conn:
+            revision = self._resolve_generated_idempotent_revision(
+                conn=conn,
+                auth=auth,
+                idempotency_key=normalized_key,
+                payload_hash=str(payload_hash),
+            )
+            if revision is None:
+                return None
+            return self._build_revision_view(conn, revision)
+
+    def apply_generated_draft_entries(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        *,
+        week_start: str,
+        entries: Sequence[WeeklyMenuEntryInput],
+        expected_series_version: int | None,
+        expected_draft_revision_id: str | None,
+        expected_draft_revision_version: int | None,
+        idempotency_key: str,
+        payload_hash: str,
+    ) -> WeeklyMenuRevisionView:
+        auth = self._authorize(context, household_id=None, mutation=True)
+        self._require_canonical_schema()
+        canonical_week_start = require_monday_week_start(normalize_week_start(str(week_start).strip()))
+        normalized_key = _normalize_idempotency_key(idempotency_key)
+        validated_entries = self._validate_entry_inputs(entries)
+        if any(_coerce_origin(entry.origin) is not WeeklyMenuEntryOrigin.GENERATED for entry in validated_entries):
+            raise WeeklyMenuValidationError("generated weekly menu entries must use generated origin")
+        normalized_expected_series_version = (
+            None
+            if expected_series_version is None
+            else _normalize_version(expected_series_version, label="expected_series_version")
+        )
+        normalized_expected_draft_revision_id = (
+            None
+            if expected_draft_revision_id is None
+            else require_weekly_menu_revision_id(expected_draft_revision_id)
+        )
+        normalized_expected_draft_revision_version = (
+            None
+            if expected_draft_revision_version is None
+            else _normalize_version(expected_draft_revision_version, label="expected_draft_revision_version")
+        )
+        for attempt in range(_MAX_ID_REGENERATION_ATTEMPTS):
+            with self._connect() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    existing_idempotent = self._resolve_generated_idempotent_revision(
+                        conn=conn,
+                        auth=auth,
+                        idempotency_key=normalized_key,
+                        payload_hash=str(payload_hash),
+                    )
+                    if existing_idempotent is not None:
+                        conn.commit()
+                        return self._build_revision_view(conn, existing_idempotent)
+                    series = self._get_series_by_household_week(conn, auth.household_id, canonical_week_start)
+                    now = _sqlite_timestamp()
+                    if series is None:
+                        if normalized_expected_series_version is not None:
+                            raise WeeklyMenuConflictError("weekly menu series version mismatch")
+                        series_id = require_weekly_menu_series_id(self._series_id_factory())
+                        conn.execute(
+                            f"""
+                            INSERT INTO {WEEKLY_MENU_SERIES_TABLE}
+                                (id, household_id, week_start, created_at, updated_at, version)
+                            VALUES (?, ?, ?, ?, ?, 1)
+                            """,
+                            (series_id, auth.household_id, canonical_week_start, now, now),
+                        )
+                        series = self._get_series_by_id(conn, series_id)
+                        if series is None:
+                            raise WeeklyMenuStateError("weekly menu series creation failed")
+                    else:
+                        self._assert_series_in_scope(auth, series)
+                        if normalized_expected_series_version is None or series.version != normalized_expected_series_version:
+                            raise WeeklyMenuConflictError("weekly menu series version mismatch")
+                    allowed_dates = set(week_dates(series.week_start))
+                    for entry in validated_entries:
+                        if entry.local_date not in allowed_dates:
+                            raise WeeklyMenuValidationError("entry local_date is outside weekly menu scope")
+                    current_draft = self._get_revision_by_status(conn, series.id, WeeklyMenuRevisionStatus.DRAFT)
+                    if normalized_expected_draft_revision_id is None:
+                        if current_draft is not None:
+                            raise WeeklyMenuConflictError("weekly menu draft state changed")
+                    else:
+                        if current_draft is None or current_draft.id != normalized_expected_draft_revision_id:
+                            raise WeeklyMenuConflictError("weekly menu draft state changed")
+                        if (
+                            normalized_expected_draft_revision_version is None
+                            or current_draft.version != normalized_expected_draft_revision_version
+                        ):
+                            raise WeeklyMenuConflictError("weekly menu draft version mismatch")
+                    if current_draft is None:
+                        revision_id = require_weekly_menu_revision_id(self._revision_id_factory())
+                        next_revision_number = self._next_revision_number(conn, series.id)
+                        published = self._get_revision_by_status(conn, series.id, WeeklyMenuRevisionStatus.PUBLISHED)
+                        conn.execute(
+                            f"""
+                            INSERT INTO {WEEKLY_MENU_REVISIONS_TABLE}
+                                (id, series_id, household_id, revision_number, status, source_revision_id,
+                                 created_by_member_id, created_at, updated_at, published_at, archived_at, version)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1)
+                            """,
+                            (
+                                revision_id,
+                                series.id,
+                                series.household_id,
+                                next_revision_number,
+                                WeeklyMenuRevisionStatus.DRAFT.value,
+                                published.id if published is not None else None,
+                                auth.household_member_id,
+                                now,
+                                now,
+                            ),
+                        )
+                        target_revision_id = revision_id
+                        idempotency_operation = WeeklyMenuIdempotencyOperation.CREATE_DRAFT
+                    else:
+                        conn.execute(
+                            f"DELETE FROM {WEEKLY_MENU_ENTRIES_TABLE} WHERE menu_id = ?",
+                            (current_draft.id,),
+                        )
+                        conn.execute(
+                            f"""
+                            UPDATE {WEEKLY_MENU_REVISIONS_TABLE}
+                            SET updated_at = ?, version = version + 1
+                            WHERE id = ? AND status = ?
+                            """,
+                            (now, current_draft.id, WeeklyMenuRevisionStatus.DRAFT.value),
+                        )
+                        target_revision_id = current_draft.id
+                        idempotency_operation = WeeklyMenuIdempotencyOperation.REPLACE_DRAFT_ENTRIES
+                    for entry in validated_entries:
+                        entry_id = require_weekly_menu_entry_id(self._entry_id_factory())
+                        conn.execute(
+                            f"""
+                            INSERT INTO {WEEKLY_MENU_ENTRIES_TABLE}
+                                (id, menu_id, household_id, local_date, meal_slot, position,
+                                 title, description, servings, origin, created_at, updated_at, version)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                            """,
+                            (
+                                entry_id,
+                                target_revision_id,
+                                series.household_id,
+                                entry.local_date,
+                                _coerce_meal_slot(entry.meal_slot).value,
+                                int(entry.position),
+                                entry.title.strip(),
+                                None if entry.description is None else entry.description.strip(),
+                                None if entry.servings is None else entry.servings.strip(),
+                                WeeklyMenuEntryOrigin.GENERATED.value,
+                                now,
+                                now,
+                            ),
+                        )
+                    self._bump_series(conn, series.id, now)
+                    self._store_idempotency(
+                        conn=conn,
+                        auth=auth,
+                        operation=idempotency_operation,
+                        idempotency_key=normalized_key,
+                        payload_hash=str(payload_hash),
+                        series_id=series.id,
+                        revision_id=target_revision_id,
+                    )
+                    updated = self._get_revision_by_id(conn, target_revision_id)
+                    if updated is None:
+                        raise WeeklyMenuStateError("weekly menu generation draft write failed")
+                    conn.commit()
+                    return self._build_revision_view(conn, updated)
+                except sqlite3.IntegrityError as exc:
+                    conn.rollback()
+                    if "UNIQUE" not in str(exc).upper():
+                        raise WeeklyMenuConflictError("weekly menu generation draft conflict") from None
+                    if attempt == _MAX_ID_REGENERATION_ATTEMPTS - 1:
+                        raise WeeklyMenuConflictError("weekly menu generation retry budget exhausted") from None
+                    time.sleep(0.01)
+                except Exception:
+                    conn.rollback()
+                    raise
+        raise WeeklyMenuConflictError("weekly menu generation retry budget exhausted")
+
     def _require_canonical_schema(self) -> None:
         state = self.schema_state()
         if state is WeeklyMenuSchemaState.NOT_INITIALIZED:
@@ -1117,6 +1313,51 @@ class HealBiteWeeklyMenuStore:
         revision_id = str(row["revision_id"]) if row["revision_id"] is not None else None
         if not revision_id:
             raise WeeklyMenuStateError("weekly menu idempotency references missing revision")
+        revision = self._get_revision_by_id(conn, revision_id)
+        if revision is None:
+            raise WeeklyMenuStateError("weekly menu idempotency references missing revision")
+        return revision
+
+    def _resolve_generated_idempotent_revision(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        auth: HouseholdAuthorizationContext,
+        idempotency_key: str,
+        payload_hash: str,
+    ) -> WeeklyMenuRevision | None:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE}
+            WHERE household_id = ?
+              AND actor_member_id = ?
+              AND operation IN (?, ?)
+              AND idempotency_key = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (
+                auth.household_id,
+                auth.household_member_id,
+                WeeklyMenuIdempotencyOperation.CREATE_DRAFT.value,
+                WeeklyMenuIdempotencyOperation.REPLACE_DRAFT_ENTRIES.value,
+                idempotency_key,
+            ),
+        ).fetchall()
+        if not rows:
+            return None
+        revision_id: str | None = None
+        for row in rows:
+            if str(row["payload_fingerprint"]) != payload_hash:
+                raise WeeklyMenuConflictError("idempotency key replayed with different payload")
+            row_revision_id = str(row["revision_id"]) if row["revision_id"] is not None else None
+            if not row_revision_id:
+                raise WeeklyMenuStateError("weekly menu idempotency references missing revision")
+            if revision_id is None:
+                revision_id = row_revision_id
+                continue
+            if row_revision_id != revision_id:
+                raise WeeklyMenuStateError("weekly menu idempotency key references multiple revisions")
+        assert revision_id is not None
         revision = self._get_revision_by_id(conn, revision_id)
         if revision is None:
             raise WeeklyMenuStateError("weekly menu idempotency references missing revision")

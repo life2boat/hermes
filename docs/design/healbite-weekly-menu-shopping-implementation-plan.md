@@ -335,6 +335,41 @@ Runtime changes:
 - explicit publish flow
 - explicit regenerate flow
 
+Implemented C5A surface:
+
+- `gateway/healbite_weekly_menu_mutation_runtime.py`
+  - `HealBiteWeeklyMenuMutationRuntimeService`
+  - `create_draft_for_week(...)`
+  - `replace_draft_entries(...)`
+  - `publish_draft(...)`
+  - `archive_revision(...)`
+- `gateway/healbite_weekly_menu_generation.py`
+  - `CanonicalWeeklyMenuMemberSnapshotProvider`
+  - `AuxiliaryWeeklyMenuGenerator`
+  - `HealBiteWeeklyMenuGenerationService.generate_draft_for_week(...)`
+  - strict structured-output parser and typed generation statuses
+- `gateway/healbite_weekly_menu_generation_types.py`
+  - request, member snapshot, generated entry, and response contracts
+- `gateway/healbite_weekly_menus.py`
+  - `lookup_generated_draft_replay(...)`
+  - `apply_generated_draft_entries(...)`
+- `gateway/healbite_user_profile.py`
+  - read-only `HealBiteWeeklyMenuProfileSnapshot`
+  - `get_weekly_menu_profile_snapshot(...)`
+
+Locked C5A invariants:
+
+- runtime mutations are owner-only even if lower store layers still permit broader household roles;
+- the existing weekly-menu feature flag and allowlist remain the only entry gate and stay fail-closed;
+- generation uses a small canonical read-only member/profile snapshot adapter and does not introduce ad-hoc SQL outside store boundaries;
+- no DB transaction remains open during provider execution;
+- generation writes are atomic at the final draft-write step only and never auto-publish;
+- existing published revisions remain immutable when a new generated draft is created;
+- replay is durable through the existing weekly-menu idempotency ledger, with no schema redesign;
+- same-key different-payload requests return typed conflicts;
+- no raw prompt, raw model output, or privacy-sensitive household/profile payload is persisted or logged;
+- no Telegram wiring changes are introduced in C5A.
+
 Tests:
 
 - optimistic concurrency
@@ -344,6 +379,9 @@ Tests:
 - LLM malformed output rejection
 - LLM retry no-duplicate guarantee
 - publish snapshot immutability
+- owner-only runtime refusal for adult-admin actors
+- no-transaction-held-during-provider-call proof
+- stale-state conflict without partial generated writes
 
 Feature state:
 

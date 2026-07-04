@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -361,6 +362,73 @@ def test_nonexistent_revision_raises_not_found(tmp_path):
 
     with pytest.raises(WeeklyMenuNotFoundError):
         store.get_weekly_menu_revision(context, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+
+
+def test_apply_generated_draft_entries_creates_generated_draft_and_replays(tmp_path):
+    db_path = tmp_path / "generated-create.db"
+    _, store, _, context = _seed_personal_household(db_path)
+    payload_hash = hashlib.sha256(b"generated-create").hexdigest()
+
+    view = store.apply_generated_draft_entries(
+        context,
+        week_start="2026-07-06",
+        entries=[
+            WeeklyMenuEntryInput(
+                local_date="2026-07-06",
+                meal_slot=WeeklyMenuMealSlot.BREAKFAST,
+                position=1,
+                title="Generated breakfast",
+                origin="generated",
+            )
+        ],
+        expected_series_version=None,
+        expected_draft_revision_id=None,
+        expected_draft_revision_version=None,
+        idempotency_key="generate:abc",
+        payload_hash=payload_hash,
+    )
+    replay = store.lookup_generated_draft_replay(
+        context,
+        idempotency_key="generate:abc",
+        payload_hash=payload_hash,
+    )
+
+    assert view.revision.status is WeeklyMenuRevisionStatus.DRAFT
+    assert len(view.entries) == 1
+    assert view.entries[0].origin.value == "generated"
+    assert replay is not None
+    assert replay.revision.id == view.revision.id
+
+
+def test_apply_generated_draft_entries_replaces_existing_draft_with_expected_version(tmp_path):
+    db_path = tmp_path / "generated-replace.db"
+    _, store, _, context = _seed_personal_household(db_path)
+    series = store.create_or_get_weekly_menu_series(context, context.household_id, "2026-07-06")
+    draft = store.create_draft_revision(context, series.id, expected_series_version=series.version, idempotency_key="draft-1")
+    payload_hash = hashlib.sha256(b"generated-replace").hexdigest()
+
+    replaced = store.apply_generated_draft_entries(
+        context,
+        week_start="2026-07-06",
+        entries=[
+            WeeklyMenuEntryInput(
+                local_date="2026-07-06",
+                meal_slot=WeeklyMenuMealSlot.DINNER,
+                position=1,
+                title="Generated dinner",
+                origin="generated",
+            )
+        ],
+        expected_series_version=draft.series.version,
+        expected_draft_revision_id=draft.revision.id,
+        expected_draft_revision_version=draft.revision.version,
+        idempotency_key="generate:def",
+        payload_hash=payload_hash,
+    )
+
+    assert replaced.revision.id == draft.revision.id
+    assert replaced.revision.version == draft.revision.version + 1
+    assert [entry.title for entry in replaced.entries] == ["Generated dinner"]
 
 
 def test_audit_schema_returns_aggregate_counts_only(tmp_path):

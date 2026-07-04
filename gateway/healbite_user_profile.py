@@ -470,8 +470,8 @@ class HealBiteUserProfileStore:
 
     def get_user_profile(self, user_id: int) -> HealBiteUserProfile | None:
         with self._connect() as conn:
-            user_row = self._load_user_row(conn, int(user_id))
-            profile_row = self._load_profile_row(conn, int(user_id))
+            user_row = self._load_user_row(conn, int(user_id)) if self._table_exists(conn, USERS_TABLE) else None
+            profile_row = self._load_profile_row(conn, int(user_id)) if self._table_exists(conn, PROFILES_TABLE) else None
         if user_row is None and profile_row is None:
             return None
 

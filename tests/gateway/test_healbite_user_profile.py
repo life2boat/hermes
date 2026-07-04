@@ -167,6 +167,40 @@ def test_user_profile_store_uses_profile_table_manual_target_fallback(tmp_path):
     assert profile.daily_kcal_target == 1950
 
 
+def test_weekly_menu_profile_snapshot_is_read_only_when_profiles_table_is_missing(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    store = HealBiteUserProfileStore(db_path=db_path)
+    store.upsert_user_profile(
+        user_id=108,
+        username="legacy-user",
+        daily_kcal_target=1850,
+        daily_protein_g=120,
+        daily_fat_g=60,
+        daily_carbs_g=170,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TABLE profiles")
+        conn.commit()
+
+    read_only_store = HealBiteUserProfileStore(db_path=db_path, ensure_schema_on_init=False)
+    snapshot = read_only_store.get_weekly_menu_profile_snapshot(108)
+
+    assert snapshot is not None
+    assert snapshot.daily_kcal_target == 1850
+    assert snapshot.daily_protein_g == 120
+    assert snapshot.daily_fat_g == 60
+    assert snapshot.daily_carbs_g == 170
+    assert snapshot.dietary_notes == ()
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        users_after = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    assert "profiles" not in tables
+    assert users_after == 1
+
+
 def test_format_healbite_profile_report_handles_missing_profile():
     report = format_healbite_profile_report(None)
 

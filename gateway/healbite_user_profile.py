@@ -164,6 +164,15 @@ class HealBiteUserProfile:
         return self.daily_carbs_g
 
 
+@dataclass(slots=True, frozen=True)
+class HealBiteWeeklyMenuProfileSnapshot:
+    daily_kcal_target: float | None = None
+    daily_protein_g: float | None = None
+    daily_fat_g: float | None = None
+    daily_carbs_g: float | None = None
+    dietary_notes: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class HealBiteOnboardingState:
     user_id: int
@@ -231,6 +240,18 @@ def _format_target(value: float | None, unit: str) -> str:
     if numeric.is_integer():
         return f"{int(numeric)} {unit}"
     return f"{numeric:.1f} {unit}"
+
+
+def _normalize_weekly_menu_note(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return None
+    return collapsed[:200]
 
 
 def format_calculation_version(value: str | None) -> str:
@@ -378,10 +399,11 @@ def profile_missing_fields(profile: HealBiteUserProfile | None) -> list[str]:
 
 
 class HealBiteUserProfileStore:
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *, ensure_schema_on_init: bool = True) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        if ensure_schema_on_init:
+            self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -407,6 +429,14 @@ class HealBiteUserProfileStore:
             for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
             if len(row) > 1
         }
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
 
     def _users_identity_column(self, conn: sqlite3.Connection) -> str:
         columns = self._table_columns(conn, USERS_TABLE)
@@ -440,8 +470,8 @@ class HealBiteUserProfileStore:
 
     def get_user_profile(self, user_id: int) -> HealBiteUserProfile | None:
         with self._connect() as conn:
-            user_row = self._load_user_row(conn, int(user_id))
-            profile_row = self._load_profile_row(conn, int(user_id))
+            user_row = self._load_user_row(conn, int(user_id)) if self._table_exists(conn, USERS_TABLE) else None
+            profile_row = self._load_profile_row(conn, int(user_id)) if self._table_exists(conn, PROFILES_TABLE) else None
         if user_row is None and profile_row is None:
             return None
 
@@ -502,6 +532,34 @@ class HealBiteUserProfileStore:
             return None
         target = profile.water_target_ml
         return int(target) if target is not None and int(target) > 0 else None
+
+    def get_weekly_menu_profile_snapshot(self, user_id: int) -> HealBiteWeeklyMenuProfileSnapshot | None:
+        profile = self.get_user_profile(int(user_id))
+        if profile is None:
+            return None
+        with self._connect() as conn:
+            if not self._table_exists(conn, PROFILES_TABLE):
+                profile_row = None
+            else:
+                profile_row = self._load_profile_row(conn, int(user_id))
+        notes: list[str] = []
+        seen_notes: set[str] = set()
+        if profile_row is not None:
+            for field_name in ("allergies", "stop_products", "preferences"):
+                if field_name not in profile_row.keys():
+                    continue
+                normalized = _normalize_weekly_menu_note(profile_row[field_name])
+                if normalized is None or normalized in seen_notes:
+                    continue
+                notes.append(normalized)
+                seen_notes.add(normalized)
+        return HealBiteWeeklyMenuProfileSnapshot(
+            daily_kcal_target=profile.daily_kcal_target,
+            daily_protein_g=profile.daily_protein_g,
+            daily_fat_g=profile.daily_fat_g,
+            daily_carbs_g=profile.daily_carbs_g,
+            dietary_notes=tuple(notes),
+        )
 
     def _ensure_user_row(self, conn: sqlite3.Connection, *, user_id: int, username: str = "") -> None:
         identity_column = self._users_identity_column(conn)

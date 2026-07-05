@@ -28,6 +28,15 @@ Confirmed post-C5A merge baseline:
 - Telegram mutation UI is still undeployed;
 - feature enablement remains a separate future canary stage.
 
+## Status Observability Constraint
+
+All operational status helpers used during weekly-menu and shopping rollout stages must remain strictly read-only.
+
+- status inspection may read canonical or copied SQLite files only through `mode=ro` plus `PRAGMA query_only=ON`;
+- status inspection may classify provider readiness and failure categories, but may not trigger provider or generation calls;
+- status output must stay aggregate-only and must not print raw allowlists, DB paths, or write-probe artifacts;
+- absence of optional profile, reminder, weekly, or shopping tables is a valid status state and must not trigger schema creation.
+
 ## Design Rules That All Implementation PRs Must Preserve
 
 1. Weekly menu is household-scoped, not member-scoped.

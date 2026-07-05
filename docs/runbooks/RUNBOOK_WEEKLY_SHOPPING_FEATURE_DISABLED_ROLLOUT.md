@@ -24,6 +24,29 @@ Qdrant changes
 provider calls
 ```
 
+## Status Helper Contract
+
+Operational status collection must stay strictly read-only.
+
+```text
+./scripts/healbite status must never run write probes
+./scripts/healbite status must never create schemas, rows, WAL, SHM, or journal files
+status DB inspection must open SQLite with mode=ro and PRAGMA query_only=ON
+status may be run against a local copied DB via ./scripts/healbite status --db-path <path>
+status provider markers are classification counters only; status must not make provider or generation calls
+```
+
+Provider marker interpretation for rollout evidence:
+
+```text
+provider_calls = actual provider calls attempted during the inspected operation
+provider_call_failures = actual provider calls that failed
+provider_auth_failures = provider call failures caused by auth/config credentials
+provider_unavailable_without_call = provider unavailable state inferred without a real call
+provider_not_configured = no usable provider configuration detected
+generation_calls = actual content-generation calls attempted during the inspected operation
+```
+
 ## Current Production Baseline
 
 Document and re-check these facts during the future execution stage:

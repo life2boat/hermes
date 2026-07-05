@@ -45,6 +45,7 @@ from gateway.healbite_weight_tracker import (
     format_weight_tracker_report,
     parse_weight_kg,
 )
+from scripts.healbite_status import StatusDBError, collect_status_snapshot
 
 CONTAINER_NAME = "hermes-bot"
 DEFAULT_LOG_TAIL = 80
@@ -1231,7 +1232,7 @@ def render_status_report(data: dict[str, Any]) -> str:
     git_status = data.get("git_status") or "(clean)"
     commits = data.get("recent_commits") or []
     runtime = data.get("runtime") or {}
-    write_probe = data.get("write_probe") or {}
+    db = data.get("db") or {}
     lines = [
         "HealBite diagnostic status",
         "",
@@ -1252,17 +1253,25 @@ def render_status_report(data: dict[str, Any]) -> str:
         f"- restart_count: {data.get('restart_count', 'unknown')}",
         "",
         "Runtime:",
-        f"- hermes_home: {runtime.get('hermes_home', 'unknown')}",
-        f"- config_path: {runtime.get('config_path', 'unknown')}",
-        f"- env_path: {runtime.get('env_path', 'unknown')}",
         f"- model.provider: {runtime.get('model_provider', 'unknown')}",
         f"- model.default: {runtime.get('model_default', 'unknown')}",
         f"- auxiliary.vision.provider: {runtime.get('vision_provider', 'unknown')}",
         f"- auxiliary.vision.model: {runtime.get('vision_model', 'unknown')}",
-        f"- check_vision_requirements: {runtime.get('vision_ready', 'unknown')}",
-        f"- SQLite db_path: {runtime.get('db_path', 'unknown')}",
-        f"- nutrition_log count: {runtime.get('nutrition_log_count', 'unknown')}",
+        f"- vision_ready: {runtime.get('vision_ready', 'unknown')}",
+        f"- provider_status_category: {runtime.get('provider_status_category', 'unknown')}",
+        f"- provider_calls: {runtime.get('provider_calls', 'unknown')}",
+        f"- provider_call_failures: {runtime.get('provider_call_failures', 'unknown')}",
+        f"- provider_auth_failures: {runtime.get('provider_auth_failures', 'unknown')}",
+        f"- provider_unavailable_without_call: {runtime.get('provider_unavailable_without_call', 'unknown')}",
+        f"- provider_not_configured: {runtime.get('provider_not_configured', 'unknown')}",
+        f"- generation_calls: {runtime.get('generation_calls', 'unknown')}",
         f"- admin-list loaded count: {runtime.get('admin_total_unique', 'unknown')}",
+        f"- weekly feature enabled: {runtime.get('weekly_feature_enabled', 'unknown')}",
+        f"- weekly allowlist count: {runtime.get('weekly_allowlist_count', 'unknown')}",
+        f"- weekly config valid: {runtime.get('weekly_config_valid', 'unknown')}",
+        f"- shopping feature enabled: {runtime.get('shopping_feature_enabled', 'unknown')}",
+        f"- shopping allowlist count: {runtime.get('shopping_allowlist_count', 'unknown')}",
+        f"- shopping config valid: {runtime.get('shopping_config_valid', 'unknown')}",
         "",
         "Presence flags:",
     ])
@@ -1275,13 +1284,25 @@ def render_status_report(data: dict[str, Any]) -> str:
             lines.append(f"- {key}: {'yes' if present else 'no'}")
     lines.extend([
         "",
-        "Admin lists:",
-        f"- allow_admin_from: {', '.join(runtime.get('allow_admin_from', [])) or '(empty)'}",
-        f"- group_allow_admin_from: {', '.join(runtime.get('group_allow_admin_from', [])) or '(empty)'}",
-        "",
-        "Runtime DB write probe (uid=10000):",
-        f"- ok: {write_probe.get('ok', False)}",
-        f"- detail: {write_probe.get('detail', 'n/a')}",
+        "DB:",
+        f"- access_mode: {db.get('db_access_mode', 'unknown')}",
+        f"- query_only: {db.get('query_only', 'unknown')}",
+        f"- integrity_check: {db.get('integrity_check', 'unknown')}",
+        f"- foreign_key_check rows: {db.get('foreign_key_check_rows', 'unknown')}",
+        f"- nutrition_log count: {db.get('nutrition_log_count', 'unknown')}",
+        f"- households: {db.get('households', 'unknown')}",
+        f"- household_members: {db.get('household_members', 'unknown')}",
+        f"- profiles_table_present: {db.get('profiles_table_present', 'unknown')}",
+        f"- weekly schema: {db.get('weekly_schema', 'unknown')}",
+        f"- weekly tables: {db.get('weekly_tables', 'unknown')}",
+        f"- weekly business rows: {db.get('weekly_business_rows', 'unknown')}",
+        f"- shopping schema: {db.get('shopping_schema', 'unknown')}",
+        f"- shopping tables: {db.get('shopping_tables', 'unknown')}",
+        f"- shopping business rows: {db.get('shopping_business_rows', 'unknown')}",
+        f"- water tables present: {db.get('water_tables_present', 'unknown')}",
+        f"- weight tables present: {db.get('weight_tables_present', 'unknown')}",
+        f"- reminder tables present: {db.get('reminder_tables_present', 'unknown')}",
+        f"- sqlite_total_changes: {db.get('sqlite_total_changes', 'unknown')}",
     ])
     return redact_secrets("\n".join(lines))
 
@@ -1359,18 +1380,23 @@ class HealBiteCLI:
             restart_count = -1
         return status, restart_count
 
-    def cmd_status(self) -> str:
+    def cmd_status(self, *, db_path: str | None = None) -> str:
         git_status = self._run_host(
             ["git", "status", "--short"], check=False
         ).stdout.strip()
         commits_raw = self._run_host(
             ["git", "log", "--oneline", "-3"], check=False
         ).stdout.strip()
-        status, restart_count = self._container_state()
-        runtime = self._docker_exec_python(_RUNTIME_STATUS_CODE)
-        write_probe = self._docker_exec_python(
-            _RUNTIME_WRITE_PROBE_CODE, user="10000:10000"
-        )
+        try:
+            if db_path is not None:
+                snapshot = collect_status_snapshot(db_path=db_path)
+                status = "local-db-mode"
+                restart_count: int | str = "n/a"
+            else:
+                status, restart_count = self._container_state()
+                snapshot = self._docker_exec_python(_RUNTIME_STATUS_CODE)
+        except StatusDBError as exc:
+            raise CLIError(exc.args[0]) from exc
         data = {
             "git_status": git_status,
             "recent_commits": [
@@ -1379,8 +1405,8 @@ class HealBiteCLI:
             "container_name": self.container_name,
             "container_status": status,
             "restart_count": restart_count,
-            "runtime": runtime,
-            "write_probe": write_probe,
+            "runtime": snapshot.get("runtime", {}),
+            "db": snapshot.get("db", {}),
         }
         return render_status_report(data)
 
@@ -1546,140 +1572,12 @@ class HealBiteCLI:
 _RUNTIME_STATUS_CODE = r"""
 from __future__ import annotations
 import json
-import os
-import sqlite3
-from pathlib import Path
 
-import yaml
+from scripts.healbite_status import collect_status_snapshot
 
-from gateway.config import Platform, load_gateway_config
-from gateway.healbite_nutrition_diary import NUTRITION_LOG_TABLE, resolve_healbite_db_path
-from gateway.slash_access import policy_from_extra
-from hermes_cli.config import get_config_path, get_hermes_home
-from tools.vision_tools import check_vision_requirements
-
-home = get_hermes_home()
-config_path = Path(get_config_path())
-env_path = home / ".env"
-raw = {}
-if config_path.exists():
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-
-model_cfg = raw.get("model") if isinstance(raw.get("model"), dict) else {}
-aux_cfg = raw.get("auxiliary") if isinstance(raw.get("auxiliary"), dict) else {}
-vision_cfg = aux_cfg.get("vision") if isinstance(aux_cfg.get("vision"), dict) else {}
-
-config = load_gateway_config()
-telegram_cfg = config.platforms.get(Platform.TELEGRAM)
-extra = getattr(telegram_cfg, "extra", {}) if telegram_cfg else {}
-dm_policy = policy_from_extra(extra, "dm")
-group_policy = policy_from_extra(extra, "group")
-
-db_path = resolve_healbite_db_path()
-nutrition_count = None
-if db_path.exists():
-    try:
-        with sqlite3.connect(db_path) as conn:
-            nutrition_count = conn.execute(
-                f"SELECT COUNT(*) FROM {NUTRITION_LOG_TABLE}"
-            ).fetchone()[0]
-    except Exception as exc:
-        nutrition_count = f"error:{type(exc).__name__}"
-
-secret_presence = {
-    "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
-    "DEEPSEEK_API_KEY": bool(os.getenv("DEEPSEEK_API_KEY")),
-    "TELEGRAM_BOT_TOKEN": bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-}
-qdrant_presence = {
-    "QDRANT_URL": bool(os.getenv("QDRANT_URL")),
-    "QDRANT_API_KEY": bool(os.getenv("QDRANT_API_KEY")),
-    "QDRANT_HOST": bool(os.getenv("QDRANT_HOST")),
-    "QDRANT_PORT": bool(os.getenv("QDRANT_PORT")),
-}
-
-admin_ids = set(dm_policy.admin_user_ids) | set(group_policy.admin_user_ids)
-
-payload = {
-    "hermes_home": str(home),
-    "config_path": str(config_path),
-    "env_path": str(env_path),
-    "model_provider": str(model_cfg.get("provider") or "unknown"),
-    "model_default": str(model_cfg.get("default") or model_cfg.get("model") or "unknown"),
-    "vision_provider": str(vision_cfg.get("provider") or "unknown"),
-    "vision_model": str(vision_cfg.get("model") or "unknown"),
-    "vision_ready": bool(check_vision_requirements()),
-    "secret_presence": secret_presence,
-    "qdrant_presence": qdrant_presence,
-    "db_path": str(db_path),
-    "nutrition_log_count": nutrition_count,
-    "allow_admin_from": sorted(dm_policy.admin_user_ids),
-    "group_allow_admin_from": sorted(group_policy.admin_user_ids),
-    "admin_total_unique": len(admin_ids),
-}
+payload = collect_status_snapshot()
 print(json.dumps(payload, ensure_ascii=False))
 """
-
-
-_RUNTIME_WRITE_PROBE_CODE = r'''
-from __future__ import annotations
-import json
-import sqlite3
-from datetime import datetime, timezone
-
-from gateway.healbite_nutrition_diary import NUTRITION_LOG_TABLE, resolve_healbite_db_path
-
-db_path = resolve_healbite_db_path()
-probe_user_id = 990000001
-probe_ref = "healbite-status-probe"
-payload = {"ok": False, "detail": "not started"}
-
-try:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    with sqlite3.connect(db_path) as conn:
-        columns = {
-            row[1]
-            for row in conn.execute(f"PRAGMA table_info({NUTRITION_LOG_TABLE})").fetchall()
-        }
-        if not columns:
-            raise RuntimeError("nutrition_log schema is missing")
-        cursor = conn.execute(
-            f"""
-            INSERT INTO {NUTRITION_LOG_TABLE}(
-                user_id, source, meal_name, items_json, calories_kcal, protein_g,
-                fat_g, carbs_g, confidence, occurred_at, raw_summary, image_ref, qdrant_indexed
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                probe_user_id,
-                "probe",
-                "CLI probe",
-                "[]",
-                123.0,
-                10.0,
-                4.0,
-                11.0,
-                1.0,
-                now,
-                "CLI write probe",
-                probe_ref,
-                0,
-            ),
-        )
-        probe_id = int(cursor.lastrowid)
-        conn.commit()
-        conn.execute(
-            f"DELETE FROM {NUTRITION_LOG_TABLE} WHERE id = ? AND user_id = ?",
-            (probe_id, probe_user_id),
-        )
-        conn.commit()
-    payload = {"ok": True, "detail": "insert/delete probe succeeded"}
-except Exception as exc:
-    payload = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
-
-print(json.dumps(payload, ensure_ascii=False))
-'''
 
 
 _TEST_DIARY_CODE = r'''
@@ -1928,8 +1826,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser(
+    status_parser = subparsers.add_parser(
         "status", help="Inspect git, container runtime, and DB health"
+    )
+    status_parser.add_argument(
+        "--db-path",
+        default=None,
+        help="Optional local SQLite path for strictly read-only status inspection",
     )
 
     logs_parser = subparsers.add_parser("logs", help="Show filtered hermes-bot logs")
@@ -1999,7 +1902,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cli = HealBiteCLI()
     if args.command == "status":
-        print(cli.cmd_status())
+        print(cli.cmd_status(db_path=args.db_path))
         return 0
     if args.command == "logs":
         print(cli.cmd_logs(args.last))

@@ -110,6 +110,13 @@ def test_build_parser_parses_logs_command():
     assert args.last == 50
 
 
+def test_build_parser_parses_status_db_path():
+    parser = healbite_cli.build_parser()
+    args = parser.parse_args(["status", "--db-path", "/tmp/healbite-copy.db"])
+    assert args.command == "status"
+    assert args.db_path == "/tmp/healbite-copy.db"
+
+
 def test_build_parser_parses_simulate_message_user_id():
     parser = healbite_cli.build_parser()
     args = parser.parse_args([
@@ -608,19 +615,25 @@ def test_render_status_report_never_prints_secret_values():
         "container_status": "running",
         "restart_count": 0,
         "runtime": {
-            "hermes_home": "/home/hermes/.hermes",
-            "config_path": "/home/hermes/.hermes/config.yaml",
-            "env_path": "/home/hermes/.hermes/.env",
             "model_provider": "deepseek",
             "model_default": "deepseek-chat",
             "vision_provider": "gemini",
             "vision_model": "gemini-2.5-flash",
             "vision_ready": True,
-            "db_path": "/home/hermes/healbite.db",
-            "nutrition_log_count": 42,
+            "provider_status_category": "ready api_key=super-secret-value",
+            "provider_calls": 0,
+            "provider_call_failures": 0,
+            "provider_auth_failures": 0,
+            "provider_unavailable_without_call": 0,
+            "provider_not_configured": 0,
+            "generation_calls": 0,
             "admin_total_unique": 2,
-            "allow_admin_from": ["968323641"],
-            "group_allow_admin_from": ["248875361"],
+            "weekly_feature_enabled": False,
+            "weekly_allowlist_count": 0,
+            "weekly_config_valid": True,
+            "shopping_feature_enabled": False,
+            "shopping_allowlist_count": 0,
+            "shopping_config_valid": True,
             "secret_presence": {
                 "GEMINI_API_KEY": True,
                 "DEEPSEEK_API_KEY": True,
@@ -631,14 +644,112 @@ def test_render_status_report_never_prints_secret_values():
                 "QDRANT_API_KEY": True,
             },
         },
-        "write_probe": {
-            "ok": True,
-            "detail": "api_key=super-secret-value",
+        "db": {
+            "db_access_mode": "read_only",
+            "query_only": True,
+            "integrity_check": "ok",
+            "foreign_key_check_rows": 0,
+            "nutrition_log_count": 42,
+            "households": 4,
+            "household_members": 4,
+            "profiles_table_present": True,
+            "weekly_schema": "canonical",
+            "weekly_tables": 4,
+            "weekly_business_rows": 0,
+            "shopping_schema": "canonical",
+            "shopping_tables": 3,
+            "shopping_business_rows": 0,
+            "water_tables_present": 2,
+            "weight_tables_present": 2,
+            "reminder_tables_present": 4,
+            "sqlite_total_changes": 0,
         },
     })
     assert "super-secret-value" not in report
     assert "GEMINI_API_KEY: yes" in report
     assert "[REDACTED]" in report
+    assert "968323641" not in report
+    assert "248875361" not in report
+    assert "/home/hermes/healbite.db" not in report
+    assert "write_probe" not in report
+
+
+
+def test_cmd_status_uses_local_read_only_snapshot_when_db_path_is_provided(monkeypatch, tmp_path):
+    class FakeRunner:
+        def run(self, args, *, cwd=None, input_text=None, check=True):
+            if args[:3] == ["git", "status", "--short"]:
+                return healbite_cli.CommandResult("", "", 0)
+            if args[:3] == ["git", "log", "--oneline"]:
+                return healbite_cli.CommandResult("abc123 local-test\n", "", 0)
+            raise AssertionError(f"unexpected host call: {args}")
+
+    cli = healbite_cli.HealBiteCLI(repo_root=Path("."), runner=FakeRunner())
+    monkeypatch.setattr(
+        cli,
+        "_docker_exec_python",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("docker should not run")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_container_state",
+        lambda: (_ for _ in ()).throw(AssertionError("container state should not be queried")),
+    )
+    monkeypatch.setattr(
+        healbite_cli,
+        "collect_status_snapshot",
+        lambda db_path: {
+            "runtime": {
+                "model_provider": "deepseek",
+                "model_default": "deepseek-chat",
+                "vision_provider": "gemini",
+                "vision_model": "gemini-2.5-flash",
+                "vision_ready": False,
+                "provider_status_category": "provider_not_configured",
+                "provider_calls": 0,
+                "provider_call_failures": 0,
+                "provider_auth_failures": 0,
+                "provider_unavailable_without_call": 0,
+                "provider_not_configured": 1,
+                "generation_calls": 0,
+                "admin_total_unique": 0,
+                "weekly_feature_enabled": False,
+                "weekly_allowlist_count": 0,
+                "weekly_config_valid": True,
+                "shopping_feature_enabled": False,
+                "shopping_allowlist_count": 0,
+                "shopping_config_valid": True,
+                "secret_presence": {},
+                "qdrant_presence": {},
+            },
+            "db": {
+                "db_access_mode": "read_only",
+                "query_only": True,
+                "integrity_check": "ok",
+                "foreign_key_check_rows": 0,
+                "nutrition_log_count": 1,
+                "households": 0,
+                "household_members": 0,
+                "profiles_table_present": False,
+                "weekly_schema": "not_initialized",
+                "weekly_tables": 0,
+                "weekly_business_rows": 0,
+                "shopping_schema": "dependency_missing",
+                "shopping_tables": 0,
+                "shopping_business_rows": 0,
+                "water_tables_present": 0,
+                "weight_tables_present": 0,
+                "reminder_tables_present": 0,
+                "sqlite_total_changes": 0,
+            },
+        },
+    )
+
+    report = cli.cmd_status(db_path=str(tmp_path / "copy.db"))
+
+    assert "status: local-db-mode" in report
+    assert "access_mode: read_only" in report
+    assert "provider_not_configured: 1" in report
 
 
 def test_simulate_profile_message_renders_local_profile(tmp_path):

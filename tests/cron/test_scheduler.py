@@ -1306,6 +1306,104 @@ class TestRunJobSessionPersistence:
         assert error is None
         assert final_response == "all good"
 
+    def test_run_job_logs_contained_agent_failure_without_traceback(self, caplog, tmp_path):
+        job = {
+            "id": "contained-failure-job",
+            "name": "contained failure",
+            "prompt": "PROMPT_SENTINEL_424242 raw prompt",
+        }
+        fake_db = MagicMock()
+        agent_result = {
+            "final_response": "PROVIDER_RESPONSE_SENTINEL_555",
+            "failed": True,
+            "completed": False,
+            "error": "TOKEN_SENTINEL_999 TELEGRAM_SENTINEL_123456789",
+        }
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls, \
+             patch("cron.scheduler.logger.exception") as exception_mock:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = agent_result
+            mock_agent_cls.return_value = mock_agent
+
+            with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+                success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert error == "RuntimeError: TOKEN_SENTINEL_999 TELEGRAM_SENTINEL_123456789"
+        assert "(FAILED)" in output
+        exception_mock.assert_not_called()
+        records = [r for r in caplog.records if r.msg == "cron_job_execution_failed"]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is None
+        assert record.event == "cron_job_execution_failed"
+        assert record.failure_category == "local_agent_failure"
+        assert record.exception_type == "CronAgentExecutionFailure"
+        assert record.scheduler_continues is True
+        assert record.traceback_emitted is False
+        assert "Traceback" not in caplog.text
+        for sentinel in (
+            "PROMPT_SENTINEL_424242",
+            "PROVIDER_RESPONSE_SENTINEL_555",
+            "TOKEN_SENTINEL_999",
+            "TELEGRAM_SENTINEL_123456789",
+        ):
+            assert sentinel not in caplog.text
+        mock_agent.close.assert_called_once()
+
+    def test_run_job_unexpected_exception_retains_traceback(self, caplog, tmp_path):
+        job = {
+            "id": "unexpected-failure-job",
+            "name": "unexpected failure",
+            "prompt": "hello",
+        }
+        fake_db = MagicMock()
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.side_effect = ValueError("synthetic crash")
+            mock_agent_cls.return_value = mock_agent
+
+            with caplog.at_level(logging.ERROR, logger="cron.scheduler"):
+                success, output, final_response, error = run_job(job)
+
+        assert success is False
+        assert final_response == ""
+        assert error == "ValueError: synthetic crash"
+        assert "(FAILED)" in output
+        exception_records = [r for r in caplog.records if r.exc_info is not None]
+        assert exception_records, "expected traceback-bearing log record"
+        assert any("ValueError: synthetic crash" in r.message for r in exception_records)
+        assert all(getattr(r, "failure_category", None) is None for r in exception_records)
+        mock_agent.close.assert_called_once()
+
     def test_tick_marks_empty_response_as_error(self, tmp_path):
         """When run_job returns success=True but final_response is empty,
         tick() should mark the job as error so last_status != 'ok'.
@@ -1939,6 +2037,39 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+
+    def test_failed_job_does_not_stop_subsequent_job(self):
+        jobs = [
+            self._make_job(),
+            {
+                "id": "monitor-job-2",
+                "name": "monitor-2",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "456"},
+            },
+        ]
+
+        with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
+             patch(
+                 "cron.scheduler.run_job",
+                 side_effect=[
+                     (False, "# failed output", "", "RuntimeError: contained failure"),
+                     (True, "# success output", "ok", None),
+                 ],
+             ) as run_job_mock, \
+             patch("cron.scheduler.advance_next_run"), \
+             patch("cron.scheduler.save_job_output", side_effect=["/tmp/out1.md", "/tmp/out2.md"]), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+
+            result = tick(verbose=False)
+
+        assert result == 2
+        assert run_job_mock.call_count == 2
+        assert [call.args[0] for call in mark_mock.call_args_list] == ["monitor-job", "monitor-job-2"]
+        assert mark_mock.call_args_list[0].args[1] is False
+        assert mark_mock.call_args_list[1].args[1] is True
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \

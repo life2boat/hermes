@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
-from agent.auxiliary_client import LLMServiceUnavailableError, extract_content_or_reasoning, safe_call_llm
+from agent.auxiliary_client import (
+    ExternalRequestTelemetry,
+    LLMServiceUnavailableError,
+    WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
+    extract_content_or_reasoning,
+    safe_call_llm,
+)
 from gateway.healbite_feature_gates import (
     FeatureAvailabilityStatus,
     FeatureGateConfig,
@@ -59,6 +66,8 @@ from gateway.healbite_weekly_menus import (
 HouseholdStoreResourceFactory = Callable[[], RuntimeResource[HealBiteHouseholdStore]]
 WeeklyMenuStoreResourceFactory = Callable[[], RuntimeResource[HealBiteWeeklyMenuStore]]
 ProfileStoreFactory = Callable[[], HealBiteUserProfileStore]
+
+logger = logging.getLogger(__name__)
 
 _MAX_GENERATION_ENTRIES = 56
 _MAX_DIETARY_NOTES = 8
@@ -317,8 +326,11 @@ class AuxiliaryWeeklyMenuGenerator:
                 "content": json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
             },
         ]
+        telemetry = ExternalRequestTelemetry()
+        outcome = "provider_failure"
         try:
             response = self._call_llm_fn(
+                task="weekly_menu_generation",
                 provider=self._provider,
                 model=self._model,
                 base_url=self._base_url,
@@ -327,17 +339,34 @@ class AuxiliaryWeeklyMenuGenerator:
                 temperature=self._temperature,
                 timeout=self._timeout,
                 extra_body=self._extra_body,
+                call_policy=WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
+                request_telemetry=telemetry,
             )
+            content = extract_content_or_reasoning(response)
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                outcome = "validation_failure"
+                raise WeeklyMenuGeneratorValidationError("weekly menu generator returned malformed json") from exc
+            result = _parse_generation_response(parsed, request=request)
+            outcome = "success"
+            return result
         except LLMServiceUnavailableError as exc:
             raise WeeklyMenuGeneratorUnavailableError("weekly menu generator unavailable") from exc
+        except WeeklyMenuGeneratorValidationError:
+            raise
         except Exception as exc:
             raise WeeklyMenuGeneratorUnavailableError("weekly menu generator unavailable") from exc
-        content = extract_content_or_reasoning(response)
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise WeeklyMenuGeneratorValidationError("weekly menu generator returned malformed json") from exc
-        return _parse_generation_response(parsed, request=request)
+        finally:
+            logger.info(
+                "weekly_menu_provider_call_complete external_request_attempts=%s "
+                "external_request_budget=%s outcome=%s retry_performed=%s fallback_performed=%s",
+                telemetry.external_request_attempts,
+                telemetry.external_request_budget,
+                outcome,
+                bool(telemetry.retry_performed),
+                bool(telemetry.fallback_performed),
+            )
 
 
 def _parse_generation_response(

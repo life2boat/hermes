@@ -46,6 +46,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -161,6 +162,107 @@ def _retry_delay_seconds(attempt: int) -> float:
     return _AUX_RETRY_BASE_DELAY_SECONDS * (2 ** max(attempt - 1, 0))
 
 
+@dataclass(frozen=True, slots=True)
+class LLMCallPolicy:
+    max_external_requests: int | None = None
+    retry_transient: bool = True
+    retry_without_temperature: bool = True
+    retry_without_max_tokens: bool = True
+    refresh_model: bool = True
+    recover_credentials: bool = True
+    fallback_provider: bool = True
+    fallback_model: bool = True
+
+
+DEFAULT_LLM_CALL_POLICY = LLMCallPolicy()
+WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY = LLMCallPolicy(
+    max_external_requests=1,
+    retry_transient=False,
+    retry_without_temperature=False,
+    retry_without_max_tokens=False,
+    refresh_model=False,
+    recover_credentials=False,
+    fallback_provider=False,
+    fallback_model=False,
+)
+
+
+@dataclass(slots=True)
+class ExternalRequestTelemetry:
+    external_request_attempts: int = 0
+    external_request_budget: int | None = None
+    retry_performed: bool = False
+    fallback_performed: bool = False
+
+
+class ExternalProviderRequestBudgetExceeded(RuntimeError):
+    pass
+
+
+def _normalize_llm_call_policy(policy: LLMCallPolicy | None) -> LLMCallPolicy:
+    return DEFAULT_LLM_CALL_POLICY if policy is None else policy
+
+
+def _consume_external_request_budget(
+    *,
+    policy: LLMCallPolicy,
+    telemetry: ExternalRequestTelemetry | None,
+    attempts_so_far: int,
+) -> int:
+    budget = policy.max_external_requests
+    if telemetry is not None:
+        telemetry.external_request_budget = budget
+    if budget is not None and attempts_so_far >= int(budget):
+        raise ExternalProviderRequestBudgetExceeded("external provider request budget exceeded")
+    if telemetry is not None:
+        telemetry.external_request_attempts += 1
+    return attempts_so_far + 1
+
+
+def _llm_policy_allows_recovery(policy: LLMCallPolicy) -> bool:
+    return (
+        policy.retry_without_temperature
+        or policy.retry_without_max_tokens
+        or policy.refresh_model
+        or policy.recover_credentials
+        or policy.fallback_provider
+        or policy.fallback_model
+    )
+
+
+def _chat_completion_create_with_budget_sync(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    policy: LLMCallPolicy,
+    telemetry: ExternalRequestTelemetry | None,
+) -> Any:
+    if telemetry is None and policy.max_external_requests is not None:
+        telemetry = ExternalRequestTelemetry(external_request_budget=policy.max_external_requests)
+    attempts_so_far = 0 if telemetry is None else telemetry.external_request_attempts
+    _consume_external_request_budget(
+        policy=policy,
+        telemetry=telemetry,
+        attempts_so_far=attempts_so_far,
+    )
+    return client.chat.completions.create(**kwargs)
+
+
+def _raise_if_external_request_budget_exhausted(
+    *,
+    policy: LLMCallPolicy,
+    telemetry: ExternalRequestTelemetry | None,
+) -> None:
+    if policy.max_external_requests is None:
+        return
+    attempts_so_far = 0 if telemetry is None else telemetry.external_request_attempts
+    _consume_external_request_budget(
+        policy=policy,
+        telemetry=telemetry,
+        attempts_so_far=attempts_so_far,
+    )
+
+
 def _perform_llm_request_sync(
     create_fn,
     *,
@@ -168,9 +270,19 @@ def _perform_llm_request_sync(
     retry_context: str = "Auxiliary",
     validate_response: bool = True,
     on_retry_check=None,
+    call_policy: LLMCallPolicy | None = None,
+    request_telemetry: ExternalRequestTelemetry | None = None,
 ):
-    for attempt in range(1, _AUX_RETRY_MAX_ATTEMPTS + 1):
+    policy = _normalize_llm_call_policy(call_policy)
+    max_attempts = _AUX_RETRY_MAX_ATTEMPTS if policy.retry_transient else 1
+    attempts_so_far = 0
+    for attempt in range(1, max_attempts + 1):
         try:
+            attempts_so_far = _consume_external_request_budget(
+                policy=policy,
+                telemetry=request_telemetry,
+                attempts_so_far=attempts_so_far,
+            )
             response = create_fn()
             return _validate_llm_response(response, task) if validate_response else response
         except Exception as exc:
@@ -183,7 +295,7 @@ def _perform_llm_request_sync(
                     exc,
                 )
                 raise
-            if not _is_retryable_llm_error(exc) or attempt >= _AUX_RETRY_MAX_ATTEMPTS:
+            if not _is_retryable_llm_error(exc) or attempt >= max_attempts:
                 if _is_retryable_llm_error(exc):
                     logger.warning(
                         "%s %s: retries exhausted after %s attempts (%s: %s)",
@@ -194,6 +306,8 @@ def _perform_llm_request_sync(
                         exc,
                     )
                 raise
+            if request_telemetry is not None:
+                request_telemetry.retry_performed = True
             delay = _retry_delay_seconds(attempt)
             logger.warning(
                 "%s %s: transient %s on attempt %s/%s; retrying in %.2fs",
@@ -201,7 +315,7 @@ def _perform_llm_request_sync(
                 task or "call",
                 type(exc).__name__,
                 attempt,
-                _AUX_RETRY_MAX_ATTEMPTS,
+                max_attempts,
                 delay,
             )
             if on_retry_check and on_retry_check():
@@ -5317,6 +5431,8 @@ def call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    call_policy: LLMCallPolicy | None = None,
+    request_telemetry: ExternalRequestTelemetry | None = None,
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -5342,6 +5458,11 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    call_policy = _normalize_llm_call_policy(call_policy)
+    if request_telemetry is None and call_policy.max_external_requests is not None:
+        request_telemetry = ExternalRequestTelemetry()
+    if request_telemetry is not None:
+        request_telemetry.external_request_budget = call_policy.max_external_requests
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -5435,9 +5556,13 @@ def call_llm(
             lambda: client.chat.completions.create(**kwargs),
             task=task,
             retry_context="Auxiliary",
+            call_policy=call_policy,
+            request_telemetry=request_telemetry,
         )
     except Exception as first_err:
-        if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
+        if not _llm_policy_allows_recovery(call_policy):
+            raise
+        if call_policy.retry_without_temperature and "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("temperature", None)
             logger.info(
@@ -5446,7 +5571,9 @@ def call_llm(
             )
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**retry_kwargs), task)
+                    _chat_completion_create_with_budget_sync(
+                        client, retry_kwargs, policy=call_policy, telemetry=request_telemetry
+                    ), task)
             except Exception as retry_err:
                 retry_err_str = str(retry_err)
                 # If retry still fails, fall through to the max_tokens /
@@ -5474,7 +5601,7 @@ def call_llm(
             "1210" in err_str
             and "bigmodel" in str(getattr(client, "base_url", ""))
         )
-        if max_tokens is not None and (
+        if call_policy.retry_without_max_tokens and max_tokens is not None and (
             "max_tokens" in err_str
             or "unsupported_parameter" in err_str
             or _is_unsupported_parameter_error(first_err, "max_tokens")
@@ -5484,7 +5611,9 @@ def call_llm(
             kwargs.pop("max_completion_tokens", None)
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**kwargs), task)
+                    _chat_completion_create_with_budget_sync(
+                        client, kwargs, policy=call_policy, telemetry=request_telemetry
+                    ), task)
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
@@ -5502,7 +5631,7 @@ def call_llm(
             resolved_provider == "nous"
             or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
         )
-        if _is_model_not_found_error(first_err) and _heal_is_nous:
+        if call_policy.refresh_model and _is_model_not_found_error(first_err) and _heal_is_nous:
             healed_model = _refresh_nous_recommended_model(
                 vision=(task == "vision"), stale_model=kwargs.get("model"))
             if healed_model and healed_model != kwargs.get("model"):
@@ -5514,7 +5643,11 @@ def call_llm(
                 kwargs["model"] = healed_model
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _chat_completion_create_with_budget_sync(
+                            client, kwargs, policy=call_policy, telemetry=request_telemetry
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     first_err = retry_err
 
@@ -5526,6 +5659,7 @@ def call_llm(
         if (
             _is_payment_error(first_err)
             and client_is_nous
+            and call_policy.recover_credentials
             and _nous_portal_account_has_fresh_paid_access()
         ):
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
@@ -5547,7 +5681,11 @@ def call_llm(
                     kwargs["model"] = refreshed_model
                 try:
                     return _validate_llm_response(
-                        refreshed_client.chat.completions.create(**kwargs), task)
+                        _chat_completion_create_with_budget_sync(
+                            refreshed_client, kwargs, policy=call_policy, telemetry=request_telemetry
+                        ),
+                        task,
+                    )
                 except Exception as retry_err:
                     if not (
                         _is_auth_error(retry_err)
@@ -5558,7 +5696,7 @@ def call_llm(
                         raise
                     first_err = retry_err
 
-        if _is_auth_error(first_err) and client_is_nous:
+        if call_policy.recover_credentials and _is_auth_error(first_err) and client_is_nous:
             refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
                 cache_provider=resolved_provider or "nous",
                 model=final_model,
@@ -5575,10 +5713,15 @@ def call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    refreshed_client.chat.completions.create(**kwargs), task)
+                    _chat_completion_create_with_budget_sync(
+                        refreshed_client, kwargs, policy=call_policy, telemetry=request_telemetry
+                    ),
+                    task,
+                )
 
         # ── Auth refresh retry ───────────────────────────────────────
-        if (_is_auth_error(first_err)
+        if (call_policy.recover_credentials
+                and _is_auth_error(first_err)
                 and resolved_provider not in {"auto", "", None}
                 and not client_is_nous):
             if _refresh_provider_credentials(resolved_provider):
@@ -5586,6 +5729,7 @@ def call_llm(
                     "Auxiliary %s: refreshed %s credentials after auth error, retrying",
                     task or "call", resolved_provider,
                 )
+                _raise_if_external_request_budget_exhausted(policy=call_policy, telemetry=request_telemetry)
                 return _retry_same_provider_sync(
                     task=task,
                     resolved_provider=resolved_provider,
@@ -5610,7 +5754,7 @@ def call_llm(
         # between this call and recovery (which leaves current()=None and makes
         # _select_unlocked() return the NEXT key by mistake).
         _client_api_key = str(getattr(client, "api_key", "") or "")
-        if pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
+        if call_policy.recover_credentials and pool_provider and (_is_auth_error(first_err) or _is_payment_error(first_err) or _is_rate_limit_error(first_err)):
             # The primary request path already consumed the retry budget for
             # transient/rate-limit failures. Do not hit the same exhausted
             # credential again here; rotate the pool based on the last error.
@@ -5621,6 +5765,7 @@ def call_llm(
                     task or "call", pool_provider, type(recovery_err).__name__,
                 )
                 try:
+                    _raise_if_external_request_budget_exhausted(policy=call_policy, telemetry=request_telemetry)
                     return _retry_same_provider_sync(
                         task=task,
                         resolved_provider=resolved_provider,
@@ -5682,7 +5827,7 @@ def call_llm(
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if should_fallback and (is_auto or is_capacity_error):
+        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 # Resolve the actual provider label (resolved_provider may be
@@ -5729,6 +5874,8 @@ def call_llm(
                     )
 
             if fb_client is not None:
+                if request_telemetry is not None:
+                    request_telemetry.fallback_performed = True
                 fb_kwargs = _build_call_kwargs(
                     fb_label, fb_model, messages,
                     temperature=temperature, max_tokens=max_tokens,
@@ -5736,7 +5883,11 @@ def call_llm(
                     extra_body=effective_extra_body,
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
                 return _validate_llm_response(
-                    fb_client.chat.completions.create(**fb_kwargs), task)
+                    _chat_completion_create_with_budget_sync(
+                        fb_client, fb_kwargs, policy=call_policy, telemetry=request_telemetry
+                    ),
+                    task,
+                )
             # All fallback layers exhausted — emit a single user-visible
             # warning so the operator knows aux task is about to fail.
             # (#26882) The error itself is re-raised below.

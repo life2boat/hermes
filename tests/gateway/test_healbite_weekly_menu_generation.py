@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -428,3 +429,184 @@ def test_auxiliary_generator_wraps_provider_failures_and_validates_json():
         assert False, "expected provider error"
     except WeeklyMenuGeneratorUnavailableError:
         pass
+
+
+def _full_week_response(title: str = "?????? ????") -> WeeklyMenuGenerationResponse:
+    dates = ("2026-07-06", "2026-07-07", "2026-07-08", "2026-07-09", "2026-07-10", "2026-07-11", "2026-07-12")
+    slots = ("breakfast", "lunch", "dinner")
+    return WeeklyMenuGenerationResponse(
+        entries=tuple(
+            WeeklyMenuGeneratedEntry(
+                local_date=local_date,
+                meal_slot=meal_slot,
+                position=1,
+                title=f"{title} {local_date} {meal_slot}",
+                description="????????",
+            )
+            for local_date in dates
+            for meal_slot in slots
+        )
+    )
+
+
+def test_valid_full_week_generation_creates_one_hidden_draft_with_21_entries(tmp_path):
+    db_path = tmp_path / "generation.db"
+    weekly_store, context = _seed_generation_runtime(db_path)
+    generator = _StaticGenerator(_full_week_response())
+    service = _service(db_path, actor_ids=frozenset({context.actor_user_id}), generator=generator)
+
+    result = service.generate_draft_for_week(context.actor_user_id, "2026-07-06", idempotency_key="gen-full")
+
+    assert result.success is True
+    assert generator.calls == 1
+    assert result.revision_view is not None
+    assert result.revision_view.revision.status.value == "draft"
+    assert len(result.revision_view.entries) == 21
+    revisions = weekly_store.list_weekly_menu_revisions(context, result.revision_view.series.id)
+    assert sum(1 for revision in revisions if revision.status.value == "published") == 0
+    assert _table_count(db_path, "household_weekly_menu_entries") == 21
+
+
+def test_auxiliary_weekly_generator_uses_strict_single_request_policy(caplog):
+    from types import SimpleNamespace
+
+    from agent.auxiliary_client import WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY
+
+    calls = []
+
+    def _fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["task"] == "weekly_menu_generation"
+        assert kwargs["call_policy"] is WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY
+        telemetry = kwargs["request_telemetry"]
+        telemetry.external_request_budget = kwargs["call_policy"].max_external_requests
+        telemetry.external_request_attempts += 1
+        payload = {
+            "entries": [
+                {"local_date": "2026-07-06", "meal_slot": "breakfast", "position": 1, "title": "????"}
+            ]
+        }
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))])
+
+    request = WeeklyMenuGenerationRequest(
+        week_start="2026-07-06",
+        dates=("2026-07-06",),
+        allowed_meal_slots=("breakfast",),
+        locale="ru-RU",
+        member_count=1,
+        members=(WeeklyMenuMemberGenerationSnapshot(age_band=None),),
+        household_dietary_notes=(),
+        max_entries=1,
+    )
+    generator = AuxiliaryWeeklyMenuGenerator(call_llm_fn=_fake_call_llm)
+
+    with caplog.at_level("INFO", logger="gateway.healbite_weekly_menu_generation"):
+        response = generator.generate(request)
+
+    assert len(calls) == 1
+    assert len(response.entries) == 1
+    assert "weekly_menu_provider_call_complete" in caplog.text
+    assert "external_request_attempts=1" in caplog.text
+    assert "external_request_budget=1" in caplog.text
+    assert "retry_performed=False" in caplog.text
+    assert "fallback_performed=False" in caplog.text
+    assert "101010101" not in caplog.text
+    assert "synthetic-api-key" not in caplog.text
+    assert "gen-secret-key" not in caplog.text
+    assert "????" not in caplog.text
+
+
+class _DBFailureGenerator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request):
+        self.calls += 1
+        return _full_week_response("DB failure")
+
+
+def test_successful_provider_then_db_conflict_does_not_call_provider_again(tmp_path):
+    db_path = tmp_path / "generation.db"
+    weekly_store, context = _seed_generation_runtime(db_path)
+    series = weekly_store.create_or_get_weekly_menu_series(context, context.household_id, "2026-07-06")
+    generator = _DBFailureGenerator()
+    service = _service(db_path, actor_ids=frozenset({context.actor_user_id}), generator=generator)
+
+    result = service.generate_draft_for_week(
+        context.actor_user_id,
+        "2026-07-06",
+        expected_series_version=series.version + 100,
+        idempotency_key="gen-conflict",
+    )
+
+    assert result.status is WeeklyMenuGenerationStatus.VERSION_CONFLICT
+    assert generator.calls == 0
+    assert _table_count(db_path, "household_weekly_menu_entries") == 0
+
+
+def test_generator_validation_failure_after_one_provider_call_leaves_zero_rows(tmp_path):
+    db_path = tmp_path / "generation.db"
+    _, context = _seed_generation_runtime(db_path)
+    class _CountingInvalidGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, request):
+            self.calls += 1
+            raise WeeklyMenuGeneratorValidationError("synthetic invalid")
+
+    generator = _CountingInvalidGenerator()
+    service = _service(db_path, actor_ids=frozenset({context.actor_user_id}), generator=generator)
+
+    result = service.generate_draft_for_week(context.actor_user_id, "2026-07-06", idempotency_key="gen-invalid")
+
+    assert result.status is WeeklyMenuGenerationStatus.GENERATOR_VALIDATION_FAILED
+    assert generator.calls == 1
+    assert _table_count(db_path, "household_weekly_menus") == 0
+    assert _table_count(db_path, "household_weekly_menu_entries") == 0
+
+
+class _FailingWeeklyStoreResource:
+    cleanup_error = None
+
+    def __enter__(self):
+        raise sqlite3.OperationalError("synthetic storage failure")
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _SecondWeeklyStoreFactoryFails:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self.calls = 0
+
+    def __call__(self):
+        from gateway.healbite_runtime_resources import borrowed_runtime_resource
+
+        self.calls += 1
+        if self.calls == 1:
+            return borrowed_runtime_resource(HealBiteWeeklyMenuStore(db_path=self.db_path))
+        return _FailingWeeklyStoreResource()
+
+
+def test_provider_success_then_db_write_failure_does_not_regenerate_or_persist(tmp_path):
+    db_path = tmp_path / "generation.db"
+    _, context = _seed_generation_runtime(db_path)
+    generator = _StaticGenerator(_full_week_response("DB fail"))
+    weekly_factory = _SecondWeeklyStoreFactoryFails(db_path)
+    service = HealBiteWeeklyMenuGenerationService(
+        generator=generator,
+        member_snapshot_provider=CanonicalWeeklyMenuMemberSnapshotProvider(db_path=db_path),
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({context.actor_user_id}), configuration_valid=True),
+        db_path=db_path,
+        weekly_menu_store_factory=weekly_factory,
+    )
+
+    result = service.generate_draft_for_week(context.actor_user_id, "2026-07-06", idempotency_key="gen-db-fail")
+
+    assert result.status is WeeklyMenuGenerationStatus.STORAGE_FAILURE
+    assert generator.calls == 1
+    assert weekly_factory.calls == 2
+    assert _table_count(db_path, "household_weekly_menus") == 0
+    assert _table_count(db_path, "household_weekly_menu_entries") == 0

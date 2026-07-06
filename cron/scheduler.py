@@ -58,6 +58,22 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
+class CronAgentExecutionFailure(RuntimeError):
+    """Contained cron-agent execution failure raised at the agent boundary.
+
+    This is reserved for agent runs that completed in-process but reported an
+    unsuccessful result payload (for example ``failed=True`` or
+    ``completed=False``). ``run_job`` catches this type separately so the
+    scheduler keeps the existing failed-job contract without emitting a Python
+    traceback. Unexpected exceptions still fall through to the generic
+    ``logger.exception`` path.
+    """
+
+    def __init__(self, error_message: str, *, failure_category: str = "local_agent_failure"):
+        super().__init__(error_message)
+        self.failure_category = failure_category
+
+
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     """Toolsets a cron-spawned agent must never receive.
 
@@ -1489,6 +1505,24 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
 
+    def _build_failed_output(error_msg: str) -> str:
+        return f"""# Cron Job: {job_name} (FAILED)
+
+**Job ID:** {job_id}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+
+## Prompt
+
+{prompt}
+
+## Error
+
+```
+{error_msg}
+```
+"""
+
     agent = None
 
     # Mark this as a cron session so the approval system can apply cron_mode.
@@ -1863,7 +1897,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 or (result.get("final_response") or "").strip()
                 or "agent reported failure"
             )
-            raise RuntimeError(_err_text)
+            raise CronAgentExecutionFailure(_err_text)
 
         final_response = result.get("final_response", "") or ""
         # Strip leaked placeholder text that upstream may inject on empty completions.
@@ -1891,27 +1925,25 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         logger.info("Job '%s' completed successfully", job_name)
         return True, output, final_response, None
         
+    except CronAgentExecutionFailure as e:
+        # Preserve the legacy error string contract for callers / persisted job
+        # state while keeping the structured log traceback-free.
+        error_msg = f"RuntimeError: {str(e)}"
+        logger.warning(
+            "cron_job_execution_failed",
+            extra={
+                "event": "cron_job_execution_failed",
+                "failure_category": e.failure_category,
+                "exception_type": type(e).__name__,
+                "scheduler_continues": True,
+                "traceback_emitted": False,
+            },
+        )
+        return False, _build_failed_output(error_msg), "", error_msg
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
-        
-        output = f"""# Cron Job: {job_name} (FAILED)
-
-**Job ID:** {job_id}
-**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
-**Schedule:** {job.get('schedule_display', 'N/A')}
-
-## Prompt
-
-{prompt}
-
-## Error
-
-```
-{error_msg}
-```
-"""
-        return False, output, "", error_msg
+        return False, _build_failed_output(error_msg), "", error_msg
 
     finally:
         # Restore TERMINAL_CWD to whatever it was before this job ran.  We

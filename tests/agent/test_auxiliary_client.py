@@ -3650,6 +3650,40 @@ class TestOpenRouterExplicitApiKey:
             )
 
 
+class TestGeminiRuntimeApiKeyProvider:
+    def test_resolve_provider_client_returns_async_native_client_with_callable_key_provider(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A")
+        with patch("agent.auxiliary_client._get_aux_model_for_provider", return_value="gemini-2.5-flash"):
+            client, model = resolve_provider_client("gemini", async_mode=True)
+        sync = getattr(client, "_sync", None)
+        assert type(client).__name__ == "AsyncGeminiNativeClient"
+        assert type(sync).__name__ == "GeminiNativeClient"
+        assert callable(getattr(client, "api_key", None))
+        assert callable(getattr(sync, "api_key", None))
+        assert model == "gemini-2.5-flash"
+
+    def test_resolve_provider_client_explicit_api_key_uses_callable_provider(self):
+        with patch("agent.auxiliary_client._get_aux_model_for_provider", return_value="gemini-2.5-flash"):
+            client, model = resolve_provider_client(
+                "gemini",
+                explicit_api_key="TEST_GEMINI_KEY_DO_NOT_LOG_7f93A",
+                async_mode=True,
+            )
+        sync = getattr(client, "_sync", None)
+        assert callable(getattr(sync, "api_key", None))
+        assert sync.api_key() == "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"
+
+    def test_resolve_vision_provider_client_returns_callable_key_provider(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A")
+        with patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("gemini", "gemini-2.5-flash", None, None, None)):
+            provider, client, model = resolve_vision_provider_client(provider="gemini", async_mode=True)
+        sync = getattr(client, "_sync", None)
+        assert provider == "gemini"
+        assert model == "gemini-2.5-flash"
+        assert type(client).__name__ == "AsyncGeminiNativeClient"
+        assert callable(getattr(sync, "api_key", None))
+
+
 class TestAnthropicExplicitApiKey:
     """Test that explicit_api_key is correctly propagated to _try_anthropic().
 

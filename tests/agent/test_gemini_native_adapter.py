@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -196,6 +198,230 @@ def test_native_client_uses_x_goog_api_key_and_native_models_endpoint(monkeypatc
     assert recorded["headers"]["x-goog-api-key"] == "AIza-test"
     assert "Authorization" not in recorded["headers"]
     assert response.choices[0].message.content == "hello"
+
+
+def test_native_client_fixed_string_key_reproduces_stale_capture(monkeypatch):
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    seen_keys = []
+    key_source = {"value": "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"}
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            seen_keys.append(headers["x-goog-api-key"])
+            return DummyResponse(
+                payload={
+                    "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+                }
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=key_source["value"])
+    client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}])
+    key_source["value"] = "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"
+    client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "two"}])
+
+    assert seen_keys == ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"]
+
+
+def test_native_client_runtime_key_provider_refreshes_per_request_without_rebuild(monkeypatch):
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    seen_keys = []
+    call_count = 0
+    key_source = {"value": "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"}
+
+    def provider():
+        nonlocal call_count
+        call_count += 1
+        return key_source["value"]
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            seen_keys.append(headers["x-goog-api-key"])
+            return DummyResponse(
+                payload={
+                    "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+                }
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=provider)
+    client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}])
+    key_source["value"] = "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"
+    client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "two"}])
+
+    assert seen_keys == ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"]
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_async_native_client_runtime_key_provider_refreshes_per_request(monkeypatch):
+    from agent.gemini_native_adapter import AsyncGeminiNativeClient, GeminiNativeClient
+
+    seen_keys = []
+    call_count = 0
+    key_source = {"value": "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"}
+
+    def provider():
+        nonlocal call_count
+        call_count += 1
+        return key_source["value"]
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            seen_keys.append(headers["x-goog-api-key"])
+            return DummyResponse(
+                payload={
+                    "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+                }
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    async_client = AsyncGeminiNativeClient(GeminiNativeClient(api_key=provider))
+    await async_client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}])
+    key_source["value"] = "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"
+    await async_client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "two"}])
+
+    assert seen_keys == ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"]
+    assert call_count == 2
+
+
+def test_native_stream_uses_request_time_header_auth(monkeypatch):
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    seen_keys = []
+    call_count = 0
+    key_source = {"value": "TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"}
+
+    def provider():
+        nonlocal call_count
+        call_count += 1
+        return key_source["value"]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {}
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def iter_text(self):
+            return iter(['data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n'])
+
+    class DummyHTTP:
+        def stream(self, method, url, json=None, headers=None, timeout=None):
+            seen_keys.append(headers["x-goog-api-key"])
+            return DummyStreamResponse()
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=provider)
+    chunks = list(client.chat.completions.create(stream=True, model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}]))
+    assert chunks
+    assert seen_keys == ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A"]
+    assert call_count == 1
+
+
+def test_native_client_empty_runtime_key_fails_before_network(monkeypatch):
+    from agent.gemini_native_adapter import GeminiCredentialError, GeminiNativeClient
+
+    called = False
+
+    class DummyHTTP:
+        def post(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("network should not be called")
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=lambda: "   ")
+    with pytest.raises(GeminiCredentialError) as excinfo:
+        client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}])
+    assert called is False
+    assert "empty API key" in str(excinfo.value)
+
+
+def test_native_client_key_provider_exception_is_redacted_and_local(monkeypatch):
+    from agent.gemini_native_adapter import GeminiCredentialError, GeminiNativeClient
+
+    sentinel = "TEST_GEMINI_KEY_DO_NOT_LOG_7f93SECRET"
+    called = False
+
+    class DummyHTTP:
+        def post(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("network should not be called")
+        def close(self):
+            return None
+
+    def provider():
+        raise ValueError(sentinel)
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=provider)
+    with pytest.raises(GeminiCredentialError) as excinfo:
+        client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": "one"}])
+    assert called is False
+    assert sentinel not in str(excinfo.value)
+    assert sentinel not in repr(client)
+
+
+def test_native_client_concurrent_requests_isolate_runtime_keys(monkeypatch):
+    from agent.gemini_native_adapter import GeminiNativeClient
+
+    seen = []
+    lock = threading.Lock()
+    key_by_thread = {}
+    call_count = 0
+
+    def provider():
+        nonlocal call_count
+        with lock:
+            call_count += 1
+        return key_by_thread[threading.get_ident()]
+
+    class DummyHTTP:
+        def post(self, url, json=None, headers=None, timeout=None):
+            with lock:
+                seen.append(headers["x-goog-api-key"])
+            return DummyResponse(
+                payload={
+                    "candidates": [{"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+                }
+            )
+        def close(self):
+            return None
+
+    monkeypatch.setattr("agent.gemini_native_adapter.httpx.Client", lambda *a, **k: DummyHTTP())
+    client = GeminiNativeClient(api_key=provider)
+
+    def run(key):
+        key_by_thread[threading.get_ident()] = key
+        return client.chat.completions.create(model="gemini-2.5-flash", messages=[{"role": "user", "content": key}])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(run, ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"]))
+
+    assert sorted(seen) == ["TEST_GEMINI_KEY_DO_NOT_LOG_7f93A", "TEST_GEMINI_KEY_DO_NOT_LOG_7f93B"]
+    assert call_count == 2
 
 
 def test_native_http_error_keeps_status_and_retry_after():

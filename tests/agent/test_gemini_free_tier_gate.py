@@ -108,6 +108,8 @@ class TestProbeGeminiTier:
             called_url = inst.post.call_args[0][0]
             assert "/openai/" not in called_url
             assert called_url.endswith(":generateContent")
+            assert "params" not in inst.post.call_args.kwargs
+            assert inst.post.call_args.kwargs["headers"]["x-goog-api-key"] == "fake"
 
 
 class TestIsFreeTierQuotaError:

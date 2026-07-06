@@ -1762,6 +1762,24 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
+def _build_runtime_api_key_provider(
+    provider_id: str,
+    *,
+    fixed_api_key: Optional[str] = None,
+):
+    fixed = str(fixed_api_key or "").strip()
+    if fixed:
+        return lambda: fixed
+
+    def _resolve() -> str:
+        from hermes_cli.auth import resolve_api_key_provider_credentials
+
+        creds = resolve_api_key_provider_credentials(provider_id)
+        return str(creds.get("api_key", "")).strip()
+
+    return _resolve
+
+
 def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
     """Try each API-key provider in PROVIDER_REGISTRY order.
 
@@ -1808,7 +1826,10 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
                 if is_native_gemini_base_url(base_url):
-                    return GeminiNativeClient(api_key=api_key, base_url=base_url), model
+                    return GeminiNativeClient(
+                        api_key=_build_runtime_api_key_provider("gemini"),
+                        base_url=base_url,
+                    ), model
             extra = {}
             if base_url_host_matches(base_url, "api.kimi.com"):
                 extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
@@ -1848,7 +1869,10 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
             if is_native_gemini_base_url(base_url):
-                return GeminiNativeClient(api_key=api_key, base_url=base_url), model
+                return GeminiNativeClient(
+                    api_key=_build_runtime_api_key_provider("gemini"),
+                    base_url=base_url,
+                ), model
         extra = {}
         if base_url_host_matches(base_url, "api.kimi.com"):
             extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
@@ -4202,7 +4226,10 @@ def resolve_provider_client(
             from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
             if is_native_gemini_base_url(base_url):
-                client = GeminiNativeClient(api_key=api_key, base_url=base_url)
+                client = GeminiNativeClient(
+                    api_key=_build_runtime_api_key_provider("gemini", fixed_api_key=explicit_api_key),
+                    base_url=base_url,
+                )
                 logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
                 return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                         else (client, final_model))

@@ -23,7 +23,7 @@ import logging
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 
@@ -86,9 +86,11 @@ def probe_gemini_tier(
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
                 url,
-                params={"key": key},
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": key,
+                },
             )
     except Exception as exc:
         logger.debug("probe_gemini_tier: network error: %s", exc)
@@ -140,6 +142,10 @@ _FREE_TIER_GUIDANCE = (
     "regenerate the key in a billing-enabled project: "
     "https://aistudio.google.com/apikey"
 )
+
+
+class GeminiCredentialError(RuntimeError):
+    """Local configuration/runtime credential failure before any network call."""
 
 
 class GeminiAPIError(Exception):
@@ -827,21 +833,24 @@ class GeminiNativeClient:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | Callable[[], str],
         base_url: Optional[str] = None,
         default_headers: Optional[Dict[str, str]] = None,
         timeout: Any = None,
         http_client: Optional[httpx.Client] = None,
         **_: Any,
     ) -> None:
-        if not (api_key or "").strip():
-            raise RuntimeError(
+        if callable(api_key):
+            self.api_key = api_key
+        elif (api_key or "").strip():
+            self.api_key = str(api_key).strip()
+        else:
+            raise GeminiCredentialError(
                 "Gemini native client requires an API key, but none was provided. "
                 "Set GOOGLE_API_KEY or GEMINI_API_KEY in your environment / ~/.hermes/.env "
                 "(get one at https://aistudio.google.com/app/apikey), or run `hermes setup` "
                 "to configure the Google provider."
             )
-        self.api_key = api_key
         normalized_base = (base_url or DEFAULT_GEMINI_BASE_URL).rstrip("/")
         if normalized_base.endswith("/openai"):
             normalized_base = normalized_base[: -len("/openai")]
@@ -866,11 +875,28 @@ class GeminiNativeClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def _headers(self) -> Dict[str, str]:
+    def _resolve_api_key(self) -> str:
+        try:
+            raw_key = self.api_key() if callable(self.api_key) else self.api_key
+        except Exception as exc:
+            raise GeminiCredentialError(
+                "Gemini native client could not resolve an API key at request time. "
+                "Ensure GEMINI_API_KEY / GOOGLE_API_KEY is available to the running process."
+            ) from exc
+        key = str(raw_key or "").strip()
+        if not key:
+            raise GeminiCredentialError(
+                "Gemini native client resolved an empty API key at request time. "
+                "Ensure GEMINI_API_KEY / GOOGLE_API_KEY is loaded before the request is sent."
+            )
+        return key
+
+    def _headers(self, *, api_key: Optional[str] = None) -> Dict[str, str]:
+        key = api_key if api_key is not None else self._resolve_api_key()
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "x-goog-api-key": self.api_key,
+            "x-goog-api-key": key,
             "User-Agent": "hermes-agent (gemini-native)",
         }
         headers.update(self._default_headers)
@@ -918,7 +944,8 @@ class GeminiNativeClient:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
         url = f"{self.base_url}/models/{model}:generateContent"
-        response = self._http.post(url, json=request, headers=self._headers(), timeout=timeout)
+        api_key = self._resolve_api_key()
+        response = self._http.post(url, json=request, headers=self._headers(api_key=api_key), timeout=timeout)
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:
@@ -934,7 +961,8 @@ class GeminiNativeClient:
 
     def _stream_completion(self, *, model: str, request: Dict[str, Any], timeout: Any = None) -> Iterator[_GeminiStreamChunk]:
         url = f"{self.base_url}/models/{model}:streamGenerateContent?alt=sse"
-        stream_headers = dict(self._headers())
+        api_key = self._resolve_api_key()
+        stream_headers = dict(self._headers(api_key=api_key))
         stream_headers["Accept"] = "text/event-stream"
 
         def _generator() -> Iterator[_GeminiStreamChunk]:

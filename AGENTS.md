@@ -14,6 +14,18 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 - Before a HealBite fix or runtime audit, run `./scripts/healbite status` so you have the current container, config, diary DB, and admin-policy snapshot.
 - See `RUNBOOK_CODING_LOOP.md` -> `Hook Bootstrap`; for a new checkout run `venv/bin/lefthook install`, verify with `venv/bin/lefthook run pre-commit --verbose`, and fall back to `bash scripts/agent_check.sh` if hooks are not installed yet.
 
+## Project State Source of Truth
+
+Before starting any task, read:
+
+docs/CURRENT_STATE.md
+
+Rules:
+- chat transcripts, PDFs and pasted reports are not the current source of truth;
+- confirmed state changes must update CURRENT_STATE.md in the same PR;
+- historical state belongs in docs/CURRENT_STATE_CHANGELOG.md;
+- never store secrets, credentials, private IDs or raw provider responses in these files.
+
 ## Режим автономной работы Codex
 
 Работай максимально самостоятельно и не запрашивай подтверждение перед обычными действиями разработки.

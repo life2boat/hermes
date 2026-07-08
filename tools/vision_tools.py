@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import (
     LLMServiceUnavailableError,
+    VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
     extract_content_or_reasoning,
     safe_async_call_llm,
 )
@@ -1077,6 +1078,7 @@ async def vision_analyze_tool(
             "temperature": vision_temperature,
             "max_tokens": 2000,
             "timeout": vision_timeout,
+            "call_policy": VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
         }
         if model:
             call_kwargs["model"] = model
@@ -1086,32 +1088,12 @@ async def vision_analyze_tool(
             provider_name,
             provider_model,
         )
-        try:
-            response = await async_call_llm(**call_kwargs)
-        except Exception as _api_err:
-            if (_is_image_size_error(_api_err)
-                    and len(image_data_url) > _RESIZE_TARGET_BYTES):
-                logger.info(
-                    "API rejected image (%.1f MB, likely too large); "
-                    "auto-resizing to ~%.0f MB and retrying...",
-                    len(image_data_url) / (1024 * 1024),
-                    _RESIZE_TARGET_BYTES / (1024 * 1024),
-                )
-                image_data_url = _resize_image_for_vision(
-                    temp_image_path, mime_type=detected_mime_type)
-                messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                response = await async_call_llm(**call_kwargs)
-            else:
-                raise
+        response = await async_call_llm(**call_kwargs)
         
-        # Extract the analysis — fall back to reasoning if content is empty
+        # Extract the analysis — fall back to reasoning if content is empty.
+        # Vision uses a strict one-photo/one-provider-request policy; empty
+        # responses flow into the existing safe parser/fallback path.
         analysis = extract_content_or_reasoning(response)
-
-        # Retry once on empty content (reasoning-only response)
-        if not analysis:
-            logger.warning("Vision LLM returned empty content, retrying once")
-            response = await async_call_llm(**call_kwargs)
-            analysis = extract_content_or_reasoning(response)
 
         analysis_length = len(analysis)
 

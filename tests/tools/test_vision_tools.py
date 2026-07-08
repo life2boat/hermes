@@ -427,6 +427,40 @@ class TestVisionConfig:
         assert mock_llm.await_args.kwargs["timeout"] == 120.0
 
 
+    @pytest.mark.asyncio
+    async def test_vision_uses_single_request_policy_and_does_not_retry_empty_content(self, tmp_path, monkeypatch):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        mock_response = MagicMock()
+        mock_llm = AsyncMock(return_value=mock_response)
+        monkeypatch.setitem(vision_analyze_tool.__globals__, "async_call_llm", mock_llm)
+        monkeypatch.setitem(vision_analyze_tool.__globals__, "extract_content_or_reasoning", lambda _response: "")
+        with patch("tools.vision_tools._image_to_base64_data_url", return_value="data:image/png;base64,abc"):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this", "test/model"))
+
+        assert result["success"] is True
+        mock_llm.assert_awaited_once()
+        policy = mock_llm.await_args.kwargs["call_policy"]
+        assert policy.max_external_requests == 1
+        assert policy.retry_transient is False
+        assert policy.fallback_provider is False
+        assert policy.fallback_model is False
+
+    @pytest.mark.asyncio
+    async def test_vision_provider_error_does_not_retry(self, tmp_path, monkeypatch):
+        img = tmp_path / "test.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+
+        mock_llm = AsyncMock(side_effect=RuntimeError("413 image too large"))
+        monkeypatch.setitem(vision_analyze_tool.__globals__, "async_call_llm", mock_llm)
+        with patch("tools.vision_tools._image_to_base64_data_url", return_value="data:image/png;base64,abc"):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this", "test/model"))
+
+        assert result["success"] is False
+        mock_llm.assert_awaited_once()
+
+
 class TestVisionSafetyGuards:
     @pytest.mark.asyncio
     async def test_local_non_image_file_rejected_before_llm_call(self, tmp_path):

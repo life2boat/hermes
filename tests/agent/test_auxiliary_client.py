@@ -29,6 +29,7 @@ from agent.auxiliary_client import (
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
+    VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
 )
 
 
@@ -3973,3 +3974,76 @@ class TestAuxiliaryMaxTokensParam:
         ):
             assert auxiliary_max_tokens_param(4096, model="") == {"max_tokens": 4096}
             assert auxiliary_max_tokens_param(4096, model=None) == {"max_tokens": 4096}
+
+
+class TestAsyncCallPolicy:
+    @pytest.mark.asyncio
+    async def test_async_vision_single_request_policy_blocks_transient_retry_and_fallback(self, monkeypatch):
+        calls = []
+
+        class ResponseError(RuntimeError):
+            status_code = 503
+
+        class FakeCompletions:
+            async def create(self, **kwargs):
+                calls.append(kwargs)
+                raise ResponseError("synthetic transient")
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions()),
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
+
+        fallback_chain = MagicMock()
+        main_fallback = MagicMock()
+        payment_fallback = MagicMock()
+        monkeypatch.setitem(async_call_llm.__globals__, "_resolve_task_provider_model", lambda *args, **kwargs: (
+            "custom", "qwen2.5-vl-7b-instruct", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "synthetic", None
+        ))
+        monkeypatch.setitem(async_call_llm.__globals__, "resolve_vision_provider_client", lambda *args, **kwargs: (
+            "custom", fake_client, "qwen2.5-vl-7b-instruct"
+        ))
+        monkeypatch.setitem(async_call_llm.__globals__, "_try_configured_fallback_chain", fallback_chain)
+        monkeypatch.setitem(async_call_llm.__globals__, "_try_main_agent_model_fallback", main_fallback)
+        monkeypatch.setitem(async_call_llm.__globals__, "_try_payment_fallback", payment_fallback)
+
+        with pytest.raises(ResponseError):
+            await async_call_llm(
+                task="vision",
+                messages=[{"role": "user", "content": "describe"}],
+                call_policy=VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
+            )
+
+        assert len(calls) == 1
+        fallback_chain.assert_not_called()
+        main_fallback.assert_not_called()
+        payment_fallback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_non_vision_call_without_policy_still_works(self, monkeypatch):
+        calls = []
+
+        class FakeCompletions:
+            async def create(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+                )
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions()),
+            base_url="https://example.test/v1",
+        )
+
+        monkeypatch.setitem(async_call_llm.__globals__, "_resolve_task_provider_model", lambda *args, **kwargs: (
+            "custom", "text-model", "https://example.test/v1", "synthetic", None
+        ))
+        monkeypatch.setitem(async_call_llm.__globals__, "_get_cached_client", lambda *args, **kwargs: (fake_client, "text-model"))
+
+        response = await async_call_llm(
+            task="compression",
+            messages=[{"role": "user", "content": "summarize"}],
+        )
+
+        assert response.choices[0].message.content == "ok"
+        assert len(calls) == 1

@@ -4,7 +4,7 @@ version: 1.1.0
 updated_at: 2026-07-08
 status: active
 source_of_truth: true
-last_confirmed_remote_main_sha: 20f1469dc395130fbde30b9736750e247e9b8306
+state_verified_against_main_sha: 20f1469dc395130fbde30b9736750e247e9b8306
 production_sha: unknown
 ---
 
@@ -16,7 +16,7 @@ Git.
 ## 1. Summary
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
-- Last confirmed project main SHA:
+- Project state in this document was verified against HealBite main SHA:
   `20f1469dc395130fbde30b9736750e247e9b8306`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.

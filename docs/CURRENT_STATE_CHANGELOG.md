@@ -14,6 +14,7 @@ Changed:
 - old V2 base mismatch moved to history;
 - Gemini next step changed to Google Console audit;
 - Qwen explicitly marked not deployed.
+- clarified that the recorded SHA is the state-verification base, not a self-referential future main HEAD.
 
 Safety:
 - production unchanged;

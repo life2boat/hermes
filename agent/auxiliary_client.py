@@ -185,6 +185,16 @@ WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY = LLMCallPolicy(
     fallback_provider=False,
     fallback_model=False,
 )
+VISION_SINGLE_REQUEST_LLM_CALL_POLICY = LLMCallPolicy(
+    max_external_requests=1,
+    retry_transient=False,
+    retry_without_temperature=False,
+    retry_without_max_tokens=False,
+    refresh_model=False,
+    recover_credentials=False,
+    fallback_provider=False,
+    fallback_model=False,
+)
 
 
 @dataclass(slots=True)
@@ -329,9 +339,19 @@ async def _perform_llm_request_async(
     task: Optional[str] = None,
     retry_context: str = "Auxiliary",
     validate_response: bool = True,
+    call_policy: LLMCallPolicy | None = None,
+    request_telemetry: ExternalRequestTelemetry | None = None,
 ):
-    for attempt in range(1, _AUX_RETRY_MAX_ATTEMPTS + 1):
+    policy = _normalize_llm_call_policy(call_policy)
+    max_attempts = _AUX_RETRY_MAX_ATTEMPTS if policy.retry_transient else 1
+    attempts_so_far = 0 if request_telemetry is None else request_telemetry.external_request_attempts
+    for attempt in range(1, max_attempts + 1):
         try:
+            attempts_so_far = _consume_external_request_budget(
+                policy=policy,
+                telemetry=request_telemetry,
+                attempts_so_far=attempts_so_far,
+            )
             response = await create_fn()
             return _validate_llm_response(response, task) if validate_response else response
         except Exception as exc:
@@ -344,7 +364,7 @@ async def _perform_llm_request_async(
                     exc,
                 )
                 raise
-            if not _is_retryable_llm_error(exc) or attempt >= _AUX_RETRY_MAX_ATTEMPTS:
+            if not _is_retryable_llm_error(exc) or attempt >= max_attempts:
                 if _is_retryable_llm_error(exc):
                     logger.warning(
                         "%s %s: retries exhausted after %s attempts (%s: %s)",
@@ -362,7 +382,7 @@ async def _perform_llm_request_async(
                 task or "call",
                 type(exc).__name__,
                 attempt,
-                _AUX_RETRY_MAX_ATTEMPTS,
+                max_attempts,
                 delay,
             )
             await asyncio.sleep(delay)
@@ -3961,6 +3981,12 @@ def resolve_provider_client(
     if provider == "custom":
         if explicit_base_url:
             custom_base = _to_openai_base_url(explicit_base_url).strip()
+            if _is_missing_task_api_key(explicit_api_key):
+                logger.warning(
+                    "resolve_provider_client: task-scoped API key env is unset; "
+                    "not creating custom endpoint client"
+                )
+                return None, None
             custom_key = (
                 (explicit_api_key or "").strip()
                 or os.getenv("OPENAI_API_KEY", "").strip()
@@ -4200,6 +4226,12 @@ def resolve_provider_client(
         # or a custom_providers entry) so callers that pass an explicit
         # credential can authenticate against endpoints where no built-in
         # credential is registered for this provider alias.
+        if _is_missing_task_api_key(explicit_api_key):
+            logger.warning(
+                "resolve_provider_client: task-scoped API key env is unset; "
+                "not creating provider client"
+            )
+            return None, None
         if explicit_api_key:
             api_key = explicit_api_key.strip() or api_key
         if not api_key:
@@ -5065,6 +5097,11 @@ def _get_cached_client(
 _AUX_DIRECT_API_BASE_URLS: Dict[str, str] = {
     "openai": "https://api.openai.com/v1",
 }
+_MISSING_TASK_API_KEY = "__hermes_missing_task_api_key__"
+
+
+def _is_missing_task_api_key(value: Optional[str]) -> bool:
+    return value == _MISSING_TASK_API_KEY
 
 
 def _resolve_task_provider_model(
@@ -5090,6 +5127,7 @@ def _resolve_task_provider_model(
     cfg_model = None
     cfg_base_url = None
     cfg_api_key = None
+    cfg_api_key_env = None
     cfg_api_mode = None
 
     if task:
@@ -5098,6 +5136,11 @@ def _resolve_task_provider_model(
         cfg_model = str(task_config.get("model", "")).strip() or None
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
+        cfg_api_key_env = str(
+            task_config.get("api_key_env") or task_config.get("key_env") or ""
+        ).strip() or None
+        if not cfg_api_key and cfg_api_key_env:
+            cfg_api_key = os.getenv(cfg_api_key_env, "").strip() or _MISSING_TASK_API_KEY
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
     resolved_model = model or cfg_model
@@ -6007,11 +6050,18 @@ async def async_call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    call_policy: LLMCallPolicy | None = None,
+    request_telemetry: ExternalRequestTelemetry | None = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    call_policy = _normalize_llm_call_policy(call_policy)
+    if request_telemetry is None and call_policy.max_external_requests is not None:
+        request_telemetry = ExternalRequestTelemetry()
+    if request_telemetry is not None:
+        request_telemetry.external_request_budget = call_policy.max_external_requests
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -6088,8 +6138,12 @@ async def async_call_llm(
             lambda: client.chat.completions.create(**kwargs),
             task=task,
             retry_context="Auxiliary (async)",
+            call_policy=call_policy,
+            request_telemetry=request_telemetry,
         )
     except Exception as first_err:
+        if not _llm_policy_allows_recovery(call_policy):
+            raise
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("temperature", None)

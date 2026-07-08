@@ -275,8 +275,10 @@ class TestDefaultConfigShape:
         vision = DEFAULT_CONFIG["auxiliary"]["vision"]
         assert "provider" in vision
         assert "model" in vision
+        assert "api_key_env" in vision
         assert vision["provider"] == "auto"
         assert vision["model"] == ""
+        assert vision["api_key_env"] == ""
 
     def test_web_extract_task_structure(self):
         from hermes_cli.config import DEFAULT_CONFIG

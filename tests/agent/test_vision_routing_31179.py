@@ -61,11 +61,16 @@ def _write_config(home: str, text: str) -> None:
 
 
 def _fresh_modules():
-    """Drop cached hermes modules so each test reloads against current env."""
+    """Drop cached config/routing modules so tests reload against current env.
+
+    Keep ``tools.vision_tools`` loaded. Other test modules import functions
+    from it at collection time and patch via the module name; deleting it from
+    ``sys.modules`` creates two module instances in one pytest process and
+    makes those patches miss the already-imported function globals.
+    """
     for mod in list(sys.modules.keys()):
         if mod.startswith(("agent.auxiliary_client", "agent.image_routing",
-                           "tools.vision_tools", "tools.browser_tool",
-                           "hermes_cli.config")):
+                           "tools.browser_tool", "hermes_cli.config")):
             del sys.modules[mod]
 
 
@@ -133,6 +138,58 @@ auxiliary:
         host = urlparse(str(getattr(client, "base_url", ""))).hostname or ""
         assert host == "api.openai.com", f"expected api.openai.com host, got {host!r}"
         assert model == "gpt-4o-mini"
+
+
+class TestQwenVisionTaskScopedConfig:
+    """Qwen/DashScope vision uses task-scoped OpenAI-compatible routing."""
+
+    def test_qwen_vision_uses_task_scoped_key_and_base_url(self, isolated_home, monkeypatch):
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    provider: openai
+    model: qwen2.5-vl-7b-instruct
+    base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    api_key_env: QWEN_API_KEY
+""")
+        monkeypatch.setenv("QWEN_API_KEY", "TEST_QWEN_KEY_DO_NOT_LOG_V2")
+        monkeypatch.setenv("OPENAI_API_KEY", "GLOBAL_OPENAI_KEY_SHOULD_NOT_BE_USED")
+        _fresh_modules()
+
+        from agent.auxiliary_client import resolve_vision_provider_client
+        from urllib.parse import urlparse
+
+        provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "custom"
+        assert client is not None
+        assert model == "qwen2.5-vl-7b-instruct"
+        assert urlparse(str(getattr(client, "base_url", ""))).hostname == "dashscope-intl.aliyuncs.com"
+        assert getattr(client, "api_key", None) == "TEST_QWEN_KEY_DO_NOT_LOG_V2"
+
+    def test_qwen_vision_missing_task_key_fails_before_client_creation(self, isolated_home, monkeypatch):
+        _write_config(isolated_home, """
+auxiliary:
+  vision:
+    provider: openai
+    model: qwen2.5-vl-7b-instruct
+    base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    api_key_env: QWEN_API_KEY
+""")
+        monkeypatch.delenv("QWEN_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _fresh_modules()
+
+        from agent.auxiliary_client import resolve_vision_provider_client
+        from unittest.mock import patch
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "custom"
+        assert client is None
+        assert model is None
+        mock_openai.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

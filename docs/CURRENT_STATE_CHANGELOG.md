@@ -1,5 +1,25 @@
 # CURRENT_STATE changelog
 
+## 1.2.0 — 2026-07-08
+
+Added:
+- current-main Qwen vision integration state;
+- source and integration implementation commit identifiers;
+- task-scoped `QWEN_API_KEY` routing status;
+- local validation results for focused, related and agent-check suites.
+
+Changed:
+- V2-R1 status moved from in-progress to implemented and locally validated;
+- CURRENT_STATE verification base moved to project main `60f84093c0fe82d29814c2ac8e3c0fb6dc847e7b`;
+- next allowed V2-R1 sequence is expressed without temporary Draft PR state so it remains true after merge.
+
+Safety:
+- Qwen remains not deployed and not active in production;
+- production build/deploy/restart not performed;
+- provider requests and Telegram smoke not performed;
+- DB/Qdrant unchanged;
+- no secrets, private IDs or raw provider responses stored.
+
 ## 1.1.0 — 2026-07-08
 
 Added:

@@ -29,9 +29,8 @@ Git.
 - Production git SHA: `unknown`.
 - Production image digest: observed by Docker inspect in earlier rollout work,
   but not mapped to a source SHA by this document.
-- Qwen vision integration: implemented in branch
-  `healbite-s71v2r1-qwen-current-main`, but not deployed and not active in
-  production.
+- Qwen vision implementation is present in this repository state and validated,
+  but not deployed or active in production.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any rollout decision.
@@ -114,7 +113,7 @@ Known state: six Telegram parse-mode failures match the existing baseline. They 
 
 Status:
 
-`STATUS=IMPLEMENTED_LOCAL_VALIDATED_DRAFT_PR_PENDING`
+`STATUS=IMPLEMENTED_LOCAL_VALIDATED_NOT_DEPLOYED`
 
 Worktrees:
 
@@ -190,12 +189,9 @@ Qwen vision support is implemented and locally validated in the integration bran
 
 For V2-R1:
 
-1. Commit this state update.
-2. Push branch `healbite-s71v2r1-qwen-current-main`.
-3. Open a Draft PR.
-4. Wait for CI and review.
-5. Build, deploy and runtime activation only in a separate approved stage.
-6. After successful deploy, run exactly one controlled Telegram smoke.
+1. If the integration PR is not yet merged, complete CI, review, and merge gate.
+2. Build, deploy and runtime activation only in a separate approved stage.
+3. After successful deploy, run exactly one controlled Telegram smoke.
 
 For Gemini:
 

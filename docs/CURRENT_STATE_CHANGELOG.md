@@ -11,7 +11,7 @@ Added:
 Changed:
 - V2-R1 status moved from in-progress to implemented and locally validated;
 - CURRENT_STATE verification base moved to project main `60f84093c0fe82d29814c2ac8e3c0fb6dc847e7b`;
-- next allowed V2-R1 sequence now starts with Draft PR creation and CI.
+- next allowed V2-R1 sequence is expressed without temporary Draft PR state so it remains true after merge.
 
 Safety:
 - Qwen remains not deployed and not active in production;

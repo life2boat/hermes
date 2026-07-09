@@ -1,5 +1,24 @@
 # CURRENT_STATE changelog
 
+## 1.2.3 ? 2026-07-09
+
+Added:
+- component-grounded Stage-1 visual inventory contract for meal-photo analysis;
+- strict local validator for Stage-1 vision output;
+- offline mixed-plate quality fixtures and thresholds.
+
+Changed:
+- rejected model-generated aggregate nutrition from the vision path;
+- blocked low-confidence or invalid vision output from staging a diary-ready pending meal;
+- updated the CURRENT_STATE verification base to project main `4aa67def8b4ece2aab6bb0ebdeb121318ccc7eab`.
+
+Safety:
+- provider requests during validation: 0;
+- production remains on Gemini;
+- Qwen remains not deployed and not active in production;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
 ## 1.2.2 — 2026-07-09
 
 Added:

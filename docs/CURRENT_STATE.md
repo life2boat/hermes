@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.2
+version: 1.2.3
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 22ed9e4d103b192947902fb66d6ad633b4d3ee31
+state_verified_against_main_sha: 4aa67def8b4ece2aab6bb0ebdeb121318ccc7eab
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `22ed9e4d103b192947902fb66d6ad633b4d3ee31`.
+  `4aa67def8b4ece2aab6bb0ebdeb121318ccc7eab`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -33,6 +33,12 @@ Git.
 - Current production vision routing is back on the prior Gemini configuration.
 - Qwen vision code is present in main, but Qwen is not deployed or active in
   production after the rejected live activation.
+- A component-grounded Stage-1 food vision contract is implemented in repository
+  code and has passed offline-only validation so far.
+- Stage-1 vision output now rejects model-generated aggregate calories/macros
+  and cannot stage a diary-ready pending meal directly from a photo result.
+- Offline mixed-plate food-vision quality fixtures and deterministic thresholds
+  are present in the test suite.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any new rollout decision.
@@ -149,11 +155,11 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work — Sprint 7.1V2-R7A
+## 4. Active Work ? Sprint 7.1V2-R7B
 
 Status:
 
-`STATUS=QWEN_ROLLED_BACK_PENDING_QUALITY_REMEDIATION`
+`STATUS=OFFLINE_FOOD_VISION_CONTRACT_UNDER_REVIEW_PRODUCTION_UNCHANGED`
 
 Current rollout state:
 
@@ -177,16 +183,16 @@ Current rollout state:
 - Production DB writes: 0.
 - Qdrant changes: 0.
 
-Forensic classification summary:
+Repository remediation summary:
 
-- The nutrition prompt is prompt-only and does not force exhaustive visible
-  component grounding for plated multi-item meals.
-- The response path accepts model-provided aggregate totals directly.
-- Confidence is logged but not used as a pending-stage gate.
-- The pending prompt shows only the aggregate meal label/calories/macros, so
-  users cannot inspect the model's detected component list before confirmation.
-- Qwen transport/auth/request success therefore does not prove acceptable food
-  recognition quality.
+- Stage-1 vision now requires a component-grounded structured inventory schema.
+- Model-generated aggregate nutrition is rejected at local validation time.
+- Invalid, low-confidence, or ambiguous outputs cannot stage a diary-ready
+  pending meal.
+- Stage-1 returns a clarification/component summary instead of pending save
+  totals when validation succeeds.
+- Offline mixed-plate quality fixtures and thresholds were added with provider
+  requests fixed at zero during validation.
 
 Historical implementation context from R1 remains true:
 

@@ -12915,7 +12915,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exc_info=True,
             )
             return user_text, False, None
-        if not outcome.available or outcome.record is None:
+        if not outcome.available:
+            return user_text, False, None
+        if outcome.clarification_text:
+            return user_text, True, outcome.clarification_text
+        if outcome.record is None:
             return user_text, False, None
         if outcome.pending:
             return user_text, True, format_pending_meal_prompt(outcome.record)

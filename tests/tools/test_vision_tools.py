@@ -428,7 +428,7 @@ class TestVisionConfig:
 
 
     @pytest.mark.asyncio
-    async def test_vision_uses_single_request_policy_and_does_not_retry_empty_content(self, tmp_path, monkeypatch):
+    async def test_vision_uses_single_request_policy_and_classifies_empty_gemini_content(self, tmp_path, monkeypatch):
         img = tmp_path / "test.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
 
@@ -436,10 +436,14 @@ class TestVisionConfig:
         mock_llm = AsyncMock(return_value=mock_response)
         monkeypatch.setitem(vision_analyze_tool.__globals__, "async_call_llm", mock_llm)
         monkeypatch.setitem(vision_analyze_tool.__globals__, "extract_content_or_reasoning", lambda _response: "")
+        monkeypatch.setitem(vision_analyze_tool.__globals__, "_configured_vision_provider_and_model", lambda _model=None: ("gemini", "gemini-2.5-flash"))
         with patch("tools.vision_tools._image_to_base64_data_url", return_value="data:image/png;base64,abc"):
             result = json.loads(await vision_analyze_tool(str(img), "describe this", "test/model"))
 
-        assert result["success"] is True
+        assert result["success"] is False
+        assert result["error"] == "Error analyzing image: provider_unavailable"
+        assert result["diagnostic"]["category"] == "GEMINI_CONTENT_EXTRACTION_FAILURE"
+        assert result["diagnostic"]["stage"] == "PROVIDER_CONTENT_EXTRACTION"
         mock_llm.assert_awaited_once()
         policy = mock_llm.await_args.kwargs["call_policy"]
         assert policy.max_external_requests == 1

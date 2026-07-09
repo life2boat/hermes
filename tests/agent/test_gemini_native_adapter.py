@@ -449,7 +449,9 @@ def test_native_http_error_keeps_status_and_retry_after():
     err = gemini_http_error(response)
     assert getattr(err, "status_code", None) == 429
     assert getattr(err, "retry_after", None) == 17.0
-    assert "quota exhausted" in str(err)
+    assert "quota exhausted" not in str(err)
+    assert "RESOURCE_EXHAUSTED" in str(err)
+    assert getattr(err, "safe_reason", None) == "http_429"
 
 
 def test_native_client_accepts_injected_http_client():

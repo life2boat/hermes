@@ -11,6 +11,7 @@ Changed:
 - updated the CURRENT_STATE verification base to project main `14981980403da56db94c90483bcab4ee209e9784`;
 - replaced the older six-request benchmark blocker summary with the newer four-request limited re-benchmark result;
 - clarified that no provider is eligible for rollout, automatic provider selection remains false, and production stays on the existing Gemini deployment state only.
+- clarified that the three-image limited re-benchmark is bounded evidence for rollout eligibility, not a general quality verdict.
 
 Safety:
 - provider requests during the limited re-benchmark evidence: 4 total (1 Gemini, 3 Qwen), with 0 retries, 0 fallbacks and 0 repair requests;

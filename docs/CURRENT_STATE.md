@@ -128,8 +128,15 @@ Confirmed state:
 - Qwen limited re-benchmark metrics were major-component precision `0.625`,
   major-component recall `0.600`, sauce recall `0.000`, and confirmation
   correctness `1.000`.
+- Local safety remediation worked: schema validity remained `3/3`, validator
+  pass remained `3/3`, aggregate nutrition violations remained `0`, invalid
+  staging remained `0`, and no unsafe diary staging was observed, but
+  recognition quality remained below the rollout threshold.
 - Qwen remained `QWEN_FAIL_CLOSED_COMPATIBLE`; the ambiguity gate still failed,
   `benchmark_candidate=false`, and Qwen remained ineligible for rollout.
+- This three-image limited re-benchmark is insufficient to establish general
+  model quality improvement or regression; it is bounded evidence for current
+  rollout eligibility only.
 - No eligible provider was produced, automatic provider selection remained
   false, deployment remained unauthorized, and deployment remained blocked.
 - Raw provider responses were not stored; secret leakage remained false; raw

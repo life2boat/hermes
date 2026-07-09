@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.6
+version: 1.2.7
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 7b38d862978781b711b1ca5d76e1735bc7ee0d27
+state_verified_against_main_sha: 0e176d0bc8db06d0443be049aa62855ebed9db51
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `7b38d862978781b711b1ca5d76e1735bc7ee0d27`.
+  `0e176d0bc8db06d0443be049aa62855ebed9db51`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -48,6 +48,14 @@ Git.
   (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
+- The Stage-1 food-vision prompt is now shorter, provider-neutral, and no
+  longer anchored to the failed benchmark plate or pastry labels.
+- Local confirmation requirement is now derived deterministically from validated
+  inventory data and cannot be suppressed by provider `needs_user_confirmation=false`.
+- Mixed plates, sauces, low confidence, uncertainty, warnings, missing weights,
+  broad ranges, and over-specific normalization now force clarification locally.
+- Historical R7D-B benchmark results remain unchanged; Qwen quality has not yet
+  been revalidated live or rebenchmarked after this remediation.
 - Historical Gemini benchmark remains recorded as
   `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`.
 - Repository code now preserves sanitized Gemini execution-stage and category
@@ -183,44 +191,34 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7E-B1
+## 4. Active Work - Sprint 7.1V2-R7E-B2
 
 Status:
 
-`STATUS=GEMINI_DIAGNOSTICS_HARDENED_PROVIDER_FREE_VALIDATION_COMPLETE_PRODUCTION_UNCHANGED`
+`STATUS=QWEN_FOOD_GROUNDING_PROMPT_SIMPLIFIED_LOCAL_AMBIGUITY_CALIBRATION_HARDENED_PROVIDER_FREE_VALIDATION_COMPLETE_PRODUCTION_UNCHANGED`
 
-Current benchmark state:
+Current remediation state:
 
 - Approved current main source for this state update:
-  `7b38d862978781b711b1ca5d76e1735bc7ee0d27`.
+  `0e176d0bc8db06d0443be049aa62855ebed9db51`.
 - Historical benchmark source remains:
   `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
-- Exact audit image:
-  `sha256:556985acd3eb46f2b8d673d529a304a5723dca67a25a195c62e5293d12953de8`.
-- Current production vision provider remains `gemini`.
-- Gemini benchmark model value: `gemini-2.5-flash`.
-- Qwen benchmark provider/model value:
-  `openai` / `qwen3-vl-8b-instruct`.
-- Qwen benchmark base URL host: `dashscope-intl.aliyuncs.com`.
-- Benchmark request accounting: PASS within the hard cap.
-- Historical Gemini benchmark result remains 0 completed responses out of 3,
-  `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`.
-- Gemini runtime now preserves sanitized stage/category diagnostics without
-  storing raw provider errors, raw responses, keys or image payloads.
-- Future Gemini live retests can emit a narrower safe category when the provider
-  exposes enough typed status information.
-- Qwen benchmark result: 3 schema-valid responses out of 3, but food-quality
-  gate FAIL with precision `0.5556`, recall `0.625`, and ambiguous
-  confirmation correctness `0.0`.
-- Eligible providers: none.
-- Higher-scoring candidate: `null`.
-- Automatic selection performed: false.
-- Raw provider responses stored: false.
-- Secret leakage: false.
-- Raw error leakage: false.
+- Stage-1 prompt was simplified and benchmark-specific anchoring was reduced.
+- Confirmation requirement is now derived locally from validated inventory data.
+- Provider `needs_user_confirmation=false` can no longer suppress local caution.
+- Mixed plates, sauces, low confidence, uncertainty, warnings, missing weight
+  ranges, broad ranges, and ambiguous normalization now force clarification.
+- Strict schema validation, aggregate nutrition rejection, malformed JSON
+  rejection, two-phase confirmation, retry=0, and fallback=0 remain unchanged.
+- Historical R7D-B benchmark evidence and recorded scores were not modified.
+- Qwen quality has not yet been rebenchmarked after this remediation.
+- Gemini compatibility remains unproven and Gemini diagnostics behavior from
+  R7E-B1 remains unchanged.
+- Provider requests: 0.
 - Telegram requests: 0.
 - Production DB opens/writes: 0 / 0.
 - Qdrant requests: 0.
+- Production runtime remained unchanged.
 
 Repository state that remains true:
 

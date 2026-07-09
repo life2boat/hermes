@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -87,9 +87,55 @@ _MAX_FOOD_VISION_GRAMS = 2000.0
 _MAX_PENDING_INVENTORY_NAME_LENGTH = 80
 _MAX_PENDING_INVENTORY_ITEMS = 16
 _AUTO_PROPOSE_WEIGHT_SPAN_G = 25.0
+_LOCAL_CONFIRMATION_MAX_WEIGHT_SPAN_G = _AUTO_PROPOSE_WEIGHT_SPAN_G
 _MIN_SELECTED_GRAMS = 1.0
 _MAX_SELECTED_GRAMS = 2000.0
-_ALLOWED_UNKNOWN_WEIGHT_VALUES = {"", "?", "unknown", "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e", "n/a", "na"}
+_ALLOWED_UNKNOWN_WEIGHT_VALUES = {"", "?", "unknown", "неизвестно", "n/a", "na"}
+_AMBIGUOUS_PREPARATION_TOKENS = (
+    "неяс",
+    "неизвест",
+    "возможно",
+    "или",
+    "примерно",
+    "похоже",
+    "unknown",
+    "uncertain",
+    "ambiguous",
+)
+_GENERIC_VISIBLE_FOOD_NAMES = frozenset({
+    "выпечка",
+    "сладкая выпечка",
+    "мясо",
+    "рыба",
+    "соус",
+    "желтый соус",
+    "белый соус",
+    "выпечка с начинкой",
+    "пирожок",
+    "булочка",
+    "нарезка",
+    "закуска",
+})
+_GENERIC_VISIBLE_NAME_TOKENS = frozenset({
+    "выпечка",
+    "соус",
+    "мясо",
+    "рыба",
+    "нарезка",
+    "закуска",
+    "или",
+    "возможно",
+})
+_NAME_SPECIFICITY_STOPWORDS = frozenset({
+    "и",
+    "с",
+    "со",
+    "или",
+    "the",
+    "a",
+    "an",
+    "of",
+})
 _FOOD_VISION_ALLOWED_TOP_LEVEL_FIELDS = frozenset({
     "schema_version",
     "items",
@@ -146,28 +192,16 @@ _COMBINED_DISH_TITLE_PREFIXES = (
     "\u0430\u0441\u0441\u043e\u0440\u0442\u0438",
 )
 _VISION_PROMPT = (
-    "You are the Stage-1 food vision inventory for HealBite. "
-    "Return STRICT JSON only, with no markdown fences and no extra text. "
-    "Describe only visually supported food components in Russian. "
-    "List every separately visible component. Treat sauces, dressings, and condiments as separate components. "
+    "You are HealBite Stage-1 food vision. "
+    "Return strict JSON only for schema food_vision_inventory_v1, with no markdown and no extra text. "
+    "Describe only separately visible food components in Russian. "
+    "Use one item per visible component and keep visible sauces or condiments as separate items. "
     "Do not collapse a mixed plate into one dish title. "
-    "Do not call waffles \u0432\u0430\u0442\u0440\u0443\u0448\u043a\u0430\u043c\u0438, \u0441\u044b\u0440\u043d\u0438\u043a\u0430\u043c\u0438, or \u043f\u0438\u0440\u043e\u0436\u043a\u0430\u043c\u0438 unless that is visually supported. "
-    "Distinguish meat, vegetables, bread or pastries, and sauces. "
-    "Use uncertainty instead of guessing hidden ingredients or exact weights. "
-    "Provide confidence per component and approximate gram ranges, not exact grams. "
-    "Return no calories, no macros, and no diary-ready totals. "
-    "Set needs_user_confirmation=true for mixed plates, low confidence, ambiguous preparation, or uncertain portion size. "
-    "Schema: "
-    "{\"schema_version\":\"food_vision_inventory_v1\","
-    "\"items\":[{\"visible_name\":string,\"normalized_name\":string,\"confidence\":number,"
-    "\"estimated_grams_min\":number|null,\"estimated_grams_max\":number|null,"
-    "\"preparation\":string,\"is_sauce\":bool,\"uncertainty\":string}],"
-    "\"overall_confidence\":number,"
-    "\"needs_user_confirmation\":bool,"
-    "\"warnings\":[string]}. "
-    "Keep unknown values as null or a short uncertainty string instead of inventing them. "
-    "Example mixed plate: waffles, sliced meat, cucumber sticks, mayonnaise, yellow sauce. "
-    "The example is illustrative only; do not overfit to it."
+    "Use a generic visual label when exact identity is uncertain, and put that uncertainty into the uncertainty field. "
+    "Do not invent hidden ingredients, fillings, or unsupported preparation details. "
+    "Give confidence per item and approximate gram ranges only when visually supportable; otherwise use null. "
+    "Never return calories, macros, or totals. "
+    "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty}], overall_confidence, needs_user_confirmation, warnings."
 )
 
 
@@ -224,6 +258,14 @@ class FoodVisionValidationResult:
     status: str
     inventory: FoodVisionInventory | None = None
     reason: str = ""
+
+
+@dataclass(slots=True)
+class FoodVisionConfirmationDecision:
+    required: bool
+    provider_requested: bool
+    local_required: bool
+    reasons: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -871,6 +913,98 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     ), ""
 
 
+def _food_vision_weight_range_width(item: FoodVisionItem) -> float | None:
+    if item.estimated_grams_min is None or item.estimated_grams_max is None:
+        return None
+    return float(item.estimated_grams_max) - float(item.estimated_grams_min)
+
+
+def _looks_like_generic_visible_component(name: str) -> bool:
+    normalized = _normalize_meal_name_text(name, "").casefold()
+    if not normalized:
+        return False
+    if normalized in _GENERIC_VISIBLE_FOOD_NAMES or " или " in f" {normalized} ":
+        return True
+    tokens = tuple(token.strip(".,;:()[]{}") for token in normalized.split())
+    return any(token in _GENERIC_VISIBLE_NAME_TOKENS for token in tokens)
+
+
+def _food_vision_preparation_is_ambiguous(preparation: str) -> bool:
+    normalized = _normalize_meal_name_text(preparation, "").casefold()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _AMBIGUOUS_PREPARATION_TOKENS)
+
+
+def _food_vision_normalized_name_exceeds_visible_evidence(item: FoodVisionItem) -> bool:
+    visible_name = _normalize_meal_name_text(item.visible_name, "").casefold()
+    normalized_name = _normalize_meal_name_text(item.normalized_name, "").casefold()
+    if not visible_name or not normalized_name or visible_name == normalized_name:
+        return False
+
+    visible_tokens = {
+        token.strip(".,;:()[]{}")
+        for token in visible_name.split()
+        if token.strip(".,;:()[]{}") and token not in _NAME_SPECIFICITY_STOPWORDS
+    }
+    normalized_tokens = {
+        token.strip(".,;:()[]{}")
+        for token in normalized_name.split()
+        if token.strip(".,;:()[]{}") and token not in _NAME_SPECIFICITY_STOPWORDS
+    }
+    if not normalized_tokens:
+        return False
+    specificity_gap = normalized_tokens - visible_tokens
+    if not specificity_gap:
+        return False
+    return (
+        _looks_like_generic_visible_component(visible_name)
+        or bool(item.uncertainty)
+        or item.confidence < 0.9
+    )
+
+
+def derive_inventory_confirmation_requirement(inventory: FoodVisionInventory) -> FoodVisionConfirmationDecision:
+    reasons: list[str] = []
+    if inventory.needs_user_confirmation:
+        reasons.append("provider_requested")
+
+    major_component_count = sum(1 for item in inventory.items if not item.is_sauce)
+    if major_component_count > 1:
+        reasons.append("multiple_major_components")
+    if any(item.is_sauce for item in inventory.items):
+        reasons.append("sauce_present")
+    if inventory.overall_confidence < MIN_OVERALL_CONFIDENCE:
+        reasons.append("low_overall_confidence")
+    if inventory.warnings:
+        reasons.append("warnings_present")
+    if any(item.confidence < MIN_ITEM_CONFIDENCE for item in inventory.items):
+        reasons.append("low_item_confidence")
+    if any(item.estimated_grams_min is None or item.estimated_grams_max is None for item in inventory.items):
+        reasons.append("missing_weight_range")
+    if any(
+        (width is not None and width > _LOCAL_CONFIRMATION_MAX_WEIGHT_SPAN_G)
+        for width in (_food_vision_weight_range_width(item) for item in inventory.items)
+    ):
+        reasons.append("broad_weight_range")
+    if any(bool(item.uncertainty) for item in inventory.items):
+        reasons.append("uncertainty_present")
+    if any(_food_vision_preparation_is_ambiguous(item.preparation) for item in inventory.items):
+        reasons.append("ambiguous_preparation")
+    if any(_food_vision_normalized_name_exceeds_visible_evidence(item) for item in inventory.items):
+        reasons.append("ambiguous_normalization")
+
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    provider_requested = "provider_requested" in unique_reasons
+    local_required = any(reason != "provider_requested" for reason in unique_reasons)
+    return FoodVisionConfirmationDecision(
+        required=provider_requested or local_required,
+        provider_requested=provider_requested,
+        local_required=local_required,
+        reasons=unique_reasons,
+    )
+
+
 def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationResult:
     payload = safe_json_loads(payload_text, {})
     if not isinstance(payload, dict) or not payload:
@@ -926,16 +1060,12 @@ def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationRes
         needs_user_confirmation=needs_user_confirmation,
         warnings=warnings,
     )
-    needs_clarification = (
-        inventory.needs_user_confirmation
-        or inventory.overall_confidence < MIN_OVERALL_CONFIDENCE
-        or bool(inventory.warnings)
-        or any(item.confidence < MIN_ITEM_CONFIDENCE or bool(item.uncertainty) for item in inventory.items)
-    )
+    confirmation = derive_inventory_confirmation_requirement(inventory)
+    normalized_inventory = replace(inventory, needs_user_confirmation=confirmation.required)
     return FoodVisionValidationResult(
-        status="NEEDS_CLARIFICATION" if needs_clarification else "VALID",
-        inventory=inventory,
-        reason="clarification_required" if needs_clarification else "validated",
+        status="NEEDS_CLARIFICATION" if confirmation.required else "VALID",
+        inventory=normalized_inventory,
+        reason="clarification_required" if confirmation.required else "validated",
     )
 
 

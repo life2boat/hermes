@@ -45,6 +45,13 @@ from agent.auxiliary_client import (
 )
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
+from tools.vision_diagnostics import (
+    VisionFailureDiagnostic,
+    build_gemini_content_extraction_diagnostic,
+    classify_gemini_failure,
+    coarse_vision_error_kind,
+    safe_vision_failure_analysis,
+)
 from tools.website_policy import check_website_access
 import sys
 
@@ -638,7 +645,13 @@ def _classify_expected_vision_error(error: Exception) -> str | None:
     return None
 
 
-def _safe_vision_failure_analysis(error: Exception) -> str:
+def _safe_vision_failure_analysis(
+    error: Exception,
+    diagnostic: VisionFailureDiagnostic | None = None,
+) -> str:
+    if diagnostic is not None:
+        return safe_vision_failure_analysis(diagnostic)
+
     expected_kind = _classify_expected_vision_error(error)
     if expected_kind == "provider_unavailable":
         return (
@@ -653,7 +666,6 @@ def _safe_vision_failure_analysis(error: Exception) -> str:
     return (
         "There was a problem with the request and the image could not be analyzed."
     )
-
 
 def _vision_size_bucket(size_bytes: int | None) -> str:
     if not isinstance(size_bytes, int) or size_bytes <= 0:
@@ -1094,6 +1106,33 @@ async def vision_analyze_tool(
         # Vision uses a strict one-photo/one-provider-request policy; empty
         # responses flow into the existing safe parser/fallback path.
         analysis = extract_content_or_reasoning(response)
+        if provider_name == "gemini" and not analysis.strip():
+            diagnostic = build_gemini_content_extraction_diagnostic(model=provider_model)
+            error_kind = coarse_vision_error_kind(diagnostic)
+            logger.warning("Vision image analysis unavailable (%s)", diagnostic.category)
+            logger.info(
+                "[Vision][vision_provider_failed] category=%s stage=%s status_class=%s retryable=%s request_attempted=%s response_received=%s parse_attempted=%s validator_reached=%s provider=%s model=%s",
+                diagnostic.category,
+                diagnostic.stage,
+                diagnostic.http_status_class,
+                str(diagnostic.retryable).lower(),
+                str(diagnostic.request_was_attempted).lower(),
+                str(diagnostic.provider_response_received).lower(),
+                str(diagnostic.response_parse_attempted).lower(),
+                str(diagnostic.validator_reached).lower(),
+                provider_name,
+                provider_model,
+            )
+            result = {
+                "success": False,
+                "error": f"Error analyzing image: {error_kind}",
+                "analysis": _safe_vision_failure_analysis(RuntimeError(error_kind), diagnostic),
+                "diagnostic": diagnostic.as_dict(),
+            }
+            debug_call_data["error"] = result["error"]
+            _debug.log_call("vision_analyze_tool", debug_call_data)
+            _debug.save()
+            return json.dumps(result, indent=2, ensure_ascii=False)
 
         analysis_length = len(analysis)
 
@@ -1116,32 +1155,59 @@ async def vision_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        expected_error_kind = _classify_expected_vision_error(e)
-        if expected_error_kind is not None:
+        diagnostic: VisionFailureDiagnostic | None = None
+        if provider_name == "gemini":
+            diagnostic = classify_gemini_failure(e, model=provider_model)
+
+        if diagnostic is not None:
+            expected_error_kind = coarse_vision_error_kind(diagnostic)
             error_msg = f"Error analyzing image: {expected_error_kind}"
             logger.warning(
                 "Vision image analysis unavailable (%s)",
-                expected_error_kind,
+                diagnostic.category,
             )
         else:
-            error_msg = f"Error analyzing image: {str(e)}"
-            logger.error("%s", error_msg, exc_info=True)
+            expected_error_kind = _classify_expected_vision_error(e)
+            if expected_error_kind is not None:
+                error_msg = f"Error analyzing image: {expected_error_kind}"
+                logger.warning(
+                    "Vision image analysis unavailable (%s)",
+                    expected_error_kind,
+                )
+            else:
+                error_msg = f"Error analyzing image: {str(e)}"
+                logger.error("%s", error_msg, exc_info=True)
 
         if temp_image_path is None:
             logger.info(
                 "[Vision][vision_download_ok] ok=false source=%s mime_hint=unknown size_bucket=unknown",
                 source_kind,
             )
-        logger.info(
-            "[Vision][vision_provider_failed] category=%s provider=%s model=%s",
-            expected_error_kind or "unexpected_error",
-            provider_name,
-            provider_model,
-        )
+        if diagnostic is not None:
+            logger.info(
+                "[Vision][vision_provider_failed] category=%s stage=%s status_class=%s retryable=%s request_attempted=%s response_received=%s parse_attempted=%s validator_reached=%s provider=%s model=%s",
+                diagnostic.category,
+                diagnostic.stage,
+                diagnostic.http_status_class,
+                str(diagnostic.retryable).lower(),
+                str(diagnostic.request_was_attempted).lower(),
+                str(diagnostic.provider_response_received).lower(),
+                str(diagnostic.response_parse_attempted).lower(),
+                str(diagnostic.validator_reached).lower(),
+                provider_name,
+                provider_model,
+            )
+        else:
+            logger.info(
+                "[Vision][vision_provider_failed] category=%s provider=%s model=%s",
+                expected_error_kind or "unexpected_error",
+                provider_name,
+                provider_model,
+            )
 
-        # Detect vision capability errors — give the model a clear message
+        # Detect vision capability errors ? give the model a clear message
         # so it can inform the user instead of a cryptic API error.
-        analysis = _safe_vision_failure_analysis(e)
+        analysis = _safe_vision_failure_analysis(e, diagnostic)
 
         # Prepare error response
         result = {
@@ -1149,6 +1215,8 @@ async def vision_analyze_tool(
             "error": error_msg,
             "analysis": analysis,
         }
+        if diagnostic is not None:
+            result["diagnostic"] = diagnostic.as_dict()
 
         debug_call_data["error"] = error_msg
         _debug.log_call("vision_analyze_tool", debug_call_data)

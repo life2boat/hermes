@@ -160,6 +160,14 @@ class GeminiAPIError(Exception):
         response: Optional[httpx.Response] = None,
         retry_after: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None,
+        stage: str = "UNKNOWN",
+        request_was_attempted: bool = False,
+        provider_response_received: bool = False,
+        response_parse_attempted: bool = False,
+        validator_reached: bool = False,
+        retryable: bool = False,
+        sanitized_provider_code: Optional[str] = None,
+        safe_reason: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -167,6 +175,14 @@ class GeminiAPIError(Exception):
         self.response = response
         self.retry_after = retry_after
         self.details = details or {}
+        self.stage = stage
+        self.request_was_attempted = request_was_attempted
+        self.provider_response_received = provider_response_received
+        self.response_parse_attempted = response_parse_attempted
+        self.validator_reached = validator_reached
+        self.retryable = retryable
+        self.sanitized_provider_code = sanitized_provider_code
+        self.safe_reason = safe_reason
 
 
 def _coerce_content_to_text(content: Any) -> str:
@@ -722,6 +738,49 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
     return chunks
 
 
+def _classify_transport_safe_reason(error: BaseException) -> str:
+    for exc in (error, getattr(error, "__cause__", None), getattr(error, "__context__", None)):
+        if exc is None:
+            continue
+        if isinstance(exc, httpx.TimeoutException):
+            return "timeout"
+        name = type(exc).__name__
+        if name == "gaierror":
+            return "transport_dns_error"
+        if name in {"SSLError", "SSLCertVerificationError"}:
+            return "transport_tls_error"
+    if isinstance(error, httpx.ConnectError):
+        return "transport_connect_error"
+    if isinstance(error, httpx.NetworkError):
+        return "transport_network_error"
+    if isinstance(error, httpx.HTTPError):
+        return "transport_http_error"
+    return "transport_network_error"
+
+
+def _safe_http_reason(status_code: int, err_status: str, reason: str) -> str:
+    normalized_reason = (reason or '').strip().upper()
+    if status_code == 401:
+        return 'http_401'
+    if status_code == 403:
+        return 'http_403'
+    if status_code == 404:
+        return 'model_not_found'
+    if status_code == 413:
+        return 'image_payload_rejected'
+    if status_code == 429:
+        return 'http_429'
+    if 500 <= status_code < 600:
+        return 'http_5xx'
+    if status_code == 400 and normalized_reason in {'REQUEST_SCHEMA_INVALID'}:
+        return 'request_schema_invalid'
+    if status_code == 400 and normalized_reason in {'IMAGE_PAYLOAD_REJECTED', 'PAYLOAD_TOO_LARGE'}:
+        return 'image_payload_rejected'
+    if 400 <= status_code < 500:
+        return 'http_4xx'
+    return 'unknown_exception'
+
+
 def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
     status = response.status_code
     body_text = ""
@@ -747,8 +806,8 @@ def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
     details_list = _raw_details if isinstance(_raw_details, list) else []
 
     reason = ""
+    metadata_keys: List[str] = []
     retry_after: Optional[float] = None
-    metadata: Dict[str, Any] = {}
     for detail in details_list:
         if not isinstance(detail, dict):
             continue
@@ -759,7 +818,7 @@ def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
                 reason = reason_value
             md = detail.get("metadata")
             if isinstance(md, dict):
-                metadata = md
+                metadata_keys = sorted(str(key) for key in md.keys() if isinstance(key, str))
     header_retry = response.headers.get("Retry-After") or response.headers.get("retry-after")
     if header_retry:
         try:
@@ -775,16 +834,14 @@ def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
     elif status == 404:
         code = "gemini_model_not_found"
 
-    if err_message:
-        message = f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}"
-    else:
-        message = f"Gemini returned HTTP {status}: {body_text[:500]}"
+    status_label = err_status or 'error'
+    message = f"Gemini HTTP {status} ({status_label})"
 
-    # Free-tier quota exhaustion -> append actionable guidance so users who
-    # bypassed the setup wizard (direct GOOGLE_API_KEY in .env) still learn
-    # that the free tier cannot sustain an agent session.
     if status == 429 and is_free_tier_quota_error(err_message or body_text):
         message = message + _FREE_TIER_GUIDANCE
+
+    safe_reason = _safe_http_reason(status, err_status, reason)
+    retryable = status == 429 or 500 <= status < 600
 
     return GeminiAPIError(
         message,
@@ -795,9 +852,16 @@ def gemini_http_error(response: httpx.Response) -> GeminiAPIError:
         details={
             "status": err_status,
             "reason": reason,
-            "metadata": metadata,
-            "message": err_message,
+            "metadata_keys": metadata_keys,
         },
+        stage="PROVIDER_HTTP",
+        request_was_attempted=True,
+        provider_response_received=True,
+        response_parse_attempted=False,
+        validator_reached=False,
+        retryable=retryable,
+        sanitized_provider_code=err_status or reason or code,
+        safe_reason=safe_reason,
     )
 
 
@@ -929,33 +993,80 @@ class GeminiNativeClient:
         if isinstance(extra_body, dict):
             thinking_config = extra_body.get("thinking_config") or extra_body.get("thinkingConfig")
 
-        request = build_gemini_request(
-            messages=messages or [],
-            tools=tools,
-            tool_choice=tool_choice,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            stop=stop,
-            thinking_config=thinking_config,
-        )
+        try:
+            request = build_gemini_request(
+                messages=messages or [],
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                stop=stop,
+                thinking_config=thinking_config,
+            )
+        except GeminiAPIError:
+            raise
+        except Exception as exc:
+            raise GeminiAPIError(
+                "Gemini request construction failed",
+                code="gemini_request_construction_failed",
+                stage="REQUEST_CONSTRUCTION",
+                request_was_attempted=False,
+                provider_response_received=False,
+                response_parse_attempted=False,
+                validator_reached=False,
+                retryable=False,
+                safe_reason="request_construction_failed",
+            ) from exc
 
         if stream:
             return self._stream_completion(model=model, request=request, timeout=timeout)
 
         url = f"{self.base_url}/models/{model}:generateContent"
         api_key = self._resolve_api_key()
-        response = self._http.post(url, json=request, headers=self._headers(api_key=api_key), timeout=timeout)
+        try:
+            response = self._http.post(url, json=request, headers=self._headers(api_key=api_key), timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise GeminiAPIError(
+                "Gemini request timed out",
+                code="gemini_timeout",
+                stage="TRANSPORT",
+                request_was_attempted=True,
+                provider_response_received=False,
+                response_parse_attempted=False,
+                validator_reached=False,
+                retryable=True,
+                safe_reason="timeout",
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GeminiAPIError(
+                "Gemini transport request failed",
+                code="gemini_transport_error",
+                stage="TRANSPORT",
+                request_was_attempted=True,
+                provider_response_received=False,
+                response_parse_attempted=False,
+                validator_reached=False,
+                retryable=True,
+                safe_reason=_classify_transport_safe_reason(exc),
+            ) from exc
         if response.status_code != 200:
             raise gemini_http_error(response)
         try:
             payload = response.json()
         except ValueError as exc:
             raise GeminiAPIError(
-                f"Invalid JSON from Gemini native API: {exc}",
+                "Gemini response JSON decode failed",
                 code="gemini_invalid_json",
                 status_code=response.status_code,
                 response=response,
+                stage="PROVIDER_RESPONSE_DECODE",
+                request_was_attempted=True,
+                provider_response_received=True,
+                response_parse_attempted=True,
+                validator_reached=False,
+                retryable=False,
+                safe_reason="response_decode_failed",
             ) from exc
         return translate_gemini_response(payload, model=model)
 
@@ -975,10 +1086,29 @@ class GeminiNativeClient:
                     for event in _iter_sse_events(response):
                         for chunk in translate_stream_event(event, model, tool_call_indices):
                             yield chunk
+            except httpx.TimeoutException as exc:
+                raise GeminiAPIError(
+                    "Gemini streaming request timed out",
+                    code="gemini_stream_timeout",
+                    stage="TRANSPORT",
+                    request_was_attempted=True,
+                    provider_response_received=False,
+                    response_parse_attempted=False,
+                    validator_reached=False,
+                    retryable=True,
+                    safe_reason="timeout",
+                ) from exc
             except httpx.HTTPError as exc:
                 raise GeminiAPIError(
-                    f"Gemini streaming request failed: {exc}",
+                    "Gemini streaming transport request failed",
                     code="gemini_stream_error",
+                    stage="TRANSPORT",
+                    request_was_attempted=True,
+                    provider_response_received=False,
+                    response_parse_attempted=False,
+                    validator_reached=False,
+                    retryable=True,
+                    safe_reason=_classify_transport_safe_reason(exc),
                 ) from exc
 
         return _generator()

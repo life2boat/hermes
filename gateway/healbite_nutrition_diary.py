@@ -65,18 +65,95 @@ CREATE INDEX IF NOT EXISTS idx_{PENDING_MEALS_TABLE}_expires_at
     ON {PENDING_MEALS_TABLE}(expires_at);
 """
 
+FOOD_VISION_SCHEMA_VERSION = "food_vision_inventory_v1"
+MIN_OVERALL_CONFIDENCE = 0.80
+MIN_ITEM_CONFIDENCE = 0.75
+_MAX_FOOD_VISION_ITEMS = 12
+_MAX_FOOD_VISION_WARNINGS = 6
+_MAX_FOOD_VISION_NAME_LENGTH = 120
+_MAX_FOOD_VISION_PREPARATION_LENGTH = 80
+_MAX_FOOD_VISION_UNCERTAINTY_LENGTH = 160
+_MAX_FOOD_VISION_WARNING_LENGTH = 160
+_MAX_FOOD_VISION_GRAMS = 2000.0
+_ALLOWED_UNKNOWN_WEIGHT_VALUES = {"", "?", "unknown", "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e", "n/a", "na"}
+_FOOD_VISION_ALLOWED_TOP_LEVEL_FIELDS = frozenset({
+    "schema_version",
+    "items",
+    "overall_confidence",
+    "needs_user_confirmation",
+    "warnings",
+})
+_FOOD_VISION_ALLOWED_ITEM_FIELDS = frozenset({
+    "visible_name",
+    "normalized_name",
+    "confidence",
+    "estimated_grams_min",
+    "estimated_grams_max",
+    "preparation",
+    "is_sauce",
+    "uncertainty",
+})
+_FOOD_VISION_REJECTED_FIELDS = frozenset({
+    "meal_name",
+    "display_name",
+    "totals",
+    "calories_kcal",
+    "protein_g",
+    "fat_g",
+    "carbs_g",
+    "foods",
+    "nutrition",
+    "raw_summary",
+    "summary",
+    "description",
+})
+_FOOD_VISION_REJECTED_ITEM_FIELDS = frozenset({
+    "name",
+    "estimated_weight_g",
+    "weight_g",
+    "calories_kcal",
+    "protein_g",
+    "fat_g",
+    "carbs_g",
+    "calories",
+    "protein",
+    "fat",
+    "carbs",
+})
+_COMBINED_DISH_TITLE_PREFIXES = (
+    "\u0437\u0430\u0432\u0442\u0440\u0430\u043a",
+    "\u043e\u0431\u0435\u0434",
+    "\u0443\u0436\u0438\u043d",
+    "meal",
+    "plate",
+    "dish",
+    "\u0442\u0430\u0440\u0435\u043b\u043a\u0430",
+    "\u0431\u043b\u044e\u0434\u043e",
+    "\u0430\u0441\u0441\u043e\u0440\u0442\u0438",
+)
 _VISION_PROMPT = (
-    "You are a nutrition analyst for HealBite. Analyze the meal or drink in this image and "
-    "return STRICT JSON only with no markdown fences and no extra text. "
-    "Schema: {\"is_food\": bool, \"meal_name\": string, \"display_name\": string, \"raw_summary\": string, "
-    "\"confidence\": number, \"items\": [{\"name\": string, \"estimated_weight_g\": number|null, "
-    "\"calories_kcal\": number|null, \"protein_g\": number|null, \"fat_g\": number|null, "
-    "\"carbs_g\": number|null}], \"totals\": {\"calories_kcal\": number|null, "
-    "\"protein_g\": number|null, \"fat_g\": number|null, \"carbs_g\": number|null}}. "
-    "Use natural Russian for all user-facing naming fields: meal_name, display_name, and item names. "
-    "If the dish is uncertain, use cautious Russian wording like \"похоже на ...\" instead of inventing specifics. "
-    "Avoid English dish names unless the image clearly shows a branded product name that cannot be translated naturally. "
-    "If this is not a food or drink image, set is_food=false, use a short raw_summary, and keep items empty."
+    "You are the Stage-1 food vision inventory for HealBite. "
+    "Return STRICT JSON only, with no markdown fences and no extra text. "
+    "Describe only visually supported food components in Russian. "
+    "List every separately visible component. Treat sauces, dressings, and condiments as separate components. "
+    "Do not collapse a mixed plate into one dish title. "
+    "Do not call waffles \u0432\u0430\u0442\u0440\u0443\u0448\u043a\u0430\u043c\u0438, \u0441\u044b\u0440\u043d\u0438\u043a\u0430\u043c\u0438, or \u043f\u0438\u0440\u043e\u0436\u043a\u0430\u043c\u0438 unless that is visually supported. "
+    "Distinguish meat, vegetables, bread or pastries, and sauces. "
+    "Use uncertainty instead of guessing hidden ingredients or exact weights. "
+    "Provide confidence per component and approximate gram ranges, not exact grams. "
+    "Return no calories, no macros, and no diary-ready totals. "
+    "Set needs_user_confirmation=true for mixed plates, low confidence, ambiguous preparation, or uncertain portion size. "
+    "Schema: "
+    "{\"schema_version\":\"food_vision_inventory_v1\","
+    "\"items\":[{\"visible_name\":string,\"normalized_name\":string,\"confidence\":number,"
+    "\"estimated_grams_min\":number|null,\"estimated_grams_max\":number|null,"
+    "\"preparation\":string,\"is_sauce\":bool,\"uncertainty\":string}],"
+    "\"overall_confidence\":number,"
+    "\"needs_user_confirmation\":bool,"
+    "\"warnings\":[string]}. "
+    "Keep unknown values as null or a short uncertainty string instead of inventing them. "
+    "Example mixed plate: waffles, sliced meat, cucumber sticks, mayonnaise, yellow sauce. "
+    "The example is illustrative only; do not overfit to it."
 )
 
 
@@ -103,6 +180,36 @@ class NutritionDiaryOutcome:
     duplicate: bool = False
     sqlite_id: int | None = None
     raw_analysis: str = ""
+    clarification_text: str = ""
+    validation_status: str = ""
+
+
+@dataclass(slots=True)
+class FoodVisionItem:
+    visible_name: str
+    normalized_name: str
+    confidence: float
+    estimated_grams_min: float | None
+    estimated_grams_max: float | None
+    preparation: str
+    is_sauce: bool
+    uncertainty: str
+
+
+@dataclass(slots=True)
+class FoodVisionInventory:
+    schema_version: str
+    items: list[FoodVisionItem]
+    overall_confidence: float
+    needs_user_confirmation: bool
+    warnings: list[str]
+
+
+@dataclass(slots=True)
+class FoodVisionValidationResult:
+    status: str
+    inventory: FoodVisionInventory | None = None
+    reason: str = ""
 
 
 @dataclass(slots=True)
@@ -584,6 +691,195 @@ def _confidence_bucket(confidence: float | None) -> str:
     return "low"
 
 
+def _bounded_text(value: Any, *, max_length: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = " ".join(value.split())
+    if not normalized or len(normalized) > max_length:
+        return None
+    return normalized
+
+
+def _parse_probability(value: Any) -> float | None:
+    numeric = _to_float(value)
+    if numeric is None:
+        return None
+    numeric = float(numeric)
+    if numeric < 0.0 or numeric > 1.0:
+        return None
+    return numeric
+
+
+def _parse_optional_grams(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().casefold() in _ALLOWED_UNKNOWN_WEIGHT_VALUES:
+        return None
+    return _to_float(value)
+
+
+def _looks_like_combined_dish_title(value: str) -> bool:
+    normalized = _normalize_meal_name_text(value, "").casefold()
+    if not normalized:
+        return False
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix} ")
+        for prefix in _COMBINED_DISH_TITLE_PREFIXES
+    )
+
+
+def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, str]:
+    if not isinstance(raw_item, dict):
+        return None, "item_not_object"
+    item_keys = set(raw_item)
+    if item_keys & _FOOD_VISION_REJECTED_ITEM_FIELDS:
+        return None, "aggregate_item_field_present"
+    unknown_keys = item_keys - _FOOD_VISION_ALLOWED_ITEM_FIELDS
+    if unknown_keys:
+        return None, "unknown_item_fields"
+
+    visible_name = _bounded_text(raw_item.get("visible_name"), max_length=_MAX_FOOD_VISION_NAME_LENGTH)
+    normalized_name = _bounded_text(raw_item.get("normalized_name"), max_length=_MAX_FOOD_VISION_NAME_LENGTH)
+    preparation = _bounded_text(raw_item.get("preparation", ""), max_length=_MAX_FOOD_VISION_PREPARATION_LENGTH) or ""
+    uncertainty = _bounded_text(raw_item.get("uncertainty", ""), max_length=_MAX_FOOD_VISION_UNCERTAINTY_LENGTH) or ""
+    confidence = _parse_probability(raw_item.get("confidence"))
+    grams_min = _parse_optional_grams(raw_item.get("estimated_grams_min"))
+    grams_max = _parse_optional_grams(raw_item.get("estimated_grams_max"))
+    is_sauce = raw_item.get("is_sauce")
+
+    if not visible_name or not normalized_name:
+        return None, "empty_item_name"
+    if confidence is None:
+        return None, "invalid_item_confidence"
+    if not isinstance(is_sauce, bool):
+        return None, "invalid_is_sauce"
+    if grams_min is not None and grams_min < 0:
+        return None, "negative_grams"
+    if grams_max is not None and grams_max < 0:
+        return None, "negative_grams"
+    if grams_min is not None and grams_max is not None and grams_min > grams_max:
+        return None, "invalid_gram_range"
+    if (
+        (grams_min is not None and grams_min > _MAX_FOOD_VISION_GRAMS)
+        or (grams_max is not None and grams_max > _MAX_FOOD_VISION_GRAMS)
+    ):
+        return None, "absurd_portion_range"
+    if _looks_like_combined_dish_title(visible_name) or _looks_like_combined_dish_title(normalized_name):
+        return None, "combined_dish_title"
+
+    return FoodVisionItem(
+        visible_name=visible_name,
+        normalized_name=normalized_name,
+        confidence=confidence,
+        estimated_grams_min=grams_min,
+        estimated_grams_max=grams_max,
+        preparation=preparation,
+        is_sauce=is_sauce,
+        uncertainty=uncertainty,
+    ), ""
+
+
+def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationResult:
+    payload = safe_json_loads(payload_text, {})
+    if not isinstance(payload, dict) or not payload:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_json")
+
+    payload_keys = set(payload)
+    if payload_keys & _FOOD_VISION_REJECTED_FIELDS:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="aggregate_nutrition_present")
+    unknown_keys = payload_keys - _FOOD_VISION_ALLOWED_TOP_LEVEL_FIELDS
+    if unknown_keys:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="unknown_top_level_fields")
+    if payload.get("schema_version") != FOOD_VISION_SCHEMA_VERSION:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="unsupported_schema_version")
+
+    items_payload = payload.get("items")
+    if not isinstance(items_payload, list) or not items_payload:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="empty_items")
+    if len(items_payload) > _MAX_FOOD_VISION_ITEMS:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="too_many_items")
+
+    overall_confidence = _parse_probability(payload.get("overall_confidence"))
+    if overall_confidence is None:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_overall_confidence")
+
+    needs_user_confirmation = payload.get("needs_user_confirmation")
+    if not isinstance(needs_user_confirmation, bool):
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_needs_user_confirmation")
+
+    warnings_payload = payload.get("warnings")
+    if not isinstance(warnings_payload, list):
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_warnings")
+    if len(warnings_payload) > _MAX_FOOD_VISION_WARNINGS:
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="too_many_warnings")
+
+    warnings: list[str] = []
+    for warning in warnings_payload:
+        normalized_warning = _bounded_text(warning, max_length=_MAX_FOOD_VISION_WARNING_LENGTH)
+        if normalized_warning is None:
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_warning_text")
+        warnings.append(normalized_warning)
+
+    items: list[FoodVisionItem] = []
+    for raw_item in items_payload:
+        item, reason = _validate_food_vision_item(raw_item)
+        if item is None:
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason=reason)
+        items.append(item)
+
+    inventory = FoodVisionInventory(
+        schema_version=FOOD_VISION_SCHEMA_VERSION,
+        items=items,
+        overall_confidence=overall_confidence,
+        needs_user_confirmation=needs_user_confirmation,
+        warnings=warnings,
+    )
+    needs_clarification = (
+        inventory.needs_user_confirmation
+        or inventory.overall_confidence < MIN_OVERALL_CONFIDENCE
+        or bool(inventory.warnings)
+        or any(item.confidence < MIN_ITEM_CONFIDENCE or bool(item.uncertainty) for item in inventory.items)
+    )
+    return FoodVisionValidationResult(
+        status="NEEDS_CLARIFICATION" if needs_clarification else "VALID",
+        inventory=inventory,
+        reason="clarification_required" if needs_clarification else "validated",
+    )
+
+
+def _format_food_vision_grams(item: FoodVisionItem) -> str:
+    grams_min = item.estimated_grams_min
+    grams_max = item.estimated_grams_max
+    if grams_min is None and grams_max is None:
+        return "?????????? ??????"
+    if grams_min is not None and grams_max is not None:
+        if grams_min == grams_max:
+            return f"\u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e {grams_min:.0f} \u0433"
+        return f"\u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e {grams_min:.0f}-{grams_max:.0f} \u0433"
+    value = grams_min if grams_min is not None else grams_max
+    return f"\u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e {value:.0f} \u0433"
+
+
+def format_food_vision_inventory_reply(inventory: FoodVisionInventory) -> str:
+    lines = ["\u042f \u0432\u0438\u0436\u0443:"]
+    for item in inventory.items:
+        detail = f"\u2022 {item.visible_name} - {_format_food_vision_grams(item)}"
+        extras: list[str] = []
+        if item.preparation:
+            extras.append(item.preparation)
+        if item.uncertainty:
+            extras.append(item.uncertainty)
+        if extras:
+            detail += f" ({'; '.join(extras)})"
+        lines.append(detail)
+    lines.extend([
+        "",
+        "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0441\u0442\u0430\u0432 \u0438 \u043f\u043e\u0440\u0446\u0438\u0438.",
+        "\u041f\u043e\u043a\u0430 \u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b \u0438 \u0437\u0430\u043f\u0438\u0441\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u0430.",
+    ])
+    return "\n".join(lines)
+
+
 def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
     payload = safe_json_loads(payload_text, {})
     if not isinstance(payload, dict) or not payload:
@@ -806,31 +1102,28 @@ class HealBiteNutritionDiary:
             )
 
         raw_analysis = str(result.get("analysis") or "").strip()
-        record = normalize_nutrition_payload(raw_analysis)
-        if record is None:
-            logger.info("[HealBite][vision_parse_ok] ok=false reason=structured_json_missing")
+        validation = validate_food_vision_inventory(raw_analysis)
+        if validation.inventory is None:
+            logger.info("[HealBite][vision_parse_ok] ok=false reason=%s", validation.reason or "structured_json_missing")
             logger.info("[HealBite][vision_pending_staged] staged=false")
-            return NutritionDiaryOutcome(available=False, raw_analysis=raw_analysis)
+            return NutritionDiaryOutcome(
+                available=False,
+                raw_analysis=raw_analysis,
+                validation_status=validation.status,
+            )
 
         logger.info(
-            "[HealBite][vision_parse_ok] ok=true is_food=%s confidence_bucket=%s",
-            str(record.is_food).lower(),
-            _confidence_bucket(record.confidence),
+            "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=%s",
+            _confidence_bucket(validation.inventory.overall_confidence),
+            validation.status,
         )
-        outcome = NutritionDiaryOutcome(available=True, record=record, raw_analysis=raw_analysis)
-        if self._should_stage_pending(record):
-            self.stage_pending_meal(
-                user_id=user_id,
-                source=source,
-                record=record,
-                image_ref=image_ref,
-                occurred_at=occurred_at,
-            )
-            outcome.pending = True
-            logger.info("[HealBite][vision_pending_staged] staged=true")
-        else:
-            logger.info("[HealBite][vision_pending_staged] staged=false")
-        return outcome
+        logger.info("[HealBite][vision_pending_staged] staged=false")
+        return NutritionDiaryOutcome(
+            available=True,
+            raw_analysis=raw_analysis,
+            clarification_text=format_food_vision_inventory_reply(validation.inventory),
+            validation_status=validation.status,
+        )
 
     def _should_stage_pending(self, record: NutritionRecord) -> bool:
         if not record.is_food:

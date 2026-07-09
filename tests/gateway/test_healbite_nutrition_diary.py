@@ -13,16 +13,19 @@ from gateway.session_context import clear_session_vars, set_session_vars
 from gateway.run import GatewayRunner, _classify_telegram_diary_turn, _exec_approval_policy_for_turn, _filter_user_facing_toolsets_for_turn
 from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command, resolve_command
 from gateway.healbite_nutrition_diary import (
+    FOOD_VISION_SCHEMA_VERSION,
     HealBiteNutritionDiary,
     PENDING_MEALS_TABLE,
     UndoMealResult,
     compute_nutrition_diary_summary,
-    localized_meal_display_name,
-    NutritionRecord,
+    format_food_vision_inventory_reply,
     format_nutrition_diary_report,
     format_pending_meal_prompt,
     format_undo_meal_report,
+    localized_meal_display_name,
+    NutritionRecord,
     normalize_nutrition_payload,
+    validate_food_vision_inventory,
 )
 from gateway.platforms.telegram import TelegramAdapter
 from tools.healbite_nutrition_diary_tool import (
@@ -236,7 +239,7 @@ async def test_malformed_vision_output_returns_unavailable_without_creating_log(
     assert diary.get_pending_meal(1) is None
     assert summary["entry_count"] == 0
     assert "vision_parse_ok" in joined
-    assert "structured_json_missing" in joined
+    assert "invalid_json" in joined
     assert "vision_pending_staged" in joined
 
 
@@ -280,7 +283,7 @@ async def test_vision_provider_failure_does_not_stage_pending_or_write_log(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_saving(tmp_path, monkeypatch, caplog):
+async def test_analyze_and_maybe_log_returns_stage1_clarification_without_pending(tmp_path, monkeypatch, caplog):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
     monkeypatch.setattr(
         "tools.vision_tools.vision_analyze_tool",
@@ -290,17 +293,22 @@ async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_savi
                     "success": True,
                     "analysis": json.dumps(
                         {
-                            "is_food": True,
-                            "meal_name": "Борщ",
-                            "raw_summary": "Тарелка борща.",
-                            "confidence": 0.81,
-                            "totals": {
-                                "calories_kcal": 300,
-                                "protein_g": 10,
-                                "fat_g": 12,
-                                "carbs_g": 28,
-                            },
-                            "items": [{"name": "Борщ"}],
+                            "schema_version": FOOD_VISION_SCHEMA_VERSION,
+                            "items": [
+                                {
+                                    "visible_name": "Борщ",
+                                    "normalized_name": "борщ",
+                                    "confidence": 0.92,
+                                    "estimated_grams_min": 250,
+                                    "estimated_grams_max": 350,
+                                    "preparation": "горячий суп",
+                                    "is_sauce": False,
+                                    "uncertainty": "",
+                                }
+                            ],
+                            "overall_confidence": 0.92,
+                            "needs_user_confirmation": False,
+                            "warnings": [],
                         },
                         ensure_ascii=False,
                     ),
@@ -319,24 +327,87 @@ async def test_analyze_and_maybe_log_stages_pending_confirmation_instead_of_savi
         )
 
     summary = diary.get_daily_summary(user_id=11)
-    pending = diary.get_pending_meal(11)
     joined = "\n".join(record.getMessage() for record in caplog.records)
 
     assert outcome.available is True
-    assert outcome.pending is True
+    assert outcome.pending is False
     assert outcome.saved is False
-    assert outcome.record is not None
-    assert pending is not None
-    assert pending.record.meal_name == "Борщ"
-    assert _count_pending_rows(tmp_path / "healbite.db", user_id=11) == 1
-    reopened = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
-    reopened_pending = reopened.get_pending_meal(11)
-    assert reopened_pending is not None
-    assert reopened_pending.record.meal_name == "Борщ"
+    assert outcome.record is None
+    assert outcome.validation_status == "VALID"
+    assert "Я вижу:" in outcome.clarification_text
+    assert "Борщ" in outcome.clarification_text
+    assert "КБЖУ не рассчитаны" in outcome.clarification_text
+    assert diary.get_pending_meal(11) is None
+    assert _count_pending_rows(tmp_path / "healbite.db", user_id=11) == 0
     assert summary["entry_count"] == 0
     assert "vision_parse_ok" in joined
-    assert "confidence_bucket=high" in joined
+    assert "validation_status=VALID" in joined
     assert "vision_pending_staged" in joined
+
+
+def test_validate_food_vision_inventory_rejects_aggregate_nutrition_injection():
+    payload = json.dumps(
+        {
+            "schema_version": FOOD_VISION_SCHEMA_VERSION,
+            "items": [
+                {
+                    "visible_name": "Паста",
+                    "normalized_name": "паста",
+                    "confidence": 0.9,
+                    "estimated_grams_min": 60,
+                    "estimated_grams_max": 90,
+                    "preparation": "",
+                    "is_sauce": False,
+                    "uncertainty": "",
+                }
+            ],
+            "overall_confidence": 0.9,
+            "needs_user_confirmation": False,
+            "warnings": [],
+            "calories_kcal": 500,
+        },
+        ensure_ascii=False,
+    )
+
+    result = validate_food_vision_inventory(payload)
+
+    assert result.status == "INVALID_PROVIDER_OUTPUT"
+    assert result.inventory is None
+    assert result.reason == "aggregate_nutrition_present"
+
+
+def test_format_food_vision_inventory_reply_never_exposes_raw_json():
+    result = validate_food_vision_inventory(
+        json.dumps(
+            {
+                "schema_version": FOOD_VISION_SCHEMA_VERSION,
+                "items": [
+                    {
+                        "visible_name": "Огурцы",
+                        "normalized_name": "огурцы",
+                        "confidence": 0.81,
+                        "estimated_grams_min": 60,
+                        "estimated_grams_max": 100,
+                        "preparation": "соломкой",
+                        "is_sauce": False,
+                        "uncertainty": "точность порции ограничена",
+                    }
+                ],
+                "overall_confidence": 0.81,
+                "needs_user_confirmation": True,
+                "warnings": [],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert result.inventory is not None
+    reply = format_food_vision_inventory_reply(result.inventory)
+    assert "Я вижу:" in reply
+    assert "Огурцы" in reply
+    assert "{" not in reply
+    assert "calories" not in reply
+    assert "КБЖУ не рассчитаны" in reply
 
 
 def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):

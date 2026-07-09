@@ -275,18 +275,22 @@ def _vision_success_payload(*, meal_name: str = "Борщ") -> str:
             "success": True,
             "analysis": json.dumps(
                 {
-                    "is_food": True,
-                    "meal_name": meal_name,
-                    "display_name": meal_name,
-                    "raw_summary": f"{meal_name} на тарелке.",
-                    "confidence": 0.84,
-                    "totals": {
-                        "calories_kcal": 320,
-                        "protein_g": 14,
-                        "fat_g": 11,
-                        "carbs_g": 29,
-                    },
-                    "items": [{"name": meal_name}],
+                    "schema_version": "food_vision_inventory_v1",
+                    "items": [
+                        {
+                            "visible_name": meal_name,
+                            "normalized_name": meal_name.casefold(),
+                            "confidence": 0.88,
+                            "estimated_grams_min": 180,
+                            "estimated_grams_max": 260,
+                            "preparation": "",
+                            "is_sauce": False,
+                            "uncertainty": "",
+                        }
+                    ],
+                    "overall_confidence": 0.88,
+                    "needs_user_confirmation": False,
+                    "warnings": [],
                 },
                 ensure_ascii=False,
             ),
@@ -397,7 +401,7 @@ async def test_runner_photo_turn_ignores_old_water_history_when_vision_unavailab
 
 
 @pytest.mark.asyncio
-async def test_runner_photo_success_stages_pending_meal(tmp_path):
+async def test_runner_photo_success_returns_stage1_clarification(tmp_path):
     runner, adapter = _make_text_only_runner()
     source = _runner_source()
     event = _runner_photo_event(source)
@@ -414,15 +418,15 @@ async def test_runner_photo_success_stages_pending_meal(tmp_path):
     assert result is None
     adapter.send.assert_awaited_once()
     sent_text = adapter.send.await_args.args[1]
-    assert "Сохранить в дневник?" in sent_text
-    pending = diary.get_pending_meal(1)
-    assert pending is not None
-    assert pending.record.display_name == "Борщ"
+    assert "\u042f \u0432\u0438\u0436\u0443:" in sent_text
+    assert "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text
+    assert "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a?" not in sent_text
+    assert diary.get_pending_meal(1) is None
     assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
 
 
 @pytest.mark.asyncio
-async def test_runner_image_document_success_stages_pending_meal(tmp_path):
+async def test_runner_image_document_success_returns_stage1_clarification(tmp_path):
     runner, adapter = _make_text_only_runner()
     source = _runner_source()
     event = _runner_document_image_event(source, text="Посчитай КБЖУ")
@@ -439,10 +443,10 @@ async def test_runner_image_document_success_stages_pending_meal(tmp_path):
     assert result is None
     adapter.send.assert_awaited_once()
     sent_text = adapter.send.await_args.args[1]
-    assert "Сохранить в дневник?" in sent_text
-    pending = diary.get_pending_meal(1)
-    assert pending is not None
-    assert pending.record.display_name == "Салат"
+    assert "\u042f \u0432\u0438\u0436\u0443:" in sent_text
+    assert "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text
+    assert "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a?" not in sent_text
+    assert diary.get_pending_meal(1) is None
     assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
 
 

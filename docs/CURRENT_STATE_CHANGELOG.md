@@ -1,5 +1,24 @@
 # CURRENT_STATE changelog
 
+## 1.2.7 - 2026-07-09
+
+Added:
+- shorter provider-neutral Stage-1 food-vision prompt contract;
+- deterministic local confirmation derivation for mixed plates, sauces, low confidence, warnings, uncertainty, missing weights, broad ranges, and ambiguous normalization;
+- provider-free replay coverage for prompt neutrality and local ambiguity calibration.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `0e176d0bc8db06d0443be049aa62855ebed9db51`;
+- reduced benchmark-specific anchoring in the prompt and moved confirmation decisions out of prompt wording into local application logic;
+- kept historical R7D-B benchmark evidence unchanged while clarifying that Qwen live quality is not yet revalidated and Gemini compatibility remains unproven.
+
+Safety:
+- provider requests during validation: 0;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged;
+- strict schema validation, aggregate nutrition rejection, retry=0, and fallback=0 remained unchanged.
+
+
 ## 1.2.6 - 2026-07-09
 
 Added:

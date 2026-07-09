@@ -8,6 +8,10 @@ from gateway.healbite_nutrition_diary import (
     FOOD_VISION_SCHEMA_VERSION,
     MIN_ITEM_CONFIDENCE,
     MIN_OVERALL_CONFIDENCE,
+    FoodVisionInventory,
+    FoodVisionItem,
+    _VISION_PROMPT,
+    derive_inventory_confirmation_requirement,
     normalize_nutrition_payload,
     validate_food_vision_inventory,
 )
@@ -58,6 +62,30 @@ def _item(
         "is_sauce": is_sauce,
         "uncertainty": uncertainty,
     }
+
+
+def _confirmation_decision(items, *, overall_confidence=0.9, needs_user_confirmation=False, warnings=None):
+    return derive_inventory_confirmation_requirement(
+        FoodVisionInventory(
+            schema_version=FOOD_VISION_SCHEMA_VERSION,
+            items=[
+                FoodVisionItem(
+                    visible_name=item["visible_name"],
+                    normalized_name=item["normalized_name"],
+                    confidence=item["confidence"],
+                    estimated_grams_min=item["estimated_grams_min"],
+                    estimated_grams_max=item["estimated_grams_max"],
+                    preparation=item["preparation"],
+                    is_sauce=item["is_sauce"],
+                    uncertainty=item["uncertainty"],
+                )
+                for item in items
+            ],
+            overall_confidence=overall_confidence,
+            needs_user_confirmation=needs_user_confirmation,
+            warnings=list(warnings or []),
+        )
+    )
 
 
 def _canonical_component(name: str) -> str:
@@ -210,12 +238,25 @@ def test_collapsed_mixed_plate_output_is_rejected_fail_closed():
         ),
     ],
 )
-def test_reference_plate_inventories_validate(items, expected_names):
+def test_reference_plate_inventories_require_clarification(items, expected_names):
     validation = validate_food_vision_inventory(_inventory_payload(items))
+
+    assert validation.status == "NEEDS_CLARIFICATION"
+    assert validation.inventory is not None
+    assert [_canonical_component(item.normalized_name) for item in validation.inventory.items] == expected_names
+
+
+def test_single_clear_component_with_narrow_weight_range_remains_valid():
+    validation = validate_food_vision_inventory(
+        _inventory_payload(
+            [_item("????", "????", grams_min=250, grams_max=260)],
+            overall_confidence=0.92,
+            needs_user_confirmation=False,
+        )
+    )
 
     assert validation.status == "VALID"
     assert validation.inventory is not None
-    assert [_canonical_component(item.normalized_name) for item in validation.inventory.items] == expected_names
 
 
 def test_ambiguous_pastry_forces_clarification_gate():
@@ -327,3 +368,154 @@ def test_legacy_non_vision_payload_remains_accepted_for_text_flows():
     assert record is not None
     assert record.meal_name == "Омлет"
     assert record.calories_kcal == pytest.approx(220.0)
+
+def test_prompt_is_provider_neutral_and_not_benchmark_specific():
+    prompt = _VISION_PROMPT.casefold()
+
+    assert len(_VISION_PROMPT) < 900
+    assert prompt.count("food_vision_inventory_v1") == 1
+    assert "qwen" not in prompt
+    assert "gemini" not in prompt
+    assert "waffle" not in prompt
+    assert "ватруш" not in prompt
+    assert "сырник" not in prompt
+    assert "пирож" not in prompt
+    assert "telegram" not in prompt
+    assert "diary" not in prompt
+    assert "uncertainty" in prompt
+    assert "separately visible food components" in _VISION_PROMPT
+
+
+def test_provider_false_cannot_suppress_local_confirmation_for_mixed_plate():
+    decision = _confirmation_decision(
+        [
+            _item("Вафли", "вафли", grams_min=45, grams_max=70),
+            _item("Мясо", "мясо", grams_min=90, grams_max=130),
+            _item("Огурцы", "огурцы", grams_min=60, grams_max=100),
+        ],
+        needs_user_confirmation=False,
+    )
+
+    assert decision.required is True
+    assert decision.provider_requested is False
+    assert decision.local_required is True
+    assert "multiple_major_components" in decision.reasons
+
+
+def test_provider_true_remains_true_even_without_local_risk():
+    decision = _confirmation_decision(
+        [_item("Борщ", "борщ", grams_min=250, grams_max=260)],
+        needs_user_confirmation=True,
+    )
+
+    assert decision.required is True
+    assert decision.provider_requested is True
+    assert "provider_requested" in decision.reasons
+
+
+def test_sauce_presence_forces_local_confirmation():
+    decision = _confirmation_decision(
+        [
+            _item("Соус", "соус", grams_min=10, grams_max=15, is_sauce=True),
+        ],
+        needs_user_confirmation=False,
+    )
+
+    assert decision.required is True
+    assert "sauce_present" in decision.reasons
+
+
+def test_missing_weight_range_forces_local_confirmation():
+    decision = _confirmation_decision(
+        [_item("Сыр", "сыр", grams_min=None, grams_max=None)],
+        needs_user_confirmation=False,
+    )
+
+    assert decision.required is True
+    assert "missing_weight_range" in decision.reasons
+
+
+def test_broad_weight_range_forces_local_confirmation():
+    decision = _confirmation_decision(
+        [_item("Паста", "паста", grams_min=80, grams_max=160)],
+        needs_user_confirmation=False,
+    )
+
+    assert decision.required is True
+    assert "broad_weight_range" in decision.reasons
+
+
+def test_ambiguous_specific_normalization_forces_local_confirmation():
+    payload = _inventory_payload(
+        [
+            _item(
+                "Слоёная выпечка",
+                "ватрушка с творогом",
+                confidence=0.72,
+                grams_min=70,
+                grams_max=110,
+                uncertainty="точный вид неясен",
+            )
+        ],
+        overall_confidence=0.82,
+        needs_user_confirmation=False,
+    )
+
+    validation = validate_food_vision_inventory(payload)
+    decision = _confirmation_decision(
+        [
+            _item(
+                "Слоёная выпечка",
+                "ватрушка с творогом",
+                confidence=0.72,
+                grams_min=70,
+                grams_max=110,
+                uncertainty="точный вид неясен",
+            )
+        ],
+        overall_confidence=0.82,
+        needs_user_confirmation=False,
+    )
+
+    assert validation.status == "NEEDS_CLARIFICATION"
+    assert validation.inventory is not None
+    assert validation.inventory.items[0].visible_name == "Слоёная выпечка"
+    assert decision.required is True
+    assert "ambiguous_normalization" in decision.reasons
+
+
+def test_warnings_and_low_confidence_force_local_confirmation():
+    decision = _confirmation_decision(
+        [_item("Рыба", "рыба", confidence=MIN_ITEM_CONFIDENCE - 0.05, grams_min=120, grams_max=140)],
+        overall_confidence=MIN_OVERALL_CONFIDENCE - 0.05,
+        warnings=["часть блюда вне кадра"],
+        needs_user_confirmation=False,
+    )
+
+    assert decision.required is True
+    assert "low_item_confidence" in decision.reasons
+    assert "low_overall_confidence" in decision.reasons
+    assert "warnings_present" in decision.reasons
+
+
+def test_generic_ambiguous_label_remains_schema_valid():
+    payload = _inventory_payload(
+        [
+            _item(
+                "Выпечка",
+                "сладкая выпечка",
+                confidence=0.78,
+                grams_min=None,
+                grams_max=None,
+                uncertainty="начинка не видна",
+            )
+        ],
+        overall_confidence=0.84,
+        needs_user_confirmation=False,
+    )
+
+    validation = validate_food_vision_inventory(payload)
+
+    assert validation.status == "NEEDS_CLARIFICATION"
+    assert validation.inventory is not None
+    assert validation.reason == "clarification_required"

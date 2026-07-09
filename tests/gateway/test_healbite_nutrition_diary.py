@@ -300,7 +300,7 @@ async def test_analyze_and_maybe_log_returns_stage1_clarification_without_pendin
                                     "normalized_name": "борщ",
                                     "confidence": 0.92,
                                     "estimated_grams_min": 250,
-                                    "estimated_grams_max": 350,
+                                    "estimated_grams_max": 260,
                                     "preparation": "горячий суп",
                                     "is_sauce": False,
                                     "uncertainty": "",

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.4
+version: 1.2.5
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: b1d540bb40e93e8ec56ab41e02c0bacfebd566d0
+state_verified_against_main_sha: 10543bf2ad05c518f202eb23bc52fcd45dfa25e6
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `b1d540bb40e93e8ec56ab41e02c0bacfebd566d0`.
+  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -28,8 +28,12 @@ Git.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
 - Production git SHA: `unknown`.
 - Production image digest remains unmapped to a source SHA by this document.
-- Exact-main Qwen vision activation was attempted, reached the normal live
-  Telegram path, failed on recognition quality, and was rolled back cleanly.
+- Exact-main food-vision benchmark was completed offline against approved main
+  SHA `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
+- Benchmark assets were three operator-approved sanitized images with SHA256
+  `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
+  `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
+  `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
 - Current production vision routing is back on the prior Gemini configuration.
 - Qwen vision code is present in main, but Qwen is not deployed or active in
   production after the rejected live activation.
@@ -44,6 +48,15 @@ Git.
   (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
+- Gemini completed 0/3 benchmark responses and classified as
+  `PROVIDER_OPERATIONAL_FAILURE`.
+- Qwen completed 3/3 schema-valid benchmark responses, but classified as
+  `FAIL_CLOSED_COMPATIBLE` because food-quality and ambiguity gates were not met.
+- No benchmarked provider is eligible for rollout, and no automatic selection
+  was performed.
+- Benchmark request accounting stayed within the approved cap: 6 total provider
+  requests, 3 Gemini, 3 Qwen, 0 retries, 0 fallbacks, 0 repair requests,
+  0 Telegram requests, 0 production DB opens/writes, and 0 Qdrant requests.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any new rollout decision.
@@ -74,43 +87,49 @@ Git.
 
 ## 3. Active Blockers
 
-### P0 — Qwen live activation failed on recognition quality
+### P0 — No provider met the Stage-1 food vision benchmark gate
 
 Confirmed state:
 
-- Approved/current main for the audited rollout:
-  `22ed9e4d103b192947902fb66d6ad633b4d3ee31`.
-- Exact-main build and controlled production activation were executed in the
-  prior approved stage.
-- Synthetic Qwen probe passed with one provider request.
-- One live Telegram food-photo smoke reached the normal pending-confirmation
-  path but failed product quality.
-- Failure class: `recognition_quality`.
-- Safe operator evidence shows a composite plated meal was collapsed into an
-  incorrect named dish, visible side components were not represented
-  adequately, and aggregate calories/macros were not trustworthy enough for
-  product acceptance.
-- Meal was not saved; no second photo was sent.
-- Existing evidence proves transport, authorization, request dispatch and
-  structured parsing were working.
-- The failed activation was rolled back successfully to the previous Gemini
-  production image.
-- Production DB writes remained 0 and Qdrant was unchanged.
+- Approved/current main for the audited benchmark:
+  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
+- Exact audit image used for the benchmark:
+  `sha256:556985acd3eb46f2b8d673d529a304a5723dca67a25a195c62e5293d12953de8`.
+- Benchmark assets were the three approved sanitized images with SHA256
+  `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
+  `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
+  `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
+- Benchmark request accounting stayed within the approved hard cap:
+  6 total provider requests, 3 Gemini requests, 3 Qwen requests, 0 retries,
+  0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
+  0 production DB writes, and 0 Qdrant requests.
+- Gemini completed 0/3 responses, produced 0/3 schema-valid outputs, and was
+  classified as `PROVIDER_OPERATIONAL_FAILURE`.
+- Qwen completed 3/3 schema-valid outputs, but only reached major-component
+  precision `0.5556`, major-component recall `0.625`, and ambiguous
+  confirmation correctness `0.0`; classification:
+  `FAIL_CLOSED_COMPATIBLE`.
+- No provider met the Stage-1 acceptance gates, no eligible provider was
+  produced, and no automatic provider selection was performed.
+- Raw provider responses were not stored; secret leakage remained false; raw
+  error leakage remained false.
+- Production runtime remained unchanged during the benchmark.
 
 Current verdict:
 
-`QWEN PRODUCTION ACTIVATION REJECTED — REMEDIATION REQUIRED BEFORE ANY NEW LIVE PHOTO SMOKE`
+`V2-R7D-B BLOCKED — NO PROVIDER MET THE STAGE-1 SCHEMA AND FOOD QUALITY ACCEPTANCE GATES — NO DEPLOYMENT AUTHORIZED — PRODUCTION UNCHANGED`
 
-Next Qwen step:
+Next vision step:
 
-- Complete forensic classification and remediation design before any new live
-  rollout approval.
-- Do not repeat Qwen live photo smoke until offline quality gates exist.
+- Complete provider-specific remediation before any new production activation
+  request.
+- Do not run a new live Telegram photo smoke until an offline benchmark PASS
+  exists.
 
 Evidence:
 
-- `/home/hermes/evidence/s71v2-r6-deploy/20260709T042208Z/summary.json`
-- `/home/hermes/evidence/s71v2-r7a-quality-audit/20260709T044017Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7d-provider-benchmark/20260709T095936Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7d-provider-benchmark/20260709T095936Z/provider_comparison.md`
 
 ### P1 — Gemini vision HTTP 403
 
@@ -160,59 +179,51 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7C
+## 4. Active Work - Sprint 7.1V2-R7D-B
 
 Status:
 
-`STATUS=FOOD_COMPONENT_CONFIRMATION_IMPLEMENTED_OFFLINE_PRODUCTION_UNCHANGED`
+`STATUS=FOOD_VISION_PROVIDER_BENCHMARK_COMPLETED_NO_ELIGIBLE_PROVIDER_PRODUCTION_UNCHANGED`
 
-Current rollout state:
+Current benchmark state:
 
-- Exact-main deploy source:
-  `22ed9e4d103b192947902fb66d6ad633b4d3ee31`.
-- Qwen rollout image built successfully:
-  `sha256:51dbf3952ae4ae255087f6a8aa8c756e587064e7d6a82d67a3655b9d24be7c22`.
-- Previous production image restored successfully:
-  `sha256:a80d58e71c5c81e5b033f1b57da82f91717f7cbc716aa95b83d6b7c2a21315ab`.
-- Current production vision provider after rollback: `gemini`.
-- Qwen target provider value: `openai`.
-- Qwen target model value: `qwen3-vl-8b-instruct`.
-- Qwen target base URL:
-  `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`.
-- Target API key env var: `QWEN_API_KEY`.
-- Synthetic probe: PASS.
-- Live Telegram smoke: FAIL on recognition quality.
-- Rollback: PASS.
-- Meal save after failed smoke: false.
-- Second photo after failed smoke: false.
-- Production DB writes: 0.
-- Qdrant changes: 0.
+- Exact audited main source:
+  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
+- Exact audit image:
+  `sha256:556985acd3eb46f2b8d673d529a304a5723dca67a25a195c62e5293d12953de8`.
+- Current production vision provider remains `gemini`.
+- Gemini benchmark model value: `gemini-2.5-flash`.
+- Qwen benchmark provider/model value:
+  `openai` / `qwen3-vl-8b-instruct`.
+- Qwen benchmark base URL host: `dashscope-intl.aliyuncs.com`.
+- Benchmark request accounting: PASS within the hard cap.
+- Gemini benchmark result: 0 completed responses out of 3,
+  `PROVIDER_OPERATIONAL_FAILURE`.
+- Qwen benchmark result: 3 schema-valid responses out of 3, but food-quality
+  gate FAIL with precision `0.5556`, recall `0.625`, and ambiguous
+  confirmation correctness `0.0`.
+- Eligible providers: none.
+- Higher-scoring candidate: `null`.
+- Automatic selection performed: false.
+- Raw provider responses stored: false.
+- Secret leakage: false.
+- Raw error leakage: false.
+- Telegram requests: 0.
+- Production DB opens/writes: 0 / 0.
+- Qdrant requests: 0.
 
-Repository remediation summary:
+Repository state that remains true:
 
-- Stage-1 vision now requires a component-grounded structured inventory schema.
+- Stage-1 vision requires a component-grounded structured inventory schema.
 - Model-generated aggregate nutrition is rejected at local validation time.
 - Invalid, low-confidence, or ambiguous outputs cannot stage a diary-ready
   pending meal.
 - Stage-1 returns a clarification/component summary instead of pending save
   totals when validation succeeds.
-- Offline mixed-plate quality fixtures and thresholds were added with provider
-  requests fixed at zero during validation.
-
-Historical implementation context from R1 remains true:
-
-- Goal: Qwen3-VL as primary vision provider through task-scoped auxiliary
-  vision routing.
-- Integration shape: OpenAI-compatible vision configuration with task-scoped
-  key resolution.
-- Same key, Singapore endpoint, workspace and auth method were externally
-  verified across both tested Qwen model identifiers.
-- Verified accessible vision model: `qwen3-vl-8b-instruct` (HTTP 200, image
-  understanding confirmed).
-- Verified denied vision model: `qwen2.5-vl-7b-instruct` (HTTP 403,
-  `access_denied`).
-- Text, weekly, shopping, memory, Qdrant and Telegram routing are unchanged by
-  the implementation diff.
+- Offline mixed-plate quality fixtures and thresholds are present in the test
+  suite.
+- Text, weekly, shopping, memory, Qdrant and Telegram routing remain isolated
+  from the vision-provider benchmark path.
 - One provider request is allowed per one vision turn.
 - No Qwen-to-Gemini fallback is allowed for vision.
 
@@ -230,15 +241,19 @@ Historical implementation context from R1 remains true:
 
 For Qwen:
 
-1. Complete remediation design and acceptance gates from the R7A forensic step.
-2. Implement prompt/schema/validation hardening in follow-up stages.
-3. Rebuild and revalidate offline before any new production activation request.
-4. After a future approved deploy, run exactly one controlled Telegram smoke.
+1. Improve component grounding quality until offline benchmark precision/recall
+   and ambiguity thresholds are met.
+2. Re-run the offline benchmark with approved assets and capped request
+   accounting before any new deploy request.
+3. Do not run a new live Telegram photo smoke until an offline benchmark PASS
+   exists.
 
 For Gemini:
 
 - Do not run new diagnostics.
 - Wait for Google Console audit or a separate operator decision.
+- Do not treat the benchmark operational failure as sufficient to change the
+  external-auth remediation path by itself.
 
 ## 7. Mandatory Codex Rules
 

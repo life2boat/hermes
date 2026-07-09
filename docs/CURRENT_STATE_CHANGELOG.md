@@ -1,3 +1,22 @@
+
+## 1.2.5 - 2026-07-09
+
+Added:
+- recorded the exact-main Stage-1 food vision provider benchmark against three approved sanitized assets;
+- recorded exact benchmark request accounting and the audit image digest;
+- recorded provider classifications for Gemini and Qwen from the same offline benchmark.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`;
+- promoted the benchmark result to the top active blocker because no provider met the Stage-1 rollout gate;
+- updated the active-work section from R7C implementation state to R7D-B benchmark state.
+
+Safety:
+- provider requests during validation: 6 total (3 Gemini, 3 Qwen), with 0 retries, 0 fallbacks and 0 repair requests;
+- Telegram requests, diary writes, production DB opens/writes and Qdrant requests remained 0;
+- production build/deploy/restart not performed and production runtime remained unchanged;
+- no secrets, raw provider responses or raw provider errors were stored.
+
 # CURRENT_STATE changelog
 
 ## 1.2.4 - 2026-07-09

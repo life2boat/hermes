@@ -3998,10 +3998,10 @@ class TestAsyncCallPolicy:
         main_fallback = MagicMock()
         payment_fallback = MagicMock()
         monkeypatch.setitem(async_call_llm.__globals__, "_resolve_task_provider_model", lambda *args, **kwargs: (
-            "custom", "qwen2.5-vl-7b-instruct", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "synthetic", None
+            "custom", "qwen3-vl-8b-instruct", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "synthetic", None
         ))
         monkeypatch.setitem(async_call_llm.__globals__, "resolve_vision_provider_client", lambda *args, **kwargs: (
-            "custom", fake_client, "qwen2.5-vl-7b-instruct"
+            "custom", fake_client, "qwen3-vl-8b-instruct"
         ))
         monkeypatch.setitem(async_call_llm.__globals__, "_try_configured_fallback_chain", fallback_chain)
         monkeypatch.setitem(async_call_llm.__globals__, "_try_main_agent_model_fallback", main_fallback)

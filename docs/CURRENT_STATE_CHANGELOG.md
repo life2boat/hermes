@@ -1,5 +1,25 @@
 # CURRENT_STATE changelog
 
+## 1.2.2 — 2026-07-09
+
+Added:
+- recorded the exact-main Qwen live activation attempt outcome;
+- recorded that synthetic probe succeeded while live Telegram food recognition quality failed;
+- recorded the clean rollback to the previous Gemini production image;
+- recorded the R7A forensic classification and remediation-only next step.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `22ed9e4d103b192947902fb66d6ad633b4d3ee31`;
+- changed Qwen state from implemented and not yet deployed to activation attempted, rejected on quality, rolled back;
+- clarified that current production routing is back on Gemini and Qwen is not active in production.
+
+Safety:
+- no provider requests were performed in this tracked-change step;
+- no production config, build, deploy or restart actions were performed in this tracked-change step;
+- production DB remained unchanged for this tracked-change step;
+- Qdrant remained unchanged;
+- no secrets, private IDs, raw provider responses or raw Telegram artifacts were stored.
+
 ## 1.2.1 — 2026-07-09
 
 Added:

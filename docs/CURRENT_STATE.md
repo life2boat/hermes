@@ -33,8 +33,8 @@ Git.
 - Current production vision routing is back on the prior Gemini configuration.
 - Qwen vision code is present in main, but Qwen is not deployed or active in
   production after the rejected live activation.
-- A component-grounded Stage-1 food vision contract is implemented in main for
-  offline-only validation.
+- A component-grounded Stage-1 food vision contract is implemented in repository
+  code and has passed offline-only validation so far.
 - Stage-1 vision output now rejects model-generated aggregate calories/macros
   and cannot stage a diary-ready pending meal directly from a photo result.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
@@ -155,11 +155,11 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work — Sprint 7.1V2-R7A
+## 4. Active Work ? Sprint 7.1V2-R7B
 
 Status:
 
-`STATUS=OFFLINE_FOOD_VISION_CONTRACT_IMPLEMENTED_PRODUCTION_UNCHANGED`
+`STATUS=OFFLINE_FOOD_VISION_CONTRACT_UNDER_REVIEW_PRODUCTION_UNCHANGED`
 
 Current rollout state:
 

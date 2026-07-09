@@ -1,6 +1,23 @@
 # CURRENT_STATE changelog
 
-## 1.2.3 ? 2026-07-09
+## 1.2.4 - 2026-07-09
+
+Added:
+- local component-confirmation flow for mixed-plate meal photos;
+- explicit correction commands for component replacement, addition, removal and weight confirmation;
+- focused regression coverage for Stage-1 inventory confirmation and Stage-2 safe nutrition handoff.
+
+Changed:
+- split meal-photo confirmation into inventory confirmation first and diary-save confirmation second;
+- blocked diary save until nutrition is derived only from confirmed components;
+- updated the CURRENT_STATE verification base to project main `b1d540bb40e93e8ec56ab41e02c0bacfebd566d0`.
+
+Safety:
+- provider requests during validation: 0;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
+## 1.2.3 - 2026-07-09
 
 Added:
 - component-grounded Stage-1 visual inventory contract for meal-photo analysis;

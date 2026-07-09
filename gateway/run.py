@@ -12832,13 +12832,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except (TypeError, ValueError):
             return None
 
+        diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
+        if diary is None:
+            return None
+
+        pending_inventory = diary.get_pending_inventory(normalized_user_id, include_expired=True)
+        if pending_inventory is not None:
+            inventory_result = diary.handle_pending_inventory_reply(normalized_user_id, message)
+            final_response = inventory_result.reply_text
+            return {
+                "final_response": final_response,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": final_response},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "session_id": session_id,
+                "completed": True,
+                "response_previewed": False,
+            }
+
         choice = self._resolve_healbite_pending_meal_choice(message)
         if choice is None:
             return None
 
-        diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
-        if diary is None:
-            return None
         pending = diary.get_pending_meal(normalized_user_id, include_expired=True)
         if pending is None:
             return None
@@ -12849,7 +12868,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         elif choice == "confirm":
             result = diary.confirm_pending_meal(normalized_user_id)
             if result.status == "missing":
-                final_response = "Не нашел ожидающую запись. Попробуй отправить фото еще раз."
+                final_response = "?? ????? ????????? ??????. ???????? ????????? ???? ??? ???."
             elif result.status == "expired":
                 final_response = format_pending_meal_expired_reply()
             else:

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.7
+version: 1.2.8
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 0e176d0bc8db06d0443be049aa62855ebed9db51
+state_verified_against_main_sha: 14981980403da56db94c90483bcab4ee209e9784
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `0e176d0bc8db06d0443be049aa62855ebed9db51`.
+  `14981980403da56db94c90483bcab4ee209e9784`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -28,46 +28,54 @@ Git.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
 - Production git SHA: `unknown`.
 - Production image digest remains unmapped to a source SHA by this document.
-- Exact-main food-vision benchmark was completed offline against approved main
-  SHA `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
-- Benchmark assets were three operator-approved sanitized images with SHA256
-  `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
+- Limited exact-main vision re-benchmark evidence was recorded against approved
+  main SHA `14981980403da56db94c90483bcab4ee209e9784`.
+- Benchmark assets remained the same three operator-approved sanitized images
+  with SHA256 `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
   `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
-- Current production vision routing is back on the prior Gemini configuration.
-- Qwen vision code is present in main, but Qwen is not deployed or active in
-  production after the rejected live activation.
+- Current production vision routing remains on the previously deployed Gemini
+  configuration by deployment state only; this docs task did not change
+  production config or runtime.
+- Qwen vision code remains present in main, but Qwen is not deployed or active
+  in production after the rejected live activation.
 - A component-grounded Stage-1 food vision contract is implemented in repository
-  code and has passed offline-only validation so far.
-- Stage-1 vision output now rejects model-generated aggregate calories/macros
-  and cannot stage a diary-ready pending meal directly from a photo result.
-- Mixed-plate photo flow now uses a two-step component confirmation path:
-  Stage-1 confirms visible components first, Stage-2 calculates nutrition only
-  from confirmed components and then asks for the final diary save decision.
+  code and has passed provider-limited offline validation only.
+- Stage-1 vision output rejects model-generated aggregate calories/macros and
+  cannot stage a diary-ready pending meal directly from a photo result.
+- Mixed-plate photo flow uses a two-step component confirmation path: Stage-1
+  confirms visible components first, Stage-2 calculates nutrition only from
+  confirmed components and then asks for the final diary save decision.
 - User correction commands for meal-photo components are implemented locally
   (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
-- The Stage-1 food-vision prompt is now shorter, provider-neutral, and no
+- The Stage-1 food-vision prompt remains shorter, provider-neutral, and no
   longer anchored to the failed benchmark plate or pastry labels.
-- Local confirmation requirement is now derived deterministically from validated
+- Local confirmation requirement is derived deterministically from validated
   inventory data and cannot be suppressed by provider `needs_user_confirmation=false`.
 - Mixed plates, sauces, low confidence, uncertainty, warnings, missing weights,
-  broad ranges, and over-specific normalization now force clarification locally.
-- Historical R7D-B benchmark results remain unchanged; Qwen quality has not yet
-  been revalidated live or rebenchmarked after this remediation.
-- Historical Gemini benchmark remains recorded as
-  `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`.
-- Repository code now preserves sanitized Gemini execution-stage and category
+  broad ranges, and over-specific normalization force clarification locally.
+- Limited re-benchmark request accounting stayed within the approved cap:
+  4 total provider requests, 1 Gemini request, 3 Qwen requests, 0 retries,
+  0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
+  0 production DB writes, and 0 Qdrant requests.
+- Gemini used asset `02_simple_plate.jpg`, reached request construction and the
+  live provider HTTP step, and failed as `GEMINI_ACCESS_DENIED` with HTTP class
+  `4xx` before decode, extraction or validation; Gemini schema validity,
+  validator reach and food-quality evaluation remain not established by the
+  limited re-benchmark.
+- Repository code preserves sanitized Gemini execution-stage and category
   diagnostics for future provider-free validation and any separately approved
-  live retest.
-- Qwen completed 3/3 schema-valid benchmark responses, but classified as
-  `FAIL_CLOSED_COMPATIBLE` because food-quality and ambiguity gates were not met.
-- No benchmarked provider is eligible for rollout, and no automatic selection
-  was performed.
-- Benchmark request accounting stayed within the approved cap: 6 total provider
-  requests, 3 Gemini, 3 Qwen, 0 retries, 0 fallbacks, 0 repair requests,
-  0 Telegram requests, 0 production DB opens/writes, and 0 Qdrant requests.
+  external-auth follow-up.
+- Qwen completed 3/3 schema-valid benchmark responses on
+  `qwen3-vl-8b-instruct`, but classified as `QWEN_FAIL_CLOSED_COMPATIBLE`
+  because food-quality and ambiguity gates were not met.
+- Qwen limited re-benchmark metrics were: major-component precision `0.625`,
+  major-component recall `0.600`, sauce recall `0.000`, and confirmation
+  correctness `1.000`; the ambiguity gate still failed.
+- No provider is eligible for rollout, no automatic provider selection was
+  performed, deployment remains unauthorized, and deployment remains blocked.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any new rollout decision.
@@ -98,52 +106,54 @@ Git.
 
 ## 3. Active Blockers
 
-### P0 — No provider met the Stage-1 food vision benchmark gate
+### P0 — Limited re-benchmark confirmed no rollout-eligible provider
 
 Confirmed state:
 
-- Approved/current main for the audited benchmark:
-  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
-- Exact audit image used for the benchmark:
-  `sha256:556985acd3eb46f2b8d673d529a304a5723dca67a25a195c62e5293d12953de8`.
-- Benchmark assets were the three approved sanitized images with SHA256
+- Approved/current main for the limited re-benchmark:
+  `14981980403da56db94c90483bcab4ee209e9784`.
+- Benchmark assets remained the three approved sanitized images with SHA256
   `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
   `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
-- Benchmark request accounting stayed within the approved hard cap:
-  6 total provider requests, 3 Gemini requests, 3 Qwen requests, 0 retries,
+- Limited re-benchmark request accounting stayed within the approved hard cap:
+  4 total provider requests, 1 Gemini request, 3 Qwen requests, 0 retries,
   0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
   0 production DB writes, and 0 Qdrant requests.
-- Gemini completed 0/3 responses, produced 0/3 schema-valid outputs, and remains
-  historically classified as `GEMINI_UNKNOWN_OPERATIONAL_FAILURE` for the stored
-  benchmark evidence.
-- Qwen completed 3/3 schema-valid outputs, but only reached major-component
-  precision `0.5556`, major-component recall `0.625`, and ambiguous
-  confirmation correctness `0.0`; classification:
-  `FAIL_CLOSED_COMPATIBLE`.
-- No provider met the Stage-1 acceptance gates, no eligible provider was
-  produced, and no automatic provider selection was performed.
+- Gemini was exercised exactly once on `02_simple_plate.jpg` and failed at
+  `PROVIDER_HTTP` as `GEMINI_ACCESS_DENIED` with HTTP class `4xx`.
+- Gemini schema validity, validator reach, and food-quality evaluation remain
+  unproven because the limited re-benchmark never reached decode or validation.
+- Qwen completed 3/3 schema-valid outputs on `qwen3-vl-8b-instruct`.
+- Qwen limited re-benchmark metrics were major-component precision `0.625`,
+  major-component recall `0.600`, sauce recall `0.000`, and confirmation
+  correctness `1.000`.
+- Qwen remained `QWEN_FAIL_CLOSED_COMPATIBLE`; the ambiguity gate still failed,
+  `benchmark_candidate=false`, and Qwen remained ineligible for rollout.
+- No eligible provider was produced, automatic provider selection remained
+  false, deployment remained unauthorized, and deployment remained blocked.
 - Raw provider responses were not stored; secret leakage remained false; raw
   error leakage remained false.
-- Production runtime remained unchanged during the benchmark.
+- Production runtime remained unchanged during the limited re-benchmark.
 
 Current verdict:
 
-`V2-R7D-B BLOCKED — NO PROVIDER MET THE STAGE-1 SCHEMA AND FOOD QUALITY ACCEPTANCE GATES — NO DEPLOYMENT AUTHORIZED — PRODUCTION UNCHANGED`
+`V2-R7E-C1 BLOCKED — GEMINI ACCESS DENIED — QWEN REMAINS FAIL-CLOSED AND INELIGIBLE — NO PROVIDER ELIGIBLE FOR ROLLOUT — PRODUCTION UNCHANGED`
 
 Next vision step:
 
-- Complete provider-specific remediation before any new production activation
-  request.
-- Do not run a new live Telegram photo smoke until an offline benchmark PASS
-  exists.
+- Keep production on the existing Gemini deployment state until a separately
+  approved provider path is proven eligible.
+- Do not run a new live Telegram photo smoke until a provider earns an offline
+  PASS and a fresh activation playbook is approved.
 
 Evidence:
 
-- `/home/hermes/evidence/s71v2-r7d-provider-benchmark/20260709T095936Z/summary.json`
-- `/home/hermes/evidence/s71v2-r7d-provider-benchmark/20260709T095936Z/provider_comparison.md`
+- `/home/hermes/evidence/s71v2-r7e-c1-limited-rebenchmark/20260709T134049Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7e-c1-limited-rebenchmark/20260709T134049Z/eligibility_decision.md`
+- `/home/hermes/evidence/s71v2-r7e-c1-limited-rebenchmark/20260709T134049Z/historical_comparison.md`
 
-### P1 — Gemini vision HTTP 403
+### P1 — Gemini external authorization remains unresolved
 
 Confirmed state:
 
@@ -152,36 +162,38 @@ Confirmed state:
 - Header used by runtime: `x-goog-api-key`.
 - Authoritative credential source: runtime callable provider.
 - Endpoint/auth family match: true.
-- Runtime key resolution defect was fixed in PR48.
-- Gemini vision still returned HTTP 403 in the live validation evidence.
+- Runtime key resolution defect from the earlier stale-key path is fixed.
+- Limited re-benchmark evidence proved runtime key resolution per request and a
+  live provider response, but Gemini still returned `GEMINI_ACCESS_DENIED` at
+  `PROVIDER_HTTP` with HTTP class `4xx`.
 - Safe reason, domain and canonical status were not present in the stored
   provider error evidence.
-- Successful Gemini text calls with the same credential source are not proven.
-- One approved reason probe has already been used and is exhausted.
-- Repeating the same Gemini probe is not allowed without a separate decision.
+- Successful Gemini text calls with the same credential source are still not
+  proven by controlled evidence.
 
 Additional ListModels result recorded from operator workflow:
 
-- Query-parameter API key mode returned HTTP 403 with `text/html`.
-- `x-goog-api-key` header mode returned HTTP 403 with `text/html`.
+- Query-parameter API key mode and `x-goog-api-key` header mode both previously
+  returned HTTP 403 with `text/html`.
 - No Gemini model list was obtained.
 - Configured model remains `gemini-2.5-flash`.
 - Do not change the Gemini model name only as a naming fix.
 
 Current verdict:
 
-`V1-R4 INCONCLUSIVE — APPROVED REASON PROBE EXHAUSTED — EXTERNAL GOOGLE CONSOLE AUDIT REQUIRED — PRODUCTION UNCHANGED`
+`V1-R4 / V2-R7E-C1 BLOCKED — RUNTIME KEY PROPAGATION FIXED LOCALLY BUT EXTERNAL GEMINI AUTHORIZATION REMAINS DENIED — PRODUCTION UNCHANGED`
 
 Evidence:
 
 - `/home/hermes/evidence/s71v1-r4/20260707T135028Z/summary.json`
-- `/home/hermes/evidence/s71v1-r3b-live/20260707T002132Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7e-c1-limited-rebenchmark/20260709T134049Z/gemini_diagnostic.json`
 
 Next Gemini step:
 
-- Operator-only read-only Google Console audit.
+- Operator-only read-only external authorization audit or separately approved
+  credential/project remediation.
 
-Do not perform until separately authorized: additional Gemini diagnostics, reason probes, credential rotation, new-key creation, production config changes or Telegram photo smoke for Gemini.
+Do not perform until separately authorized: additional Gemini diagnostics, reason probes, credential rotation, new-key creation, production config changes, or Telegram photo smoke for Gemini.
 
 ### P2 — Existing weekly-menu draft cannot be published
 
@@ -191,33 +203,32 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7E-B2
+## 4. Active Work - Sprint 7.1V2-R7E-C1-DOCS
 
 Status:
 
-`STATUS=QWEN_FOOD_GROUNDING_PROMPT_SIMPLIFIED_LOCAL_AMBIGUITY_CALIBRATION_HARDENED_PROVIDER_FREE_VALIDATION_COMPLETE_PRODUCTION_UNCHANGED`
+`STATUS=LIMITED_VISION_REBENCHMARK_RECORDED_NO_PROVIDER_ELIGIBLE_DEPLOYMENT_BLOCKED_PRODUCTION_UNCHANGED`
 
-Current remediation state:
+Current recorded state:
 
 - Approved current main source for this state update:
-  `0e176d0bc8db06d0443be049aa62855ebed9db51`.
-- Historical benchmark source remains:
-  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
-- Stage-1 prompt was simplified and benchmark-specific anchoring was reduced.
-- Confirmation requirement is now derived locally from validated inventory data.
-- Provider `needs_user_confirmation=false` can no longer suppress local caution.
-- Mixed plates, sauces, low confidence, uncertainty, warnings, missing weight
-  ranges, broad ranges, and ambiguous normalization now force clarification.
-- Strict schema validation, aggregate nutrition rejection, malformed JSON
-  rejection, two-phase confirmation, retry=0, and fallback=0 remain unchanged.
-- Historical R7D-B benchmark evidence and recorded scores were not modified.
-- Qwen quality has not yet been rebenchmarked after this remediation.
-- Gemini compatibility remains unproven and Gemini diagnostics behavior from
-  R7E-B1 remains unchanged.
-- Provider requests: 0.
-- Telegram requests: 0.
-- Production DB opens/writes: 0 / 0.
-- Qdrant requests: 0.
+  `14981980403da56db94c90483bcab4ee209e9784`.
+- Limited re-benchmark evidence path:
+  `/home/hermes/evidence/s71v2-r7e-c1-limited-rebenchmark/20260709T134049Z`.
+- Benchmark assets and manifest matched the previously approved benchmark set.
+- Gemini was exercised once and failed at `PROVIDER_HTTP` as
+  `GEMINI_ACCESS_DENIED` with HTTP class `4xx`.
+- Qwen was exercised three times on `qwen3-vl-8b-instruct`, produced 3/3
+  schema-valid responses, and remained `QWEN_FAIL_CLOSED_COMPATIBLE` because
+  food-quality and ambiguity gates were not met.
+- Eligible providers: none.
+- Automatic provider selection: false.
+- Deployment authorized: false.
+- Deployment blocked: true.
+- Provider requests during this docs task: 0.
+- Telegram requests during this docs task: 0.
+- Production DB opens/writes during this docs task: 0 / 0.
+- Qdrant requests during this docs task: 0.
 - Production runtime remained unchanged.
 
 Repository state that remains true:
@@ -249,19 +260,28 @@ Repository state that remains true:
 
 For Qwen:
 
-1. Improve component grounding quality until offline benchmark precision/recall
-   and ambiguity thresholds are met.
-2. Re-run the offline benchmark with approved assets and capped request
-   accounting before any new deploy request.
-3. Do not run a new live Telegram photo smoke until an offline benchmark PASS
-   exists.
+1. Keep Qwen fail-closed and undeployed until a future provider revision earns a
+   fresh offline PASS on approved assets.
+2. Any future Qwen re-benchmark must preserve capped request accounting and must
+   not bypass the ambiguity gate.
+3. Do not run a new live Telegram photo smoke for Qwen until an offline PASS
+   exists and a separate activation playbook is approved.
 
 For Gemini:
 
-- Do not run new diagnostics.
-- Wait for Google Console audit or a separate operator decision.
-- Do not treat the benchmark operational failure as sufficient to change the
-  external-auth remediation path by itself.
+- Treat runtime key propagation as locally fixed but external authorization as
+  unresolved.
+- Wait for operator-approved external auth remediation before any new Gemini
+  live request.
+- Do not treat the limited re-benchmark 403 alone as permission to change the
+  deployed provider automatically.
+
+For rollout decisions:
+
+- Eligible providers remain none.
+- Automatic provider selection remains false.
+- Production deployment changes remain blocked until a provider becomes
+  rollout-eligible under controlled evidence.
 
 ## 7. Mandatory Codex Rules
 

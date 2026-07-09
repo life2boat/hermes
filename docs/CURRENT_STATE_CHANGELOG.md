@@ -1,5 +1,23 @@
 # CURRENT_STATE changelog
 
+## 1.2.8 - 2026-07-09
+
+Added:
+- recorded the limited exact-main vision re-benchmark against approved main `14981980403da56db94c90483bcab4ee209e9784`;
+- recorded the single-request Gemini operational result `GEMINI_ACCESS_DENIED` at `PROVIDER_HTTP` with HTTP class `4xx`;
+- recorded Qwen limited re-benchmark quality metrics and fail-closed ineligibility from the same evidence set.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `14981980403da56db94c90483bcab4ee209e9784`;
+- replaced the older six-request benchmark blocker summary with the newer four-request limited re-benchmark result;
+- clarified that no provider is eligible for rollout, automatic provider selection remains false, and production stays on the existing Gemini deployment state only.
+
+Safety:
+- provider requests during the limited re-benchmark evidence: 4 total (1 Gemini, 3 Qwen), with 0 retries, 0 fallbacks and 0 repair requests;
+- provider requests during this docs task: 0;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
 ## 1.2.7 - 2026-07-09
 
 Added:

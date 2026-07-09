@@ -1,5 +1,24 @@
 # CURRENT_STATE changelog
 
+## 1.2.1 — 2026-07-09
+
+Added:
+- verified external access for `qwen3-vl-8b-instruct`;
+- recorded confirmed image-understanding success for the verified Qwen3 model;
+- recorded confirmed `qwen2.5-vl-7b-instruct` model-specific `access_denied`.
+
+Changed:
+- corrected the tracked Qwen vision target model identifier to `qwen3-vl-8b-instruct`;
+- updated the CURRENT_STATE verification base to project main `3cac5ecf6b47671d57675f2c26995d5ab97370f1`;
+- clarified that credential replacement is not required and production remains on Gemini.
+
+Safety:
+- production unchanged;
+- build/deploy/restart not performed;
+- provider requests and Telegram smoke not performed in this tracked-change step;
+- DB/Qdrant unchanged;
+- no secrets, private IDs or raw provider responses stored.
+
 ## 1.2.0 — 2026-07-08
 
 Added:

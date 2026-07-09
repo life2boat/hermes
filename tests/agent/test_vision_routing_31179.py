@@ -148,7 +148,7 @@ class TestQwenVisionTaskScopedConfig:
 auxiliary:
   vision:
     provider: openai
-    model: qwen2.5-vl-7b-instruct
+    model: qwen3-vl-8b-instruct
     base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
     api_key_env: QWEN_API_KEY
 """)
@@ -163,7 +163,7 @@ auxiliary:
 
         assert provider == "custom"
         assert client is not None
-        assert model == "qwen2.5-vl-7b-instruct"
+        assert model == "qwen3-vl-8b-instruct"
         assert urlparse(str(getattr(client, "base_url", ""))).hostname == "dashscope-intl.aliyuncs.com"
         assert getattr(client, "api_key", None) == "TEST_QWEN_KEY_DO_NOT_LOG_V2"
 
@@ -172,7 +172,7 @@ auxiliary:
 auxiliary:
   vision:
     provider: openai
-    model: qwen2.5-vl-7b-instruct
+    model: qwen3-vl-8b-instruct
     base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
     api_key_env: QWEN_API_KEY
 """)

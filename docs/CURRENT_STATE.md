@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.0
-updated_at: 2026-07-08
+version: 1.2.1
+updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 60f84093c0fe82d29814c2ac8e3c0fb6dc847e7b
+state_verified_against_main_sha: 3cac5ecf6b47671d57675f2c26995d5ab97370f1
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `60f84093c0fe82d29814c2ac8e3c0fb6dc847e7b`.
+  `3cac5ecf6b47671d57675f2c26995d5ab97370f1`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -127,7 +127,7 @@ Confirmed state:
 - Original V2 base:
   `20f1469dc395130fbde30b9736750e247e9b8306`.
 - Current project main base:
-  `60f84093c0fe82d29814c2ac8e3c0fb6dc847e7b`.
+  `3cac5ecf6b47671d57675f2c26995d5ab97370f1`.
 - Main advancement from the old V2 base was docs-only:
   `AGENTS.md`, `docs/CURRENT_STATE.md`, and
   `docs/CURRENT_STATE_CHANGELOG.md`.
@@ -136,15 +136,22 @@ Confirmed state:
 - Integration implementation commit:
   `797ce97ca516ce624a4ccd3b1247a96bd2b9f207`.
 - Canonical dirty checkout was not modified by the V2-R1 work.
-- Goal: Qwen2.5-VL as primary vision provider through task-scoped auxiliary
+- Goal: Qwen3-VL as primary vision provider through task-scoped auxiliary
   vision routing.
 - Integration shape: OpenAI-compatible vision configuration with task-scoped
   key resolution.
 - Target provider value: `openai`.
-- Target model value: `qwen2.5-vl-7b-instruct`.
+- Target model value: `qwen3-vl-8b-instruct`.
 - Target base URL:
   `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`.
 - Target API key env var: `QWEN_API_KEY`.
+- Same key, Singapore endpoint, workspace and auth method were externally
+  verified across both tested Qwen model identifiers.
+- Verified accessible vision model: `qwen3-vl-8b-instruct` (HTTP 200, image
+  understanding confirmed).
+- Verified denied vision model: `qwen2.5-vl-7b-instruct` (HTTP 403,
+  `access_denied`).
+- Credential replacement is not required for the production activation path.
 - Text, weekly, shopping, memory, Qdrant and Telegram routing are unchanged by
   the implementation diff.
 - One provider request is allowed per one vision turn.
@@ -173,7 +180,7 @@ Not performed:
 
 Final V2-R1 state line:
 
-Qwen vision support is implemented and locally validated in the integration branch, but it is not deployed or active in production.
+Qwen vision support is implemented and locally validated in the integration branch, the verified target model is `qwen3-vl-8b-instruct`, and it is not deployed or active in production.
 
 ## 5. Previous V2 Attempt History
 

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.3
+version: 1.2.4
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 4aa67def8b4ece2aab6bb0ebdeb121318ccc7eab
+state_verified_against_main_sha: b1d540bb40e93e8ec56ab41e02c0bacfebd566d0
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `4aa67def8b4ece2aab6bb0ebdeb121318ccc7eab`.
+  `b1d540bb40e93e8ec56ab41e02c0bacfebd566d0`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -37,6 +37,11 @@ Git.
   code and has passed offline-only validation so far.
 - Stage-1 vision output now rejects model-generated aggregate calories/macros
   and cannot stage a diary-ready pending meal directly from a photo result.
+- Mixed-plate photo flow now uses a two-step component confirmation path:
+  Stage-1 confirms visible components first, Stage-2 calculates nutrition only
+  from confirmed components and then asks for the final diary save decision.
+- User correction commands for meal-photo components are implemented locally
+  (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
 - Weekly/shopping production feature flags: last confirmed target state is
@@ -155,11 +160,11 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work ? Sprint 7.1V2-R7B
+## 4. Active Work - Sprint 7.1V2-R7C
 
 Status:
 
-`STATUS=OFFLINE_FOOD_VISION_CONTRACT_UNDER_REVIEW_PRODUCTION_UNCHANGED`
+`STATUS=FOOD_COMPONENT_CONFIRMATION_IMPLEMENTED_OFFLINE_PRODUCTION_UNCHANGED`
 
 Current rollout state:
 

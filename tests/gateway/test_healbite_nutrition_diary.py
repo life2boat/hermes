@@ -337,8 +337,11 @@ async def test_analyze_and_maybe_log_returns_stage1_clarification_without_pendin
     assert "Я вижу:" in outcome.clarification_text
     assert "Борщ" in outcome.clarification_text
     assert "КБЖУ не рассчитаны" in outcome.clarification_text
+    pending_inventory = diary.get_pending_inventory(11)
+    assert pending_inventory is not None
+    assert pending_inventory.inventory_id
     assert diary.get_pending_meal(11) is None
-    assert _count_pending_rows(tmp_path / "healbite.db", user_id=11) == 0
+    assert _count_pending_rows(tmp_path / "healbite.db", user_id=11) == 1
     assert summary["entry_count"] == 0
     assert "vision_parse_ok" in joined
     assert "validation_status=VALID" in joined
@@ -1272,7 +1275,7 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
     tokens = set_session_vars(platform="telegram", chat_id="chat-96", user_id="96", session_key="s-96", session_id="session-96")
     try:
-        payload = json.loads(update_last_meal_tool(new_meal_name="?????????????? ??????????", new_calories=210))
+        payload = json.loads(update_last_meal_tool(new_meal_name="\u041e\u0431\u043d\u043e\u0432\u043b\u0451\u043d\u043d\u044b\u0439 \u0441\u0430\u043b\u0430\u0442", new_calories=210))
     finally:
         clear_session_vars(tokens)
 
@@ -1283,7 +1286,7 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
     assert "210 ккал" in payload["user_facing_reply"]
     assert first_summary["entries"][0]["meal_name"] == "\u041f\u043b\u043e\u0432"
     assert first_summary["entries"][0]["calories_kcal"] == pytest.approx(640.0)
-    assert second_summary["entries"][0]["meal_name"] == "?????????????? ??????????"
+    assert second_summary["entries"][0]["meal_name"] == "\u041e\u0431\u043d\u043e\u0432\u043b\u0451\u043d\u043d\u044b\u0439 \u0441\u0430\u043b\u0430\u0442"
     assert second_summary["entries"][0]["calories_kcal"] == pytest.approx(210.0)
 
 

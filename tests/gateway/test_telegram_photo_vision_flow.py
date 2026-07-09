@@ -209,7 +209,7 @@ async def test_reply_to_image_document_with_text_routes_to_vision_image_flow(ada
 
 @pytest.mark.asyncio
 async def test_text_only_reply_does_not_attach_image_without_photo(adapter):
-    original_text = _make_message(text="????my lunch?")
+    original_text = _make_message(text="\u0447\u0442\u043e \u0441 \u043c\u043e\u0438\u043c \u043e\u0431\u0435\u0434\u043e\u043c?")
     msg = _make_message(text="reply", reply_to_message=original_text)
 
     with patch.object(adapter, "_enqueue_text_event") as enqueue_mock:
@@ -380,7 +380,7 @@ async def test_runner_photo_turn_ignores_old_water_history_when_vision_unavailab
     runner, adapter = _make_text_only_runner()
     source = _runner_source()
     event = _runner_photo_event(source)
-    history = [{"role": "user", "content": "????? ?????? ????"}]
+    history = [{"role": "user", "content": "\u0432\u043e\u0434\u044b \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0441\u043a\u043e\u043b\u044c\u043a\u043e"}]
 
     with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=json.dumps({
         "success": False,

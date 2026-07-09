@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.5
+version: 1.2.6
 updated_at: 2026-07-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 10543bf2ad05c518f202eb23bc52fcd45dfa25e6
+state_verified_against_main_sha: 7b38d862978781b711b1ca5d76e1735bc7ee0d27
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
+  `7b38d862978781b711b1ca5d76e1735bc7ee0d27`.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -48,8 +48,11 @@ Git.
   (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
-- Gemini completed 0/3 benchmark responses and classified as
-  `PROVIDER_OPERATIONAL_FAILURE`.
+- Historical Gemini benchmark remains recorded as
+  `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`.
+- Repository code now preserves sanitized Gemini execution-stage and category
+  diagnostics for future provider-free validation and any separately approved
+  live retest.
 - Qwen completed 3/3 schema-valid benchmark responses, but classified as
   `FAIL_CLOSED_COMPATIBLE` because food-quality and ambiguity gates were not met.
 - No benchmarked provider is eligible for rollout, and no automatic selection
@@ -103,8 +106,9 @@ Confirmed state:
   6 total provider requests, 3 Gemini requests, 3 Qwen requests, 0 retries,
   0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
   0 production DB writes, and 0 Qdrant requests.
-- Gemini completed 0/3 responses, produced 0/3 schema-valid outputs, and was
-  classified as `PROVIDER_OPERATIONAL_FAILURE`.
+- Gemini completed 0/3 responses, produced 0/3 schema-valid outputs, and remains
+  historically classified as `GEMINI_UNKNOWN_OPERATIONAL_FAILURE` for the stored
+  benchmark evidence.
 - Qwen completed 3/3 schema-valid outputs, but only reached major-component
   precision `0.5556`, major-component recall `0.625`, and ambiguous
   confirmation correctness `0.0`; classification:
@@ -179,15 +183,17 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7D-B
+## 4. Active Work - Sprint 7.1V2-R7E-B1
 
 Status:
 
-`STATUS=FOOD_VISION_PROVIDER_BENCHMARK_COMPLETED_NO_ELIGIBLE_PROVIDER_PRODUCTION_UNCHANGED`
+`STATUS=GEMINI_DIAGNOSTICS_HARDENED_PROVIDER_FREE_VALIDATION_COMPLETE_PRODUCTION_UNCHANGED`
 
 Current benchmark state:
 
-- Exact audited main source:
+- Approved current main source for this state update:
+  `7b38d862978781b711b1ca5d76e1735bc7ee0d27`.
+- Historical benchmark source remains:
   `10543bf2ad05c518f202eb23bc52fcd45dfa25e6`.
 - Exact audit image:
   `sha256:556985acd3eb46f2b8d673d529a304a5723dca67a25a195c62e5293d12953de8`.
@@ -197,8 +203,12 @@ Current benchmark state:
   `openai` / `qwen3-vl-8b-instruct`.
 - Qwen benchmark base URL host: `dashscope-intl.aliyuncs.com`.
 - Benchmark request accounting: PASS within the hard cap.
-- Gemini benchmark result: 0 completed responses out of 3,
-  `PROVIDER_OPERATIONAL_FAILURE`.
+- Historical Gemini benchmark result remains 0 completed responses out of 3,
+  `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`.
+- Gemini runtime now preserves sanitized stage/category diagnostics without
+  storing raw provider errors, raw responses, keys or image payloads.
+- Future Gemini live retests can emit a narrower safe category when the provider
+  exposes enough typed status information.
 - Qwen benchmark result: 3 schema-valid responses out of 3, but food-quality
   gate FAIL with precision `0.5556`, recall `0.625`, and ambiguous
   confirmation correctness `0.0`.

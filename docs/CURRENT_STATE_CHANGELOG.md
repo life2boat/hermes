@@ -1,3 +1,24 @@
+# CURRENT_STATE changelog
+
+## 1.2.6 - 2026-07-09
+
+Added:
+- sanitized Gemini failure diagnostic contract with allowlisted execution stages and categories;
+- provider-free Gemini request-shape compatibility coverage for the native adapter path;
+- provider-free classification tests for wrapped HTTP, transport, decode, content-extraction and inventory-validation failures.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `7b38d862978781b711b1ca5d76e1735bc7ee0d27`;
+- preserved typed Gemini stage/category metadata before redacting raw provider details;
+- kept historical Gemini benchmark evidence unchanged as `GEMINI_UNKNOWN_OPERATIONAL_FAILURE`;
+- clarified that future Gemini retests may yield narrower safe categories, but live Gemini compatibility remains unproven.
+
+Safety:
+- provider requests during validation: 0;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged;
+- raw provider errors, raw responses, keys and image payloads remained redacted.
+
 
 ## 1.2.5 - 2026-07-09
 
@@ -16,8 +37,6 @@ Safety:
 - Telegram requests, diary writes, production DB opens/writes and Qdrant requests remained 0;
 - production build/deploy/restart not performed and production runtime remained unchanged;
 - no secrets, raw provider responses or raw provider errors were stored.
-
-# CURRENT_STATE changelog
 
 ## 1.2.4 - 2026-07-09
 

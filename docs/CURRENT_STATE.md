@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.10
+version: 1.2.11
 updated_at: 2026-07-10
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 1e048a7479253283ba2087e4e2ef6ad9ca584556
+state_verified_against_main_sha: f45a3c16b49282775d06003948e449d756aa54f2
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
+  `f45a3c16b49282775d06003948e449d756aa54f2`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -30,18 +30,24 @@ Git.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
 - Production git SHA: `unknown`.
 - Production image digest remains unmapped to a source SHA by this document.
-- Next-generation Qwen access and benchmark evidence remains anchored to the
-  benchmarked repository main SHA `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
-- That Q1 evidence used repository food-vision prompt/validator/confirmation
-  components together with a task-scoped DashScope-compatible benchmark
-  harness, not the current built-in Hermes Qwen OAuth runtime.
+- Next-generation Qwen benchmark evidence now spans two bounded external tasks:
+  Q1 access/schema plus `qwen3.7-plus` quality evidence anchored to repository
+  main `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`, and the completed
+  `qwen3.6-plus` three-image quality benchmark anchored to repository main
+  `f45a3c16b49282775d06003948e449d756aa54f2`.
+- Both benchmark tasks used repository food-vision prompt, validator, local
+  confirmation derivation, manifest, and scoring together with an approved
+  task-scoped DashScope OpenAI-compatible external harness.
+- Neither benchmark task validated the current built-in Hermes Qwen OAuth
+  runtime; `qwen3.7-plus` and `qwen3.6-plus` benchmark validity does not prove
+  deployable Qwen runtime integration.
 - Benchmark assets remained the same three operator-approved sanitized images
   with SHA256 `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
   `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
-- Current production vision routing remains on the previously deployed Gemini
-  configuration by deployment state only; this docs task did not change
-  production config or runtime.
+- Current production vision routing remains on the existing Gemini deployment
+  state only; this docs task did not change production config or runtime, and
+  the benchmark does not endorse Gemini as a winner.
 - Qwen vision code remains present in main, but Qwen is not deployed or active
   in production after the rejected live activation.
 - A component-grounded Stage-1 food vision contract is implemented in repository
@@ -61,41 +67,43 @@ Git.
   inventory data and cannot be suppressed by provider `needs_user_confirmation=false`.
 - Mixed plates, sauces, low confidence, uncertainty, warnings, missing weights,
   broad ranges, and over-specific normalization force clarification locally.
-- Next-generation Qwen request accounting stayed within the approved cap:
-  6 total provider requests, 3 access probes, 3 benchmark requests, 0 retries,
-  0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
-  0 production DB writes, and 0 Qdrant requests.
+- Next-generation Qwen request accounting remained within approved budgets:
+  Q1 used 6 provider requests total (3 access probes, 3 `qwen3.7-plus`
+  benchmark requests), and the `qwen3.6-plus` benchmark used exactly 3 provider
+  requests with 0 access probes, 0 retries, 0 fallbacks, 0 repair requests,
+  0 Telegram requests, 0 production DB opens, 0 production DB writes, and
+  0 Qdrant requests.
 - All three next-generation aliases `qwen3.7-plus`, `qwen3.6-plus`, and
   `qwen3.6-flash` were operationally reachable on the access asset within that
   task-scoped external benchmark context, each produced schema-valid inventory
   output, and each passed the local validator.
 - Access/schema success in that external benchmark context is not a
   food-quality benchmark and does not make any tested alias rollout eligible.
-- Q1 model access and benchmark results remain valid for the recorded model
-  aliases, but Q1 did not validate the current built-in Hermes Qwen OAuth
-  runtime and did not prove deployable Qwen provider integration.
-- `qwen3.7-plus` was selected as the highest-priority model under the
-  pre-approved fixed ordering among models that passed the access/schema probe.
-- Only `qwen3.7-plus` received the full three-image benchmark in this task;
-  `qwen3.6-plus` and `qwen3.6-flash` were not quality-benchmarked.
-- `qwen3.7-plus` completed 3/3 schema-valid benchmark responses and 3/3 local
-  validator passes, with aggregate nutrition violations `0`, invalid staging
-  `0`, confirmation correctness `1.000`, and ambiguity gate pass `true`.
-- `qwen3.7-plus` food grounding remained below the approved quality gate:
-  major-component precision `0.111111`, major-component recall `0.444444`, and
-  sauce recall `0.5`.
-- `qwen3.7-plus` was classified as `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE` and
-  `benchmark_candidate=false`.
-- Successful schema output did not imply acceptable recognition quality.
-- Relative to the previous `qwen3-vl-8b-instruct` benchmark, mixed-plate and
-  simple-plate component precision/recall regressed, aggregate sauce recall
-  remained below the gate, confirmation correctness remained `1.0`, schema
-  compatibility remained valid, ambiguity handling improved, and invalid
-  staging remained zero.
+- `qwen3.7-plus` completed the earlier three-image benchmark and remained
+  `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE` with major-component precision
+  `0.111111`, major-component recall `0.444444`, sauce recall `0.5`,
+  confirmation correctness `1.000`, ambiguity gate pass `true`, aggregate
+  nutrition violations `0`, and invalid staging `0`.
+- `qwen3.6-plus` has now completed its own three-image benchmark and remained
+  `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE` with major-component precision
+  `0.222222`, major-component recall `0.555556`, sauce recall `0.5`,
+  confirmation correctness `1.000`, ambiguity gate pass `true`, aggregate
+  nutrition violations `0`, and invalid staging `0`.
+- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
+  quality-benchmarked.
+- The `qwen3.6-plus` benchmark improved aggregate precision and recall versus
+  `qwen3.7-plus`, but both remained below the quality gate and neither became a
+  benchmark candidate.
+- Relative to the previous `qwen3-vl-8b-instruct` benchmark, `qwen3.6-plus`
+  aggregate precision, recall, and sauce recall regressed, while schema safety
+  remained valid and ambiguity handling remained passing.
+- The simple-plate sample produced `0.0` major-component precision and `0.0`
+  major-component recall for `qwen3.6-plus`; this is a confirmed benchmark
+  outcome, not a confirmed root cause.
 - The three-image benchmark remains a release gate only and is too small to
-  establish general superiority of one model over another.
-- No provider is eligible for rollout, no automatic provider selection was
-  performed, deployment remains unauthorized, and deployment remains blocked.
+  establish general superiority or inferiority of one model over another.
+- No provider is eligible for rollout, automatic provider selection remains
+  false, deployment remains unauthorized, and deployment remains blocked.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any new rollout decision.
@@ -126,76 +134,100 @@ Git.
 
 ## 3. Active Blockers
 
-### P0 — Next-generation Qwen access audit confirmed no rollout-eligible provider
+### P0 ? External Qwen benchmarks confirmed no rollout-eligible provider
 
 Confirmed state:
 
-- Approved benchmarked main for the next-generation Qwen access audit:
-  `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
-- Current repository/docs-closure main for this correction:
-  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
-- Q1 execution path: `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`.
-- Q1 benchmark context: `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`.
-- Q1 credential mechanism: `QWEN_API_KEY`.
-- Q1 endpoint family: `DASHSCOPE_INTL`.
-- Current Hermes runtime context for requested Qwen:
+- Approved repository/docs-closure main for this state update:
+  `f45a3c16b49282775d06003948e449d756aa54f2`.
+- Earlier Q1 access/schema plus `qwen3.7-plus` benchmark evidence remains
+  anchored to repository main `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+- Completed `qwen3.6-plus` benchmark evidence is anchored to repository main
+  `f45a3c16b49282775d06003948e449d756aa54f2`.
+- External Qwen benchmark execution path:
+  `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`.
+- External Qwen benchmark context:
+  `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`.
+- External Qwen credential mechanism: `QWEN_API_KEY`.
+- External Qwen endpoint family: `DASHSCOPE_INTL`.
+- Current built-in Hermes runtime context for requested Qwen:
   `QWEN_OAUTH_PORTAL_CONTEXT`.
-- Repository credential resolver used in Q1: `false`.
-- Credential context match: `false`.
-- Endpoint context match: `false`.
-- Client path match: `false`.
+- Current Hermes Qwen runtime proven: `false`.
+- Deployable Qwen integration proven: `false`.
+- Repository credential resolver used in these external benchmark tasks:
+  `false`.
 - Benchmark assets remained the three approved sanitized images with SHA256
   `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
   `58a4b4a12c19deeafa12be55e965300ed89eb57aa1adecea1daa323204379363`.
-- Request accounting stayed within the approved hard cap:
-  6 total provider requests, 3 access probes, 3 benchmark requests, 0 retries,
-  0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
-  0 production DB writes, and 0 Qdrant requests.
+- Request accounting stayed within approved hard caps:
+  Q1 used 6 total provider requests (3 access probes, 3 benchmark requests),
+  and the `qwen3.6-plus` benchmark used exactly 3 provider requests with
+  0 access probes, 0 retries, 0 fallbacks, 0 repair requests,
+  0 Telegram requests, 0 production DB opens, 0 production DB writes, and
+  0 Qdrant requests.
 - `qwen3.7-plus`, `qwen3.6-plus`, and `qwen3.6-flash` each produced one
   schema-valid access response on `02_simple_plate.jpg` and each passed the
   local validator within the task-scoped DashScope-compatible benchmark
   context.
 - Access/schema success proved operational reachability and contract
   compatibility only within that external benchmark context; it did not prove
-  food-recognition quality.
-- `qwen3.7-plus` was selected as the highest-priority model under the
-  pre-approved fixed ordering among models that passed the access/schema probe.
-- `qwen3.7-plus` alone received the full three-image benchmark.
-- `qwen3.6-plus` and `qwen3.6-flash` remain `not_benchmarked` for quality.
-- `qwen3.7-plus` benchmark metrics were major-component precision `0.111111`,
-  major-component recall `0.444444`, sauce recall `0.5`, and confirmation
-  correctness `1.000`.
-- Local safety behavior worked: schema validity remained `3/3`, validator pass
-  remained `3/3`, aggregate nutrition violations remained `0`, invalid staging
-  remained `0`, ambiguity handling passed, and no unsafe diary staging was
-  observed.
-- Food-component grounding and sauce recognition still remained below the
-  rollout threshold.
-- `qwen3.7-plus` was classified as `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`,
-  `benchmark_candidate=false`, and no next-generation Qwen provider became
-  rollout eligible.
-- Q1 benchmark results remain valid, but current Hermes Qwen runtime
-  compatibility remains unproven and no deployable Qwen integration became
-  proven.
+  current built-in Hermes runtime compatibility and did not prove food quality.
+- `qwen3.7-plus` completed the earlier three-image benchmark and remained
+  `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
+- `qwen3.6-plus` has now completed the same three-image benchmark and remained
+  `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
+- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
+  quality-benchmarked.
+- `qwen3-vl-8b-instruct` remains `QWEN_FAIL_CLOSED_COMPATIBLE`,
+  `benchmark_candidate=false`.
+- `qwen3.6-plus` safety and schema handling passed: schema validity `3/3`,
+  validator pass `3/3`, aggregate nutrition violations `0`, invalid staging
+  `0`, ambiguity handling pass `true`, confirmation correctness `1.0`, and no
+  unsafe diary staging observed.
+- `qwen3.6-plus` component-grounding quality failed the existing gate:
+  mixed-plate precision `0.666667`, mixed-plate recall `0.666667`,
+  mixed-plate sauce recall `0.5`; simple-plate precision `0.0`, simple-plate
+  recall `0.0`, simple-plate sauce recall `1.0`; aggregate precision
+  `0.222222`, aggregate recall `0.555556`, aggregate sauce recall `0.5`.
+- The simple-plate `0.0/0.0` result is confirmed evidence. Its cause remains
+  open and may reflect model recognition failure, component segmentation
+  mismatch, normalized-name mismatch, manifest alias/scoring mismatch, or
+  prompt-contract interpretation difference.
+- Relative to `qwen3.7-plus`, `qwen3.6-plus` aggregate precision improved,
+  aggregate recall improved, sauce recall remained unchanged, confirmation
+  correctness remained unchanged, ambiguity remained passing, and both models
+  remained below the quality gate.
+- Relative to `qwen3-vl-8b-instruct`, `qwen3.6-plus` aggregate precision,
+  recall, and sauce recall regressed; schema compatibility remained valid,
+  ambiguity handling remained passing, and invalid staging remained zero.
 - The three-image benchmark is a bounded release gate and is too small to
-  establish general superiority of one model over another.
-- No eligible provider was produced, automatic provider selection remained
-  false, deployment remained unauthorized, and deployment remained blocked.
+  establish general superiority or inferiority of one model over another.
+- Eligible providers remain `none`; automatic provider selection remains
+  `false`; deployment authorized remains `false`; deployment blocked remains
+  `true`.
+- Production vision provider remains Gemini by existing deployment state only;
+  this benchmark does not endorse Gemini and does not authorize a provider
+  switch.
 - Raw provider responses were not stored; secret leakage remained false; raw
   error leakage remained false.
-- Production runtime remained unchanged during the next-generation Qwen access audit.
+- Production runtime remained unchanged during these external Qwen benchmark tasks.
 
 Current verdict:
 
-`V2-R7F-Q1 PASS — NEXT-GENERATION QWEN ACCESS AUDIT COMPLETED — STRONGEST ACCESSIBLE MODEL BENCHMARKED — MODEL REMAINS FAIL-CLOSED AND NOT ELIGIBLE — NO DEPLOYMENT AUTHORIZATION — PRODUCTION UNCHANGED`
+`V2-R7F-Q2-B PASS ? QWEN3.6-PLUS BENCHMARK COMPLETED THROUGH APPROVED EXTERNAL DASHSCOPE CONTEXT ? MODEL REMAINS FAIL-CLOSED AND INELIGIBLE ? CURRENT HERMES RUNTIME STILL UNPROVEN ? PRODUCTION UNCHANGED`
 
 Next vision step:
 
 - Keep production on the existing Gemini deployment state until a separately
   approved provider path is proven eligible.
+- Perform provider-free forensic analysis of sanitized recognized component
+  names and expected manifest mappings before changing prompt, manifest, or
+  scoring.
 - Do not run a new live Telegram photo smoke until a provider earns an offline
   PASS and a fresh activation playbook is approved.
+- Do not automatically authorize `qwen3.6-flash` benchmarking, prompt changes,
+  manifest changes, scoring-threshold changes, runtime integration, or deployment.
 
 Evidence:
 
@@ -203,6 +235,8 @@ Evidence:
 - `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z/eligibility_decision.md`
 - `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z/historical_comparison.md`
 - `/home/hermes/evidence/s71v2-r7f-q2-a-qwen-context-alignment/20260710T011214Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7f-q2-b-qwen36plus/20260710T043420Z/summary.json`
+- `/home/hermes/evidence/s71v2-r7f-q2-b-qwen36plus/20260710T043420Z/model_comparison.md`
 
 ### P1 — Gemini external authorization remains unresolved
 
@@ -254,46 +288,46 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7F-Q2-A-DOCS
+## 4. Active Work - Sprint 7.1V2-R7F-Q2-B-DOCS
 
 Status:
 
-`STATUS=QWEN_BENCHMARK_CONTEXT_CLARIFIED_RESULTS_PRESERVED_RUNTIME_NOT_PROVEN_DEPLOYMENT_BLOCKED_PRODUCTION_UNCHANGED`
+`STATUS=QWEN36_PLUS_EXTERNAL_BENCHMARK_RECORDED_FAIL_CLOSED_RUNTIME_UNPROVEN_DEPLOYMENT_BLOCKED_PRODUCTION_UNCHANGED`
 
 Current recorded state:
 
 - Approved current main source for this docs-only state update:
-  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
-- Next-generation Qwen benchmark evidence remains anchored to:
-  `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+  `f45a3c16b49282775d06003948e449d756aa54f2`.
 - Context-alignment evidence path:
   `/home/hermes/evidence/s71v2-r7f-q2-a-qwen-context-alignment/20260710T011214Z`.
 - Next-generation Qwen Q1 evidence path:
   `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z`.
-- Recorded Q1 execution path:
+- `qwen3.6-plus` benchmark evidence path:
+  `/home/hermes/evidence/s71v2-r7f-q2-b-qwen36plus/20260710T043420Z`.
+- Recorded external benchmark execution path:
   `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`.
-- Recorded Q1 benchmark context:
+- Recorded external benchmark context:
   `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`.
-- Recorded Q1 credential mechanism:
+- Recorded external benchmark credential mechanism:
   `QWEN_API_KEY`.
-- Recorded Q1 endpoint family:
+- Recorded external benchmark endpoint family:
   `DASHSCOPE_INTL`.
 - Current Hermes runtime context for requested Qwen remains:
   `QWEN_OAUTH_PORTAL_CONTEXT`.
-- Repository credential resolver used in Q1: false.
+- Current Hermes runtime proven: false.
+- Deployable integration proven: false.
 - Benchmark assets and manifest matched the previously approved benchmark set.
 - `qwen3.7-plus`, `qwen3.6-plus`, and `qwen3.6-flash` each passed the
   access/schema probe on `02_simple_plate.jpg` within the task-scoped
   DashScope-compatible benchmark context.
-- Only `qwen3.7-plus` received the three-image quality benchmark.
-- `qwen3.7-plus` remained `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE` because
-  food-component grounding and sauce recognition stayed below the approved
-  threshold.
-- Q1 model benchmark results remain valid.
-- Q1 current Hermes runtime proven: false.
-- Q1 deployable integration proven: false.
-- External harness reusable for benchmark only: true.
-- Runtime alignment required before deployment: true.
+- `qwen3.7-plus` and `qwen3.6-plus` have both completed the three-image quality
+  benchmark and both remained below the quality gate.
+- `qwen3.6-plus` aggregate metrics are precision `0.222222`, recall `0.555556`,
+  sauce recall `0.5`, confirmation correctness `1.0`, ambiguity gate `true`,
+  aggregate nutrition violations `0`, and invalid staging `0`.
+- `qwen3.6-plus` final classification is
+  `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE` with `benchmark_candidate=false`.
+- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is not benchmarked.
 - Eligible providers: none.
 - Automatic provider selection: false.
 - Deployment authorized: false.
@@ -333,23 +367,21 @@ Repository state that remains true:
 
 For Qwen:
 
-1. Option A: benchmark `qwen3.6-plus` on the same three approved assets under
-   the same manifest and thresholds, with a maximum future request budget of 3,
-   reusing the same task-scoped DashScope context only after explicit approval.
-2. Option B: benchmark `qwen3.6-flash` only after separate approval.
-3. Option C: perform provider-neutral prompt/runtime research only without
-   weakening the strict validator, local confirmation gate, no-macro rule, or
-   two-phase save flow.
-4. Recommended next quality candidate: `qwen3.6-plus`, because it passed the
-   access/schema probe but has not yet received the full three-image quality
-   benchmark.
-5. This recommendation is a testing recommendation only and is not a
-   production-provider selection.
-6. Reusing the same benchmark context would establish controlled external
+1. Perform provider-free forensic analysis of the sanitized recognized
+   component names and expected manifest mappings for the completed
+   `qwen3.6-plus` benchmark.
+2. Determine whether the simple-plate `0.0/0.0` failure reflects genuine visual
+   misrecognition, naming/normalization mismatch, component grouping, scoring
+   alias limitations, or prompt-contract behavior.
+3. Do not change prompt, manifest, aliases, thresholds, runtime integration, or
+   deployment policy before that provider-free analysis is complete and reviewed.
+4. `qwen3.6-flash` remains a possible future benchmark candidate only after
+   separate approval.
+5. Reusing the same benchmark context would establish controlled external
    benchmark-path model quality only; it would not prove current Hermes OAuth
    runtime compatibility, production integration readiness, or deployment
    authorization.
-7. No repeat access probe is necessary only if the credential mechanism,
+6. No repeat access probe is necessary only if the credential mechanism,
    endpoint family, model alias, and client/request shape remain unchanged.
 
 For Gemini:

@@ -1,5 +1,26 @@
 # CURRENT_STATE changelog
 
+## 1.2.11 - 2026-07-10
+
+Added:
+- recorded the completed `qwen3.6-plus` three-image benchmark evidence path `/home/hermes/evidence/s71v2-r7f-q2-b-qwen36plus/20260710T043420Z`;
+- recorded `qwen3.6-plus` external benchmark execution path `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS` and benchmark context `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`;
+- recorded `qwen3.6-plus` aggregate metrics as major precision `0.222222`, major recall `0.555556`, sauce recall `0.5`, confirmation correctness `1.000`, ambiguity gate pass `true`, aggregate nutrition violations `0`, and invalid staging `0`.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `f45a3c16b49282775d06003948e449d756aa54f2` for repository-state/docs closure only;
+- clarified that `qwen3.6-plus` benchmark validity is real for the external DashScope task-scoped harness, but current Hermes OAuth runtime compatibility and deployable Qwen integration remain unproven;
+- changed `qwen3.6-plus` status from `ACCESS_SCHEMA_PASS / not_benchmarked` to `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE / benchmark_candidate=false`;
+- clarified that `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and not benchmarked;
+- replaced the previous recommendation to benchmark `qwen3.6-plus` with a provider-free forensic analysis recommendation for the observed simple-plate `0.0/0.0` result.
+
+Safety:
+- provider requests during the recorded benchmark evidence: 3 total, with 0 access probes, 0 retries, 0 fallbacks and 0 repair requests;
+- provider requests during this docs task: 0;
+- runtime/test/config changes during this docs task: 0;
+- production build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
 ## 1.2.10 - 2026-07-10
 
 Added:

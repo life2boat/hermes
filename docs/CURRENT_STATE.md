@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.9
+version: 1.2.10
 updated_at: 2026-07-10
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 1b8a98195bc15e5dc0bfc54b71d308c77b86e627
+state_verified_against_main_sha: 1e048a7479253283ba2087e4e2ef6ad9ca584556
 production_sha: unknown
 ---
 
@@ -17,7 +17,9 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
+- This verification SHA records repository state and Source-of-Truth docs closure
+  only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
@@ -28,8 +30,11 @@ Git.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
 - Production git SHA: `unknown`.
 - Production image digest remains unmapped to a source SHA by this document.
-- Next-generation Qwen access and benchmark evidence was recorded against
-  approved main SHA `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+- Next-generation Qwen access and benchmark evidence remains anchored to the
+  benchmarked repository main SHA `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+- That Q1 evidence used repository food-vision prompt/validator/confirmation
+  components together with a task-scoped DashScope-compatible benchmark
+  harness, not the current built-in Hermes Qwen OAuth runtime.
 - Benchmark assets remained the same three operator-approved sanitized images
   with SHA256 `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
@@ -61,10 +66,14 @@ Git.
   0 fallbacks, 0 repair requests, 0 Telegram requests, 0 production DB opens,
   0 production DB writes, and 0 Qdrant requests.
 - All three next-generation aliases `qwen3.7-plus`, `qwen3.6-plus`, and
-  `qwen3.6-flash` were operationally reachable on the access asset, each
-  produced schema-valid inventory output, and each passed the local validator.
-- Access/schema success is not a food-quality benchmark and does not make any
-  tested alias rollout eligible.
+  `qwen3.6-flash` were operationally reachable on the access asset within that
+  task-scoped external benchmark context, each produced schema-valid inventory
+  output, and each passed the local validator.
+- Access/schema success in that external benchmark context is not a
+  food-quality benchmark and does not make any tested alias rollout eligible.
+- Q1 model access and benchmark results remain valid for the recorded model
+  aliases, but Q1 did not validate the current built-in Hermes Qwen OAuth
+  runtime and did not prove deployable Qwen provider integration.
 - `qwen3.7-plus` was selected as the highest-priority model under the
   pre-approved fixed ordering among models that passed the access/schema probe.
 - Only `qwen3.7-plus` received the full three-image benchmark in this task;
@@ -121,8 +130,20 @@ Git.
 
 Confirmed state:
 
-- Approved/current main for the next-generation Qwen access audit:
+- Approved benchmarked main for the next-generation Qwen access audit:
   `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
+- Current repository/docs-closure main for this correction:
+  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
+- Q1 execution path: `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`.
+- Q1 benchmark context: `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`.
+- Q1 credential mechanism: `QWEN_API_KEY`.
+- Q1 endpoint family: `DASHSCOPE_INTL`.
+- Current Hermes runtime context for requested Qwen:
+  `QWEN_OAUTH_PORTAL_CONTEXT`.
+- Repository credential resolver used in Q1: `false`.
+- Credential context match: `false`.
+- Endpoint context match: `false`.
+- Client path match: `false`.
 - Benchmark assets remained the three approved sanitized images with SHA256
   `135872354b6c531fdeeb4cdabf2b3edfddc62d943f944b8a8600aad3806ebd74`,
   `6b06b7f5bc822ac2d806472840f41be58dad4d2cce472c113d7b3487fbc1ed8d`, and
@@ -133,9 +154,11 @@ Confirmed state:
   0 production DB writes, and 0 Qdrant requests.
 - `qwen3.7-plus`, `qwen3.6-plus`, and `qwen3.6-flash` each produced one
   schema-valid access response on `02_simple_plate.jpg` and each passed the
-  local validator.
+  local validator within the task-scoped DashScope-compatible benchmark
+  context.
 - Access/schema success proved operational reachability and contract
-  compatibility only; it did not prove food-recognition quality.
+  compatibility only within that external benchmark context; it did not prove
+  food-recognition quality.
 - `qwen3.7-plus` was selected as the highest-priority model under the
   pre-approved fixed ordering among models that passed the access/schema probe.
 - `qwen3.7-plus` alone received the full three-image benchmark.
@@ -152,6 +175,9 @@ Confirmed state:
 - `qwen3.7-plus` was classified as `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`,
   `benchmark_candidate=false`, and no next-generation Qwen provider became
   rollout eligible.
+- Q1 benchmark results remain valid, but current Hermes Qwen runtime
+  compatibility remains unproven and no deployable Qwen integration became
+  proven.
 - The three-image benchmark is a bounded release gate and is too small to
   establish general superiority of one model over another.
 - No eligible provider was produced, automatic provider selection remained
@@ -176,6 +202,7 @@ Evidence:
 - `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z/summary.json`
 - `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z/eligibility_decision.md`
 - `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z/historical_comparison.md`
+- `/home/hermes/evidence/s71v2-r7f-q2-a-qwen-context-alignment/20260710T011214Z/summary.json`
 
 ### P1 — Gemini external authorization remains unresolved
 
@@ -227,25 +254,46 @@ Confirmed state from the last review report: the draft had 20 entries instead of
 
 Known state: six Telegram parse-mode failures match the existing baseline. They are not a new regression for this state update, but still require a fix or quarantine with owner and deadline.
 
-## 4. Active Work - Sprint 7.1V2-R7F-Q1-DOCS
+## 4. Active Work - Sprint 7.1V2-R7F-Q2-A-DOCS
 
 Status:
 
-`STATUS=NEXTGEN_QWEN_ACCESS_RECORDED_NO_PROVIDER_ELIGIBLE_DEPLOYMENT_BLOCKED_PRODUCTION_UNCHANGED`
+`STATUS=QWEN_BENCHMARK_CONTEXT_CLARIFIED_RESULTS_PRESERVED_RUNTIME_NOT_PROVEN_DEPLOYMENT_BLOCKED_PRODUCTION_UNCHANGED`
 
 Current recorded state:
 
-- Approved current main source for this state update:
+- Approved current main source for this docs-only state update:
+  `1e048a7479253283ba2087e4e2ef6ad9ca584556`.
+- Next-generation Qwen benchmark evidence remains anchored to:
   `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`.
-- Next-generation Qwen evidence path:
+- Context-alignment evidence path:
+  `/home/hermes/evidence/s71v2-r7f-q2-a-qwen-context-alignment/20260710T011214Z`.
+- Next-generation Qwen Q1 evidence path:
   `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z`.
+- Recorded Q1 execution path:
+  `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`.
+- Recorded Q1 benchmark context:
+  `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`.
+- Recorded Q1 credential mechanism:
+  `QWEN_API_KEY`.
+- Recorded Q1 endpoint family:
+  `DASHSCOPE_INTL`.
+- Current Hermes runtime context for requested Qwen remains:
+  `QWEN_OAUTH_PORTAL_CONTEXT`.
+- Repository credential resolver used in Q1: false.
 - Benchmark assets and manifest matched the previously approved benchmark set.
 - `qwen3.7-plus`, `qwen3.6-plus`, and `qwen3.6-flash` each passed the
-  access/schema probe on `02_simple_plate.jpg`.
+  access/schema probe on `02_simple_plate.jpg` within the task-scoped
+  DashScope-compatible benchmark context.
 - Only `qwen3.7-plus` received the three-image quality benchmark.
 - `qwen3.7-plus` remained `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE` because
   food-component grounding and sauce recognition stayed below the approved
   threshold.
+- Q1 model benchmark results remain valid.
+- Q1 current Hermes runtime proven: false.
+- Q1 deployable integration proven: false.
+- External harness reusable for benchmark only: true.
+- Runtime alignment required before deployment: true.
 - Eligible providers: none.
 - Automatic provider selection: false.
 - Deployment authorized: false.
@@ -286,7 +334,8 @@ Repository state that remains true:
 For Qwen:
 
 1. Option A: benchmark `qwen3.6-plus` on the same three approved assets under
-   the same manifest and thresholds, with a maximum future request budget of 3.
+   the same manifest and thresholds, with a maximum future request budget of 3,
+   reusing the same task-scoped DashScope context only after explicit approval.
 2. Option B: benchmark `qwen3.6-flash` only after separate approval.
 3. Option C: perform provider-neutral prompt/runtime research only without
    weakening the strict validator, local confirmation gate, no-macro rule, or
@@ -296,6 +345,12 @@ For Qwen:
    benchmark.
 5. This recommendation is a testing recommendation only and is not a
    production-provider selection.
+6. Reusing the same benchmark context would establish controlled external
+   benchmark-path model quality only; it would not prove current Hermes OAuth
+   runtime compatibility, production integration readiness, or deployment
+   authorization.
+7. No repeat access probe is necessary only if the credential mechanism,
+   endpoint family, model alias, and client/request shape remain unchanged.
 
 For Gemini:
 
@@ -330,7 +385,7 @@ For rollout decisions:
 
 ## 8. Unknown Before Production Deploy
 
-Before any production deployment decision, re-confirm: production source SHA, image-digest-to-source mapping, effective feature flags, final Qwen/DashScope-compatible base URL, authoritative runtime config location, final remediation PR status, Google Console audit result, and whether the current production DB has all weekly/shopping tables.
+Before any production deployment decision, re-confirm: production source SHA, image-digest-to-source mapping, effective feature flags, whether a Qwen path still depends on a task-scoped DashScope-compatible benchmark harness or a separately aligned Hermes runtime path, final authoritative runtime config location, final remediation PR status, Google Console audit result, and whether the current production DB has all weekly/shopping tables.
 
 ## 9. Update Rules
 

@@ -1,5 +1,25 @@
 # CURRENT_STATE changelog
 
+## 1.2.10 - 2026-07-10
+
+Added:
+- recorded the Qwen benchmark-context correction evidence path `/home/hermes/evidence/s71v2-r7f-q2-a-qwen-context-alignment/20260710T011214Z`;
+- recorded Q1 execution path as `REPOSITORY_COMPONENTS_WITH_EXTERNAL_HARNESS`;
+- recorded Q1 benchmark context as `TASK_SCOPED_DASHSCOPE_OPENAI_COMPATIBLE`, with credential mechanism `QWEN_API_KEY` and endpoint family `DASHSCOPE_INTL`;
+- recorded the current built-in Hermes Qwen runtime context as `QWEN_OAUTH_PORTAL_CONTEXT`.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main `1e048a7479253283ba2087e4e2ef6ad9ca584556` for repository-state/docs closure only;
+- clarified that the historical Q1 access/schema and `qwen3.7-plus` benchmark results remain valid, but were produced through a task-scoped DashScope-compatible benchmark harness rather than the current built-in Hermes Qwen OAuth runtime;
+- clarified that `qwen3.6-plus` and `qwen3.6-flash` remain `ACCESS_SCHEMA_PASS` / `not_benchmarked` in the same external benchmark context only;
+- clarified that current Hermes Qwen runtime compatibility is not proven, deployable Qwen integration is not proven, eligible providers remain `none`, and deployment remains blocked.
+
+Safety:
+- provider requests during this docs task: 0;
+- runtime/test/config changes during this docs task: 0;
+- production build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
 ## 1.2.9 - 2026-07-10
 
 Added:

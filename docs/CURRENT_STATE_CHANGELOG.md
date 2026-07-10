@@ -1,5 +1,39 @@
 # CURRENT_STATE changelog
 
+## 1.2.9 - 2026-07-10
+
+Added:
+- recorded next-generation Qwen access/schema success for `qwen3.7-plus`,
+  `qwen3.6-plus`, and `qwen3.6-flash` against approved main
+  `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`;
+- recorded that only `qwen3.7-plus` received the full three-image benchmark
+  under the pre-approved fixed access-priority ordering;
+- recorded next-generation Qwen benchmark evidence path
+  `/home/hermes/evidence/s71v2-r7f-q1-qwen-nextgen/20260709T161257Z`.
+
+Changed:
+- updated the CURRENT_STATE verification base to project main
+  `1b8a98195bc15e5dc0bfc54b71d308c77b86e627`;
+- replaced the prior limited `qwen3-vl-8b-instruct` summary with the newer
+  next-generation Qwen access audit semantics;
+- clarified that all three tested next-generation aliases were operationally
+  reachable and schema-valid on the access asset, but only `qwen3.7-plus` was
+  quality-benchmarked;
+- recorded `qwen3.7-plus` benchmark metrics as major precision `0.111111`,
+  major recall `0.444444`, sauce recall `0.5`, confirmation correctness
+  `1.000`, ambiguity gate pass `true`, aggregate nutrition violations `0`, and
+  invalid staging `0`;
+- recorded final classification `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`,
+  `benchmark_candidate=false`, eligible providers `none`, deployment blocked,
+  and production remaining on the existing Gemini deployment state only.
+
+Safety:
+- provider requests during the recorded evidence: 6 total (3 access probes, 3
+  benchmark requests), with 0 retries, 0 fallbacks and 0 repair requests;
+- provider requests during this docs task: 0;
+- production config/build/deploy/restart not performed;
+- production DB and Qdrant unchanged.
+
 ## 1.2.8 - 2026-07-09
 
 Added:

@@ -1,5 +1,5 @@
 """Tests for auxiliary model config bridging — verifies that config.yaml values
-are properly mapped to environment variables by both CLI and gateway loaders.
+are properly mapped to environment variables by the gateway bridge contract.
 
 Also tests the vision_tools and browser_tool model override env vars.
 """
@@ -16,10 +16,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def _run_auxiliary_bridge(config_dict, monkeypatch, *, existing=None):
-    """Simulate the auxiliary config → env var bridging logic shared by CLI and gateway.
+    """Simulate the gateway auxiliary config-to-env bridge contract.
 
-    This mirrors the code in cli.py load_cli_config() and gateway/run.py.
-    Both use the same pattern; we test it once here.
+    Real CLI behavior is exercised through cli.load_cli_config in the dedicated
+    CLI regression suite instead of being copied into this helper.
     """
     # Clear env vars
     for key in (
@@ -73,7 +73,7 @@ def _run_auxiliary_bridge(config_dict, monkeypatch, *, existing=None):
 
 
 class TestAuxiliaryConfigBridge:
-    """Verify the config.yaml → env var bridging logic used by CLI and gateway."""
+    """Verify the gateway config.yaml-to-env bridge contract."""
 
     def test_vision_provider_bridged(self, monkeypatch):
         config = {

@@ -4720,6 +4720,59 @@ def resolve_vision_provider_client(
     return requested, client, final_model
 
 
+def _resolve_vision_call_backend(
+    *,
+    resolved_provider: Optional[str],
+    resolved_model: Optional[str],
+    resolved_base_url: Optional[str],
+    resolved_api_key: Optional[str],
+    raw_provider: Optional[str],
+    raw_model: Optional[str],
+    raw_base_url: Optional[str],
+    raw_api_key: Optional[str],
+    async_mode: bool,
+    fallback_allowed: bool,
+) -> Tuple[Optional[str], Any, Optional[str]]:
+    """Resolve one vision backend without silently changing explicit providers."""
+    try:
+        effective_provider, client, final_model = resolve_vision_provider_client(
+            provider=resolved_provider if resolved_provider != "auto" else raw_provider,
+            model=resolved_model or raw_model,
+            base_url=resolved_base_url or raw_base_url,
+            api_key=resolved_api_key or raw_api_key,
+            async_mode=async_mode,
+        )
+        explicit_provider = resolved_provider not in {"", "auto", None}
+        if (
+            client is None
+            and explicit_provider
+            and not resolved_base_url
+            and fallback_allowed
+        ):
+            logger.warning(
+                "Vision provider %s unavailable; explicit policy permits auto fallback",
+                resolved_provider,
+            )
+            effective_provider, client, final_model = resolve_vision_provider_client(
+                provider="auto",
+                model=resolved_model,
+                async_mode=async_mode,
+            )
+    except Exception as exc:
+        raise LLMServiceUnavailableError(
+            "Configured vision provider is unavailable.",
+            task="vision",
+            cause=exc,
+        ) from None
+
+    if client is None:
+        raise LLMServiceUnavailableError(
+            "Configured vision provider is unavailable.",
+            task="vision",
+        )
+    return effective_provider or resolved_provider, client, final_model
+
+
 def get_auxiliary_extra_body() -> dict:
     """Return extra_body kwargs for auxiliary API calls.
     
@@ -5528,6 +5581,7 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
+    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -5539,29 +5593,18 @@ def call_llm(
     effective_extra_body.update(extra_body or {})
 
     if task == "vision":
-        effective_provider, client, final_model = resolve_vision_provider_client(
-            provider=resolved_provider if resolved_provider != "auto" else provider,
-            model=resolved_model or model,
-            base_url=resolved_base_url or base_url,
-            api_key=resolved_api_key or api_key,
+        resolved_provider, client, final_model = _resolve_vision_call_backend(
+            resolved_provider=resolved_provider,
+            resolved_model=resolved_model,
+            resolved_base_url=resolved_base_url,
+            resolved_api_key=resolved_api_key,
+            raw_provider=provider,
+            raw_model=model,
+            raw_base_url=base_url,
+            raw_api_key=api_key,
             async_mode=False,
+            fallback_allowed=vision_fallback_allowed,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=False,
-            )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
-            )
-        resolved_provider = effective_provider or resolved_provider
     else:
         client, final_model = _get_cached_client(
             resolved_provider,
@@ -6057,6 +6100,7 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
+    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -6068,29 +6112,18 @@ async def async_call_llm(
     effective_extra_body.update(extra_body or {})
 
     if task == "vision":
-        effective_provider, client, final_model = resolve_vision_provider_client(
-            provider=resolved_provider if resolved_provider != "auto" else provider,
-            model=resolved_model or model,
-            base_url=resolved_base_url or base_url,
-            api_key=resolved_api_key or api_key,
+        resolved_provider, client, final_model = _resolve_vision_call_backend(
+            resolved_provider=resolved_provider,
+            resolved_model=resolved_model,
+            resolved_base_url=resolved_base_url,
+            resolved_api_key=resolved_api_key,
+            raw_provider=provider,
+            raw_model=model,
+            raw_base_url=base_url,
+            raw_api_key=api_key,
             async_mode=True,
+            fallback_allowed=vision_fallback_allowed,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
-            logger.warning(
-                "Vision provider %s unavailable, falling back to auto vision backends",
-                resolved_provider,
-            )
-            effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=True,
-            )
-        if client is None:
-            raise RuntimeError(
-                f"No LLM provider configured for task={task} provider={resolved_provider}. "
-                f"Run: hermes setup"
-            )
-        resolved_provider = effective_provider or resolved_provider
     else:
         client, final_model = _get_cached_client(
             resolved_provider,
@@ -6350,7 +6383,7 @@ async def async_call_llm(
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if should_fallback and (is_auto or is_capacity_error):
+        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 _mark_provider_unhealthy(

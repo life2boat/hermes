@@ -214,13 +214,15 @@ def load_hermes_dotenv(
     hermes_home: str | os.PathLike | None = None,
     project_env: str | os.PathLike | None = None,
 ) -> list[Path]:
-    """Load Hermes environment files with user config taking precedence.
+    """Load Hermes environment files without replacing process values.
 
     Behavior:
-    - `~/.hermes/.env` overrides stale shell-exported values when present.
-    - project `.env` acts as a dev fallback and only fills missing values when
-      the user env exists.
-    - if no user env exists, the project `.env` also overrides stale shell vars.
+    - values already injected into the process/container always win;
+    - `~/.hermes/.env` fills missing values before the project `.env`;
+    - repeated calls are idempotent because dotenv files never override values.
+
+    External secret sources are applied separately and may replace values only
+    when their explicit `override_existing` policy enables it.
     """
     loaded: list[Path] = []
 
@@ -235,11 +237,11 @@ def load_hermes_dotenv(
         _sanitize_env_file_if_needed(project_env_path)
 
     if user_env.exists():
-        _load_dotenv_with_fallback(user_env, override=True)
+        _load_dotenv_with_fallback(user_env, override=False)
         loaded.append(user_env)
 
     if project_env_path and project_env_path.exists():
-        _load_dotenv_with_fallback(project_env_path, override=not loaded)
+        _load_dotenv_with_fallback(project_env_path, override=False)
         loaded.append(project_env_path)
 
     _apply_external_secret_sources(home_path)

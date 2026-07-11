@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.env_loader import load_hermes_dotenv, set_env_if_missing
 
 
 def test_process_env_takes_precedence_over_user_env(tmp_path, monkeypatch):
@@ -193,3 +193,35 @@ def test_malformed_dotenv_line_does_not_override_process_value(tmp_path, monkeyp
     load_hermes_dotenv(hermes_home=home)
 
     assert os.getenv("OPENAI_BASE_URL") == "https://container.example/v1"
+
+
+def test_set_env_if_missing_preserves_existing_nonempty_value(monkeypatch):
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "process-value")
+
+    changed = set_env_if_missing("AUXILIARY_VISION_API_KEY", "config-value")
+
+    assert changed is False
+    assert os.environ["AUXILIARY_VISION_API_KEY"] == "process-value"
+
+
+def test_set_env_if_missing_preserves_existing_empty_value(monkeypatch):
+    monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "")
+
+    changed = set_env_if_missing("AUXILIARY_VISION_API_KEY", "config-value")
+
+    assert changed is False
+    assert os.environ["AUXILIARY_VISION_API_KEY"] == ""
+
+
+def test_set_env_if_missing_adds_valid_missing_value(monkeypatch):
+    monkeypatch.delenv("AUXILIARY_VISION_API_KEY", raising=False)
+
+    assert set_env_if_missing("AUXILIARY_VISION_API_KEY", " config-value ") is True
+    assert os.environ["AUXILIARY_VISION_API_KEY"] == "config-value"
+
+
+def test_set_env_if_missing_ignores_blank_value(monkeypatch):
+    monkeypatch.delenv("AUXILIARY_VISION_API_KEY", raising=False)
+
+    assert set_env_if_missing("AUXILIARY_VISION_API_KEY", "   ") is False
+    assert "AUXILIARY_VISION_API_KEY" not in os.environ

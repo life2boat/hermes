@@ -565,6 +565,47 @@ class TestVisionRequirements:
         assert check_vision_requirements() is True
 
 
+    def test_explicit_unavailable_does_not_retry_auto(self):
+        with patch(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            return_value=("gemini", None, None),
+        ) as resolver:
+            assert check_vision_requirements() is False
+
+        resolver.assert_called_once_with()
+
+    def test_initialization_exception_fails_closed_without_retry(self):
+        with patch(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            side_effect=ValueError("synthetic internal detail"),
+        ) as resolver:
+            assert check_vision_requirements() is False
+
+        resolver.assert_called_once_with()
+
+    def test_explicit_available_passes_with_one_resolution(self):
+        client = MagicMock()
+        with patch(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            return_value=("gemini", client, "vision-model"),
+        ) as resolver:
+            assert check_vision_requirements() is True
+
+        resolver.assert_called_once_with()
+        client.chat.completions.create.assert_not_called()
+
+    def test_auto_configuration_uses_single_canonical_resolution(self):
+        client = MagicMock()
+        with patch(
+            "agent.auxiliary_client.resolve_vision_provider_client",
+            return_value=("openrouter", client, "auto-model"),
+        ) as resolver:
+            assert check_vision_requirements() is True
+
+        resolver.assert_called_once_with()
+        client.chat.completions.create.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Integration: registry entry
 # ---------------------------------------------------------------------------

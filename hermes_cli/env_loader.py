@@ -156,6 +156,22 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     _sanitize_loaded_credentials()
 
 
+def set_env_if_missing(key: str, value: object) -> bool:
+    """Set one non-empty environment value only when the key is absent.
+
+    Key presence is authoritative even when the process value is empty. This
+    matches python-dotenv override=False behavior and keeps credential
+    precedence deterministic across dotenv and config bridges.
+    """
+    if value is None:
+        return False
+    normalized = str(value).strip()
+    if not normalized or key in os.environ:
+        return False
+    os.environ[key] = normalized
+    return True
+
+
 def _sanitize_env_file_if_needed(path: Path) -> None:
     """Pre-sanitize a .env file before python-dotenv reads it.
 

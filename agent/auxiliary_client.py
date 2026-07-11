@@ -175,6 +175,9 @@ class LLMCallPolicy:
 
 
 DEFAULT_LLM_CALL_POLICY = LLMCallPolicy()
+VISION_DEFAULT_LLM_CALL_POLICY = LLMCallPolicy(
+    fallback_provider=False,
+)
 WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY = LLMCallPolicy(
     max_external_requests=1,
     retry_transient=False,
@@ -209,8 +212,14 @@ class ExternalProviderRequestBudgetExceeded(RuntimeError):
     pass
 
 
-def _normalize_llm_call_policy(policy: LLMCallPolicy | None) -> LLMCallPolicy:
-    return DEFAULT_LLM_CALL_POLICY if policy is None else policy
+def _normalize_llm_call_policy(
+    policy: LLMCallPolicy | None,
+    *,
+    task: str | None = None,
+) -> LLMCallPolicy:
+    if policy is None:
+        return VISION_DEFAULT_LLM_CALL_POLICY if task == "vision" else DEFAULT_LLM_CALL_POLICY
+    return policy
 
 
 def _consume_external_request_budget(
@@ -283,7 +292,7 @@ def _perform_llm_request_sync(
     call_policy: LLMCallPolicy | None = None,
     request_telemetry: ExternalRequestTelemetry | None = None,
 ):
-    policy = _normalize_llm_call_policy(call_policy)
+    policy = _normalize_llm_call_policy(call_policy, task=task)
     max_attempts = _AUX_RETRY_MAX_ATTEMPTS if policy.retry_transient else 1
     attempts_so_far = 0
     for attempt in range(1, max_attempts + 1):
@@ -342,7 +351,7 @@ async def _perform_llm_request_async(
     call_policy: LLMCallPolicy | None = None,
     request_telemetry: ExternalRequestTelemetry | None = None,
 ):
-    policy = _normalize_llm_call_policy(call_policy)
+    policy = _normalize_llm_call_policy(call_policy, task=task)
     max_attempts = _AUX_RETRY_MAX_ATTEMPTS if policy.retry_transient else 1
     attempts_so_far = 0 if request_telemetry is None else request_telemetry.external_request_attempts
     for attempt in range(1, max_attempts + 1):
@@ -5582,7 +5591,7 @@ def call_llm(
         RuntimeError: If no provider is configured.
     """
     vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
-    call_policy = _normalize_llm_call_policy(call_policy)
+    call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
     if request_telemetry is not None:
@@ -6101,7 +6110,7 @@ async def async_call_llm(
     Same as call_llm() but async. See call_llm() for full documentation.
     """
     vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
-    call_policy = _normalize_llm_call_policy(call_policy)
+    call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
     if request_telemetry is not None:

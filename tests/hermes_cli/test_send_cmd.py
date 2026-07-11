@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 
 import pytest
 
@@ -397,3 +398,112 @@ def test_load_hermes_env_handles_missing_files(tmp_path, monkeypatch):
 
     # Should not raise.
     send_cmd._load_hermes_env()
+
+
+def _configure_send_env_paths(monkeypatch, home, project):
+    import hermes_cli.config as config
+
+    monkeypatch.setattr(config, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(config, "get_project_root", lambda: project)
+
+
+def test_load_hermes_env_uses_canonical_loader(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    _configure_send_env_paths(monkeypatch, home, project)
+    calls = []
+
+    import hermes_cli.env_loader as env_loader
+
+    monkeypatch.setattr(
+        env_loader,
+        "load_hermes_dotenv",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    send_cmd._load_hermes_env()
+
+    assert calls == [{"hermes_home": home, "project_env": project / ".env"}]
+
+
+def test_load_hermes_env_preserves_process_credential_over_user_dotenv(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    (home / ".env").write_text("SYNTHETIC_SEND_TOKEN=user-value\n")
+    _configure_send_env_paths(monkeypatch, home, project)
+    monkeypatch.setenv("SYNTHETIC_SEND_TOKEN", "process-value")
+
+    send_cmd._load_hermes_env()
+
+    assert os.environ["SYNTHETIC_SEND_TOKEN"] == "process-value"
+
+
+def test_load_hermes_env_preserves_process_credential_over_project_dotenv(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    (project / ".env").write_text("SYNTHETIC_SEND_TOKEN=project-value\n")
+    _configure_send_env_paths(monkeypatch, home, project)
+    monkeypatch.setenv("SYNTHETIC_SEND_TOKEN", "process-value")
+
+    send_cmd._load_hermes_env()
+
+    assert os.environ["SYNTHETIC_SEND_TOKEN"] == "process-value"
+
+
+def test_load_hermes_env_fills_missing_credential_from_user_dotenv(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    (home / ".env").write_text("SYNTHETIC_SEND_TOKEN=user-value\n")
+    _configure_send_env_paths(monkeypatch, home, project)
+    monkeypatch.delenv("SYNTHETIC_SEND_TOKEN", raising=False)
+
+    send_cmd._load_hermes_env()
+
+    assert os.environ["SYNTHETIC_SEND_TOKEN"] == "user-value"
+
+
+def test_load_hermes_env_is_idempotent(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    env_file = home / ".env"
+    env_file.write_text("SYNTHETIC_SEND_TOKEN=first-value\n")
+    _configure_send_env_paths(monkeypatch, home, project)
+    monkeypatch.delenv("SYNTHETIC_SEND_TOKEN", raising=False)
+
+    send_cmd._load_hermes_env()
+    env_file.write_text("SYNTHETIC_SEND_TOKEN=second-value\n")
+    send_cmd._load_hermes_env()
+
+    assert os.environ["SYNTHETIC_SEND_TOKEN"] == "first-value"
+
+
+def test_load_hermes_env_empty_dotenv_does_not_replace_process_value(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    (home / ".env").write_text("SYNTHETIC_SEND_TOKEN=\n")
+    _configure_send_env_paths(monkeypatch, home, project)
+    monkeypatch.setenv("SYNTHETIC_SEND_TOKEN", "process-value")
+
+    send_cmd._load_hermes_env()
+
+    assert os.environ["SYNTHETIC_SEND_TOKEN"] == "process-value"

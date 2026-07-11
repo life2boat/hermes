@@ -29,6 +29,7 @@ from agent.auxiliary_client import (
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
+    LLMCallPolicy,
     VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
 )
 
@@ -1637,6 +1638,7 @@ class TestAuxiliaryFallbackLayering:
                    side_effect=main_called):
             result = call_llm(
                 task="vision",
+                call_policy=LLMCallPolicy(fallback_provider=True),
                 messages=[{"role": "user", "content": "hello"}],
             )
 
@@ -1666,6 +1668,7 @@ class TestAuxiliaryFallbackLayering:
                    return_value=(main_client, "claude-sonnet-4", "main-agent(openrouter)")):
             result = call_llm(
                 task="vision",
+                call_policy=LLMCallPolicy(fallback_provider=True),
                 messages=[{"role": "user", "content": "hello"}],
             )
 
@@ -1691,6 +1694,7 @@ class TestAuxiliaryFallbackLayering:
                 call_llm(
                     task="vision",
                     messages=[{"role": "user", "content": "hello"}],
+                    call_policy=LLMCallPolicy(fallback_provider=True),
                 )
 
         assert any(

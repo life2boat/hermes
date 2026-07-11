@@ -174,7 +174,7 @@ from hermes_cli.browser_connect import (
     manual_chrome_debug_command,
     try_launch_chrome_debug,
 )
-from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.env_loader import load_hermes_dotenv, set_env_if_missing
 from utils import base_url_host_matches
 
 _hermes_home = get_hermes_home()
@@ -683,7 +683,7 @@ def load_cli_config() -> Dict[str, Any]:
         prov = str(task_cfg.get("provider", "")).strip()
         model = str(task_cfg.get("model", "")).strip()
         base_url = str(task_cfg.get("base_url", "")).strip()
-        api_key = str(task_cfg.get("api_key", "")).strip()
+        api_key = task_cfg.get("api_key")
         if prov and prov != "auto":
             os.environ[env_map["provider"]] = prov
         if model:
@@ -691,7 +691,7 @@ def load_cli_config() -> Dict[str, Any]:
         if base_url:
             os.environ[env_map["base_url"]] = base_url
         if api_key:
-            os.environ[env_map["api_key"]] = api_key
+            set_env_if_missing(env_map["api_key"], api_key)
     
     # Security settings
     security_config = defaults.get("security", {})

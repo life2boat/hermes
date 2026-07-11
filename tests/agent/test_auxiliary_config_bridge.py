@@ -1,5 +1,5 @@
 """Tests for auxiliary model config bridging — verifies that config.yaml values
-are properly mapped to environment variables by both CLI and gateway loaders.
+are properly mapped to environment variables by the gateway bridge contract.
 
 Also tests the vision_tools and browser_tool model override env vars.
 """
@@ -8,16 +8,18 @@ import os
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+import pytest
 
+from hermes_cli.env_loader import set_env_if_missing
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def _run_auxiliary_bridge(config_dict, monkeypatch):
-    """Simulate the auxiliary config → env var bridging logic shared by CLI and gateway.
+def _run_auxiliary_bridge(config_dict, monkeypatch, *, existing=None):
+    """Simulate the gateway auxiliary config-to-env bridge contract.
 
-    This mirrors the code in cli.py load_cli_config() and gateway/run.py.
-    Both use the same pattern; we test it once here.
+    Real CLI behavior is exercised through cli.load_cli_config in the dedicated
+    CLI regression suite instead of being copied into this helper.
     """
     # Clear env vars
     for key in (
@@ -27,6 +29,8 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
         "AUXILIARY_WEB_EXTRACT_BASE_URL", "AUXILIARY_WEB_EXTRACT_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+    for key, value in (existing or {}).items():
+        monkeypatch.setenv(key, value)
 
     # Compression config is read directly from config.yaml — no env var bridging.
 
@@ -54,7 +58,7 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
             prov = str(task_cfg.get("provider", "")).strip()
             model = str(task_cfg.get("model", "")).strip()
             base_url = str(task_cfg.get("base_url", "")).strip()
-            api_key = str(task_cfg.get("api_key", "")).strip()
+            api_key = task_cfg.get("api_key")
             if prov and prov != "auto":
                 os.environ[env_map["provider"]] = prov
             if model:
@@ -62,14 +66,14 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
             if base_url:
                 os.environ[env_map["base_url"]] = base_url
             if api_key:
-                os.environ[env_map["api_key"]] = api_key
+                set_env_if_missing(env_map["api_key"], api_key)
 
 
 # ── Config bridging tests ────────────────────────────────────────────────────
 
 
 class TestAuxiliaryConfigBridge:
-    """Verify the config.yaml → env var bridging logic used by CLI and gateway."""
+    """Verify the gateway config.yaml-to-env bridge contract."""
 
     def test_vision_provider_bridged(self, monkeypatch):
         config = {
@@ -188,6 +192,76 @@ class TestAuxiliaryConfigBridge:
         assert os.environ.get("AUXILIARY_WEB_EXTRACT_PROVIDER") is None
 
 
+@pytest.mark.parametrize(
+    ("task", "env_key"),
+    [
+        ("vision", "AUXILIARY_VISION_API_KEY"),
+        ("web_extract", "AUXILIARY_WEB_EXTRACT_API_KEY"),
+    ],
+)
+def test_auxiliary_bridge_preserves_existing_process_key(
+    task, env_key, monkeypatch
+):
+    config = {"auxiliary": {task: {"api_key": "config-value"}}}
+
+    _run_auxiliary_bridge(
+        config,
+        monkeypatch,
+        existing={env_key: "process-value"},
+    )
+
+    assert os.environ[env_key] == "process-value"
+
+
+@pytest.mark.parametrize(
+    ("task", "env_key"),
+    [
+        ("vision", "AUXILIARY_VISION_API_KEY"),
+        ("web_extract", "AUXILIARY_WEB_EXTRACT_API_KEY"),
+    ],
+)
+def test_auxiliary_bridge_fills_missing_process_key(task, env_key, monkeypatch):
+    config = {"auxiliary": {task: {"api_key": "config-value"}}}
+
+    _run_auxiliary_bridge(config, monkeypatch)
+
+    assert os.environ[env_key] == "config-value"
+
+
+def test_auxiliary_bridge_preserves_existing_empty_process_key(monkeypatch):
+    _run_auxiliary_bridge(
+        {"auxiliary": {"vision": {"api_key": "config-value"}}},
+        monkeypatch,
+        existing={"AUXILIARY_VISION_API_KEY": ""},
+    )
+
+    assert os.environ["AUXILIARY_VISION_API_KEY"] == ""
+
+
+@pytest.mark.parametrize("value", ["", "   ", None])
+def test_auxiliary_bridge_ignores_blank_or_missing_config_key(value, monkeypatch):
+    _run_auxiliary_bridge(
+        {"auxiliary": {"vision": {"api_key": value}}},
+        monkeypatch,
+    )
+
+    assert "AUXILIARY_VISION_API_KEY" not in os.environ
+
+
+def test_auxiliary_bridge_is_idempotent(monkeypatch):
+    first = {"auxiliary": {"vision": {"api_key": "first-value"}}}
+    second = {"auxiliary": {"vision": {"api_key": "second-value"}}}
+
+    _run_auxiliary_bridge(first, monkeypatch)
+    _run_auxiliary_bridge(
+        second,
+        monkeypatch,
+        existing={"AUXILIARY_VISION_API_KEY": os.environ["AUXILIARY_VISION_API_KEY"]},
+    )
+
+    assert os.environ["AUXILIARY_VISION_API_KEY"] == "first-value"
+
+
 # ── Gateway bridge parity test ───────────────────────────────────────────────
 
 
@@ -212,6 +286,7 @@ class TestGatewayBridgeCodeParity:
         # Dynamic env-var derivation present
         assert 'f"AUXILIARY_{_upper}_PROVIDER"' in content
         assert 'f"AUXILIARY_{_upper}_MODEL"' in content
+        assert 'set_env_if_missing(f"AUXILIARY_{_upper}_API_KEY"' in content
         assert 'f"AUXILIARY_{_upper}_BASE_URL"' in content
         assert 'f"AUXILIARY_{_upper}_API_KEY"' in content
         # Built-in bridged keys present

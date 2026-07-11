@@ -272,10 +272,10 @@ auxiliary:
         from tools.vision_tools import check_vision_requirements
         assert check_vision_requirements() is True
 
-    def test_check_vision_falls_back_to_auto(self, isolated_home, monkeypatch):
-        """Bad explicit provider doesn't hide the tool when auto fallback works.
+    def test_check_vision_explicit_unavailable_fails_closed(self, isolated_home, monkeypatch):
+        """Bad explicit provider does not use an unrelated auto backend.
 
-        Mirrors call_llm's runtime fallback chain.
+        Matches explicit-provider fail-closed runtime routing.
         """
         _write_config(isolated_home, """
 model:
@@ -289,7 +289,7 @@ auxiliary:
         _fresh_modules()
 
         from tools.vision_tools import check_vision_requirements
-        assert check_vision_requirements() is True
+        assert check_vision_requirements() is False
 
     def test_check_vision_false_with_text_only_main_and_no_aggregator(
         self, isolated_home, monkeypatch

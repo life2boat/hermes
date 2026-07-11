@@ -1000,7 +1000,7 @@ _hermes_home = get_hermes_home()
 # Load environment variables from ~/.hermes/.env first.
 # User-managed env files should override stale shell exports on restart.
 from dotenv import load_dotenv  # noqa: F401  # backward-compat for tests that monkeypatch this symbol
-from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.env_loader import load_hermes_dotenv, set_env_if_missing
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
@@ -1132,7 +1132,7 @@ if _config_path.exists():
                 _prov = str(_task_cfg.get("provider", "")).strip()
                 _model = str(_task_cfg.get("model", "")).strip()
                 _base_url = str(_task_cfg.get("base_url", "")).strip()
-                _api_key = str(_task_cfg.get("api_key", "")).strip()
+                _api_key = _task_cfg.get("api_key")
                 _upper = _task_key.upper()
                 if _prov and _prov != "auto":
                     os.environ[f"AUXILIARY_{_upper}_PROVIDER"] = _prov
@@ -1141,7 +1141,7 @@ if _config_path.exists():
                 if _base_url:
                     os.environ[f"AUXILIARY_{_upper}_BASE_URL"] = _base_url
                 if _api_key:
-                    os.environ[f"AUXILIARY_{_upper}_API_KEY"] = _api_key
+                    set_env_if_missing(f"AUXILIARY_{_upper}_API_KEY", _api_key)
         # config.yaml is the documented, authoritative source for these
         # settings — it unconditionally wins over .env values. Previously
         # the guards below read `if X not in os.environ` and let stale

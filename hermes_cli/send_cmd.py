@@ -214,29 +214,20 @@ def _load_hermes_env() -> None:
     intentionally reimplement the minimum needed here so ``hermes send``
     doesn't pull in the full gateway module just to resolve a home channel.
     """
-    # Step 1: dotenv
     try:
-        from dotenv import load_dotenv
-    except Exception:
-        load_dotenv = None  # type: ignore[assignment]
-
-    try:
-        from hermes_cli.config import get_hermes_home
-        home = get_hermes_home()
+        from hermes_cli.config import get_hermes_home, get_project_root
+        from hermes_cli.env_loader import load_hermes_dotenv
     except Exception:
         return
 
-    env_path = home / ".env"
-    if load_dotenv and env_path.exists():
-        try:
-            load_dotenv(str(env_path), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            try:
-                load_dotenv(str(env_path), override=True, encoding="latin-1")
-            except Exception:
-                pass
-        except Exception:
-            pass
+    home = get_hermes_home()
+    try:
+        load_hermes_dotenv(
+            hermes_home=home,
+            project_env=get_project_root() / ".env",
+        )
+    except Exception:
+        return
 
     # Step 2: bridge top-level config.yaml values into the environment so
     # gateway.config.load_gateway_config() sees them. Scalars only; don't

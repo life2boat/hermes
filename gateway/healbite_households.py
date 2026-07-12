@@ -298,6 +298,69 @@ def resolve_users_identity_column(conn: sqlite3.Connection) -> str:
     raise HouseholdIntegrityError("unsupported users identity schema")
 
 
+def has_blocking_household_relation(conn: sqlite3.Connection, user_id: int) -> bool:
+    """Return whether deleting a user would break an active or owned household."""
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    household_tables = {HOUSEHOLDS_TABLE, HOUSEHOLD_MEMBERS_TABLE}
+    present = tables & household_tables
+    if not present:
+        return False
+    if present != household_tables:
+        raise HouseholdIntegrityError("incomplete household schema")
+
+    household_columns = HealBiteHouseholdStore._table_columns(conn, HOUSEHOLDS_TABLE)
+    member_columns = HealBiteHouseholdStore._table_columns(conn, HOUSEHOLD_MEMBERS_TABLE)
+    if not {"id", "owner_user_id", "status"} <= household_columns or not {
+        "household_id",
+        "linked_user_id",
+        "role",
+        "status",
+    } <= member_columns:
+        raise HouseholdIntegrityError("unsupported household schema")
+
+    member_rows = conn.execute(
+        f"""
+        SELECT m.household_id, m.status AS member_status,
+               h.id AS resolved_household_id, h.owner_user_id, h.status AS household_status
+        FROM {HOUSEHOLD_MEMBERS_TABLE} m
+        LEFT JOIN {HOUSEHOLDS_TABLE} h ON h.id = m.household_id
+        WHERE m.linked_user_id = ?
+        """,
+        (int(user_id),),
+    ).fetchall()
+    for row in member_rows:
+        if row["resolved_household_id"] is None:
+            raise HouseholdIntegrityError("orphan household membership")
+        try:
+            member_status = HouseholdMemberStatus(str(row["member_status"]))
+            HouseholdStatus(str(row["household_status"]))
+        except ValueError as exc:
+            raise HouseholdIntegrityError("invalid household relation") from exc
+        if member_status is HouseholdMemberStatus.ACTIVE:
+            return True
+        owner_rows = conn.execute(
+            f"SELECT linked_user_id FROM {HOUSEHOLD_MEMBERS_TABLE} "
+            "WHERE household_id = ? AND role = 'owner' AND status = 'active' LIMIT 2",
+            (str(row["household_id"]),),
+        ).fetchall()
+        if len(owner_rows) != 1 or owner_rows[0][0] is None or int(owner_rows[0][0]) != int(row["owner_user_id"]):
+            raise HouseholdIntegrityError("invalid household owner")
+
+    owner_rows = conn.execute(
+        f"SELECT status FROM {HOUSEHOLDS_TABLE} WHERE owner_user_id = ? LIMIT 2",
+        (int(user_id),),
+    ).fetchall()
+    for row in owner_rows:
+        try:
+            HouseholdStatus(str(row["status"]))
+        except ValueError as exc:
+            raise HouseholdIntegrityError("invalid household relation") from exc
+    return bool(owner_rows)
+
+
 def load_household_feature_config(env: Mapping[str, str] | None = None) -> HouseholdFeatureConfig:
     source = env if env is not None else os.environ
     enabled_raw = str(source.get("HEALBITE_HOUSEHOLDS_ENABLED", "")).strip().lower()

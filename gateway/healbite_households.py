@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_household_schema import (
@@ -276,8 +277,29 @@ class HealBiteHouseholdStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @contextmanager
+    def _owned_connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        else:
+            conn.close()
+
+    @staticmethod
+    def _rollback_preserving_error(conn: sqlite3.Connection) -> None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     def ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             conn.executescript(_SCHEMA_SQL)
 
     @staticmethod
@@ -305,9 +327,10 @@ class HealBiteHouseholdStore:
     def _next_member_id(self) -> str:
         return require_canonical_uuid4(self._member_id_factory())
 
-    def get_household_by_id(self, household_id: str) -> Household | None:
+    def _read_household_by_id_internal(self, household_id: str) -> Household | None:
+        """Read by opaque ID only after the caller has established authorization."""
         require_canonical_uuid4(household_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             household = self._get_household_by_id(conn, household_id)
             if household is not None:
                 self._validate_owner_invariant(conn, household)
@@ -320,9 +343,10 @@ class HealBiteHouseholdStore:
         ).fetchone()
         return _row_to_household(row) if row is not None else None
 
-    def get_household_for_linked_user(self, linked_user_id: int) -> Household | None:
+    def _read_household_for_linked_user_internal(self, linked_user_id: int) -> Household | None:
+        """Resolve a linked user for trusted bootstrap and service-layer callers."""
         actor = _normalize_actor_user_id(linked_user_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             rows = conn.execute(
                 f"""
                 SELECT h.* FROM {HOUSEHOLDS_TABLE} h
@@ -341,9 +365,10 @@ class HealBiteHouseholdStore:
             self._validate_owner_invariant(conn, household)
             return household
 
-    def get_primary_member_for_user(self, linked_user_id: int) -> HouseholdMember | None:
+    def _read_primary_member_for_user_internal(self, linked_user_id: int) -> HouseholdMember | None:
+        """Read a primary membership for trusted bootstrap and integrity checks."""
         actor = _normalize_actor_user_id(linked_user_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM {HOUSEHOLD_MEMBERS_TABLE}
@@ -366,9 +391,10 @@ class HealBiteHouseholdStore:
                 raise HouseholdIntegrityError("actor membership is not primary owner")
             return member
 
-    def list_household_members(self, household_id: str) -> list[HouseholdMember]:
+    def _list_household_members_internal(self, household_id: str) -> list[HouseholdMember]:
+        """List by opaque ID only after the caller has established authorization."""
         require_canonical_uuid4(household_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             household = self._get_household_by_id(conn, household_id)
             if household is None:
                 return []
@@ -386,7 +412,7 @@ class HealBiteHouseholdStore:
     def get_or_create_personal_household(self, actor_user_id: int) -> PersonalHousehold:
         actor = _normalize_actor_user_id(actor_user_id)
         for attempt in range(_MAX_ID_REGENERATION_ATTEMPTS):
-            with self._connect() as conn:
+            with self._owned_connection() as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     if not self._actor_exists(conn, actor):
@@ -436,7 +462,7 @@ class HealBiteHouseholdStore:
                     conn.commit()
                     return PersonalHousehold(household, member, created=True)
                 except sqlite3.IntegrityError as exc:
-                    conn.rollback()
+                    self._rollback_preserving_error(conn)
                     if "UNIQUE" not in str(exc).upper() and "PRIMARY" not in str(exc).upper():
                         raise HouseholdIntegrityError("household integrity conflict") from None
                     existing_after_conflict = self._read_existing_after_conflict(actor)
@@ -446,23 +472,23 @@ class HealBiteHouseholdStore:
                         raise HouseholdIntegrityError("household id collision budget exhausted") from None
                     time.sleep(0.01)
                 except sqlite3.OperationalError as exc:
-                    conn.rollback()
+                    self._rollback_preserving_error(conn)
                     message = str(exc).lower()
                     if "locked" in message or "busy" in message:
                         raise HouseholdIntegrityError("household database busy") from None
                     raise
                 except Exception:
-                    conn.rollback()
+                    self._rollback_preserving_error(conn)
                     raise
         raise HouseholdIntegrityError("household creation retry budget exhausted")
 
     def _read_existing_after_conflict(self, actor_user_id: int) -> tuple[Household, HouseholdMember] | None:
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             return self._load_personal_household_for_actor(conn, actor_user_id)
 
     def resolve_actor_context(self, actor_user_id: int) -> HouseholdContext:
         actor = _normalize_actor_user_id(actor_user_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             membership = self._load_any_membership_for_actor(conn, actor)
             if membership is None:
                 created = self.get_or_create_personal_household(actor)
@@ -486,7 +512,7 @@ class HealBiteHouseholdStore:
 
     def resolve_existing_actor_context(self, actor_user_id: int) -> HouseholdContext:
         actor = _normalize_actor_user_id(actor_user_id)
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             if not self._actor_exists(conn, actor):
                 raise HouseholdValidationError("unknown actor")
             membership = self._load_any_membership_for_actor(conn, actor)
@@ -590,12 +616,52 @@ class HealBiteHouseholdService:
         return context
 
     def resolve_existing_actor_household_context(self, actor_user_id: int) -> HouseholdContext:
+        """Resolve active membership from SQLite without creating a household."""
         context = self.store.resolve_existing_actor_context(actor_user_id)
         if context.member_status is not HouseholdMemberStatus.ACTIVE:
             raise HouseholdAccessError("household access denied")
         if context.household_status is not HouseholdStatus.ACTIVE:
             raise HouseholdAccessError("household access denied")
         return context
+
+    def get_actor_household(self, actor_user_id: int) -> Household:
+        """Return the actor's active household; SQLite membership is authoritative."""
+        context = self.resolve_existing_actor_household_context(actor_user_id)
+        household = self.store._read_household_by_id_internal(context.household_id)
+        if household is None:
+            raise HouseholdIntegrityError("actor household is missing")
+        return household
+
+    def get_household_for_actor(self, actor_user_id: int, household_id: str) -> Household:
+        """Read an active household for an actor; an opaque ID is not authorization proof."""
+        context = self.resolve_existing_actor_household_context(actor_user_id)
+        self.assert_household_access(context, household_id)
+        household = self.store._read_household_by_id_internal(context.household_id)
+        if household is None:
+            raise HouseholdIntegrityError("actor household is missing")
+        return household
+
+    def get_membership_for_actor(self, actor_user_id: int, household_id: str) -> HouseholdMember:
+        """Return only the membership established server-side for the supplied actor."""
+        context = self.resolve_existing_actor_household_context(actor_user_id)
+        self.assert_household_access(context, household_id)
+        members = self.store._list_household_members_internal(context.household_id)
+        member = next((item for item in members if item.id == context.household_member_id), None)
+        if member is None or member.linked_user_id != context.actor_user_id:
+            raise HouseholdIntegrityError("actor membership is missing")
+        return member
+
+    def list_members_for_actor(self, actor_user_id: int, household_id: str) -> list[HouseholdMember]:
+        """List members after actor, household, status, and read-role authorization."""
+        context = self.resolve_existing_actor_household_context(actor_user_id)
+        self.assert_household_access(context, household_id)
+        if context.role not in (
+            HouseholdRole.OWNER,
+            HouseholdRole.ADULT_ADMIN,
+            HouseholdRole.ADULT_MEMBER,
+        ):
+            raise HouseholdAccessError("household access denied")
+        return self.store._list_household_members_internal(context.household_id)
 
     def assert_household_access(self, context: HouseholdContext, requested_household_id: str) -> None:
         require_canonical_uuid4(requested_household_id)

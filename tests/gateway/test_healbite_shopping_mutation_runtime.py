@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from gateway.healbite_households import (
     HouseholdRole,
     HouseholdStatus,
 )
+from gateway.healbite_runtime_resources import borrowed_runtime_resource
 from gateway.healbite_shopping import (
     GeneratedShoppingItemInput,
     HealBiteShoppingStore,
@@ -661,3 +663,300 @@ def test_clear_toggle_race_serializes_without_item_resurrection(tmp_path):
     assert len(errors) == 1
     persisted = store.get_shopping_list(context, added.shopping_list.id)
     assert persisted.items == () or persisted.items[0].checked_state is True
+
+
+
+class _BeforeShoppingStoreFactory:
+    def __init__(self, db_path: Path, callback, store_type=HealBiteShoppingStore) -> None:
+        self.db_path = db_path
+        self.callback = callback
+        self.store_type = store_type
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        self.callback()
+        return borrowed_runtime_resource(self.store_type(db_path=self.db_path))
+
+
+def _shopping_state(db_path: Path, shopping_list_id: str) -> tuple[int, int, int, int]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT l.version,
+                   COUNT(i.id) AS item_count,
+                   COALESCE(SUM(i.checked_state), 0) AS checked_count,
+                   (SELECT COUNT(*) FROM household_shopping_idempotency) AS idempotency_count
+            FROM household_shopping_lists l
+            LEFT JOIN household_shopping_items i ON i.shopping_list_id = l.id
+            WHERE l.id = ?
+            GROUP BY l.id
+            """,
+            (shopping_list_id,),
+        ).fetchone()
+    assert row is not None
+    return tuple(int(value) for value in row)
+
+
+def _invoke_runtime_mutation(
+    runtime: HealBiteShoppingRuntimeService,
+    operation: str,
+    *,
+    list_version: int,
+    item_id: str,
+    item_version: int,
+    key: str,
+):
+    if operation == "add":
+        return runtime.add_manual_shopping_item(
+            101, WEEK, "New", "1", "piece", key, list_version
+        )
+    if operation == "toggle":
+        return runtime.set_shopping_item_checked(101, item_id, True, key, item_version)
+    if operation == "delete":
+        return runtime.delete_shopping_item(101, item_id, key, item_version)
+    if operation == "clear":
+        return runtime.clear_shopping_list(
+            101, WEEK, "all_items", key, list_version
+        )
+    raise AssertionError(f"unsupported synthetic operation: {operation}")
+
+
+@pytest.mark.parametrize("operation", ["add", "toggle", "delete", "clear"])
+@pytest.mark.parametrize("revocation_target", ["membership", "household"])
+def test_runtime_mutations_revalidate_authorization_after_begin(
+    tmp_path,
+    operation,
+    revocation_target,
+):
+    db_path = tmp_path / f"{operation}-{revocation_target}.db"
+    personal, context, store, active = _seed_active_list(db_path)
+    seeded = store.add_manual_item(
+        context,
+        active.shopping_list.id,
+        ManualShoppingItemInput(
+            display_name="Seed",
+            quantity_value="1",
+            quantity_unit_normalized="piece",
+        ),
+        expected_list_version=active.shopping_list.version,
+        idempotency_key="seed",
+    )
+    item = seeded.items[0]
+    before = _shopping_state(db_path, seeded.shopping_list.id)
+
+    def revoke():
+        with _connect(db_path) as conn:
+            if revocation_target == "membership":
+                conn.execute(
+                    "UPDATE household_members SET status='disabled' WHERE id=?",
+                    (context.household_member_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE households SET status='disabled' WHERE id=?",
+                    (personal.household.id,),
+                )
+
+    factory = _BeforeShoppingStoreFactory(db_path, revoke)
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(
+            enabled=True,
+            allowlist=frozenset({101}),
+            configuration_valid=True,
+        ),
+        db_path=db_path,
+        shopping_store_factory=factory,
+    )
+
+    with pytest.raises(ShoppingRuntimeNotFoundError):
+        _invoke_runtime_mutation(
+            runtime,
+            operation,
+            list_version=seeded.shopping_list.version,
+            item_id=item.id,
+            item_version=item.version,
+            key=f"revoked-{operation}",
+        )
+
+    assert factory.calls == 1
+    assert _shopping_state(db_path, seeded.shopping_list.id) == before
+
+
+def test_revoked_actor_cannot_replay_successful_idempotency_result(tmp_path):
+    db_path = tmp_path / "replay.db"
+    _personal, context, store, active = _seed_active_list(db_path)
+    runtime = _runtime(db_path, 101)
+    added = _add(runtime, active.shopping_list.version, "successful")
+    before = _shopping_state(db_path, active.shopping_list.id)
+
+    def revoke():
+        with _connect(db_path) as conn:
+            conn.execute(
+                "UPDATE household_members SET status='disabled' WHERE id=?",
+                (context.household_member_id,),
+            )
+
+    revoked_runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(
+            enabled=True,
+            allowlist=frozenset({101}),
+            configuration_valid=True,
+        ),
+        db_path=db_path,
+        shopping_store_factory=_BeforeShoppingStoreFactory(db_path, revoke),
+    )
+    with pytest.raises(ShoppingRuntimeNotFoundError):
+        _add(revoked_runtime, active.shopping_list.version, "successful")
+    assert _shopping_state(db_path, active.shopping_list.id) == before
+    assert len(added.items) == 1
+
+
+def test_runtime_household_mismatch_is_denied_before_mutation(tmp_path):
+    db_path = tmp_path / "mismatch.db"
+    personal, _context, store, active = _seed_active_list(db_path)
+    member_context = _add_member(
+        db_path,
+        personal.household.id,
+        303,
+        HouseholdRole.ADULT_MEMBER,
+    )
+    _insert_user(db_path, 202)
+    other_household = HealBiteHouseholdStore(db_path=db_path).get_or_create_personal_household(202)
+    before = _shopping_state(db_path, active.shopping_list.id)
+
+    def move_actor():
+        with _connect(db_path) as conn:
+            conn.execute(
+                "UPDATE household_members SET household_id=? WHERE id=?",
+                (other_household.household.id, member_context.household_member_id),
+            )
+
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(
+            enabled=True,
+            allowlist=frozenset({303}),
+            configuration_valid=True,
+        ),
+        db_path=db_path,
+        shopping_store_factory=_BeforeShoppingStoreFactory(db_path, move_actor),
+    )
+    with pytest.raises(ShoppingRuntimeNotFoundError):
+        runtime.add_manual_shopping_item(
+            303,
+            WEEK,
+            "Foreign",
+            "1",
+            "piece",
+            "mismatch",
+            active.shopping_list.version,
+        )
+    assert _shopping_state(db_path, active.shopping_list.id) == before
+    assert store.get_shopping_list(
+        HouseholdContext(
+            actor_user_id=101,
+            household_id=personal.household.id,
+            household_member_id=personal.member.id,
+            role=HouseholdRole.OWNER,
+            member_status=HouseholdMemberStatus.ACTIVE,
+            household_status=HouseholdStatus.ACTIVE,
+        ),
+        active.shopping_list.id,
+    ).items == ()
+
+
+def test_mutation_first_serializes_before_membership_revocation(tmp_path):
+    db_path = tmp_path / "mutation-first.db"
+    _personal, context, _store, active = _seed_active_list(db_path)
+    authorized = threading.Event()
+    revocation_started = threading.Event()
+    results = []
+    errors = []
+
+    class PausingShoppingStore(HealBiteShoppingStore):
+        def _revalidate_shopping_actor_for_write(self, conn, runtime_context, *, operation):
+            auth = super()._revalidate_shopping_actor_for_write(
+                conn,
+                runtime_context,
+                operation=operation,
+            )
+            authorized.set()
+            assert revocation_started.wait(timeout=5)
+            time.sleep(0.1)
+            return auth
+
+    runtime = HealBiteShoppingRuntimeService(
+        config=FeatureGateConfig(
+            enabled=True,
+            allowlist=frozenset({101}),
+            configuration_valid=True,
+        ),
+        db_path=db_path,
+        shopping_store_factory=lambda: borrowed_runtime_resource(
+            PausingShoppingStore(db_path=db_path)
+        ),
+    )
+
+    def mutate():
+        try:
+            results.append(_add(runtime, active.shopping_list.version, "mutation-first"))
+        except Exception as exc:
+            errors.append(exc)
+
+    def revoke():
+        assert authorized.wait(timeout=5)
+        revocation_started.set()
+        with _connect(db_path) as conn:
+            conn.execute(
+                "UPDATE household_members SET status='disabled' WHERE id=?",
+                (context.household_member_id,),
+            )
+
+    mutation_thread = threading.Thread(target=mutate)
+    revocation_thread = threading.Thread(target=revoke)
+    mutation_thread.start()
+    revocation_thread.start()
+    mutation_thread.join(timeout=10)
+    revocation_thread.join(timeout=10)
+
+    assert not mutation_thread.is_alive()
+    assert not revocation_thread.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    with _connect(db_path) as conn:
+        member_status = conn.execute(
+            "SELECT status FROM household_members WHERE id=?",
+            (context.household_member_id,),
+        ).fetchone()[0]
+    assert member_status == "disabled"
+    assert _shopping_state(db_path, active.shopping_list.id)[1] == 1
+
+
+
+def test_authorization_query_failure_rolls_back_without_partial_state(tmp_path, monkeypatch):
+    db_path = tmp_path / "authorization-query-failure.db"
+    _personal, context, store, active = _seed_active_list(db_path)
+    before = _shopping_state(db_path, active.shopping_list.id)
+
+    def fail_query(*_args, **_kwargs):
+        raise sqlite3.OperationalError("synthetic authorization query failure")
+
+    monkeypatch.setattr(
+        store._household_store,
+        "_resolve_existing_actor_context_on_connection",
+        fail_query,
+    )
+    with pytest.raises(sqlite3.OperationalError, match="synthetic authorization query failure"):
+        store.add_manual_item(
+            context,
+            active.shopping_list.id,
+            ManualShoppingItemInput(
+                display_name="Blocked",
+                quantity_value="1",
+                quantity_unit_normalized="piece",
+            ),
+            expected_list_version=active.shopping_list.version,
+            idempotency_key="query-failure",
+        )
+
+    assert _shopping_state(db_path, active.shopping_list.id) == before

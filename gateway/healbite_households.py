@@ -644,6 +644,28 @@ class HealBiteHouseholdStore:
                 household_status=household.status,
             )
 
+    def _resolve_existing_actor_context_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        actor_user_id: int,
+    ) -> HouseholdContext:
+        """Resolve current actor authorization without owning the supplied connection."""
+        actor = _normalize_actor_user_id(actor_user_id)
+        if not self._actor_exists(conn, actor):
+            raise HouseholdValidationError("unknown actor")
+        membership = self._load_any_membership_for_actor(conn, actor)
+        if membership is None:
+            raise HouseholdNotFoundError("household not found")
+        household, member = membership
+        return HouseholdContext(
+            actor_user_id=actor,
+            household_id=household.id,
+            household_member_id=member.id,
+            role=member.role,
+            member_status=member.status,
+            household_status=household.status,
+        )
+
     def _load_any_membership_for_actor(self, conn: sqlite3.Connection, actor_user_id: int) -> tuple[Household, HouseholdMember] | None:
         rows = conn.execute(
             f"""

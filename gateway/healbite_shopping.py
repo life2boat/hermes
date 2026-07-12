@@ -15,10 +15,15 @@ from urllib.parse import quote
 
 from gateway.healbite_household_schema import require_canonical_uuid4
 from gateway.healbite_households import (
+    HealBiteHouseholdStore,
+    HouseholdAccessError,
     HouseholdContext,
+    HouseholdIntegrityError,
     HouseholdMemberStatus,
+    HouseholdNotFoundError,
     HouseholdRole,
     HouseholdStatus,
+    HouseholdValidationError,
 )
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_weekly_menu_schema import (
@@ -419,6 +424,10 @@ class HealBiteShoppingStore:
         self._shopping_list_id_factory = shopping_list_id_factory
         self._shopping_item_id_factory = shopping_item_id_factory
         self._idempotency_id_factory = idempotency_id_factory
+        self._household_store = HealBiteHouseholdStore(
+            db_path=self.db_path,
+            ensure_schema_on_init=False,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
@@ -692,6 +701,11 @@ class HealBiteShoppingStore:
             with self._connect() as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    auth = self._revalidate_shopping_actor_for_write(
+                        conn,
+                        context,
+                        operation="list_lifecycle",
+                    )
                     existing = self._resolve_idempotent_list(
                         conn=conn,
                         auth=auth,
@@ -897,6 +911,11 @@ class HealBiteShoppingStore:
             with self._connect() as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    auth = self._revalidate_shopping_actor_for_write(
+                        conn,
+                        context,
+                        operation="item_edit",
+                    )
                     shopping_list = self._get_list_by_id(conn, list_id)
                     if shopping_list is None:
                         raise ShoppingNotFoundError("shopping list not found")
@@ -1026,6 +1045,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 item_row = self._get_item_by_id(conn, item_id)
                 if item_row is None:
                     raise ShoppingNotFoundError("shopping item not found")
@@ -1194,6 +1218,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 item_row = self._get_item_by_id(conn, item_id)
                 if item_row is None:
                     raise ShoppingNotFoundError("shopping item not found")
@@ -1275,6 +1304,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 existing = self._resolve_idempotent_list(
                     conn=conn,
                     auth=auth,
@@ -1346,6 +1380,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 shopping_list = self._get_list_by_id(conn, list_id)
                 if shopping_list is None:
                     raise ShoppingNotFoundError("shopping list not found")
@@ -1415,6 +1454,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="regenerate",
+                )
                 shopping_list = self._get_list_by_id(conn, list_id)
                 if shopping_list is None:
                     raise ShoppingNotFoundError("shopping list not found")
@@ -1596,6 +1640,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="list_lifecycle",
+                )
                 shopping_list = self._get_list_by_id(conn, list_id)
                 if shopping_list is None:
                     raise ShoppingNotFoundError("shopping list not found")
@@ -1692,6 +1741,35 @@ class HealBiteShoppingStore:
             raise ShoppingSchemaError("shopping schema is partial")
         if state is ShoppingSchemaState.INCOMPATIBLE:
             raise ShoppingSchemaError("shopping schema is incompatible")
+
+    def _revalidate_shopping_actor_for_write(
+        self,
+        conn: sqlite3.Connection,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        *,
+        operation: str,
+    ) -> HouseholdAuthorizationContext:
+        expected = HouseholdAuthorizationContext.from_household_context(context)
+        try:
+            current_context = self._household_store._resolve_existing_actor_context_on_connection(
+                conn,
+                expected.actor_user_id,
+            )
+        except (
+            HouseholdAccessError,
+            HouseholdIntegrityError,
+            HouseholdNotFoundError,
+            HouseholdValidationError,
+        ) as exc:
+            raise ShoppingAccessError("shopping access denied") from exc
+        current = HouseholdAuthorizationContext.from_household_context(current_context)
+        if current.household_id != expected.household_id:
+            raise ShoppingAccessError("shopping access denied")
+        return self._authorize(
+            current,
+            household_id=expected.household_id,
+            operation=operation,
+        )
 
     def _authorize(
         self,

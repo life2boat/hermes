@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gateway.healbite_households import (
+    HouseholdIntegrityError,
+    has_blocking_household_relation,
+    resolve_users_identity_column,
+)
 from gateway.healbite_nutrition_diary import load_nutrition_targets, resolve_healbite_db_path
 from gateway.healbite_nutrition_targets import (
     NUTRITION_CALCULATION_VERSION,
@@ -23,6 +28,17 @@ from gateway.healbite_nutrition_targets import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+USER_DELETE_BLOCKED_ACTIVE_HOUSEHOLD_RELATION = "USER_DELETE_BLOCKED_ACTIVE_HOUSEHOLD_RELATION"
+
+
+class UserDeleteBlockedActiveHouseholdRelationError(RuntimeError):
+    """Deletion is unsafe until an explicit household cleanup lifecycle runs."""
+
+    def __init__(self) -> None:
+        super().__init__(USER_DELETE_BLOCKED_ACTIVE_HOUSEHOLD_RELATION)
+
 
 PROFILE_CALCULATION_DISCLAIMER = "Расчёт носит справочный характер и не заменяет консультацию врача или специалиста по питанию."
 
@@ -954,10 +970,36 @@ class HealBiteUserProfileStore:
         return refreshed
 
     def delete_user_profile(self, user_id: int) -> None:
-        with self._connect() as conn:
-            conn.execute(f"DELETE FROM {USERS_TABLE} WHERE {self._users_identity_column(conn)} = ?", (int(user_id),))
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                identity_column = resolve_users_identity_column(conn)
+                conn.execute(
+                    f"SELECT 1 FROM {USERS_TABLE} WHERE {identity_column} = ? LIMIT 1",
+                    (int(user_id),),
+                ).fetchone()
+                blocked = has_blocking_household_relation(conn, int(user_id))
+            except (HouseholdIntegrityError, sqlite3.Error, TypeError, ValueError):
+                raise UserDeleteBlockedActiveHouseholdRelationError() from None
+            if blocked:
+                raise UserDeleteBlockedActiveHouseholdRelationError()
+            conn.execute(f"DELETE FROM {USERS_TABLE} WHERE {identity_column} = ?", (int(user_id),))
             conn.execute(f"DELETE FROM {PROFILES_TABLE} WHERE {self._profiles_identity_column(conn)} = ?", (int(user_id),))
             conn.execute(f"DELETE FROM {USER_ONBOARDING_TABLE} WHERE user_id = ?", (int(user_id),))
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        else:
+            conn.close()
 
 
 def get_existing_healbite_user_profile() -> HealBiteUserProfileStore | None:

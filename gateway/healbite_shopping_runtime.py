@@ -24,7 +24,9 @@ from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_runtime_resources import RuntimeResource, borrowed_runtime_resource
 from gateway.healbite_shopping import (
     HealBiteShoppingStore,
+    ManualShoppingItemInput,
     ShoppingAccessError,
+    ShoppingConflictError,
     ShoppingItem,
     ShoppingList,
     ShoppingListView,
@@ -246,6 +248,125 @@ class HealBiteShoppingRuntimeService:
 
     def list_shopping_items(self, actor_user_id: object, shopping_list_id: str) -> tuple[ShoppingItem, ...]:
         return self.get_shopping_list(actor_user_id, shopping_list_id).items
+
+    def get_current_shopping_list(self, actor_user_id: object, week_key: str) -> ShoppingListView | None:
+        return self._run_public_operation(
+            actor_user_id,
+            lambda context, store: store.get_current_shopping_list(
+                context,
+                context.household_id,
+                week_start=week_key,
+            ),
+            not_found_message="shopping list not found",
+        )
+
+    def add_manual_shopping_item(
+        self,
+        actor_user_id: object,
+        week_key: str,
+        name: str,
+        quantity: str | None,
+        unit: str,
+        idempotency_key: str,
+        expected_list_version: int,
+    ) -> ShoppingListView:
+        def operation(context: HouseholdAuthorizationContext, store: HealBiteShoppingStore) -> ShoppingListView:
+            current = store.get_current_shopping_list(context, context.household_id, week_start=week_key)
+            if current is None:
+                raise ShoppingNotFoundError("shopping list not found")
+            return store.add_manual_item(
+                context,
+                current.shopping_list.id,
+                ManualShoppingItemInput(
+                    display_name=name,
+                    quantity_value=quantity,
+                    quantity_unit_normalized=unit,
+                ),
+                expected_list_version=expected_list_version,
+                idempotency_key=idempotency_key,
+            )
+
+        return self._run_public_operation(actor_user_id, operation, not_found_message="shopping list not found")
+
+    def set_shopping_item_checked(
+        self,
+        actor_user_id: object,
+        item_reference: str,
+        checked: bool,
+        idempotency_key: str,
+        expected_item_version: int,
+    ) -> ShoppingListView:
+        return self._run_public_operation(
+            actor_user_id,
+            lambda context, store: store.set_item_checked(
+                context,
+                item_reference,
+                checked,
+                expected_item_version=expected_item_version,
+                idempotency_key=idempotency_key,
+            ),
+            not_found_message="shopping item not found",
+        )
+
+    def delete_shopping_item(
+        self,
+        actor_user_id: object,
+        item_reference: str,
+        idempotency_key: str,
+        expected_item_version: int,
+    ) -> ShoppingListView:
+        return self._run_public_operation(
+            actor_user_id,
+            lambda context, store: store.delete_item(
+                context,
+                item_reference,
+                expected_item_version=expected_item_version,
+                idempotency_key=idempotency_key,
+            ),
+            not_found_message="shopping item not found",
+        )
+
+    def clear_shopping_list(
+        self,
+        actor_user_id: object,
+        week_key: str,
+        clear_mode: str,
+        idempotency_key: str,
+        expected_list_version: int,
+    ) -> ShoppingListView:
+        def operation(context: HouseholdAuthorizationContext, store: HealBiteShoppingStore) -> ShoppingListView:
+            current = store.get_current_shopping_list(context, context.household_id, week_start=week_key)
+            if current is None:
+                raise ShoppingNotFoundError("shopping list not found")
+            return store.clear_shopping_list(
+                context,
+                current.shopping_list.id,
+                clear_mode=clear_mode,
+                expected_list_version=expected_list_version,
+                idempotency_key=idempotency_key,
+            )
+
+        return self._run_public_operation(actor_user_id, operation, not_found_message="shopping list not found")
+
+    def _run_public_operation(
+        self,
+        actor_user_id: object,
+        operation: Callable[[HouseholdAuthorizationContext, HealBiteShoppingStore], T],
+        *,
+        not_found_message: str,
+    ) -> T:
+        try:
+            return self._with_store(actor_user_id, operation)
+        except (ShoppingRuntimeUnavailableError, ShoppingRuntimeCleanupError):
+            raise
+        except (ShoppingNotFoundError, ShoppingAccessError):
+            raise ShoppingRuntimeNotFoundError(not_found_message) from None
+        except (ShoppingConflictError, ShoppingValidationError):
+            raise ShoppingRuntimeStateError("shopping mutation rejected") from None
+        except (ShoppingSchemaError, ShoppingStateError, sqlite3.Error):
+            raise ShoppingRuntimeStateError("shopping runtime failure") from None
+        except Exception:
+            raise ShoppingRuntimeStateError("shopping runtime failure") from None
 
 
 def build_shopping_runtime_service(

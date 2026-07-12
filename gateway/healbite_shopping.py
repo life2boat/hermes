@@ -15,10 +15,15 @@ from urllib.parse import quote
 
 from gateway.healbite_household_schema import require_canonical_uuid4
 from gateway.healbite_households import (
+    HealBiteHouseholdStore,
+    HouseholdAccessError,
     HouseholdContext,
+    HouseholdIntegrityError,
     HouseholdMemberStatus,
+    HouseholdNotFoundError,
     HouseholdRole,
     HouseholdStatus,
+    HouseholdValidationError,
 )
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_weekly_menu_schema import (
@@ -234,6 +239,12 @@ def _normalize_idempotency_key(value: str) -> str:
     return key
 
 
+def _scoped_idempotency_key(operation: str, value: str) -> str:
+    key = _normalize_idempotency_key(value)
+    digest = hashlib.sha256(f"{operation}:{key}".encode("utf-8")).hexdigest()
+    return f"{operation}:{digest}"
+
+
 def _normalize_display_name(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value))
     text = " ".join(text.split())
@@ -413,6 +424,10 @@ class HealBiteShoppingStore:
         self._shopping_list_id_factory = shopping_list_id_factory
         self._shopping_item_id_factory = shopping_item_id_factory
         self._idempotency_id_factory = idempotency_id_factory
+        self._household_store = HealBiteHouseholdStore(
+            db_path=self.db_path,
+            ensure_schema_on_init=False,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
@@ -686,6 +701,11 @@ class HealBiteShoppingStore:
             with self._connect() as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    auth = self._revalidate_shopping_actor_for_write(
+                        conn,
+                        context,
+                        operation="list_lifecycle",
+                    )
                     existing = self._resolve_idempotent_list(
                         conn=conn,
                         auth=auth,
@@ -785,6 +805,31 @@ class HealBiteShoppingStore:
         with self._read_only_connect() as conn:
             return tuple(self._row_to_list(row) for row in conn.execute(query, tuple(params)).fetchall())
 
+    def get_current_shopping_list(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        household_id: str,
+        *,
+        week_start: str,
+    ) -> ShoppingListView | None:
+        auth = self._authorize(context, household_id=household_id, operation="read")
+        self._require_canonical_schema()
+        canonical_week_start = require_monday_week_start(week_start)
+        with self._read_only_connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {SHOPPING_LISTS_TABLE}
+                WHERE household_id = ? AND week_start = ? AND status = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (auth.household_id, canonical_week_start, ShoppingListStatus.ACTIVE.value),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ShoppingStateError("multiple active shopping lists")
+            if not rows:
+                return None
+            return self._build_list_view(conn, self._row_to_list(rows[0]))
+
     def list_shopping_items(
         self,
         context: HouseholdContext | HouseholdAuthorizationContext,
@@ -866,6 +911,11 @@ class HealBiteShoppingStore:
             with self._connect() as conn:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
+                    auth = self._revalidate_shopping_actor_for_write(
+                        conn,
+                        context,
+                        operation="item_edit",
+                    )
                     shopping_list = self._get_list_by_id(conn, list_id)
                     if shopping_list is None:
                         raise ShoppingNotFoundError("shopping list not found")
@@ -995,6 +1045,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 item_row = self._get_item_by_id(conn, item_id)
                 if item_row is None:
                     raise ShoppingNotFoundError("shopping item not found")
@@ -1130,25 +1185,44 @@ class HealBiteShoppingStore:
         shopping_item_id: str,
         desired_state: bool,
         *,
-        expected_list_version: int,
+        expected_list_version: int | None = None,
+        expected_item_version: int | None = None,
         idempotency_key: str,
     ) -> ShoppingListView:
         auth = self._authorize(context, household_id=None, operation="item_edit")
         self._require_canonical_schema()
         item_id = require_shopping_item_id(shopping_item_id)
         desired = _normalize_checked_state(desired_state)
-        expected_list_version = _normalize_version(expected_list_version, label="expected_list_version")
-        normalized_key = _normalize_idempotency_key(idempotency_key)
-        payload_hash = _payload_fingerprint(
-            {
-                "shopping_item_id": item_id,
-                "desired_state": desired,
-                "expected_list_version": expected_list_version,
-            }
+        if (expected_list_version is None) == (expected_item_version is None):
+            raise ShoppingValidationError("exactly one expected version is required")
+        normalized_list_version = (
+            None
+            if expected_list_version is None
+            else _normalize_version(expected_list_version, label="expected_list_version")
         )
+        normalized_item_version = (
+            None
+            if expected_item_version is None
+            else _normalize_version(expected_item_version, label="expected_item_version")
+        )
+        normalized_key = _normalize_idempotency_key(idempotency_key)
+        payload: dict[str, object] = {
+            "shopping_item_id": item_id,
+            "desired_state": desired,
+        }
+        if normalized_list_version is not None:
+            payload["expected_list_version"] = normalized_list_version
+        else:
+            payload["expected_item_version"] = normalized_item_version
+        payload_hash = _payload_fingerprint(payload)
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
                 item_row = self._get_item_by_id(conn, item_id)
                 if item_row is None:
                     raise ShoppingNotFoundError("shopping item not found")
@@ -1167,8 +1241,10 @@ class HealBiteShoppingStore:
                 if existing is not None:
                     conn.commit()
                     return self._build_list_view(conn, existing)
-                if shopping_list.version != expected_list_version:
+                if normalized_list_version is not None and shopping_list.version != normalized_list_version:
                     raise ShoppingConflictError("shopping list version mismatch")
+                if normalized_item_version is not None and item_row.version != normalized_item_version:
+                    raise ShoppingConflictError("shopping item version mismatch")
                 if item_row.checked_state is desired:
                     self._store_idempotency(
                         conn=conn,
@@ -1209,6 +1285,150 @@ class HealBiteShoppingStore:
                 conn.rollback()
                 raise
 
+    def delete_item(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        shopping_item_id: str,
+        *,
+        expected_item_version: int,
+        idempotency_key: str,
+    ) -> ShoppingListView:
+        auth = self._authorize(context, household_id=None, operation="item_edit")
+        self._require_canonical_schema()
+        item_id = require_shopping_item_id(shopping_item_id)
+        expected_version = _normalize_version(expected_item_version, label="expected_item_version")
+        normalized_key = _scoped_idempotency_key("delete_item", idempotency_key)
+        payload_hash = _payload_fingerprint(
+            {"shopping_item_id": item_id, "expected_item_version": expected_version}
+        )
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
+                existing = self._resolve_idempotent_list(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.UPDATE_ITEM,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                )
+                if existing is not None:
+                    conn.commit()
+                    return self._build_list_view(conn, existing)
+                item_row = self._get_item_by_id(conn, item_id)
+                if item_row is None:
+                    raise ShoppingNotFoundError("shopping item not found")
+                shopping_list = self._get_list_by_id(conn, item_row.shopping_list_id)
+                if shopping_list is None:
+                    raise ShoppingStateError("shopping item references missing list")
+                self._assert_list_in_scope(auth, shopping_list)
+                self._assert_item_mutation_allowed(auth, shopping_list)
+                if item_row.version != expected_version:
+                    raise ShoppingConflictError("shopping item version mismatch")
+                conn.execute(
+                    f"UPDATE {SHOPPING_IDEMPOTENCY_TABLE} SET shopping_item_id = NULL WHERE shopping_item_id = ?",
+                    (item_id,),
+                )
+                conn.execute(f"DELETE FROM {SHOPPING_ITEMS_TABLE} WHERE id = ?", (item_id,))
+                self._normalize_positions(conn, shopping_list_id=shopping_list.id)
+                self._bump_list(conn, shopping_list.id, _sqlite_timestamp())
+                self._store_idempotency(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.UPDATE_ITEM,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                    shopping_list_id=shopping_list.id,
+                    shopping_item_id=None,
+                )
+                updated = self._get_list_by_id(conn, shopping_list.id)
+                if updated is None:
+                    raise ShoppingStateError("shopping item deletion failed")
+                conn.commit()
+                return self._build_list_view(conn, updated)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def clear_shopping_list(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        shopping_list_id: str,
+        *,
+        clear_mode: str,
+        expected_list_version: int,
+        idempotency_key: str,
+    ) -> ShoppingListView:
+        auth = self._authorize(context, household_id=None, operation="item_edit")
+        self._require_canonical_schema()
+        list_id = require_shopping_list_id(shopping_list_id)
+        if str(clear_mode) != "all_items":
+            raise ShoppingValidationError("unsupported clear mode")
+        expected_version = _normalize_version(expected_list_version, label="expected_list_version")
+        normalized_key = _scoped_idempotency_key("clear_all_items", idempotency_key)
+        payload_hash = _payload_fingerprint(
+            {
+                "shopping_list_id": list_id,
+                "clear_mode": "all_items",
+                "expected_list_version": expected_version,
+            }
+        )
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="item_edit",
+                )
+                shopping_list = self._get_list_by_id(conn, list_id)
+                if shopping_list is None:
+                    raise ShoppingNotFoundError("shopping list not found")
+                self._assert_list_in_scope(auth, shopping_list)
+                self._assert_item_mutation_allowed(auth, shopping_list)
+                existing = self._resolve_idempotent_list(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.UPDATE_ITEM,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                )
+                if existing is not None:
+                    conn.commit()
+                    return self._build_list_view(conn, existing)
+                if shopping_list.version != expected_version:
+                    raise ShoppingConflictError("shopping list version mismatch")
+                item_ids = tuple(item.id for item in self._list_items_for_list(conn, list_id))
+                if item_ids:
+                    placeholders = ",".join("?" for _ in item_ids)
+                    conn.execute(
+                        f"UPDATE {SHOPPING_IDEMPOTENCY_TABLE} SET shopping_item_id = NULL WHERE shopping_item_id IN ({placeholders})",
+                        item_ids,
+                    )
+                    conn.execute(f"DELETE FROM {SHOPPING_ITEMS_TABLE} WHERE shopping_list_id = ?", (list_id,))
+                    self._bump_list(conn, list_id, _sqlite_timestamp())
+                self._store_idempotency(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.UPDATE_ITEM,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                    shopping_list_id=list_id,
+                    shopping_item_id=None,
+                )
+                updated = self._get_list_by_id(conn, list_id)
+                if updated is None:
+                    raise ShoppingStateError("shopping list clear failed")
+                conn.commit()
+                return self._build_list_view(conn, updated)
+            except Exception:
+                conn.rollback()
+                raise
+
     def replace_or_regenerate_generated_items(
         self,
         context: HouseholdContext | HouseholdAuthorizationContext,
@@ -1234,6 +1454,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="regenerate",
+                )
                 shopping_list = self._get_list_by_id(conn, list_id)
                 if shopping_list is None:
                     raise ShoppingNotFoundError("shopping list not found")
@@ -1415,6 +1640,11 @@ class HealBiteShoppingStore:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="list_lifecycle",
+                )
                 shopping_list = self._get_list_by_id(conn, list_id)
                 if shopping_list is None:
                     raise ShoppingNotFoundError("shopping list not found")
@@ -1511,6 +1741,35 @@ class HealBiteShoppingStore:
             raise ShoppingSchemaError("shopping schema is partial")
         if state is ShoppingSchemaState.INCOMPATIBLE:
             raise ShoppingSchemaError("shopping schema is incompatible")
+
+    def _revalidate_shopping_actor_for_write(
+        self,
+        conn: sqlite3.Connection,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        *,
+        operation: str,
+    ) -> HouseholdAuthorizationContext:
+        expected = HouseholdAuthorizationContext.from_household_context(context)
+        try:
+            current_context = self._household_store._resolve_existing_actor_context_on_connection(
+                conn,
+                expected.actor_user_id,
+            )
+        except (
+            HouseholdAccessError,
+            HouseholdIntegrityError,
+            HouseholdNotFoundError,
+            HouseholdValidationError,
+        ) as exc:
+            raise ShoppingAccessError("shopping access denied") from exc
+        current = HouseholdAuthorizationContext.from_household_context(current_context)
+        if current.household_id != expected.household_id:
+            raise ShoppingAccessError("shopping access denied")
+        return self._authorize(
+            current,
+            household_id=expected.household_id,
+            operation=operation,
+        )
 
     def _authorize(
         self,

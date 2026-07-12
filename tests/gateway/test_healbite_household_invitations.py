@@ -62,6 +62,21 @@ def _seed(db_path: Path, *, targets: tuple[int, ...] = (202, 303, 404)):
     return personal, clock, store, service
 
 
+def _seed_legacy(db_path: Path, identity_column: str):
+    assert identity_column in {"user_id", "telegram_id"}
+    with _connect(db_path) as conn:
+        conn.execute(f"CREATE TABLE users ({identity_column} INTEGER PRIMARY KEY, username TEXT)")
+        conn.executemany(
+            f"INSERT INTO users ({identity_column}, username) VALUES (?, 'synthetic')",
+            [(101,), (202,)],
+        )
+    households = HealBiteHouseholdStore(db_path=db_path)
+    personal = households.get_or_create_personal_household(101)
+    clock = _Clock()
+    store = HealBiteHouseholdInvitationStore(db_path, now_factory=clock)
+    return personal, clock, store, HealBiteHouseholdInvitationService(store)
+
+
 def _add_member(db_path: Path, household_id: str, user_id: int, role: HouseholdRole, *, status: str = "active") -> str:
     _users(db_path, user_id)
     member_id = new_household_member_id()
@@ -256,6 +271,92 @@ def test_accept_is_atomic_and_replay_safe(tmp_path):
     assert first.invitation.status is HouseholdInvitationStatus.ACCEPTED
     assert second.household_member_id == first.household_member_id
     with _connect(db_path) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {HOUSEHOLD_MEMBERS_TABLE} WHERE linked_user_id = 202 AND status = 'active'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("identity_column", ["user_id", "telegram_id"])
+def test_accept_rejects_invitee_deleted_from_supported_legacy_users_schema(tmp_path, identity_column):
+    db_path = tmp_path / f"deleted-invitee-{identity_column}.db"
+    personal, clock, _store, service = _seed_legacy(db_path, identity_column)
+    invitation = _invite(service, clock, personal.household.id)
+    with _connect(db_path) as conn:
+        conn.execute(f"DELETE FROM users WHERE {identity_column} = ?", (202,))
+
+    for key in ("accept-missing-1", "accept-missing-2"):
+        with pytest.raises(HouseholdInvitationNotFoundError, match="invitation unavailable"):
+            service.accept_invitation(202, invitation.id, key)
+
+    with _connect(db_path) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {HOUSEHOLD_MEMBERS_TABLE} WHERE linked_user_id = 202"
+        ).fetchone()[0] == 0
+        row = conn.execute(
+            f"SELECT status, responded_at, terminal_operation FROM {HOUSEHOLD_INVITATIONS_TABLE} WHERE id = ?",
+            (invitation.id,),
+        ).fetchone()
+    assert tuple(row) == ("pending", None, None)
+
+
+def test_accept_fails_closed_for_unknown_users_identity_schema(tmp_path):
+    db_path = tmp_path / "unknown-users-schema.db"
+    personal, clock, _store, service = _seed(db_path)
+    invitation = _invite(service, clock, personal.household.id)
+    with _connect(db_path) as conn:
+        conn.execute("ALTER TABLE users RENAME TO legacy_users")
+        conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT)")
+
+    with pytest.raises(HouseholdInvitationIntegrityError, match="users identity unavailable"):
+        service.accept_invitation(202, invitation.id, "accept-unknown-schema")
+
+    with _connect(db_path) as conn:
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {HOUSEHOLD_MEMBERS_TABLE} WHERE linked_user_id = 202"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            f"SELECT status FROM {HOUSEHOLD_INVITATIONS_TABLE} WHERE id = ?", (invitation.id,)
+        ).fetchone()[0] == "pending"
+
+
+def test_accept_existence_check_and_membership_insert_share_write_transaction(tmp_path, monkeypatch):
+    db_path = tmp_path / "accept-delete-race.db"
+    personal, clock, store, service = _seed(db_path)
+    invitation = _invite(service, clock, personal.household.id)
+    checked = threading.Event()
+    release = threading.Event()
+    original_user_exists = store._user_exists
+
+    def pause_after_check(conn, user_id):
+        exists = original_user_exists(conn, user_id)
+        checked.set()
+        assert release.wait(timeout=5)
+        return exists
+
+    monkeypatch.setattr(store, "_user_exists", pause_after_check)
+    outcomes = []
+
+    def accept():
+        try:
+            outcomes.append(service.accept_invitation(202, invitation.id, "accept-race"))
+        except Exception as exc:  # pragma: no cover - asserted below
+            outcomes.append(exc)
+
+    thread = threading.Thread(target=accept)
+    thread.start()
+    assert checked.wait(timeout=5)
+    try:
+        with sqlite3.connect(db_path, timeout=0.05) as conn:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                conn.execute("DELETE FROM users WHERE user_id = ?", (202,))
+    finally:
+        release.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(outcomes) == 1 and not isinstance(outcomes[0], Exception)
+    with _connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM users WHERE user_id = ?", (202,)).fetchone()[0] == 1
         assert conn.execute(
             f"SELECT COUNT(*) FROM {HOUSEHOLD_MEMBERS_TABLE} WHERE linked_user_id = 202 AND status = 'active'"
         ).fetchone()[0] == 1

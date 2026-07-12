@@ -21,7 +21,7 @@ from gateway.healbite_household_schema import (
     new_household_member_id,
     require_canonical_uuid4,
 )
-from gateway.healbite_households import HealBiteHouseholdStore
+from gateway.healbite_households import HealBiteHouseholdStore, HouseholdIntegrityError, resolve_users_identity_column
 
 _MAX_LIFETIME = timedelta(days=30)
 _CREATE_ROLES = frozenset({HouseholdRole.ADULT_ADMIN, HouseholdRole.ADULT_MEMBER, HouseholdRole.DEPENDENT})
@@ -109,8 +109,12 @@ def _expiry(value: datetime | str, *, now: datetime) -> str:
 def _positive_int(value: object) -> int:
     if isinstance(value, bool):
         raise HouseholdInvitationValidationError("invalid actor")
+    if isinstance(value, (int, str)):
+        candidate = value
+    else:
+        raise HouseholdInvitationValidationError("invalid actor")
     try:
-        normalized = int(value)
+        normalized = int(candidate)
     except (TypeError, ValueError) as exc:
         raise HouseholdInvitationValidationError("invalid actor") from exc
     if normalized <= 0 or normalized > 2**63 - 1:
@@ -164,17 +168,13 @@ class HealBiteHouseholdInvitationStore:
             raise HouseholdInvitationIntegrityError("invalid runtime clock")
         return value.astimezone(timezone.utc)
 
-    @staticmethod
-    def _users_identity_column(conn: sqlite3.Connection) -> str:
-        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-        if "user_id" in columns:
-            return "user_id"
-        if "telegram_id" in columns:
-            return "telegram_id"
-        raise HouseholdInvitationIntegrityError("users identity unavailable")
-
     def _user_exists(self, conn: sqlite3.Connection, user_id: int) -> bool:
-        column = self._users_identity_column(conn)
+        # Legacy users schemas cannot share one static FK. This transactional
+        # lookup is therefore a required integrity guard before linking a user.
+        try:
+            column = resolve_users_identity_column(conn)
+        except HouseholdIntegrityError as exc:
+            raise HouseholdInvitationIntegrityError("users identity unavailable") from exc
         return conn.execute(f"SELECT 1 FROM users WHERE {column} = ? LIMIT 1", (user_id,)).fetchone() is not None
 
     @staticmethod
@@ -439,6 +439,8 @@ class HealBiteHouseholdInvitationStore:
                     return HouseholdInvitationAcceptance(self._row(row), str(member["id"]))
                 if str(row["status"]) != HouseholdInvitationStatus.PENDING.value:
                     raise HouseholdInvitationStateError("invitation unavailable")
+                if not self._user_exists(conn, actor_user_id):
+                    raise HouseholdInvitationNotFoundError("invitation unavailable")
                 if conn.execute(
                     f"SELECT 1 FROM {HOUSEHOLD_MEMBERS_TABLE} WHERE linked_user_id = ? LIMIT 1",
                     (actor_user_id,),

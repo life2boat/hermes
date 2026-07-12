@@ -12,6 +12,8 @@ from typing import Callable, Iterator, Mapping
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_household_schema import (
     HOUSEHOLD_MEMBERS_TABLE,
+    HOUSEHOLD_INVITATIONS_TABLE,
+    HOUSEHOLD_INVITATION_STATUSES,
     HOUSEHOLD_MEMBER_STATUSES,
     HOUSEHOLD_MEMBER_TYPES,
     HOUSEHOLD_ROLES,
@@ -74,6 +76,57 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_household_members_active_linked_user
 CREATE UNIQUE INDEX IF NOT EXISTS idx_household_members_active_owner
     ON {HOUSEHOLD_MEMBERS_TABLE} (household_id)
     WHERE role = 'owner' AND status = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_household_members_id_household
+    ON {HOUSEHOLD_MEMBERS_TABLE} (id, household_id);
+CREATE TABLE IF NOT EXISTS {HOUSEHOLD_INVITATIONS_TABLE} (
+    id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+    household_id TEXT NOT NULL,
+    invitee_user_id INTEGER NOT NULL CHECK (invitee_user_id > 0),
+    invited_by_user_id INTEGER NOT NULL CHECK (invited_by_user_id > 0),
+    invited_by_member_id TEXT NOT NULL,
+    proposed_role TEXT NOT NULL CHECK (proposed_role IN ('adult_admin', 'adult_member', 'dependent')),
+    status TEXT NOT NULL CHECK (status IN ({_quoted_values(HOUSEHOLD_INVITATION_STATUSES)})),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL CHECK (expires_at > created_at),
+    responded_at TEXT NULL,
+    revoked_at TEXT NULL,
+    create_idempotency_key TEXT NOT NULL CHECK (length(trim(create_idempotency_key)) BETWEEN 1 AND 128),
+    create_payload_fingerprint TEXT NOT NULL CHECK (length(create_payload_fingerprint) = 64),
+    terminal_operation TEXT NULL CHECK (terminal_operation IS NULL OR terminal_operation IN ('accept', 'refuse', 'revoke')),
+    terminal_actor_user_id INTEGER NULL CHECK (terminal_actor_user_id IS NULL OR terminal_actor_user_id > 0),
+    terminal_idempotency_key TEXT NULL CHECK (
+        terminal_idempotency_key IS NULL OR length(trim(terminal_idempotency_key)) BETWEEN 1 AND 128
+    ),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    FOREIGN KEY (household_id) REFERENCES {HOUSEHOLDS_TABLE}(id) ON DELETE RESTRICT,
+    FOREIGN KEY (invited_by_member_id, household_id)
+        REFERENCES {HOUSEHOLD_MEMBERS_TABLE}(id, household_id) ON DELETE RESTRICT,
+    CHECK (invitee_user_id != invited_by_user_id),
+    CHECK (
+        (status = 'pending' AND responded_at IS NULL AND revoked_at IS NULL)
+        OR (status IN ('accepted', 'refused', 'expired') AND responded_at IS NOT NULL AND revoked_at IS NULL)
+        OR (status = 'revoked' AND responded_at IS NULL AND revoked_at IS NOT NULL)
+    ),
+    CHECK (
+        (status IN ('pending', 'expired') AND terminal_operation IS NULL
+            AND terminal_actor_user_id IS NULL AND terminal_idempotency_key IS NULL)
+        OR (status = 'accepted' AND terminal_operation = 'accept'
+            AND terminal_actor_user_id = invitee_user_id AND terminal_idempotency_key IS NOT NULL)
+        OR (status = 'refused' AND terminal_operation = 'refuse'
+            AND terminal_actor_user_id = invitee_user_id AND terminal_idempotency_key IS NOT NULL)
+        OR (status = 'revoked' AND terminal_operation = 'revoke'
+            AND terminal_actor_user_id IS NOT NULL AND terminal_idempotency_key IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_household_invitations_create_idempotency
+    ON {HOUSEHOLD_INVITATIONS_TABLE} (household_id, invited_by_member_id, create_idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_household_invitations_pending_unique
+    ON {HOUSEHOLD_INVITATIONS_TABLE} (household_id, invitee_user_id, proposed_role)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_household_invitations_incoming
+    ON {HOUSEHOLD_INVITATIONS_TABLE} (invitee_user_id, status, expires_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_household_invitations_household
+    ON {HOUSEHOLD_INVITATIONS_TABLE} (household_id, status, created_at);
 """
 
 

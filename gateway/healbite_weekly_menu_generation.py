@@ -233,9 +233,13 @@ class CanonicalWeeklyMenuMemberSnapshotProvider:
         normalized_max_entries = _normalize_max_entries(max_entries)
         household_store = self._household_store_factory()
         profile_store = self._profile_store_factory()
+        household_service = HealBiteHouseholdService(household_store)
         members = [
             member
-            for member in household_store.list_household_members(context.household_id)
+            for member in household_service.list_members_for_actor(
+                context.actor_user_id,
+                context.household_id,
+            )
             if member.status is HouseholdMemberStatus.ACTIVE
         ]
         member_snapshots: list[WeeklyMenuMemberGenerationSnapshot] = []

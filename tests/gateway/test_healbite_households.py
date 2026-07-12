@@ -26,6 +26,7 @@ from gateway.healbite_households import (
     HouseholdFeatureConfig,
     HouseholdIntegrityError,
     HouseholdMemberStatus,
+    HouseholdNotFoundError,
     HouseholdRole,
     HouseholdStatus,
     HouseholdValidationError,
@@ -78,6 +79,54 @@ def _first_personal(db_path: Path, user_id: int = 101):
     _create_users_table(db_path)
     _insert_user(db_path, user_id)
     return HealBiteHouseholdStore(db_path=db_path).get_or_create_personal_household(user_id)
+
+
+def _add_linked_member(db_path: Path, household_id: str, user_id: int, role: HouseholdRole) -> str:
+    _insert_user(db_path, user_id)
+    member_id = new_household_member_id()
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"""
+            INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                (id, household_id, linked_user_id, display_name, member_type, role, status,
+                 created_at, updated_at, version)
+            VALUES (?, ?, ?, 'synthetic', 'linked_adult', ?, 'active', 't', 't', 1)
+            """,
+            (member_id, household_id, user_id, role.value),
+        )
+    return member_id
+
+
+class _ConnectionProbe:
+    def __init__(self, connection: sqlite3.Connection, *, fail_execute: bool = False, fail_close: bool = False) -> None:
+        self.connection = connection
+        self.fail_execute = fail_execute
+        self.fail_close = fail_close
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self.closed = False
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, *args, **kwargs):
+        if self.fail_execute:
+            raise ValueError("original read failure")
+        return self.connection.execute(*args, **kwargs)
+
+    def commit(self):
+        self.commit_calls += 1
+        return self.connection.commit()
+
+    def rollback(self):
+        self.rollback_calls += 1
+        return self.connection.rollback()
+
+    def close(self):
+        self.closed = True
+        self.connection.close()
+        if self.fail_close:
+            raise RuntimeError("cleanup failure")
 
 
 def test_schema_constants_match_adr_values():
@@ -319,10 +368,10 @@ def test_create_personal_household_and_reads(tmp_path):
     store = HealBiteHouseholdStore(db_path=db_path)
 
     result = store.get_or_create_personal_household(101)
-    household = store.get_household_by_id(result.household.id)
-    by_user = store.get_household_for_linked_user(101)
-    primary = store.get_primary_member_for_user(101)
-    members = store.list_household_members(result.household.id)
+    household = store._read_household_by_id_internal(result.household.id)
+    by_user = store._read_household_for_linked_user_internal(101)
+    primary = store._read_primary_member_for_user_internal(101)
+    members = store._list_household_members_internal(result.household.id)
 
     assert result.created is True
     assert household == result.household
@@ -435,9 +484,11 @@ def test_owner_pointer_mismatch_detected(tmp_path):
 
     store = HealBiteHouseholdStore(db_path=db_path)
     with pytest.raises(HouseholdIntegrityError, match="owner pointer mismatch"):
-        store.get_household_by_id(result.household.id)
+        store._read_household_by_id_internal(result.household.id)
     with pytest.raises(HouseholdIntegrityError, match="owner pointer mismatch"):
-        store.get_primary_member_for_user(101)
+        store._read_primary_member_for_user_internal(101)
+    with pytest.raises(HouseholdIntegrityError, match="owner pointer mismatch"):
+        HealBiteHouseholdService(store).get_actor_household(101)
 
 
 def test_partial_household_detected(tmp_path):
@@ -455,7 +506,7 @@ def test_partial_household_detected(tmp_path):
         )
 
     with pytest.raises(HouseholdIntegrityError, match="invalid active owner count"):
-        store.get_household_by_id(household_id)
+        store._read_household_by_id_internal(household_id)
 
 
 def test_duplicate_membership_detected_when_index_missing_in_corrupt_db(tmp_path):
@@ -482,7 +533,7 @@ def test_duplicate_membership_detected_when_index_missing_in_corrupt_db(tmp_path
         )
 
     with pytest.raises(HouseholdIntegrityError, match="duplicate active household membership"):
-        store.get_household_for_linked_user(101)
+        store._read_household_for_linked_user_internal(101)
     assert result.household.id
 
 
@@ -502,9 +553,9 @@ def test_duplicate_owner_detected_when_index_missing_in_corrupt_db(tmp_path):
         )
 
     with pytest.raises(HouseholdIntegrityError, match="invalid active owner count"):
-        store.get_household_by_id(result.household.id)
+        store._read_household_by_id_internal(result.household.id)
     with pytest.raises(HouseholdIntegrityError, match="invalid active owner count"):
-        store.get_primary_member_for_user(101)
+        store._read_primary_member_for_user_internal(101)
 
 
 def test_orphaned_primary_member_detected_when_foreign_keys_were_bypassed(tmp_path):
@@ -524,7 +575,9 @@ def test_orphaned_primary_member_detected_when_foreign_keys_were_bypassed(tmp_pa
         )
 
     with pytest.raises(HouseholdIntegrityError, match="member references missing household"):
-        store.get_primary_member_for_user(101)
+        store._read_primary_member_for_user_internal(101)
+    with pytest.raises(HouseholdIntegrityError, match="member references missing household"):
+        HealBiteHouseholdService(store).get_actor_household(101)
 
 
 def test_member_insert_failure_rolls_back_household_insert(tmp_path):
@@ -625,6 +678,163 @@ def test_authorization_context_and_access(tmp_path):
         service.assert_household_access(context, new_household_id())
 
 
+def test_actor_scoped_family_reads_return_only_own_household(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    personal = _first_personal(db_path)
+    member_id = _add_linked_member(db_path, personal.household.id, 202, HouseholdRole.ADULT_MEMBER)
+    service = HealBiteHouseholdService(HealBiteHouseholdStore(db_path=db_path))
+
+    assert service.get_actor_household(202).id == personal.household.id
+    assert service.get_household_for_actor(202, personal.household.id).id == personal.household.id
+    assert service.get_membership_for_actor(202, personal.household.id).id == member_id
+    assert {member.id for member in service.list_members_for_actor(202, personal.household.id)} == {
+        personal.member.id,
+        member_id,
+    }
+
+
+def test_foreign_and_random_household_ids_are_indistinguishable(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    first = _first_personal(db_path)
+    _insert_user(db_path, 202)
+    second = HealBiteHouseholdStore(db_path=db_path).get_or_create_personal_household(202)
+    service = HealBiteHouseholdService(HealBiteHouseholdStore(db_path=db_path))
+
+    for reader in (
+        service.get_household_for_actor,
+        service.get_membership_for_actor,
+        service.list_members_for_actor,
+    ):
+        errors = []
+        for requested_id in (second.household.id, new_household_id()):
+            with pytest.raises(HouseholdAccessError) as excinfo:
+                reader(101, requested_id)
+            errors.append((type(excinfo.value), str(excinfo.value)))
+        assert errors[0] == errors[1]
+    assert service.get_actor_household(101).id == first.household.id
+
+
+@pytest.mark.parametrize(
+    ("role", "member_list_allowed"),
+    [
+        (HouseholdRole.OWNER, True),
+        (HouseholdRole.ADULT_ADMIN, True),
+        (HouseholdRole.ADULT_MEMBER, True),
+        (HouseholdRole.DEPENDENT, False),
+    ],
+)
+def test_actor_scoped_read_authorization_matrix(tmp_path, role, member_list_allowed):
+    db_path = tmp_path / f"{role.value}.db"
+    personal = _first_personal(db_path)
+    actor_user_id = 101 if role is HouseholdRole.OWNER else 202
+    if role is not HouseholdRole.OWNER:
+        _add_linked_member(db_path, personal.household.id, actor_user_id, role)
+    service = HealBiteHouseholdService(HealBiteHouseholdStore(db_path=db_path))
+
+    assert service.get_household_for_actor(actor_user_id, personal.household.id).id == personal.household.id
+    assert service.get_membership_for_actor(actor_user_id, personal.household.id).role is role
+    if member_list_allowed:
+        assert service.list_members_for_actor(actor_user_id, personal.household.id)
+    else:
+        with pytest.raises(HouseholdAccessError, match="household access denied"):
+            service.list_members_for_actor(actor_user_id, personal.household.id)
+
+
+def test_actor_scoped_reads_fail_closed_for_missing_or_inactive_membership(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    personal = _first_personal(db_path)
+    _insert_user(db_path, 202)
+    service = HealBiteHouseholdService(HealBiteHouseholdStore(db_path=db_path))
+
+    with pytest.raises(HouseholdNotFoundError, match="household not found"):
+        service.get_actor_household(202)
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE {HOUSEHOLD_MEMBERS_TABLE} SET status = 'disabled' WHERE id = ?",
+            (personal.member.id,),
+        )
+    with pytest.raises(HouseholdAccessError, match="household access denied"):
+        service.get_actor_household(101)
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE {HOUSEHOLD_MEMBERS_TABLE} SET status = 'active' WHERE id = ?",
+            (personal.member.id,),
+        )
+        conn.execute(
+            f"UPDATE {HOUSEHOLDS_TABLE} SET status = 'disabled' WHERE id = ?",
+            (personal.household.id,),
+        )
+    with pytest.raises(HouseholdAccessError, match="household access denied"):
+        service.get_actor_household(101)
+
+
+def test_actor_scoped_reads_do_not_create_or_mutate_business_rows(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    personal = _first_personal(db_path)
+    service = HealBiteHouseholdService(HealBiteHouseholdStore(db_path=db_path))
+    with _connect(db_path) as conn:
+        before = (_count(conn, HOUSEHOLDS_TABLE), _count(conn, HOUSEHOLD_MEMBERS_TABLE))
+
+    for _ in range(3):
+        service.get_actor_household(101)
+        service.get_household_for_actor(101, personal.household.id)
+        service.get_membership_for_actor(101, personal.household.id)
+        service.list_members_for_actor(101, personal.household.id)
+
+    with _connect(db_path) as conn:
+        after = (_count(conn, HOUSEHOLDS_TABLE), _count(conn, HOUSEHOLD_MEMBERS_TABLE))
+    assert after == before
+
+
+def test_actor_scoped_reads_close_owned_connections_without_committing(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    personal = _first_personal(db_path)
+    store = HealBiteHouseholdStore(db_path=db_path)
+    original_connect = store._connect
+    probes: list[_ConnectionProbe] = []
+
+    def tracked_connect():
+        probe = _ConnectionProbe(original_connect())
+        probes.append(probe)
+        return probe
+
+    monkeypatch.setattr(store, "_connect", tracked_connect)
+    service = HealBiteHouseholdService(store)
+    service.get_household_for_actor(101, personal.household.id)
+    service.get_membership_for_actor(101, personal.household.id)
+    service.list_members_for_actor(101, personal.household.id)
+
+    assert probes
+    assert all(probe.closed for probe in probes)
+    assert sum(probe.commit_calls for probe in probes) == 0
+    assert sum(probe.rollback_calls for probe in probes) == 0
+
+
+def test_owned_connection_cleanup_does_not_mask_original_read_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    _first_personal(db_path)
+    store = HealBiteHouseholdStore(db_path=db_path)
+    original_connect = store._connect
+    probe = _ConnectionProbe(original_connect(), fail_execute=True, fail_close=True)
+    monkeypatch.setattr(store, "_connect", lambda: probe)
+
+    with pytest.raises(ValueError, match="original read failure"):
+        HealBiteHouseholdService(store).get_actor_household(101)
+    assert probe.closed is True
+
+
+def test_raw_household_id_reads_are_internal_only():
+    assert not hasattr(HealBiteHouseholdStore, "get_household_by_id")
+    assert not hasattr(HealBiteHouseholdStore, "get_household_for_linked_user")
+    assert not hasattr(HealBiteHouseholdStore, "get_primary_member_for_user")
+    assert not hasattr(HealBiteHouseholdStore, "list_household_members")
+    source = Path("gateway/healbite_weekly_menu_generation.py").read_text(encoding="utf-8")
+    assert "household_store.list_household_members" not in source
+    assert "household_service.list_members_for_actor" in source
+
+
 @pytest.mark.parametrize(
     ("household_status", "member_status"),
     [
@@ -684,7 +894,7 @@ def test_privacy_no_ids_in_errors_or_logs(tmp_path, caplog, capsys):
 
     caplog.set_level(logging.INFO)
     with pytest.raises(HouseholdIntegrityError) as excinfo:
-        HealBiteHouseholdStore(db_path=db_path).get_household_by_id(result.household.id)
+        HealBiteHouseholdStore(db_path=db_path)._read_household_by_id_internal(result.household.id)
     captured = capsys.readouterr()
     combined = "\n".join([str(excinfo.value), captured.out, captured.err, caplog.text])
 

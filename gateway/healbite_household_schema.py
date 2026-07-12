@@ -5,6 +5,7 @@ from enum import Enum
 
 HOUSEHOLDS_TABLE = "households"
 HOUSEHOLD_MEMBERS_TABLE = "household_members"
+HOUSEHOLD_INVITATIONS_TABLE = "household_invitations"
 
 
 class HouseholdStatus(str, Enum):
@@ -34,10 +35,19 @@ class HouseholdMemberType(str, Enum):
     DEPENDENT = "dependent"
 
 
+class HouseholdInvitationStatus(str, Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REFUSED = "refused"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
 HOUSEHOLD_STATUSES = tuple(item.value for item in HouseholdStatus)
 HOUSEHOLD_MEMBER_STATUSES = tuple(item.value for item in HouseholdMemberStatus)
 HOUSEHOLD_ROLES = tuple(item.value for item in HouseholdRole)
 HOUSEHOLD_MEMBER_TYPES = tuple(item.value for item in HouseholdMemberType)
+HOUSEHOLD_INVITATION_STATUSES = tuple(item.value for item in HouseholdInvitationStatus)
 
 
 def new_household_id() -> str:
@@ -45,6 +55,10 @@ def new_household_id() -> str:
 
 
 def new_household_member_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_household_invitation_id() -> str:
     return str(uuid.uuid4())
 
 

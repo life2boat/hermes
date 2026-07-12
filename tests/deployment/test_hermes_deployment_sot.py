@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -327,7 +326,7 @@ def test_override_wrong_owner_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     def fake_stat(path: Path, *args, **kwargs):
         metadata = real_stat(path, *args, **kwargs)
         if path == override:
-            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=os.geteuid() + 1)
+            return SimpleNamespace(st_mode=metadata.st_mode, st_uid=metadata.st_uid + 1)
         return metadata
 
     monkeypatch.setattr(Path, "stat", fake_stat)

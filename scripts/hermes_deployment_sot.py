@@ -343,7 +343,10 @@ def validate_override(path: Path, manifest: DeploymentManifest) -> dict[str, str
         raise DeploymentSOTError("secrets override must be a regular file")
     if stat.S_IMODE(metadata.st_mode) != int(manifest.secrets_override["required_mode"], 8):
         raise DeploymentSOTError("secrets override permissions mismatch")
-    if metadata.st_uid != os.geteuid():
+    get_effective_uid = getattr(os, "geteuid", None)
+    if not callable(get_effective_uid):
+        raise DeploymentSOTError("secrets override owner validation unavailable")
+    if metadata.st_uid != get_effective_uid():
         raise DeploymentSOTError("secrets override owner mismatch")
     parsed = _mapping(load_unique_yaml(path), "secrets override")
     if set(parsed) != {"services"}:

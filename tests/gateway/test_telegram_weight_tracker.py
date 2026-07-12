@@ -247,10 +247,12 @@ async def test_weight_command_core_marker_uses_same_correlation_as_route_marker(
 async def test_weight_command_correlation_differs_between_turns(tmp_path, monkeypatch, caplog):
     _patch_weight(monkeypatch, tmp_path / "healbite.db")
     adapter = _adapter()
+    first_message = _message(text="/weight 82,4")
+    second_message = _message(text="/weight 82,5")
 
     with caplog.at_level(logging.INFO):
-        await adapter._maybe_handle_healbite_weight_command(_message(text="/weight 82,4"))
-        await adapter._maybe_handle_healbite_weight_command(_message(text="/weight 82,5"))
+        await adapter._maybe_handle_healbite_weight_command(first_message)
+        await adapter._maybe_handle_healbite_weight_command(second_message)
 
     weight_logs = [record.getMessage() for record in caplog.records if "[HealBite][weight_record]" in record.getMessage()]
     assert len(weight_logs) >= 2

@@ -1,0 +1,99 @@
+version: 1
+
+compose:
+  project: hermes-agent
+  application_service: hermes-bot
+  qdrant_service: qdrant
+  files:
+    - kind: repository
+      path: docker-compose.yml
+    - kind: generated_override
+      operator_input: HERMES_SECRETS_OVERRIDE_PATH
+  interpolation_env_input: HERMES_DEPLOY_ENV_FILE
+  service_env_input: HERMES_SERVICE_ENV_FILE
+  runtime_config_input: HERMES_RUNTIME_CONFIG_FILE
+  profiles: []
+  expected_services:
+    - hermes-bot
+    - qdrant
+
+deployment:
+  recreate_policy: application-only
+  recreate_services:
+    - hermes-bot
+  image_variable: HERMES_IMAGE
+  revision_variable: HERMES_GIT_SHA
+  rollback_image_input: HERMES_ROLLBACK_IMAGE
+  revision_label: org.opencontainers.image.revision
+
+secrets_override:
+  runtime_path_input: HERMES_SECRETS_OVERRIDE_PATH
+  producer_status: inconclusive
+  generator: null
+  service: hermes-bot
+  required_mode: "0600"
+  required_owner: current-user
+  symlink_allowed: false
+  required_variables:
+    - NOUS_API_KEY
+    - NOUS_INFERENCE_BASE_URL
+    - TELEGRAM_BOT_TOKEN
+  interpolation_template:
+    NOUS_API_KEY: "${NOUS_API_KEY}"
+    NOUS_INFERENCE_BASE_URL: "${NOUS_INFERENCE_BASE_URL}"
+    TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+  credential_fingerprint_variables:
+    - GEMINI_API_KEY
+    - NOUS_API_KEY
+    - TELEGRAM_BOT_TOKEN
+
+required_contract:
+  restart_policy: unless-stopped
+  command:
+    - hermes
+    - gateway
+  image_entrypoint:
+    - /init
+    - /opt/hermes/docker/main-wrapper.sh
+  networks:
+    - default
+  mounts:
+    - service: hermes-bot
+      type: bind
+      source: /home/hermes/.hermes
+      target: /home/hermes/.hermes
+    - service: hermes-bot
+      type: bind
+      source: /home/hermes/healbite.db
+      target: /home/hermes/healbite.db
+    - service: hermes-bot
+      type: bind
+      source: /home/hermes/backups
+      target: /home/hermes/backups
+    - service: hermes-bot
+      type: bind
+      source: /home/hermes/.cache/huggingface
+      target: /home/hermes/.cache/huggingface
+    - service: qdrant
+      type: volume
+      source: qdrant_data
+      target: /qdrant/storage
+  database_mount_target: /home/hermes/healbite.db
+  feature_flags:
+    HEALBITE_HOUSEHOLDS_ENABLED: absent_or_false
+    HEALBITE_HOUSEHOLDS_ALLOWLIST: absent_or_empty
+    HEALBITE_WEEKLY_MENU_ENABLED: absent_or_false
+    HEALBITE_WEEKLY_MENU_ALLOWLIST: absent_or_empty
+    HEALBITE_SHOPPING_LIST_ENABLED: absent_or_false
+    HEALBITE_SHOPPING_LIST_ALLOWLIST: absent_or_empty
+  providers:
+    text:
+      provider_path: model.provider
+      provider: deepseek
+      model_path: model.default
+      model: deepseek-chat
+    vision:
+      provider_path: auxiliary.vision.provider
+      provider: gemini
+      model_path: auxiliary.vision.model
+      model: gemini-2.5-flash

@@ -111,6 +111,13 @@ from gateway.healbite_weekly_menu_telegram import (
     build_weekly_menu_presentation_for_now,
 )
 from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
+from gateway.healbite_family_telegram import (
+    FAMILY_CALLBACK_ROOT,
+    FAMILY_CALLBACK_PREFIX,
+    FAMILY_COMMAND,
+    FamilyTelegramResult,
+    build_family_telegram_controller,
+)
 from gateway.healbite_water_tracker import (
     WATER_CUSTOM_AMOUNT_STATE,
     format_water_custom_prompt,
@@ -184,7 +191,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "🛒 Список покупок": "__placeholder__:shopping_list",
     "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
-    "👨‍👩‍👧 Семья": "__placeholder__:family",
+    "👨‍👩‍👧 Семья": FAMILY_COMMAND,
     "📈 Отчет за неделю": "/stats 7d",
     "⚙️ Ограничения": "__placeholder__:restrictions",
     "❓ Помощь": "__placeholder__:help",
@@ -536,6 +543,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
+        self._family_telegram = build_family_telegram_controller()
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
@@ -3471,6 +3479,11 @@ class TelegramAdapter(BasePlatformAdapter):
         query_chat_type = getattr(query_chat, "type", None)
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
+
+        # --- HealBite Family callbacks (always consumed locally) ---
+        if data.startswith(FAMILY_CALLBACK_ROOT):
+            await self._handle_healbite_family_callback(query, data)
+            return
 
         # --- HealBite weight tracker callbacks ---
         if data.startswith("weight:"):
@@ -6862,6 +6875,134 @@ class TelegramAdapter(BasePlatformAdapter):
             outcome="coming_soon",
         )
 
+    def _healbite_family_keyboard(self, result: FamilyTelegramResult) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not result.screen.rows:
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=callback_data)
+                    for label, callback_data in row
+                ]
+                for row in result.screen.rows
+            ]
+        )
+
+    @staticmethod
+    def _healbite_family_result_text(result: FamilyTelegramResult) -> str:
+        if not result.notice:
+            return result.screen.text
+        return f"{_html.escape(result.notice)}\n\n{result.screen.text}"
+
+    async def _send_healbite_family_result(
+        self,
+        msg: Message,
+        result: FamilyTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        kwargs: Dict[str, Any] = {
+            "chat_id": str(getattr(chat, "id", "")),
+            "text": self._healbite_family_result_text(result),
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_family_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _maybe_handle_healbite_family_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (
+            text_override
+            if text_override is not None
+            else getattr(msg, "text", None) or ""
+        ).strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != FAMILY_COMMAND:
+            return False
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        result = self._family_telegram.home(actor_user_id)
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="family",
+                result=result.state,
+            )
+        await self._send_healbite_family_result(msg, result)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="family",
+            outcome=result.state,
+            error_type=result.error_class,
+        )
+        return True
+
+    async def _handle_healbite_family_callback(self, query: Any, data: str) -> None:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        result = self._family_telegram.handle_callback(
+            actor_user_id,
+            data,
+            callback_query_id=getattr(query, "id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=getattr(query, "message", None),
+            route="family_callback",
+            action=result.state,
+            lane="healbite_public",
+            result=(
+                "blocked"
+                if result.state in {"disabled", "stale", "unavailable"}
+                else "allowed"
+            ),
+            error_type=result.error_class,
+        )
+        if result.state == "back":
+            try:
+                await query.answer(text="\u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u043c\u0435\u043d\u044e.")
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            message = getattr(query, "message", None)
+            if message is not None:
+                await self._send_healbite_menu_message(message, command="/menu")
+            return
+        answer_text = result.notice
+        if not answer_text:
+            answer_text = (
+                "Раздел пока недоступен."
+                if result.state == "disabled"
+                else "Действие недоступно."
+                if result.state in {"stale", "unavailable"}
+                else "Обновлено."
+            )
+        try:
+            await query.answer(text=answer_text)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, Any] = {
+            "text": self._healbite_family_result_text(result),
+            "reply_markup": self._healbite_family_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            message = getattr(query, "message", None)
+            if message is not None:
+                await self._send_healbite_family_result(message, result)
+
     async def _dispatch_healbite_keyboard_action(
         self,
         msg: Message,
@@ -6906,6 +7047,12 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         if normalized_action == "/profile":
             return await self._maybe_handle_healbite_profile_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if normalized_action == FAMILY_COMMAND:
+            return await self._maybe_handle_healbite_family_command(
                 msg,
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,

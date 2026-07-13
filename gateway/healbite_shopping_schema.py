@@ -13,6 +13,7 @@ from gateway.healbite_household_schema import (
 )
 from gateway.healbite_weekly_menu_schema import (
     WEEKLY_MENU_ENTRIES_TABLE,
+    WEEKLY_MENU_INGREDIENTS_TABLE,
     WEEKLY_MENU_REVISIONS_TABLE,
     WeeklyMenuSchemaState,
     detect_weekly_menu_schema_state,
@@ -21,6 +22,7 @@ from gateway.healbite_weekly_menu_schema import (
 
 SHOPPING_LISTS_TABLE = "household_shopping_lists"
 SHOPPING_ITEMS_TABLE = "household_shopping_items"
+SHOPPING_CONTRIBUTIONS_TABLE = "household_shopping_item_contributions"
 SHOPPING_IDEMPOTENCY_TABLE = "household_shopping_idempotency"
 
 _QUANTITY_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]{1,3})?$")
@@ -93,6 +95,7 @@ SHOPPING_IDEMPOTENCY_OPERATIONS = tuple(item.value for item in ShoppingIdempoten
 EXPECTED_TABLES = {
     SHOPPING_LISTS_TABLE,
     SHOPPING_ITEMS_TABLE,
+    SHOPPING_CONTRIBUTIONS_TABLE,
     SHOPPING_IDEMPOTENCY_TABLE,
 }
 EXPECTED_INDEXES = {
@@ -102,6 +105,7 @@ EXPECTED_INDEXES = {
     "idx_household_shopping_items_list_position_unique",
     "idx_household_shopping_items_list_origin",
     "idx_household_shopping_items_generated_dedup_unique",
+    "idx_household_shopping_contributions_item_source_unique",
     "idx_household_shopping_idempotency_unique",
 }
 EXPECTED_LIST_COLUMNS = {
@@ -138,6 +142,15 @@ EXPECTED_ITEM_COLUMNS = {
     "created_at",
     "updated_at",
     "version",
+}
+EXPECTED_CONTRIBUTION_COLUMNS = {
+    "id",
+    "shopping_item_id",
+    "source_menu_entry_id",
+    "source_ingredient_id",
+    "scaled_quantity_value",
+    "quantity_unit_normalized",
+    "created_at",
 }
 EXPECTED_IDEMPOTENCY_COLUMNS = {
     "id",
@@ -185,6 +198,15 @@ EXPECTED_ITEM_COLUMN_DETAILS = {
     "updated_at": {"type": "TEXT", "notnull": 1, "pk": 0},
     "version": {"type": "INTEGER", "notnull": 1, "pk": 0, "default": "1"},
 }
+EXPECTED_CONTRIBUTION_COLUMN_DETAILS = {
+    "id": {"type": "TEXT", "notnull": 0, "pk": 1},
+    "shopping_item_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "source_menu_entry_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "source_ingredient_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "scaled_quantity_value": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "quantity_unit_normalized": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "created_at": {"type": "TEXT", "notnull": 1, "pk": 0},
+}
 EXPECTED_IDEMPOTENCY_COLUMN_DETAILS = {
     "id": {"type": "TEXT", "notnull": 0, "pk": 1},
     "household_id": {"type": "TEXT", "notnull": 1, "pk": 0},
@@ -204,6 +226,11 @@ EXPECTED_FOREIGN_KEYS = {
     },
     SHOPPING_ITEMS_TABLE: {
         (SHOPPING_LISTS_TABLE, ("shopping_list_id", "household_id"), ("id", "household_id"), "RESTRICT"),
+    },
+    SHOPPING_CONTRIBUTIONS_TABLE: {
+        (SHOPPING_ITEMS_TABLE, ("shopping_item_id",), ("id",), "CASCADE"),
+        (WEEKLY_MENU_ENTRIES_TABLE, ("source_menu_entry_id",), ("id",), "RESTRICT"),
+        (WEEKLY_MENU_INGREDIENTS_TABLE, ("source_ingredient_id",), ("id",), "RESTRICT"),
     },
     SHOPPING_IDEMPOTENCY_TABLE: {
         (HOUSEHOLDS_TABLE, ("household_id",), ("id",), "RESTRICT"),
@@ -255,6 +282,13 @@ EXPECTED_INDEX_DETAILS = {
         "columns": ("shopping_list_id", "dedup_fingerprint"),
         "where": "origin = 'menu_generated' AND override_state = 'none'",
     },
+    "idx_household_shopping_contributions_item_source_unique": {
+        "table": SHOPPING_CONTRIBUTIONS_TABLE,
+        "unique": 1,
+        "partial": 0,
+        "columns": ("shopping_item_id", "source_ingredient_id"),
+        "where": None,
+    },
     "idx_household_shopping_idempotency_unique": {
         "table": SHOPPING_IDEMPOTENCY_TABLE,
         "unique": 1,
@@ -285,6 +319,10 @@ EXPECTED_CHECK_SNIPPETS = {
         "position >= 1",
         "quantity_unit_normalized IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless', 'unknown')",
         "quantity_value IS NULL OR",
+    ),
+    SHOPPING_CONTRIBUTIONS_TABLE: (
+        "length(trim(scaled_quantity_value)) > 0",
+        "quantity_unit_normalized IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless', 'unknown')",
     ),
     SHOPPING_IDEMPOTENCY_TABLE: (
         "operation IN ('create_list', 'activate_list', 'complete_list', 'archive_list', 'add_manual_item', 'update_item', 'set_item_checked', 'regenerate_generated_items')",
@@ -389,6 +427,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_household_shopping_items_generated_dedup_u
     ON {SHOPPING_ITEMS_TABLE} (shopping_list_id, dedup_fingerprint)
     WHERE origin = 'menu_generated' AND override_state = 'none';
 
+CREATE TABLE IF NOT EXISTS {SHOPPING_CONTRIBUTIONS_TABLE} (
+    id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+    shopping_item_id TEXT NOT NULL,
+    source_menu_entry_id TEXT NOT NULL,
+    source_ingredient_id TEXT NOT NULL,
+    scaled_quantity_value TEXT NOT NULL CHECK (length(trim(scaled_quantity_value)) > 0),
+    quantity_unit_normalized TEXT NOT NULL CHECK (quantity_unit_normalized IN ({_quoted(SHOPPING_UNITS)})),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (shopping_item_id) REFERENCES {SHOPPING_ITEMS_TABLE}(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_menu_entry_id) REFERENCES {WEEKLY_MENU_ENTRIES_TABLE}(id) ON DELETE RESTRICT,
+    FOREIGN KEY (source_ingredient_id) REFERENCES {WEEKLY_MENU_INGREDIENTS_TABLE}(id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_household_shopping_contributions_item_source_unique
+    ON {SHOPPING_CONTRIBUTIONS_TABLE} (shopping_item_id, source_ingredient_id);
+
 CREATE TABLE IF NOT EXISTS {SHOPPING_IDEMPOTENCY_TABLE} (
     id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
     household_id TEXT NOT NULL,
@@ -414,6 +467,10 @@ def new_shopping_list_id() -> str:
 
 
 def new_shopping_item_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_shopping_contribution_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -624,10 +681,23 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
     if not present_tables:
         return ShoppingSchemaState.NOT_INITIALIZED
     if present_tables != EXPECTED_TABLES:
+        legacy_tables = EXPECTED_TABLES - {SHOPPING_CONTRIBUTIONS_TABLE}
+        if present_tables == legacy_tables:
+            return (
+                ShoppingSchemaState.PARTIAL
+                if is_legacy_shopping_schema_without_contributions(conn)
+                else ShoppingSchemaState.INCOMPATIBLE
+            )
         return ShoppingSchemaState.PARTIAL
     if not _has_expected_columns(_table_info(conn, SHOPPING_LISTS_TABLE), EXPECTED_LIST_COLUMNS, EXPECTED_LIST_COLUMN_DETAILS):
         return ShoppingSchemaState.INCOMPATIBLE
     if not _has_expected_columns(_table_info(conn, SHOPPING_ITEMS_TABLE), EXPECTED_ITEM_COLUMNS, EXPECTED_ITEM_COLUMN_DETAILS):
+        return ShoppingSchemaState.INCOMPATIBLE
+    if not _has_expected_columns(
+        _table_info(conn, SHOPPING_CONTRIBUTIONS_TABLE),
+        EXPECTED_CONTRIBUTION_COLUMNS,
+        EXPECTED_CONTRIBUTION_COLUMN_DETAILS,
+    ):
         return ShoppingSchemaState.INCOMPATIBLE
     if not _has_expected_columns(
         _table_info(conn, SHOPPING_IDEMPOTENCY_TABLE),
@@ -638,6 +708,8 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
     if _foreign_keys(conn, SHOPPING_LISTS_TABLE) != EXPECTED_FOREIGN_KEYS[SHOPPING_LISTS_TABLE]:
         return ShoppingSchemaState.INCOMPATIBLE
     if _foreign_keys(conn, SHOPPING_ITEMS_TABLE) != EXPECTED_FOREIGN_KEYS[SHOPPING_ITEMS_TABLE]:
+        return ShoppingSchemaState.INCOMPATIBLE
+    if _foreign_keys(conn, SHOPPING_CONTRIBUTIONS_TABLE) != EXPECTED_FOREIGN_KEYS[SHOPPING_CONTRIBUTIONS_TABLE]:
         return ShoppingSchemaState.INCOMPATIBLE
     if _foreign_keys(conn, SHOPPING_IDEMPOTENCY_TABLE) != EXPECTED_FOREIGN_KEYS[SHOPPING_IDEMPOTENCY_TABLE]:
         return ShoppingSchemaState.INCOMPATIBLE
@@ -656,3 +728,48 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
             if snippet not in table_sql:
                 return ShoppingSchemaState.INCOMPATIBLE
     return ShoppingSchemaState.CANONICAL
+
+
+def is_legacy_shopping_schema_without_contributions(conn: sqlite3.Connection) -> bool:
+    legacy_tables = EXPECTED_TABLES - {SHOPPING_CONTRIBUTIONS_TABLE}
+    if EXPECTED_TABLES.intersection(_table_names(conn)) != legacy_tables:
+        return False
+    table_specs = (
+        (SHOPPING_LISTS_TABLE, EXPECTED_LIST_COLUMNS, EXPECTED_LIST_COLUMN_DETAILS),
+        (SHOPPING_ITEMS_TABLE, EXPECTED_ITEM_COLUMNS, EXPECTED_ITEM_COLUMN_DETAILS),
+        (
+            SHOPPING_IDEMPOTENCY_TABLE,
+            EXPECTED_IDEMPOTENCY_COLUMNS,
+            EXPECTED_IDEMPOTENCY_COLUMN_DETAILS,
+        ),
+    )
+    if any(
+        not _has_expected_columns(_table_info(conn, table), columns, details)
+        for table, columns, details in table_specs
+    ):
+        return False
+    if any(
+        _foreign_keys(conn, table) != EXPECTED_FOREIGN_KEYS[table]
+        for table, _columns, _details in table_specs
+    ):
+        return False
+    legacy_indexes = EXPECTED_INDEXES - {
+        "idx_household_shopping_contributions_item_source_unique"
+    }
+    index_rows = _index_rows(conn)
+    if not legacy_indexes.issubset(index_rows):
+        return False
+    for index_name in legacy_indexes:
+        details = EXPECTED_INDEX_DETAILS[index_name]
+        actual = _index_spec(
+            conn,
+            index_name,
+            str(details["table"]),
+            str(index_rows[index_name]["sql"]),
+        )
+        if actual != details:
+            return False
+    return all(
+        all(snippet in _sql_for_table(conn, table) for snippet in EXPECTED_CHECK_SNIPPETS[table])
+        for table, _columns, _details in table_specs
+    )

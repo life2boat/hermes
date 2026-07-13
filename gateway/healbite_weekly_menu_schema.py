@@ -10,6 +10,7 @@ from gateway.healbite_household_schema import is_canonical_uuid4, require_canoni
 WEEKLY_MENU_SERIES_TABLE = "household_weekly_menu_series"
 WEEKLY_MENU_REVISIONS_TABLE = "household_weekly_menus"
 WEEKLY_MENU_ENTRIES_TABLE = "household_weekly_menu_entries"
+WEEKLY_MENU_INGREDIENTS_TABLE = "household_weekly_menu_entry_ingredients"
 WEEKLY_MENU_IDEMPOTENCY_TABLE = "household_weekly_menu_idempotency"
 
 
@@ -61,6 +62,7 @@ EXPECTED_TABLES = {
     WEEKLY_MENU_SERIES_TABLE,
     WEEKLY_MENU_REVISIONS_TABLE,
     WEEKLY_MENU_ENTRIES_TABLE,
+    WEEKLY_MENU_INGREDIENTS_TABLE,
     WEEKLY_MENU_IDEMPOTENCY_TABLE,
 }
 EXPECTED_INDEXES = {
@@ -72,6 +74,7 @@ EXPECTED_INDEXES = {
     "idx_weekly_menu_revisions_single_published",
     "idx_weekly_menu_entries_menu_slot_position_unique",
     "idx_weekly_menu_entries_menu_local_date_slot_position",
+    "idx_weekly_menu_ingredients_entry_position_unique",
     "idx_weekly_menu_idempotency_unique",
 }
 EXPECTED_SERIES_COLUMNS = {
@@ -110,6 +113,16 @@ EXPECTED_ENTRY_COLUMNS = {
     "created_at",
     "updated_at",
     "version",
+}
+EXPECTED_INGREDIENT_COLUMNS = {
+    "id",
+    "menu_entry_id",
+    "position",
+    "display_name",
+    "quantity_value",
+    "quantity_unit",
+    "recipe_base_servings",
+    "created_at",
 }
 EXPECTED_IDEMPOTENCY_COLUMNS = {
     "id",
@@ -159,6 +172,16 @@ EXPECTED_ENTRY_COLUMN_DETAILS = {
     "updated_at": {"type": "TEXT", "notnull": 1, "pk": 0},
     "version": {"type": "INTEGER", "notnull": 1, "pk": 0, "default": "1"},
 }
+EXPECTED_INGREDIENT_COLUMN_DETAILS = {
+    "id": {"type": "TEXT", "notnull": 0, "pk": 1},
+    "menu_entry_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "position": {"type": "INTEGER", "notnull": 1, "pk": 0},
+    "display_name": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "quantity_value": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "quantity_unit": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "recipe_base_servings": {"type": "TEXT", "notnull": 1, "pk": 0},
+    "created_at": {"type": "TEXT", "notnull": 1, "pk": 0},
+}
 EXPECTED_IDEMPOTENCY_COLUMN_DETAILS = {
     "id": {"type": "TEXT", "notnull": 0, "pk": 1},
     "household_id": {"type": "TEXT", "notnull": 1, "pk": 0},
@@ -182,6 +205,9 @@ EXPECTED_FOREIGN_KEYS = {
     WEEKLY_MENU_ENTRIES_TABLE: {
         ("menu_id|household_id", WEEKLY_MENU_REVISIONS_TABLE, "id|household_id", "RESTRICT"),
     },
+    WEEKLY_MENU_INGREDIENTS_TABLE: {
+        ("menu_entry_id", WEEKLY_MENU_ENTRIES_TABLE, "id", "CASCADE"),
+    },
     WEEKLY_MENU_IDEMPOTENCY_TABLE: {
         ("household_id", "households", "id", "RESTRICT"),
         ("actor_member_id", "household_members", "id", "RESTRICT"),
@@ -198,12 +224,20 @@ EXPECTED_INDEX_DETAILS = {
     "idx_weekly_menu_revisions_single_published": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 1, "columns": ("series_id",), "where": "status = 'published'"},
     "idx_weekly_menu_entries_menu_slot_position_unique": {"table": WEEKLY_MENU_ENTRIES_TABLE, "unique": 1, "partial": 0, "columns": ("menu_id", "local_date", "meal_slot", "position"), "where": None},
     "idx_weekly_menu_entries_menu_local_date_slot_position": {"table": WEEKLY_MENU_ENTRIES_TABLE, "unique": 0, "partial": 0, "columns": ("menu_id", "local_date", "meal_slot", "position"), "where": None},
+    "idx_weekly_menu_ingredients_entry_position_unique": {"table": WEEKLY_MENU_INGREDIENTS_TABLE, "unique": 1, "partial": 0, "columns": ("menu_entry_id", "position"), "where": None},
     "idx_weekly_menu_idempotency_unique": {"table": WEEKLY_MENU_IDEMPOTENCY_TABLE, "unique": 1, "partial": 0, "columns": ("household_id", "actor_member_id", "operation", "idempotency_key"), "where": None},
 }
 EXPECTED_CHECK_SNIPPETS = {
     WEEKLY_MENU_SERIES_TABLE: ("strftime('%w', week_start) = '1'", "CHECK (version >= 1)"),
     WEEKLY_MENU_REVISIONS_TABLE: ("status IN ('draft', 'published', 'archived')", "revision_number >= 1", "status = 'draft'", "status = 'published'", "status = 'archived'"),
     WEEKLY_MENU_ENTRIES_TABLE: ("meal_slot IN ('breakfast', 'lunch', 'dinner', 'snack')", "position >= 1", "length(trim(title)) > 0", "origin IN ('generated', 'manual', 'copied')"),
+    WEEKLY_MENU_INGREDIENTS_TABLE: (
+        "position >= 1",
+        "length(trim(display_name)) > 0",
+        "quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless')",
+        "length(trim(quantity_value)) > 0",
+        "length(trim(recipe_base_servings)) > 0",
+    ),
     WEEKLY_MENU_IDEMPOTENCY_TABLE: ("operation IN ('create_draft', 'replace_draft_entries', 'publish_revision', 'archive_revision')", "length(trim(idempotency_key)) BETWEEN 1 AND 128", "length(payload_fingerprint) = 64"),
 }
 
@@ -294,6 +328,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_entries_menu_slot_position_uni
 CREATE INDEX IF NOT EXISTS idx_weekly_menu_entries_menu_local_date_slot_position
     ON {WEEKLY_MENU_ENTRIES_TABLE} (menu_id, local_date, meal_slot, position);
 
+CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_INGREDIENTS_TABLE} (
+    id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+    menu_entry_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 1),
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    quantity_value TEXT NOT NULL CHECK (length(trim(quantity_value)) > 0),
+    quantity_unit TEXT NOT NULL CHECK (quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless')),
+    recipe_base_servings TEXT NOT NULL CHECK (length(trim(recipe_base_servings)) > 0),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (menu_entry_id) REFERENCES {WEEKLY_MENU_ENTRIES_TABLE}(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_ingredients_entry_position_unique
+    ON {WEEKLY_MENU_INGREDIENTS_TABLE} (menu_entry_id, position);
+
 CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_IDEMPOTENCY_TABLE} (
     id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
     household_id TEXT NOT NULL,
@@ -323,6 +371,10 @@ def new_weekly_menu_revision_id() -> str:
 
 
 def new_weekly_menu_entry_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_weekly_menu_ingredient_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -495,12 +547,24 @@ def detect_weekly_menu_schema_state(conn: sqlite3.Connection) -> WeeklyMenuSchem
     if not present:
         return WeeklyMenuSchemaState.NOT_INITIALIZED
     if present != EXPECTED_TABLES:
+        legacy_tables = EXPECTED_TABLES - {WEEKLY_MENU_INGREDIENTS_TABLE}
+        if present == legacy_tables:
+            return (
+                WeeklyMenuSchemaState.PARTIAL
+                if is_legacy_weekly_menu_schema_without_ingredients(conn)
+                else WeeklyMenuSchemaState.INCOMPATIBLE
+            )
         return WeeklyMenuSchemaState.PARTIAL
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_SERIES_TABLE), EXPECTED_SERIES_COLUMN_DETAILS):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_REVISIONS_TABLE), EXPECTED_REVISION_COLUMN_DETAILS):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_ENTRIES_TABLE), EXPECTED_ENTRY_COLUMN_DETAILS):
+        return WeeklyMenuSchemaState.INCOMPATIBLE
+    if not _matches_column_details(
+        _table_column_details(conn, WEEKLY_MENU_INGREDIENTS_TABLE),
+        EXPECTED_INGREDIENT_COLUMN_DETAILS,
+    ):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_IDEMPOTENCY_TABLE), EXPECTED_IDEMPOTENCY_COLUMN_DETAILS):
         return WeeklyMenuSchemaState.INCOMPATIBLE
@@ -512,6 +576,8 @@ def detect_weekly_menu_schema_state(conn: sqlite3.Connection) -> WeeklyMenuSchem
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if _foreign_keys(conn, WEEKLY_MENU_ENTRIES_TABLE) != EXPECTED_FOREIGN_KEYS[WEEKLY_MENU_ENTRIES_TABLE]:
         return WeeklyMenuSchemaState.INCOMPATIBLE
+    if _foreign_keys(conn, WEEKLY_MENU_INGREDIENTS_TABLE) != EXPECTED_FOREIGN_KEYS[WEEKLY_MENU_INGREDIENTS_TABLE]:
+        return WeeklyMenuSchemaState.INCOMPATIBLE
     if _foreign_keys(conn, WEEKLY_MENU_IDEMPOTENCY_TABLE) != EXPECTED_FOREIGN_KEYS[WEEKLY_MENU_IDEMPOTENCY_TABLE]:
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_index_metadata(_index_metadata(conn), EXPECTED_INDEX_DETAILS):
@@ -522,9 +588,45 @@ def detect_weekly_menu_schema_state(conn: sqlite3.Connection) -> WeeklyMenuSchem
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_check_snippets(conn, WEEKLY_MENU_ENTRIES_TABLE):
         return WeeklyMenuSchemaState.INCOMPATIBLE
+    if not _matches_check_snippets(conn, WEEKLY_MENU_INGREDIENTS_TABLE):
+        return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_check_snippets(conn, WEEKLY_MENU_IDEMPOTENCY_TABLE):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     return WeeklyMenuSchemaState.CANONICAL
+
+
+def is_legacy_weekly_menu_schema_without_ingredients(conn: sqlite3.Connection) -> bool:
+    legacy_tables = EXPECTED_TABLES - {WEEKLY_MENU_INGREDIENTS_TABLE}
+    if EXPECTED_TABLES.intersection(_table_names(conn)) != legacy_tables:
+        return False
+    table_specs = (
+        (WEEKLY_MENU_SERIES_TABLE, EXPECTED_SERIES_COLUMN_DETAILS),
+        (WEEKLY_MENU_REVISIONS_TABLE, EXPECTED_REVISION_COLUMN_DETAILS),
+        (WEEKLY_MENU_ENTRIES_TABLE, EXPECTED_ENTRY_COLUMN_DETAILS),
+        (WEEKLY_MENU_IDEMPOTENCY_TABLE, EXPECTED_IDEMPOTENCY_COLUMN_DETAILS),
+    )
+    if any(
+        not _matches_column_details(_table_column_details(conn, table), details)
+        for table, details in table_specs
+    ):
+        return False
+    if any(
+        _foreign_keys(conn, table) != EXPECTED_FOREIGN_KEYS[table]
+        for table, _details in table_specs
+    ):
+        return False
+    legacy_indexes = EXPECTED_INDEXES - {
+        "idx_weekly_menu_ingredients_entry_position_unique"
+    }
+    if not legacy_indexes.issubset(_index_names(conn)):
+        return False
+    metadata = _index_metadata(conn)
+    if not _matches_index_metadata(
+        metadata,
+        {name: EXPECTED_INDEX_DETAILS[name] for name in legacy_indexes},
+    ):
+        return False
+    return all(_matches_check_snippets(conn, table) for table, _details in table_specs)
 
 
 def weekly_menu_schema_tables_present(conn: sqlite3.Connection) -> set[str]:

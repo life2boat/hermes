@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,10 +53,134 @@ from gateway.healbite_weekly_menus import (
 from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
 
-ACTOR = 101
-OTHER_ACTOR = 202
+SYNTHETIC_ACTOR_ID = 8_000_000_000_000_001_337
+SYNTHETIC_OTHER_ACTOR_ID = 8_000_000_000_000_001_338
+ACTOR = SYNTHETIC_ACTOR_ID
+OTHER_ACTOR = SYNTHETIC_OTHER_ACTOR_ID
 WEEK_START = "2026-07-06"
 _DEFAULT_MESSAGE = object()
+_STANDARD_LOG_RECORD_ATTRIBUTES = frozenset(logging.makeLogRecord({}).__dict__) | {
+    "asctime",
+    "message",
+}
+_SENSITIVE_LOG_FIELD_KEYS = frozenset(
+    {
+        "actor_user_id",
+        "arguments",
+        "callback_data",
+        "callback_payload",
+        "exception",
+        "exception_body",
+        "household_id",
+        "idempotency_key",
+        "operation_args",
+        "payload",
+        "shopping_item_id",
+        "shopping_list_id",
+        "telegram_user_id",
+        "user_id",
+    }
+)
+_SAFE_CORRELATION_FIELD_KEYS = frozenset(
+    {"corr", "correlation_id", "correlation_marker"}
+)
+_SAFE_CORRELATION_ASSIGNMENT_RE = re.compile(
+    r"(?<!\S)(?:corr|correlation_id|correlation_marker)=[^\s]+"
+)
+_SENSITIVE_LOG_ASSIGNMENT_RE = re.compile(
+    rf"(?<![A-Za-z0-9_])(?:{'|'.join(sorted(_SENSITIVE_LOG_FIELD_KEYS))})\s*="
+)
+
+
+def _assert_structured_log_value_private(
+    key: str,
+    value: object,
+    *,
+    actor_ids: tuple[int, ...],
+    callback_payloads: tuple[str, ...],
+    forbidden_text: tuple[str, ...],
+    seen: set[int],
+) -> None:
+    normalized_key = key.lower().replace("-", "_")
+    assert normalized_key not in _SENSITIVE_LOG_FIELD_KEYS
+
+    if isinstance(value, Mapping):
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        for nested_key, nested_value in value.items():
+            _assert_structured_log_value_private(
+                str(nested_key),
+                nested_value,
+                actor_ids=actor_ids,
+                callback_payloads=callback_payloads,
+                forbidden_text=forbidden_text,
+                seen=seen,
+            )
+        return
+    if isinstance(value, (list, tuple, set, frozenset)):
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        for nested_value in value:
+            _assert_structured_log_value_private(
+                normalized_key,
+                nested_value,
+                actor_ids=actor_ids,
+                callback_payloads=callback_payloads,
+                forbidden_text=forbidden_text,
+                seen=seen,
+            )
+        return
+    if not isinstance(value, (str, bytes, int, float, bool)):
+        return
+
+    scalar = (
+        value.decode("utf-8", errors="replace")
+        if isinstance(value, bytes)
+        else str(value)
+    )
+    assert not any(payload in scalar for payload in callback_payloads)
+    assert not any(text in scalar for text in forbidden_text)
+    if normalized_key not in _SAFE_CORRELATION_FIELD_KEYS:
+        assert not any(scalar == str(actor_id) for actor_id in actor_ids)
+
+
+def _assert_shopping_log_records_private(
+    records: list[logging.LogRecord],
+    *,
+    actor_ids: tuple[int, ...],
+    callback_payloads: tuple[str, ...],
+    forbidden_text: tuple[str, ...] = (),
+) -> None:
+    for record in records:
+        message = record.getMessage()
+        assert _SENSITIVE_LOG_ASSIGNMENT_RE.search(message) is None
+        assert not any(payload in message for payload in callback_payloads)
+        assert not any(text in message for text in forbidden_text)
+        message_without_correlation = _SAFE_CORRELATION_ASSIGNMENT_RE.sub(
+            "correlation=<safe>", message
+        )
+        assert not any(
+            str(actor_id) in message_without_correlation for actor_id in actor_ids
+        )
+        assert record.exc_info is None
+        assert record.exc_text is None
+        assert record.stack_info is None
+
+        for key, value in record.__dict__.items():
+            if key in _STANDARD_LOG_RECORD_ATTRIBUTES:
+                continue
+            _assert_structured_log_value_private(
+                key,
+                value,
+                actor_ids=actor_ids,
+                callback_payloads=callback_payloads,
+                forbidden_text=forbidden_text,
+                seen=set(),
+            )
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -1042,9 +1168,12 @@ async def test_callback_is_local_redacted_and_edit_fallback_does_not_remutate(
     adapter._enqueue_text_event.assert_not_called()
     adapter.handle_message.assert_not_awaited()
     assert "✅" in controller.home(ACTOR).screen.text
-    assert "Secret item" not in caplog.text
-    assert data not in caplog.text
-    assert str(ACTOR) not in caplog.text
+    _assert_shopping_log_records_private(
+        caplog.records,
+        actor_ids=(ACTOR,),
+        callback_payloads=(data,),
+        forbidden_text=("Secret item",),
+    )
 
 
 @pytest.mark.asyncio
@@ -1078,9 +1207,12 @@ async def test_generation_callback_is_local_redacted_and_edit_failure_does_not_r
     adapter.handle_message.assert_not_awaited()
     current = _runtime(db_path).get_current_shopping_list(ACTOR, WEEK_START)
     assert current is not None and len(current.items) == 2
-    assert data not in caplog.text
-    assert str(ACTOR) not in caplog.text
-    assert "Молоко" not in caplog.text
+    _assert_shopping_log_records_private(
+        caplog.records,
+        actor_ids=(ACTOR,),
+        callback_payloads=(data,),
+        forbidden_text=("Молоко",),
+    )
 
 
 @pytest.mark.asyncio
@@ -1138,8 +1270,90 @@ async def test_missing_source_message_blocks_every_shopping_callback(
     adapter._send_message_with_thread_fallback.assert_not_awaited()
     adapter._enqueue_text_event.assert_not_called()
     adapter.handle_message.assert_not_awaited()
-    assert data not in caplog.text
-    assert str(ACTOR) not in caplog.text
+    _assert_shopping_log_records_private(
+        caplog.records,
+        actor_ids=(ACTOR,),
+        callback_payloads=(data,),
+    )
+
+
+def _synthetic_log_record(message: str, **extra: object) -> logging.LogRecord:
+    record = logging.LogRecord(
+        name="synthetic.shopping",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    for key, value in extra.items():
+        setattr(record, key, value)
+    return record
+
+
+def test_log_privacy_helper_allows_short_actor_fragment_in_safe_correlation():
+    short_synthetic_actor = 1
+    payload = "shopping:v1:p:1"
+    record = _synthetic_log_record(
+        "[Telegram][healbite_route_selected] "
+        "corr=safe-marker-containing-1 route=shopping_callback result=blocked",
+        correlation_id="safe-1-correlation",
+        action="source_unavailable",
+        result="blocked",
+        error_type="SyntheticStatus",
+    )
+
+    _assert_shopping_log_records_private(
+        [record],
+        actor_ids=(short_synthetic_actor,),
+        callback_payloads=(payload,),
+    )
+
+
+def test_log_privacy_helper_rejects_actor_in_sensitive_structured_field():
+    record = _synthetic_log_record("safe", actor_user_id=ACTOR)
+
+    with pytest.raises(AssertionError):
+        _assert_shopping_log_records_private(
+            [record],
+            actor_ids=(ACTOR,),
+            callback_payloads=("shopping:v1:p:1",),
+        )
+
+
+def test_log_privacy_helper_rejects_full_callback_payload_in_message():
+    payload = "shopping:v1:p:1"
+    record = _synthetic_log_record(f"unsafe callback={payload}")
+
+    with pytest.raises(AssertionError):
+        _assert_shopping_log_records_private(
+            [record], actor_ids=(ACTOR,), callback_payloads=(payload,)
+        )
+
+
+def test_log_privacy_helper_rejects_full_callback_payload_in_structured_value():
+    payload = "shopping:v1:p:1"
+    record = _synthetic_log_record("safe", safe_detail={"value": payload})
+
+    with pytest.raises(AssertionError):
+        _assert_shopping_log_records_private(
+            [record], actor_ids=(ACTOR,), callback_payloads=(payload,)
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["household_id", "shopping_list_id", "shopping_item_id"]
+)
+def test_log_privacy_helper_rejects_internal_identifier_fields(field_name):
+    record = _synthetic_log_record("safe", **{field_name: "synthetic-internal-id"})
+
+    with pytest.raises(AssertionError):
+        _assert_shopping_log_records_private(
+            [record],
+            actor_ids=(ACTOR,),
+            callback_payloads=("shopping:v1:p:1",),
+        )
 
 
 @pytest.mark.asyncio

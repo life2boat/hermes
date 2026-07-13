@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "compose": {
+    "project_name": "hermes-agent",
+    "target_service": "hermes-bot",
+    "base_file": "docker-compose.yml",
+    "production_override": "deploy/docker-compose.production.yml",
+    "project_directory": "repository-root"
+  },
+  "runtime": {
+    "directory": "/run/hermes",
+    "directory_mode": "0700",
+    "secret_override": "/run/hermes/hermes-secrets-override.yml",
+    "secret_override_mode": "0600",
+    "owner": "deployment-operator"
+  },
+  "secrets": {
+    "source_type": "explicit-protected-dotenv",
+    "approved_source_path": "/etc/hermes/hermes-production.env",
+    "approved_owner_uids": [
+      0
+    ],
+    "source_mode": "0600",
+    "required_variables": [
+      "TELEGRAM_BOT_TOKEN"
+    ],
+    "ambient_environment_allowed": false
+  },
+  "deployment": {
+    "image_reference_policy": "digest-only",
+    "revision_required": true,
+    "revision_label": "org.opencontainers.image.revision",
+    "allowed_revision_ref": "refs/remotes/healbite-project/main",
+    "recreate_services": [
+      "hermes-bot"
+    ],
+    "health_check": "container-running-restart-count-zero-image-match",
+    "cleanup_after_operation": true
+  },
+  "rollback": {
+    "image_reference_policy": "digest-only",
+    "same_compose_chain": true,
+    "schema_downgrade": false,
+    "database_restore": false
+  },
+  "feature_gates": {
+    "HEALBITE_SHOPPING_LIST_ENABLED": "false",
+    "HEALBITE_SHOPPING_LIST_ALLOWLIST": ""
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "services": {
+    "hermes-bot": {
+      "environment": {
+        "HEALBITE_SHOPPING_LIST_ENABLED": "false",
+        "HEALBITE_SHOPPING_LIST_ALLOWLIST": ""
+      }
+    }
+  }
+}

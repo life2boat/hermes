@@ -9,16 +9,23 @@ from pathlib import Path
 from typing import Callable
 
 from gateway.healbite_feature_gates import FeatureAvailabilityStatus
-from gateway.healbite_shopping import ShoppingListView
+from gateway.healbite_shopping import (
+    ShoppingItemOrigin,
+    ShoppingItemOverrideState,
+    ShoppingListView,
+)
 from gateway.healbite_shopping_runtime import (
     HealBiteShoppingRuntimeService,
     ShoppingRuntimeCleanupError,
+    ShoppingRuntimeConflictError,
     ShoppingRuntimeNotFoundError,
+    ShoppingRuntimeSourceError,
     ShoppingRuntimeStateError,
     ShoppingRuntimeUnavailableError,
     build_shopping_runtime_service,
 )
 from gateway.healbite_shopping_schema import require_shopping_item_id
+from gateway.healbite_weekly_menu_schema import is_valid_week_start
 from gateway.healbite_weekly_menu_telegram import current_week_start
 
 SHOPPING_COMMAND = "/shopping"
@@ -34,6 +41,15 @@ SHOPPING_ADD_HELP = (
     "Добавьте товар командой:\n/shopping_add Молоко\n/shopping_add Молоко | 2 | л"
 )
 SHOPPING_ADD_USAGE = "Формат: /shopping_add <название> [| количество | единица]"
+SHOPPING_GENERATION_MISSING_MENU_REPLY = "На эту неделю меню ещё не создано."
+SHOPPING_GENERATION_FAILED_REPLY = "Не удалось сформировать список по этому меню."
+SHOPPING_GENERATION_SUCCESS_REPLY = "Список обновлён по недельному меню."
+SHOPPING_GENERATION_CONFIRMATION = (
+    "Обновить список покупок по недельному меню?\n\n"
+    "Ручные позиции сохранятся. Позиции из меню будут пересчитаны. "
+    "Удалённые позиции могут появиться снова, если они всё ещё нужны по меню. "
+    "Недельное меню не изменится."
+)
 
 _PLACEHOLDER_STATES = {
     FeatureAvailabilityStatus.DISABLED,
@@ -78,6 +94,7 @@ class ShoppingCallback:
     argument: str | None = None
     version: int | None = None
     desired_state: bool | None = None
+    week_start: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +150,30 @@ def _parse_positive_version(value: str) -> int | None:
     return parsed if 0 < parsed <= 2**31 - 1 else None
 
 
+def _week_token(week_start: str) -> str:
+    if not is_valid_week_start(week_start):
+        raise ValueError("invalid shopping week")
+    return week_start.replace("-", "")
+
+
+def _parse_week_token(value: str) -> str | None:
+    if len(value) != 8 or not value.isdigit():
+        return None
+    week_start = f"{value[:4]}-{value[4:6]}-{value[6:]}"
+    return week_start if is_valid_week_start(week_start) else None
+
+
+def _parse_generation_version(value: str) -> int | None:
+    if not value.isdigit():
+        return None
+    parsed = int(value)
+    return parsed if 0 <= parsed <= 2**31 - 1 else None
+
+
+def _generation_callback(action: str, week_start: str, version: int) -> str:
+    return _callback(action, _week_token(week_start), version)
+
+
 def parse_shopping_callback(data: object) -> ShoppingCallback | None:
     if not isinstance(data, str):
         return None
@@ -158,6 +199,16 @@ def parse_shopping_callback(data: object) -> ShoppingCallback | None:
     if action in {"cr", "cc"} and len(parts) == 2:
         version = _parse_positive_version(parts[1])
         return None if version is None else ShoppingCallback(action, version=version)
+    if action in {"gr", "gc", "gx"} and len(parts) == 3:
+        week_start = _parse_week_token(parts[1])
+        version = _parse_generation_version(parts[2])
+        if week_start is None or version is None:
+            return None
+        return ShoppingCallback(
+            action,
+            version=version,
+            week_start=week_start,
+        )
     if action == "d" and len(parts) == 3:
         version = _parse_positive_version(parts[2])
         if version is None:
@@ -275,13 +326,20 @@ class HealBiteShoppingTelegramController:
         except Exception:
             return self._unavailable(error_class="internal_error")
         if view is None:
+            lines = [
+                "<b>Список покупок</b>",
+                _week_label(week_start),
+                "",
+            ]
+            if notice:
+                lines.extend([escape(notice), ""])
+            lines.append("Список на эту неделю пока не создан.")
             return ShoppingTelegramResult(
                 state="empty",
                 screen=ShoppingTelegramScreen(
-                    f"<b>Список покупок</b>\n"
-                    f"{_week_label(week_start)}\n\n"
-                    "Список на эту неделю пока не создан.",
+                    "\n".join(lines),
                     rows=(
+                        (("Сформировать по меню", _generation_callback("gr", week_start, 0)),),
                         (("Обновить", _callback("r")),),
                         (("Назад", _callback("b")),),
                     ),
@@ -338,7 +396,25 @@ class HealBiteShoppingTelegramController:
             paging.append(("Далее", _callback("p", selected_page + 1)))
         if paging:
             rows.append(tuple(paging))
+        has_generated_items = any(
+            item.origin is ShoppingItemOrigin.MENU_GENERATED
+            and item.override_state is ShoppingItemOverrideState.NONE
+            for item in items
+        )
+        generation_label = (
+            "Обновить по меню"
+            if has_generated_items
+            else "Сформировать по меню"
+        )
         rows.extend([
+            ((
+                generation_label,
+                _generation_callback(
+                    "gr",
+                    view.shopping_list.week_start,
+                    view.shopping_list.version,
+                ),
+            ),),
             (
                 ("Добавить", _callback("a")),
                 ("Обновить", _callback("r")),
@@ -439,6 +515,10 @@ class HealBiteShoppingTelegramController:
             )
         if parsed.action == "cx":
             return self.home(actor)
+        if parsed.action == "gx":
+            return self.home(actor)
+        if parsed.action == "gr":
+            return self._generation_confirmation(runtime, actor, parsed)
         week_start = self._week_start()
         if parsed.action == "cr":
             current = self._safe_current(runtime, actor, week_start)
@@ -456,6 +536,13 @@ class HealBiteShoppingTelegramController:
                     ),
                     parse_mode=None,
                 ),
+            )
+        if parsed.action == "gc":
+            return self._confirm_generation(
+                runtime,
+                actor,
+                parsed,
+                callback_query_id=callback_query_id,
             )
         try:
             key = shopping_delivery_idempotency_key(
@@ -505,6 +592,94 @@ class HealBiteShoppingTelegramController:
         except Exception:
             return self._unavailable(error_class="internal_error")
         return self._unavailable(error_class="invalid_callback")
+
+    def _generation_confirmation(
+        self,
+        runtime: HealBiteShoppingRuntimeService,
+        actor: int,
+        parsed: ShoppingCallback,
+    ) -> ShoppingTelegramResult:
+        week_start = self._week_start()
+        if parsed.week_start != week_start or parsed.version is None:
+            return self.home(actor, notice=SHOPPING_ACTION_UNAVAILABLE_REPLY)
+        try:
+            current = runtime.get_current_shopping_list(actor, week_start)
+        except ShoppingRuntimeUnavailableError as exc:
+            if exc.availability.status in _PLACEHOLDER_STATES:
+                return self._placeholder()
+            return self._unavailable(error_class=exc.availability.status.value)
+        except (ShoppingRuntimeCleanupError, ShoppingRuntimeStateError, sqlite3.Error):
+            return self._unavailable(error_class="state_unavailable")
+        except Exception:
+            return self._unavailable(error_class="internal_error")
+        current_version = 0 if current is None else current.shopping_list.version
+        if current_version != parsed.version:
+            return self.home(actor, notice=SHOPPING_ACTION_UNAVAILABLE_REPLY)
+        confirm_label = (
+            "Да, сформировать"
+            if current is None
+            else "Да, обновить"
+        )
+        return ShoppingTelegramResult(
+            state="generation_confirmation",
+            screen=ShoppingTelegramScreen(
+                SHOPPING_GENERATION_CONFIRMATION,
+                rows=(
+                    ((
+                        confirm_label,
+                        _generation_callback("gc", week_start, current_version),
+                    ),),
+                    ((
+                        "Отмена",
+                        _generation_callback("gx", week_start, current_version),
+                    ),),
+                ),
+                parse_mode=None,
+            ),
+        )
+
+    def _confirm_generation(
+        self,
+        runtime: HealBiteShoppingRuntimeService,
+        actor: int,
+        parsed: ShoppingCallback,
+        *,
+        callback_query_id: object,
+    ) -> ShoppingTelegramResult:
+        week_start = self._week_start()
+        if parsed.week_start != week_start or parsed.version is None:
+            return self.home(actor, notice=SHOPPING_ACTION_UNAVAILABLE_REPLY)
+        try:
+            generated = runtime.generate_shopping_list_from_weekly_menu(
+                actor,
+                week_start,
+                shopping_delivery_idempotency_key(
+                    callback_query_id,
+                    operation="generate",
+                ),
+                parsed.version or None,
+            )
+        except ShoppingRuntimeNotFoundError:
+            return self.home(actor, notice=SHOPPING_GENERATION_MISSING_MENU_REPLY)
+        except ShoppingRuntimeConflictError:
+            return self.home(actor, notice=SHOPPING_ACTION_UNAVAILABLE_REPLY)
+        except ShoppingRuntimeSourceError:
+            return self.home(actor, notice=SHOPPING_GENERATION_FAILED_REPLY)
+        except ShoppingRuntimeUnavailableError as exc:
+            if exc.availability.status in _PLACEHOLDER_STATES:
+                return self._placeholder()
+            return self._unavailable(error_class=exc.availability.status.value)
+        except (ShoppingRuntimeCleanupError, sqlite3.Error):
+            return self._unavailable(error_class="state_unavailable")
+        except ShoppingRuntimeStateError:
+            return self.home(actor, notice=SHOPPING_GENERATION_FAILED_REPLY)
+        except Exception:
+            return self._unavailable(error_class="internal_error")
+        return self._render_view(
+            generated,
+            page=0,
+            notice=SHOPPING_GENERATION_SUCCESS_REPLY,
+        )
 
     @staticmethod
     def _safe_current(

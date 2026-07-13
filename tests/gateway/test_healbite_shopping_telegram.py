@@ -12,14 +12,22 @@ import pytest
 from gateway.platforms import telegram as telegram_platform
 from gateway.config import PlatformConfig
 from gateway.healbite_feature_gates import FeatureGateConfig
+from gateway.healbite_household_schema import HOUSEHOLD_MEMBERS_TABLE
 from gateway.healbite_households import HealBiteHouseholdStore
-from gateway.healbite_shopping import HealBiteShoppingStore
+from gateway.healbite_shopping import (
+    HealBiteShoppingStore,
+    ManualShoppingItemInput,
+    ShoppingItemOrigin,
+)
 from gateway.healbite_shopping_runtime import HealBiteShoppingRuntimeService
 from gateway.healbite_shopping_telegram import (
     SHOPPING_ACTION_UNAVAILABLE_REPLY,
     SHOPPING_ADD_COMMAND,
     SHOPPING_CALLBACK_PREFIX,
     SHOPPING_COMMAND,
+    SHOPPING_GENERATION_FAILED_REPLY,
+    SHOPPING_GENERATION_MISSING_MENU_REPLY,
+    SHOPPING_GENERATION_SUCCESS_REPLY,
     SHOPPING_MAX_CALLBACK_BYTES,
     SHOPPING_PLACEHOLDER_REPLY,
     HealBiteShoppingTelegramController,
@@ -28,7 +36,18 @@ from gateway.healbite_shopping_telegram import (
     parse_shopping_callback,
     shopping_delivery_idempotency_key,
 )
-from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
+from gateway.healbite_shopping_schema import (
+    SHOPPING_IDEMPOTENCY_TABLE,
+    SHOPPING_ITEMS_TABLE,
+    SHOPPING_LISTS_TABLE,
+)
+from gateway.healbite_weekly_menu_schema import WEEKLY_MENU_INGREDIENTS_TABLE
+from gateway.healbite_weekly_menus import (
+    HealBiteWeeklyMenuStore,
+    WeeklyMenuEntryInput,
+    WeeklyMenuIngredientInput,
+    WeeklyMenuMealSlot,
+)
 from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
 
@@ -107,6 +126,102 @@ def _seed_list(db_path: Path, actor: int = ACTOR):
         idempotency_key=f"activate-list-{actor}",
     )
     return context, store, active
+
+
+def _ingredient(
+    name: str,
+    quantity: str,
+    unit: str,
+    *,
+    base_servings: str,
+    position: int,
+) -> WeeklyMenuIngredientInput:
+    return WeeklyMenuIngredientInput(
+        display_name=name,
+        quantity_value=quantity,
+        quantity_unit=unit,
+        recipe_base_servings=base_servings,
+        position=position,
+    )
+
+
+def _weekly_entries(*, structured: bool = True) -> list[WeeklyMenuEntryInput]:
+    ingredients = (
+        _ingredient("Молоко", "1", "l", base_servings="2", position=1),
+        _ingredient("Хлеб", "1", "package", base_servings="2", position=2),
+    ) if structured else ()
+    return [
+        WeeklyMenuEntryInput(
+            local_date=WEEK_START,
+            meal_slot=WeeklyMenuMealSlot.BREAKFAST,
+            position=1,
+            title="Синтетический завтрак",
+            servings="2",
+            ingredients=ingredients,
+        )
+    ]
+
+
+def _seed_weekly_source(
+    db_path: Path,
+    *,
+    structured: bool = True,
+    create_list: bool = False,
+):
+    _seed_user(db_path, ACTOR)
+    households = HealBiteHouseholdStore(db_path=db_path)
+    personal = households.get_or_create_personal_household(ACTOR)
+    context = households.resolve_actor_context(ACTOR)
+    weekly = HealBiteWeeklyMenuStore(db_path=db_path)
+    weekly.initialize_schema()
+    shopping = HealBiteShoppingStore(db_path=db_path)
+    shopping.initialize_schema()
+    series = weekly.create_or_get_weekly_menu_series(
+        context,
+        personal.household.id,
+        WEEK_START,
+    )
+    draft = weekly.create_draft_revision(
+        context,
+        series.id,
+        expected_series_version=series.version,
+        idempotency_key=f"draft-{structured}",
+    )
+    ready = weekly.replace_draft_entries(
+        context,
+        draft.revision.id,
+        _weekly_entries(structured=structured),
+        expected_revision_version=draft.revision.version,
+        idempotency_key=f"replace-{structured}",
+    )
+    published = weekly.publish_weekly_menu_revision(
+        context,
+        ready.revision.id,
+        expected_series_version=ready.series.version,
+        expected_revision_version=ready.revision.version,
+        idempotency_key=f"publish-{structured}",
+    )
+    view = None
+    if create_list:
+        created = shopping.create_shopping_list(
+            context,
+            personal.household.id,
+            week_start=WEEK_START,
+            idempotency_key="seed-generation-list",
+        )
+        view = shopping.activate_shopping_list(
+            context,
+            created.shopping_list.id,
+            expected_version=created.shopping_list.version,
+            idempotency_key="activate-generation-list",
+        )
+    return households, shopping, context, published, view
+
+
+def _table_snapshot(conn: sqlite3.Connection, table: str):
+    columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+    order = "id" if "id" in columns else columns[0]
+    return tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY {order}"))
 
 
 def _callbacks(result) -> list[tuple[str, str]]:
@@ -188,11 +303,17 @@ def test_feature_is_disabled_by_default_without_opening_database(tmp_path):
         "shopping:v1:r",
         callback_query_id="disabled-callback",
     )
+    generation_result = controller.handle_callback(
+        ACTOR,
+        "shopping:v1:gc:20260706:0",
+        callback_query_id="disabled-generation",
+    )
 
     assert result.state == "disabled"
     assert result.screen.text == SHOPPING_PLACEHOLDER_REPLY
     assert add_result.state == "disabled"
     assert callback_result.state == "disabled"
+    assert generation_result.state == "disabled"
     assert not db_path.exists()
 
 
@@ -214,9 +335,342 @@ def test_command_parser_and_callback_contract_are_strict():
     assert parse_shopping_add_command("/shopping_add Milk | 2") is None
     assert parse_shopping_callback("shopping:v2:r") is None
     assert parse_shopping_callback("shopping:v1:t:not-a-uuid:1:1") is None
+    request = parse_shopping_callback("shopping:v1:gr:20260706:0")
+    confirm = parse_shopping_callback("shopping:v1:gc:20260706:17")
+    cancel = parse_shopping_callback("shopping:v1:gx:20260706:17")
+    assert request is not None and (
+        request.action,
+        request.week_start,
+        request.version,
+    ) == ("gr", WEEK_START, 0)
+    assert confirm is not None and (
+        confirm.action,
+        confirm.week_start,
+        confirm.version,
+    ) == ("gc", WEEK_START, 17)
+    assert cancel is not None and cancel.action == "gx"
+    assert parse_shopping_callback("shopping:v1:gr:20260707:0") is None
+    assert parse_shopping_callback("shopping:v1:gc:20260706:-1") is None
+    assert parse_shopping_callback("shopping:v1:gc:20260706:not-a-version") is None
     assert parse_shopping_callback("shopping:v1:" + "x" * 80) is None
     assert parse_shopping_callback("shopping:v1:\ud800") is None
     assert len(shopping_delivery_idempotency_key("delivery", operation="add")) <= 128
+
+
+def test_generation_request_cancel_and_success_are_explicit_and_actor_scoped(tmp_path):
+    db_path = tmp_path / "generation.db"
+    _households, _shopping, _context, published, _view = _seed_weekly_source(
+        db_path
+    )
+    controller = _controller(db_path)
+    home = controller.home(ACTOR)
+    request_data = _find_callback(home, "Сформировать по меню")
+    assert len(request_data.encode("utf-8")) <= SHOPPING_MAX_CALLBACK_BYTES
+    assert str(ACTOR) not in request_data
+    assert published.series.household_id not in request_data
+    assert published.revision.id not in request_data
+
+    with _connect(db_path) as conn:
+        before = {
+            table: _table_snapshot(conn, table)
+            for table in (
+                SHOPPING_LISTS_TABLE,
+                SHOPPING_ITEMS_TABLE,
+                SHOPPING_IDEMPOTENCY_TABLE,
+            )
+        }
+    request = controller.handle_callback(
+        ACTOR,
+        request_data,
+        callback_query_id="request-only",
+    )
+    assert request.state == "generation_confirmation"
+    assert "Ручные позиции сохранятся" in request.screen.text
+    assert "Недельное меню не изменится" in request.screen.text
+    assert published.revision.id not in request.screen.text
+
+    cancelled = controller.handle_callback(
+        ACTOR,
+        _find_callback(request, "Отмена"),
+        callback_query_id="cancel-only",
+    )
+    assert cancelled.state == "empty"
+    with _connect(db_path) as conn:
+        assert before == {
+            table: _table_snapshot(conn, table)
+            for table in before
+        }
+
+    generated = controller.handle_callback(
+        ACTOR,
+        _find_callback(request, "Да, сформировать"),
+        callback_query_id="generate-once",
+    )
+    assert generated.state == "home"
+    assert SHOPPING_GENERATION_SUCCESS_REPLY in generated.screen.text
+    assert _find_callback(generated, "Обновить по меню")
+    current = _runtime(db_path).get_current_shopping_list(ACTOR, WEEK_START)
+    assert current is not None
+    assert len(current.items) == 2
+    assert all(item.origin is ShoppingItemOrigin.MENU_GENERATED for item in current.items)
+
+
+def test_generation_replay_changed_payload_and_stale_version_fail_closed(tmp_path):
+    db_path = tmp_path / "generation-idempotency.db"
+    _seed_weekly_source(db_path)
+    controller = _controller(db_path)
+    request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Сформировать по меню"),
+        callback_query_id="request",
+    )
+    confirm = _find_callback(request, "Да, сформировать")
+    once = controller.handle_callback(ACTOR, confirm, callback_query_id="same-delivery")
+    with _connect(db_path) as conn:
+        after_once = {
+            table: _table_snapshot(conn, table)
+            for table in (
+                SHOPPING_LISTS_TABLE,
+                SHOPPING_ITEMS_TABLE,
+                SHOPPING_IDEMPOTENCY_TABLE,
+            )
+        }
+    replay = controller.handle_callback(ACTOR, confirm, callback_query_id="same-delivery")
+    assert once.screen.text == replay.screen.text
+    with _connect(db_path) as conn:
+        assert after_once == {
+            table: _table_snapshot(conn, table)
+            for table in after_once
+        }
+
+    update_request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Обновить по меню"),
+        callback_query_id="new-request",
+    )
+    changed_payload = controller.handle_callback(
+        ACTOR,
+        _find_callback(update_request, "Да, обновить"),
+        callback_query_id="same-delivery",
+    )
+    assert SHOPPING_ACTION_UNAVAILABLE_REPLY in changed_payload.screen.text
+    with _connect(db_path) as conn:
+        assert after_once == {
+            table: _table_snapshot(conn, table)
+            for table in after_once
+        }
+
+    stale_confirm = _find_callback(update_request, "Да, обновить")
+    controller.add_from_command(
+        ACTOR,
+        "/shopping_add Manual item",
+        delivery_id="intervening-mutation",
+    )
+    with _connect(db_path) as conn:
+        before_stale = {
+            table: _table_snapshot(conn, table)
+            for table in (
+                SHOPPING_LISTS_TABLE,
+                SHOPPING_ITEMS_TABLE,
+                SHOPPING_IDEMPOTENCY_TABLE,
+            )
+        }
+    stale = controller.handle_callback(
+        ACTOR,
+        stale_confirm,
+        callback_query_id="stale-delivery",
+    )
+    assert SHOPPING_ACTION_UNAVAILABLE_REPLY in stale.screen.text
+    with _connect(db_path) as conn:
+        assert before_stale == {
+            table: _table_snapshot(conn, table)
+            for table in before_stale
+        }
+
+
+def test_regeneration_preserves_manual_checked_policy_and_restores_deleted_generated(
+    tmp_path,
+):
+    db_path = tmp_path / "generation-policy.db"
+    _seed_weekly_source(db_path, create_list=True)
+    controller = _controller(db_path)
+    controller.add_from_command(
+        ACTOR,
+        "/shopping_add Ручная позиция",
+        delivery_id="manual-add",
+    )
+    first_request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Сформировать по меню"),
+        callback_query_id="first-request",
+    )
+    controller.handle_callback(
+        ACTOR,
+        _find_callback(first_request, "Да, обновить"),
+        callback_query_id="first-generate",
+    )
+    runtime = _runtime(db_path)
+    first = runtime.get_current_shopping_list(ACTOR, WEEK_START)
+    assert first is not None
+    generated = [
+        item for item in first.items if item.origin is ShoppingItemOrigin.MENU_GENERATED
+    ]
+    assert len(generated) == 2
+    checked = generated[0]
+    deleted = generated[1]
+    runtime.set_shopping_item_checked(
+        ACTOR,
+        checked.id,
+        True,
+        "test-check-generated",
+        checked.version,
+    )
+    runtime.delete_shopping_item(
+        ACTOR,
+        deleted.id,
+        "test-delete-generated",
+        deleted.version,
+    )
+
+    second_request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Обновить по меню"),
+        callback_query_id="second-request",
+    )
+    regenerated = controller.handle_callback(
+        ACTOR,
+        _find_callback(second_request, "Да, обновить"),
+        callback_query_id="second-generate",
+    )
+    assert SHOPPING_GENERATION_SUCCESS_REPLY in regenerated.screen.text
+    current = runtime.get_current_shopping_list(ACTOR, WEEK_START)
+    assert current is not None
+    assert any(item.display_name == "Ручная позиция" for item in current.items)
+    generated_by_name = {
+        item.display_name: item
+        for item in current.items
+        if item.origin is ShoppingItemOrigin.MENU_GENERATED
+    }
+    assert checked.display_name in generated_by_name
+    assert generated_by_name[checked.display_name].checked_state is True
+    assert deleted.display_name in generated_by_name
+
+
+def test_missing_legacy_and_malformed_weekly_sources_preserve_existing_list(tmp_path):
+    cases = ("missing", "legacy", "malformed")
+    for case in cases:
+        db_path = tmp_path / f"{case}.db"
+        if case == "missing":
+            _seed_list(db_path)
+        else:
+            _seed_weekly_source(
+                db_path,
+                structured=case != "legacy",
+                create_list=True,
+            )
+            if case == "malformed":
+                with _connect(db_path) as conn:
+                    conn.execute(
+                        f"UPDATE {WEEKLY_MENU_INGREDIENTS_TABLE} "
+                        "SET quantity_value = 'not-a-number'"
+                    )
+        controller = _controller(db_path)
+        request = controller.handle_callback(
+            ACTOR,
+            _find_callback(controller.home(ACTOR), "Сформировать по меню"),
+            callback_query_id=f"{case}-request",
+        )
+        with _connect(db_path) as conn:
+            before = {
+                table: _table_snapshot(conn, table)
+                for table in (
+                    SHOPPING_LISTS_TABLE,
+                    SHOPPING_ITEMS_TABLE,
+                    SHOPPING_IDEMPOTENCY_TABLE,
+                )
+            }
+            ingredient_count = conn.execute(
+                f"SELECT COUNT(*) FROM {WEEKLY_MENU_INGREDIENTS_TABLE}"
+            ).fetchone()[0]
+        label = "Да, обновить"
+        result = controller.handle_callback(
+            ACTOR,
+            _find_callback(request, label),
+            callback_query_id=f"{case}-confirm",
+        )
+        expected = (
+            SHOPPING_GENERATION_MISSING_MENU_REPLY
+            if case == "missing"
+            else SHOPPING_GENERATION_FAILED_REPLY
+        )
+        assert expected in result.screen.text
+        with _connect(db_path) as conn:
+            assert before == {
+                table: _table_snapshot(conn, table)
+                for table in before
+            }
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {WEEKLY_MENU_INGREDIENTS_TABLE}"
+            ).fetchone()[0] == ingredient_count
+
+
+def test_foreign_week_and_revoked_membership_are_denied_without_mutation(tmp_path):
+    db_path = tmp_path / "scope-generation.db"
+    _seed_weekly_source(db_path, create_list=True)
+    controller = _controller(db_path)
+    with _connect(db_path) as conn:
+        before_foreign = {
+            table: _table_snapshot(conn, table)
+            for table in (
+                SHOPPING_LISTS_TABLE,
+                SHOPPING_ITEMS_TABLE,
+                SHOPPING_IDEMPOTENCY_TABLE,
+            )
+        }
+    foreign = controller.handle_callback(
+        ACTOR,
+        "shopping:v1:gc:20260713:1",
+        callback_query_id="foreign-week",
+    )
+    assert SHOPPING_ACTION_UNAVAILABLE_REPLY in foreign.screen.text
+    with _connect(db_path) as conn:
+        assert before_foreign == {
+            table: _table_snapshot(conn, table)
+            for table in before_foreign
+        }
+
+    request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Сформировать по меню"),
+        callback_query_id="revoke-request",
+    )
+    confirm = _find_callback(request, "Да, обновить")
+    with _connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE {HOUSEHOLD_MEMBERS_TABLE} SET status = 'removed' "
+            "WHERE linked_user_id = ?",
+            (ACTOR,),
+        )
+        before_revoked = {
+            table: _table_snapshot(conn, table)
+            for table in (
+                SHOPPING_LISTS_TABLE,
+                SHOPPING_ITEMS_TABLE,
+                SHOPPING_IDEMPOTENCY_TABLE,
+            )
+        }
+    revoked = controller.handle_callback(
+        ACTOR,
+        confirm,
+        callback_query_id="revoke-confirm",
+    )
+    assert revoked.state in {"empty", "unavailable"}
+    assert SHOPPING_GENERATION_SUCCESS_REPLY not in revoked.screen.text
+    with _connect(db_path) as conn:
+        assert before_revoked == {
+            table: _table_snapshot(conn, table)
+            for table in before_revoked
+        }
 
 
 def test_home_add_toggle_delete_and_clear_lifecycle(tmp_path):
@@ -594,6 +1048,42 @@ async def test_callback_is_local_redacted_and_edit_fallback_does_not_remutate(
 
 
 @pytest.mark.asyncio
+async def test_generation_callback_is_local_redacted_and_edit_failure_does_not_repeat(
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "generation-adapter.db"
+    _seed_weekly_source(db_path)
+    controller = _controller(db_path)
+    request = controller.handle_callback(
+        ACTOR,
+        _find_callback(controller.home(ACTOR), "Сформировать по меню"),
+        callback_query_id="request",
+    )
+    data = _find_callback(request, "Да, сформировать")
+    controller_spy = Mock(wraps=controller)
+    adapter = _adapter(controller_spy)
+    query = _query(data=data, query_id="opaque-generation-query")
+    query.edit_message_text.side_effect = RuntimeError("synthetic edit failure")
+
+    with caplog.at_level(logging.INFO):
+        await adapter._handle_callback_query(
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(),
+        )
+
+    controller_spy.handle_callback.assert_called_once()
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+    current = _runtime(db_path).get_current_shopping_list(ACTOR, WEEK_START)
+    assert current is not None and len(current.items) == 2
+    assert data not in caplog.text
+    assert str(ACTOR) not in caplog.text
+    assert "Молоко" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_forged_callback_is_consumed_locally(tmp_path):
     adapter = _adapter(_controller(tmp_path / "disabled.db", enabled=False))
     query = _query(data="shopping:v9:forged")
@@ -620,6 +1110,9 @@ async def test_forged_callback_is_consumed_locally(tmp_path):
         "shopping:v1:cr:1",
         "shopping:v1:cc:1",
         "shopping:v1:cx",
+        "shopping:v1:gr:20260706:0",
+        "shopping:v1:gc:20260706:0",
+        "shopping:v1:gx:20260706:0",
         "shopping:v1:b",
         "shopping:v1:unknown",
         "shopping:v9:unknown",
@@ -656,6 +1149,7 @@ async def test_missing_source_message_blocks_every_shopping_callback(
         "shopping:v1:t:11111111-1111-4111-8111-111111111111:1:1",
         "shopping:v1:d:11111111-1111-4111-8111-111111111111:1",
         "shopping:v1:cc:1",
+        "shopping:v1:gc:20260706:0",
     ],
 )
 async def test_inaccessible_source_message_blocks_mutations(data, monkeypatch):
@@ -684,6 +1178,26 @@ async def test_inaccessible_source_message_blocks_mutations(data, monkeypatch):
     inaccessible = SyntheticInaccessibleMessage()
     query = _query(data=data, message=inaccessible)
     assert adapter._healbite_shopping_source_message(query) is None
+
+    await adapter._handle_callback_query(
+        SimpleNamespace(callback_query=query),
+        SimpleNamespace(),
+    )
+
+    controller.handle_callback.assert_not_called()
+    query.answer.assert_awaited_once()
+    query.edit_message_text.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_source_message_without_message_id_blocks_generation_callback():
+    controller = Mock()
+    adapter = _adapter(controller)
+    source = _message(text="old")
+    source.message_id = None
+    query = _query(data="shopping:v1:gc:20260706:0", message=source)
 
     await adapter._handle_callback_query(
         SimpleNamespace(callback_query=query),

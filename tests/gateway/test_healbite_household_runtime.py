@@ -322,6 +322,6 @@ def test_existing_telegram_keyboard_contract_routes_family_through_its_feature_g
         [restrictions, help_button],
     ]
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[weekly_menu] == "/weekly_menu"
-    assert HEALBITE_REPLY_KEYBOARD_ACTIONS[shopping] == "__placeholder__:shopping_list"
+    assert HEALBITE_REPLY_KEYBOARD_ACTIONS[shopping] == "/shopping"
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[family] == "/family"
     assert HEALBITE_PLACEHOLDER_REPLY == "\u0412 \u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u043a\u0435"

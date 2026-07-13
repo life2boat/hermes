@@ -26,6 +26,7 @@ try:
         Update,
         Bot,
         Message,
+        MaybeInaccessibleMessage,
         InlineKeyboardButton,
         InlineKeyboardMarkup,
         KeyboardButton,
@@ -51,6 +52,7 @@ except ImportError:
     Update = Any
     Bot = Any
     Message = Any
+    MaybeInaccessibleMessage = None
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
     KeyboardButton = Any
@@ -117,6 +119,13 @@ from gateway.healbite_family_telegram import (
     FAMILY_COMMAND,
     FamilyTelegramResult,
     build_family_telegram_controller,
+)
+from gateway.healbite_shopping_telegram import (
+    SHOPPING_ADD_COMMAND,
+    SHOPPING_CALLBACK_ROOT,
+    SHOPPING_COMMAND,
+    ShoppingTelegramResult,
+    build_shopping_telegram_controller,
 )
 from gateway.healbite_water_tracker import (
     WATER_CUSTOM_AMOUNT_STATE,
@@ -188,7 +197,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "👤 Мой профиль": "/profile",
     "🍎 Дневник еды": "/diary",
     "📋 Меню на неделю": WEEKLY_MENU_COMMAND,
-    "🛒 Список покупок": "__placeholder__:shopping_list",
+    "🛒 Список покупок": SHOPPING_COMMAND,
     "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
     "👨‍👩‍👧 Семья": FAMILY_COMMAND,
@@ -209,7 +218,8 @@ def check_telegram_requirements() -> bool:
     install, re-imports the SDK and flips ``TELEGRAM_AVAILABLE`` to True
     so the adapter's class-level type aliases get rebound.
     """
-    global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
+    global TELEGRAM_AVAILABLE, Update, Bot, Message, MaybeInaccessibleMessage
+    global InlineKeyboardButton
     global InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
     global LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
@@ -222,7 +232,12 @@ def check_telegram_requirements() -> bool:
     except Exception:
         return False
     try:
-        from telegram import Update as _Update, Bot as _Bot, Message as _Message
+        from telegram import (
+            Update as _Update,
+            Bot as _Bot,
+            Message as _Message,
+            MaybeInaccessibleMessage as _MaybeInaccessibleMessage,
+        )
         from telegram import (
             InlineKeyboardButton as _IKB,
             InlineKeyboardMarkup as _IKM,
@@ -246,6 +261,7 @@ def check_telegram_requirements() -> bool:
     Update = _Update
     Bot = _Bot
     Message = _Message
+    MaybeInaccessibleMessage = _MaybeInaccessibleMessage
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
     KeyboardButton = _KB
@@ -544,6 +560,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._family_telegram = build_family_telegram_controller()
+        self._shopping_telegram = build_shopping_telegram_controller()
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
@@ -3483,6 +3500,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite Family callbacks (always consumed locally) ---
         if data.startswith(FAMILY_CALLBACK_ROOT):
             await self._handle_healbite_family_callback(query, data)
+            return
+
+        # --- HealBite Shopping callbacks (always consumed locally) ---
+        if data.startswith(SHOPPING_CALLBACK_ROOT):
+            await self._handle_healbite_shopping_callback(query, data)
             return
 
         # --- HealBite weight tracker callbacks ---
@@ -7003,6 +7025,171 @@ class TelegramAdapter(BasePlatformAdapter):
             if message is not None:
                 await self._send_healbite_family_result(message, result)
 
+    def _healbite_shopping_keyboard(
+        self,
+        result: ShoppingTelegramResult,
+    ) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not result.screen.rows:
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=callback_data)
+                    for label, callback_data in row
+                ]
+                for row in result.screen.rows
+            ]
+        )
+
+    async def _send_healbite_shopping_result(
+        self,
+        msg: Message,
+        result: ShoppingTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        kwargs: Dict[str, Any] = {
+            "chat_id": str(getattr(chat, "id", "")),
+            "text": result.screen.text,
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_shopping_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _maybe_handle_healbite_shopping_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (
+            text_override
+            if text_override is not None
+            else getattr(msg, "text", None) or ""
+        ).strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {SHOPPING_COMMAND, SHOPPING_ADD_COMMAND}:
+            return False
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if command_token == SHOPPING_ADD_COMMAND:
+            result = self._shopping_telegram.add_from_command(
+                actor_user_id,
+                text,
+                delivery_id=getattr(msg, "message_id", None),
+            )
+            operation = "add"
+        else:
+            result = self._shopping_telegram.home(actor_user_id)
+            operation = "open"
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="shopping",
+                action=operation,
+                result=result.state,
+            )
+        await self._send_healbite_shopping_result(msg, result)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="shopping",
+            action=operation,
+            outcome=result.state,
+            error_type=result.error_class,
+        )
+        return True
+
+    @staticmethod
+    def _healbite_shopping_source_message(query: Any) -> Optional[Message]:
+        message = getattr(query, "message", None)
+        if message is None:
+            return None
+        if (
+            isinstance(MaybeInaccessibleMessage, type)
+            and isinstance(message, MaybeInaccessibleMessage)
+            and not isinstance(message, Message)
+        ):
+            return None
+        chat = getattr(message, "chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
+            return None
+        return message
+
+    async def _handle_healbite_shopping_callback(self, query: Any, data: str) -> None:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        message = self._healbite_shopping_source_message(query)
+        if message is None:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="shopping_callback",
+                action="source_unavailable",
+                lane="healbite_public",
+                result="blocked",
+            )
+            try:
+                await query.answer(
+                    text=(
+                        "Эта кнопка больше недоступна. "
+                        "Откройте список покупок заново."
+                    )
+                )
+            except Exception:
+                pass
+            return
+        result = self._shopping_telegram.handle_callback(
+            actor_user_id,
+            data,
+            callback_query_id=getattr(query, "id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=message,
+            route="shopping_callback",
+            action=result.state,
+            lane="healbite_public",
+            result=(
+                "blocked"
+                if result.state in {"disabled", "stale", "unavailable"}
+                else "allowed"
+            ),
+            error_type=result.error_class,
+        )
+        if result.state == "back":
+            try:
+                await query.answer(text="Главное меню.")
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_menu_message(message, command="/menu")
+            return
+
+        if result.state == "disabled":
+            answer_text = "Раздел пока недоступен."
+        elif result.state in {"stale", "unavailable", "invalid_input"}:
+            answer_text = "Действие недоступно."
+        else:
+            answer_text = "Обновлено."
+        try:
+            await query.answer(text=answer_text)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, Any] = {
+            "text": result.screen.text,
+            "reply_markup": self._healbite_shopping_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            await self._send_healbite_shopping_result(message, result)
+
     async def _dispatch_healbite_keyboard_action(
         self,
         msg: Message,
@@ -7053,6 +7240,12 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         if normalized_action == FAMILY_COMMAND:
             return await self._maybe_handle_healbite_family_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if normalized_action in {SHOPPING_COMMAND, SHOPPING_ADD_COMMAND}:
+            return await self._maybe_handle_healbite_shopping_command(
                 msg,
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,

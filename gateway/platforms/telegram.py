@@ -26,6 +26,7 @@ try:
         Update,
         Bot,
         Message,
+        MaybeInaccessibleMessage,
         InlineKeyboardButton,
         InlineKeyboardMarkup,
         KeyboardButton,
@@ -51,6 +52,7 @@ except ImportError:
     Update = Any
     Bot = Any
     Message = Any
+    MaybeInaccessibleMessage = None
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
     KeyboardButton = Any
@@ -216,7 +218,8 @@ def check_telegram_requirements() -> bool:
     install, re-imports the SDK and flips ``TELEGRAM_AVAILABLE`` to True
     so the adapter's class-level type aliases get rebound.
     """
-    global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
+    global TELEGRAM_AVAILABLE, Update, Bot, Message, MaybeInaccessibleMessage
+    global InlineKeyboardButton
     global InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
     global LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
@@ -229,7 +232,12 @@ def check_telegram_requirements() -> bool:
     except Exception:
         return False
     try:
-        from telegram import Update as _Update, Bot as _Bot, Message as _Message
+        from telegram import (
+            Update as _Update,
+            Bot as _Bot,
+            Message as _Message,
+            MaybeInaccessibleMessage as _MaybeInaccessibleMessage,
+        )
         from telegram import (
             InlineKeyboardButton as _IKB,
             InlineKeyboardMarkup as _IKM,
@@ -253,6 +261,7 @@ def check_telegram_requirements() -> bool:
     Update = _Update
     Bot = _Bot
     Message = _Message
+    MaybeInaccessibleMessage = _MaybeInaccessibleMessage
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
     KeyboardButton = _KB
@@ -7092,8 +7101,43 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    @staticmethod
+    def _healbite_shopping_source_message(query: Any) -> Optional[Message]:
+        message = getattr(query, "message", None)
+        if message is None:
+            return None
+        if (
+            isinstance(MaybeInaccessibleMessage, type)
+            and isinstance(message, MaybeInaccessibleMessage)
+            and not isinstance(message, Message)
+        ):
+            return None
+        chat = getattr(message, "chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
+            return None
+        return message
+
     async def _handle_healbite_shopping_callback(self, query: Any, data: str) -> None:
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        message = self._healbite_shopping_source_message(query)
+        if message is None:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="shopping_callback",
+                action="source_unavailable",
+                lane="healbite_public",
+                result="blocked",
+            )
+            try:
+                await query.answer(
+                    text=(
+                        "Эта кнопка больше недоступна. "
+                        "Откройте список покупок заново."
+                    )
+                )
+            except Exception:
+                pass
+            return
         result = self._shopping_telegram.handle_callback(
             actor_user_id,
             data,
@@ -7101,7 +7145,7 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         self._log_healbite_marker(
             "healbite_route_selected",
-            msg=getattr(query, "message", None),
+            msg=message,
             route="shopping_callback",
             action=result.state,
             lane="healbite_public",
@@ -7121,9 +7165,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            message = getattr(query, "message", None)
-            if message is not None:
-                await self._send_healbite_menu_message(message, command="/menu")
+            await self._send_healbite_menu_message(message, command="/menu")
             return
 
         if result.state == "disabled":
@@ -7146,9 +7188,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
-            message = getattr(query, "message", None)
-            if message is not None:
-                await self._send_healbite_shopping_result(message, result)
+            await self._send_healbite_shopping_result(message, result)
 
     async def _dispatch_healbite_keyboard_action(
         self,

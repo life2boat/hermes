@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from gateway.platforms import telegram as telegram_platform
 from gateway.config import PlatformConfig
 from gateway.healbite_feature_gates import FeatureGateConfig
 from gateway.healbite_households import HealBiteHouseholdStore
@@ -34,6 +35,7 @@ from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, Telegram
 ACTOR = 101
 OTHER_ACTOR = 202
 WEEK_START = "2026-07-06"
+_DEFAULT_MESSAGE = object()
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -136,12 +138,23 @@ def _message(*, text: str, actor: int = ACTOR, message_id: int = 77):
     )
 
 
-def _query(*, data: str, actor: int = ACTOR, query_id: str = "query-one"):
+def _query(
+    *,
+    data: str,
+    actor: int = ACTOR,
+    query_id: str = "query-one",
+    message: object = _DEFAULT_MESSAGE,
+    inline_message_id: str | None = None,
+):
+    source_message = (
+        _message(text="old", actor=actor) if message is _DEFAULT_MESSAGE else message
+    )
     return SimpleNamespace(
         id=query_id,
         data=data,
         from_user=SimpleNamespace(id=actor, username="ignored", first_name="Ignored"),
-        message=_message(text="old", actor=actor),
+        message=source_message,
+        inline_message_id=inline_message_id,
         answer=AsyncMock(),
         edit_message_text=AsyncMock(),
         edit_message_reply_markup=AsyncMock(),
@@ -594,3 +607,156 @@ async def test_forged_callback_is_consumed_locally(tmp_path):
     query.edit_message_text.assert_awaited_once()
     adapter._enqueue_text_event.assert_not_called()
     adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        "shopping:v1:r",
+        "shopping:v1:p:1",
+        "shopping:v1:t:11111111-1111-4111-8111-111111111111:1:1",
+        "shopping:v1:d:11111111-1111-4111-8111-111111111111:1",
+        "shopping:v1:cr:1",
+        "shopping:v1:cc:1",
+        "shopping:v1:cx",
+        "shopping:v1:b",
+        "shopping:v1:unknown",
+        "shopping:v9:unknown",
+    ],
+)
+async def test_missing_source_message_blocks_every_shopping_callback(
+    data,
+    caplog,
+):
+    controller = Mock()
+    adapter = _adapter(controller)
+    query = _query(data=data, message=None)
+
+    with caplog.at_level(logging.INFO):
+        await adapter._handle_callback_query(
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(),
+        )
+
+    controller.handle_callback.assert_not_called()
+    query.answer.assert_awaited_once()
+    query.edit_message_text.assert_not_awaited()
+    adapter._send_message_with_thread_fallback.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+    assert data not in caplog.text
+    assert str(ACTOR) not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        "shopping:v1:t:11111111-1111-4111-8111-111111111111:1:1",
+        "shopping:v1:d:11111111-1111-4111-8111-111111111111:1",
+        "shopping:v1:cc:1",
+    ],
+)
+async def test_inaccessible_source_message_blocks_mutations(data, monkeypatch):
+    class SyntheticMaybeInaccessibleMessage:
+        pass
+
+    class SyntheticAccessibleMessage(SyntheticMaybeInaccessibleMessage):
+        pass
+
+    class SyntheticInaccessibleMessage(SyntheticMaybeInaccessibleMessage):
+        def __init__(self):
+            self.chat = SimpleNamespace(id=555, type="private")
+
+    monkeypatch.setattr(
+        telegram_platform,
+        "MaybeInaccessibleMessage",
+        SyntheticMaybeInaccessibleMessage,
+    )
+    monkeypatch.setattr(
+        telegram_platform,
+        "Message",
+        SyntheticAccessibleMessage,
+    )
+    controller = Mock()
+    adapter = _adapter(controller)
+    inaccessible = SyntheticInaccessibleMessage()
+    query = _query(data=data, message=inaccessible)
+    assert adapter._healbite_shopping_source_message(query) is None
+
+    await adapter._handle_callback_query(
+        SimpleNamespace(callback_query=query),
+        SimpleNamespace(),
+    )
+
+    controller.handle_callback.assert_not_called()
+    query.answer.assert_awaited_once()
+    query.edit_message_text.assert_not_awaited()
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_message_without_source_is_not_accepted():
+    controller = Mock()
+    adapter = _adapter(controller)
+    query = _query(
+        data="shopping:v1:r",
+        message=None,
+        inline_message_id="synthetic-inline",
+    )
+
+    await adapter._handle_callback_query(
+        SimpleNamespace(callback_query=query),
+        SimpleNamespace(),
+    )
+
+    controller.handle_callback.assert_not_called()
+    query.answer.assert_awaited_once()
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["toggle", "delete", "clear"])
+async def test_accessible_edit_failure_invokes_mutation_controller_once(
+    tmp_path,
+    operation,
+):
+    db_path = tmp_path / f"edit-{operation}.db"
+    _seed_list(db_path)
+    controller = _controller(db_path)
+    created = controller.add_from_command(
+        ACTOR,
+        "/shopping_add One item",
+        delivery_id=f"seed-{operation}",
+    )
+    if operation == "toggle":
+        data = _find_callback(created, "Куплено")
+    elif operation == "delete":
+        data = _find_callback(created, "Удалить")
+    else:
+        clear_request = controller.handle_callback(
+            ACTOR,
+            _find_callback(created, "Очистить"),
+            callback_query_id="clear-request",
+        )
+        data = _find_callback(clear_request, "Да, очистить")
+    controller_spy = Mock(wraps=controller)
+    adapter = _adapter(controller_spy)
+    query = _query(data=data, query_id=f"edit-{operation}")
+    query.edit_message_text.side_effect = RuntimeError("synthetic edit failure")
+
+    await adapter._handle_callback_query(
+        SimpleNamespace(callback_query=query),
+        SimpleNamespace(),
+    )
+
+    controller_spy.handle_callback.assert_called_once()
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    current = controller.home(ACTOR).screen.text
+    if operation == "toggle":
+        assert "✅" in current
+    else:
+        assert "One item" not in current

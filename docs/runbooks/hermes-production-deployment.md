@@ -33,7 +33,10 @@ and its allowlist empty. Other feature settings are not changed by this contract
 
 Image inputs must be immutable Docker image IDs (`sha256:<64 hex>`) or repository
 digests (`name@sha256:<64 hex>`). Mutable tags, including `latest`, are rejected.
-The exact 40-character source revision is also mandatory.
+The exact 40-character source revision is also mandatory. Every deployable or
+rollback image must contain that same full SHA in the single authoritative OCI
+label `org.opencontainers.image.revision`. A missing, malformed, abbreviated, or
+mismatched label is a hard failure; tag text is never treated as provenance.
 
 ## Repository validation
 
@@ -44,9 +47,10 @@ scripts/hermes_production_deploy.sh check-repository \
   --expected-sha <exact-40-character-source-sha>
 ```
 
-This mode checks HEAD, clean worktree state, canonical files, project/service
-identity, disabled Shopping flags, and absence of active legacy paths. It does
-not invoke Docker or read secret values.
+This mode checks the canonical repository root, exact HEAD, reachability from
+`refs/remotes/healbite-project/main`, clean worktree state, canonical files,
+project/service identity, disabled Shopping flags, and absence of active legacy
+paths. It does not invoke Docker or read secret values.
 
 ## Protected secret source and producer
 
@@ -91,7 +95,8 @@ scripts/hermes_production_deploy.sh check-render \
 scripts/hermes_production_deploy.sh cleanup
 ```
 
-The preferred plan command prepares and cleans the override automatically,
+The preferred plan command creates its override only inside a unique private
+temporary directory and removes both the override and directory automatically,
 including after failures:
 
 ```bash
@@ -101,8 +106,12 @@ scripts/hermes_production_deploy.sh plan \
   --revision <exact-40-character-source-sha>
 ```
 
-Planning validates local image availability and Compose rendering but never
-builds, pulls, starts, stops, or recreates a container.
+Planning validates repository provenance, local immutable image availability,
+the OCI revision label, exact image/revision equality, the protected secret
+source, and Compose rendering. It never creates `/run/hermes`, touches the
+legacy `/tmp` override, retains rendered configuration, or builds, pulls,
+starts, stops, or recreates a container. A successful plan is not authorization
+to deploy.
 
 ## Controlled deployment
 
@@ -117,10 +126,14 @@ scripts/hermes_production_deploy.sh execute-deploy \
   --confirm DEPLOY_HERMES_BOT
 ```
 
-The wrapper renders the same canonical chain, recreates only `hermes-bot` with
-`--no-deps --force-recreate`, verifies running state, restart count zero and
-image identity, then removes the runtime override. Qdrant is not in the recreate
-plan. Do not invoke this mode without a dedicated controlled-deploy task.
+The execute path independently reruns every repository, revision, image-label,
+secret-source, and Compose gate. These checks use an ephemeral override; only
+after all pass may execution create `/run/hermes`. Deployment uses the exact
+inspected immutable image ID rather than returning to the supplied reference.
+The wrapper recreates only `hermes-bot` with `--no-deps --force-recreate`,
+verifies running state, restart count zero and image identity, then removes the
+runtime override. Qdrant is not in the recreate plan. Do not invoke this mode
+without a dedicated controlled-deploy task.
 
 ## Cleanup lifecycle
 
@@ -131,8 +144,9 @@ scripts/hermes_production_deploy.sh cleanup
 Cleanup is idempotent and can remove only the exact canonical override. It
 rejects symlinks and unexpected paths and never touches the source dotenv file.
 Run it after a failed manual prepare/render, after deployment, and after rollback.
-The `/run` filesystem also clears at reboot. Automated plan, deploy, and rollback
-modes clean the override in `finally` behavior.
+The `/run` filesystem also clears at reboot. Execute deploy and rollback modes
+clean the canonical override in `finally` behavior. Plan modes never use this
+path and clean only their private temporary override.
 
 ## Application rollback
 
@@ -146,10 +160,12 @@ scripts/hermes_production_deploy.sh plan-rollback \
   --revision <exact-40-character-previous-source-sha>
 ```
 
-The previous and current image IDs must both exist locally and differ. The plan
-uses the canonical project, Compose files, protected override, and target service.
-The additive Weekly/Shopping schema remains in place; schema downgrade and DB
-restore are not part of application rollback.
+The previous and current immutable images must both exist locally and differ.
+The previous image's authoritative OCI revision label must exactly equal the
+requested rollback SHA. The plan uses the canonical project and Compose files
+with an ephemeral protected override; it never creates `/run/hermes`. The
+additive Weekly/Shopping schema remains in place; schema downgrade and DB restore
+are not part of application rollback.
 
 An approved rollback task may execute:
 

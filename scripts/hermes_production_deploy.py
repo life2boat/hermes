@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -53,7 +53,15 @@ class DeploymentContract:
     required_secret_names: tuple[str, ...]
     project_name: str
     target_service: str
+    image_revision_label: str
+    allowed_revision_ref: str
     feature_gates: dict[str, str]
+
+
+@dataclass(frozen=True)
+class InspectedImage:
+    image_id: str
+    revision: str
 
 
 def _fail(code: str) -> None:
@@ -155,6 +163,8 @@ def load_contract(root: Path = REPOSITORY_ROOT) -> DeploymentContract:
     if (
         deployment.get("image_reference_policy") != "digest-only"
         or deployment.get("revision_required") is not True
+        or deployment.get("revision_label") != "org.opencontainers.image.revision"
+        or deployment.get("allowed_revision_ref") != "refs/remotes/healbite-project/main"
         or deployment.get("recreate_services") != ["hermes-bot"]
         or deployment.get("cleanup_after_operation") is not True
     ):
@@ -187,6 +197,8 @@ def load_contract(root: Path = REPOSITORY_ROOT) -> DeploymentContract:
         required_secret_names=tuple(required),
         project_name="hermes-agent",
         target_service="hermes-bot",
+        image_revision_label="org.opencontainers.image.revision",
+        allowed_revision_ref="refs/remotes/healbite-project/main",
         feature_gates=dict(expected_gates),
     )
 
@@ -222,10 +234,26 @@ def _git_output(contract: DeploymentContract, *args: str) -> str:
 def validate_repository(contract: DeploymentContract, expected_sha: str) -> None:
     if not SHA_RE.fullmatch(expected_sha):
         _fail("expected-sha")
+    if Path(_git_output(contract, "rev-parse", "--show-toplevel")).resolve() != contract.root.resolve():
+        _fail("repository-root-mismatch")
     if _git_output(contract, "rev-parse", "HEAD") != expected_sha:
         _fail("head-mismatch")
     if _git_output(contract, "status", "--porcelain=v1"):
         _fail("dirty-worktree")
+    ancestry = _run(
+        (
+            "git",
+            "-C",
+            str(contract.root),
+            "merge-base",
+            "--is-ancestor",
+            expected_sha,
+            contract.allowed_revision_ref,
+        ),
+        timeout=20,
+    )
+    if ancestry.returncode != 0:
+        _fail("revision-not-allowed")
     for path in (contract.manifest_path, contract.base_compose, contract.production_override):
         try:
             metadata = path.lstat()
@@ -404,8 +432,7 @@ def _override_document(contract: DeploymentContract, secrets: dict[str, str]) ->
     return (json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def prepare_secret_override(contract: DeploymentContract, source: Path) -> None:
-    secrets = read_required_secrets(contract, source)
+def _write_secret_override(contract: DeploymentContract, secrets: dict[str, str]) -> None:
     _validate_runtime_directory(contract, create=True)
     if contract.secret_override.exists() or contract.secret_override.is_symlink():
         validate_secret_override(contract)
@@ -457,6 +484,10 @@ def prepare_secret_override(contract: DeploymentContract, source: Path) -> None:
                 pass
             except OSError:
                 _fail("override-partial-cleanup")
+
+
+def prepare_secret_override(contract: DeploymentContract, source: Path) -> None:
+    _write_secret_override(contract, read_required_secrets(contract, source))
 
 
 def cleanup_secret_override(contract: DeploymentContract, requested_path: Path | None = None) -> None:
@@ -538,24 +569,109 @@ def validate_compose_render(contract: DeploymentContract, image: str, revision: 
         _fail("target-service-missing")
 
 
-def inspect_local_image(image: str) -> str:
+def inspect_local_image(
+    contract: DeploymentContract,
+    image: str,
+    *,
+    expected_revision: str | None = None,
+) -> InspectedImage:
     validate_immutable_image(image)
-    result = _run(("docker", "image", "inspect", "--format", "{{.Id}}", image), timeout=30)
-    image_id = result.stdout.strip()
-    if result.returncode != 0 or not IMAGE_ID_RE.fullmatch(image_id):
+    result = _run(("docker", "image", "inspect", image), timeout=30)
+    if result.returncode != 0:
         _fail("local-image-missing")
-    return image_id
+    try:
+        records = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        _fail("image-inspect-invalid")
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+        _fail("image-inspect-ambiguous")
+    record = records[0]
+    image_id = record.get("Id")
+    config = record.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    revision = labels.get(contract.image_revision_label) if isinstance(labels, dict) else None
+    if not isinstance(image_id, str) or not IMAGE_ID_RE.fullmatch(image_id):
+        _fail("image-inspect-invalid")
+    if not isinstance(revision, str) or not revision:
+        _fail("image-revision-label-missing")
+    if not SHA_RE.fullmatch(revision):
+        _fail("image-revision-label-invalid")
+    if expected_revision is not None:
+        validate_revision(expected_revision)
+        if revision != expected_revision:
+            _fail("image-revision-mismatch")
+    return InspectedImage(image_id=image_id, revision=revision)
 
 
-def _print_plan(contract: DeploymentContract, image: str, *, rollback: bool) -> None:
+def _print_plan(
+    contract: DeploymentContract,
+    image: str,
+    revision: str,
+    *,
+    rollback: bool,
+) -> None:
     action = "ROLLBACK" if rollback else "DEPLOY"
     command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
     print(f"PLAN={action}")
     print(f"IMAGE={image}")
+    print(f"REVISION={revision}")
+    print(f"IMAGE_REVISION_LABEL_KEY={contract.image_revision_label}")
+    print("IMAGE_REVISION_MATCH=true")
     print(f"COMPOSE_PROJECT={contract.project_name}")
     print(f"TARGET_SERVICE={contract.target_service}")
     print(f"COMMAND={shlex.join(command)}")
     print("DEPLOYMENT_ACTIONS_PERFORMED=false")
+
+
+def _temporary_render_contract(contract: DeploymentContract, directory: Path) -> DeploymentContract:
+    _assert_no_symlink_components(directory)
+    metadata = directory.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or metadata.st_uid != _effective_uid()
+    ):
+        _fail("temporary-plan-directory")
+    runtime_directory = directory / "runtime"
+    return replace(
+        contract,
+        runtime_directory=runtime_directory,
+        secret_override=runtime_directory / "hermes-secrets-override.yml",
+    )
+
+
+def _validate_pre_mutation(
+    contract: DeploymentContract,
+    *,
+    source: Path,
+    image: str,
+    revision: str,
+    current_image: str | None = None,
+) -> tuple[InspectedImage, dict[str, str]]:
+    validate_repository(contract, revision)
+    target = inspect_local_image(contract, image, expected_revision=revision)
+    if current_image is not None:
+        current = inspect_local_image(contract, current_image)
+        if current.image_id == target.image_id:
+            _fail("rollback-image-not-distinct")
+    secrets = read_required_secrets(contract, source)
+    with tempfile.TemporaryDirectory(prefix="hermes-production-plan-") as raw_directory:
+        temporary = _temporary_render_contract(contract, Path(raw_directory))
+        _write_secret_override(temporary, secrets)
+        primary_error: BaseException | None = None
+        try:
+            validate_compose_render(temporary, target.image_id, revision)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                cleanup_secret_override(temporary)
+            except DeploymentContractError:
+                if primary_error is None:
+                    raise
+    return target, secrets
 
 
 def plan_operation(
@@ -566,20 +682,14 @@ def plan_operation(
     revision: str,
     rollback_from: str | None = None,
 ) -> None:
-    validate_immutable_image(image)
-    validate_revision(revision)
-    if rollback_from is not None:
-        validate_immutable_image(rollback_from)
-        if inspect_local_image(image) == inspect_local_image(rollback_from):
-            _fail("rollback-image-not-distinct")
-    else:
-        inspect_local_image(image)
-    prepare_secret_override(contract, source)
-    try:
-        validate_compose_render(contract, image, revision)
-        _print_plan(contract, image, rollback=rollback_from is not None)
-    finally:
-        cleanup_secret_override(contract)
+    target, _secrets = _validate_pre_mutation(
+        contract,
+        source=source,
+        image=image,
+        revision=revision,
+        current_image=rollback_from,
+    )
+    _print_plan(contract, target.image_id, revision, rollback=rollback_from is not None)
 
 
 def execute_operation(
@@ -595,16 +705,20 @@ def execute_operation(
     required_confirmation = ROLLBACK_CONFIRMATION if rollback else DEPLOY_CONFIRMATION
     if confirmation != required_confirmation:
         _fail("explicit-confirmation-required")
-    expected_image_id = inspect_local_image(image)
-    if rollback:
-        if current_image is None:
-            _fail("current-image-required")
-        if inspect_local_image(current_image) == expected_image_id:
-            _fail("rollback-image-not-distinct")
-    prepare_secret_override(contract, source)
+    if rollback and current_image is None:
+        _fail("current-image-required")
+    target, secrets = _validate_pre_mutation(
+        contract,
+        source=source,
+        image=image,
+        revision=revision,
+        current_image=current_image if rollback else None,
+    )
+    expected_image_id = target.image_id
+    _write_secret_override(contract, secrets)
+    primary_error: BaseException | None = None
     try:
-        validate_compose_render(contract, image, revision)
-        environment = _compose_environment(image, revision)
+        environment = _compose_environment(expected_image_id, revision)
         command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
         result = _run(command, cwd=contract.root, env=environment, timeout=300)
         if result.returncode != 0:
@@ -621,8 +735,15 @@ def execute_operation(
         )
         if health.returncode != 0 or health.stdout.strip() != f"running 0 {expected_image_id}":
             _fail("post-operation-health")
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        cleanup_secret_override(contract)
+        try:
+            cleanup_secret_override(contract)
+        except DeploymentContractError:
+            if primary_error is None:
+                raise
 
 
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:
@@ -705,7 +826,9 @@ def main(argv: list[str] | None = None) -> int:
             cleanup_secret_override(contract)
             print("SECRET_OVERRIDE_PRESENT=false")
         elif args.command == "check-render":
-            validate_compose_render(contract, args.image, args.revision)
+            validate_repository(contract, args.revision)
+            inspected = inspect_local_image(contract, args.image, expected_revision=args.revision)
+            validate_compose_render(contract, inspected.image_id, args.revision)
             print("CHECK_COMPOSE_RENDER=PASS")
             print("DEPLOYMENT_ACTIONS_PERFORMED=false")
         elif args.command == "plan":

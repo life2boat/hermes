@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -22,7 +21,10 @@ import hermes_production_deploy as deploy  # noqa: E402
 FAKE_SECRET = "placeholder-telegram-token"
 IMAGE_A = "sha256:" + "a" * 64
 IMAGE_B = "sha256:" + "b" * 64
+IMAGE_DIGEST = "example.invalid/hermes@sha256:" + "e" * 64
 REVISION = "c" * 40
+OTHER_REVISION = "d" * 40
+REVISION_LABEL = "org.opencontainers.image.revision"
 
 
 @pytest.fixture
@@ -37,7 +39,7 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
         runtime_directory=runtime,
         secret_override=runtime / "hermes-secrets-override.yml",
         approved_secret_source=source,
-        approved_source_owner_uids=frozenset({os.geteuid()}),
+        approved_source_owner_uids=frozenset({deploy._effective_uid()}),
     )
     return contract, source
 
@@ -50,13 +52,29 @@ def _completed(argv, *, returncode: int = 0, stdout: str = "", stderr: str = "")
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
-def _safe_docker_runner(calls: list[tuple[str, ...]], *, services: str = "hermes-bot\nqdrant\n"):
+def _image_record(image_id: str, revision: object = REVISION) -> dict[str, object]:
+    labels = {} if revision is None else {REVISION_LABEL: revision}
+    return {"Id": image_id, "Config": {"Labels": labels}}
+
+
+def _safe_docker_runner(
+    calls: list[tuple[str, ...]],
+    *,
+    services: str = "hermes-bot\nqdrant\n",
+    revisions: dict[str, object] | None = None,
+):
+    revisions = revisions or {}
+
     def runner(argv, **_kwargs):
         command = tuple(str(item) for item in argv)
         calls.append(command)
         if command[:3] == ("docker", "image", "inspect"):
             image = command[-1]
-            return _completed(argv, stdout=(IMAGE_A if image == IMAGE_A else IMAGE_B) + "\n")
+            image_id = IMAGE_A if image == IMAGE_A else IMAGE_B
+            revision = revisions.get(image, REVISION)
+            return _completed(argv, stdout=json.dumps([_image_record(image_id, revision)]))
+        if command[:2] == ("docker", "inspect"):
+            return _completed(argv, stdout=f"running 0 {IMAGE_A}\n")
         if command[-2:] == ("config", "--services"):
             return _completed(argv, stdout=services, stderr=FAKE_SECRET)
         return _completed(argv, stderr=FAKE_SECRET)
@@ -84,7 +102,9 @@ def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
     _git("config", "user.name", "Audit Fixture", cwd=root)
     _git("add", ".", cwd=root)
     _git("commit", "-qm", "fixture", cwd=root)
-    return deploy.load_contract(root), _git("rev-parse", "HEAD", cwd=root)
+    head = _git("rev-parse", "HEAD", cwd=root)
+    _git("update-ref", "refs/remotes/healbite-project/main", head, cwd=root)
+    return deploy.load_contract(root), head
 
 
 def test_manifest_is_canonical_and_secret_free() -> None:
@@ -97,6 +117,8 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.required_secret_names == ("TELEGRAM_BOT_TOKEN",)
     assert contract.approved_secret_source == Path("/etc/hermes/hermes-production.env")
     assert contract.approved_source_owner_uids == frozenset({0})
+    assert contract.image_revision_label == REVISION_LABEL
+    assert contract.allowed_revision_ref == "refs/remotes/healbite-project/main"
     assert FAKE_SECRET not in text
 
 
@@ -118,6 +140,16 @@ def test_repository_check_rejects_dirty_worktree(repository_fixture) -> None:
         deploy.validate_repository(contract, head)
 
 
+def test_repository_check_rejects_revision_not_reachable_from_allowed_ref(repository_fixture) -> None:
+    contract, _head = repository_fixture
+    (contract.root / "new.txt").write_text("new", encoding="utf-8")
+    _git("add", ".", cwd=contract.root)
+    _git("commit", "-qm", "unpublished", cwd=contract.root)
+    unpublished = _git("rev-parse", "HEAD", cwd=contract.root)
+    with pytest.raises(deploy.DeploymentContractError, match="revision-not-allowed"):
+        deploy.validate_repository(contract, unpublished)
+
+
 def test_repository_check_rejects_legacy_worktree_reference(repository_fixture) -> None:
     contract, _head = repository_fixture
     text = contract.production_override.read_text(encoding="utf-8")
@@ -125,6 +157,7 @@ def test_repository_check_rejects_legacy_worktree_reference(repository_fixture) 
     _git("add", ".", cwd=contract.root)
     _git("commit", "-qm", "bad reference", cwd=contract.root)
     head = _git("rev-parse", "HEAD", cwd=contract.root)
+    _git("update-ref", contract.allowed_revision_ref, head, cwd=contract.root)
     with pytest.raises(deploy.DeploymentContractError, match="legacy-reference"):
         deploy.validate_repository(contract, head)
 
@@ -136,6 +169,7 @@ def test_repository_check_rejects_tmp_override_reference(repository_fixture) -> 
     _git("add", ".", cwd=contract.root)
     _git("commit", "-qm", "bad reference", cwd=contract.root)
     head = _git("rev-parse", "HEAD", cwd=contract.root)
+    _git("update-ref", contract.allowed_revision_ref, head, cwd=contract.root)
     with pytest.raises(deploy.DeploymentContractError, match="legacy-reference"):
         deploy.validate_repository(contract, head)
 
@@ -270,7 +304,7 @@ def test_insecure_source_permissions_fail(protected_contract) -> None:
 
 def test_unapproved_source_owner_fails(protected_contract) -> None:
     contract, source = protected_contract
-    contract = replace(contract, approved_source_owner_uids=frozenset({os.geteuid() + 1}))
+    contract = replace(contract, approved_source_owner_uids=frozenset({deploy._effective_uid() + 1}))
     with pytest.raises(deploy.DeploymentContractError, match="secret-source-owner"):
         _prepare(contract, source)
 
@@ -440,18 +474,23 @@ def test_invalid_compose_render_fails_without_error_body(protected_contract, mon
 def test_plan_performs_no_deployment_and_cleans_override(protected_contract, monkeypatch, capsys) -> None:
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
     deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
     captured = capsys.readouterr()
     assert "DEPLOYMENT_ACTIONS_PERFORMED=false" in captured.out
     assert FAKE_SECRET not in captured.out + captured.err
     assert not contract.secret_override.exists()
+    assert not contract.runtime_directory.exists()
+    assert any("hermes-production-plan-" in part for command in calls for part in command)
+    assert not any(str(contract.secret_override) in command for command in calls)
     assert not any("up" in command or "build" in command or "pull" in command for command in calls)
 
 
 def test_rollback_plan_uses_distinct_local_immutable_image(protected_contract, monkeypatch, capsys) -> None:
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
     deploy.plan_operation(
         contract,
@@ -466,6 +505,7 @@ def test_rollback_plan_uses_distinct_local_immutable_image(protected_contract, m
     assert contract.target_service in captured.out
     assert FAKE_SECRET not in captured.out + captured.err
     assert not contract.secret_override.exists()
+    assert not contract.runtime_directory.exists()
 
 
 def test_missing_rollback_image_fails(protected_contract, monkeypatch) -> None:
@@ -474,6 +514,7 @@ def test_missing_rollback_image_fails(protected_contract, monkeypatch) -> None:
     def missing(argv, **_kwargs):
         return _completed(argv, returncode=1)
 
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     monkeypatch.setattr(deploy, "_run", missing)
     with pytest.raises(deploy.DeploymentContractError, match="local-image-missing"):
         deploy.plan_operation(
@@ -483,6 +524,184 @@ def test_missing_rollback_image_fails(protected_contract, monkeypatch) -> None:
             revision=REVISION,
             rollback_from=IMAGE_B,
         )
+
+
+def test_plan_render_failure_cleans_ephemeral_override(protected_contract, monkeypatch) -> None:
+    contract, source = protected_contract
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+
+    def fail_render(argv, **_kwargs):
+        command = tuple(str(item) for item in argv)
+        calls.append(command)
+        if command[:3] == ("docker", "image", "inspect"):
+            return _completed(argv, stdout=json.dumps([_image_record(IMAGE_A)]))
+        if command[-2:] == ("config", "--quiet"):
+            return _completed(argv, returncode=1, stderr=FAKE_SECRET)
+        return _completed(argv)
+
+    monkeypatch.setattr(deploy, "_run", fail_render)
+    with pytest.raises(deploy.DeploymentContractError, match="compose-render"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
+    assert not contract.runtime_directory.exists()
+    temporary_paths = [part for command in calls for part in command if "hermes-production-plan-" in part]
+    assert temporary_paths
+    assert all(not Path(part).exists() for part in temporary_paths)
+
+
+def test_plan_leaves_legacy_tmp_path_untouched(protected_contract, monkeypatch, tmp_path: Path) -> None:
+    contract, source = protected_contract
+    legacy = tmp_path / "hermes-secrets-override.yml"
+    legacy.write_text("preserve", encoding="utf-8")
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([]))
+    deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
+    assert legacy.read_text(encoding="utf-8") == "preserve"
+
+
+def test_matching_image_revision_label_passes(protected_contract, monkeypatch) -> None:
+    contract, _source = protected_contract
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([]))
+    inspected = deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
+    assert inspected == deploy.InspectedImage(image_id=IMAGE_A, revision=REVISION)
+
+
+@pytest.mark.parametrize(
+    ("label", "error"),
+    [
+        (None, "image-revision-label-missing"),
+        ("", "image-revision-label-missing"),
+        ("not-a-sha", "image-revision-label-invalid"),
+        ("a" * 12, "image-revision-label-invalid"),
+        (OTHER_REVISION, "image-revision-mismatch"),
+    ],
+)
+def test_invalid_image_revision_labels_fail_closed(protected_contract, monkeypatch, label, error) -> None:
+    contract, _source = protected_contract
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _safe_docker_runner([], revisions={IMAGE_A: label}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match=error):
+        deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
+
+
+def test_multiple_image_inspect_records_are_denied(protected_contract, monkeypatch) -> None:
+    contract, _source = protected_contract
+
+    def ambiguous(argv, **_kwargs):
+        return _completed(argv, stdout=json.dumps([_image_record(IMAGE_A), _image_record(IMAGE_B)]))
+
+    monkeypatch.setattr(deploy, "_run", ambiguous)
+    with pytest.raises(deploy.DeploymentContractError, match="image-inspect-ambiguous"):
+        deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
+
+
+def test_nonexistent_image_is_denied(protected_contract, monkeypatch) -> None:
+    contract, _source = protected_contract
+    monkeypatch.setattr(deploy, "_run", lambda argv, **_kwargs: _completed(argv, returncode=1))
+    with pytest.raises(deploy.DeploymentContractError, match="local-image-missing"):
+        deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
+
+
+def test_plan_image_mismatch_fails_without_canonical_runtime_write(protected_contract, monkeypatch) -> None:
+    contract, source = protected_contract
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _safe_docker_runner([], revisions={IMAGE_A: OTHER_REVISION}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="image-revision-mismatch"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
+    assert not contract.runtime_directory.exists()
+
+
+@pytest.mark.parametrize(("rollback", "error"), [(False, "dirty-worktree"), (True, "head-mismatch")])
+def test_execute_repository_failure_precedes_secret_image_and_runtime(
+    protected_contract,
+    monkeypatch,
+    rollback: bool,
+    error: str,
+) -> None:
+    contract, source = protected_contract
+    events: list[str] = []
+
+    def reject_repository(*_args):
+        events.append("repository")
+        raise deploy.DeploymentContractError(error)
+
+    monkeypatch.setattr(deploy, "validate_repository", reject_repository)
+    monkeypatch.setattr(deploy, "inspect_local_image", lambda *_args, **_kwargs: events.append("image"))
+    monkeypatch.setattr(deploy, "read_required_secrets", lambda *_args: events.append("secret"))
+    with pytest.raises(deploy.DeploymentContractError, match=error):
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=REVISION,
+            confirmation=deploy.ROLLBACK_CONFIRMATION if rollback else deploy.DEPLOY_CONFIRMATION,
+            rollback=rollback,
+            current_image=IMAGE_B if rollback else None,
+        )
+    assert events == ["repository"]
+    assert not contract.runtime_directory.exists()
+
+
+@pytest.mark.parametrize("revision", ["c" * 12, "main", "v1.0.0", "C" * 40])
+def test_execute_denies_non_exact_revision_before_other_gates(
+    protected_contract,
+    monkeypatch,
+    revision: str,
+) -> None:
+    contract, source = protected_contract
+    monkeypatch.setattr(deploy, "_run", lambda *_args, **_kwargs: pytest.fail("command must not run"))
+    with pytest.raises(deploy.DeploymentContractError, match="expected-sha"):
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=revision,
+            confirmation=deploy.DEPLOY_CONFIRMATION,
+            rollback=False,
+        )
+    assert not contract.runtime_directory.exists()
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_execute_image_mismatch_precedes_secret_read_and_runtime(
+    protected_contract,
+    monkeypatch,
+    rollback: bool,
+) -> None:
+    contract, source = protected_contract
+    secret_reads = 0
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _safe_docker_runner([], revisions={IMAGE_A: OTHER_REVISION}),
+    )
+
+    def count_secret_reads(*_args):
+        nonlocal secret_reads
+        secret_reads += 1
+        return {}
+
+    monkeypatch.setattr(deploy, "read_required_secrets", count_secret_reads)
+    with pytest.raises(deploy.DeploymentContractError, match="image-revision-mismatch"):
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=REVISION,
+            confirmation=deploy.ROLLBACK_CONFIRMATION if rollback else deploy.DEPLOY_CONFIRMATION,
+            rollback=rollback,
+            current_image=IMAGE_B if rollback else None,
+        )
+    assert secret_reads == 0
+    assert not contract.runtime_directory.exists()
 
 
 def test_execute_requires_explicit_confirmation_before_docker(protected_contract, monkeypatch) -> None:
@@ -501,9 +720,136 @@ def test_execute_requires_explicit_confirmation_before_docker(protected_contract
     assert calls == []
 
 
+def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contract, monkeypatch) -> None:
+    contract, source = protected_contract
+    events: list[str] = []
+    original_read = deploy.read_required_secrets
+    original_write = deploy._write_secret_override
+
+    def repository_gate(*_args):
+        events.append("repository")
+
+    def secret_gate(*args):
+        events.append("secret")
+        return original_read(*args)
+
+    def tracked_write(target_contract, secrets):
+        events.append("canonical_override" if target_contract is contract else "temporary_override")
+        return original_write(target_contract, secrets)
+
+    def runner(argv, **kwargs):
+        command = tuple(str(item) for item in argv)
+        if command[:3] == ("docker", "image", "inspect"):
+            events.append("image")
+            return _completed(argv, stdout=json.dumps([_image_record(IMAGE_A)]))
+        if command[-2:] == ("config", "--quiet"):
+            events.append("compose_render")
+            return _completed(argv)
+        if command[-2:] == ("config", "--services"):
+            return _completed(argv, stdout="hermes-bot\nqdrant\n")
+        if "up" in command:
+            events.append("docker_mutation")
+            assert kwargs["env"]["HERMES_IMAGE"] == IMAGE_A
+            assert IMAGE_DIGEST not in kwargs["env"].values()
+            return _completed(argv)
+        if command[:2] == ("docker", "inspect"):
+            return _completed(argv, stdout=f"running 0 {IMAGE_A}\n")
+        return _completed(argv)
+
+    monkeypatch.setattr(deploy, "validate_repository", repository_gate)
+    monkeypatch.setattr(deploy, "read_required_secrets", secret_gate)
+    monkeypatch.setattr(deploy, "_write_secret_override", tracked_write)
+    monkeypatch.setattr(deploy, "_run", runner)
+    deploy.execute_operation(
+        contract,
+        source=source,
+        image=IMAGE_DIGEST,
+        revision=REVISION,
+        confirmation=deploy.DEPLOY_CONFIRMATION,
+        rollback=False,
+    )
+    assert events == [
+        "repository",
+        "image",
+        "secret",
+        "temporary_override",
+        "compose_render",
+        "canonical_override",
+        "docker_mutation",
+    ]
+    assert not contract.secret_override.exists()
+
+
+def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contract, monkeypatch) -> None:
+    contract, source = protected_contract
+    original_cleanup = deploy.cleanup_secret_override
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+
+    def cleanup(target_contract, requested_path=None):
+        if target_contract is contract:
+            raise deploy.DeploymentContractError("cleanup-failed")
+        return original_cleanup(target_contract, requested_path)
+
+    def runner(argv, **_kwargs):
+        command = tuple(str(item) for item in argv)
+        if command[:3] == ("docker", "image", "inspect"):
+            return _completed(argv, stdout=json.dumps([_image_record(IMAGE_A)]))
+        if command[-2:] == ("config", "--services"):
+            return _completed(argv, stdout="hermes-bot\n")
+        if "up" in command:
+            return _completed(argv, returncode=1)
+        return _completed(argv)
+
+    monkeypatch.setattr(deploy, "cleanup_secret_override", cleanup)
+    monkeypatch.setattr(deploy, "_run", runner)
+    with pytest.raises(deploy.DeploymentContractError, match="compose-up"):
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=REVISION,
+            confirmation=deploy.DEPLOY_CONFIRMATION,
+            rollback=False,
+        )
+
+
+def test_execute_rollback_deploys_inspected_previous_image_id(protected_contract, monkeypatch) -> None:
+    contract, source = protected_contract
+    deployed_images: list[str] = []
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+
+    def runner(argv, **kwargs):
+        command = tuple(str(item) for item in argv)
+        if command[:3] == ("docker", "image", "inspect"):
+            image_id = IMAGE_A if command[-1] == IMAGE_DIGEST else IMAGE_B
+            return _completed(argv, stdout=json.dumps([_image_record(image_id)]))
+        if command[-2:] == ("config", "--services"):
+            return _completed(argv, stdout="hermes-bot\n")
+        if "up" in command:
+            deployed_images.append(kwargs["env"]["HERMES_IMAGE"])
+            return _completed(argv)
+        if command[:2] == ("docker", "inspect"):
+            return _completed(argv, stdout=f"running 0 {IMAGE_A}\n")
+        return _completed(argv)
+
+    monkeypatch.setattr(deploy, "_run", runner)
+    deploy.execute_operation(
+        contract,
+        source=source,
+        image=IMAGE_DIGEST,
+        revision=REVISION,
+        confirmation=deploy.ROLLBACK_CONFIRMATION,
+        rollback=True,
+        current_image=IMAGE_B,
+    )
+    assert deployed_images == [IMAGE_A]
+    assert not contract.secret_override.exists()
+
+
 def test_execute_rollback_requires_distinct_current_image(protected_contract, monkeypatch) -> None:
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
     with pytest.raises(deploy.DeploymentContractError, match="rollback-image-not-distinct"):
         deploy.execute_operation(
@@ -544,3 +890,14 @@ def test_wrapper_has_no_implicit_deployment() -> None:
     assert "docker compose" not in wrapper
     assert " up " not in wrapper
     assert "set -x" not in wrapper
+
+
+def test_runbook_documents_read_only_plans_and_revision_binding() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "hermes-production-deployment.md").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(runbook.split())
+    assert "org.opencontainers.image.revision" in runbook
+    assert "never creates `/run/hermes`" in runbook
+    assert "successful plan is not authorization" in runbook
+    assert "exact inspected immutable image ID" in normalized

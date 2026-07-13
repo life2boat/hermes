@@ -29,6 +29,8 @@
   "deployment": {
     "image_reference_policy": "digest-only",
     "revision_required": true,
+    "revision_label": "org.opencontainers.image.revision",
+    "allowed_revision_ref": "refs/remotes/healbite-project/main",
     "recreate_services": [
       "hermes-bot"
     ],

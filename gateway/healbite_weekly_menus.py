@@ -1336,7 +1336,7 @@ class HealBiteWeeklyMenuStore:
     ) -> tuple[WeeklyMenuIngredientInput, ...]:
         normalized: list[WeeklyMenuIngredientInput] = []
         positions: set[int] = set()
-        allowed_units = {"g", "kg", "ml", "l", "piece", "unitless"}
+        allowed_units = {"g", "kg", "ml", "l", "piece", "package", "unitless"}
         for ingredient in sorted(ingredients, key=lambda item: int(item.position)):
             position = _normalize_positive_int(ingredient.position, label="ingredient position")
             if position in positions:

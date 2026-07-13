@@ -337,10 +337,16 @@ def test_quantity_rounding_rejects_invalid_or_unrepresentable_values(value):
         _rounded_quantity(value)
 
 
-@pytest.mark.parametrize("unit", ("unknown", "package", "tablespoon", ""))
+@pytest.mark.parametrize("unit", ("unknown", "tablespoon", ""))
 def test_derivation_rejects_unapproved_units(unit):
     with pytest.raises(ShoppingValidationError):
         _derived_base_unit(unit)
+
+
+def test_package_unit_is_supported_without_cross_unit_conversion():
+    unit, factor = _derived_base_unit("package")
+    assert unit.value == "package"
+    assert factor == Decimal("1")
 
 
 def test_derivation_revalidates_actor_inside_transaction(tmp_path):

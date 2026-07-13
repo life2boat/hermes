@@ -234,7 +234,7 @@ EXPECTED_CHECK_SNIPPETS = {
     WEEKLY_MENU_INGREDIENTS_TABLE: (
         "position >= 1",
         "length(trim(display_name)) > 0",
-        "quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'unitless')",
+        "quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless')",
         "length(trim(quantity_value)) > 0",
         "length(trim(recipe_base_servings)) > 0",
     ),
@@ -334,7 +334,7 @@ CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_INGREDIENTS_TABLE} (
     position INTEGER NOT NULL CHECK (position >= 1),
     display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
     quantity_value TEXT NOT NULL CHECK (length(trim(quantity_value)) > 0),
-    quantity_unit TEXT NOT NULL CHECK (quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'unitless')),
+    quantity_unit TEXT NOT NULL CHECK (quantity_unit IN ('g', 'kg', 'ml', 'l', 'piece', 'package', 'unitless')),
     recipe_base_servings TEXT NOT NULL CHECK (length(trim(recipe_base_servings)) > 0),
     created_at TEXT NOT NULL,
     FOREIGN KEY (menu_entry_id) REFERENCES {WEEKLY_MENU_ENTRIES_TABLE}(id) ON DELETE CASCADE

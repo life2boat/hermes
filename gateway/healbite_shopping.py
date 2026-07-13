@@ -451,6 +451,7 @@ def _derived_base_unit(value: object) -> tuple[ShoppingUnit, Decimal]:
         "ml": (ShoppingUnit.ML, Decimal("1")),
         "l": (ShoppingUnit.ML, Decimal("1000")),
         "piece": (ShoppingUnit.PIECE, Decimal("1")),
+        "package": (ShoppingUnit.PACKAGE, Decimal("1")),
         "unitless": (ShoppingUnit.UNITLESS, Decimal("1")),
     }
     try:

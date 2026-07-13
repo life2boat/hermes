@@ -76,6 +76,14 @@ class ShoppingRuntimeStateError(ShoppingRuntimeError):
     pass
 
 
+class ShoppingRuntimeConflictError(ShoppingRuntimeStateError):
+    pass
+
+
+class ShoppingRuntimeSourceError(ShoppingRuntimeStateError):
+    pass
+
+
 class ShoppingRuntimeCleanupError(ShoppingRuntimeStateError):
     pass
 
@@ -356,16 +364,28 @@ class HealBiteShoppingRuntimeService:
         expected_list_version: int | None,
     ) -> ShoppingListView:
         """Derive one actor-scoped list from the published menu for a week."""
-        return self._run_public_operation(
-            actor_user_id,
-            lambda context, store: store.generate_shopping_list_from_weekly_menu(
-                context,
-                week_key,
-                expected_list_version=expected_list_version,
-                idempotency_key=idempotency_key,
-            ),
-            not_found_message="published weekly menu not found",
-        )
+        try:
+            return self._with_store(
+                actor_user_id,
+                lambda context, store: store.generate_shopping_list_from_weekly_menu(
+                    context,
+                    week_key,
+                    expected_list_version=expected_list_version,
+                    idempotency_key=idempotency_key,
+                ),
+            )
+        except (ShoppingRuntimeUnavailableError, ShoppingRuntimeCleanupError):
+            raise
+        except (ShoppingNotFoundError, ShoppingAccessError):
+            raise ShoppingRuntimeNotFoundError("published weekly menu not found") from None
+        except ShoppingConflictError:
+            raise ShoppingRuntimeConflictError("shopping derivation conflict") from None
+        except (ShoppingValidationError, ShoppingStateError):
+            raise ShoppingRuntimeSourceError("shopping source rejected") from None
+        except (ShoppingSchemaError, sqlite3.Error):
+            raise ShoppingRuntimeStateError("shopping runtime failure") from None
+        except Exception:
+            raise ShoppingRuntimeStateError("shopping runtime failure") from None
 
     def _run_public_operation(
         self,

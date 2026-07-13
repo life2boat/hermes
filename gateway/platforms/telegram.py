@@ -7115,6 +7115,8 @@ class TelegramAdapter(BasePlatformAdapter):
         chat = getattr(message, "chat", None)
         if chat is None or getattr(chat, "id", None) is None:
             return None
+        if getattr(message, "message_id", None) is None:
+            return None
         return message
 
     async def _handle_healbite_shopping_callback(self, query: Any, data: str) -> None:

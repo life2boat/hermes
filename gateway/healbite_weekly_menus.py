@@ -4,7 +4,9 @@ import hashlib
 import json
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -22,6 +24,7 @@ from gateway.healbite_weekly_menu_schema import (
     MEAL_SLOT_ORDER,
     WEEKLY_MENU_ENTRIES_TABLE,
     WEEKLY_MENU_IDEMPOTENCY_TABLE,
+    WEEKLY_MENU_INGREDIENTS_TABLE,
     WEEKLY_MENU_IDEMPOTENCY_OPERATIONS,
     WEEKLY_MENU_MEAL_SLOTS,
     WEEKLY_MENU_REVISION_STATUSES,
@@ -36,8 +39,10 @@ from gateway.healbite_weekly_menu_schema import (
     detect_weekly_menu_schema_state,
     is_valid_local_date,
     is_valid_week_start,
+    is_legacy_weekly_menu_schema_without_ingredients,
     new_weekly_menu_entry_id,
     new_weekly_menu_idempotency_id,
+    new_weekly_menu_ingredient_id,
     new_weekly_menu_revision_id,
     new_weekly_menu_series_id,
     normalize_week_start,
@@ -154,6 +159,15 @@ class WeeklyMenuEntry:
 
 
 @dataclass(slots=True, frozen=True)
+class WeeklyMenuIngredientInput:
+    display_name: str
+    quantity_value: str
+    quantity_unit: str
+    recipe_base_servings: str
+    position: int = 1
+
+
+@dataclass(slots=True, frozen=True)
 class WeeklyMenuEntryInput:
     local_date: str
     meal_slot: WeeklyMenuMealSlot | str
@@ -162,6 +176,7 @@ class WeeklyMenuEntryInput:
     description: str | None = None
     servings: str | None = None
     origin: WeeklyMenuEntryOrigin | str = WeeklyMenuEntryOrigin.MANUAL
+    ingredients: tuple[WeeklyMenuIngredientInput, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -289,6 +304,7 @@ class HealBiteWeeklyMenuStore:
         series_id_factory: Callable[[], str] = new_weekly_menu_series_id,
         revision_id_factory: Callable[[], str] = new_weekly_menu_revision_id,
         entry_id_factory: Callable[[], str] = new_weekly_menu_entry_id,
+        ingredient_id_factory: Callable[[], str] = new_weekly_menu_ingredient_id,
         idempotency_id_factory: Callable[[], str] = new_weekly_menu_idempotency_id,
     ) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
@@ -296,6 +312,7 @@ class HealBiteWeeklyMenuStore:
         self._series_id_factory = series_id_factory
         self._revision_id_factory = revision_id_factory
         self._entry_id_factory = entry_id_factory
+        self._ingredient_id_factory = ingredient_id_factory
         self._idempotency_id_factory = idempotency_id_factory
 
     def _connect(self) -> sqlite3.Connection:
@@ -326,7 +343,26 @@ class HealBiteWeeklyMenuStore:
         if state is WeeklyMenuSchemaState.CANONICAL:
             return state
         if state is WeeklyMenuSchemaState.PARTIAL:
-            raise WeeklyMenuSchemaError("weekly menu schema is partial")
+            with self._connect() as conn:
+                if not is_legacy_weekly_menu_schema_without_ingredients(conn):
+                    raise WeeklyMenuSchemaError("weekly menu schema is partial")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for statement in self._schema_statements():
+                        if (
+                            WEEKLY_MENU_INGREDIENTS_TABLE in statement
+                            or "idx_weekly_menu_ingredients_entry_position_unique"
+                            in statement
+                        ):
+                            conn.execute(statement)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            final = self.schema_state()
+            if final is not WeeklyMenuSchemaState.CANONICAL:
+                raise WeeklyMenuSchemaError("weekly menu ingredient migration failed")
+            return final
         if state is WeeklyMenuSchemaState.INCOMPATIBLE:
             raise WeeklyMenuSchemaError("weekly menu schema is incompatible")
         with self._connect() as conn:
@@ -683,6 +719,15 @@ class HealBiteWeeklyMenuStore:
                                     now,
                                 ),
                             )
+                            self._insert_entry_ingredients(
+                                conn,
+                                entry_id=entry_id,
+                                ingredients=self._list_ingredient_inputs_for_entry(
+                                    conn,
+                                    entry.id,
+                                ),
+                                created_at=now,
+                            )
                     self._bump_series(conn, series.id, now)
                     self._store_idempotency(
                         conn=conn,
@@ -738,6 +783,16 @@ class HealBiteWeeklyMenuStore:
                         "description": None if entry.description is None else entry.description.strip(),
                         "servings": None if entry.servings is None else entry.servings.strip(),
                         "origin": _coerce_origin(entry.origin).value,
+                        "ingredients": [
+                            {
+                                "position": ingredient.position,
+                                "display_name": ingredient.display_name,
+                                "quantity_value": ingredient.quantity_value,
+                                "quantity_unit": ingredient.quantity_unit,
+                                "recipe_base_servings": ingredient.recipe_base_servings,
+                            }
+                            for ingredient in entry.ingredients
+                        ],
                     }
                     for entry in validated_entries
                 ],
@@ -797,6 +852,12 @@ class HealBiteWeeklyMenuStore:
                                 now,
                                 now,
                             ),
+                        )
+                        self._insert_entry_ingredients(
+                            conn,
+                            entry_id=entry_id,
+                            ingredients=entry.ingredients,
+                            created_at=now,
                         )
                     self._bump_revision(conn, revision.id, now)
                     self._bump_series(conn, series.id, now)
@@ -1188,6 +1249,12 @@ class HealBiteWeeklyMenuStore:
                                 now,
                             ),
                         )
+                        self._insert_entry_ingredients(
+                            conn,
+                            entry_id=entry_id,
+                            ingredients=entry.ingredients,
+                            created_at=now,
+                        )
                     self._bump_series(conn, series.id, now)
                     self._store_idempotency(
                         conn=conn,
@@ -1247,6 +1314,112 @@ class HealBiteWeeklyMenuStore:
         if series.household_id != auth.household_id:
             raise WeeklyMenuAccessError("weekly menu series out of household scope")
 
+    @staticmethod
+    def _positive_decimal_text(value: object, *, label: str) -> str:
+        text = str(value).strip()
+        try:
+            number = Decimal(text)
+        except (InvalidOperation, ValueError) as exc:
+            raise WeeklyMenuValidationError(f"invalid {label}") from exc
+        if not number.is_finite() or number <= 0:
+            raise WeeklyMenuValidationError(f"invalid {label}")
+        canonical = format(number.normalize(), "f")
+        if "." in canonical:
+            canonical = canonical.rstrip("0").rstrip(".")
+        if len(canonical) > 32:
+            raise WeeklyMenuValidationError(f"invalid {label}")
+        return canonical
+
+    def _normalize_ingredients(
+        self,
+        ingredients: Sequence[WeeklyMenuIngredientInput],
+    ) -> tuple[WeeklyMenuIngredientInput, ...]:
+        normalized: list[WeeklyMenuIngredientInput] = []
+        positions: set[int] = set()
+        allowed_units = {"g", "kg", "ml", "l", "piece", "unitless"}
+        for ingredient in sorted(ingredients, key=lambda item: int(item.position)):
+            position = _normalize_positive_int(ingredient.position, label="ingredient position")
+            if position in positions:
+                raise WeeklyMenuValidationError("duplicate ingredient position")
+            positions.add(position)
+            display_name = unicodedata.normalize("NFKC", str(ingredient.display_name))
+            display_name = " ".join(display_name.split())
+            if not display_name or len(display_name) > 200:
+                raise WeeklyMenuValidationError("invalid ingredient name")
+            unit = str(ingredient.quantity_unit).strip().lower()
+            if unit not in allowed_units:
+                raise WeeklyMenuValidationError("invalid ingredient unit")
+            normalized.append(
+                WeeklyMenuIngredientInput(
+                    display_name=display_name,
+                    quantity_value=self._positive_decimal_text(
+                        ingredient.quantity_value,
+                        label="ingredient quantity",
+                    ),
+                    quantity_unit=unit,
+                    recipe_base_servings=self._positive_decimal_text(
+                        ingredient.recipe_base_servings,
+                        label="recipe base servings",
+                    ),
+                    position=position,
+                )
+            )
+        return tuple(normalized)
+
+    def _insert_entry_ingredients(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        entry_id: str,
+        ingredients: Sequence[WeeklyMenuIngredientInput],
+        created_at: str,
+    ) -> None:
+        for ingredient in ingredients:
+            conn.execute(
+                f"""
+                INSERT INTO {WEEKLY_MENU_INGREDIENTS_TABLE}
+                    (id, menu_entry_id, position, display_name, quantity_value,
+                     quantity_unit, recipe_base_servings, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    require_canonical_uuid4(self._ingredient_id_factory()),
+                    entry_id,
+                    ingredient.position,
+                    ingredient.display_name,
+                    ingredient.quantity_value,
+                    ingredient.quantity_unit,
+                    ingredient.recipe_base_servings,
+                    created_at,
+                ),
+            )
+
+    def _list_ingredient_inputs_for_entry(
+        self,
+        conn: sqlite3.Connection,
+        entry_id: str,
+    ) -> tuple[WeeklyMenuIngredientInput, ...]:
+        rows = conn.execute(
+            f"""
+            SELECT position, display_name, quantity_value, quantity_unit,
+                   recipe_base_servings
+            FROM {WEEKLY_MENU_INGREDIENTS_TABLE}
+            WHERE menu_entry_id = ?
+            ORDER BY position ASC, id ASC
+            """,
+            (entry_id,),
+        ).fetchall()
+        return tuple(
+            WeeklyMenuIngredientInput(
+                display_name=str(row["display_name"]),
+                quantity_value=str(row["quantity_value"]),
+                quantity_unit=str(row["quantity_unit"]),
+                recipe_base_servings=str(row["recipe_base_servings"]),
+                position=int(row["position"]),
+            )
+            for row in rows
+        )
+
     def _validate_entry_inputs(self, entries: Sequence[WeeklyMenuEntryInput]) -> list[WeeklyMenuEntryInput]:
         if not entries:
             raise WeeklyMenuValidationError("weekly menu revision must contain at least one entry")
@@ -1271,6 +1444,11 @@ class HealBiteWeeklyMenuStore:
                 servings = None
             if servings is not None and len(servings) > 32:
                 raise WeeklyMenuValidationError("invalid servings")
+            ingredients = self._normalize_ingredients(entry.ingredients)
+            if ingredients:
+                if servings is None:
+                    raise WeeklyMenuValidationError("ingredient entries require planned servings")
+                servings = self._positive_decimal_text(servings, label="planned servings")
             origin = _coerce_origin(entry.origin)
             dedupe_key = (local_date, slot.value, position)
             if dedupe_key in seen_slots:
@@ -1285,6 +1463,7 @@ class HealBiteWeeklyMenuStore:
                     description=description,
                     servings=servings,
                     origin=origin,
+                    ingredients=ingredients,
                 )
             )
         return normalized

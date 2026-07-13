@@ -7,7 +7,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
@@ -28,6 +28,7 @@ from gateway.healbite_households import (
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_weekly_menu_schema import (
     WEEKLY_MENU_ENTRIES_TABLE,
+    WEEKLY_MENU_INGREDIENTS_TABLE,
     WEEKLY_MENU_REVISIONS_TABLE,
     WEEKLY_MENU_SERIES_TABLE,
     WeeklyMenuRevisionStatus,
@@ -38,6 +39,7 @@ from gateway.healbite_weekly_menu_schema import (
 )
 from gateway.healbite_weekly_menus import HouseholdAuthorizationContext
 from gateway.healbite_shopping_schema import (
+    SHOPPING_CONTRIBUTIONS_TABLE,
     SHOPPING_IDEMPOTENCY_OPERATIONS,
     SHOPPING_IDEMPOTENCY_TABLE,
     SHOPPING_ITEM_ORIGINS,
@@ -55,8 +57,10 @@ from gateway.healbite_shopping_schema import (
     ShoppingUnit,
     ShoppingUnitFamily,
     detect_shopping_schema_state,
+    is_legacy_shopping_schema_without_contributions,
     is_valid_quantity_value,
     new_shopping_idempotency_id,
+    new_shopping_contribution_id,
     new_shopping_item_id,
     new_shopping_list_id,
     normalize_quantity_value,
@@ -74,6 +78,7 @@ _MAX_DISPLAY_NAME_LENGTH = 200
 _MAX_CATEGORY_LENGTH = 64
 _MAX_IDEMPOTENCY_KEY_LENGTH = 128
 _NORMALIZATION_VERSION = 1
+_DERIVATION_QUANTUM = Decimal("0.001")
 _UNSET = object()
 
 
@@ -410,6 +415,163 @@ def _aggregate_generated_payloads(
     return aggregated
 
 
+@dataclass(slots=True, frozen=True)
+class _DerivedContribution:
+    source_menu_entry_id: str
+    source_ingredient_id: str
+    scaled_quantity_value: str
+
+
+@dataclass(slots=True, frozen=True)
+class _DerivedShoppingItem:
+    display_name: str
+    normalized_name: str
+    quantity_value: str
+    quantity_unit: ShoppingUnit
+    source_menu_entry_id: str
+    dedup_fingerprint: str
+    contributions: tuple[_DerivedContribution, ...]
+
+
+def _positive_decimal(value: object, *, label: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ShoppingValidationError(f"invalid {label}") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ShoppingValidationError(f"invalid {label}")
+    return parsed
+
+
+def _derived_base_unit(value: object) -> tuple[ShoppingUnit, Decimal]:
+    unit = str(value).strip().lower()
+    mapping = {
+        "g": (ShoppingUnit.G, Decimal("1")),
+        "kg": (ShoppingUnit.G, Decimal("1000")),
+        "ml": (ShoppingUnit.ML, Decimal("1")),
+        "l": (ShoppingUnit.ML, Decimal("1000")),
+        "piece": (ShoppingUnit.PIECE, Decimal("1")),
+        "unitless": (ShoppingUnit.UNITLESS, Decimal("1")),
+    }
+    try:
+        return mapping[unit]
+    except KeyError as exc:
+        raise ShoppingValidationError("invalid ingredient unit") from exc
+
+
+def _rounded_quantity(value: Decimal) -> str:
+    """Round each source contribution to 0.001 before aggregation."""
+    if not value.is_finite() or value <= 0:
+        raise ShoppingValidationError("scaled ingredient quantity is invalid")
+    try:
+        rounded = value.quantize(_DERIVATION_QUANTUM, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise ShoppingValidationError("scaled ingredient quantity is invalid") from exc
+    if rounded <= 0:
+        raise ShoppingValidationError("scaled ingredient quantity is too small")
+    try:
+        normalized = normalize_quantity_value(format(rounded, "f"))
+    except ValueError as exc:
+        raise ShoppingValidationError("scaled ingredient quantity is invalid") from exc
+    if normalized is None:
+        raise ShoppingValidationError("scaled ingredient quantity is invalid")
+    return normalized
+
+
+def _derive_weekly_ingredient_rows(
+    rows: Sequence[sqlite3.Row],
+) -> list[_DerivedShoppingItem]:
+    grouped: dict[
+        tuple[str, ShoppingUnit],
+        list[tuple[tuple[object, ...], str, _DerivedContribution]],
+    ] = {}
+    for row in rows:
+        display_name = _normalize_display_name(str(row["display_name"]))
+        normalized_name = _normalize_identity(display_name)
+        base_quantity = _positive_decimal(
+            row["quantity_value"],
+            label="ingredient quantity",
+        )
+        base_servings = _positive_decimal(
+            row["recipe_base_servings"],
+            label="recipe base servings",
+        )
+        planned_portions = _positive_decimal(
+            row["planned_portions"],
+            label="planned portions",
+        )
+        canonical_unit, factor = _derived_base_unit(row["quantity_unit"])
+        scaled = _rounded_quantity(
+            base_quantity * planned_portions * factor / base_servings
+        )
+        source_entry_id = require_canonical_uuid4(str(row["source_menu_entry_id"]))
+        source_ingredient_id = require_canonical_uuid4(
+            str(row["source_ingredient_id"])
+        )
+        source_order = (
+            str(row["local_date"]),
+            str(row["meal_slot"]),
+            int(row["meal_position"]),
+            source_entry_id,
+            int(row["ingredient_position"]),
+            source_ingredient_id,
+        )
+        contribution = _DerivedContribution(
+            source_menu_entry_id=source_entry_id,
+            source_ingredient_id=source_ingredient_id,
+            scaled_quantity_value=scaled,
+        )
+        grouped.setdefault((normalized_name, canonical_unit), []).append(
+            (source_order, display_name, contribution)
+        )
+
+    derived: list[_DerivedShoppingItem] = []
+    for (normalized_name, canonical_unit), values in grouped.items():
+        ordered = sorted(values, key=lambda value: value[0])
+        contributions = tuple(
+            sorted(
+                (value[2] for value in ordered),
+                key=lambda value: value.source_ingredient_id,
+            )
+        )
+        quantity_value = _rounded_quantity(
+            sum(
+                (Decimal(value.scaled_quantity_value) for value in contributions),
+                Decimal("0"),
+            )
+        )
+        fingerprint = _payload_fingerprint(
+            {
+                "normalized_name": normalized_name,
+                "quantity_value": quantity_value,
+                "quantity_unit": canonical_unit.value,
+                "normalization_version": _NORMALIZATION_VERSION,
+            }
+        )
+        derived.append(
+            _DerivedShoppingItem(
+                display_name=ordered[0][1],
+                normalized_name=normalized_name,
+                quantity_value=quantity_value,
+                quantity_unit=canonical_unit,
+                source_menu_entry_id=min(
+                    value.source_menu_entry_id for value in contributions
+                ),
+                dedup_fingerprint=fingerprint,
+                contributions=contributions,
+            )
+        )
+    return sorted(
+        derived,
+        key=lambda item: (
+            item.normalized_name,
+            shopping_unit_family(item.quantity_unit).value,
+            item.quantity_unit.value,
+            item.dedup_fingerprint,
+        ),
+    )
+
+
 class HealBiteShoppingStore:
     def __init__(
         self,
@@ -417,13 +579,17 @@ class HealBiteShoppingStore:
         *,
         shopping_list_id_factory: Callable[[], str] = new_shopping_list_id,
         shopping_item_id_factory: Callable[[], str] = new_shopping_item_id,
+        contribution_id_factory: Callable[[], str] = new_shopping_contribution_id,
         idempotency_id_factory: Callable[[], str] = new_shopping_idempotency_id,
+        derivation_fault_hook: Callable[[str], None] | None = None,
     ) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._shopping_list_id_factory = shopping_list_id_factory
         self._shopping_item_id_factory = shopping_item_id_factory
+        self._contribution_id_factory = contribution_id_factory
         self._idempotency_id_factory = idempotency_id_factory
+        self._derivation_fault_hook = derivation_fault_hook
         self._household_store = HealBiteHouseholdStore(
             db_path=self.db_path,
             ensure_schema_on_init=False,
@@ -457,7 +623,26 @@ class HealBiteShoppingStore:
         if state is ShoppingSchemaState.CANONICAL:
             return state
         if state is ShoppingSchemaState.PARTIAL:
-            raise ShoppingSchemaError("shopping schema is partial")
+            with self._connect() as conn:
+                if not is_legacy_shopping_schema_without_contributions(conn):
+                    raise ShoppingSchemaError("shopping schema is partial")
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for statement in self._schema_statements():
+                        if (
+                            SHOPPING_CONTRIBUTIONS_TABLE in statement
+                            or "idx_household_shopping_contributions_item_source_unique"
+                            in statement
+                        ):
+                            conn.execute(statement)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            final = self.schema_state()
+            if final is not ShoppingSchemaState.CANONICAL:
+                raise ShoppingSchemaError("shopping contribution migration failed")
+            return final
         if state is ShoppingSchemaState.INCOMPATIBLE:
             raise ShoppingSchemaError("shopping schema is incompatible")
         if state is ShoppingSchemaState.DEPENDENCY_MISSING:
@@ -1429,6 +1614,313 @@ class HealBiteShoppingStore:
                 conn.rollback()
                 raise
 
+    def generate_shopping_list_from_weekly_menu(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        week_start: str,
+        *,
+        expected_list_version: int | None,
+        idempotency_key: str,
+    ) -> ShoppingListView:
+        """Atomically derive an active list; deleted generated items may return."""
+        self._authorize(context, household_id=None, operation="regenerate")
+        self._require_canonical_schema()
+        canonical_week_start = require_monday_week_start(week_start)
+        expected_version = (
+            None
+            if expected_list_version is None
+            else _normalize_version(
+                expected_list_version,
+                label="expected_list_version",
+            )
+        )
+        normalized_key = _normalize_idempotency_key(idempotency_key)
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                auth = self._revalidate_shopping_actor_for_write(
+                    conn,
+                    context,
+                    operation="regenerate",
+                )
+                self._derivation_fault("after_authorization")
+                source = conn.execute(
+                    f"""
+                    SELECT r.*, s.week_start
+                    FROM {WEEKLY_MENU_REVISIONS_TABLE} r
+                    JOIN {WEEKLY_MENU_SERIES_TABLE} s ON s.id = r.series_id
+                    WHERE r.household_id = ?
+                      AND s.week_start = ?
+                      AND r.status = ?
+                    LIMIT 1
+                    """,
+                    (
+                        auth.household_id,
+                        canonical_week_start,
+                        WeeklyMenuRevisionStatus.PUBLISHED.value,
+                    ),
+                ).fetchone()
+                if source is None:
+                    raise ShoppingNotFoundError("published weekly menu not found")
+                entry_rows = conn.execute(
+                    f"""
+                    SELECT id, servings
+                    FROM {WEEKLY_MENU_ENTRIES_TABLE}
+                    WHERE menu_id = ? AND household_id = ?
+                    ORDER BY local_date ASC, meal_slot ASC, position ASC, id ASC
+                    """,
+                    (source["id"], auth.household_id),
+                ).fetchall()
+                if not entry_rows:
+                    raise ShoppingStateError("published weekly menu has no entries")
+                ingredient_rows = conn.execute(
+                    f"""
+                    SELECT e.id AS source_menu_entry_id,
+                           e.local_date,
+                           e.meal_slot,
+                           e.position AS meal_position,
+                           e.servings AS planned_portions,
+                           i.id AS source_ingredient_id,
+                           i.position AS ingredient_position,
+                           i.display_name,
+                           i.quantity_value,
+                           i.quantity_unit,
+                           i.recipe_base_servings
+                    FROM {WEEKLY_MENU_ENTRIES_TABLE} e
+                    JOIN {WEEKLY_MENU_INGREDIENTS_TABLE} i
+                      ON i.menu_entry_id = e.id
+                    WHERE e.menu_id = ? AND e.household_id = ?
+                    ORDER BY e.local_date ASC, e.meal_slot ASC, e.position ASC,
+                             e.id ASC, i.position ASC, i.id ASC
+                    """,
+                    (source["id"], auth.household_id),
+                ).fetchall()
+                ingredient_entry_ids = {
+                    str(row["source_menu_entry_id"]) for row in ingredient_rows
+                }
+                if any(str(row["id"]) not in ingredient_entry_ids for row in entry_rows):
+                    raise ShoppingStateError(
+                        "published weekly menu has incomplete ingredient snapshots"
+                    )
+                self._derivation_fault("after_source_read")
+                derived_items = _derive_weekly_ingredient_rows(ingredient_rows)
+                if not derived_items:
+                    raise ShoppingStateError("published weekly menu has no ingredients")
+                self._derivation_fault("after_validation")
+                self._derivation_fault("after_aggregation")
+                source_fingerprint = _payload_fingerprint(
+                    {
+                        "source_menu_id": str(source["id"]),
+                        "source_revision_number": int(source["revision_number"]),
+                        "source_revision_version": int(source["version"]),
+                        "items": [
+                            {
+                                "fingerprint": item.dedup_fingerprint,
+                                "quantity": item.quantity_value,
+                                "unit": item.quantity_unit.value,
+                            }
+                            for item in derived_items
+                        ],
+                    }
+                )
+                payload_hash = _payload_fingerprint(
+                    {
+                        "week_start": canonical_week_start,
+                        "expected_list_version": expected_version,
+                        "source_fingerprint": source_fingerprint,
+                    }
+                )
+                shopping_list_row = conn.execute(
+                    f"""
+                    SELECT * FROM {SHOPPING_LISTS_TABLE}
+                    WHERE household_id = ? AND week_start = ? AND status = ?
+                    LIMIT 1
+                    """,
+                    (
+                        auth.household_id,
+                        canonical_week_start,
+                        ShoppingListStatus.ACTIVE.value,
+                    ),
+                ).fetchone()
+                existing = self._resolve_idempotent_list(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.REGENERATE_GENERATED_ITEMS,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                )
+                if existing is not None:
+                    conn.commit()
+                    return self._build_list_view(conn, existing)
+                now = _sqlite_timestamp()
+                if shopping_list_row is None:
+                    if expected_version is not None:
+                        raise ShoppingConflictError("shopping list version mismatch")
+                    list_id = require_shopping_list_id(self._shopping_list_id_factory())
+                    conn.execute(
+                        f"""
+                        INSERT INTO {SHOPPING_LISTS_TABLE}
+                            (id, household_id, week_start, source_menu_id,
+                             source_menu_revision, status, created_by_member_id,
+                             created_at, updated_at, completed_at, archived_at, version)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 1)
+                        """,
+                        (
+                            list_id,
+                            auth.household_id,
+                            canonical_week_start,
+                            str(source["id"]),
+                            int(source["revision_number"]),
+                            ShoppingListStatus.ACTIVE.value,
+                            auth.household_member_id,
+                            now,
+                            now,
+                        ),
+                    )
+                    shopping_list = self._get_list_by_id(conn, list_id)
+                    if shopping_list is None:
+                        raise ShoppingStateError("shopping list creation failed")
+                else:
+                    shopping_list = self._row_to_list(shopping_list_row)
+                    self._assert_list_in_scope(auth, shopping_list)
+                    self._assert_regeneration_allowed(auth, shopping_list)
+                    if expected_version is None or shopping_list.version != expected_version:
+                        raise ShoppingConflictError("shopping list version mismatch")
+
+                existing_items = self._list_items_for_list(conn, shopping_list.id)
+                mutable_generated = [
+                    item
+                    for item in existing_items
+                    if item.origin is ShoppingItemOrigin.MENU_GENERATED
+                    and item.override_state is ShoppingItemOverrideState.NONE
+                ]
+                checked_by_fingerprint = {
+                    item.dedup_fingerprint: item.checked_state
+                    for item in mutable_generated
+                }
+                next_fingerprints = {item.dedup_fingerprint for item in derived_items}
+                for item in mutable_generated:
+                    if item.checked_state and item.dedup_fingerprint not in next_fingerprints:
+                        conn.execute(
+                            f"""
+                            UPDATE {SHOPPING_ITEMS_TABLE}
+                            SET override_state = ?, updated_at = ?, version = version + 1
+                            WHERE id = ?
+                            """,
+                            (
+                                ShoppingItemOverrideState.MANUALIZED.value,
+                                now,
+                                item.id,
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            f"UPDATE {SHOPPING_IDEMPOTENCY_TABLE} "
+                            "SET shopping_item_id = NULL WHERE shopping_item_id = ?",
+                            (item.id,),
+                        )
+                        conn.execute(
+                            f"DELETE FROM {SHOPPING_ITEMS_TABLE} WHERE id = ?",
+                            (item.id,),
+                        )
+                self._derivation_fault("after_generated_deletion")
+
+                next_position = 1000000 + len(existing_items)
+                for index, item in enumerate(derived_items):
+                    item_id = require_shopping_item_id(self._shopping_item_id_factory())
+                    conn.execute(
+                        f"""
+                        INSERT INTO {SHOPPING_ITEMS_TABLE}
+                            (id, shopping_list_id, household_id, normalized_name,
+                             display_name, quantity_value, quantity_unit_normalized,
+                             quantity_unit_display, category, position, checked_state,
+                             origin, override_state, source_menu_entry_id,
+                             normalization_version, dedup_fingerprint, created_at,
+                             updated_at, version)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            item_id,
+                            shopping_list.id,
+                            auth.household_id,
+                            item.normalized_name,
+                            item.display_name,
+                            item.quantity_value,
+                            item.quantity_unit.value,
+                            item.quantity_unit.value,
+                            next_position,
+                            int(checked_by_fingerprint.get(item.dedup_fingerprint, False)),
+                            ShoppingItemOrigin.MENU_GENERATED.value,
+                            ShoppingItemOverrideState.NONE.value,
+                            item.source_menu_entry_id,
+                            _NORMALIZATION_VERSION,
+                            item.dedup_fingerprint,
+                            now,
+                            now,
+                        ),
+                    )
+                    next_position += 1
+                    for contribution in item.contributions:
+                        conn.execute(
+                            f"""
+                            INSERT INTO {SHOPPING_CONTRIBUTIONS_TABLE}
+                                (id, shopping_item_id, source_menu_entry_id,
+                                 source_ingredient_id, scaled_quantity_value,
+                                 quantity_unit_normalized, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                require_canonical_uuid4(
+                                    self._contribution_id_factory()
+                                ),
+                                item_id,
+                                contribution.source_menu_entry_id,
+                                contribution.source_ingredient_id,
+                                contribution.scaled_quantity_value,
+                                item.quantity_unit.value,
+                                now,
+                            ),
+                        )
+                    if index == 0:
+                        self._derivation_fault("after_first_generated_insert")
+                self._derivation_fault("after_generated_mutation")
+                self._normalize_positions(conn, shopping_list_id=shopping_list.id)
+                if shopping_list_row is not None:
+                    conn.execute(
+                        f"""
+                        UPDATE {SHOPPING_LISTS_TABLE}
+                        SET source_menu_id = ?, source_menu_revision = ?,
+                            updated_at = ?, version = version + 1
+                        WHERE id = ?
+                        """,
+                        (
+                            str(source["id"]),
+                            int(source["revision_number"]),
+                            now,
+                            shopping_list.id,
+                        ),
+                    )
+                self._derivation_fault("after_list_version_update")
+                self._store_idempotency(
+                    conn=conn,
+                    auth=auth,
+                    operation=ShoppingIdempotencyOperation.REGENERATE_GENERATED_ITEMS,
+                    idempotency_key=normalized_key,
+                    payload_hash=payload_hash,
+                    shopping_list_id=shopping_list.id,
+                    shopping_item_id=None,
+                )
+                self._derivation_fault("after_idempotency_write")
+                updated = self._get_list_by_id(conn, shopping_list.id)
+                if updated is None:
+                    raise ShoppingStateError("shopping derivation failed")
+                self._derivation_fault("before_commit")
+                conn.commit()
+                return self._build_list_view(conn, updated)
+            except Exception:
+                conn.rollback()
+                raise
+
     def replace_or_regenerate_generated_items(
         self,
         context: HouseholdContext | HouseholdAuthorizationContext,
@@ -1741,6 +2233,10 @@ class HealBiteShoppingStore:
             raise ShoppingSchemaError("shopping schema is partial")
         if state is ShoppingSchemaState.INCOMPATIBLE:
             raise ShoppingSchemaError("shopping schema is incompatible")
+
+    def _derivation_fault(self, phase: str) -> None:
+        if self._derivation_fault_hook is not None:
+            self._derivation_fault_hook(phase)
 
     def _revalidate_shopping_actor_for_write(
         self,

@@ -348,6 +348,25 @@ class HealBiteShoppingRuntimeService:
 
         return self._run_public_operation(actor_user_id, operation, not_found_message="shopping list not found")
 
+    def generate_shopping_list_from_weekly_menu(
+        self,
+        actor_user_id: object,
+        week_key: str,
+        idempotency_key: str,
+        expected_list_version: int | None,
+    ) -> ShoppingListView:
+        """Derive one actor-scoped list from the published menu for a week."""
+        return self._run_public_operation(
+            actor_user_id,
+            lambda context, store: store.generate_shopping_list_from_weekly_menu(
+                context,
+                week_key,
+                expected_list_version=expected_list_version,
+                idempotency_key=idempotency_key,
+            ),
+            not_found_message="published weekly menu not found",
+        )
+
     def _run_public_operation(
         self,
         actor_user_id: object,

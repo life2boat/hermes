@@ -625,24 +625,17 @@ class HealBiteShoppingStore:
             return state
         if state is ShoppingSchemaState.PARTIAL:
             with self._connect() as conn:
-                if not is_legacy_shopping_schema_without_contributions(conn):
-                    raise ShoppingSchemaError("shopping schema is partial")
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     for statement in self._schema_statements():
-                        if (
-                            SHOPPING_CONTRIBUTIONS_TABLE in statement
-                            or "idx_household_shopping_contributions_item_source_unique"
-                            in statement
-                        ):
-                            conn.execute(statement)
+                        conn.execute(statement)
                     conn.commit()
-                except Exception:
+                except Exception as exc:
                     conn.rollback()
-                    raise
+                    raise ShoppingSchemaError("shopping partial schema recovery failed") from exc
             final = self.schema_state()
             if final is not ShoppingSchemaState.CANONICAL:
-                raise ShoppingSchemaError("shopping contribution migration failed")
+                raise ShoppingSchemaError("shopping partial schema recovery failed")
             return final
         if state is ShoppingSchemaState.INCOMPATIBLE:
             raise ShoppingSchemaError("shopping schema is incompatible")

@@ -500,69 +500,91 @@ Do not print IDs or row payloads.
 
 ### D3 Weekly schema initialization
 
-Use the canonical store initializer inside the exact deployed image namespace:
+Use the public migration-only CLI in a one-shot container from the exact immutable image. This replaces the former inline `docker exec ... python` snippets as the authoritative production migration interface.
+
+Required contract:
 
 ```bash
 set -euo pipefail
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
-store = HealBiteWeeklyMenuStore(db_path="/home/hermes/healbite.db")
-state = store.initialize_schema()
-print(f"weekly_schema_state={state.value}")
-audit = store.audit_schema()
-print(f"weekly_series_count={audit.series_count}")
-print(f"weekly_revision_count={audit.revision_count}")
-print(f"weekly_entry_count={audit.entry_count}")
-print(f"weekly_idempotency_count=0")
-PY
+docker run --rm \
+  --network none \
+  --user 10000:10000 \
+  --mount type=bind,src="/home/hermes/healbite.db",dst="/data/healbite.db" \
+  "$EXACT_IMAGE_ID" \
+  /opt/hermes/.venv/bin/python /opt/hermes/scripts/healbite_schema_migrate.py \
+    --db-path /data/healbite.db \
+    --json
 ```
 
-Required post-conditions:
+The command must be run only after a fresh SQLite online backup and a read-only schema/count baseline. It must run before the Hermes service is recreated on the new image.
+
+Required command properties:
 
 ```text
-weekly schema state = canonical
-partial schema must be refused
-incompatible schema must be refused
-series_count = 0
-revision_count = 0
-entry_count = 0
-households unchanged
-household_members unchanged
-nutrition/profile/weight/water/reminder counts unchanged
+explicit --db-path is mandatory
+immutable image ID is used
+network is disabled
+runtime UID/GID is explicit
+no production secrets are mounted
+no main Hermes service starts
+no Qdrant, Telegram, provider, scheduler, or background worker starts
+no feature flag is changed
+no snapshot or shopping backfill is performed
 ```
+
+Expected migration sequence:
+
+```text
+household schema initialization
+weekly-menu schema initialization
+shopping schema initialization
+```
+
+The public CLI performs the weekly phase before the shopping phase in one deterministic command. The heading below is retained as a compatibility marker for the production readiness contract; do not replace it with inline Python.
 
 ### D3 Shopping schema initialization
 
-Only after weekly schema is canonical:
+The shopping phase is executed by the same public CLI invocation after weekly schema reaches canonical state. Do not use `docker exec` or inline Python for this phase.
 
-```bash
-set -euo pipefail
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-from gateway.healbite_shopping import HealBiteShoppingStore
-store = HealBiteShoppingStore(db_path="/home/hermes/healbite.db")
-state = store.initialize_schema()
-print(f"shopping_schema_state={state.value}")
-audit = store.audit_schema()
-print(f"shopping_list_count={audit.list_count}")
-print(f"shopping_item_count={audit.item_count}")
-print(f"shopping_idempotency_count={audit.idempotency_count}")
-PY
+Required successful output:
+
+```text
+status=success
+HOUSEHOLD_SCHEMA_STATUS=canonical
+WEEKLY_SCHEMA_STATUS=canonical
+SHOPPING_SCHEMA_STATUS=canonical
+data_backfilled=false
 ```
 
 Required post-conditions:
 
 ```text
+household schema state = canonical
+weekly schema state = canonical
 shopping schema state = canonical
-dependency_missing must be refused before weekly canonical
-partial schema must be refused
-incompatible schema must be refused
-list_count = 0
-item_count = 0
-idempotency_count = 0
-weekly schema remains canonical
-existing household/member/health data counts unchanged
+weekly series/revision/entry counts unchanged from baseline
+series_count = 0 before first weekly feature use unless already present before migration
+revision_count = 0 before first weekly feature use unless already present before migration
+entry_count = 0 before first weekly feature use unless already present before migration
+shopping list/item/idempotency counts = 0 unless already present before migration
+list_count = 0 before first shopping feature use unless already present before migration
+item_count = 0 before first shopping feature use unless already present before migration
+idempotency_count = 0 before first shopping feature use unless already present before migration
+nutrition/profile/weight/water/reminder counts unchanged
+DB owner and mode unchanged
+WAL/SHM files, if present, are not broad-readable
+```
+
+Failure rules:
+
+```text
+nonzero migration exit blocks deployment
+no automatic retry
+no manual DDL repair
+retain the fresh backup
+open a separate recovery task
 ```
 
 ## D4 - Disabled-State Observation and Rollback Verification

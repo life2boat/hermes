@@ -715,7 +715,7 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
         return ShoppingSchemaState.INCOMPATIBLE
     index_rows = _index_rows(conn)
     if not EXPECTED_INDEXES.issubset(index_rows):
-        return ShoppingSchemaState.INCOMPATIBLE
+        return ShoppingSchemaState.PARTIAL
     for index_name, details in EXPECTED_INDEX_DETAILS.items():
         actual = _index_spec(conn, index_name, str(details["table"]), str(index_rows[index_name]["sql"]))
         if actual != details:

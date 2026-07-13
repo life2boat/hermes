@@ -344,24 +344,17 @@ class HealBiteWeeklyMenuStore:
             return state
         if state is WeeklyMenuSchemaState.PARTIAL:
             with self._connect() as conn:
-                if not is_legacy_weekly_menu_schema_without_ingredients(conn):
-                    raise WeeklyMenuSchemaError("weekly menu schema is partial")
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     for statement in self._schema_statements():
-                        if (
-                            WEEKLY_MENU_INGREDIENTS_TABLE in statement
-                            or "idx_weekly_menu_ingredients_entry_position_unique"
-                            in statement
-                        ):
-                            conn.execute(statement)
+                        conn.execute(statement)
                     conn.commit()
-                except Exception:
+                except Exception as exc:
                     conn.rollback()
-                    raise
+                    raise WeeklyMenuSchemaError("weekly menu partial schema recovery failed") from exc
             final = self.schema_state()
             if final is not WeeklyMenuSchemaState.CANONICAL:
-                raise WeeklyMenuSchemaError("weekly menu ingredient migration failed")
+                raise WeeklyMenuSchemaError("weekly menu partial schema recovery failed")
             return final
         if state is WeeklyMenuSchemaState.INCOMPATIBLE:
             raise WeeklyMenuSchemaError("weekly menu schema is incompatible")

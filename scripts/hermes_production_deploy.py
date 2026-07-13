@@ -280,6 +280,43 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
         _fail("production-feature-gates")
 
 
+def current_source_head_revision(contract: DeploymentContract) -> str:
+    head = _git_output(contract, "rev-parse", "HEAD")
+    if not SHA_RE.fullmatch(head):
+        _fail("source-head")
+    return head
+
+
+def validate_rollback_revision(
+    contract: DeploymentContract,
+    *,
+    source_head_revision: str,
+    rollback_revision: str,
+) -> None:
+    validate_revision(rollback_revision)
+    validate_revision(source_head_revision)
+    commit = _run(
+        ("git", "-C", str(contract.root), "cat-file", "-e", f"{rollback_revision}^{{commit}}"),
+        timeout=20,
+    )
+    if commit.returncode != 0:
+        _fail("rollback-revision-not-commit")
+    ancestry = _run(
+        (
+            "git",
+            "-C",
+            str(contract.root),
+            "merge-base",
+            "--is-ancestor",
+            rollback_revision,
+            source_head_revision,
+        ),
+        timeout=20,
+    )
+    if ancestry.returncode != 0:
+        _fail("rollback-revision-not-ancestor")
+
+
 def _assert_no_symlink_components(path: Path) -> None:
     absolute = path.absolute()
     current = Path(absolute.anchor)
@@ -609,12 +646,21 @@ def _print_plan(
     revision: str,
     *,
     rollback: bool,
+    source_head_revision: str,
 ) -> None:
     action = "ROLLBACK" if rollback else "DEPLOY"
     command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
     print(f"PLAN={action}")
     print(f"IMAGE={image}")
     print(f"REVISION={revision}")
+    print(f"SOURCE_HEAD_REVISION={source_head_revision}")
+    if rollback:
+        print(f"ROLLBACK_TARGET_REVISION={revision}")
+        print(f"ROLLBACK_TARGET_IMAGE_ID={image}")
+        print(f"ROLLBACK_IMAGE_REVISION_LABEL={revision}")
+        print("ROLLBACK_REVISION_ANCESTOR_OF_SOURCE=true")
+    else:
+        print(f"DEPLOY_TARGET_REVISION={revision}")
     print(f"IMAGE_REVISION_LABEL_KEY={contract.image_revision_label}")
     print("IMAGE_REVISION_MATCH=true")
     print(f"COMPOSE_PROJECT={contract.project_name}")
@@ -648,8 +694,19 @@ def _validate_pre_mutation(
     image: str,
     revision: str,
     current_image: str | None = None,
-) -> tuple[InspectedImage, dict[str, str]]:
-    validate_repository(contract, revision)
+    rollback: bool = False,
+) -> tuple[InspectedImage, dict[str, str], str]:
+    if rollback:
+        source_head = current_source_head_revision(contract)
+        validate_repository(contract, source_head)
+        validate_rollback_revision(
+            contract,
+            source_head_revision=source_head,
+            rollback_revision=revision,
+        )
+    else:
+        source_head = revision
+        validate_repository(contract, revision)
     target = inspect_local_image(contract, image, expected_revision=revision)
     if current_image is not None:
         current = inspect_local_image(contract, current_image)
@@ -671,7 +728,7 @@ def _validate_pre_mutation(
             except DeploymentContractError:
                 if primary_error is None:
                     raise
-    return target, secrets
+    return target, secrets, source_head
 
 
 def plan_operation(
@@ -682,14 +739,16 @@ def plan_operation(
     revision: str,
     rollback_from: str | None = None,
 ) -> None:
-    target, _secrets = _validate_pre_mutation(
+    rollback = rollback_from is not None
+    target, _secrets, source_head = _validate_pre_mutation(
         contract,
         source=source,
         image=image,
         revision=revision,
         current_image=rollback_from,
+        rollback=rollback,
     )
-    _print_plan(contract, target.image_id, revision, rollback=rollback_from is not None)
+    _print_plan(contract, target.image_id, revision, rollback=rollback, source_head_revision=source_head)
 
 
 def execute_operation(
@@ -707,12 +766,13 @@ def execute_operation(
         _fail("explicit-confirmation-required")
     if rollback and current_image is None:
         _fail("current-image-required")
-    target, secrets = _validate_pre_mutation(
+    target, secrets, _source_head = _validate_pre_mutation(
         contract,
         source=source,
         image=image,
         revision=revision,
         current_image=current_image if rollback else None,
+        rollback=rollback,
     )
     expected_image_id = target.image_id
     _write_secret_override(contract, secrets)

@@ -87,6 +87,29 @@ def _git(*args: str, cwd: Path) -> str:
     return result.stdout.strip()
 
 
+def _allow_mocked_rollback_revision(monkeypatch) -> None:
+    monkeypatch.setattr(deploy, "current_source_head_revision", lambda _contract: OTHER_REVISION)
+    monkeypatch.setattr(deploy, "validate_rollback_revision", lambda *_args, **_kwargs: None)
+
+
+def _runner_with_real_git(calls: list[tuple[str, ...]], **kwargs):
+    docker_runner = _safe_docker_runner(calls, **kwargs)
+
+    def runner(argv, **run_kwargs):
+        command = tuple(str(item) for item in argv)
+        if command[:1] == ("git",):
+            return subprocess.run(
+                list(command),
+                text=True,
+                capture_output=True,
+                timeout=run_kwargs.get("timeout"),
+                check=False,
+            )
+        return docker_runner(argv, **run_kwargs)
+
+    return runner
+
+
 @pytest.fixture
 def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
     root = tmp_path / "repo"
@@ -491,6 +514,7 @@ def test_rollback_plan_uses_distinct_local_immutable_image(protected_contract, m
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    _allow_mocked_rollback_revision(monkeypatch)
     monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
     deploy.plan_operation(
         contract,
@@ -515,6 +539,7 @@ def test_missing_rollback_image_fails(protected_contract, monkeypatch) -> None:
         return _completed(argv, returncode=1)
 
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    _allow_mocked_rollback_revision(monkeypatch)
     monkeypatch.setattr(deploy, "_run", missing)
     with pytest.raises(deploy.DeploymentContractError, match="local-image-missing"):
         deploy.plan_operation(
@@ -678,6 +703,8 @@ def test_execute_image_mismatch_precedes_secret_read_and_runtime(
     contract, source = protected_contract
     secret_reads = 0
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    if rollback:
+        _allow_mocked_rollback_revision(monkeypatch)
     monkeypatch.setattr(
         deploy,
         "_run",
@@ -817,6 +844,7 @@ def test_execute_rollback_deploys_inspected_previous_image_id(protected_contract
     contract, source = protected_contract
     deployed_images: list[str] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    _allow_mocked_rollback_revision(monkeypatch)
 
     def runner(argv, **kwargs):
         command = tuple(str(item) for item in argv)
@@ -850,6 +878,7 @@ def test_execute_rollback_requires_distinct_current_image(protected_contract, mo
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
+    _allow_mocked_rollback_revision(monkeypatch)
     monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
     with pytest.raises(deploy.DeploymentContractError, match="rollback-image-not-distinct"):
         deploy.execute_operation(
@@ -863,6 +892,147 @@ def test_execute_rollback_requires_distinct_current_image(protected_contract, mo
         )
     assert not contract.secret_override.exists()
 
+
+
+def _make_child_commit(contract: deploy.DeploymentContract) -> str:
+    marker = contract.root / "child.txt"
+    marker.write_text("child", encoding="utf-8")
+    _git("add", ".", cwd=contract.root)
+    _git("commit", "-qm", "child", cwd=contract.root)
+    head = _git("rev-parse", "HEAD", cwd=contract.root)
+    _git("update-ref", contract.allowed_revision_ref, head, cwd=contract.root)
+    return head
+
+
+def _production_like_contract(repository_fixture, protected_contract) -> tuple[deploy.DeploymentContract, Path, str, str]:
+    repo_contract, previous = repository_fixture
+    protected, source = protected_contract
+    source_head = _make_child_commit(repo_contract)
+    contract = replace(
+        repo_contract,
+        runtime_directory=protected.runtime_directory,
+        secret_override=protected.secret_override,
+        approved_secret_source=source,
+        approved_source_owner_uids=protected.approved_source_owner_uids,
+    )
+    return contract, source, previous, source_head
+
+
+def test_rollback_plan_accepts_previous_ancestor_revision_distinct_from_source_head(
+    repository_fixture,
+    protected_contract,
+    monkeypatch,
+    capsys,
+) -> None:
+    contract, source, rollback_revision, source_head = _production_like_contract(repository_fixture, protected_contract)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git(calls, revisions={IMAGE_A: rollback_revision, IMAGE_B: source_head}),
+    )
+    deploy.plan_operation(
+        contract,
+        source=source,
+        image=IMAGE_A,
+        revision=rollback_revision,
+        rollback_from=IMAGE_B,
+    )
+    captured = capsys.readouterr()
+    assert "PLAN=ROLLBACK" in captured.out
+    assert f"SOURCE_HEAD_REVISION={source_head}" in captured.out
+    assert f"ROLLBACK_TARGET_REVISION={rollback_revision}" in captured.out
+    assert f"ROLLBACK_IMAGE_REVISION_LABEL={rollback_revision}" in captured.out
+    assert "ROLLBACK_REVISION_ANCESTOR_OF_SOURCE=true" in captured.out
+    assert "DEPLOYMENT_ACTIONS_PERFORMED=false" in captured.out
+    assert FAKE_SECRET not in captured.out + captured.err
+    assert not contract.secret_override.exists()
+    assert not contract.runtime_directory.exists()
+    assert not any("up" in command or "build" in command or "pull" in command for command in calls)
+
+
+def test_rollback_plan_denies_label_substitution_with_source_head(
+    repository_fixture,
+    protected_contract,
+    monkeypatch,
+) -> None:
+    contract, source, rollback_revision, source_head = _production_like_contract(repository_fixture, protected_contract)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git([], revisions={IMAGE_A: source_head, IMAGE_B: source_head}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="image-revision-mismatch"):
+        deploy.plan_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=rollback_revision,
+            rollback_from=IMAGE_B,
+        )
+    assert not contract.runtime_directory.exists()
+
+
+@pytest.mark.parametrize("revision", ["c" * 12, "main", "C" * 40, "not-a-sha"])
+def test_rollback_plan_denies_non_full_lowercase_sha(
+    repository_fixture,
+    protected_contract,
+    monkeypatch,
+    revision: str,
+) -> None:
+    contract, source, _rollback_revision, source_head = _production_like_contract(repository_fixture, protected_contract)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git([], revisions={IMAGE_A: revision, IMAGE_B: source_head}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="revision"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=revision, rollback_from=IMAGE_B)
+    assert not contract.runtime_directory.exists()
+
+
+def test_rollback_plan_denies_unknown_commit(repository_fixture, protected_contract, monkeypatch) -> None:
+    contract, source, _rollback_revision, source_head = _production_like_contract(repository_fixture, protected_contract)
+    unknown = "e" * 40
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git([], revisions={IMAGE_A: unknown, IMAGE_B: source_head}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="rollback-revision-not-commit"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=unknown, rollback_from=IMAGE_B)
+    assert not contract.runtime_directory.exists()
+
+
+def test_rollback_plan_denies_non_ancestor_commit(repository_fixture, protected_contract, monkeypatch) -> None:
+    contract, source, _rollback_revision, source_head = _production_like_contract(repository_fixture, protected_contract)
+    _git("checkout", "--orphan", "side", cwd=contract.root)
+    (contract.root / "side.txt").write_text("side", encoding="utf-8")
+    _git("add", ".", cwd=contract.root)
+    _git("commit", "-qm", "side", cwd=contract.root)
+    side = _git("rev-parse", "HEAD", cwd=contract.root)
+    _git("checkout", "-q", source_head, cwd=contract.root)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git([], revisions={IMAGE_A: side, IMAGE_B: source_head}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="rollback-revision-not-ancestor"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=side, rollback_from=IMAGE_B)
+    assert not contract.runtime_directory.exists()
+
+
+def test_rollback_plan_denies_source_head_mismatch(repository_fixture, protected_contract, monkeypatch) -> None:
+    contract, source, rollback_revision, _source_head = _production_like_contract(repository_fixture, protected_contract)
+    monkeypatch.setattr(deploy, "current_source_head_revision", lambda _contract: rollback_revision)
+    monkeypatch.setattr(
+        deploy,
+        "_run",
+        _runner_with_real_git([], revisions={IMAGE_A: rollback_revision, IMAGE_B: OTHER_REVISION}),
+    )
+    with pytest.raises(deploy.DeploymentContractError, match="head-mismatch"):
+        deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=rollback_revision, rollback_from=IMAGE_B)
+    assert not contract.runtime_directory.exists()
 
 def test_feature_flags_remain_disabled() -> None:
     contract = deploy.load_contract()

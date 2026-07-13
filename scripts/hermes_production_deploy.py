@@ -60,6 +60,13 @@ def _fail(code: str) -> None:
     raise DeploymentContractError(code)
 
 
+def _effective_uid() -> int:
+    get_euid = getattr(os, "geteuid", None)
+    if not callable(get_euid):
+        _fail("posix-runtime-required")
+    return get_euid()
+
+
 def _read_json_file(path: Path, *, code: str) -> dict[str, object]:
     try:
         metadata = path.lstat()
@@ -370,7 +377,7 @@ def _validate_runtime_directory(contract: DeploymentContract, *, create: bool) -
         _fail("runtime-directory-type")
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         _fail("runtime-directory-mode")
-    if metadata.st_uid != os.geteuid():
+    if metadata.st_uid != _effective_uid():
         _fail("runtime-directory-owner")
 
 
@@ -381,7 +388,7 @@ def validate_secret_override(contract: DeploymentContract) -> None:
     _validate_regular_file(
         contract.secret_override,
         mode=0o600,
-        allowed_uids=frozenset({os.geteuid()}),
+        allowed_uids=frozenset({_effective_uid()}),
         code="secret-override",
     )
 
@@ -424,7 +431,7 @@ def prepare_secret_override(contract: DeploymentContract, source: Path) -> None:
             _validate_regular_file(
                 temp_path,
                 mode=0o600,
-                allowed_uids=frozenset({os.geteuid()}),
+                allowed_uids=frozenset({_effective_uid()}),
                 code="temporary-override",
             )
             os.replace(temp_path, contract.secret_override)

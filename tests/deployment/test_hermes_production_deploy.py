@@ -100,6 +100,12 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert FAKE_SECRET not in text
 
 
+def test_non_posix_runtime_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(deploy.os, "geteuid", None)
+    with pytest.raises(deploy.DeploymentContractError, match="posix-runtime-required"):
+        deploy._effective_uid()
+
+
 def test_repository_check_passes_on_clean_exact_head(repository_fixture) -> None:
     contract, head = repository_fixture
     deploy.validate_repository(contract, head)

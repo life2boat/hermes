@@ -1048,7 +1048,7 @@ def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
 
 def test_delete_last_meal_does_not_touch_other_users(tmp_path):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     user_one = _build_record(
         meal_name="Суп",
         calories_kcal=180,
@@ -1243,7 +1243,7 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     user_one = _build_record(
         meal_name="\u041f\u043b\u043e\u0432",
         calories_kcal=640,

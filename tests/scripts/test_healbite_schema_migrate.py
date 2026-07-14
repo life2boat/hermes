@@ -318,10 +318,11 @@ def test_writable_ancestor_is_denied(tmp_path: Path, monkeypatch) -> None:
     ancestor = tmp_path / "ancestor"
     parent = ancestor / "safe-parent"
     parent.mkdir(parents=True)
-    os.chmod(ancestor, 0o770)
-    os.chmod(parent, 0o550)
     db_path = parent / "db.sqlite"
     db_path.touch(mode=0o660)
+    os.chmod(db_path, 0o660)
+    os.chmod(ancestor, 0o770)
+    os.chmod(parent, 0o550)
     monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (ancestor, parent))
     identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=ancestor.stat().st_gid, groups=frozenset())
     result = healbite_schema_migrate.run_migration(db_path=str(db_path), _identity=identity)
@@ -333,11 +334,11 @@ def test_safe_bind_mount_style_path_is_accepted(tmp_path: Path, monkeypatch) -> 
     root = tmp_path / "root"
     parent = root / "data"
     parent.mkdir(parents=True)
-    os.chmod(root, 0o550)
-    os.chmod(parent, 0o550)
     db_path = parent / "db.sqlite"
     db_path.touch(mode=0o660)
     os.chmod(db_path, 0o660)
+    os.chmod(root, 0o550)
+    os.chmod(parent, 0o550)
     monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (root, parent))
     identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=db_path.stat().st_gid, groups=frozenset())
     target = healbite_schema_migrate._resolve_db_path(str(db_path), allow_create=False, identity=identity)

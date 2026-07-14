@@ -6,8 +6,12 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import traceback
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
+
+import pytest
 
 from gateway.healbite_household_bootstrap import detect_schema_state
 from gateway.healbite_households import HealBiteHouseholdStore
@@ -18,19 +22,63 @@ from gateway.healbite_shopping_schema import (
     SHOPPING_LISTS_TABLE,
     ShoppingSchemaState,
 )
-from gateway.healbite_weekly_menu_schema import WEEKLY_MENU_INGREDIENTS_TABLE, WeeklyMenuSchemaState
+from gateway.healbite_weekly_menu_schema import (
+    WEEKLY_MENU_INGREDIENTS_TABLE,
+    WEEKLY_MENU_SERIES_TABLE,
+    WeeklyMenuSchemaState,
+)
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
 from scripts import healbite_schema_migrate
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "healbite_schema_migrate.py"
 
 
+def _trusted_target(db_path: Path, *, classification: str = "synthetic_test_path") -> healbite_schema_migrate.DatabaseTarget:
+    metadata = db_path.lstat()
+    return healbite_schema_migrate.DatabaseTarget(
+        path=db_path,
+        classification=classification,
+        mode_before=f"{stat.S_IMODE(metadata.st_mode):04o}",
+        owner_before=f"{metadata.st_uid}:{metadata.st_gid}",
+        identity_before=(metadata.st_dev, metadata.st_ino),
+    )
+
+
+def _trusted_resolver(
+    raw_path: str | None,
+    allow_create: bool,
+    _identity: healbite_schema_migrate.ProcessIdentity | None,
+) -> healbite_schema_migrate.DatabaseTarget:
+    assert raw_path is not None
+    db_path = Path(raw_path)
+    if not db_path.exists():
+        if not allow_create:
+            raise healbite_schema_migrate.MigrationError(
+                healbite_schema_migrate.ExitClassification.MISSING_DATABASE,
+                detail_code="DB_PATH_MISSING",
+            )
+        db_path.touch(mode=0o600)
+        os.chmod(db_path, 0o600)
+    return _trusted_target(db_path)
+
+
 def _run_cli(db_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), "--db-path", str(db_path), "--json", *extra],
-        text=True,
-        capture_output=True,
-        check=False,
+    allow_create = "--allow-create" in extra
+    components: str | None = None
+    if "--components" in extra:
+        index = extra.index("--components")
+        components = extra[index + 1]
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        allow_create=allow_create,
+        components=components,
+        _target_resolver=_trusted_resolver,
+    )
+    return subprocess.CompletedProcess(
+        args=[str(SCRIPT)],
+        returncode=result.exit_code,
+        stdout=json.dumps(result.as_dict(), ensure_ascii=True, sort_keys=True),
+        stderr="",
     )
 
 
@@ -59,6 +107,28 @@ def _index_exists(db_path: Path, index: str) -> bool:
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
             (index,),
         ).fetchone() is not None
+
+
+def _schema_snapshot(db_path: Path) -> tuple[tuple[str, str, str], ...]:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT type, name, COALESCE(sql, '') FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    return tuple((str(row[0]), str(row[1]), str(row[2])) for row in rows)
+
+
+def _database_snapshot(db_path: Path) -> tuple[str, ...]:
+    with sqlite3.connect(db_path) as conn:
+        return tuple(conn.iterdump())
+
+
+def _table_names(db_path: Path) -> set[str]:
+    with sqlite3.connect(db_path) as conn:
+        return {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
 
 
 def _fresh_db(tmp_path: Path) -> Path:
@@ -125,6 +195,48 @@ def _insert_legacy_weekly_data(db_path: Path) -> None:
         conn.commit()
 
 
+class _TrackingConnection:
+    def __init__(
+        self,
+        delegate: sqlite3.Connection,
+        *,
+        fail_rollback: bool = False,
+        fail_close: bool = False,
+    ) -> None:
+        self.delegate = delegate
+        self.fail_rollback = fail_rollback
+        self.fail_close = fail_close
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.close_count = 0
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        return self.delegate.execute(*args, **kwargs)
+
+    def commit(self) -> None:
+        self.commit_count += 1
+        self.delegate.commit()
+
+    def rollback(self) -> None:
+        self.rollback_count += 1
+        if self.fail_rollback:
+            raise RuntimeError("synthetic rollback failure")
+        self.delegate.rollback()
+
+    def close(self) -> None:
+        self.close_count += 1
+        self.delegate.close()
+        if self.fail_close:
+            raise RuntimeError("synthetic close failure")
+
+
+def _sqlite_operational_error(code: int, name: str) -> sqlite3.OperationalError:
+    error = sqlite3.OperationalError("sanitized synthetic sqlite failure")
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
 def test_missing_db_path_is_rejected() -> None:
     result = subprocess.run([sys.executable, str(SCRIPT), "--json"], text=True, capture_output=True, check=False)
     assert result.returncode == 2
@@ -138,15 +250,17 @@ def test_relative_db_path_is_rejected() -> None:
         check=False,
     )
     assert result.returncode == healbite_schema_migrate.EXIT_INVALID_ARGUMENTS
-    assert json.loads(result.stdout)["exit_classification"] == "DB_PATH_NOT_ABSOLUTE"
+    payload = json.loads(result.stdout)
+    assert payload["exit_classification"] == "INVALID_ARGUMENT"
+    assert payload["error_type"] == "DB_PATH_NOT_ABSOLUTE"
 
 
 def test_missing_db_is_not_created_without_allow_create(tmp_path: Path) -> None:
     db_path = tmp_path / "missing.sqlite"
     result = _run_cli(db_path)
-    assert result.returncode == healbite_schema_migrate.EXIT_INVALID_ARGUMENTS
+    assert result.returncode == healbite_schema_migrate.EXIT_MISSING_DATABASE
     assert not db_path.exists()
-    assert _json_result(result)["exit_classification"] == "DB_PATH_MISSING"
+    assert _json_result(result)["exit_classification"] == "MISSING_DATABASE"
 
 
 def test_allow_create_creates_mode_0600_and_migrates(tmp_path: Path) -> None:
@@ -154,7 +268,7 @@ def test_allow_create_creates_mode_0600_and_migrates(tmp_path: Path) -> None:
     result = _run_cli(db_path, "--allow-create")
     payload = _json_result(result)
     assert result.returncode == 0
-    assert payload["database_path_classification"] == "absolute_created_regular"
+    assert payload["database_path_classification"] == "synthetic_test_path"
     assert payload["mode_after"] == "0600"
     assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
     assert detect_schema_state(sqlite3.connect(db_path)) == "canonical"
@@ -166,9 +280,300 @@ def test_symlink_db_path_is_denied(tmp_path: Path) -> None:
     target = _fresh_db(tmp_path)
     link = tmp_path / "link.sqlite"
     link.symlink_to(target)
-    result = _run_cli(link)
-    assert result.returncode == healbite_schema_migrate.EXIT_INVALID_ARGUMENTS
-    assert _json_result(result)["exit_classification"] == "DB_PATH_SYMLINK"
+    result = healbite_schema_migrate.run_migration(db_path=str(link))
+    assert result.exit_code == healbite_schema_migrate.EXIT_UNSAFE_PATH
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "DB_PATH_SYMLINK"
+
+
+def test_symlink_ancestor_is_denied(tmp_path: Path, monkeypatch) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    db_path = real_parent / "db.sqlite"
+    db_path.touch(mode=0o660)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+    aliased_db = alias / "db.sqlite"
+    monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (alias,))
+    identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=db_path.stat().st_gid, groups=frozenset())
+    result = healbite_schema_migrate.run_migration(db_path=str(aliased_db), _identity=identity)
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "PATH_COMPONENT_SYMLINK"
+
+
+def test_writable_parent_is_denied(tmp_path: Path, monkeypatch) -> None:
+    parent = tmp_path / "writable"
+    parent.mkdir(mode=0o770)
+    os.chmod(parent, 0o770)
+    db_path = parent / "db.sqlite"
+    db_path.touch(mode=0o660)
+    monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (parent,))
+    identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=parent.stat().st_gid, groups=frozenset())
+    result = healbite_schema_migrate.run_migration(db_path=str(db_path), _identity=identity)
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "PATH_DIRECTORY_WRITABLE"
+
+
+def test_writable_ancestor_is_denied(tmp_path: Path, monkeypatch) -> None:
+    ancestor = tmp_path / "ancestor"
+    parent = ancestor / "safe-parent"
+    parent.mkdir(parents=True)
+    os.chmod(ancestor, 0o770)
+    os.chmod(parent, 0o550)
+    db_path = parent / "db.sqlite"
+    db_path.touch(mode=0o660)
+    monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (ancestor, parent))
+    identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=ancestor.stat().st_gid, groups=frozenset())
+    result = healbite_schema_migrate.run_migration(db_path=str(db_path), _identity=identity)
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "PATH_DIRECTORY_WRITABLE"
+
+
+def test_safe_bind_mount_style_path_is_accepted(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    parent = root / "data"
+    parent.mkdir(parents=True)
+    os.chmod(root, 0o550)
+    os.chmod(parent, 0o550)
+    db_path = parent / "db.sqlite"
+    db_path.touch(mode=0o660)
+    os.chmod(db_path, 0o660)
+    monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (root, parent))
+    identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=db_path.stat().st_gid, groups=frozenset())
+    target = healbite_schema_migrate._resolve_db_path(str(db_path), allow_create=False, identity=identity)
+    assert target.identity_before == (db_path.stat().st_dev, db_path.stat().st_ino)
+
+
+def test_allow_create_is_explicit_and_uses_safe_directory_contract(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    parent = root / "data"
+    parent.mkdir(parents=True)
+    os.chmod(root, 0o550)
+    os.chmod(parent, 0o550)
+    db_path = parent / "created.sqlite"
+    monkeypatch.setattr(healbite_schema_migrate, "_path_components", lambda _path: (root, parent))
+    identity = healbite_schema_migrate.ProcessIdentity(uid=10001, gid=parent.stat().st_gid, groups=frozenset())
+    real_open = os.open
+    real_classify = healbite_schema_migrate._classify_existing_path
+
+    def privileged_test_open(path: str | os.PathLike[str], flags: int, mode: int) -> int:
+        os.chmod(parent, 0o770)
+        try:
+            return real_open(path, flags, mode)
+        finally:
+            os.chmod(parent, 0o550)
+
+    def classify_created(path: Path, _identity: healbite_schema_migrate.ProcessIdentity):
+        metadata = path.lstat()
+        return healbite_schema_migrate.DatabaseTarget(
+            path=path,
+            classification="absolute_created_regular_safe_parent",
+            mode_before=f"{stat.S_IMODE(metadata.st_mode):04o}",
+            owner_before=f"{metadata.st_uid}:{metadata.st_gid}",
+            identity_before=(metadata.st_dev, metadata.st_ino),
+        )
+
+    monkeypatch.setattr(os, "open", privileged_test_open)
+    monkeypatch.setattr(healbite_schema_migrate, "_classify_existing_path", classify_created)
+    target = healbite_schema_migrate._resolve_db_path(str(db_path), allow_create=True, identity=identity)
+    monkeypatch.setattr(healbite_schema_migrate, "_classify_existing_path", real_classify)
+    assert target.classification == "absolute_created_regular_safe_parent"
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+
+
+def test_path_substitution_before_open_is_rejected_without_mutation(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    original_snapshot = _database_snapshot(db_path)
+    substitute = tmp_path / "substitute.sqlite"
+    substitute.touch(mode=0o600)
+    substitute_snapshot = _database_snapshot(substitute)
+    parked = tmp_path / "parked.sqlite"
+
+    def substitute_before_open() -> None:
+        db_path.rename(parked)
+        db_path.symlink_to(substitute)
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _before_open_hook=substitute_before_open,
+    )
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "DB_PATH_REPLACED"
+    assert _database_snapshot(parked) == original_snapshot
+    assert _database_snapshot(substitute) == substitute_snapshot
+
+
+def test_path_substitution_before_ddl_is_rejected_without_mutation(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    original_snapshot = _database_snapshot(db_path)
+    substitute = tmp_path / "substitute.sqlite"
+    substitute.touch(mode=0o600)
+    substitute_snapshot = _database_snapshot(substitute)
+    parked = tmp_path / "parked.sqlite"
+
+    def substitute_before_ddl() -> None:
+        db_path.rename(parked)
+        db_path.symlink_to(substitute)
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _before_ddl_hook=substitute_before_ddl,
+    )
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "DB_PATH_REPLACED"
+    assert _database_snapshot(parked) == original_snapshot
+    assert _database_snapshot(substitute) == substitute_snapshot
+
+
+def test_owned_connection_closes_exactly_once_after_success(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(sqlite3.connect(db_path))
+
+    def connect_factory(*_args: Any, **_kwargs: Any) -> _TrackingConnection:
+        return tracker
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=connect_factory,
+    )
+    assert result.exit_classification == "SUCCESS"
+    assert tracker.commit_count == 1
+    assert tracker.rollback_count == 0
+    assert tracker.close_count == 1
+
+
+def test_borrowed_connection_is_not_closed(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(sqlite3.connect(db_path))
+    phases, changed = healbite_schema_migrate._migrate_borrowed_connection(
+        tracker,
+        selected=healbite_schema_migrate.ALL_COMPONENTS,
+    )
+    assert changed is True
+    assert len(phases) == 3
+    assert tracker.close_count == 0
+    assert tracker.execute("SELECT 1").fetchone() == (1,)
+    tracker.close()
+
+
+def test_migration_failure_rolls_back_and_closes_owned_connection(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(sqlite3.connect(db_path))
+
+    def connect_factory(*_args: Any, **_kwargs: Any) -> _TrackingConnection:
+        return tracker
+
+    def fail_before_ddl() -> None:
+        raise RuntimeError("synthetic primary failure")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=connect_factory,
+        _before_ddl_hook=fail_before_ddl,
+    )
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert result.error_type == "RuntimeError"
+    assert tracker.commit_count == 0
+    assert tracker.rollback_count == 1
+    assert tracker.close_count == 1
+
+
+@pytest.mark.parametrize(("fail_rollback", "fail_close"), [(True, False), (False, True), (True, True)])
+def test_cleanup_failures_do_not_change_primary_result_classification(
+    tmp_path: Path,
+    fail_rollback: bool,
+    fail_close: bool,
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(
+        sqlite3.connect(db_path),
+        fail_rollback=fail_rollback,
+        fail_close=fail_close,
+    )
+
+    def connect_factory(*_args: Any, **_kwargs: Any) -> _TrackingConnection:
+        return tracker
+
+    def fail_before_ddl() -> None:
+        raise ValueError("synthetic primary failure")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=connect_factory,
+        _before_ddl_hook=fail_before_ddl,
+    )
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert result.error_type == "ValueError"
+    assert tracker.rollback_count == 1
+    assert tracker.close_count == 1
+
+
+@pytest.mark.parametrize(
+    ("fail_rollback", "fail_close", "expected_notes"),
+    [
+        (True, False, {"rollback_failed"}),
+        (False, True, {"close_failed"}),
+        (True, True, {"rollback_failed", "close_failed"}),
+    ],
+)
+def test_cleanup_failure_preserves_primary_exception_and_traceback(
+    tmp_path: Path,
+    fail_rollback: bool,
+    fail_close: bool,
+    expected_notes: set[str],
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(
+        sqlite3.connect(db_path),
+        fail_rollback=fail_rollback,
+        fail_close=fail_close,
+    )
+
+    def connect_factory(*_args: Any, **_kwargs: Any) -> _TrackingConnection:
+        return tracker
+
+    def raise_primary_failure() -> None:
+        raise ValueError("synthetic primary failure")
+
+    with pytest.raises(ValueError) as caught:
+        healbite_schema_migrate._connect_target(
+            _trusted_target(db_path),
+            selected=healbite_schema_migrate.ALL_COMPONENTS,
+            connect_factory=connect_factory,
+            before_open_hook=None,
+            before_ddl_hook=raise_primary_failure,
+        )
+
+    frame_names = {frame.name for frame in traceback.extract_tb(caught.value.__traceback__)}
+    assert "raise_primary_failure" in frame_names
+    assert set(getattr(caught.value, "__notes__", ())) == expected_notes
+    assert tracker.rollback_count == 1
+    assert tracker.close_count == 1
+
+
+def test_close_failure_after_success_has_explicit_cleanup_classification(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    tracker = _TrackingConnection(sqlite3.connect(db_path), fail_close=True)
+
+    def connect_factory(*_args: Any, **_kwargs: Any) -> _TrackingConnection:
+        return tracker
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=connect_factory,
+    )
+    payload = json.dumps(result.as_dict(), sort_keys=True)
+    assert result.exit_classification == "CLEANUP_FAILED"
+    assert result.error_type == "CONNECTION_CLOSE_FAILED"
+    assert tracker.commit_count == 1
+    assert tracker.close_count == 1
+    assert str(db_path) not in payload
 
 
 def test_fresh_db_full_migration_order_and_sanitized_output(tmp_path: Path) -> None:
@@ -256,25 +661,176 @@ def test_missing_indexes_recover(tmp_path: Path) -> None:
     assert _index_exists(db_path, "idx_household_shopping_lists_household_week_status")
 
 
-def test_unknown_schema_fails_closed_and_skips_later_phases(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("phase", "table"),
+    [
+        ("household", "households"),
+        ("weekly", WEEKLY_MENU_SERIES_TABLE),
+        ("shopping", SHOPPING_LISTS_TABLE),
+    ],
+)
+def test_unknown_schema_fails_closed_without_any_mutation(
+    tmp_path: Path,
+    phase: str,
+    table: str,
+) -> None:
     db_path = _fresh_db(tmp_path)
     with sqlite3.connect(db_path) as conn:
-        conn.execute("CREATE TABLE households (id TEXT PRIMARY KEY)")
+        conn.execute(f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, marker TEXT NOT NULL)')
+        conn.execute(f'INSERT INTO "{table}" (id, marker) VALUES (?, ?)', ("synthetic", "unchanged"))
         conn.commit()
+    schema_before = _schema_snapshot(db_path)
+    data_before = _database_snapshot(db_path)
     result = _run_cli(db_path)
     payload = _json_result(result)
     assert result.returncode == healbite_schema_migrate.EXIT_SCHEMA_PRECONDITION
-    assert payload["phases"][0]["name"] == "household"
+    assert payload["exit_classification"] == "INCOMPATIBLE_SCHEMA"
+    assert payload["phases"][0]["name"] == phase
     assert payload["phases"][0]["status"] == "failed"
     assert len(payload["phases"]) == 1
-    assert not _table_exists(db_path, "household_weekly_menu_series")
+    assert _schema_snapshot(db_path) == schema_before
+    assert _database_snapshot(db_path) == data_before
+    assert len(_table_names(db_path)) == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.total_changes == 0
+
+
+def test_known_prefixes_of_authoritative_schema_are_recoverable(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(HealBiteHouseholdStore.schema_statements()[0])
+        conn.commit()
+    assert _run_cli(db_path).returncode == 0
+
+    weekly_db = tmp_path / "weekly-prefix.sqlite"
+    weekly_db.touch(mode=0o600)
+    _init_household(weekly_db)
+    with sqlite3.connect(weekly_db) as conn:
+        conn.execute(HealBiteWeeklyMenuStore.schema_statements()[0])
+        conn.commit()
+    assert _run_cli(weekly_db).returncode == 0
+
+    shopping_db = tmp_path / "shopping-prefix.sqlite"
+    shopping_db.touch(mode=0o600)
+    _init_household(shopping_db)
+    _init_weekly(shopping_db)
+    with sqlite3.connect(shopping_db) as conn:
+        conn.execute(HealBiteShoppingStore.schema_statements()[0])
+        conn.commit()
+    assert _run_cli(shopping_db).returncode == 0
+
+
+def test_structurally_valid_nonprefix_partial_schema_is_incompatible(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    revision_statement = next(
+        statement
+        for statement in HealBiteWeeklyMenuStore.schema_statements()
+        if statement.lstrip().startswith("CREATE TABLE IF NOT EXISTS household_weekly_menus")
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(revision_statement)
+        conn.commit()
+    before = _schema_snapshot(db_path)
+    result = _run_cli(db_path)
+    assert result.returncode == healbite_schema_migrate.EXIT_SCHEMA_PRECONDITION
+    assert _json_result(result)["exit_classification"] == "INCOMPATIBLE_SCHEMA"
+    assert _schema_snapshot(db_path) == before
+
+
+@pytest.mark.parametrize("failure_phase", ["household", "weekly"])
+def test_late_phase_failure_rolls_back_all_component_ddl(
+    tmp_path: Path,
+    monkeypatch,
+    failure_phase: str,
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    schema_before = _schema_snapshot(db_path)
+    called: list[str] = []
+    real_apply = healbite_schema_migrate._apply_component
+
+    def fail_after_component(conn: sqlite3.Connection, name: str, statements: tuple[str, ...]) -> None:
+        called.append(name)
+        real_apply(conn, name, statements)
+        if name == failure_phase:
+            failure = RuntimeError("synthetic phase failure")
+            failure._healbite_migration_phase = name
+            raise failure
+
+    monkeypatch.setattr(healbite_schema_migrate, "_apply_component", fail_after_component)
+    result = _run_cli(db_path)
+    assert result.returncode == healbite_schema_migrate.EXIT_MIGRATION_FAILURE
+    assert _json_result(result)["phases"] == [
+        {"changed": False, "error_type": "RuntimeError", "name": failure_phase, "status": "failed"}
+    ]
+    assert _schema_snapshot(db_path) == schema_before
+    expected_calls = ["household"] if failure_phase == "household" else ["household", "weekly"]
+    assert called == expected_calls
+
+
+def test_locked_database_has_stable_exit_classification(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    lock = sqlite3.connect(db_path)
+    try:
+        lock.execute("BEGIN EXCLUSIVE")
+        result = healbite_schema_migrate.run_migration(
+            db_path=str(db_path),
+            _target_resolver=_trusted_resolver,
+        )
+    finally:
+        lock.rollback()
+        lock.close()
+    assert result.exit_classification == "DATABASE_LOCKED"
+    assert result.exit_code == healbite_schema_migrate.EXIT_DATABASE_LOCKED
+
+
+def test_read_only_database_has_stable_exit_classification(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+
+    def read_only_factory(path: Path, **_kwargs: Any) -> sqlite3.Connection:
+        return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=0.2)
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=read_only_factory,
+    )
+    assert result.exit_classification == "DATABASE_READ_ONLY"
+    assert result.exit_code == healbite_schema_migrate.EXIT_DATABASE_READ_ONLY
+
+
+def test_permission_denied_has_stable_exit_classification(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+
+    def denied_factory(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
+        raise _sqlite_operational_error(sqlite3.SQLITE_CANTOPEN, "SQLITE_CANTOPEN")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        _target_resolver=_trusted_resolver,
+        _connect_factory=denied_factory,
+    )
+    assert result.exit_classification == "DATABASE_PERMISSION_DENIED"
+    assert result.exit_code == healbite_schema_migrate.EXIT_DATABASE_PERMISSION_DENIED
+
+
+def test_sqlite_classification_does_not_use_error_message_only() -> None:
+    error = sqlite3.OperationalError("database is locked")
+    assert healbite_schema_migrate._sqlite_classification(error) is healbite_schema_migrate.ExitClassification.MIGRATION_FAILED
+
+
+def test_cli_help_documents_public_exit_classifications() -> None:
+    help_text = healbite_schema_migrate.build_parser().format_help()
+    for classification in healbite_schema_migrate.ExitClassification:
+        assert classification.value in help_text
 
 
 def test_component_order_is_enforced(tmp_path: Path) -> None:
     db_path = _fresh_db(tmp_path)
     result = _run_cli(db_path, "--components", "shopping,weekly")
     assert result.returncode == healbite_schema_migrate.EXIT_INVALID_ARGUMENTS
-    assert _json_result(result)["exit_classification"] == "COMPONENTS_OUT_OF_ORDER"
+    payload = _json_result(result)
+    assert payload["exit_classification"] == "INVALID_ARGUMENT"
+    assert payload["error_type"] == "COMPONENTS_OUT_OF_ORDER"
 
 
 def test_mode_and_owner_are_preserved(tmp_path: Path) -> None:
@@ -296,10 +852,20 @@ def test_public_cli_does_not_import_runtime_systems() -> None:
 
 
 def test_runbook_uses_public_cli_instead_of_authoritative_inline_exec() -> None:
-    runbook = (Path(__file__).resolve().parents[2] / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md").read_text(encoding="utf-8")
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+    ).read_text(encoding="utf-8")
     d3 = runbook.split("### D3 Weekly schema initialization", 1)[1].split(
         "## D4 - Disabled-State Observation", 1
     )[0]
     assert "scripts/healbite_schema_migrate.py" in d3
     assert "store.initialize_schema()" not in d3
     assert "docker exec \"$" not in d3
+    assert "exact read/write file bind mount" in d3
+    assert "not writable by UID/GID 10000:10000" in d3
+    assert "privileged container administrator" in d3
+    assert "DATABASE_LOCKED" in d3
+    assert "DATABASE_READ_ONLY" in d3
+    assert "CLEANUP_FAILED" in d3
+    assert "Do not retry automatically" in d3

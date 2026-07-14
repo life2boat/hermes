@@ -103,14 +103,31 @@ def test_initialize_schema_creates_canonical_tables_idempotently(tmp_path):
         assert detect_shopping_schema_state(conn) is ShoppingSchemaState.CANONICAL
 
 
-def test_partial_schema_is_detected_and_initializer_refuses(tmp_path):
+def test_malformed_partial_schema_is_incompatible_and_initializer_refuses(tmp_path):
     db_path = tmp_path / "partial.db"
     _seed_dependencies(db_path)
     with _connect(db_path) as conn:
         conn.execute(f"CREATE TABLE {SHOPPING_LISTS_TABLE} (id TEXT PRIMARY KEY)")
     store = HealBiteShoppingStore(db_path=db_path)
 
-    assert store.schema_state() is ShoppingSchemaState.PARTIAL
+    assert store.schema_state() is ShoppingSchemaState.INCOMPATIBLE
+    with pytest.raises(ShoppingSchemaError):
+        store.initialize_schema()
+
+
+def test_valid_nonprefix_partial_schema_is_incompatible(tmp_path):
+    db_path = tmp_path / "nonprefix.db"
+    _seed_dependencies(db_path)
+    idempotency_statement = next(
+        statement
+        for statement in HealBiteShoppingStore.schema_statements()
+        if statement.lstrip().startswith("CREATE TABLE IF NOT EXISTS household_shopping_idempotency")
+    )
+    with _connect(db_path) as conn:
+        conn.execute(idempotency_statement)
+    store = HealBiteShoppingStore(db_path=db_path)
+
+    assert store.schema_state() is ShoppingSchemaState.INCOMPATIBLE
     with pytest.raises(ShoppingSchemaError):
         store.initialize_schema()
 

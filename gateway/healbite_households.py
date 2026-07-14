@@ -414,9 +414,25 @@ class HealBiteHouseholdStore:
         except Exception:
             pass
 
+    @staticmethod
+    def schema_statements() -> tuple[str, ...]:
+        return tuple(statement.strip() for statement in _SCHEMA_SQL.split(";") if statement.strip())
+
+    @classmethod
+    def apply_schema(cls, conn: sqlite3.Connection) -> None:
+        """Apply authoritative household DDL to a borrowed connection."""
+        for statement in cls.schema_statements():
+            conn.execute(statement)
+
     def ensure_schema(self) -> None:
         with self._owned_connection() as conn:
-            conn.executescript(_SCHEMA_SQL)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self.apply_schema(conn)
+                conn.commit()
+            except BaseException:
+                self._rollback_preserving_error(conn)
+                raise
 
     @staticmethod
     def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:

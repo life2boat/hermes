@@ -510,7 +510,7 @@ set -euo pipefail
 docker run --rm \
   --network none \
   --user 10000:10000 \
-  --mount type=bind,src="/home/hermes/healbite.db",dst="/data/healbite.db" \
+  --mount type=bind,src="/home/hermes/healbite.db",dst="/data/healbite.db",readonly=false \
   "$EXACT_IMAGE_ID" \
   /opt/hermes/.venv/bin/python /opt/hermes/scripts/healbite_schema_migrate.py \
     --db-path /data/healbite.db \
@@ -518,6 +518,24 @@ docker run --rm \
 ```
 
 The command must be run only after a fresh SQLite online backup and a read-only schema/count baseline. It must run before the Hermes service is recreated on the new image.
+
+Path-security preconditions are part of the migration authorization, not a post-run
+check:
+
+```text
+/data is supplied by the immutable image and owned by root
+/data and every relevant container-side ancestor are not writable by UID/GID 10000:10000
+/data/healbite.db is an exact read/write file bind mount, not a directory mount
+the DB file is a regular non-symlink file writable by UID/GID 10000:10000
+no path component is a symlink
+the CLI does not chmod, chown, copy, hardlink, or replace the DB
+```
+
+This contract prevents the unprivileged migration identity from substituting the
+database pathname before or during open. It does not claim protection against host
+root or a privileged container administrator; those actors remain outside this
+one-shot process threat boundary. Validate the image-side `/data` ownership and mode
+offline before production use.
 
 Required command properties:
 
@@ -531,6 +549,7 @@ no main Hermes service starts
 no Qdrant, Telegram, provider, scheduler, or background worker starts
 no feature flag is changed
 no snapshot or shopping backfill is performed
+no production docker exec is used for migration
 ```
 
 Expected migration sequence:
@@ -548,15 +567,35 @@ The public CLI performs the weekly phase before the shopping phase in one determ
 The shopping phase is executed by the same public CLI invocation after weekly schema reaches canonical state. Do not use `docker exec` or inline Python for this phase.
 
 
-Required successful output:
+Required successful sanitized JSON output:
 
 ```text
-status=success
-HOUSEHOLD_SCHEMA_STATUS=canonical
-WEEKLY_SCHEMA_STATUS=canonical
-SHOPPING_SCHEMA_STATUS=canonical
-data_backfilled=false
+status = success
+exit_classification = SUCCESS
+HOUSEHOLD schema_state = CURRENT
+WEEKLY schema_state = CURRENT
+SHOPPING schema_state = CURRENT
+data_backfilled = false
 ```
+
+Public stable exit classifications:
+
+```text
+0  SUCCESS
+2  INVALID_ARGUMENT
+3  UNSAFE_PATH
+4  MISSING_DATABASE
+5  INCOMPATIBLE_SCHEMA
+6  DATABASE_LOCKED
+7  DATABASE_READ_ONLY
+8  DATABASE_PERMISSION_DENIED
+9  MIGRATION_FAILED
+10 CLEANUP_FAILED
+11 CONTRACT_DRIFT
+```
+
+Any nonzero classification is terminal for this attempt. Do not retry automatically,
+do not repair DDL manually, and do not continue to service recreation.
 
 Required post-conditions:
 

@@ -78,13 +78,29 @@ def test_initialize_schema_creates_canonical_tables_idempotently(tmp_path):
         assert _count(conn, WEEKLY_MENU_IDEMPOTENCY_TABLE) == 0
 
 
-def test_partial_schema_is_detected_and_initializer_refuses(tmp_path):
+def test_malformed_partial_schema_is_incompatible_and_initializer_refuses(tmp_path):
     db_path = tmp_path / "partial.db"
     with _connect(db_path) as conn:
         conn.execute(f"CREATE TABLE {WEEKLY_MENU_SERIES_TABLE} (id TEXT PRIMARY KEY)")
     store = HealBiteWeeklyMenuStore(db_path=db_path)
 
-    assert store.schema_state() is WeeklyMenuSchemaState.PARTIAL
+    assert store.schema_state() is WeeklyMenuSchemaState.INCOMPATIBLE
+    with pytest.raises(WeeklyMenuSchemaError):
+        store.initialize_schema()
+
+
+def test_valid_nonprefix_partial_schema_is_incompatible(tmp_path):
+    db_path = tmp_path / "nonprefix.db"
+    revision_statement = next(
+        statement
+        for statement in HealBiteWeeklyMenuStore.schema_statements()
+        if statement.lstrip().startswith("CREATE TABLE IF NOT EXISTS household_weekly_menus")
+    )
+    with _connect(db_path) as conn:
+        conn.execute(revision_statement)
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+
+    assert store.schema_state() is WeeklyMenuSchemaState.INCOMPATIBLE
     with pytest.raises(WeeklyMenuSchemaError):
         store.initialize_schema()
 

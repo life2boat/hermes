@@ -5,11 +5,12 @@ import json
 import sqlite3
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 from urllib.parse import quote
 
 from gateway.healbite_household_schema import require_canonical_uuid4
@@ -321,9 +322,41 @@ class HealBiteWeeklyMenuStore:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    @contextmanager
+    def _owned_connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        else:
+            conn.close()
+
+    @staticmethod
+    def _rollback_preserving_error(conn: sqlite3.Connection) -> None:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     @staticmethod
     def _schema_statements() -> tuple[str, ...]:
         return tuple(statement.strip() for statement in WEEKLY_MENU_SCHEMA_SQL.split(";") if statement.strip())
+
+    @classmethod
+    def schema_statements(cls) -> tuple[str, ...]:
+        """Return authoritative weekly-menu DDL without applying it."""
+        return cls._schema_statements()
+
+    @classmethod
+    def apply_schema(cls, conn: sqlite3.Connection) -> None:
+        """Apply authoritative weekly-menu DDL to a borrowed connection."""
+        for statement in cls.schema_statements():
+            conn.execute(statement)
 
     def _read_only_connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(_sqlite_read_only_uri(self.db_path), uri=True, timeout=30.0, check_same_thread=False)
@@ -335,42 +368,27 @@ class HealBiteWeeklyMenuStore:
     def schema_state(self) -> WeeklyMenuSchemaState:
         if not self.db_path.exists():
             return WeeklyMenuSchemaState.NOT_INITIALIZED
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
             return detect_weekly_menu_schema_state(conn)
 
     def initialize_schema(self) -> WeeklyMenuSchemaState:
-        state = self.schema_state()
-        if state is WeeklyMenuSchemaState.CANONICAL:
-            return state
-        if state is WeeklyMenuSchemaState.PARTIAL:
-            with self._connect() as conn:
-                try:
-                    conn.execute("BEGIN IMMEDIATE")
-                    for statement in self._schema_statements():
-                        conn.execute(statement)
-                    conn.commit()
-                except Exception as exc:
-                    conn.rollback()
-                    raise WeeklyMenuSchemaError("weekly menu partial schema recovery failed") from exc
-            final = self.schema_state()
-            if final is not WeeklyMenuSchemaState.CANONICAL:
-                raise WeeklyMenuSchemaError("weekly menu partial schema recovery failed")
-            return final
-        if state is WeeklyMenuSchemaState.INCOMPATIBLE:
-            raise WeeklyMenuSchemaError("weekly menu schema is incompatible")
-        with self._connect() as conn:
+        with self._owned_connection() as conn:
+            state = detect_weekly_menu_schema_state(conn)
+            if state is WeeklyMenuSchemaState.CANONICAL:
+                return state
+            if state is WeeklyMenuSchemaState.INCOMPATIBLE:
+                raise WeeklyMenuSchemaError("weekly menu schema is incompatible")
             try:
                 conn.execute("BEGIN IMMEDIATE")
-                for statement in self._schema_statements():
-                    conn.execute(statement)
+                self.apply_schema(conn)
+                final = detect_weekly_menu_schema_state(conn)
+                if final is not WeeklyMenuSchemaState.CANONICAL:
+                    raise WeeklyMenuSchemaError("weekly menu schema initialization failed")
                 conn.commit()
-            except Exception:
-                conn.rollback()
+            except BaseException:
+                self._rollback_preserving_error(conn)
                 raise
-        final = self.schema_state()
-        if final is not WeeklyMenuSchemaState.CANONICAL:
-            raise WeeklyMenuSchemaError("weekly menu schema initialization failed")
-        return final
+            return final
 
     def audit_schema(self) -> WeeklyMenuSchemaAudit:
         state = self.schema_state()

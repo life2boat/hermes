@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -18,26 +19,81 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from gateway.healbite_household_bootstrap import detect_schema_state as detect_household_schema_state
-from gateway.healbite_households import HealBiteHouseholdStore, HouseholdError
-from gateway.healbite_shopping import HealBiteShoppingStore, ShoppingSchemaError
-from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore, WeeklyMenuSchemaError
+from gateway.healbite_households import HealBiteHouseholdStore
+from gateway.healbite_shopping import HealBiteShoppingStore
+from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
+
+
+class ExitClassification(str, Enum):
+    SUCCESS = "SUCCESS"
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
+    UNSAFE_PATH = "UNSAFE_PATH"
+    MISSING_DATABASE = "MISSING_DATABASE"
+    INCOMPATIBLE_SCHEMA = "INCOMPATIBLE_SCHEMA"
+    DATABASE_LOCKED = "DATABASE_LOCKED"
+    DATABASE_READ_ONLY = "DATABASE_READ_ONLY"
+    DATABASE_PERMISSION_DENIED = "DATABASE_PERMISSION_DENIED"
+    MIGRATION_FAILED = "MIGRATION_FAILED"
+    CLEANUP_FAILED = "CLEANUP_FAILED"
+    CONTRACT_DRIFT = "CONTRACT_DRIFT"
+
 
 EXIT_SUCCESS = 0
 EXIT_INVALID_ARGUMENTS = 2
-EXIT_SCHEMA_PRECONDITION = 3
-EXIT_MIGRATION_FAILURE = 4
-EXIT_CONTRACT_DRIFT = 5
+EXIT_UNSAFE_PATH = 3
+EXIT_MISSING_DATABASE = 4
+EXIT_SCHEMA_PRECONDITION = 5
+EXIT_DATABASE_LOCKED = 6
+EXIT_DATABASE_READ_ONLY = 7
+EXIT_DATABASE_PERMISSION_DENIED = 8
+EXIT_MIGRATION_FAILURE = 9
+EXIT_CLEANUP_FAILURE = 10
+EXIT_CONTRACT_DRIFT = 11
+
+EXIT_CODES: dict[ExitClassification, int] = {
+    ExitClassification.SUCCESS: EXIT_SUCCESS,
+    ExitClassification.INVALID_ARGUMENT: EXIT_INVALID_ARGUMENTS,
+    ExitClassification.UNSAFE_PATH: EXIT_UNSAFE_PATH,
+    ExitClassification.MISSING_DATABASE: EXIT_MISSING_DATABASE,
+    ExitClassification.INCOMPATIBLE_SCHEMA: EXIT_SCHEMA_PRECONDITION,
+    ExitClassification.DATABASE_LOCKED: EXIT_DATABASE_LOCKED,
+    ExitClassification.DATABASE_READ_ONLY: EXIT_DATABASE_READ_ONLY,
+    ExitClassification.DATABASE_PERMISSION_DENIED: EXIT_DATABASE_PERMISSION_DENIED,
+    ExitClassification.MIGRATION_FAILED: EXIT_MIGRATION_FAILURE,
+    ExitClassification.CLEANUP_FAILED: EXIT_CLEANUP_FAILURE,
+    ExitClassification.CONTRACT_DRIFT: EXIT_CONTRACT_DRIFT,
+}
 
 ALL_COMPONENTS = ("household", "weekly", "shopping")
 
 
+class SchemaClassification(str, Enum):
+    ABSENT = "ABSENT"
+    KNOWN_COMPATIBLE_PARTIAL = "KNOWN_COMPATIBLE_PARTIAL"
+    CURRENT = "CURRENT"
+    INCOMPATIBLE = "INCOMPATIBLE"
+
+
 class MigrationError(RuntimeError):
-    def __init__(self, code: str, exit_code: int, phase: str | None = None) -> None:
-        super().__init__(code)
-        self.code = code
-        self.exit_code = exit_code
+    def __init__(
+        self,
+        classification: ExitClassification,
+        *,
+        detail_code: str | None = None,
+        phase: str | None = None,
+    ) -> None:
+        super().__init__(detail_code or classification.value)
+        self.classification = classification
+        self.detail_code = detail_code or classification.value
+        self.exit_code = EXIT_CODES[classification]
         self.phase = phase
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    uid: int
+    gid: int
+    groups: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -58,11 +114,7 @@ class PhaseResult:
     error_type: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "name": self.name,
-            "status": self.status,
-            "changed": self.changed,
-        }
+        payload: dict[str, Any] = {"name": self.name, "status": self.status, "changed": self.changed}
         if self.schema_state is not None:
             payload["schema_state"] = self.schema_state
         if self.error_type is not None:
@@ -78,14 +130,15 @@ class MigrationResult:
     phases: tuple[PhaseResult, ...]
     schema_changed: bool
     data_backfilled: bool = False
-    exit_classification: str = "success"
+    exit_classification: str = ExitClassification.SUCCESS.value
+    error_type: str | None = None
     mode_before: str | None = None
     mode_after: str | None = None
     owner_before: str | None = None
     owner_after: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "status": self.status,
             "database_path_classification": self.database_path_classification,
             "phases": [phase.as_dict() for phase in self.phases],
@@ -97,11 +150,9 @@ class MigrationResult:
             "owner_before": self.owner_before,
             "owner_after": self.owner_after,
         }
-
-
-class OutputFormat(str, Enum):
-    TEXT = "text"
-    JSON = "json"
+        if self.error_type is not None:
+            payload["error_type"] = self.error_type
+        return payload
 
 
 def _file_mode(metadata: os.stat_result) -> str:
@@ -112,57 +163,115 @@ def _file_owner(metadata: os.stat_result) -> str:
     return f"{metadata.st_uid}:{metadata.st_gid}"
 
 
-def _classify_existing_path(path: Path) -> DatabaseTarget:
+def _current_identity() -> ProcessIdentity:
+    geteuid = getattr(os, "geteuid", None)
+    getegid = getattr(os, "getegid", None)
+    getgroups = getattr(os, "getgroups", None)
+    if not callable(geteuid) or not callable(getegid) or not callable(getgroups):
+        raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="POSIX_IDENTITY_UNAVAILABLE")
+    return ProcessIdentity(uid=int(geteuid()), gid=int(getegid()), groups=frozenset(int(group) for group in getgroups()))
+
+
+def _identity_has_mode(
+    metadata: os.stat_result,
+    identity: ProcessIdentity,
+    owner_bit: int,
+    group_bit: int,
+    other_bit: int,
+) -> bool:
+    if identity.uid == 0:
+        return True
+    if identity.uid == metadata.st_uid:
+        return bool(metadata.st_mode & owner_bit)
+    if metadata.st_gid == identity.gid or metadata.st_gid in identity.groups:
+        return bool(metadata.st_mode & group_bit)
+    return bool(metadata.st_mode & other_bit)
+
+
+def _identity_can_write(metadata: os.stat_result, identity: ProcessIdentity) -> bool:
+    return _identity_has_mode(metadata, identity, stat.S_IWUSR, stat.S_IWGRP, stat.S_IWOTH)
+
+
+def _path_components(path: Path) -> tuple[Path, ...]:
+    current = Path(path.anchor)
+    components = [current]
+    for part in path.parts[1:]:
+        current /= part
+        components.append(current)
+    return tuple(components)
+
+
+def _validate_directory_chain(parent: Path, identity: ProcessIdentity) -> None:
+    for component in _path_components(parent):
+        try:
+            metadata = component.lstat()
+        except OSError as exc:
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_UNAVAILABLE") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_SYMLINK")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_NOT_DIRECTORY")
+        if _identity_can_write(metadata, identity):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_DIRECTORY_WRITABLE")
+
+
+def _classify_existing_path(path: Path, identity: ProcessIdentity) -> DatabaseTarget:
     try:
         metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise MigrationError(ExitClassification.MISSING_DATABASE, detail_code="DB_PATH_MISSING") from exc
     except OSError as exc:
-        raise MigrationError("DB_PATH_MISSING", EXIT_INVALID_ARGUMENTS) from exc
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_UNAVAILABLE") from exc
     if stat.S_ISLNK(metadata.st_mode):
-        raise MigrationError("DB_PATH_SYMLINK", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_SYMLINK")
     if not stat.S_ISREG(metadata.st_mode):
-        raise MigrationError("DB_PATH_NOT_REGULAR", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_NOT_REGULAR")
+    _validate_directory_chain(path.parent, identity)
+    if not _identity_can_write(metadata, identity):
+        raise MigrationError(ExitClassification.DATABASE_PERMISSION_DENIED, detail_code="DB_PATH_NOT_WRITABLE")
     return DatabaseTarget(
         path=path,
-        classification="absolute_existing_regular",
+        classification="absolute_existing_regular_safe_parent",
         mode_before=_file_mode(metadata),
         owner_before=_file_owner(metadata),
         identity_before=(metadata.st_dev, metadata.st_ino),
     )
 
 
-def _resolve_db_path(raw_path: str | None, *, allow_create: bool) -> DatabaseTarget:
+def _resolve_db_path(
+    raw_path: str | None,
+    *,
+    allow_create: bool,
+    identity: ProcessIdentity | None = None,
+) -> DatabaseTarget:
     if not raw_path:
-        raise MigrationError("DB_PATH_REQUIRED", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="DB_PATH_REQUIRED")
     path = Path(raw_path)
     if not path.is_absolute():
-        raise MigrationError("DB_PATH_NOT_ABSOLUTE", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="DB_PATH_NOT_ABSOLUTE")
+    effective_identity = identity or _current_identity()
     if path.exists() or path.is_symlink():
-        return _classify_existing_path(path)
+        return _classify_existing_path(path, effective_identity)
     if not allow_create:
-        raise MigrationError("DB_PATH_MISSING", EXIT_INVALID_ARGUMENTS)
-    parent = path.parent
-    if not parent.exists():
-        raise MigrationError("DB_PARENT_MISSING", EXIT_INVALID_ARGUMENTS)
-    try:
-        parent_metadata = parent.lstat()
-    except OSError as exc:
-        raise MigrationError("DB_PARENT_UNAVAILABLE", EXIT_INVALID_ARGUMENTS) from exc
-    if stat.S_ISLNK(parent_metadata.st_mode) or not stat.S_ISDIR(parent_metadata.st_mode):
-        raise MigrationError("DB_PARENT_UNSAFE", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.MISSING_DATABASE, detail_code="DB_PATH_MISSING")
+    _validate_directory_chain(path.parent, effective_identity)
     old_umask = os.umask(0o077)
     fd: int | None = None
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, 0o600)
     except OSError as exc:
-        raise MigrationError("DB_CREATE_FAILED", EXIT_INVALID_ARGUMENTS) from exc
+        raise MigrationError(ExitClassification.DATABASE_PERMISSION_DENIED, detail_code="DB_CREATE_FAILED") from exc
     finally:
         os.umask(old_umask)
         if fd is not None:
             os.close(fd)
-    target = _classify_existing_path(path)
+    target = _classify_existing_path(path, effective_identity)
     return DatabaseTarget(
         path=target.path,
-        classification="absolute_created_regular",
+        classification="absolute_created_regular_safe_parent",
         mode_before=target.mode_before,
         owner_before=target.owner_before,
         identity_before=target.identity_before,
@@ -175,71 +284,133 @@ def _verify_identity_unchanged(target: DatabaseTarget) -> tuple[str | None, str 
     try:
         metadata = target.path.lstat()
     except OSError as exc:
-        raise MigrationError("DB_PATH_LOST", EXIT_MIGRATION_FAILURE) from exc
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_LOST") from exc
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise MigrationError("DB_PATH_REPLACED", EXIT_MIGRATION_FAILURE)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
     if (metadata.st_dev, metadata.st_ino) != target.identity_before:
-        raise MigrationError("DB_PATH_REPLACED", EXIT_MIGRATION_FAILURE)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
     return _file_mode(metadata), _file_owner(metadata)
 
 
-def _sqlite_integrity(path: Path) -> None:
-    try:
-        with sqlite3.connect(path, timeout=30.0) as conn:
-            value = str(conn.execute("PRAGMA quick_check").fetchone()[0])
-    except sqlite3.Error as exc:
-        raise MigrationError("SQLITE_INTEGRITY_CHECK_FAILED", EXIT_SCHEMA_PRECONDITION) from exc
-    if value.lower() != "ok":
-        raise MigrationError("SQLITE_INTEGRITY_CHECK_FAILED", EXIT_SCHEMA_PRECONDITION)
+def _normalize_schema_sql(value: str) -> str:
+    normalized = re.sub(r"\bif\s+not\s+exists\b", "", value, flags=re.IGNORECASE)
+    return " ".join(normalized.lower().split())
 
 
-def _household_phase(path: Path) -> tuple[str, str]:
-    try:
-        with sqlite3.connect(path, timeout=30.0) as conn:
-            before = detect_household_schema_state(conn)
-        if before not in {"not_initialized", "canonical"}:
-            raise MigrationError("HOUSEHOLD_SCHEMA_NOT_CANONICAL", EXIT_SCHEMA_PRECONDITION, "household")
-        HealBiteHouseholdStore(db_path=path, ensure_schema_on_init=False).ensure_schema()
-        with sqlite3.connect(path, timeout=30.0) as conn:
-            after = detect_household_schema_state(conn)
-    except MigrationError:
-        raise
-    except (HouseholdError, sqlite3.Error) as exc:
-        raise MigrationError(type(exc).__name__, EXIT_MIGRATION_FAILURE, "household") from exc
-    if after != "canonical":
-        raise MigrationError("HOUSEHOLD_SCHEMA_INITIALIZATION_FAILED", EXIT_MIGRATION_FAILURE, "household")
-    return before, after
+_CREATE_OBJECT_RE = re.compile(
+    r"^create\s+(?:unique\s+)?(?P<type>table|index)\s+(?:if\s+not\s+exists\s+)?(?P<name>[a-zA-Z0-9_]+)",
+    re.IGNORECASE,
+)
 
 
-def _weekly_phase(path: Path) -> tuple[str, str]:
-    store = HealBiteWeeklyMenuStore(db_path=path)
-    before = store.schema_state().value
-    try:
-        after_state = store.initialize_schema()
-    except WeeklyMenuSchemaError as exc:
-        raise MigrationError(type(exc).__name__, EXIT_SCHEMA_PRECONDITION, "weekly") from exc
-    except sqlite3.Error as exc:
-        raise MigrationError(type(exc).__name__, EXIT_MIGRATION_FAILURE, "weekly") from exc
-    return before, after_state.value
+def _expected_schema_objects(statements: Sequence[str]) -> dict[str, tuple[str, str]]:
+    objects: dict[str, tuple[str, str]] = {}
+    for statement in statements:
+        match = _CREATE_OBJECT_RE.match(statement.strip())
+        if match is None:
+            raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="UNSUPPORTED_SCHEMA_STATEMENT")
+        name = match.group("name")
+        objects[name] = (match.group("type").lower(), _normalize_schema_sql(statement))
+    return objects
 
 
-def _shopping_phase(path: Path) -> tuple[str, str]:
-    store = HealBiteShoppingStore(db_path=path)
-    before = store.schema_state().value
-    try:
-        after_state = store.initialize_schema()
-    except ShoppingSchemaError as exc:
-        raise MigrationError(type(exc).__name__, EXIT_SCHEMA_PRECONDITION, "shopping") from exc
-    except sqlite3.Error as exc:
-        raise MigrationError(type(exc).__name__, EXIT_MIGRATION_FAILURE, "shopping") from exc
-    return before, after_state.value
-
-
-PHASES: dict[str, Callable[[Path], tuple[str, str]]] = {
-    "household": _household_phase,
-    "weekly": _weekly_phase,
-    "shopping": _shopping_phase,
+_LEGACY_PARTIAL_OMISSIONS: dict[str, frozenset[str]] = {
+    "weekly": frozenset(
+        {
+            "household_weekly_menu_entry_ingredients",
+            "idx_weekly_menu_ingredients_entry_position_unique",
+        }
+    ),
+    "shopping": frozenset(
+        {
+            "household_shopping_item_contributions",
+            "idx_household_shopping_contributions_item_source_unique",
+        }
+    ),
 }
+
+
+def _is_known_compatible_partial(
+    component: str,
+    actual_names: set[str],
+    expected: dict[str, tuple[str, str]],
+) -> bool:
+    expected_names = tuple(expected)
+    if any(actual_names == set(expected_names[:length]) for length in range(1, len(expected_names))):
+        return True
+    expected_tables = {name for name, (object_type, _sql) in expected.items() if object_type == "table"}
+    if expected_tables.issubset(actual_names):
+        return True
+    omitted = _LEGACY_PARTIAL_OMISSIONS.get(component)
+    return omitted is not None and actual_names == set(expected_names) - omitted
+
+
+def _classify_component_schema(
+    conn: sqlite3.Connection,
+    component: str,
+    statements: Sequence[str],
+) -> SchemaClassification:
+    expected = _expected_schema_objects(statements)
+    placeholders = ",".join("?" for _ in expected)
+    rows = conn.execute(
+        f"SELECT type, name, sql FROM sqlite_master WHERE name IN ({placeholders})",
+        tuple(expected),
+    ).fetchall()
+    if not rows:
+        return SchemaClassification.ABSENT
+    for row in rows:
+        name = str(row[1])
+        expected_type, expected_sql = expected[name]
+        actual_sql = "" if row[2] is None else _normalize_schema_sql(str(row[2]))
+        if str(row[0]).lower() != expected_type or actual_sql != expected_sql:
+            return SchemaClassification.INCOMPATIBLE
+    actual_names = {str(row[1]) for row in rows}
+    if len(actual_names) == len(expected):
+        return SchemaClassification.CURRENT
+    if _is_known_compatible_partial(component, actual_names, expected):
+        return SchemaClassification.KNOWN_COMPATIBLE_PARTIAL
+    return SchemaClassification.INCOMPATIBLE
+
+
+def _component_statements() -> dict[str, tuple[str, ...]]:
+    return {
+        "household": HealBiteHouseholdStore.schema_statements(),
+        "weekly": HealBiteWeeklyMenuStore.schema_statements(),
+        "shopping": HealBiteShoppingStore.schema_statements(),
+    }
+
+
+def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassification]:
+    plans = {
+        name: _classify_component_schema(conn, name, statements)
+        for name, statements in _component_statements().items()
+    }
+    incompatible = next((name for name, state in plans.items() if state is SchemaClassification.INCOMPATIBLE), None)
+    if incompatible is not None:
+        raise MigrationError(
+            ExitClassification.INCOMPATIBLE_SCHEMA,
+            detail_code="SCHEMA_OBJECT_INCOMPATIBLE",
+            phase=incompatible,
+        )
+    if plans["weekly"] is not SchemaClassification.ABSENT and plans["household"] is SchemaClassification.ABSENT:
+        raise MigrationError(
+            ExitClassification.INCOMPATIBLE_SCHEMA,
+            detail_code="WEEKLY_DEPENDENCY_MISSING",
+            phase="weekly",
+        )
+    if plans["shopping"] is not SchemaClassification.ABSENT and plans["weekly"] is SchemaClassification.ABSENT:
+        raise MigrationError(
+            ExitClassification.INCOMPATIBLE_SCHEMA,
+            detail_code="SHOPPING_DEPENDENCY_MISSING",
+            phase="shopping",
+        )
+    return plans
+
+
+def _sqlite_integrity(conn: sqlite3.Connection) -> None:
+    value = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+    if value.lower() != "ok":
+        raise MigrationError(ExitClassification.INCOMPATIBLE_SCHEMA, detail_code="SQLITE_INTEGRITY_CHECK_FAILED")
 
 
 def _parse_components(raw: str | None) -> tuple[str, ...]:
@@ -247,46 +418,197 @@ def _parse_components(raw: str | None) -> tuple[str, ...]:
         return ALL_COMPONENTS
     components = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
     if not components:
-        raise MigrationError("COMPONENTS_EMPTY", EXIT_INVALID_ARGUMENTS)
-    unknown = [component for component in components if component not in PHASES]
-    if unknown:
-        raise MigrationError("COMPONENTS_UNKNOWN", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="COMPONENTS_EMPTY")
+    if any(component not in ALL_COMPONENTS for component in components):
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="COMPONENTS_UNKNOWN")
     if len(set(components)) != len(components):
-        raise MigrationError("COMPONENTS_DUPLICATE", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="COMPONENTS_DUPLICATE")
     positions = [ALL_COMPONENTS.index(component) for component in components]
     if positions != sorted(positions):
-        raise MigrationError("COMPONENTS_OUT_OF_ORDER", EXIT_INVALID_ARGUMENTS)
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="COMPONENTS_OUT_OF_ORDER")
     return components
 
 
-def run_migration(*, db_path: str | None, allow_create: bool = False, components: str | None = None) -> MigrationResult:
-    phases: list[PhaseResult] = []
+def _attach_cleanup_note(primary_error: Exception, cleanup_name: str) -> None:
+    try:
+        primary_error.add_note(f"{cleanup_name}_failed")
+    except Exception:
+        pass
+
+
+def _rollback_preserving_primary(conn: sqlite3.Connection, primary_error: Exception) -> None:
+    try:
+        conn.rollback()
+    except Exception:
+        _attach_cleanup_note(primary_error, "rollback")
+
+
+def _apply_component(conn: sqlite3.Connection, name: str, statements: Sequence[str]) -> None:
+    try:
+        for statement in statements:
+            conn.execute(statement)
+    except Exception as exc:
+        try:
+            setattr(exc, "_healbite_migration_phase", name)
+        except Exception:
+            pass
+        raise
+
+
+def _migrate_borrowed_connection(
+    conn: sqlite3.Connection,
+    *,
+    selected: tuple[str, ...],
+    before_ddl_hook: Callable[[], None] | None = None,
+) -> tuple[tuple[PhaseResult, ...], bool]:
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("BEGIN IMMEDIATE")
+        _sqlite_integrity(conn)
+        plans = _preflight_all_schemas(conn)
+        if before_ddl_hook is not None:
+            before_ddl_hook()
+        phases: list[PhaseResult] = []
+        changed_any = False
+        statements_by_component = _component_statements()
+        for name in selected:
+            before = plans[name]
+            if before is not SchemaClassification.CURRENT:
+                _apply_component(conn, name, statements_by_component[name])
+            after = _classify_component_schema(conn, name, statements_by_component[name])
+            if after is not SchemaClassification.CURRENT:
+                raise MigrationError(
+                    ExitClassification.CONTRACT_DRIFT,
+                    detail_code="SCHEMA_NOT_CURRENT_AFTER_APPLY",
+                    phase=name,
+                )
+            changed = before is not SchemaClassification.CURRENT
+            changed_any = changed_any or changed
+            phases.append(PhaseResult(name=name, status="success", schema_state=after.value, changed=changed))
+        conn.commit()
+        return tuple(phases), changed_any
+    except Exception as exc:
+        _rollback_preserving_primary(conn, exc)
+        raise
+
+
+def _sqlite_classification(exc: sqlite3.Error) -> ExitClassification:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int):
+        primary_code = error_code & 0xFF
+        if primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            return ExitClassification.DATABASE_LOCKED
+        if primary_code == sqlite3.SQLITE_READONLY:
+            return ExitClassification.DATABASE_READ_ONLY
+        if primary_code in {sqlite3.SQLITE_PERM, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_AUTH}:
+            return ExitClassification.DATABASE_PERMISSION_DENIED
+    return ExitClassification.MIGRATION_FAILED
+
+
+def _as_migration_error(exc: Exception) -> MigrationError:
+    if isinstance(exc, MigrationError):
+        return exc
+    phase = getattr(exc, "_healbite_migration_phase", None)
+    if isinstance(exc, sqlite3.Error):
+        return MigrationError(_sqlite_classification(exc), detail_code=type(exc).__name__, phase=phase)
+    if isinstance(exc, PermissionError):
+        return MigrationError(
+            ExitClassification.DATABASE_PERMISSION_DENIED,
+            detail_code=type(exc).__name__,
+            phase=phase,
+        )
+    return MigrationError(ExitClassification.MIGRATION_FAILED, detail_code=type(exc).__name__, phase=phase)
+
+
+def _connect_target(
+    target: DatabaseTarget,
+    *,
+    selected: tuple[str, ...],
+    connect_factory: Callable[..., sqlite3.Connection],
+    before_open_hook: Callable[[], None] | None,
+    before_ddl_hook: Callable[[], None] | None,
+) -> tuple[tuple[PhaseResult, ...], bool]:
+    conn: sqlite3.Connection | None = None
+    primary_error: Exception | None = None
+    try:
+        if before_open_hook is not None:
+            before_open_hook()
+        _verify_identity_unchanged(target)
+        conn = connect_factory(target.path, timeout=0.2, check_same_thread=False)
+        _verify_identity_unchanged(target)
+
+        def guarded_before_ddl() -> None:
+            if before_ddl_hook is not None:
+                before_ddl_hook()
+            _verify_identity_unchanged(target)
+
+        return _migrate_borrowed_connection(conn, selected=selected, before_ddl_hook=guarded_before_ddl)
+    except Exception as exc:
+        primary_error = exc
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as close_error:
+                if primary_error is not None:
+                    _attach_cleanup_note(primary_error, "close")
+                else:
+                    raise MigrationError(
+                        ExitClassification.CLEANUP_FAILED,
+                        detail_code="CONNECTION_CLOSE_FAILED",
+                    ) from close_error
+
+
+def run_migration(
+    *,
+    db_path: str | None,
+    allow_create: bool = False,
+    components: str | None = None,
+    _identity: ProcessIdentity | None = None,
+    _connect_factory: Callable[..., sqlite3.Connection] = sqlite3.connect,
+    _target_resolver: Callable[[str | None, bool, ProcessIdentity | None], DatabaseTarget] | None = None,
+    _before_open_hook: Callable[[], None] | None = None,
+    _before_ddl_hook: Callable[[], None] | None = None,
+) -> MigrationResult:
+    phases: tuple[PhaseResult, ...] = ()
     target: DatabaseTarget | None = None
     try:
         selected = _parse_components(components)
-        target = _resolve_db_path(db_path, allow_create=allow_create)
-        _sqlite_integrity(target.path)
-        schema_changed = False
-        for name in selected:
-            before, after = PHASES[name](target.path)
-            changed = before != after
-            schema_changed = schema_changed or changed
-            phases.append(PhaseResult(name=name, status="success", schema_state=after, changed=changed))
+        if _target_resolver is None:
+            target = _resolve_db_path(db_path, allow_create=allow_create, identity=_identity)
+        else:
+            target = _target_resolver(db_path, allow_create, _identity)
+        phases, schema_changed = _connect_target(
+            target,
+            selected=selected,
+            connect_factory=_connect_factory,
+            before_open_hook=_before_open_hook,
+            before_ddl_hook=_before_ddl_hook,
+        )
         mode_after, owner_after = _verify_identity_unchanged(target)
         return MigrationResult(
             status="success",
             exit_code=EXIT_SUCCESS,
             database_path_classification=target.classification,
-            phases=tuple(phases),
+            phases=phases,
             schema_changed=schema_changed,
             mode_before=target.mode_before,
             mode_after=mode_after,
             owner_before=target.owner_before,
             owner_after=owner_after,
         )
-    except MigrationError as exc:
-        if exc.phase:
-            phases.append(PhaseResult(name=exc.phase, status="failed", error_type=exc.code))
+    except Exception as exc:
+        migration_error = _as_migration_error(exc)
+        failed_phases = list(phases)
+        if migration_error.phase and not any(phase.name == migration_error.phase for phase in failed_phases):
+            failed_phases.append(
+                PhaseResult(
+                    name=migration_error.phase,
+                    status="failed",
+                    error_type=migration_error.detail_code,
+                )
+            )
         mode_after = owner_after = None
         if target is not None:
             try:
@@ -295,11 +617,12 @@ def run_migration(*, db_path: str | None, allow_create: bool = False, components
                 pass
         return MigrationResult(
             status="failed",
-            exit_code=exc.exit_code,
+            exit_code=migration_error.exit_code,
             database_path_classification=target.classification if target else "invalid",
-            phases=tuple(phases),
-            schema_changed=any(phase.changed for phase in phases),
-            exit_classification=exc.code,
+            phases=tuple(failed_phases),
+            schema_changed=any(phase.changed for phase in failed_phases),
+            exit_classification=migration_error.classification.value,
+            error_type=migration_error.detail_code,
             mode_before=target.mode_before if target else None,
             mode_after=mode_after,
             owner_before=target.owner_before if target else None,
@@ -310,6 +633,8 @@ def run_migration(*, db_path: str | None, allow_create: bool = False, components
 def _print_text(result: MigrationResult) -> None:
     print(f"status={result.status}")
     print(f"exit_classification={result.exit_classification}")
+    if result.error_type:
+        print(f"error_type={result.error_type}")
     print(f"database_path_classification={result.database_path_classification}")
     print(f"schema_changed={str(result.schema_changed).lower()}")
     print(f"data_backfilled={str(result.data_backfilled).lower()}")
@@ -321,7 +646,14 @@ def _print_text(result: MigrationResult) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="HealBite migration-only schema CLI")
+    parser = argparse.ArgumentParser(
+        description="HealBite migration-only schema CLI",
+        epilog=(
+            "Exit classifications: SUCCESS=0, INVALID_ARGUMENT=2, UNSAFE_PATH=3, MISSING_DATABASE=4, "
+            "INCOMPATIBLE_SCHEMA=5, DATABASE_LOCKED=6, DATABASE_READ_ONLY=7, "
+            "DATABASE_PERMISSION_DENIED=8, MIGRATION_FAILED=9, CLEANUP_FAILED=10, CONTRACT_DRIFT=11."
+        ),
+    )
     parser.add_argument("--db-path", required=True, help="Absolute SQLite DB path to migrate")
     parser.add_argument("--allow-create", action="store_true", help="Create a missing explicit DB path with mode 0600")
     parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping")
@@ -331,22 +663,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    try:
-        args = parser.parse_args(argv)
-        result = run_migration(
-            db_path=args.db_path,
-            allow_create=bool(args.allow_create),
-            components=args.components,
-        )
-    except MigrationError as exc:
-        result = MigrationResult(
-            status="failed",
-            exit_code=exc.exit_code,
-            database_path_classification="invalid",
-            phases=(),
-            schema_changed=False,
-            exit_classification=exc.code,
-        )
+    args = parser.parse_args(argv)
+    result = run_migration(
+        db_path=args.db_path,
+        allow_create=bool(args.allow_create),
+        components=args.components,
+    )
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=True, sort_keys=True))
     else:

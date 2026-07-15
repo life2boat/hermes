@@ -4381,6 +4381,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert resp.get("result"), f"got error: {resp.get('error')}"
     sid = resp["result"]["session_id"]
+    session_ready = server._sessions[sid]["agent_ready"]
     assert build_entered.wait(timeout=1.0), "deferred build did not start"
 
     # Wait until the (deferred) build thread has actually entered
@@ -4407,13 +4408,9 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     # worker it just allocated + unregister the notify.
     release_build.set()
 
-    # Give the build thread a moment to run through its finally.
-    for _ in range(100):
-        if closed_workers:
-            break
-        import time
-
-        time.sleep(0.02)
+    # The ready event is the build-thread ownership boundary: it is set only
+    # after orphan worker and notification cleanup has completed.
+    assert session_ready.wait(timeout=2.0), "build thread did not finish orphan cleanup"
 
     assert (
         len(closed_workers) == 1
@@ -4434,6 +4431,7 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     alone (no over-eager cleanup)."""
     closed_workers: list[str] = []
     unregistered_keys: list[str] = []
+    notification_stop = threading.Event()
 
     class _FakeWorker:
         def __init__(self, key, model):
@@ -4460,6 +4458,11 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda _sid, _session: notification_stop,
+    )
 
     import tools.approval as _approval
 
@@ -4482,7 +4485,9 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
     # Wait for the build to finish (ready event inside session dict).
     session = server._sessions[sid]
-    session["agent_ready"].wait(timeout=2.0)
+    assert session["agent_ready"].wait(
+        timeout=2.0
+    ), "build thread did not reach its ready boundary"
 
     # Build finished without a close race — nothing should have been
     # cleaned up by the orphan check.
@@ -4497,7 +4502,37 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     assert session.get("slash_worker") is not None
 
     # Cleanup
-    server._sessions.pop(sid, None)
+    assert server._close_session_by_id(sid) is True
+    assert sid not in server._sessions
+    assert notification_stop.is_set()
+    assert len(closed_workers) == 1
+    assert len(unregistered_keys) == 1
+
+
+def test_session_create_build_failure_is_ready_and_visible(monkeypatch):
+    emitted: list[tuple] = []
+
+    def fail_agent_build(*_args, **_kwargs):
+        raise RuntimeError("synthetic worker startup failure")
+
+    monkeypatch.setattr(server, "_make_agent", fail_agent_build)
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **_kwargs: emitted.append(args))
+
+    response = server.handle_request(
+        {"id": "1", "method": "session.create", "params": {"cols": 80}}
+    )
+    sid = response["result"]["session_id"]
+    session = server._sessions[sid]
+
+    assert session["agent_ready"].wait(timeout=2.0)
+    assert session["agent"] is None
+    assert session["slash_worker"] is None
+    assert session["agent_error"] == "synthetic worker startup failure"
+    assert any(event == "error" and event_sid == sid for event, event_sid, _payload in emitted)
+
+    assert server._close_session_by_id(sid) is True
+    assert sid not in server._sessions
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
@@ -6816,6 +6851,23 @@ def test_slash_worker_close_reaps_zombie_and_closes_fds():
     assert calls["kill"] == 1
     assert calls["wait"] >= 2  # reaped after both terminate and kill
     assert calls["stdin"] == calls["stdout"] == calls["stderr"] == 1
+
+
+def test_slash_worker_run_rejects_premature_exit():
+    class ExitedProc:
+        @staticmethod
+        def poll():
+            return 1
+
+    worker = object.__new__(server._SlashWorker)
+    worker.proc = ExitedProc()
+
+    try:
+        worker.run("/help")
+    except RuntimeError as exc:
+        assert str(exc) == "slash worker exited"
+    else:
+        raise AssertionError("prematurely exited slash worker was reported healthy")
 
 
 def test_close_session_by_id_is_idempotent_and_full(monkeypatch):

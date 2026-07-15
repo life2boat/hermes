@@ -168,6 +168,8 @@ def _assert_run_state(source: Path, before_sha: str, phase: str) -> tuple[bool, 
 
 
 def _matrix(args: argparse.Namespace) -> int:
+    staged.RUNTIME_UID = RUNTIME_UID
+    staged.RUNTIME_GID = RUNTIME_GID
     scratch_parent = Path(args.scratch_root).resolve()
     scratch_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     matrix_root = scratch_parent / f"matrix-{uuid.uuid4().hex}"

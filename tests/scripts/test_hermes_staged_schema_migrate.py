@@ -18,6 +18,8 @@ from scripts import hermes_staged_schema_migrate as staged
 REVISION = "1" * 40
 IMAGE_ID = "sha256:" + "2" * 64
 PREVIOUS_IMAGE_ID = "sha256:" + "3" * 64
+FAILURE_MATRIX = Path(__file__).with_name("staged_migration_failure_matrix.py")
+CRASH_MATRIX = Path(__file__).with_name("staged_migration_crash_matrix.py")
 
 
 def _private_directory(path: Path) -> Path:
@@ -94,6 +96,9 @@ def test_public_parsers_do_not_expose_fault_injection() -> None:
     assert "--test-crash-after" not in migration_help
     assert "--test-crash-after" not in synthetic_help
     assert "--test-fail-phase" not in synthetic_help
+    source = Path(staged.__file__).read_text(encoding="utf-8")
+    assert "HERMES_STAGED_FAILURE" not in source
+    assert "HERMES_STAGED_CRASH" not in source
 
 
 def test_transaction_crash_worker_reaches_live_transaction_without_commit(tmp_path: Path) -> None:
@@ -216,20 +221,44 @@ def test_execute_synthetic_publishes_only_validated_staging_copy(
     payload = json.loads(capsys.readouterr().out)
     manifests = list((tmp_path / "backups").glob("manifest-*.json"))
     backups = list((tmp_path / "backups").glob("backup-*.sqlite"))
-    assert payload["publish_state"] == "VERIFIED"
+    assert payload["publish_state"] == "FINAL_VERIFIED"
+    assert payload["atomic_primitive"] == "renameat2_RENAME_EXCHANGE"
+    assert payload["source_sqlite_lease_acquired"] is True
+    assert payload["staging_sqlite_lease_acquired"] is True
+    assert payload["source_lease_held_through_final_verification"] is True
+    assert payload["staging_lease_held_through_final_verification"] is True
+    assert payload["leases_held_through_final_verification"] is True
+    assert payload["poll_only_quiescence_used"] is False
+    assert payload["source_fd_identity_pinned"] is True
+    assert payload["staging_fd_identity_pinned"] is True
+    assert payload["target_parent_fd_pinned"] is True
     assert payload["migration_runs"] == 3
     assert staged._sha256(source) != original_hash
     assert len(manifests) == 1
     assert json.loads(manifests[0].read_text())["STATE"] == "VERIFIED"
     assert len(backups) == 1
     assert staged._sha256(backups[0]) == original_hash
+    displaced = list((tmp_path / "staging").glob("staging-*/database.sqlite"))
+    assert len(displaced) == 1
+    assert staged._sha256(displaced[0]) == original_hash
     assert staged._sqlite_validation(source) == ("ok", 0)
     assert stat.S_IMODE(source.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize(
     "phase",
-    ("household", "weekly", "shopping", "integrity", "previous_compatibility", "atomic_publish"),
+    (
+        "backup_creation",
+        "backup_file_fsync",
+        "backup_directory_fsync",
+        "staging_creation",
+        "staging_file_fsync",
+        "staging_directory_fsync",
+        "integrity_validation",
+        "foreign_key_validation",
+        "previous_image_startup",
+        "pre_publish_cleanup",
+    ),
 )
 def test_pre_publish_failures_leave_target_unchanged(
     tmp_path: Path,
@@ -250,9 +279,13 @@ def test_pre_publish_failures_leave_target_unchanged(
     ) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["publish_state"] == "NOT_PUBLISHED"
+    assert payload["publish_state"] == "BEFORE_EXCHANGE"
+    assert payload["cleanup_failed"] is False
     assert staged._sha256(source) == original_hash
     assert staged._sqlite_validation(source) == ("ok", 0)
+    assert list((tmp_path / "staging").glob("staging-*")) == []
+    assert len(list((tmp_path / "backups").glob("backup-*.sqlite"))) <= 1
+    assert len(list((tmp_path / "backups").glob("manifest-*.json"))) == 1
 
 
 def test_post_publish_fsync_failure_is_unknown_and_not_retried(
@@ -267,17 +300,238 @@ def test_post_publish_fsync_failure_is_unknown_and_not_retried(
     monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
     assert staged.execute_synthetic(
         args,
-        _failure_callback=_failure_at("target_dir_fsync"),
+        _failure_callback=_failure_at("target_parent_fsync"),
         _migration_runner=_host_migration,
         _compatibility_probe=lambda *_args, **_kwargs: None,
     ) == 1
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["publish_state"] == "UNKNOWN"
+    assert payload["publish_state"] == "EXCHANGE_VERIFIED_NOT_FSYNCED"
+    assert payload["target_may_have_changed"] is True
     assert payload["automatic_retry_allowed"] is False
     assert payload["manual_recovery_required"] is True
     assert staged._sha256(source) != original_hash
     assert staged._sqlite_validation(source) == ("ok", 0)
+    assert len(list((tmp_path / "staging").glob("staging-*"))) == 1
+
+
+def _external_sqlite_attempt(path: Path, mode: str) -> subprocess.CompletedProcess[str]:
+    code = (
+        "import sqlite3,sys; c=sqlite3.connect(sys.argv[1],timeout=0); "
+        "\ntry:\n"
+        " c.execute('BEGIN IMMEDIATE' if sys.argv[2]=='writer' else 'BEGIN'); "
+        " c.execute('SELECT COUNT(*) FROM sqlite_master').fetchone(); sys.exit(0)\n"
+        "except sqlite3.OperationalError as e:\n"
+        " code=getattr(e,'sqlite_errorcode',None); "
+        " sys.exit(75 if isinstance(code,int) and (code & 255) in "
+        "(sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED) else 76)\n"
+        "finally:\n c.close()\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", code, str(path), mode],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_sqlite_leases_refuse_late_readers_and_writers_at_eight_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_runtime_identity(monkeypatch)
+    source = _source(tmp_path)
+    args = _args(tmp_path, source)
+    monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
+    expected_boundaries = (
+        "source_lease_acquired",
+        "backup_complete",
+        "staging_copy_complete",
+        "migration_complete",
+        "validation_complete",
+        "previous_startup_complete",
+        "staging_lease_acquired",
+        "final_verification",
+    )
+    observed: list[str] = []
+    reader_refused = 0
+    writer_refused = 0
+
+    def assert_locked(name: str, path: Path) -> None:
+        nonlocal reader_refused, writer_refused
+        observed.append(name)
+        reader = _external_sqlite_attempt(path, "reader")
+        writer = _external_sqlite_attempt(path, "writer")
+        assert reader.returncode == 75, (name, reader.returncode, reader.stderr)
+        assert writer.returncode == 75, (name, writer.returncode, writer.stderr)
+        reader_refused += 1
+        writer_refused += 1
+
+    assert staged.execute_synthetic(
+        args,
+        _migration_runner=_host_migration,
+        _compatibility_probe=lambda *_args, **_kwargs: None,
+        _lifecycle_callback=assert_locked,
+    ) == 0
+    capsys.readouterr()
+    assert tuple(observed) == expected_boundaries
+    assert reader_refused == 8
+    assert writer_refused == 8
+
+
+def test_staging_change_after_compatibility_probe_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_runtime_identity(monkeypatch)
+    source = _source(tmp_path)
+    args = _args(tmp_path, source)
+    original_hash = staged._sha256(source)
+    monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
+
+    def mutate_staging(name: str, _path: Path) -> None:
+        if name != "previous_startup_complete":
+            return
+        staging_db = next((tmp_path / "staging").glob("staging-*/database.sqlite"))
+        with sqlite3.connect(staging_db) as connection:
+            connection.execute("CREATE TABLE injected_after_validation (value TEXT)")
+
+    assert staged.execute_synthetic(
+        args,
+        _migration_runner=_host_migration,
+        _compatibility_probe=lambda *_args, **_kwargs: None,
+        _lifecycle_callback=mutate_staging,
+    ) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_type"] == "STAGING_VALIDATION_IDENTITY_CHANGED"
+    assert payload["publish_state"] == "BEFORE_EXCHANGE"
+    assert staged._sha256(source) == original_hash
+    assert list((tmp_path / "staging").glob("staging-*")) == []
+
+
+def test_target_substitution_is_reversed_one_hundred_times(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_runtime_identity(monkeypatch)
+    monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
+    denied = 0
+    for repeat in range(100):
+        root = _private_directory(tmp_path / f"run-{repeat:03d}")
+        source = _source(root)
+        args = _args(root, source)
+        replacement = source.with_name("replacement.sqlite")
+        with sqlite3.connect(replacement) as conn:
+            conn.execute("CREATE TABLE replacement_marker (value TEXT NOT NULL)")
+            conn.execute("INSERT INTO replacement_marker VALUES ('synthetic')")
+        os.chmod(replacement, 0o600)
+        replacement_hash = staged._sha256(replacement)
+
+        def substitute_target() -> None:
+            os.replace(replacement, source)
+
+        assert staged.execute_synthetic(
+            args,
+            _migration_runner=_host_migration,
+            _compatibility_probe=lambda *_args, **_kwargs: None,
+            _before_exchange_callback=substitute_target,
+        ) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["error_type"] == "CONTRACT_DRIFT"
+        assert payload["publish_state"] == "EXCHANGE_REVERSED"
+        assert payload["automatic_retry_allowed"] is False
+        assert payload["manual_recovery_required"] is True
+        assert staged._sha256(source) == replacement_hash
+        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as conn:
+            assert conn.execute("SELECT value FROM replacement_marker").fetchone() == ("synthetic",)
+        denied += 1
+    assert denied == 100
+
+
+def test_cleanup_failure_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _prepare_runtime_identity(monkeypatch)
+    source = _source(tmp_path)
+    args = _args(tmp_path, source)
+    original_hash = staged._sha256(source)
+    monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
+
+    def inject(phase: str, publish_state: str) -> None:
+        if phase == "pre_publish_cleanup":
+            raise staged.OrchestratorError("PRIMARY_FAILURE", publish_state=publish_state)
+        if phase == "staging_cleanup":
+            raise staged.OrchestratorError("INJECTED_STAGING_CLEANUP_FAILURE", publish_state=publish_state)
+
+    assert staged.execute_synthetic(
+        args,
+        _failure_callback=inject,
+        _migration_runner=_host_migration,
+        _compatibility_probe=lambda *_args, **_kwargs: None,
+    ) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_type"] == "PRIMARY_FAILURE"
+    assert payload["cleanup_failed"] is True
+    assert payload["cleanup_error_type"] == "INJECTED_STAGING_CLEANUP_FAILURE"
+    assert staged._sha256(source) == original_hash
+    assert len(list((tmp_path / "staging").glob("staging-*"))) == 1
+
+
+def test_tracked_failure_matrix_contract_smoke(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(FAILURE_MATRIX),
+            "--scratch-root",
+            str(tmp_path),
+            "--repeats",
+            "1",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["FAILURE_MATRIX_PHASES"] == 18
+    assert payload["REPEATS_PER_PHASE"] == 1
+    assert payload["FAILURE_MATRIX_REPEAT_RUNS"] == "18/18"
+    assert payload["FALSE_COMMIT_REPORTED"] is False
+    assert payload["FALSE_ROLLBACK_REPORTED"] is False
+    assert payload["BACKUP_AVAILABLE_WHEN_REQUIRED"] is True
+    assert payload["PUBLIC_FAILURE_HOOK_EXPOSED"] is False
+    assert payload["PUBLIC_CRASH_HOOK_EXPOSED"] is False
+
+
+def test_tracked_crash_matrix_recovers_only_pre_publish_staging(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CRASH_MATRIX),
+            "matrix",
+            "--scratch-root",
+            str(tmp_path),
+            "--repeats",
+            "1",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["CRASH_PHASES"] == 10
+    assert payload["CRASH_MATRIX_REPEAT_RUNS"] == "10/10"
+    assert payload["PRE_PUBLISH_CRASH_STAGING_REMAINS"] == 0
+    assert payload["POST_PUBLISH_UNCERTAIN_STAGING_AUTODELETED"] == 0
+    assert payload["CORRUPT_TARGETS"] == 0
+    assert payload["PARTIAL_SCHEMA_VISIBLE"] is False
 
 
 def test_cross_filesystem_publish_is_refused_when_second_filesystem_available(tmp_path: Path) -> None:

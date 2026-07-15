@@ -390,6 +390,37 @@ def test_transaction_hook_runs_after_begin_immediate_with_write_lock(tmp_path: P
     assert db_path.read_bytes() == before
     assert result.migration_commit_state == "ROLLED_BACK"
 
+
+def test_component_hook_is_internal_and_runs_inside_real_transaction(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
+    os.chmod(db_path, 0o600)
+    observed: list[str] = []
+
+    def fail_at_weekly(name: str, conn: sqlite3.Connection) -> None:
+        assert conn.in_transaction is True
+        observed.append(name)
+        if name == "weekly":
+            raise RuntimeError("test-only component failure")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _component_hook=fail_at_weekly,
+    )
+
+    assert observed == ["household", "weekly"]
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert result.migration_commit_state == "ROLLED_BACK"
+    with sqlite3.connect(db_path) as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert names == {"legacy_rows"}
+
+
 def test_staged_copy_and_synthetic_create_are_mutually_exclusive(tmp_path: Path) -> None:
     parent = tmp_path / "private"
     parent.mkdir(mode=0o700)
@@ -1323,8 +1354,16 @@ def test_runbook_documents_staged_atomic_publish_and_rollback_boundaries() -> No
         "production execution is disabled",
         "normal SQLite DELETE journaling and synchronous FULL remain enabled",
         "same-filesystem",
-        "os.replace",
-        "PUBLISH_STATE=UNKNOWN",
+        "renameat2(..., RENAME_EXCHANGE)",
+        "There is no `os.replace` fallback",
+        "PUBLISH_STATE=EXCHANGE_STARTED",
+        "PUBLISH_STATE=FINAL_VERIFIED",
+        "exclusive SQLite-compatible source lease",
+        "second exclusive SQLite-compatible lease",
+        "reverse exchange",
+        "operation-owned staging tree",
+        "automatic staging deletion is forbidden",
+        "canonical /init entrypoint",
         "automatic retry is prohibited",
         "Image rollback after a successful additive migration uses the migrated DB",
         "Backup restore is an emergency manual action only",

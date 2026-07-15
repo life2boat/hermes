@@ -170,6 +170,8 @@ def _matrix(args: argparse.Namespace) -> int:
     runs_passed = 0
     corrupt_targets = 0
     partial_schema_targets = 0
+    pre_publish_staging_remains = 0
+    post_publish_uncertain_staging_autodeleted = 0
     active_proof: dict[str, object] | None = None
     try:
         for phase in PHASES:
@@ -208,6 +210,23 @@ def _matrix(args: argparse.Namespace) -> int:
                     partial_schema_targets += 1
                 if result.returncode != 137 or result.stdout or result.stderr or not state_valid or partial:
                     raise RuntimeError(f"matrix failure phase={phase} repeat={repeat} rc={result.returncode}")
+                manifests = list((run_root / "backups").glob("manifest-*.json"))
+                if len(manifests) != 1:
+                    raise RuntimeError(f"manifest count mismatch phase={phase} repeat={repeat}")
+                if phase in PRE_PUBLISH_PHASES:
+                    if not staged._recover_pre_publish_staging(manifests[0], run_root / "staging"):
+                        raise RuntimeError(f"pre-publish recovery refused phase={phase} repeat={repeat}")
+                    remaining = len(list((run_root / "staging").glob("staging-*")))
+                    pre_publish_staging_remains += remaining
+                    if remaining:
+                        raise RuntimeError(f"pre-publish staging retained phase={phase} repeat={repeat}")
+                else:
+                    if staged._recover_pre_publish_staging(manifests[0], run_root / "staging"):
+                        raise RuntimeError(f"post-publish recovery incorrectly allowed phase={phase} repeat={repeat}")
+                    remaining = len(list((run_root / "staging").glob("staging-*")))
+                    if remaining == 0:
+                        post_publish_uncertain_staging_autodeleted += 1
+                        raise RuntimeError(f"post-publish staging deleted phase={phase} repeat={repeat}")
                 if phase == "active_sqlite_transaction":
                     proof = json.loads(active_evidence.read_text(encoding="ascii"))
                     required_true = (
@@ -239,6 +258,8 @@ def _matrix(args: argparse.Namespace) -> int:
             "CRASH_PHASES": len(PHASES),
             "DATABASE_INTEGRITY_AFTER_EACH_CRASH": "PASS",
             "PARTIAL_SCHEMA_VISIBLE": partial_schema_targets != 0,
+            "POST_PUBLISH_UNCERTAIN_STAGING_AUTODELETED": post_publish_uncertain_staging_autodeleted,
+            "PRE_PUBLISH_CRASH_STAGING_REMAINS": pre_publish_staging_remains,
             "PRODUCTION_CRASH_HOOK_EXPOSED": False,
             "REPEATS_PER_PHASE": args.repeats,
             "SQLITE_LOCK_COMPATIBLE_QUIESCENCE_CHECK": True,

@@ -518,6 +518,17 @@ source identity, mode, integrity, and foreign keys must match the approved plan
 automatic lock retry is prohibited
 ```
 
+The one-shot lock probe is only a preflight signal. Before backup creation, the
+orchestrator pins the source file and its parent directory descriptors and acquires
+an exclusive SQLite-compatible source lease on that exact inode. The lease remains
+held continuously through copy, migration, publish, parent fsync, and final
+verification. After validation and previous-image startup, the orchestrator acquires a
+second exclusive SQLite-compatible lease on the pinned staging inode and holds it
+through final verification. Poll-only quiescence and unrelated generic `flock`
+locks are not sufficient. Separate SQLite readers and writers must be refused at
+every lifecycle boundary. These controls do not claim protection from host root or
+another privileged administrator.
+
 After quiescence, the future root orchestrator must create and fsync a durable
 backup, then create a byte-identical staging copy on the same filesystem as the
 target. Both files must derive from the same quiesced source identity and hash.
@@ -645,16 +656,29 @@ expected schema complete and unknown schema objects = 0
 all pre-existing table counts unchanged
 new weekly snapshot and shopping business rows = 0
 three staged migration runs have zero schema and data delta after the first run
-previous production image opens the migrated staging DB with both features disabled
+previous production image reaches persisted gateway_state=running through its
+canonical /init entrypoint with both features disabled, network none, no production
+secrets, no automatic migration, no DB mutation, and a clean shutdown
 ```
 
 ### D3 atomic publish boundary
 
 Only after all staging validations and previous-image compatibility pass may future
-production execution publish. The publish primitive is same-filesystem
-`os.replace`; cross-filesystem publication fails closed. The migrated DB is fsynced
-before replace and the target parent is fsynced after replace. Bytes are never
-copied over the live target and incomplete validation can never publish.
+production execution publish. Source DB, staging DB, target parent, and staging
+parent descriptors remain pinned. The Linux publish primitive is same-filesystem
+`renameat2(..., RENAME_EXCHANGE)` through the pinned directory descriptors;
+cross-filesystem publication fails closed, as does any platform without
+`RENAME_EXCHANGE`.
+There is no `os.replace` fallback. The migrated DB is fsynced before exchange and
+both affected parent directories are fsynced after exchange. Bytes are never copied
+over the live target and incomplete validation can never publish.
+
+Immediately after exchange, the displaced staging pathname must resolve to the
+previously pinned source inode and the live target pathname must resolve to the
+pinned migrated inode. An identity mismatch triggers one reverse exchange while
+both SQLite leases are still held, followed by parent fsync and `CONTRACT_DRIFT`.
+Automatic retry remains prohibited. If reversal cannot be proved, publish state is
+uncertain and manual recovery is mandatory.
 
 A durable sanitized manifest records only operation metadata and monotonic states:
 
@@ -662,16 +686,32 @@ A durable sanitized manifest records only operation metadata and monotonic state
 PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED
 FAILED is terminal for a known pre-publish failure
 unknown state fails closed
-failure after replace but before durable parent fsync is PUBLISH_STATE=UNKNOWN
+PUBLISH_STATE=BEFORE_EXCHANGE before any exchange attempt
+PUBLISH_STATE=EXCHANGE_STARTED is durably recorded before the syscall
+PUBLISH_STATE=EXCHANGE_COMPLETED_NOT_VERIFIED after the syscall returns
+PUBLISH_STATE=EXCHANGE_VERIFIED_NOT_FSYNCED after inode verification
+PUBLISH_STATE=PARENT_FSYNCED after durable parent fsync
+PUBLISH_STATE=FINAL_VERIFIED only after pinned-inode SQLite verification
+Legacy PUBLISH_STATE=UNKNOWN is never emitted; any unrecognized state fails closed.
 automatic retry is prohibited
-manual recovery is required for unknown publish state
+manual recovery is required for every failure after EXCHANGE_STARTED
 ```
 
 The manifest contains source/staging/backup paths, inode and SHA-256 values, but no
 DB contents, application identifiers, credentials, or user data. Every manifest
 transition and containing directory is fsynced.
 
-Failure before publish discards staging and leaves the original target unchanged.
+Failure before `EXCHANGE_STARTED` removes only the operation-owned staging tree and
+leaves the original target unchanged. Cleanup revalidates the saved staging-root and
+operation-directory device/inode, private ownership and modes, rejects symlink or
+nested-directory traversal, and refuses to unlink the live target or displaced
+source inode. Backup, manifest, and sanitized evidence are retained. A cleanup
+failure is reported separately and never masks the primary error.
+
+After `EXCHANGE_STARTED`, or whenever publish state is uncertain, automatic staging deletion is forbidden because the staging pathname may contain the displaced source
+DB required for recovery. The backup and manifest remain durable and no automatic
+retry is allowed.
+
 Image rollback after a successful additive migration uses the migrated DB and does
 not restore the pre-migration backup. Backup restore is an emergency manual action only.
 It is forbidden after new application writes unless the operator explicitly

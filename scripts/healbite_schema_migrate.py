@@ -820,6 +820,7 @@ def _migrate_borrowed_connection(
     selected: tuple[str, ...],
     transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None = None,
+    component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     commit_attempted = False
     try:
@@ -848,6 +849,8 @@ def _migrate_borrowed_connection(
             changed = before is not SchemaClassification.CURRENT
             changed_any = changed_any or changed
             phases.append(PhaseResult(name=name, status="success", schema_state=after.value, changed=changed))
+            if component_hook is not None:
+                component_hook(name, conn)
         commit_attempted = True
         conn.commit()
         return tuple(phases), changed_any
@@ -900,6 +903,7 @@ def _connect_target(
     before_open_hook: Callable[[], None] | None,
     transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None,
+    component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     conn: sqlite3.Connection | None = None
     primary_error: Exception | None = None
@@ -936,6 +940,7 @@ def _connect_target(
             selected=selected,
             transaction_hook=transaction_hook,
             before_ddl_hook=guarded_before_ddl,
+            component_hook=component_hook,
         )
         migration_committed = True
         return phases, schema_changed
@@ -1004,6 +1009,7 @@ def run_migration(
     _before_open_hook: Callable[[], None] | None = None,
     _transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     _before_ddl_hook: Callable[[], None] | None = None,
+    _component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> MigrationResult:
     phases: tuple[PhaseResult, ...] = ()
     target: DatabaseTarget | None = None
@@ -1031,6 +1037,7 @@ def run_migration(
             before_open_hook=_before_open_hook,
             transaction_hook=_transaction_hook,
             before_ddl_hook=_before_ddl_hook,
+            component_hook=_component_hook,
         )
         commit_completed = True
         mode_after, owner_after = _verify_identity_unchanged(target)

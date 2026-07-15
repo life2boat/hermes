@@ -127,7 +127,23 @@ def test_real_container_staged_migration_and_atomic_publish(tmp_path: Path) -> N
     )
 
     assert result.returncode == 0, result.stdout
-    assert json.loads(result.stdout)["publish_state"] == "VERIFIED"
+    payload = json.loads(result.stdout)
+    assert payload["publish_state"] == "FINAL_VERIFIED"
+    assert payload["atomic_primitive"] == "renameat2_RENAME_EXCHANGE"
+    assert payload["source_lease_held_through_final_verification"] is True
+    assert payload["staging_lease_held_through_final_verification"] is True
+    assert payload["leases_held_through_final_verification"] is True
+    assert payload["previous_image_canonical_entrypoint_used"] is True
+    assert payload["previous_image_reached_ready_milestone"] is True
+    assert payload["previous_image_process_started"] is True
+    assert payload["previous_image_clean_shutdown"] is True
+    assert payload["previous_image_network_requests"] == 0
+    assert payload["previous_image_no_schema_error"] is True
+    assert payload["previous_image_no_unknown_column_error"] is True
+    assert payload["previous_image_no_automatic_migration"] is True
+    assert payload["previous_image_no_db_mutation"] is True
+    assert payload["previous_image_feature_disabled_startup_pass"] is True
+    assert payload["rollback_image_compatibility"] is True
 
     assert before_published == 2
     assert _count(source, "household_weekly_menus") == 2
@@ -143,6 +159,9 @@ def test_real_container_staged_migration_and_atomic_publish(tmp_path: Path) -> N
     backup_files = list(backups.glob("backup-*.sqlite"))
     assert len(backup_files) == 1
     assert staged._sha256(backup_files[0]) == before_hash
+    displaced = list(staging_root.glob("staging-*/database.sqlite"))
+    assert len(displaced) == 1
+    assert staged._sha256(displaced[0]) == before_hash
 
     migration_source = inspect.getsource(staged._run_target_migration)
     assert "/home/hermes/healbite.db" not in migration_source

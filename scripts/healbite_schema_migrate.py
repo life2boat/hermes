@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import signal
 import sqlite3
 import stat
 import sys
@@ -1158,7 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     def crash_in_active_transaction() -> None:
         if args.test_crash_after == "active_sqlite_transaction":
-            os.kill(os.getpid(), signal.SIGKILL)
+            os._exit(137)
 
     result = run_migration(
         db_path=args.db_path,

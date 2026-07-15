@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import inspect
 import json
 import os
@@ -21,6 +20,7 @@ from scripts import hermes_staged_schema_migrate as staged
 TARGET_IMAGE = os.environ.get("HEALBITE_STAGED_MIGRATION_IMAGE_ID")
 PREVIOUS_IMAGE = os.environ.get("HEALBITE_STAGED_PREVIOUS_IMAGE_ID")
 TARGET_REVISION = os.environ.get("HEALBITE_STAGED_MIGRATION_REVISION")
+ORCHESTRATOR_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "hermes_staged_schema_migrate.py"
 
 
 pytestmark = pytest.mark.skipif(
@@ -95,19 +95,33 @@ def test_real_container_staged_migration_and_atomic_publish(tmp_path: Path) -> N
     staging_root = _private(tmp_path / "staging")
     before_hash = staged._sha256(source)
     before_published = _count(source, "household_weekly_menus")
-    args = argparse.Namespace(
-        source_db=str(source),
-        backup_dir=str(backups),
-        staging_root=str(staging_root),
-        target_image_id=TARGET_IMAGE,
-        previous_image_id=PREVIOUS_IMAGE,
-        expected_source_revision=TARGET_REVISION,
-        synthetic_root=str(tmp_path),
-        test_crash_after=None,
-        test_fail_phase=None,
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ORCHESTRATOR_SCRIPT),
+            "execute-synthetic",
+            "--source-db",
+            str(source),
+            "--backup-dir",
+            str(backups),
+            "--staging-root",
+            str(staging_root),
+            "--target-image-id",
+            str(TARGET_IMAGE),
+            "--previous-image-id",
+            str(PREVIOUS_IMAGE),
+            "--expected-source-revision",
+            str(TARGET_REVISION),
+            "--synthetic-root",
+            str(tmp_path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
-    assert staged.execute_synthetic(args) == 0
+    assert result.returncode == 0, result.stdout
+    assert json.loads(result.stdout)["publish_state"] == "VERIFIED"
 
     assert before_published == 2
     assert _count(source, "household_weekly_menus") == 2

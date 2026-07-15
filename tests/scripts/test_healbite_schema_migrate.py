@@ -353,6 +353,43 @@ def test_staged_copy_rejects_unsafe_metadata(
     assert db_path.stat().st_size == 0
 
 
+def test_transaction_hook_runs_after_begin_immediate_with_write_lock(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
+    os.chmod(db_path, 0o600)
+    before = db_path.read_bytes()
+    observed: dict[str, bool] = {}
+
+    def inspect_active_transaction(conn: sqlite3.Connection) -> None:
+        observed["begin_immediate"] = conn.in_transaction
+        competitor = sqlite3.connect(db_path, timeout=0)
+        try:
+            competitor.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            observed["write_lock_held"] = isinstance(code, int) and (code & 0xFF) in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            }
+        finally:
+            competitor.close()
+        raise RuntimeError("test-only transaction stop")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _transaction_hook=inspect_active_transaction,
+    )
+
+    assert observed == {"begin_immediate": True, "write_lock_held": True}
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert db_path.read_bytes() == before
+    assert result.migration_commit_state == "ROLLED_BACK"
+
 def test_staged_copy_and_synthetic_create_are_mutually_exclusive(tmp_path: Path) -> None:
     parent = tmp_path / "private"
     parent.mkdir(mode=0o700)

@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import sqlite3
 import stat
 import subprocess
@@ -21,7 +20,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,18 +43,6 @@ STATE_RANK = {state: rank for rank, state in enumerate(MANIFEST_STATES)}
 SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 RUNTIME_UID = 10000
 RUNTIME_GID = 10000
-CRASH_GATES = (
-    "planned",
-    "backup_fsynced",
-    "staging_copied",
-    "active_sqlite_transaction",
-    "migration_committed",
-    "validated",
-    "before_publish",
-    "after_publish",
-    "before_target_dir_fsync",
-    "after_target_dir_fsync",
-)
 
 
 class OrchestratorError(RuntimeError):
@@ -364,17 +351,7 @@ def _preflight(contract: Contract, *, synthetic: bool, inspect_images: bool) -> 
     return identity
 
 
-def _crash(gate: str, selected: str | None) -> None:
-    if selected == gate:
-        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
-
-
-def _fail(phase: str, selected: str | None, *, publish_state: str = "NOT_PUBLISHED") -> None:
-    if selected == phase:
-        raise OrchestratorError(f"INJECTED_{phase.upper()}_FAILURE", publish_state=publish_state)
-
-
-def _run_target_migration(contract: Contract, staging_dir: Path, *, crash_gate: str | None) -> None:
+def _run_target_migration(contract: Contract, staging_dir: Path) -> None:
     container_db = "/migration/database.sqlite"
     command = [
         "docker",
@@ -395,11 +372,7 @@ def _run_target_migration(contract: Contract, staging_dir: Path, *, crash_gate: 
         "--staged-copy",
         "--json",
     ]
-    if crash_gate == "active_sqlite_transaction":
-        command.extend(["--test-crash-after", "active_sqlite_transaction"])
     result = subprocess.run(command, text=True, capture_output=True, check=False)
-    if crash_gate == "active_sqlite_transaction" and result.returncode != 0:
-        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
     if result.returncode != 0:
         raise OrchestratorError("TARGET_IMAGE_MIGRATION_FAILED")
     try:
@@ -464,7 +437,22 @@ def plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def execute_synthetic(args: argparse.Namespace) -> int:
+def execute_synthetic(
+    args: argparse.Namespace,
+    *,
+    _phase_callback: Callable[[str], None] | None = None,
+    _failure_callback: Callable[[str, str], None] | None = None,
+    _migration_runner: Callable[[Contract, Path], None] = _run_target_migration,
+    _compatibility_probe: Callable[[Contract, Path], None] = _run_previous_image_probe,
+) -> int:
+    def phase(name: str) -> None:
+        if _phase_callback is not None:
+            _phase_callback(name)
+
+    def fail(name: str, *, publish_state: str = "NOT_PUBLISHED") -> None:
+        if _failure_callback is not None:
+            _failure_callback(name, publish_state)
+
     contract = _contract(args, synthetic=True)
     source_identity = _preflight(contract, synthetic=True, inspect_images=True)
     operation_id = uuid.uuid4().hex
@@ -489,7 +477,7 @@ def execute_synthetic(args: argparse.Namespace) -> int:
         },
     )
     manifest.transition("PLANNED")
-    _crash("planned", args.test_crash_after)
+    phase("planned")
     try:
         _copy_durable(
             contract.source_db,
@@ -501,7 +489,7 @@ def execute_synthetic(args: argparse.Namespace) -> int:
         if backup_sha != source_identity.sha256 or _sqlite_validation(backup) != ("ok", 0):
             raise OrchestratorError("BACKUP_VALIDATION_FAILED")
         manifest.transition("BACKED_UP", BACKUP_SHA256=backup_sha)
-        _crash("backup_fsynced", args.test_crash_after)
+        phase("backup_fsynced")
 
         staging_dir.mkdir(mode=0o700)
         os.chmod(staging_dir, 0o700)
@@ -515,19 +503,19 @@ def execute_synthetic(args: argparse.Namespace) -> int:
         )
         if _sha256(staging_db) != backup_sha:
             raise OrchestratorError("STAGING_SOURCE_MISMATCH")
-        _crash("staging_copied", args.test_crash_after)
+        phase("staging_copied")
 
         for run_number in range(1, 4):
-            _fail(("household", "weekly", "shopping")[min(run_number - 1, 2)], args.test_fail_phase)
+            fail(("household", "weekly", "shopping")[min(run_number - 1, 2)])
             before = _database_snapshot(staging_db) if run_number > 1 else None
-            _run_target_migration(contract, staging_dir, crash_gate=args.test_crash_after)
+            _migration_runner(contract, staging_dir)
             after = _database_snapshot(staging_db)
             if before is not None and after != before:
                 raise OrchestratorError("MIGRATION_NOT_IDEMPOTENT")
-        _crash("migration_committed", args.test_crash_after)
+        phase("migration_committed")
         manifest.transition("MIGRATED", STAGING_SHA256=_sha256(staging_db))
 
-        _fail("integrity", args.test_fail_phase)
+        fail("integrity")
         integrity, foreign_keys = _sqlite_validation(staging_db)
         migrated_objects, migrated_counts = _database_snapshot(staging_db)
         if integrity != "ok" or foreign_keys != 0 or _sidecars(staging_db):
@@ -554,15 +542,15 @@ def execute_synthetic(args: argparse.Namespace) -> int:
         ):
             raise OrchestratorError("MIGRATED_DATABASE_METADATA_INVALID")
 
-        _fail("previous_compatibility", args.test_fail_phase)
+        fail("previous_compatibility")
         before_previous_probe = _sha256(staging_db)
-        _run_previous_image_probe(contract, staging_dir)
+        _compatibility_probe(contract, staging_dir)
         if _sha256(staging_db) != before_previous_probe:
             raise OrchestratorError("PREVIOUS_IMAGE_MUTATED_STAGING")
         manifest.transition("VALIDATED", STAGING_SHA256=before_previous_probe)
-        _crash("validated", args.test_crash_after)
-        _crash("before_publish", args.test_crash_after)
-        _fail("atomic_publish", args.test_fail_phase)
+        phase("validated")
+        phase("before_publish")
+        fail("atomic_publish")
 
         current_identity = _source_identity(contract.source_db, require_private_parent=True)
         if current_identity != source_identity:
@@ -573,11 +561,11 @@ def execute_synthetic(args: argparse.Namespace) -> int:
         os.replace(staging_db, contract.source_db)
         published = True
         manifest.transition("PUBLISHED")
-        _crash("after_publish", args.test_crash_after)
-        _crash("before_target_dir_fsync", args.test_crash_after)
-        _fail("target_dir_fsync", args.test_fail_phase, publish_state="UNKNOWN")
+        phase("after_publish")
+        phase("before_target_dir_fsync")
+        fail("target_dir_fsync", publish_state="UNKNOWN")
         _fsync_directory(contract.source_db.parent)
-        _crash("after_target_dir_fsync", args.test_crash_after)
+        phase("after_target_dir_fsync")
 
         if _sqlite_validation(contract.source_db) != ("ok", 0):
             raise OrchestratorError("PUBLISHED_DATABASE_INVALID", publish_state="UNKNOWN")
@@ -632,20 +620,6 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--expected-source-revision", required=True)
         if command == "execute-synthetic":
             child.add_argument("--synthetic-root", required=True)
-            child.add_argument("--test-crash-after", choices=CRASH_GATES, help=argparse.SUPPRESS)
-            child.add_argument(
-                "--test-fail-phase",
-                choices=(
-                    "household",
-                    "weekly",
-                    "shopping",
-                    "integrity",
-                    "previous_compatibility",
-                    "atomic_publish",
-                    "target_dir_fsync",
-                ),
-                help=argparse.SUPPRESS,
-            )
     return parser
 
 

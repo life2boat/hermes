@@ -818,12 +818,15 @@ def _migrate_borrowed_connection(
     conn: sqlite3.Connection,
     *,
     selected: tuple[str, ...],
+    transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     commit_attempted = False
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN IMMEDIATE")
+        if transaction_hook is not None:
+            transaction_hook(conn)
         _sqlite_integrity(conn)
         plans = _preflight_all_schemas(conn)
         if before_ddl_hook is not None:
@@ -895,6 +898,7 @@ def _connect_target(
     selected: tuple[str, ...],
     connect_factory: Callable[..., sqlite3.Connection],
     before_open_hook: Callable[[], None] | None,
+    transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     conn: sqlite3.Connection | None = None
@@ -930,6 +934,7 @@ def _connect_target(
         phases, schema_changed = _migrate_borrowed_connection(
             conn,
             selected=selected,
+            transaction_hook=transaction_hook,
             before_ddl_hook=guarded_before_ddl,
         )
         migration_committed = True
@@ -997,6 +1002,7 @@ def run_migration(
     _connect_factory: Callable[..., sqlite3.Connection] = sqlite3.connect,
     _target_resolver: Callable[[str | None, bool, ProcessIdentity | None], DatabaseTarget] | None = None,
     _before_open_hook: Callable[[], None] | None = None,
+    _transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     _before_ddl_hook: Callable[[], None] | None = None,
 ) -> MigrationResult:
     phases: tuple[PhaseResult, ...] = ()
@@ -1023,6 +1029,7 @@ def run_migration(
             selected=selected,
             connect_factory=_connect_factory,
             before_open_hook=_before_open_hook,
+            transaction_hook=_transaction_hook,
             before_ddl_hook=_before_ddl_hook,
         )
         commit_completed = True
@@ -1140,11 +1147,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Migrate an existing disposable DB in an owned private 0700 directory",
     )
     parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping")
-    parser.add_argument(
-        "--test-crash-after",
-        choices=("active_sqlite_transaction",),
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
     return parser
 
@@ -1152,19 +1154,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.test_crash_after and not args.staged_copy:
-        parser.error("--test-crash-after requires --staged-copy")
-
-    def crash_in_active_transaction() -> None:
-        if args.test_crash_after == "active_sqlite_transaction":
-            os._exit(137)
-
     result = run_migration(
         db_path=args.db_path,
         synthetic_create=bool(args.synthetic_create),
         staged_copy=bool(args.staged_copy),
         components=args.components,
-        _before_ddl_hook=crash_in_active_transaction,
     )
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=True, sort_keys=True))

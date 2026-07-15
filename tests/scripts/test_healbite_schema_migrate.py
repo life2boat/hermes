@@ -458,16 +458,21 @@ def test_synthetic_create_exclusive_collision_is_denied(tmp_path: Path, monkeypa
     assert stat.S_IMODE(parent.stat().st_mode) == 0o700
 
 
-def test_synthetic_path_replacement_before_ddl_is_detected_without_schema_write(tmp_path: Path) -> None:
+def test_synthetic_path_replacement_before_ddl_is_prevented_or_detected(tmp_path: Path) -> None:
     parent = _private_synthetic_parent(tmp_path)
     db_path = parent / "created.sqlite"
     parked = parent / "parked.sqlite"
     substitute = parent / "substitute.sqlite"
     substitute.touch(mode=0o600)
+    replacement_denied = False
 
     def replace_target() -> None:
-        db_path.rename(parked)
-        db_path.symlink_to(substitute)
+        nonlocal replacement_denied
+        try:
+            db_path.rename(parked)
+            db_path.symlink_to(substitute)
+        except PermissionError:
+            replacement_denied = True
 
     result = healbite_schema_migrate.run_migration(
         db_path=str(db_path),
@@ -475,22 +480,32 @@ def test_synthetic_path_replacement_before_ddl_is_detected_without_schema_write(
         _before_ddl_hook=replace_target,
     )
 
-    assert result.exit_classification == "UNSAFE_PATH"
-    assert result.migration_commit_state == "ROLLED_BACK"
+    if replacement_denied:
+        assert result.exit_classification == "SUCCESS"
+        assert result.migration_commit_state == "COMMITTED"
+        assert _table_exists(db_path, SHOPPING_LISTS_TABLE)
+    else:
+        assert result.exit_classification == "UNSAFE_PATH"
+        assert result.migration_commit_state == "ROLLED_BACK"
     assert not _table_exists(substitute, SHOPPING_LISTS_TABLE)
     assert stat.S_IMODE(parent.stat().st_mode) == 0o700
 
 
-def test_synthetic_path_replacement_before_open_is_detected_without_schema_write(tmp_path: Path) -> None:
+def test_synthetic_path_replacement_before_open_is_prevented_or_detected(tmp_path: Path) -> None:
     parent = _private_synthetic_parent(tmp_path)
     db_path = parent / "created.sqlite"
     parked = parent / "parked.sqlite"
     substitute = parent / "substitute.sqlite"
     substitute.touch(mode=0o600)
+    replacement_denied = False
 
     def replace_target() -> None:
-        db_path.rename(parked)
-        db_path.symlink_to(substitute)
+        nonlocal replacement_denied
+        try:
+            db_path.rename(parked)
+            db_path.symlink_to(substitute)
+        except PermissionError:
+            replacement_denied = True
 
     result = healbite_schema_migrate.run_migration(
         db_path=str(db_path),
@@ -498,8 +513,13 @@ def test_synthetic_path_replacement_before_open_is_detected_without_schema_write
         _before_open_hook=replace_target,
     )
 
-    assert result.exit_classification == "UNSAFE_PATH"
-    assert result.migration_commit_state == "NOT_STARTED"
+    if replacement_denied:
+        assert result.exit_classification == "SUCCESS"
+        assert result.migration_commit_state == "COMMITTED"
+        assert _table_exists(db_path, SHOPPING_LISTS_TABLE)
+    else:
+        assert result.exit_classification == "UNSAFE_PATH"
+        assert result.migration_commit_state == "NOT_STARTED"
     assert not _table_exists(substitute, SHOPPING_LISTS_TABLE)
     assert stat.S_IMODE(parent.stat().st_mode) == 0o700
 

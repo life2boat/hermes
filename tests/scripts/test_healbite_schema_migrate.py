@@ -294,6 +294,89 @@ def test_synthetic_create_public_cli_end_to_end(tmp_path: Path) -> None:
     assert HealBiteShoppingStore(db_path=db_path).schema_state() is ShoppingSchemaState.CANONICAL
 
 
+def test_staged_copy_public_cli_end_to_end(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, 0o600)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--db-path", str(db_path), "--staged-copy", "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    payload = _json_result(result)
+
+    assert result.returncode == 0
+    assert payload["path_mode"] == "STAGED_COPY"
+    assert payload["database_path_classification"] == "absolute_existing_staged_copy_private_parent"
+    assert payload["migration_commit_state"] == "COMMITTED"
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    assert db_path.stat().st_nlink == 1
+    assert not Path(f"{db_path}-journal").exists()
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+
+@pytest.mark.parametrize(
+    ("parent_mode", "db_mode", "make_hardlink", "expected_error"),
+    [
+        (0o750, 0o600, False, "STAGED_PARENT_NOT_PRIVATE"),
+        (0o700, 0o640, False, "STAGED_DB_METADATA_INVALID"),
+        (0o700, 0o600, True, "STAGED_DB_LINK_COUNT_INVALID"),
+    ],
+)
+def test_staged_copy_rejects_unsafe_metadata(
+    tmp_path: Path,
+    parent_mode: int,
+    db_mode: int,
+    make_hardlink: bool,
+    expected_error: str,
+) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, parent_mode)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, db_mode)
+    if make_hardlink:
+        os.link(db_path, parent / "alias.sqlite")
+
+    result = healbite_schema_migrate.run_migration(db_path=str(db_path), staged_copy=True)
+
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == expected_error
+    assert db_path.stat().st_size == 0
+
+
+def test_staged_copy_and_synthetic_create_are_mutually_exclusive(tmp_path: Path) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    db_path = parent / "database.sqlite"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--db-path",
+            str(db_path),
+            "--staged-copy",
+            "--synthetic-create",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert not db_path.exists()
+
+
 def test_symlink_db_path_is_denied(tmp_path: Path) -> None:
     target = _fresh_db(tmp_path)
     link = tmp_path / "link.sqlite"
@@ -1129,11 +1212,14 @@ def test_runbook_uses_public_cli_instead_of_authoritative_inline_exec() -> None:
     assert "docker exec" not in d3
     assert "python - <<" not in d3
     assert "--allow-create" not in d3
-    assert "--synthetic-create" not in d3
+    assert "synthetic-create and protected-existing modes are forbidden" in d3
     assert ":latest" not in d3
-    assert "exact read/write file bind mount" in d3
-    assert "not writable by UID/GID 10000:10000" in d3
-    assert "privileged container administrator" in d3
+    assert "only the disposable staging directory is mounted read/write" in d3
+    assert "production DB path and production parent are not mounted" in d3
+    assert "--staged-copy" in d3
+    assert "PATH_MODE=STAGED_COPY" in d3
+    assert "production execute mode is deliberately absent" in d3
+    assert "Direct in-place" in d3
     assert "DATABASE_LOCKED" in d3
     assert "DATABASE_READ_ONLY" in d3
     assert "CLEANUP_FAILED" in d3
@@ -1166,3 +1252,25 @@ def test_runbook_has_no_secondary_production_migration_interface() -> None:
     ).read_text(encoding="utf-8")
     assert "docker exec" not in runbook
     assert "python - <<" not in runbook
+    assert "--mount type=bind,src=\"/home/hermes/healbite.db\"" not in runbook
+
+
+def test_runbook_documents_staged_atomic_publish_and_rollback_boundaries() -> None:
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+    ).read_text(encoding="utf-8")
+    required = (
+        "staged copy plus atomic publish",
+        "scripts/hermes_staged_schema_migrate.py",
+        "production execution is disabled",
+        "normal SQLite DELETE journaling and synchronous FULL remain enabled",
+        "same-filesystem",
+        "os.replace",
+        "PUBLISH_STATE=UNKNOWN",
+        "automatic retry is prohibited",
+        "Image rollback after a successful additive migration uses the migrated DB",
+        "Backup restore is an emergency manual action only",
+    )
+    for marker in required:
+        assert marker in runbook

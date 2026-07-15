@@ -131,6 +131,28 @@ def test_runbook_separates_image_and_db_rollbacks_and_forbids_destructive_shell_
             assert needle not in block, f"forbidden command leaked into executable runbook block: {needle}"
 
 
+def test_runbook_requires_staged_copy_and_disables_production_execution() -> None:
+    text = _text(RUNBOOK)
+    _require(
+        text,
+        [
+            "staged copy plus atomic publish",
+            "Direct in-place",
+            "scripts/hermes_staged_schema_migrate.py",
+            "production execution is disabled",
+            "production DB path and production parent are not mounted",
+            "PATH_MODE=STAGED_COPY",
+            "normal SQLite DELETE journaling and synchronous FULL remain enabled",
+            "os.replace",
+            "cross-filesystem publication fails closed",
+            "PUBLISH_STATE=UNKNOWN",
+            "Backup restore is an emergency manual action only",
+        ],
+        label="staged-copy migration contract",
+    )
+    assert '--mount type=bind,src="/home/hermes/healbite.db"' not in text
+
+
 def test_runbook_prohibits_sensitive_ids_and_secrets() -> None:
     text = _text(RUNBOOK)
     _require(

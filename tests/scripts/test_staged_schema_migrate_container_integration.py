@@ -88,8 +88,14 @@ def _count(db_path: Path, table: str) -> int:
         return int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
 
 
+def _require_root_or_skip() -> None:
+    getter = getattr(os, "geteuid", None)
+    if not callable(getter) or int(getter()) != 0:
+        pytest.skip("integration contract requires POSIX root orchestrator")
+
+
 def test_real_container_staged_migration_and_atomic_publish(tmp_path: Path) -> None:
-    assert os.geteuid() == 0, "integration contract requires root orchestrator"
+    _require_root_or_skip()
     source = _legacy_source(tmp_path)
     backups = _private(tmp_path / "backups")
     staging_root = _private(tmp_path / "staging")
@@ -144,7 +150,7 @@ def test_real_container_staged_migration_and_atomic_publish(tmp_path: Path) -> N
 
 
 def test_real_container_old_nonwritable_parent_contract_fails(tmp_path: Path) -> None:
-    assert os.geteuid() == 0, "integration contract requires root orchestrator"
+    _require_root_or_skip()
     parent = _private(tmp_path / "old-in-place", uid=staged.RUNTIME_UID, gid=staged.RUNTIME_GID)
     db_path = parent / "database.sqlite"
     db_path.touch(mode=0o600)

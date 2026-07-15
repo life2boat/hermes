@@ -65,6 +65,13 @@ class OrchestratorError(RuntimeError):
         self.publish_state = publish_state
 
 
+def _effective_uid() -> int:
+    getter = getattr(os, "geteuid", None)
+    if not callable(getter):
+        raise OrchestratorError("POSIX_IDENTITY_UNAVAILABLE")
+    return int(getter())
+
+
 @dataclass(frozen=True)
 class Contract:
     source_db: Path
@@ -343,7 +350,7 @@ def _preflight(contract: Contract, *, synthetic: bool, inspect_images: bool) -> 
     if synthetic:
         for directory in (contract.backup_dir, contract.staging_root):
             metadata = directory.lstat()
-            if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            if metadata.st_uid != _effective_uid() or stat.S_IMODE(metadata.st_mode) != 0o700:
                 raise OrchestratorError("SYNTHETIC_OPERATION_DIRECTORY_NOT_PRIVATE")
     if contract.source_db.parent.stat().st_dev != contract.staging_root.stat().st_dev:
         raise OrchestratorError("CROSS_FILESYSTEM_PUBLISH_REFUSED")
@@ -359,7 +366,7 @@ def _preflight(contract: Contract, *, synthetic: bool, inspect_images: bool) -> 
 
 def _crash(gate: str, selected: str | None) -> None:
     if selected == gate:
-        os.kill(os.getpid(), signal.SIGKILL)
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
 def _fail(phase: str, selected: str | None, *, publish_state: str = "NOT_PUBLISHED") -> None:
@@ -392,7 +399,7 @@ def _run_target_migration(contract: Contract, staging_dir: Path, *, crash_gate: 
         command.extend(["--test-crash-after", "active_sqlite_transaction"])
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if crash_gate == "active_sqlite_transaction" and result.returncode != 0:
-        os.kill(os.getpid(), signal.SIGKILL)
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
     if result.returncode != 0:
         raise OrchestratorError("TARGET_IMAGE_MIGRATION_FAILED")
     try:

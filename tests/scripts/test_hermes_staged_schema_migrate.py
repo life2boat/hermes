@@ -53,8 +53,11 @@ def _args(root: Path, source: Path, **overrides: object) -> argparse.Namespace:
 
 
 def _prepare_runtime_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(staged, "RUNTIME_UID", os.geteuid())
-    monkeypatch.setattr(staged, "RUNTIME_GID", os.getegid())
+    uid_getter = getattr(os, "geteuid", None)
+    gid_getter = getattr(os, "getegid", None)
+    assert callable(uid_getter) and callable(gid_getter)
+    monkeypatch.setattr(staged, "RUNTIME_UID", int(uid_getter()))
+    monkeypatch.setattr(staged, "RUNTIME_GID", int(gid_getter()))
 
 
 def _host_migration(_contract: staged.Contract, staging_dir: Path, *, crash_gate: str | None) -> None:

@@ -36,8 +36,9 @@ PRE_PUBLISH_PHASES = frozenset(PHASES[:7])
 DUMMY_IMAGE = "sha256:" + "2" * 64
 DUMMY_PREVIOUS_IMAGE = "sha256:" + "3" * 64
 DUMMY_REVISION = "1" * 40
-RUNTIME_UID = 10000
-RUNTIME_GID = 10000
+_CAN_CHOWN = os.geteuid() == 0
+RUNTIME_UID = 10000 if _CAN_CHOWN else os.geteuid()
+RUNTIME_GID = 10000 if _CAN_CHOWN else os.getegid()
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -57,13 +58,15 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 def _create_source(root: Path) -> Path:
     parent = root / "source"
     parent.mkdir(mode=0o700)
-    os.chown(parent, RUNTIME_UID, RUNTIME_GID)
+    if _CAN_CHOWN:
+        os.chown(parent, RUNTIME_UID, RUNTIME_GID)
     database = parent / "database.sqlite"
     with sqlite3.connect(database) as conn:
         conn.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
         conn.execute("INSERT INTO legacy_rows VALUES ('synthetic')")
     os.chmod(database, 0o600)
-    os.chown(database, RUNTIME_UID, RUNTIME_GID)
+    if _CAN_CHOWN:
+        os.chown(database, RUNTIME_UID, RUNTIME_GID)
     return database
 
 
@@ -92,6 +95,8 @@ def _single_run(args: argparse.Namespace) -> int:
     source = Path(args.source_db).resolve(strict=True)
     active_evidence = Path(args.active_evidence).resolve(strict=False)
     staged._inspect_image = lambda *_args, **_kwargs: DUMMY_REVISION  # type: ignore[assignment]
+    staged.RUNTIME_UID = RUNTIME_UID
+    staged.RUNTIME_GID = RUNTIME_GID
 
     namespace = argparse.Namespace(
         source_db=str(source),

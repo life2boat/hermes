@@ -670,6 +670,41 @@ def _has_expected_columns(
     return True
 
 
+def _partial_shopping_schema_is_compatible(conn: sqlite3.Connection, present: set[str]) -> bool:
+    table_order = (
+        SHOPPING_LISTS_TABLE,
+        SHOPPING_ITEMS_TABLE,
+        SHOPPING_CONTRIBUTIONS_TABLE,
+        SHOPPING_IDEMPOTENCY_TABLE,
+    )
+    known_table_states = {frozenset(table_order[:length]) for length in range(1, len(table_order))}
+    known_table_states.add(frozenset(set(table_order) - {SHOPPING_CONTRIBUTIONS_TABLE}))
+    if frozenset(present) not in known_table_states:
+        return False
+    table_specs = {
+        SHOPPING_LISTS_TABLE: (EXPECTED_LIST_COLUMNS, EXPECTED_LIST_COLUMN_DETAILS),
+        SHOPPING_ITEMS_TABLE: (EXPECTED_ITEM_COLUMNS, EXPECTED_ITEM_COLUMN_DETAILS),
+        SHOPPING_CONTRIBUTIONS_TABLE: (EXPECTED_CONTRIBUTION_COLUMNS, EXPECTED_CONTRIBUTION_COLUMN_DETAILS),
+        SHOPPING_IDEMPOTENCY_TABLE: (EXPECTED_IDEMPOTENCY_COLUMNS, EXPECTED_IDEMPOTENCY_COLUMN_DETAILS),
+    }
+    for table in present:
+        expected_names, expected_details = table_specs[table]
+        if not _has_expected_columns(_table_info(conn, table), expected_names, expected_details):
+            return False
+        if _foreign_keys(conn, table) != EXPECTED_FOREIGN_KEYS[table]:
+            return False
+        table_sql = _sql_for_table(conn, table)
+        if not table_sql or any(snippet not in table_sql for snippet in EXPECTED_CHECK_SNIPPETS[table]):
+            return False
+    index_rows = _index_rows(conn)
+    for index_name in EXPECTED_INDEXES & set(index_rows):
+        details = EXPECTED_INDEX_DETAILS[index_name]
+        actual = _index_spec(conn, index_name, str(details["table"]), str(index_rows[index_name]["sql"]))
+        if actual != details:
+            return False
+    return True
+
+
 def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaState:
     tables = _table_names(conn)
     required_household_tables = {HOUSEHOLDS_TABLE, HOUSEHOLD_MEMBERS_TABLE}
@@ -681,14 +716,11 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
     if not present_tables:
         return ShoppingSchemaState.NOT_INITIALIZED
     if present_tables != EXPECTED_TABLES:
-        legacy_tables = EXPECTED_TABLES - {SHOPPING_CONTRIBUTIONS_TABLE}
-        if present_tables == legacy_tables:
-            return (
-                ShoppingSchemaState.PARTIAL
-                if is_legacy_shopping_schema_without_contributions(conn)
-                else ShoppingSchemaState.INCOMPATIBLE
-            )
-        return ShoppingSchemaState.PARTIAL
+        return (
+            ShoppingSchemaState.PARTIAL
+            if _partial_shopping_schema_is_compatible(conn, present_tables)
+            else ShoppingSchemaState.INCOMPATIBLE
+        )
     if not _has_expected_columns(_table_info(conn, SHOPPING_LISTS_TABLE), EXPECTED_LIST_COLUMNS, EXPECTED_LIST_COLUMN_DETAILS):
         return ShoppingSchemaState.INCOMPATIBLE
     if not _has_expected_columns(_table_info(conn, SHOPPING_ITEMS_TABLE), EXPECTED_ITEM_COLUMNS, EXPECTED_ITEM_COLUMN_DETAILS):
@@ -715,7 +747,7 @@ def detect_shopping_schema_state(conn: sqlite3.Connection) -> ShoppingSchemaStat
         return ShoppingSchemaState.INCOMPATIBLE
     index_rows = _index_rows(conn)
     if not EXPECTED_INDEXES.issubset(index_rows):
-        return ShoppingSchemaState.INCOMPATIBLE
+        return ShoppingSchemaState.PARTIAL
     for index_name, details in EXPECTED_INDEX_DETAILS.items():
         actual = _index_spec(conn, index_name, str(details["table"]), str(index_rows[index_name]["sql"]))
         if actual != details:

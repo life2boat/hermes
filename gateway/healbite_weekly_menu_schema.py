@@ -541,20 +541,50 @@ def _matches_check_snippets(conn: sqlite3.Connection, table: str) -> bool:
     return all(" ".join(snippet.lower().split()) in sql for snippet in EXPECTED_CHECK_SNIPPETS[table])
 
 
+def _partial_weekly_schema_is_compatible(conn: sqlite3.Connection, present: set[str]) -> bool:
+    table_order = (
+        WEEKLY_MENU_SERIES_TABLE,
+        WEEKLY_MENU_REVISIONS_TABLE,
+        WEEKLY_MENU_ENTRIES_TABLE,
+        WEEKLY_MENU_INGREDIENTS_TABLE,
+        WEEKLY_MENU_IDEMPOTENCY_TABLE,
+    )
+    known_table_states = {frozenset(table_order[:length]) for length in range(1, len(table_order))}
+    known_table_states.add(frozenset(set(table_order) - {WEEKLY_MENU_INGREDIENTS_TABLE}))
+    if frozenset(present) not in known_table_states:
+        return False
+    table_details = {
+        WEEKLY_MENU_SERIES_TABLE: EXPECTED_SERIES_COLUMN_DETAILS,
+        WEEKLY_MENU_REVISIONS_TABLE: EXPECTED_REVISION_COLUMN_DETAILS,
+        WEEKLY_MENU_ENTRIES_TABLE: EXPECTED_ENTRY_COLUMN_DETAILS,
+        WEEKLY_MENU_INGREDIENTS_TABLE: EXPECTED_INGREDIENT_COLUMN_DETAILS,
+        WEEKLY_MENU_IDEMPOTENCY_TABLE: EXPECTED_IDEMPOTENCY_COLUMN_DETAILS,
+    }
+    for table in present:
+        if not _matches_column_details(_table_column_details(conn, table), table_details[table]):
+            return False
+        if _foreign_keys(conn, table) != EXPECTED_FOREIGN_KEYS[table]:
+            return False
+        if not _matches_check_snippets(conn, table):
+            return False
+    existing_expected_indexes = EXPECTED_INDEXES & _index_names(conn)
+    return _matches_index_metadata(
+        _index_metadata(conn),
+        {name: EXPECTED_INDEX_DETAILS[name] for name in existing_expected_indexes},
+    )
+
+
 def detect_weekly_menu_schema_state(conn: sqlite3.Connection) -> WeeklyMenuSchemaState:
     tables = _table_names(conn)
     present = EXPECTED_TABLES.intersection(tables)
     if not present:
         return WeeklyMenuSchemaState.NOT_INITIALIZED
     if present != EXPECTED_TABLES:
-        legacy_tables = EXPECTED_TABLES - {WEEKLY_MENU_INGREDIENTS_TABLE}
-        if present == legacy_tables:
-            return (
-                WeeklyMenuSchemaState.PARTIAL
-                if is_legacy_weekly_menu_schema_without_ingredients(conn)
-                else WeeklyMenuSchemaState.INCOMPATIBLE
-            )
-        return WeeklyMenuSchemaState.PARTIAL
+        return (
+            WeeklyMenuSchemaState.PARTIAL
+            if _partial_weekly_schema_is_compatible(conn, present)
+            else WeeklyMenuSchemaState.INCOMPATIBLE
+        )
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_SERIES_TABLE), EXPECTED_SERIES_COLUMN_DETAILS):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     if not _matches_column_details(_table_column_details(conn, WEEKLY_MENU_REVISIONS_TABLE), EXPECTED_REVISION_COLUMN_DETAILS):

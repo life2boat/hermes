@@ -408,7 +408,7 @@ test "$NEW_HERMES_CONTAINER_ID" != "$OLD_HERMES_CONTAINER_ID"
 test "$(docker inspect -f '{{.Id}}' "$QDRANT_SERVICE")" = "$OLD_QDRANT_CONTAINER_ID"
 test "$(docker inspect -f '{{.Image}}' "$QDRANT_SERVICE")" = "$OLD_QDRANT_IMAGE_ID"
 
-docker exec "$EXACT_CONTAINER" cat "$BUILD_SHA_FILE"
+test "$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$NEW_HERMES_IMAGE_ID")" = "$EXPECTED_MAIN_SHA"
 docker logs --tail 200 "$EXACT_CONTAINER" 2>&1 | egrep -i "traceback|database is locked|readonly|provider authentication|command approval" || true
 ```
 
@@ -454,15 +454,7 @@ RESTORE_DB="/tmp/healbite-restore-$TS.db"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-import sqlite3
-src = sqlite3.connect("/home/hermes/healbite.db")
-dst = sqlite3.connect("/home/hermes/backups/PLACEHOLDER/healbite.db")
-with dst:
-    src.backup(dst)
-dst.close()
-src.close()
-PY
+sqlite3 -cmd '.timeout 5000' /home/hermes/healbite.db ".backup '$BACKUP_DB'"
 
 sha256sum "$BACKUP_DB" > "$BACKUP_DB.sha256"
 sqlite3 "$BACKUP_DB" 'PRAGMA integrity_check;'
@@ -500,69 +492,148 @@ Do not print IDs or row payloads.
 
 ### D3 Weekly schema initialization
 
-Use the canonical store initializer inside the exact deployed image namespace:
+Use the public migration-only CLI in a one-shot container from the exact immutable image. It is the only authoritative production migration interface; in-service execution and inline Python are prohibited.
+
+Required contract:
 
 ```bash
 set -euo pipefail
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
-store = HealBiteWeeklyMenuStore(db_path="/home/hermes/healbite.db")
-state = store.initialize_schema()
-print(f"weekly_schema_state={state.value}")
-audit = store.audit_schema()
-print(f"weekly_series_count={audit.series_count}")
-print(f"weekly_revision_count={audit.revision_count}")
-print(f"weekly_entry_count={audit.entry_count}")
-print(f"weekly_idempotency_count=0")
-PY
+docker run --rm \
+  --network none \
+  --user 10000:10000 \
+  --mount type=bind,src="/home/hermes/healbite.db",dst="/data/healbite.db",readonly=false \
+  "$EXACT_IMAGE_ID" \
+  /opt/hermes/.venv/bin/python /opt/hermes/scripts/healbite_schema_migrate.py \
+    --db-path /data/healbite.db \
+    --json
 ```
 
-Required post-conditions:
+The command must be run only after a fresh SQLite online backup and a read-only schema/count baseline. It must run before the Hermes service is recreated on the new image.
+
+Path-security preconditions are part of the migration authorization, not a post-run
+check:
 
 ```text
-weekly schema state = canonical
-partial schema must be refused
-incompatible schema must be refused
-series_count = 0
-revision_count = 0
-entry_count = 0
-households unchanged
-household_members unchanged
-nutrition/profile/weight/water/reminder counts unchanged
+/data is supplied by the immutable image and owned by root
+/data and every relevant container-side ancestor are not writable by UID/GID 10000:10000
+/data/healbite.db is an exact read/write file bind mount, not a directory mount
+the DB file is a regular non-symlink file writable by UID/GID 10000:10000
+no path component is a symlink
+the CLI does not chmod, chown, copy, hardlink, or replace the DB
 ```
+
+This contract prevents the unprivileged migration identity from substituting the
+database pathname before or during open. It does not claim protection against host
+root or a privileged container administrator; those actors remain outside this
+one-shot process threat boundary. Validate the image-side `/data` ownership and mode
+offline before production use.
+
+Required command properties:
+
+```text
+explicit --db-path is mandatory
+immutable image ID is used
+network is disabled
+runtime UID/GID is explicit
+no production secrets are mounted
+no main Hermes service starts
+no Qdrant, Telegram, provider, scheduler, or background worker starts
+no feature flag is changed
+no snapshot or shopping backfill is performed
+no command is executed inside the running production service for migration
+existing-database mode is required; synthetic-create mode is forbidden
+```
+
+Expected migration sequence:
+
+```text
+household schema initialization
+weekly-menu schema initialization
+shopping schema initialization
+```
+
+The public CLI performs the weekly phase before the shopping phase in one deterministic command. The heading below is retained as a compatibility marker for the production readiness contract; do not replace it with inline Python.
 
 ### D3 Shopping schema initialization
 
-Only after weekly schema is canonical:
+The shopping phase is executed by the same public CLI invocation after weekly schema reaches canonical state. Do not use in-service execution or inline Python for this phase.
 
-```bash
-set -euo pipefail
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-from gateway.healbite_shopping import HealBiteShoppingStore
-store = HealBiteShoppingStore(db_path="/home/hermes/healbite.db")
-state = store.initialize_schema()
-print(f"shopping_schema_state={state.value}")
-audit = store.audit_schema()
-print(f"shopping_list_count={audit.list_count}")
-print(f"shopping_item_count={audit.item_count}")
-print(f"shopping_idempotency_count={audit.idempotency_count}")
-PY
+Required successful sanitized JSON output:
+
+```text
+status = success
+exit_classification = SUCCESS
+migration_commit_state = COMMITTED
+schema_may_have_changed = true
+cleanup_failed = false
+safe_to_rerun = true
+HOUSEHOLD schema_state = CURRENT
+WEEKLY schema_state = CURRENT
+SHOPPING schema_state = CURRENT
+data_backfilled = false
 ```
+
+Public stable exit classifications and deterministic precedence (highest priority first after `SUCCESS`):
+
+```text
+0  SUCCESS
+2  INVALID_ARGUMENT
+3  UNSAFE_PATH
+4  MISSING_DATABASE
+8  DATABASE_PERMISSION_DENIED
+7  DATABASE_READ_ONLY
+6  DATABASE_LOCKED
+5  INCOMPATIBLE_SCHEMA
+9  MIGRATION_FAILED
+10 CLEANUP_FAILED
+11 CONTRACT_DRIFT
+```
+
+This order is the classification source of truth when an operation exposes more
+than one failure. Cleanup state is reported separately and never masks the primary
+operational classification. SQLite `sqlite_errorcode`, `sqlite_errorname`, and
+known result codes are used when structured metadata is present. Exception-message
+text is never used to infer a specific operational class. When structured metadata
+is absent or insufficient, the CLI reports `MIGRATION_FAILED`; operators must not
+infer locked, read-only, or permission status from exception text.
+
+The production command requires an existing regular database file. No create-mode
+flag is permitted in production. Synthetic mode is limited to temporary local tests
+with an owned private `0700` parent and must never appear in a production execution
+manifest.
+
+Any nonzero classification is terminal for this attempt. Do not retry automatically,
+do not repair DDL manually, and do not continue to service recreation.
 
 Required post-conditions:
 
 ```text
+household schema state = canonical
+weekly schema state = canonical
 shopping schema state = canonical
-dependency_missing must be refused before weekly canonical
-partial schema must be refused
-incompatible schema must be refused
-list_count = 0
-item_count = 0
-idempotency_count = 0
-weekly schema remains canonical
-existing household/member/health data counts unchanged
+weekly series/revision/entry counts unchanged from baseline
+series_count = 0 before first weekly feature use unless already present before migration
+revision_count = 0 before first weekly feature use unless already present before migration
+entry_count = 0 before first weekly feature use unless already present before migration
+shopping list/item/idempotency counts = 0 unless already present before migration
+list_count = 0 before first shopping feature use unless already present before migration
+item_count = 0 before first shopping feature use unless already present before migration
+idempotency_count = 0 before first shopping feature use unless already present before migration
+nutrition/profile/weight/water/reminder counts unchanged
+DB owner and mode unchanged
+WAL/SHM files, if present, are not broad-readable
+```
+
+Failure rules:
+
+```text
+nonzero migration exit blocks deployment
+no automatic retry
+no manual DDL repair
+retain the fresh backup
+open a separate recovery task
 ```
 
 ## D4 - Disabled-State Observation and Rollback Verification

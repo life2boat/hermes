@@ -181,7 +181,7 @@ def test_partial_and_incompatible_weekly_schema_are_reported_without_mutation(tm
     partial_db = tmp_path / "weekly-partial.db"
     _make_base_db(partial_db)
     with sqlite3.connect(partial_db) as conn:
-        conn.execute("CREATE TABLE household_weekly_menu_series (id TEXT PRIMARY KEY)")
+        conn.execute(next(statement.strip() for statement in WEEKLY_MENU_SCHEMA_SQL.split(";") if statement.strip()))
     partial = healbite_status.inspect_db_path(partial_db)
     assert partial["weekly_schema"] == WeeklyMenuSchemaState.PARTIAL.value
     assert partial["shopping_schema"] == ShoppingSchemaState.DEPENDENCY_MISSING.value
@@ -206,7 +206,7 @@ def test_partial_and_incompatible_shopping_schema_are_reported_without_mutation(
     partial_db = tmp_path / "shopping-partial.db"
     _canonical_weekly_db(partial_db)
     with sqlite3.connect(partial_db) as conn:
-        conn.execute("CREATE TABLE household_shopping_lists (id TEXT PRIMARY KEY)")
+        conn.execute(next(statement.strip() for statement in SHOPPING_SCHEMA_SQL.split(";") if statement.strip()))
     partial = healbite_status.inspect_db_path(partial_db)
     assert partial["weekly_schema"] == WeeklyMenuSchemaState.CANONICAL.value
     assert partial["shopping_schema"] == ShoppingSchemaState.PARTIAL.value

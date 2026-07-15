@@ -377,6 +377,26 @@ def test_staged_copy_and_synthetic_create_are_mutually_exclusive(tmp_path: Path)
     assert not db_path.exists()
 
 
+def test_staged_copy_metadata_change_before_ddl_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, 0o600)
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _before_ddl_hook=lambda: os.chmod(db_path, 0o640),
+    )
+
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "STAGED_DB_METADATA_CHANGED"
+    assert result.migration_commit_state == "ROLLED_BACK"
+    assert not _table_exists(db_path, "households")
+
+
 def test_symlink_db_path_is_denied(tmp_path: Path) -> None:
     target = _fresh_db(tmp_path)
     link = tmp_path / "link.sqlite"

@@ -216,14 +216,24 @@ def _sidecars(path: Path) -> list[Path]:
 def _check_quiescent(path: Path) -> None:
     if _sidecars(path):
         raise OrchestratorError("SQLITE_SIDECAR_PRESENT")
-    conn = sqlite3.connect(path, timeout=0, isolation_level=None)
-    try:
-        conn.execute("BEGIN EXCLUSIVE")
-        conn.execute("ROLLBACK")
-    except sqlite3.Error as exc:
-        raise OrchestratorError("SOURCE_NOT_QUIESCENT") from exc
-    finally:
-        conn.close()
+    lock_probe = (
+        "import fcntl, os, sys; "
+        "fd=os.open(sys.argv[1], os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)); "
+        "\ntry:\n fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n sys.exit(75)\n"
+        "finally:\n os.close(fd)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", lock_probe, str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 75:
+        raise OrchestratorError("SOURCE_NOT_QUIESCENT")
+    if result.returncode != 0:
+        raise OrchestratorError("QUIESCENCE_PROBE_FAILED")
     if _sidecars(path):
         raise OrchestratorError("SQLITE_SIDECAR_PRESENT")
 

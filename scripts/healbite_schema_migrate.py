@@ -134,6 +134,9 @@ class DatabaseTarget:
     owner_before: str | None
     identity_before: tuple[int, int] | None
     path_mode: str = PathMode.PROTECTED_EXISTING.value
+    parent_identity_before: tuple[int, int] | None = None
+    parent_owner_before: tuple[int, int] | None = None
+    parent_mode_before: int | None = None
     synthetic_parent: Path | None = None
     synthetic_parent_identity: tuple[int, int] | None = None
     synthetic_parent_mode_before: int | None = None
@@ -350,6 +353,9 @@ def _classify_staged_copy(path: Path, identity: ProcessIdentity) -> DatabaseTarg
         owner_before=_file_owner(metadata),
         identity_before=(metadata.st_dev, metadata.st_ino),
         path_mode=PathMode.STAGED_COPY.value,
+        parent_identity_before=(parent_metadata.st_dev, parent_metadata.st_ino),
+        parent_owner_before=(parent_metadata.st_uid, parent_metadata.st_gid),
+        parent_mode_before=stat.S_IMODE(parent_metadata.st_mode),
     )
 
 
@@ -535,6 +541,25 @@ def _verify_identity_unchanged(target: DatabaseTarget) -> tuple[str | None, str 
         raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
     if (metadata.st_dev, metadata.st_ino) != target.identity_before:
         raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
+    if target.path_mode == PathMode.STAGED_COPY.value:
+        try:
+            parent_metadata = target.path.parent.lstat()
+        except OSError as exc:
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PARENT_LOST") from exc
+        if (
+            stat.S_ISLNK(parent_metadata.st_mode)
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or (parent_metadata.st_dev, parent_metadata.st_ino) != target.parent_identity_before
+            or (parent_metadata.st_uid, parent_metadata.st_gid) != target.parent_owner_before
+            or stat.S_IMODE(parent_metadata.st_mode) != target.parent_mode_before
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PARENT_REPLACED")
+        if (
+            metadata.st_nlink != 1
+            or _file_mode(metadata) != "0600"
+            or (metadata.st_uid, metadata.st_gid) != target.parent_owner_before
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_DB_METADATA_CHANGED")
     return _file_mode(metadata), _file_owner(metadata)
 
 

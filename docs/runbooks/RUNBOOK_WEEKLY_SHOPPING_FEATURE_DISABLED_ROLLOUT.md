@@ -593,9 +593,11 @@ Public stable exit classifications and deterministic precedence (highest priorit
 
 This order is the classification source of truth when an operation exposes more
 than one failure. Cleanup state is reported separately and never masks the primary
-operational classification. SQLite `sqlite_errorcode` and `sqlite_errorname` are
-authoritative; sanitized message matching is only a tested fallback when no
-structured code exists.
+operational classification. SQLite `sqlite_errorcode`, `sqlite_errorname`, and
+known result codes are used when structured metadata is present. Exception-message
+text is never used to infer a specific operational class. When structured metadata
+is absent or insufficient, the CLI reports `MIGRATION_FAILED`; operators must not
+infer locked, read-only, or permission status from exception text.
 
 The production command requires an existing regular database file. No create-mode
 flag is permitted in production. Synthetic mode is limited to temporary local tests

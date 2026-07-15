@@ -1142,6 +1142,23 @@ def test_runbook_uses_public_cli_instead_of_authoritative_inline_exec() -> None:
     assert "Do not retry automatically" in d3
 
 
+def test_runbook_documents_fail_closed_sqlite_classification_contract() -> None:
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+    ).read_text(encoding="utf-8")
+    d3 = runbook.split("## D3 - Explicit Weekly Then Shopping Schema Initialization", 1)[1].split(
+        "## D4 - Disabled-State Observation", 1
+    )[0]
+    normalized_d3 = " ".join(d3.split())
+
+    assert "sqlite_errorcode" in d3
+    assert "sqlite_errorname" in d3
+    assert "Exception-message text is never used" in normalized_d3
+    assert "MIGRATION_FAILED" in d3
+    assert "sanitized message matching" not in d3
+
+
 def test_runbook_has_no_secondary_production_migration_interface() -> None:
     runbook = (
         Path(__file__).resolve().parents[2]

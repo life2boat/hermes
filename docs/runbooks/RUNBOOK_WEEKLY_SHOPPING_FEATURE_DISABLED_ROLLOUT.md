@@ -408,7 +408,7 @@ test "$NEW_HERMES_CONTAINER_ID" != "$OLD_HERMES_CONTAINER_ID"
 test "$(docker inspect -f '{{.Id}}' "$QDRANT_SERVICE")" = "$OLD_QDRANT_CONTAINER_ID"
 test "$(docker inspect -f '{{.Image}}' "$QDRANT_SERVICE")" = "$OLD_QDRANT_IMAGE_ID"
 
-docker exec "$EXACT_CONTAINER" cat "$BUILD_SHA_FILE"
+test "$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$NEW_HERMES_IMAGE_ID")" = "$EXPECTED_MAIN_SHA"
 docker logs --tail 200 "$EXACT_CONTAINER" 2>&1 | egrep -i "traceback|database is locked|readonly|provider authentication|command approval" || true
 ```
 
@@ -454,15 +454,7 @@ RESTORE_DB="/tmp/healbite-restore-$TS.db"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
-docker exec "$EXACT_CONTAINER" "$IMAGE_PYTHON" - <<'PY'
-import sqlite3
-src = sqlite3.connect("/home/hermes/healbite.db")
-dst = sqlite3.connect("/home/hermes/backups/PLACEHOLDER/healbite.db")
-with dst:
-    src.backup(dst)
-dst.close()
-src.close()
-PY
+sqlite3 -cmd '.timeout 5000' /home/hermes/healbite.db ".backup '$BACKUP_DB'"
 
 sha256sum "$BACKUP_DB" > "$BACKUP_DB.sha256"
 sqlite3 "$BACKUP_DB" 'PRAGMA integrity_check;'
@@ -500,7 +492,7 @@ Do not print IDs or row payloads.
 
 ### D3 Weekly schema initialization
 
-Use the public migration-only CLI in a one-shot container from the exact immutable image. This replaces the former inline `docker exec ... python` snippets as the authoritative production migration interface.
+Use the public migration-only CLI in a one-shot container from the exact immutable image. It is the only authoritative production migration interface; in-service execution and inline Python are prohibited.
 
 Required contract:
 
@@ -549,7 +541,8 @@ no main Hermes service starts
 no Qdrant, Telegram, provider, scheduler, or background worker starts
 no feature flag is changed
 no snapshot or shopping backfill is performed
-no production docker exec is used for migration
+no command is executed inside the running production service for migration
+existing-database mode is required; synthetic-create mode is forbidden
 ```
 
 Expected migration sequence:
@@ -564,7 +557,7 @@ The public CLI performs the weekly phase before the shopping phase in one determ
 
 ### D3 Shopping schema initialization
 
-The shopping phase is executed by the same public CLI invocation after weekly schema reaches canonical state. Do not use `docker exec` or inline Python for this phase.
+The shopping phase is executed by the same public CLI invocation after weekly schema reaches canonical state. Do not use in-service execution or inline Python for this phase.
 
 
 Required successful sanitized JSON output:
@@ -572,27 +565,42 @@ Required successful sanitized JSON output:
 ```text
 status = success
 exit_classification = SUCCESS
+migration_commit_state = COMMITTED
+schema_may_have_changed = true
+cleanup_failed = false
+safe_to_rerun = true
 HOUSEHOLD schema_state = CURRENT
 WEEKLY schema_state = CURRENT
 SHOPPING schema_state = CURRENT
 data_backfilled = false
 ```
 
-Public stable exit classifications:
+Public stable exit classifications and deterministic precedence (highest priority first after `SUCCESS`):
 
 ```text
 0  SUCCESS
 2  INVALID_ARGUMENT
 3  UNSAFE_PATH
 4  MISSING_DATABASE
-5  INCOMPATIBLE_SCHEMA
-6  DATABASE_LOCKED
-7  DATABASE_READ_ONLY
 8  DATABASE_PERMISSION_DENIED
+7  DATABASE_READ_ONLY
+6  DATABASE_LOCKED
+5  INCOMPATIBLE_SCHEMA
 9  MIGRATION_FAILED
 10 CLEANUP_FAILED
 11 CONTRACT_DRIFT
 ```
+
+This order is the classification source of truth when an operation exposes more
+than one failure. Cleanup state is reported separately and never masks the primary
+operational classification. SQLite `sqlite_errorcode` and `sqlite_errorname` are
+authoritative; sanitized message matching is only a tested fallback when no
+structured code exists.
+
+The production command requires an existing regular database file. No create-mode
+flag is permitted in production. Synthetic mode is limited to temporary local tests
+with an owned private `0700` parent and must never appear in a production execution
+manifest.
 
 Any nonzero classification is terminal for this attempt. Do not retry automatically,
 do not repair DDL manually, and do not continue to service recreation.

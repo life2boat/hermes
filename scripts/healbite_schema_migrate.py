@@ -38,6 +38,13 @@ class ExitClassification(str, Enum):
     CONTRACT_DRIFT = "CONTRACT_DRIFT"
 
 
+class MigrationCommitState(str, Enum):
+    NOT_STARTED = "NOT_STARTED"
+    ROLLED_BACK = "ROLLED_BACK"
+    COMMITTED = "COMMITTED"
+    UNKNOWN = "UNKNOWN"
+
+
 EXIT_SUCCESS = 0
 EXIT_INVALID_ARGUMENTS = 2
 EXIT_UNSAFE_PATH = 3
@@ -62,6 +69,22 @@ EXIT_CODES: dict[ExitClassification, int] = {
     ExitClassification.MIGRATION_FAILED: EXIT_MIGRATION_FAILURE,
     ExitClassification.CLEANUP_FAILED: EXIT_CLEANUP_FAILURE,
     ExitClassification.CONTRACT_DRIFT: EXIT_CONTRACT_DRIFT,
+}
+
+EXIT_CLASSIFICATION_PRECEDENCE: tuple[ExitClassification, ...] = (
+    ExitClassification.INVALID_ARGUMENT,
+    ExitClassification.UNSAFE_PATH,
+    ExitClassification.MISSING_DATABASE,
+    ExitClassification.DATABASE_PERMISSION_DENIED,
+    ExitClassification.DATABASE_READ_ONLY,
+    ExitClassification.DATABASE_LOCKED,
+    ExitClassification.INCOMPATIBLE_SCHEMA,
+    ExitClassification.MIGRATION_FAILED,
+    ExitClassification.CLEANUP_FAILED,
+    ExitClassification.CONTRACT_DRIFT,
+)
+_EXIT_PRECEDENCE_RANK = {
+    classification: rank for rank, classification in enumerate(EXIT_CLASSIFICATION_PRECEDENCE)
 }
 
 ALL_COMPONENTS = ("household", "weekly", "shopping")
@@ -103,6 +126,10 @@ class DatabaseTarget:
     mode_before: str | None
     owner_before: str | None
     identity_before: tuple[int, int] | None
+    synthetic_parent: Path | None = None
+    synthetic_parent_identity: tuple[int, int] | None = None
+    synthetic_parent_mode_before: int | None = None
+    synthetic_parent_fd: int | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +156,10 @@ class MigrationResult:
     database_path_classification: str
     phases: tuple[PhaseResult, ...]
     schema_changed: bool
+    migration_commit_state: str = MigrationCommitState.NOT_STARTED.value
+    schema_may_have_changed: bool = False
+    cleanup_failed: bool = False
+    safe_to_rerun: bool = True
     data_backfilled: bool = False
     exit_classification: str = ExitClassification.SUCCESS.value
     error_type: str | None = None
@@ -143,6 +174,10 @@ class MigrationResult:
             "database_path_classification": self.database_path_classification,
             "phases": [phase.as_dict() for phase in self.phases],
             "schema_changed": self.schema_changed,
+            "migration_commit_state": self.migration_commit_state,
+            "schema_may_have_changed": self.schema_may_have_changed,
+            "cleanup_failed": self.cleanup_failed,
+            "safe_to_rerun": self.safe_to_rerun,
             "data_backfilled": self.data_backfilled,
             "exit_classification": self.exit_classification,
             "mode_before": self.mode_before,
@@ -215,6 +250,18 @@ def _validate_directory_chain(parent: Path, identity: ProcessIdentity) -> None:
             raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_DIRECTORY_WRITABLE")
 
 
+def _validate_no_symlink_directory_chain(parent: Path) -> None:
+    for component in _path_components(parent):
+        try:
+            metadata = component.lstat()
+        except OSError as exc:
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_UNAVAILABLE") from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_SYMLINK")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="PATH_COMPONENT_NOT_DIRECTORY")
+
+
 def _classify_existing_path(path: Path, identity: ProcessIdentity) -> DatabaseTarget:
     try:
         metadata = path.lstat()
@@ -238,10 +285,120 @@ def _classify_existing_path(path: Path, identity: ProcessIdentity) -> DatabaseTa
     )
 
 
+def _resolve_synthetic_target(path: Path, identity: ProcessIdentity) -> DatabaseTarget:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_UNAVAILABLE") from exc
+    else:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_TARGET_EXISTS")
+
+    _validate_no_symlink_directory_chain(path.parent)
+    try:
+        parent_metadata = path.parent.lstat()
+    except OSError as exc:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_UNAVAILABLE") from exc
+    if parent_metadata.st_uid != identity.uid:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_OWNER_MISMATCH")
+    if stat.S_IMODE(parent_metadata.st_mode) != 0o700:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_NOT_PRIVATE")
+
+    parent_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        parent_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+    try:
+        parent_fd = os.open(path.parent, parent_flags)
+    except OSError as exc:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_OPEN_FAILED") from exc
+    opened_parent = os.fstat(parent_fd)
+    if (
+        (opened_parent.st_dev, opened_parent.st_ino) != (parent_metadata.st_dev, parent_metadata.st_ino)
+        or opened_parent.st_uid != identity.uid
+        or stat.S_IMODE(opened_parent.st_mode) != 0o700
+    ):
+        os.close(parent_fd)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_REPLACED")
+
+    old_umask = os.umask(0o077)
+    fd: int | None = None
+    created = False
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path.name, flags, 0o600, dir_fd=parent_fd)
+        created = True
+    except FileExistsError as exc:
+        os.close(parent_fd)
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_CREATE_COLLISION") from exc
+    except OSError as exc:
+        os.close(parent_fd)
+        raise MigrationError(
+            ExitClassification.DATABASE_PERMISSION_DENIED,
+            detail_code="SYNTHETIC_CREATE_FAILED",
+        ) from exc
+    finally:
+        os.umask(old_umask)
+
+    try:
+        if fd is None:
+            raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="SYNTHETIC_TARGET_FD_MISSING")
+        opened_target = os.fstat(fd)
+        if not stat.S_ISREG(opened_target.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_TARGET_NOT_REGULAR")
+        if opened_target.st_uid != identity.uid or stat.S_IMODE(opened_target.st_mode) != 0o600:
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_TARGET_METADATA_MISMATCH")
+        os.fchmod(parent_fd, 0o500)
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_TARGET_NOT_REGULAR")
+        if (
+            (metadata.st_dev, metadata.st_ino) != (opened_target.st_dev, opened_target.st_ino)
+            or metadata.st_uid != identity.uid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_TARGET_METADATA_MISMATCH")
+        protected_parent = os.fstat(parent_fd)
+        if (
+            (protected_parent.st_dev, protected_parent.st_ino)
+            != (parent_metadata.st_dev, parent_metadata.st_ino)
+            or stat.S_IMODE(protected_parent.st_mode) != 0o500
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_NOT_PROTECTED")
+    except Exception:
+        try:
+            os.fchmod(parent_fd, 0o700)
+            if created:
+                os.unlink(path.name, dir_fd=parent_fd)
+        except OSError:
+            pass
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+        raise
+    os.close(fd)
+
+    return DatabaseTarget(
+        path=path,
+        classification="absolute_synthetic_created_private_parent",
+        mode_before=_file_mode(metadata),
+        owner_before=_file_owner(metadata),
+        identity_before=(metadata.st_dev, metadata.st_ino),
+        synthetic_parent=path.parent,
+        synthetic_parent_identity=(parent_metadata.st_dev, parent_metadata.st_ino),
+        synthetic_parent_mode_before=0o700,
+        synthetic_parent_fd=parent_fd,
+    )
+
+
 def _resolve_db_path(
     raw_path: str | None,
     *,
-    allow_create: bool,
+    synthetic_create: bool,
     identity: ProcessIdentity | None = None,
 ) -> DatabaseTarget:
     if not raw_path:
@@ -250,32 +407,47 @@ def _resolve_db_path(
     if not path.is_absolute():
         raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="DB_PATH_NOT_ABSOLUTE")
     effective_identity = identity or _current_identity()
-    if path.exists() or path.is_symlink():
-        return _classify_existing_path(path, effective_identity)
-    if not allow_create:
-        raise MigrationError(ExitClassification.MISSING_DATABASE, detail_code="DB_PATH_MISSING")
-    _validate_directory_chain(path.parent, effective_identity)
-    old_umask = os.umask(0o077)
-    fd: int | None = None
+    if synthetic_create:
+        return _resolve_synthetic_target(path, effective_identity)
+    return _classify_existing_path(path, effective_identity)
+
+
+def _verify_synthetic_parent_protected(target: DatabaseTarget) -> None:
+    if target.synthetic_parent is None:
+        return
+    if target.synthetic_parent_fd is None:
+        raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="SYNTHETIC_PARENT_FD_MISSING")
     try:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags, 0o600)
+        opened_metadata = os.fstat(target.synthetic_parent_fd)
+        metadata = target.synthetic_parent.lstat()
     except OSError as exc:
-        raise MigrationError(ExitClassification.DATABASE_PERMISSION_DENIED, detail_code="DB_CREATE_FAILED") from exc
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_LOST") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_REPLACED")
+    if (metadata.st_dev, metadata.st_ino) != target.synthetic_parent_identity:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_REPLACED")
+    if (opened_metadata.st_dev, opened_metadata.st_ino) != target.synthetic_parent_identity:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_REPLACED")
+    if stat.S_IMODE(metadata.st_mode) != 0o500 or stat.S_IMODE(opened_metadata.st_mode) != 0o500:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="SYNTHETIC_PARENT_NOT_PROTECTED")
+
+
+def _restore_synthetic_parent(target: DatabaseTarget) -> None:
+    if target.synthetic_parent is None:
+        return
+    if target.synthetic_parent_fd is None:
+        raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="SYNTHETIC_PARENT_FD_MISSING")
+    verification_error: Exception | None = None
+    try:
+        _verify_synthetic_parent_protected(target)
+    except Exception as exc:
+        verification_error = exc
+    try:
+        os.fchmod(target.synthetic_parent_fd, target.synthetic_parent_mode_before or 0o700)
     finally:
-        os.umask(old_umask)
-        if fd is not None:
-            os.close(fd)
-    target = _classify_existing_path(path, effective_identity)
-    return DatabaseTarget(
-        path=target.path,
-        classification="absolute_created_regular_safe_parent",
-        mode_before=target.mode_before,
-        owner_before=target.owner_before,
-        identity_before=target.identity_before,
-    )
+        os.close(target.synthetic_parent_fd)
+    if verification_error is not None:
+        raise verification_error
 
 
 def _verify_identity_unchanged(target: DatabaseTarget) -> tuple[str | None, str | None]:
@@ -436,11 +608,100 @@ def _attach_cleanup_note(primary_error: Exception, cleanup_name: str) -> None:
         pass
 
 
-def _rollback_preserving_primary(conn: sqlite3.Connection, primary_error: Exception) -> None:
+def _attach_migration_state(
+    error: Exception,
+    *,
+    commit_state: MigrationCommitState,
+    schema_may_have_changed: bool,
+    cleanup_failed: bool,
+    safe_to_rerun: bool,
+    phases: tuple[PhaseResult, ...] = (),
+    schema_changed: bool = False,
+) -> None:
+    values = {
+        "_healbite_commit_state": commit_state.value,
+        "_healbite_schema_may_have_changed": schema_may_have_changed,
+        "_healbite_cleanup_failed": cleanup_failed,
+        "_healbite_safe_to_rerun": safe_to_rerun,
+        "_healbite_phases": phases,
+        "_healbite_schema_changed": schema_changed,
+    }
+    for name, value in values.items():
+        try:
+            setattr(error, name, value)
+        except Exception:
+            pass
+
+
+def _migration_state_from_error(
+    error: Exception,
+) -> tuple[MigrationCommitState, bool, bool, bool, tuple[PhaseResult, ...], bool]:
+    raw_state = getattr(error, "_healbite_commit_state", MigrationCommitState.NOT_STARTED.value)
+    try:
+        commit_state = MigrationCommitState(str(raw_state))
+    except ValueError:
+        commit_state = MigrationCommitState.UNKNOWN
+    phases = getattr(error, "_healbite_phases", ())
+    return (
+        commit_state,
+        bool(getattr(error, "_healbite_schema_may_have_changed", False)),
+        bool(getattr(error, "_healbite_cleanup_failed", False)),
+        bool(getattr(error, "_healbite_safe_to_rerun", commit_state is not MigrationCommitState.UNKNOWN)),
+        phases if isinstance(phases, tuple) else (),
+        bool(getattr(error, "_healbite_schema_changed", False)),
+    )
+
+
+def _mark_cleanup_failure(primary_error: Exception, cleanup_name: str) -> None:
+    _attach_cleanup_note(primary_error, cleanup_name)
+    commit_state, may_have_changed, _cleanup_failed, safe_to_rerun, phases, schema_changed = (
+        _migration_state_from_error(primary_error)
+    )
+    _attach_migration_state(
+        primary_error,
+        commit_state=commit_state,
+        schema_may_have_changed=may_have_changed,
+        cleanup_failed=True,
+        safe_to_rerun=safe_to_rerun,
+        phases=phases,
+        schema_changed=schema_changed,
+    )
+
+
+def _rollback_preserving_primary(
+    conn: sqlite3.Connection,
+    primary_error: Exception,
+    *,
+    commit_attempted: bool,
+) -> None:
     try:
         conn.rollback()
     except Exception:
         _attach_cleanup_note(primary_error, "rollback")
+        _attach_migration_state(
+            primary_error,
+            commit_state=MigrationCommitState.UNKNOWN,
+            schema_may_have_changed=True,
+            cleanup_failed=True,
+            safe_to_rerun=False,
+        )
+        return
+    if commit_attempted:
+        _attach_migration_state(
+            primary_error,
+            commit_state=MigrationCommitState.UNKNOWN,
+            schema_may_have_changed=True,
+            cleanup_failed=False,
+            safe_to_rerun=False,
+        )
+    else:
+        _attach_migration_state(
+            primary_error,
+            commit_state=MigrationCommitState.ROLLED_BACK,
+            schema_may_have_changed=False,
+            cleanup_failed=False,
+            safe_to_rerun=True,
+        )
 
 
 def _apply_component(conn: sqlite3.Connection, name: str, statements: Sequence[str]) -> None:
@@ -461,6 +722,7 @@ def _migrate_borrowed_connection(
     selected: tuple[str, ...],
     before_ddl_hook: Callable[[], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
+    commit_attempted = False
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN IMMEDIATE")
@@ -485,11 +747,20 @@ def _migrate_borrowed_connection(
             changed = before is not SchemaClassification.CURRENT
             changed_any = changed_any or changed
             phases.append(PhaseResult(name=name, status="success", schema_state=after.value, changed=changed))
+        commit_attempted = True
         conn.commit()
         return tuple(phases), changed_any
     except Exception as exc:
-        _rollback_preserving_primary(conn, exc)
+        _rollback_preserving_primary(conn, exc, commit_attempted=commit_attempted)
         raise
+
+
+def _select_exit_classification(
+    primary: ExitClassification,
+    *additional: ExitClassification,
+) -> ExitClassification:
+    classifications = (primary, *additional)
+    return min(classifications, key=lambda item: _EXIT_PRECEDENCE_RANK.get(item, len(_EXIT_PRECEDENCE_RANK)))
 
 
 def _sqlite_classification(exc: sqlite3.Error) -> ExitClassification:
@@ -530,19 +801,35 @@ def _connect_target(
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     conn: sqlite3.Connection | None = None
     primary_error: Exception | None = None
+    cleanup_error: MigrationError | None = None
+    phases: tuple[PhaseResult, ...] = ()
+    schema_changed = False
+    migration_committed = False
     try:
         if before_open_hook is not None:
             before_open_hook()
+        _verify_synthetic_parent_protected(target)
         _verify_identity_unchanged(target)
         conn = connect_factory(target.path, timeout=0.2, check_same_thread=False)
+        if target.synthetic_parent is not None:
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA temp_store=MEMORY")
+        _verify_synthetic_parent_protected(target)
         _verify_identity_unchanged(target)
 
         def guarded_before_ddl() -> None:
             if before_ddl_hook is not None:
                 before_ddl_hook()
+            _verify_synthetic_parent_protected(target)
             _verify_identity_unchanged(target)
 
-        return _migrate_borrowed_connection(conn, selected=selected, before_ddl_hook=guarded_before_ddl)
+        phases, schema_changed = _migrate_borrowed_connection(
+            conn,
+            selected=selected,
+            before_ddl_hook=guarded_before_ddl,
+        )
+        migration_committed = True
+        return phases, schema_changed
     except Exception as exc:
         primary_error = exc
         raise
@@ -552,18 +839,54 @@ def _connect_target(
                 conn.close()
             except Exception as close_error:
                 if primary_error is not None:
-                    _attach_cleanup_note(primary_error, "close")
+                    _mark_cleanup_failure(primary_error, "close")
                 else:
-                    raise MigrationError(
+                    cleanup_error = MigrationError(
                         ExitClassification.CLEANUP_FAILED,
                         detail_code="CONNECTION_CLOSE_FAILED",
-                    ) from close_error
+                    )
+                    _attach_migration_state(
+                        cleanup_error,
+                        commit_state=MigrationCommitState.COMMITTED,
+                        schema_may_have_changed=True,
+                        cleanup_failed=True,
+                        safe_to_rerun=True,
+                        phases=phases,
+                        schema_changed=schema_changed,
+                    )
+                    cleanup_error.__cause__ = close_error
+        try:
+            _restore_synthetic_parent(target)
+        except Exception as restore_error:
+            if primary_error is not None:
+                _mark_cleanup_failure(primary_error, "synthetic_parent_restore")
+            elif cleanup_error is not None:
+                _mark_cleanup_failure(cleanup_error, "synthetic_parent_restore")
+            else:
+                cleanup_error = MigrationError(
+                    ExitClassification.CLEANUP_FAILED,
+                    detail_code="SYNTHETIC_PARENT_RESTORE_FAILED",
+                )
+                _attach_migration_state(
+                    cleanup_error,
+                    commit_state=(
+                        MigrationCommitState.COMMITTED if migration_committed else MigrationCommitState.NOT_STARTED
+                    ),
+                    schema_may_have_changed=migration_committed,
+                    cleanup_failed=True,
+                    safe_to_rerun=True,
+                    phases=phases,
+                    schema_changed=schema_changed,
+                )
+                cleanup_error.__cause__ = restore_error
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def run_migration(
     *,
     db_path: str | None,
-    allow_create: bool = False,
+    synthetic_create: bool = False,
     components: str | None = None,
     _identity: ProcessIdentity | None = None,
     _connect_factory: Callable[..., sqlite3.Connection] = sqlite3.connect,
@@ -573,12 +896,13 @@ def run_migration(
 ) -> MigrationResult:
     phases: tuple[PhaseResult, ...] = ()
     target: DatabaseTarget | None = None
+    commit_completed = False
     try:
         selected = _parse_components(components)
         if _target_resolver is None:
-            target = _resolve_db_path(db_path, allow_create=allow_create, identity=_identity)
+            target = _resolve_db_path(db_path, synthetic_create=synthetic_create, identity=_identity)
         else:
-            target = _target_resolver(db_path, allow_create, _identity)
+            target = _target_resolver(db_path, synthetic_create, _identity)
         phases, schema_changed = _connect_target(
             target,
             selected=selected,
@@ -586,6 +910,7 @@ def run_migration(
             before_open_hook=_before_open_hook,
             before_ddl_hook=_before_ddl_hook,
         )
+        commit_completed = True
         mode_after, owner_after = _verify_identity_unchanged(target)
         return MigrationResult(
             status="success",
@@ -593,6 +918,10 @@ def run_migration(
             database_path_classification=target.classification,
             phases=phases,
             schema_changed=schema_changed,
+            migration_commit_state=MigrationCommitState.COMMITTED.value,
+            schema_may_have_changed=True,
+            cleanup_failed=False,
+            safe_to_rerun=True,
             mode_before=target.mode_before,
             mode_after=mode_after,
             owner_before=target.owner_before,
@@ -600,6 +929,15 @@ def run_migration(
         )
     except Exception as exc:
         migration_error = _as_migration_error(exc)
+        commit_state, may_have_changed, cleanup_failed, safe_to_rerun, state_phases, state_changed = (
+            _migration_state_from_error(exc)
+        )
+        if commit_completed and commit_state is MigrationCommitState.NOT_STARTED:
+            commit_state = MigrationCommitState.COMMITTED
+            may_have_changed = True
+            safe_to_rerun = True
+        if state_phases:
+            phases = state_phases
         failed_phases = list(phases)
         if migration_error.phase and not any(phase.name == migration_error.phase for phase in failed_phases):
             failed_phases.append(
@@ -615,13 +953,23 @@ def run_migration(
                 mode_after, owner_after = _verify_identity_unchanged(target)
             except MigrationError:
                 pass
+        final_classification = migration_error.classification
+        if cleanup_failed:
+            final_classification = _select_exit_classification(
+                final_classification,
+                ExitClassification.CLEANUP_FAILED,
+            )
         return MigrationResult(
             status="failed",
-            exit_code=migration_error.exit_code,
+            exit_code=EXIT_CODES[final_classification],
             database_path_classification=target.classification if target else "invalid",
             phases=tuple(failed_phases),
-            schema_changed=any(phase.changed for phase in failed_phases),
-            exit_classification=migration_error.classification.value,
+            schema_changed=state_changed or any(phase.changed for phase in failed_phases),
+            migration_commit_state=commit_state.value,
+            schema_may_have_changed=may_have_changed,
+            cleanup_failed=cleanup_failed,
+            safe_to_rerun=safe_to_rerun,
+            exit_classification=final_classification.value,
             error_type=migration_error.detail_code,
             mode_before=target.mode_before if target else None,
             mode_after=mode_after,
@@ -638,6 +986,10 @@ def _print_text(result: MigrationResult) -> None:
     print(f"database_path_classification={result.database_path_classification}")
     print(f"schema_changed={str(result.schema_changed).lower()}")
     print(f"data_backfilled={str(result.data_backfilled).lower()}")
+    print(f"MIGRATION_COMMIT_STATE={result.migration_commit_state}")
+    print(f"SCHEMA_MAY_HAVE_CHANGED={str(result.schema_may_have_changed).lower()}")
+    print(f"CLEANUP_FAILED={str(result.cleanup_failed).lower()}")
+    print(f"SAFE_TO_RERUN={str(result.safe_to_rerun).lower()}")
     for phase in result.phases:
         prefix = phase.name.upper()
         print(f"{prefix}_SCHEMA_STATUS={phase.schema_state or phase.status}")
@@ -649,13 +1001,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="HealBite migration-only schema CLI",
         epilog=(
-            "Exit classifications: SUCCESS=0, INVALID_ARGUMENT=2, UNSAFE_PATH=3, MISSING_DATABASE=4, "
-            "INCOMPATIBLE_SCHEMA=5, DATABASE_LOCKED=6, DATABASE_READ_ONLY=7, "
-            "DATABASE_PERMISSION_DENIED=8, MIGRATION_FAILED=9, CLEANUP_FAILED=10, CONTRACT_DRIFT=11."
+            "Exit precedence (highest first): INVALID_ARGUMENT, UNSAFE_PATH, MISSING_DATABASE, "
+            "DATABASE_PERMISSION_DENIED, DATABASE_READ_ONLY, DATABASE_LOCKED, INCOMPATIBLE_SCHEMA, "
+            "MIGRATION_FAILED, CLEANUP_FAILED, CONTRACT_DRIFT. Exit codes: SUCCESS=0, "
+            "INVALID_ARGUMENT=2, UNSAFE_PATH=3, MISSING_DATABASE=4, INCOMPATIBLE_SCHEMA=5, "
+            "DATABASE_LOCKED=6, DATABASE_READ_ONLY=7, DATABASE_PERMISSION_DENIED=8, "
+            "MIGRATION_FAILED=9, CLEANUP_FAILED=10, CONTRACT_DRIFT=11."
         ),
     )
     parser.add_argument("--db-path", required=True, help="Absolute SQLite DB path to migrate")
-    parser.add_argument("--allow-create", action="store_true", help="Create a missing explicit DB path with mode 0600")
+    parser.add_argument(
+        "--synthetic-create",
+        action="store_true",
+        help="Create a test-only DB in an owned private 0700 directory; forbidden for production",
+    )
     parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping")
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
     return parser
@@ -666,7 +1025,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     result = run_migration(
         db_path=args.db_path,
-        allow_create=bool(args.allow_create),
+        synthetic_create=bool(args.synthetic_create),
         components=args.components,
     )
     if args.json:

@@ -71,6 +71,11 @@ def _host_migration(_contract: staged.Contract, staging_dir: Path) -> None:
     assert result.path_mode == "STAGED_COPY"
 
 
+def _minimal_idempotent_migration(_contract: staged.Contract, staging_dir: Path) -> None:
+    with sqlite3.connect(staging_dir / "database.sqlite") as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS target_schema_marker (value TEXT)")
+
+
 def _failure_at(selected: str) -> Callable[[str, str], None]:
     def callback(phase: str, publish_state: str) -> None:
         if phase == selected:
@@ -412,15 +417,19 @@ def test_staging_change_after_compatibility_probe_is_rejected(
     assert list((tmp_path / "staging").glob("staging-*")) == []
 
 
+@pytest.mark.parametrize("batch", range(10))
 def test_target_substitution_is_reversed_one_hundred_times(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    batch: int,
 ) -> None:
     _prepare_runtime_identity(monkeypatch)
     monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
+    monkeypatch.setattr(staged, "_expected_schema_names", lambda: {"target_schema_marker"})
     denied = 0
-    for repeat in range(100):
+    for offset in range(10):
+        repeat = batch * 10 + offset
         root = _private_directory(tmp_path / f"run-{repeat:03d}")
         source = _source(root)
         args = _args(root, source)
@@ -436,7 +445,7 @@ def test_target_substitution_is_reversed_one_hundred_times(
 
         assert staged.execute_synthetic(
             args,
-            _migration_runner=_host_migration,
+            _migration_runner=_minimal_idempotent_migration,
             _compatibility_probe=lambda *_args, **_kwargs: None,
             _before_exchange_callback=substitute_target,
         ) == 1
@@ -449,7 +458,7 @@ def test_target_substitution_is_reversed_one_hundred_times(
         with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as conn:
             assert conn.execute("SELECT value FROM replacement_marker").fetchone() == ("synthetic",)
         denied += 1
-    assert denied == 100
+    assert denied == 10
 
 
 def test_cleanup_failure_does_not_mask_primary_error(

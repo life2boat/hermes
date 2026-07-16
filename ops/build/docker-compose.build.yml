@@ -1,0 +1,8 @@
+services:
+  hermes-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HERMES_GIT_SHA: ${HERMES_GIT_SHA:?HERMES_GIT_SHA must be a full 40-character lowercase Git SHA}
+    image: ${HERMES_IMAGE:?HERMES_IMAGE must be an explicit immutable image tag}

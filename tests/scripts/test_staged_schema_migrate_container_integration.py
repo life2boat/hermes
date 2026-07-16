@@ -25,6 +25,9 @@ def test_hardened_command_contract(scenario: str) -> None:
     command = harness.build_docker_command(IMMUTABLE_IMAGE, scenario)
 
     assert command[:3] == ("docker", "run", "--rm")
+    assert command.count("--interactive") == 1
+    assert "--tty" not in command
+    assert "-t" not in command
     assert _flag_value(command, "--network") == "none"
     assert "--read-only" in command
     assert _flag_value(command, "--cap-drop") == "ALL"
@@ -69,6 +72,11 @@ def test_fixture_is_delivered_over_standard_input() -> None:
 
     assert harness.run_scenario(IMMUTABLE_IMAGE, "import", runner=runner)["status"] == "pass"
     assert observed["input"] == harness.HARNESS_PROGRAM
+    assert observed["input"]
+    observed_command = observed["command"]
+    assert isinstance(observed_command, tuple)
+    assert observed_command.count("--interactive") == 1
+    assert observed_command[-3:] == ("-B", "-", "import")
     assert observed["text"] is True
     assert observed["capture_output"] is True
     assert observed["check"] is False

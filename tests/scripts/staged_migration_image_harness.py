@@ -147,6 +147,7 @@ def build_docker_command(image_id: str, scenario: str) -> tuple[str, ...]:
         "docker",
         "run",
         "--rm",
+        "--interactive",
         "--network",
         "none",
         "--read-only",

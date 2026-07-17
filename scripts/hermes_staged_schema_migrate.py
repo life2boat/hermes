@@ -32,6 +32,8 @@ if str(REPO_ROOT) not in sys.path:
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
+DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+OPERATION_ID_RE = re.compile(r"[0-9a-f]{32}")
 MANIFEST_STATES = (
     "PLANNED",
     "BACKED_UP",
@@ -61,8 +63,10 @@ PUBLISH_MAY_HAVE_CHANGED = frozenset(
         "EXCHANGE_COMPLETED_NOT_VERIFIED",
         "EXCHANGE_VERIFIED_NOT_FSYNCED",
         "PARENT_FSYNCED",
+        "FINAL_VERIFIED",
     }
 )
+_PRODUCTION_AUTHORIZATION_SEAL = object()
 
 
 class OrchestratorError(RuntimeError):
@@ -101,6 +105,13 @@ class SourceIdentity:
     sha256: str
 
 
+@dataclass(frozen=True)
+class TargetSchemaContract:
+    version: str
+    fingerprint: str
+
+
+
 @dataclass
 class PinnedDatabase:
     path: Path
@@ -124,11 +135,61 @@ class SQLiteLease:
         finally:
             self.connection.close()
 
+@dataclass(frozen=True)
+class _ProductionAuthorization:
+    operation_id: str
+    plan_sha256: str
+    source_identity: SourceIdentity
+    image_revision: str
+    target_schema_version: str
+    target_schema_fingerprint: str
+    _seal: object = field(repr=False)
+
+
+@dataclass
+class _PreparedProductionExecution:
+    contract: Contract
+    source_identity: SourceIdentity
+    source_pin: PinnedDatabase | None
+    source_lease: SQLiteLease | None
+    backup_parent_fd: int | None
+    authorization: _ProductionAuthorization
+    consumed: bool = False
+
+    def take(
+        self,
+    ) -> tuple[PinnedDatabase, SQLiteLease, int]:
+        if self.consumed or self.source_pin is None or self.source_lease is None:
+            raise OrchestratorError("PRODUCTION_AUTHORIZATION_ALREADY_CONSUMED")
+        if self.backup_parent_fd is None:
+            raise OrchestratorError("PRODUCTION_AUTHORIZATION_DIRECTORY_MISSING")
+        self.consumed = True
+        source_pin = self.source_pin
+        source_lease = self.source_lease
+        backup_parent_fd = self.backup_parent_fd
+        self.source_pin = None
+        self.source_lease = None
+        self.backup_parent_fd = None
+        return source_pin, source_lease, backup_parent_fd
+
+    def close(self) -> None:
+        if self.source_lease is not None:
+            self.source_lease.close()
+            self.source_lease = None
+        if self.source_pin is not None:
+            self.source_pin.close()
+            self.source_pin = None
+        if self.backup_parent_fd is not None:
+            os.close(self.backup_parent_fd)
+            self.backup_parent_fd = None
+
+
 
 @dataclass
 class DurableManifest:
     path: Path
     payload: dict[str, Any]
+    parent_fd: int | None = field(default=None, repr=False)
     failure_callback: Callable[[str, str], None] | None = field(default=None, repr=False)
 
     def checkpoint(self, **updates: Any) -> None:
@@ -138,7 +199,12 @@ class DurableManifest:
     def _write(self) -> None:
         if self.failure_callback is not None:
             self.failure_callback("manifest_fsync", str(self.payload.get("PUBLISH_STATE", "BEFORE_EXCHANGE")))
-        _write_json_durable(self.path, self.payload)
+        if self.parent_fd is None:
+            _write_json_durable(self.path, self.payload)
+        else:
+            _write_json_durable_at(
+                self.parent_fd, self.path.name, self.payload
+            )
 
     def transition(self, state: str, **updates: Any) -> None:
         if state not in STATE_RANK:
@@ -209,6 +275,54 @@ def _write_json_durable(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _write_json_durable_at(
+    parent_fd: int,
+    name: str,
+    payload: dict[str, Any],
+) -> None:
+    if "/" in name or name in {"", ".", ".."}:
+        raise OrchestratorError("MANIFEST_NAME_INVALID")
+    encoded = (
+        json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n"
+    ).encode("ascii")
+    temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+    flags = (
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fd = -1
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        os.fsync(parent_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise OrchestratorError("MANIFEST_METADATA_INVALID")
 
 
 def _copy_fd_durable(
@@ -502,6 +616,105 @@ def _expected_schema_names() -> set[str]:
     return names
 
 
+def _target_schema_payload() -> dict[str, Any]:
+    from scripts.healbite_schema_migrate import (
+        _component_statements,
+        _expected_schema_objects,
+    )
+
+    objects: dict[str, tuple[str, str]] = {}
+    components = _component_statements()
+    for component in sorted(components):
+        for name, contract in _expected_schema_objects(
+            components[component]
+        ).items():
+            if name in objects and objects[name] != contract:
+                raise OrchestratorError("EXPECTED_SCHEMA_CONTRACT_DRIFT")
+            objects[name] = contract
+    return {
+        "components": sorted(components),
+        "objects": [
+            {
+                "name": name,
+                "type": objects[name][0],
+                "sql": objects[name][1],
+            }
+            for name in sorted(objects)
+        ],
+    }
+
+
+def _target_schema_contract() -> TargetSchemaContract:
+    payload = _target_schema_payload()
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    return TargetSchemaContract(
+        version=f"healbite-schema-{fingerprint[:16]}",
+        fingerprint=fingerprint,
+    )
+
+
+def _target_schema_fingerprint_connection(
+    conn: sqlite3.Connection,
+) -> str:
+    from scripts.healbite_schema_migrate import _normalize_schema_sql
+
+    payload = _target_schema_payload()
+    expected = {
+        str(item["name"]): (str(item["type"]), str(item["sql"]))
+        for item in payload["objects"]
+    }
+    placeholders = ",".join("?" for _ in expected)
+    rows = conn.execute(
+        f"SELECT type, name, sql FROM sqlite_master "
+        f"WHERE name IN ({placeholders})",
+        tuple(expected),
+    ).fetchall()
+    if len(rows) != len(expected):
+        raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
+    actual: dict[str, tuple[str, str]] = {}
+    for object_type, name, sql in rows:
+        object_name = str(name)
+        normalized = "" if sql is None else _normalize_schema_sql(str(sql))
+        actual[object_name] = (str(object_type).lower(), normalized)
+    if actual != expected:
+        raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
+    actual_payload = {
+        "components": payload["components"],
+        "objects": [
+            {
+                "name": name,
+                "type": actual[name][0],
+                "sql": actual[name][1],
+            }
+            for name in sorted(actual)
+        ],
+    }
+    encoded = json.dumps(
+        actual_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    if fingerprint != _target_schema_contract().fingerprint:
+        raise OrchestratorError("TARGET_SCHEMA_FINGERPRINT_MISMATCH")
+    return fingerprint
+
+
+def _target_schema_fingerprint(path: Path) -> str:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        return _target_schema_fingerprint_connection(conn)
+    finally:
+        conn.close()
+
 def _inspect_image(image_id: str, expected_revision: str | None = None) -> str:
     if not IMAGE_ID_RE.fullmatch(image_id):
         raise OrchestratorError("IMAGE_ID_INVALID")
@@ -703,6 +916,119 @@ def _preflight(contract: Contract, *, synthetic: bool, inspect_images: bool) -> 
         _inspect_image(contract.target_image_id, contract.expected_source_revision)
         _inspect_image(contract.previous_image_id)
     return identity
+
+def _issue_production_authorization(
+    *,
+    operation_id: str,
+    plan_sha256: str,
+    source_identity: SourceIdentity,
+    image_revision: str,
+    target_schema_version: str,
+    target_schema_fingerprint: str,
+) -> _ProductionAuthorization:
+    expected_target = _target_schema_contract()
+    if (
+        OPERATION_ID_RE.fullmatch(operation_id) is None
+        or DIGEST_RE.fullmatch(plan_sha256) is None
+        or SHA_RE.fullmatch(image_revision) is None
+        or DIGEST_RE.fullmatch(source_identity.sha256) is None
+        or target_schema_version != expected_target.version
+        or target_schema_fingerprint != expected_target.fingerprint
+    ):
+        raise OrchestratorError("PRODUCTION_AUTHORIZATION_INVALID")
+    return _ProductionAuthorization(
+        operation_id=operation_id,
+        plan_sha256=plan_sha256,
+        source_identity=source_identity,
+        image_revision=image_revision,
+        target_schema_version=target_schema_version,
+        target_schema_fingerprint=target_schema_fingerprint,
+        _seal=_PRODUCTION_AUTHORIZATION_SEAL,
+    )
+
+
+def _validate_production_authorization(
+    authorization: object,
+    *,
+    contract: Contract,
+    expected_source_identity: SourceIdentity,
+) -> _ProductionAuthorization:
+    if (
+        not isinstance(authorization, _ProductionAuthorization)
+        or authorization._seal is not _PRODUCTION_AUTHORIZATION_SEAL
+        or authorization.source_identity != expected_source_identity
+        or authorization.image_revision != contract.expected_source_revision
+    ):
+        raise OrchestratorError("PRODUCTION_AUTHORIZATION_REQUIRED")
+    expected_target = _target_schema_contract()
+    if (
+        authorization.target_schema_version != expected_target.version
+        or authorization.target_schema_fingerprint
+        != expected_target.fingerprint
+    ):
+        raise OrchestratorError("PRODUCTION_AUTHORIZATION_SCHEMA_DRIFT")
+    return authorization
+
+
+def _prepare_authorized_production_execution(
+    args: argparse.Namespace,
+    *,
+    authorization: object,
+    expected_source_identity: SourceIdentity,
+    backup_parent_fd: int,
+) -> _PreparedProductionExecution:
+    contract = _contract(args, synthetic=False)
+    checked = _validate_production_authorization(
+        authorization,
+        contract=contract,
+        expected_source_identity=expected_source_identity,
+    )
+    try:
+        descriptor_metadata = os.fstat(backup_parent_fd)
+        path_metadata = contract.backup_dir.lstat()
+    except OSError as exc:
+        raise OrchestratorError("BACKUP_PARENT_PIN_INVALID") from exc
+    if (
+        not stat.S_ISDIR(descriptor_metadata.st_mode)
+        or not stat.S_ISDIR(path_metadata.st_mode)
+        or (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+        != (path_metadata.st_dev, path_metadata.st_ino)
+    ):
+        raise OrchestratorError("BACKUP_PARENT_PIN_INVALID")
+    pinned_backup_parent_fd = os.dup(backup_parent_fd)
+    os.set_inheritable(pinned_backup_parent_fd, False)
+    source_identity = _preflight(
+        contract,
+        synthetic=False,
+        inspect_images=True,
+    )
+    if source_identity != expected_source_identity:
+        raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
+    source_pin: PinnedDatabase | None = None
+    source_lease: SQLiteLease | None = None
+    try:
+        source_pin = _open_pinned_database(
+            contract.source_db,
+            expected=source_identity,
+        )
+        source_lease = _acquire_sqlite_lease(source_pin, label="SOURCE")
+        if _identity_from_fd(source_pin.file_fd) != source_identity:
+            raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
+        return _PreparedProductionExecution(
+            contract=contract,
+            source_identity=source_identity,
+            source_pin=source_pin,
+            source_lease=source_lease,
+            backup_parent_fd=pinned_backup_parent_fd,
+            authorization=checked,
+        )
+    except Exception:
+        os.close(pinned_backup_parent_fd)
+        if source_lease is not None:
+            source_lease.close()
+        if source_pin is not None:
+            source_pin.close()
+        raise
 
 
 def _run_target_migration(contract: Contract, staging_dir: Path) -> None:
@@ -920,35 +1246,85 @@ def plan(args: argparse.Namespace) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class _SyntheticExecutionHooks:
+    phase_callback: Callable[[str], None] | None = None
+    failure_callback: Callable[[str, str], None] | None = None
+    migration_runner: Callable[[Contract, Path], None] = _run_target_migration
+    compatibility_probe: Callable[[Contract, Path], Any] = _run_previous_image_probe
+    before_exchange_callback: Callable[[], None] | None = None
+    lifecycle_callback: Callable[[str, Path], None] | None = None
+
+
 def _execute_staged(
     args: argparse.Namespace,
     *,
     synthetic: bool,
     operation_id: str | None = None,
     expected_source_identity: SourceIdentity | None = None,
-    _phase_callback: Callable[[str], None] | None = None,
-    _failure_callback: Callable[[str, str], None] | None = None,
-    _migration_runner: Callable[[Contract, Path], None] = _run_target_migration,
-    _compatibility_probe: Callable[[Contract, Path], Any] = _run_previous_image_probe,
-    _before_exchange_callback: Callable[[], None] | None = None,
-    _lifecycle_callback: Callable[[str, Path], None] | None = None,
+    _prepared_production: _PreparedProductionExecution | None = None,
+    _synthetic_hooks: _SyntheticExecutionHooks | None = None,
 ) -> int:
+    if synthetic:
+        if _prepared_production is not None:
+            raise OrchestratorError("SYNTHETIC_PRODUCTION_CONTEXT_REFUSED")
+        hooks = _synthetic_hooks or _SyntheticExecutionHooks()
+        contract = _contract(args, synthetic=True)
+        source_identity = _preflight(
+            contract,
+            synthetic=True,
+            inspect_images=True,
+        )
+        if (
+            expected_source_identity is not None
+            and source_identity != expected_source_identity
+        ):
+            raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
+    else:
+        if _synthetic_hooks is not None:
+            raise OrchestratorError("PRODUCTION_TEST_HOOK_REFUSED")
+        if _prepared_production is None:
+            raise OrchestratorError("PRODUCTION_AUTHORIZATION_REQUIRED")
+        contract = _prepared_production.contract
+        source_identity = _prepared_production.source_identity
+        authorization = _validate_production_authorization(
+            _prepared_production.authorization,
+            contract=contract,
+            expected_source_identity=source_identity,
+        )
+        if (
+            operation_id is not None
+            and operation_id != authorization.operation_id
+        ):
+            raise OrchestratorError("PRODUCTION_AUTHORIZATION_MISMATCH")
+        if (
+            expected_source_identity is not None
+            and expected_source_identity != source_identity
+        ):
+            raise OrchestratorError("PRODUCTION_AUTHORIZATION_MISMATCH")
+        operation_id = authorization.operation_id
+        hooks = _SyntheticExecutionHooks()
+    target_schema = _target_schema_contract()
+
+    phase_callback = hooks.phase_callback
+    failure_callback = hooks.failure_callback
+    migration_runner = hooks.migration_runner
+    compatibility_probe = hooks.compatibility_probe
+    before_exchange_callback = hooks.before_exchange_callback
+    lifecycle_callback = hooks.lifecycle_callback
+
     def phase(name: str) -> None:
-        if _phase_callback is not None:
-            _phase_callback(name)
+        if phase_callback is not None:
+            phase_callback(name)
 
     def fail(name: str, *, publish_state: str = "BEFORE_EXCHANGE") -> None:
-        if _failure_callback is not None:
-            _failure_callback(name, publish_state)
+        if failure_callback is not None:
+            failure_callback(name, publish_state)
 
     def lifecycle(name: str, path: Path) -> None:
-        if _lifecycle_callback is not None:
-            _lifecycle_callback(name, path)
+        if lifecycle_callback is not None:
+            lifecycle_callback(name, path)
 
-    contract = _contract(args, synthetic=synthetic)
-    source_identity = _preflight(contract, synthetic=synthetic, inspect_images=True)
-    if expected_source_identity is not None and source_identity != expected_source_identity:
-        raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
     operation_id = operation_id or uuid.uuid4().hex
     backup = contract.backup_dir / f"backup-{operation_id}.sqlite"
     staging_dir = contract.staging_root / f"staging-{operation_id}"
@@ -958,12 +1334,22 @@ def _execute_staged(
     source_lease: SQLiteLease | None = None
     staging_pin: PinnedDatabase | None = None
     staging_lease: SQLiteLease | None = None
+    manifest_parent_fd: int | None = None
     manifest: DurableManifest | None = None
     publish_state = "BEFORE_EXCHANGE"
     exchange_started = False
     try:
-        source_pin = _open_pinned_database(contract.source_db, expected=source_identity)
-        source_lease = _acquire_sqlite_lease(source_pin, label="SOURCE")
+        if _prepared_production is not None:
+            (
+                source_pin,
+                source_lease,
+                manifest_parent_fd,
+            ) = _prepared_production.take()
+        else:
+            source_pin = _open_pinned_database(
+                contract.source_db, expected=source_identity
+            )
+            source_lease = _acquire_sqlite_lease(source_pin, label="SOURCE")
         if _identity_from_fd(source_pin.file_fd) != source_identity:
             raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
         baseline_objects, baseline_counts = _database_snapshot_connection(source_lease.connection)
@@ -985,15 +1371,18 @@ def _execute_staged(
                 "STAGING_PATH": str(staging_db),
                 "STAGING_SHA256": None,
                 "TARGET_PATH": str(contract.source_db),
+                "TARGET_SCHEMA_VERSION": target_schema.version,
+                "TARGET_SCHEMA_FINGERPRINT": target_schema.fingerprint,
                 "PUBLISH_STATE": publish_state,
                 "TARGET_MAY_HAVE_CHANGED": False,
                 "AUTOMATIC_RETRY_ALLOWED": False,
                 "MANUAL_RECOVERY_REQUIRED": False,
                 "STATE": "PLANNED",
             },
+            parent_fd=manifest_parent_fd,
         )
         manifest.transition("PLANNED")
-        manifest.failure_callback = _failure_callback
+        manifest.failure_callback = failure_callback
         phase("planned")
         lifecycle("source_lease_acquired", contract.source_db)
 
@@ -1003,7 +1392,7 @@ def _execute_staged(
             uid=source_identity.uid,
             gid=source_identity.gid,
             phase_prefix="backup",
-            failure_callback=_failure_callback,
+            failure_callback=failure_callback,
         )
         backup_sha = _sha256(backup)
         if backup_sha != source_identity.sha256 or _sqlite_validation(backup) != ("ok", 0):
@@ -1027,7 +1416,7 @@ def _execute_staged(
             uid=RUNTIME_UID,
             gid=RUNTIME_GID,
             phase_prefix="staging",
-            failure_callback=_failure_callback,
+            failure_callback=failure_callback,
         )
         if _sha256(staging_db) != backup_sha:
             raise OrchestratorError("STAGING_SOURCE_MISMATCH")
@@ -1036,12 +1425,20 @@ def _execute_staged(
 
         for run_number in range(1, 4):
             before = _database_snapshot(staging_db) if run_number > 1 else None
-            _migration_runner(contract, staging_dir)
+            migration_runner(contract, staging_dir)
             after = _database_snapshot(staging_db)
             if before is not None and after != before:
                 raise OrchestratorError("MIGRATION_NOT_IDEMPOTENT")
+        migrated_target_fingerprint = _target_schema_fingerprint(staging_db)
+        if migrated_target_fingerprint != target_schema.fingerprint:
+            raise OrchestratorError("TARGET_SCHEMA_FINGERPRINT_MISMATCH")
         phase("migration_committed")
-        manifest.transition("MIGRATED", STAGING_SHA256=_sha256(staging_db))
+        manifest.transition(
+            "MIGRATED",
+            STAGING_SHA256=_sha256(staging_db),
+            TARGET_SCHEMA_VERSION=target_schema.version,
+            TARGET_SCHEMA_FINGERPRINT=migrated_target_fingerprint,
+        )
         lifecycle("migration_complete", contract.source_db)
 
         integrity, foreign_keys = _sqlite_validation(staging_db)
@@ -1078,7 +1475,7 @@ def _execute_staged(
         lifecycle("validation_complete", contract.source_db)
 
         before_previous_probe = _sha256(staging_db)
-        previous_startup = _compatibility_probe(contract, staging_dir)
+        previous_startup = compatibility_probe(contract, staging_dir)
         fail("previous_image_startup")
         if _sha256(staging_db) != before_previous_probe:
             raise OrchestratorError("PREVIOUS_IMAGE_MUTATED_STAGING")
@@ -1118,8 +1515,8 @@ def _execute_staged(
         publish_state = "EXCHANGE_STARTED"
         phase("exchange_started")
         exchange_started = True
-        if _before_exchange_callback is not None:
-            _before_exchange_callback()
+        if before_exchange_callback is not None:
+            before_exchange_callback()
         pre_exchange_target = _inode_at(source_pin.parent_fd, source_pin.path.name)
         pre_exchange_staging = _inode_at(staging_pin.parent_fd, staging_pin.path.name)
         _rename_exchange(
@@ -1175,6 +1572,11 @@ def _execute_staged(
             raise OrchestratorError("PUBLISHED_TARGET_IDENTITY_CHANGED", publish_state=publish_state)
         if _sqlite_validation_connection(staging_lease.connection) != ("ok", 0):
             raise OrchestratorError("PUBLISHED_DATABASE_INVALID", publish_state=publish_state)
+        final_target_fingerprint = _target_schema_fingerprint_connection(
+            staging_lease.connection
+        )
+        if final_target_fingerprint != target_schema.fingerprint:
+            raise OrchestratorError("TARGET_SCHEMA_FINGERPRINT_MISMATCH")
         fail("final_verification", publish_state=publish_state)
         lifecycle("final_verification", contract.source_db)
         publish_state = "FINAL_VERIFIED"
@@ -1185,6 +1587,8 @@ def _execute_staged(
             AUTOMATIC_RETRY_ALLOWED=False,
             MANUAL_RECOVERY_REQUIRED=False,
             DISPLACED_SOURCE_PATH=str(staging_db),
+            TARGET_SCHEMA_VERSION=target_schema.version,
+            TARGET_SCHEMA_FINGERPRINT=final_target_fingerprint,
         )
         phase("final_verified")
         _json_print(
@@ -1235,6 +1639,10 @@ def _execute_staged(
                 "target_parent_fsynced": True,
                 "manifest_state": "VERIFIED",
                 "publish_state": publish_state,
+                "target_schema_version": target_schema.version,
+                "target_schema_fingerprint_match": (
+                    final_target_fingerprint == target_schema.fingerprint
+                ),
                 "target_may_have_changed": True,
                 "automatic_retry_allowed": False,
                 "manual_recovery_required": False,
@@ -1245,6 +1653,11 @@ def _execute_staged(
         error = exc if isinstance(exc, OrchestratorError) else OrchestratorError(type(exc).__name__)
         if exchange_started and publish_state == "BEFORE_EXCHANGE":
             publish_state = error.publish_state
+        publish_uncertain = (
+            exchange_started
+            and publish_state != "EXCHANGE_REVERSED"
+        )
+        failure_code = "PUBLISH_UNCERTAIN" if publish_uncertain else error.code
         if not exchange_started:
             if staging_lease is not None:
                 staging_lease.close()
@@ -1262,7 +1675,7 @@ def _execute_staged(
                     _cleanup_operation_staging(
                         manifest,
                         contract.staging_root,
-                        failure_callback=_failure_callback,
+                        failure_callback=failure_callback,
                     )
                 except Exception as cleanup_error:
                     cleanup_failed = True
@@ -1272,7 +1685,11 @@ def _execute_staged(
                         else type(cleanup_error).__name__
                     )
             target_may_have_changed = _target_may_have_changed(publish_state)
-            manual_recovery_required = exchange_started or cleanup_failed
+            if publish_uncertain:
+                target_may_have_changed = True
+            manual_recovery_required = (
+                publish_uncertain or publish_state == "EXCHANGE_REVERSED" or cleanup_failed
+            )
             try:
                 manifest.transition(
                     "FAILED",
@@ -1280,7 +1697,8 @@ def _execute_staged(
                     TARGET_MAY_HAVE_CHANGED=target_may_have_changed,
                     AUTOMATIC_RETRY_ALLOWED=False,
                     MANUAL_RECOVERY_REQUIRED=manual_recovery_required,
-                    ERROR_TYPE=error.code,
+                    ERROR_TYPE=failure_code,
+                    FAILURE_REASON=error.code if publish_uncertain else None,
                     CLEANUP_FAILED=cleanup_failed,
                     CLEANUP_ERROR_TYPE=cleanup_error_type,
                 )
@@ -1288,11 +1706,15 @@ def _execute_staged(
                 manifest_write_failed = True
         else:
             target_may_have_changed = _target_may_have_changed(publish_state)
-            manual_recovery_required = exchange_started
+            if publish_uncertain:
+                target_may_have_changed = True
+            manual_recovery_required = publish_uncertain or publish_state == "EXCHANGE_REVERSED"
         _json_print(
             {
                 "status": "FAILED",
-                "error_type": error.code,
+                "error_type": failure_code,
+                "exit_classification": failure_code,
+                "failure_reason": error.code if publish_uncertain else None,
                 "publish_state": publish_state,
                 "target_may_have_changed": target_may_have_changed,
                 "automatic_retry_allowed": False,
@@ -1314,6 +1736,8 @@ def _execute_staged(
             staging_pin.close()
         if source_pin is not None:
             source_pin.close()
+        if manifest_parent_fd is not None:
+            os.close(manifest_parent_fd)
 
 
 def execute_synthetic(
@@ -1326,34 +1750,33 @@ def execute_synthetic(
     _before_exchange_callback: Callable[[], None] | None = None,
     _lifecycle_callback: Callable[[str, Path], None] | None = None,
 ) -> int:
+    hooks = _SyntheticExecutionHooks(
+        phase_callback=_phase_callback,
+        failure_callback=_failure_callback,
+        migration_runner=_migration_runner,
+        compatibility_probe=_compatibility_probe,
+        before_exchange_callback=_before_exchange_callback,
+        lifecycle_callback=_lifecycle_callback,
+    )
     return _execute_staged(
         args,
         synthetic=True,
-        _phase_callback=_phase_callback,
-        _failure_callback=_failure_callback,
-        _migration_runner=_migration_runner,
-        _compatibility_probe=_compatibility_probe,
-        _before_exchange_callback=_before_exchange_callback,
-        _lifecycle_callback=_lifecycle_callback,
+        _synthetic_hooks=hooks,
     )
 
 
-def execute_production_staged(
+def _execute_authorized_staged(
     args: argparse.Namespace,
     *,
-    operation_id: str,
-    expected_source_identity: SourceIdentity,
-    phase_callback: Callable[[str], None] | None = None,
+    prepared: _PreparedProductionExecution,
 ) -> int:
-    """Run the staged implementation after an external production gate authorizes it."""
-    if re.fullmatch(r"[0-9a-f]{32}", operation_id) is None:
-        raise OrchestratorError("OPERATION_ID_INVALID")
+    """Run production only through the private, lease-holding authorization context."""
     return _execute_staged(
         args,
         synthetic=False,
-        operation_id=operation_id,
-        expected_source_identity=expected_source_identity,
-        _phase_callback=phase_callback,
+        operation_id=prepared.authorization.operation_id,
+        expected_source_identity=prepared.source_identity,
+        _prepared_production=prepared,
     )
 
 

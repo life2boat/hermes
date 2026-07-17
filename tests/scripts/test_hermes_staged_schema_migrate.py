@@ -71,6 +71,66 @@ def _host_migration(_contract: staged.Contract, staging_dir: Path) -> None:
     assert result.path_mode == "STAGED_COPY"
 
 
+def _fully_migrated_source(root: Path) -> Path:
+    source = _source(root)
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(source),
+        staged_copy=True,
+    )
+    assert result.exit_code == 0
+    assert result.path_mode == "STAGED_COPY"
+    return source
+
+
+def test_target_schema_fingerprint_matches_canonical_migration(
+    tmp_path: Path,
+) -> None:
+    source = _fully_migrated_source(tmp_path)
+    contract = staged._target_schema_contract()
+
+    assert staged._target_schema_fingerprint(source) == contract.fingerprint
+    assert contract.version == f"healbite-schema-{contract.fingerprint[:16]}"
+
+
+def test_target_schema_fingerprint_rejects_missing_required_object(
+    tmp_path: Path,
+) -> None:
+    source = _fully_migrated_source(tmp_path)
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "DROP TABLE household_shopping_item_contributions"
+        )
+
+    with pytest.raises(
+        staged.OrchestratorError,
+        match="TARGET_SCHEMA_CONTRACT_MISMATCH",
+    ):
+        staged._target_schema_fingerprint(source)
+
+
+def test_target_schema_fingerprint_rejects_incompatible_object_definition(
+    tmp_path: Path,
+) -> None:
+    source = _fully_migrated_source(tmp_path)
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "DROP INDEX "
+            "idx_weekly_menu_ingredients_entry_position_unique"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX "
+            "idx_weekly_menu_ingredients_entry_position_unique "
+            "ON household_weekly_menu_entry_ingredients "
+            "(position, menu_entry_id)"
+        )
+
+    with pytest.raises(
+        staged.OrchestratorError,
+        match="TARGET_SCHEMA_CONTRACT_MISMATCH",
+    ):
+        staged._target_schema_fingerprint(source)
+
+
 def _minimal_idempotent_migration(_contract: staged.Contract, staging_dir: Path) -> None:
     with sqlite3.connect(staging_dir / "database.sqlite") as connection:
         connection.execute("CREATE TABLE IF NOT EXISTS target_schema_marker (value TEXT)")
@@ -311,6 +371,8 @@ def test_post_publish_fsync_failure_is_unknown_and_not_retried(
     ) == 1
 
     payload = json.loads(capsys.readouterr().out)
+    assert payload["error_type"] == "PUBLISH_UNCERTAIN"
+    assert payload["exit_classification"] == "PUBLISH_UNCERTAIN"
     assert payload["publish_state"] == "EXCHANGE_VERIFIED_NOT_FSYNCED"
     assert payload["target_may_have_changed"] is True
     assert payload["automatic_retry_allowed"] is False
@@ -427,6 +489,12 @@ def test_target_substitution_is_reversed_one_hundred_times(
     _prepare_runtime_identity(monkeypatch)
     monkeypatch.setattr(staged, "_inspect_image", lambda *_args, **_kwargs: REVISION)
     monkeypatch.setattr(staged, "_expected_schema_names", lambda: {"target_schema_marker"})
+    target_schema = staged._target_schema_contract()
+    monkeypatch.setattr(
+        staged,
+        "_target_schema_fingerprint",
+        lambda _path: target_schema.fingerprint,
+    )
     denied = 0
     for offset in range(10):
         repeat = batch * 10 + offset

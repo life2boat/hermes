@@ -144,6 +144,15 @@ def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
             "separate explicit `plan` and `execute` subcommands",
             "production execution is disabled by default",
             "plan and execute are separate",
+            "plan and execute must run as root",
+            "--repository-root",
+            "<repository-root>/deploy/hermes-production.json",
+            "caller-selected contract paths are not accepted",
+            "explicit JSON booleans false",
+            "target schema version and fingerprint are derived",
+            "root-owned, mode 0700 directories",
+            "before creating its",
+            "QUIESCENCE_FAILED with zero execute",
             "--expected-plan-sha256",
             "--confirm-operation-id",
             "--confirm-source-sha256",
@@ -162,21 +171,20 @@ def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
         ],
         label="hash-bound production staged-copy contract",
     )
-    ordered_states = [
-        "PLANNED",
-        "PREFLIGHT_VERIFIED",
-        "BACKUP_DURABLE",
-        "STAGING_MIGRATED",
-        "COMPATIBILITY_VERIFIED",
-        "QUIESCENCE_HELD",
-        "EXCHANGE_STARTED",
-        "EXCHANGE_VERIFIED",
-        "PARENT_FSYNCED",
-        "FINAL_VERIFIED",
-        "COMPLETED",
-    ]
-    indices = [_index(text, state) for state in ordered_states]
-    assert indices == sorted(indices)
+    _require(
+        text,
+        [
+            "QUIESCENCE_HELD -> COMPLETED",
+            "PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED",
+            "internal manifest directory descriptors remain pinned",
+            "Every exception after `EXCHANGE_STARTED`",
+            "sanitized machine-readable stderr result",
+            "Only a verified reverse exchange",
+        ],
+        label="ordered execution and uncertainty contract",
+    )
+    assert "--deployment-contract" not in text
+    assert "--target-schema-version" not in text
     assert '--mount type=bind,src="/home/hermes/healbite.db"' not in text
 
 

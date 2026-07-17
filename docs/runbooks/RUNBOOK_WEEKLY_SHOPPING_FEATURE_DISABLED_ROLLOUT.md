@@ -514,21 +514,35 @@ container that implementation invokes only
 Required contract:
 
 ```text
-production plan requires explicit --db-path, --backup-parent, --staging-parent,
---evidence-parent, --deployment-contract, --migration-image-id,
+plan and execute must run as root; the plan records and execute revalidates the
+creator UID, GID, username, process UID, and process GID
+production plan requires explicit --repository-root, --db-path, --backup-parent,
+--staging-parent, --evidence-parent, --migration-image-id,
 --migration-image-revision, --previous-image-id, --expected-hostname,
 --expected-source-device, --expected-source-inode, --expected-source-size,
---expected-source-sha256, --expected-free-bytes, --target-schema-version, and
---expires-in-seconds
+--expected-source-sha256, --expected-free-bytes, and --expires-in-seconds
+the only deployment authority is
+<repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
+by file descriptor; caller-selected contract paths are not accepted
+Household and Shopping enabled flags must both be explicit JSON booleans false,
+and both allowlists must be empty in that pinned canonical contract
+the target schema version and fingerprint are derived from trusted migration
+code, recorded in the plan, and independently recalculated during execute
 production execute requires exact --plan, --expected-plan-sha256,
 --confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
 plan and execute are separate and require an independent plan/SHA review gate
 no path, image, revision, confirmation, or authorization comes from environment
+plan, backup, staging, and evidence parents are canonical, non-symlink,
+root-owned, mode 0700 directories
 the operator must stop the application and every DB user through the canonical
 deployment source of truth before execute
 no process may have the source DB open
 no -journal, -wal, or -shm source sidecar may exist
 source identity, mode, integrity, and foreign keys must match the approved plan
+execute must acquire the real SQLite lifetime lease before creating its
+execution directory, execution.json, backup, staging, or internal manifest
+an active reader or writer must return QUIESCENCE_FAILED with zero execute
+filesystem delta; the separately approved immutable plan remains the only file
 automatic lock retry is prohibited
 ```
 
@@ -563,16 +577,15 @@ set -euo pipefail
 
 HOST_PYTHON="<approved-host-python>"
 GATE="scripts/hermes_production_staged_migrate.py"
+REPOSITORY_ROOT="<exact-clean-repository-root>"
 DB_PATH="<explicit-approved-database-path>"
 BACKUP_PARENT="<explicit-private-backup-parent>"
 STAGING_PARENT="<explicit-private-same-filesystem-staging-parent>"
 EVIDENCE_PARENT="<explicit-private-evidence-parent>"
-DEPLOYMENT_CONTRACT="<explicit-canonical-deployment-manifest>"
 MIGRATION_IMAGE_ID="<sha256-image-id>"
 MIGRATION_IMAGE_REVISION="<full-40-character-main-sha>"
 PREVIOUS_IMAGE_ID="<sha256-previous-image-id>"
 EXPECTED_HOSTNAME="<approved-hostname>"
-TARGET_SCHEMA_VERSION="<approved-target-schema-contract>"
 EXPECTED_FREE_BYTES="<approved-minimum-free-bytes>"
 
 SOURCE_DEVICE="$(stat --format='%d' "$DB_PATH")"
@@ -581,11 +594,11 @@ SOURCE_SIZE="$(stat --format='%s' "$DB_PATH")"
 SOURCE_SHA256="$(sha256sum "$DB_PATH" | awk '{print $1}')"
 
 sudo "$HOST_PYTHON" "$GATE" plan \
+  --repository-root "$REPOSITORY_ROOT" \
   --db-path "$DB_PATH" \
   --backup-parent "$BACKUP_PARENT" \
   --staging-parent "$STAGING_PARENT" \
   --evidence-parent "$EVIDENCE_PARENT" \
-  --deployment-contract "$DEPLOYMENT_CONTRACT" \
   --migration-image-id "$MIGRATION_IMAGE_ID" \
   --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
   --previous-image-id "$PREVIOUS_IMAGE_ID" \
@@ -595,7 +608,6 @@ sudo "$HOST_PYTHON" "$GATE" plan \
   --expected-source-size "$SOURCE_SIZE" \
   --expected-source-sha256 "$SOURCE_SHA256" \
   --expected-free-bytes "$EXPECTED_FREE_BYTES" \
-  --target-schema-version "$TARGET_SCHEMA_VERSION" \
   --expires-in-seconds 3600
 ```
 
@@ -608,6 +620,10 @@ APPROVED_PLAN_SHA256=<exact-plan-sha256>
 APPROVED_OPERATION_ID=<exact-operation-id>
 APPROVED_SOURCE_SHA256=<exact-source-sha256>
 APPROVED_IMAGE_REVISION=<exact-image-revision>
+APPROVED_PLAN_CREATOR_UID=0
+APPROVED_PLAN_CREATOR_GID=<recorded-root-group>
+APPROVED_TARGET_SCHEMA_VERSION=<derived-version>
+APPROVED_TARGET_SCHEMA_FINGERPRINT=<derived-fingerprint>
 ```
 
 Before execute, verify the plan hash and use the canonical deployment SOT to stop
@@ -627,6 +643,11 @@ sudo "$HOST_PYTHON" "$GATE" execute \
   --confirm-image-revision "$APPROVED_IMAGE_REVISION"
 ```
 
+If execute cannot acquire the source SQLite lease, it must stop before creating
+`execution.json`, backup, staging, or internal-manifest artifacts. Do not treat
+the immutable plan from the separate plan command as execute-time filesystem
+mutation.
+
 A pre-publish failure leaves the original target live. A proved reverse exchange
 restores the original inode and fsyncs the parent. Any post-exchange uncertainty is
 PUBLISH_UNCERTAIN followed by MANUAL_RECOVERY_REQUIRED; automatic retry and blind
@@ -634,21 +655,23 @@ DB restore are forbidden. DB restoration is a separate explicit recovery procedu
 Image rollback is allowed only after the previous-image compatibility probe
 succeeds against the migrated schema.
 
-Successful production evidence must contain these monotonic states:
+Successful public execution evidence has this monotonic state stream:
 
 ```text
-PLANNED
-PREFLIGHT_VERIFIED
-BACKUP_DURABLE
-STAGING_MIGRATED
-COMPATIBILITY_VERIFIED
-QUIESCENCE_HELD
-EXCHANGE_STARTED
-EXCHANGE_VERIFIED
-PARENT_FSYNCED
-FINAL_VERIFIED
-COMPLETED
+QUIESCENCE_HELD -> COMPLETED
 ```
+
+The separately pinned internal staged manifest has this monotonic state stream:
+
+```text
+PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED
+```
+
+Its publish-state stream is `BEFORE_EXCHANGE`, `EXCHANGE_STARTED`,
+`EXCHANGE_COMPLETED_NOT_VERIFIED`, `EXCHANGE_VERIFIED_NOT_FSYNCED`,
+`PARENT_FSYNCED`, and `FINAL_VERIFIED`. The plan path, deployment contract,
+operation parents, and internal manifest directory descriptors remain pinned
+through completion and are never reopened as unverified authority.
 
 It must also record backup/staging/final SHA-256 values without DB contents,
 identifiers, credentials, environment dumps, or raw logs. Evidence directory mode
@@ -683,11 +706,12 @@ locks are not sufficient. Separate SQLite readers and writers must be refused at
 every lifecycle boundary. These controls do not claim protection from host root or
 another privileged administrator.
 
-After quiescence, the future root orchestrator must create and fsync a durable
+After quiescence, the root orchestrator must create and fsync a durable
 backup, then create a byte-identical staging copy on the same filesystem as the
 target. Both files must derive from the same quiesced source identity and hash.
-The staging parent is private, owned by `10000:10000`, and exactly mode `0700`;
-the staging DB is mode `0600`, has link count one, and has no symlink component.
+The staging parent is root-owned and exactly mode `0700`; only its operation-owned
+child directory is owned by `10000:10000` and mode `0700`. The staging DB is mode
+`0600`, has link count one, and has no symlink component.
 
 Path-security preconditions are part of the migration authorization, not a post-run
 check:
@@ -850,6 +874,14 @@ Legacy PUBLISH_STATE=UNKNOWN is never emitted; any unrecognized state fails clos
 automatic retry is prohibited
 manual recovery is required for every failure after EXCHANGE_STARTED
 ```
+
+Every exception after `EXCHANGE_STARTED`, including internal manifest I/O, final
+target validation or hashing, plan-path revalidation, external evidence I/O,
+completion transition, and operation cleanup, is classified centrally as
+`PUBLISH_UNCERTAIN`. If durable evidence persistence itself fails, the gate emits
+one sanitized machine-readable stderr result, does not claim persistence, forbids
+automatic retry, and requires manual inspection. Only a verified reverse exchange
+followed by parent fsync may report the original target restored.
 
 The manifest contains source/staging/backup paths, inode and SHA-256 values, but no
 DB contents, application identifiers, credentials, or user data. Every manifest

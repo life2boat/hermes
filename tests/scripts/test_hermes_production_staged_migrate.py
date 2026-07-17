@@ -92,6 +92,7 @@ EXECUTE_GATE_CASES = (
 
 POST_EXCHANGE_CASES = (
     "internal_manifest_read_failure",
+    "internal_manifest_close_failure",
     "final_target_validation_failure",
     "external_evidence_write_failure",
     "completed_transition_failure",
@@ -106,12 +107,24 @@ SCHEMA_FAILURE_CASES = (
     "migration_incompatible_schema",
 )
 
+CLOSE_FAILURE_CASES = (
+    "validated_close_before_exchange",
+    "validated_close_after_exchange_started",
+    "validated_close_after_final_verification",
+    "pinned_plan_close_before_exchange",
+    "pinned_plan_close_after_exchange_started",
+    "pinned_plan_close_after_final_validation",
+    "primary_post_exchange_plus_cleanup_failure",
+    "successful_body_evidence_finalization_failure",
+)
+
 NEGATIVE_MATRIX_CASES = (
     len(PARSER_CASES)
     + len(PLAN_GATE_CASES)
     + len(EXECUTE_GATE_CASES)
     + len(POST_EXCHANGE_CASES)
     + len(SCHEMA_FAILURE_CASES)
+    + len(CLOSE_FAILURE_CASES)
 )
 
 
@@ -407,12 +420,13 @@ def _plan_argv(context: UnitContext) -> list[str]:
     ]
 
 
-def _json_result(
+def _json_results(
     capfd: pytest.CaptureFixture[str],
-) -> tuple[dict[str, Any], str]:
+) -> list[tuple[dict[str, Any], str]]:
     captured = capfd.readouterr()
+    results: list[tuple[dict[str, Any], str]] = []
     for stream_name, value in (("stderr", captured.err), ("stdout", captured.out)):
-        for line in reversed(value.splitlines()):
+        for line in value.splitlines():
             if not line.strip():
                 continue
             try:
@@ -420,10 +434,27 @@ def _json_result(
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict):
-                return payload, stream_name
-    raise AssertionError(
-        f"no JSON result; stdout={captured.out!r}; stderr={captured.err!r}"
-    )
+                results.append((payload, stream_name))
+    if not results:
+        raise AssertionError(
+            f"no JSON result; stdout={captured.out!r}; stderr={captured.err!r}"
+        )
+    return results
+
+
+def _json_result(
+    capfd: pytest.CaptureFixture[str],
+) -> tuple[dict[str, Any], str]:
+    results = _json_results(capfd)
+    for stream_name in ("stderr", "stdout"):
+        matching = [
+            result
+            for result in results
+            if result[1] == stream_name
+        ]
+        if matching:
+            return matching[-1]
+    raise AssertionError("unreachable")
 
 
 def _create_plan(
@@ -676,10 +707,17 @@ def test_public_parser_negative_matrix_has_zero_deltas(
         raise AssertionError(case)
     before_hash = production._sha256(context.source)
     before_paths = _path_set(context.runtime)
-    with pytest.raises(SystemExit) as exc:
-        production.main(argv)
-    assert exc.value.code == 2
-    capfd.readouterr()
+    assert production.main(argv) == 2
+    results = _json_results(capfd)
+    assert len(results) == 1
+    result, stream = results[0]
+    assert stream == "stderr"
+    assert result["exit_classification"] == "ARGUMENT_ERROR"
+    assert result["publish_state"] == "BEFORE_EXCHANGE"
+    assert result["target_may_have_changed"] is False
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is False
+    assert result["durable_evidence_updated"] is False
     assert production._sha256(context.source) == before_hash
     assert _path_set(context.runtime) == before_paths
 
@@ -1018,7 +1056,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
             fail_later,
         )
     elif case == "operation_cleanup_failure":
-        expected_publish_state = "EXCHANGE_COMPLETED_NOT_VERIFIED"
+        expected_publish_state = "EXCHANGE_STARTED"
 
         def fail_after_authorization(
             _args: Any,
@@ -1034,6 +1072,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
             fail_after_authorization,
         )
     else:
+        actual_manifest_reader = production._read_internal_manifest
         _install_staged_success(monkeypatch)
         if case == "internal_manifest_read_failure":
             monkeypatch.setattr(
@@ -1044,6 +1083,91 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                         "INTERNAL_MANIFEST_INVALID"
                     )
                 ),
+            )
+        elif case == "internal_manifest_close_failure":
+            manifest_path = context.backup / (
+                f"manifest-{plan.payload['OPERATION_ID']}.json"
+            )
+            def succeed_with_manifest(
+                _args: Any,
+                *,
+                prepared: Any,
+            ) -> int:
+                prepared.close()
+                production._write_json_durable(
+                    manifest_path,
+                    {
+                        "OPERATION_ID": plan.payload["OPERATION_ID"],
+                        "STATE": "VERIFIED",
+                        "PUBLISH_STATE": "FINAL_VERIFIED",
+                        "BACKUP_SHA256": "4" * 64,
+                        "STAGING_SHA256": "5" * 64,
+                    },
+                )
+                os.chmod(manifest_path, 0o600)
+                print(
+                    json.dumps(
+                        {
+                            "status": "PASS",
+                            "publish_state": "FINAL_VERIFIED",
+                            "target_may_have_changed": True,
+                            "automatic_retry_allowed": False,
+                            "manual_recovery_required": False,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                )
+                return 0
+
+            monkeypatch.setattr(
+                production,
+                "_execute_authorized_staged",
+                succeed_with_manifest,
+            )
+            monkeypatch.setattr(
+                production,
+                "_read_internal_manifest",
+                actual_manifest_reader,
+            )
+            original_reader = production._read_fd_bytes
+            original_close = production.os.close
+            manifest_fd: int | None = None
+
+            def track_manifest_fd(
+                fd: int,
+                *,
+                maximum: int,
+                code: str,
+            ) -> bytes:
+                nonlocal manifest_fd
+                if code == "INTERNAL_MANIFEST_INVALID":
+                    manifest_fd = fd
+                return original_reader(
+                    fd,
+                    maximum=maximum,
+                    code=code,
+                )
+
+            def fail_manifest_close(fd: int) -> None:
+                nonlocal manifest_fd
+                if fd == manifest_fd:
+                    manifest_fd = None
+                    original_close(fd)
+                    raise OSError(
+                        "synthetic manifest descriptor close failure"
+                    )
+                original_close(fd)
+
+            monkeypatch.setattr(
+                production,
+                "_read_fd_bytes",
+                track_manifest_fd,
+            )
+            monkeypatch.setattr(
+                production.os,
+                "close",
+                fail_manifest_close,
             )
         elif case == "final_target_validation_failure":
             def install_validation_failure(
@@ -1150,17 +1274,264 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
     assert result["automatic_retry_allowed"] is False
     assert result["manual_recovery_required"] is True
     assert production._sha256(context.source) == before_hash
-    assert _path_set(context.runtime) - before_paths == {
+    expected_path_delta = {
         str(
             (plan.path.parent / "execution.json").relative_to(context.runtime)
         )
     }
+    if case == "internal_manifest_close_failure":
+        expected_path_delta.add(
+            str(manifest_path.relative_to(context.runtime))
+        )
+    assert _path_set(context.runtime) - before_paths == expected_path_delta
     if case == "external_evidence_write_failure":
         assert stream == "stderr"
         assert result["durable_evidence_persisted"] is False
+    if case == "internal_manifest_close_failure":
+        assert stream == "stderr"
+        assert result["cleanup_exception_recorded"] is True
+        assert result["primary_exception_preserved"] is False
+        assert result["cleanup_failure_codes"] == [
+            "INTERNAL_MANIFEST_CLOSE_FAILED"
+        ]
+        assert "synthetic manifest" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("case", CLOSE_FAILURE_CASES)
+def test_public_close_failure_matrix_preserves_primary_and_state(
+    case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    expected_class = "PUBLISH_UNCERTAIN"
+    expected_state = "EXCHANGE_STARTED"
+    expected_target_changed = True
+    expected_manual_recovery = True
+    expected_durable_evidence = True
+    expected_primary_preserved = True
+    expected_primary_error: str | None = (
+        "PRIMARY_POST_EXCHANGE_FAILURE"
+    )
+    expected_stream = "stderr"
+    expected_path_delta = {
+        str(
+            (plan.path.parent / "execution.json").relative_to(
+                context.runtime
+            )
+        )
+    }
+
+    def fail_after_close(
+        owner: type[Any],
+        code: str,
+    ) -> None:
+        original_close = owner.close
+
+        def close_then_fail(self: Any) -> None:
+            original_close(self)
+            raise OSError(code)
+
+        monkeypatch.setattr(owner, "close", close_then_fail)
+
+    def fail_before_exchange(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> Any:
+        raise staged.OrchestratorError("SOURCE_NOT_QUIESCENT")
+
+    def fail_after_exchange(
+        _args: Any,
+        *,
+        prepared: Any,
+    ) -> int:
+        prepared.close()
+        raise production.ProductionGateError(
+            "PRIMARY_POST_EXCHANGE_FAILURE"
+        )
+
+    if case == "validated_close_before_exchange":
+        fail_after_close(
+            production.ValidatedExecution,
+            "validated-close-before-exchange",
+        )
+        monkeypatch.setattr(
+            production,
+            "_prepare_authorized_production_execution",
+            fail_before_exchange,
+        )
+        expected_class = "QUIESCENCE_FAILED"
+        expected_state = "BEFORE_EXCHANGE"
+        expected_target_changed = False
+        expected_manual_recovery = False
+        expected_durable_evidence = False
+        expected_primary_error = "QUIESCENCE_FAILED"
+        expected_stream = "stdout"
+        expected_path_delta = set()
+    elif case == "validated_close_after_exchange_started":
+        fail_after_close(
+            production.ValidatedExecution,
+            "validated-close-after-exchange",
+        )
+        monkeypatch.setattr(
+            production,
+            "_execute_authorized_staged",
+            fail_after_exchange,
+        )
+    elif case == "validated_close_after_final_verification":
+        fail_after_close(
+            production.ValidatedExecution,
+            "validated-close-after-verify",
+        )
+        _install_staged_success(monkeypatch)
+        expected_state = "FINAL_VERIFIED"
+        expected_primary_preserved = False
+        expected_primary_error = None
+    elif case == "pinned_plan_close_before_exchange":
+        fail_after_close(
+            production.PinnedPlan,
+            "pinned-close-before-exchange",
+        )
+        monkeypatch.setattr(
+            production,
+            "_prepare_authorized_production_execution",
+            fail_before_exchange,
+        )
+        expected_class = "QUIESCENCE_FAILED"
+        expected_state = "BEFORE_EXCHANGE"
+        expected_target_changed = False
+        expected_manual_recovery = False
+        expected_durable_evidence = False
+        expected_primary_error = "QUIESCENCE_FAILED"
+        expected_stream = "stdout"
+        expected_path_delta = set()
+    elif case == "pinned_plan_close_after_exchange_started":
+        fail_after_close(
+            production.PinnedPlan,
+            "pinned-close-after-exchange",
+        )
+        monkeypatch.setattr(
+            production,
+            "_execute_authorized_staged",
+            fail_after_exchange,
+        )
+        expected_durable_evidence = False
+    elif case == "pinned_plan_close_after_final_validation":
+        fail_after_close(
+            production.PinnedPlan,
+            "pinned-close-after-validation",
+        )
+        _install_staged_success(monkeypatch)
+        expected_state = "FINAL_VERIFIED"
+        expected_durable_evidence = False
+        expected_primary_preserved = False
+        expected_primary_error = None
+    elif case == "primary_post_exchange_plus_cleanup_failure":
+        fail_after_close(
+            production.ValidatedExecution,
+            "cleanup-alongside-primary",
+        )
+        monkeypatch.setattr(
+            production,
+            "_execute_authorized_staged",
+            fail_after_exchange,
+        )
+    elif case == "successful_body_evidence_finalization_failure":
+        _install_staged_success(monkeypatch)
+
+        def fail_evidence_finalization(
+            self: production.ExecutionEvidence,
+            **_updates: Any,
+        ) -> None:
+            raise OSError("synthetic evidence finalization failure")
+
+        monkeypatch.setattr(
+            production.ExecutionEvidence,
+            "checkpoint",
+            fail_evidence_finalization,
+        )
+        expected_state = "FINAL_VERIFIED"
+        expected_durable_evidence = False
+        expected_primary_preserved = False
+        expected_primary_error = None
+    else:
+        raise AssertionError(case)
+
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+    assert production.main(_execute_argv(plan)) == 1
+    results = _json_results(capfd)
+    assert len(results) == 1
+    result, stream = results[0]
+    assert stream == expected_stream
+    assert result["exit_classification"] == expected_class
+    assert result["publish_state"] == expected_state
+    assert result["target_may_have_changed"] is expected_target_changed
+    assert result["automatic_retry_allowed"] is False
+    assert (
+        result["manual_recovery_required"]
+        is expected_manual_recovery
+    )
+    assert (
+        result["durable_evidence_updated"]
+        is expected_durable_evidence
+    )
+    assert (
+        result["primary_exception_preserved"]
+        is expected_primary_preserved
+    )
+    assert result.get("primary_error_type") == expected_primary_error
+    assert result["cleanup_exception_recorded"] is True
+    assert result["status"] == "FAILED"
+    assert result["cleanup_failure_codes"]
+    serialized_result = json.dumps(result, ensure_ascii=True)
+    assert "synthetic" not in serialized_result
+    assert "validated-close" not in serialized_result
+    assert "pinned-close" not in serialized_result
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) - before_paths == expected_path_delta
+
+
+def test_execute_main_generic_fallback_never_reports_before_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    def fail_outside_boundary(_args: Any) -> int:
+        raise OSError("synthetic-sensitive-exception-body")
+
+    monkeypatch.setattr(production, "execute_plan", fail_outside_boundary)
+    argv = [
+        "execute",
+        "--plan",
+        "/synthetic/plan.json",
+        "--expected-plan-sha256",
+        "0" * 64,
+        "--confirm-operation-id",
+        "0" * 32,
+        "--confirm-source-sha256",
+        "0" * 64,
+        "--confirm-image-revision",
+        REVISION,
+    ]
+    assert production.main(argv) == 1
+    results = _json_results(capfd)
+    assert len(results) == 1
+    result, stream = results[0]
+    assert stream == "stderr"
+    assert result["exit_classification"] == "PUBLISH_UNCERTAIN"
+    assert result["publish_state"] == "EXECUTION_STATE_UNKNOWN"
+    assert result["target_may_have_changed"] is True
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["durable_evidence_updated"] is False
+    assert "synthetic-sensitive" not in json.dumps(result)
 
 
 def test_negative_matrix_contract_is_large_and_public() -> None:
-    assert NEGATIVE_MATRIX_CASES >= 45
+    assert NEGATIVE_MATRIX_CASES >= 77
     source = Path(__file__).read_text(encoding="utf-8")
     assert "production.main(" in source
+    direct_parser_call = "production.build_parser()" + ".parse_args("
+    assert direct_parser_call not in source

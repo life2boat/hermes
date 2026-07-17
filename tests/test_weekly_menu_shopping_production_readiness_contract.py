@@ -131,7 +131,7 @@ def test_runbook_separates_image_and_db_rollbacks_and_forbids_destructive_shell_
             assert needle not in block, f"forbidden command leaked into executable runbook block: {needle}"
 
 
-def test_runbook_requires_staged_copy_and_disables_production_execution() -> None:
+def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
     text = _text(RUNBOOK)
     _require(
         text,
@@ -139,17 +139,44 @@ def test_runbook_requires_staged_copy_and_disables_production_execution() -> Non
             "staged copy plus atomic publish",
             "Direct in-place",
             "scripts/hermes_staged_schema_migrate.py",
-            "production execution is disabled",
+            "scripts/hermes_production_staged_migrate.py",
+            "single public production",
+            "separate explicit `plan` and `execute` subcommands",
+            "production execution is disabled by default",
+            "plan and execute are separate",
+            "--expected-plan-sha256",
+            "--confirm-operation-id",
+            "--confirm-source-sha256",
+            "--confirm-image-revision",
+            "independent plan/SHA review gate",
             "production DB path and production parent are not mounted",
             "PATH_MODE=STAGED_COPY",
             "normal SQLite DELETE journaling and synchronous FULL remain enabled",
-            "os.replace",
+            "renameat2(..., RENAME_EXCHANGE)",
             "cross-filesystem publication fails closed",
-            "PUBLISH_STATE=UNKNOWN",
+            "PUBLISH_UNCERTAIN",
+            "MANUAL_RECOVERY_REQUIRED",
+            "automatic retry and blind",
+            "No inline Python, in-container exec-based migration",
             "Backup restore is an emergency manual action only",
         ],
-        label="staged-copy migration contract",
+        label="hash-bound production staged-copy contract",
     )
+    ordered_states = [
+        "PLANNED",
+        "PREFLIGHT_VERIFIED",
+        "BACKUP_DURABLE",
+        "STAGING_MIGRATED",
+        "COMPATIBILITY_VERIFIED",
+        "QUIESCENCE_HELD",
+        "EXCHANGE_STARTED",
+        "EXCHANGE_VERIFIED",
+        "PARENT_FSYNCED",
+        "FINAL_VERIFIED",
+        "COMPLETED",
+    ]
+    indices = [_index(text, state) for state in ordered_states]
+    assert indices == sorted(indices)
     assert '--mount type=bind,src="/home/hermes/healbite.db"' not in text
 
 

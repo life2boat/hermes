@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plan and exercise durable staged SQLite schema publication.
 
-Only ``execute-synthetic`` can mutate a target. A production execution mode is
-deliberately absent until a separate production gate authorizes it.
+This module owns the staged-copy implementation. Public production authorization
+is deliberately kept in a separate host-side gate.
 """
 
 from __future__ import annotations
@@ -920,9 +920,12 @@ def plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def execute_synthetic(
+def _execute_staged(
     args: argparse.Namespace,
     *,
+    synthetic: bool,
+    operation_id: str | None = None,
+    expected_source_identity: SourceIdentity | None = None,
     _phase_callback: Callable[[str], None] | None = None,
     _failure_callback: Callable[[str, str], None] | None = None,
     _migration_runner: Callable[[Contract, Path], None] = _run_target_migration,
@@ -942,9 +945,11 @@ def execute_synthetic(
         if _lifecycle_callback is not None:
             _lifecycle_callback(name, path)
 
-    contract = _contract(args, synthetic=True)
-    source_identity = _preflight(contract, synthetic=True, inspect_images=True)
-    operation_id = uuid.uuid4().hex
+    contract = _contract(args, synthetic=synthetic)
+    source_identity = _preflight(contract, synthetic=synthetic, inspect_images=True)
+    if expected_source_identity is not None and source_identity != expected_source_identity:
+        raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
+    operation_id = operation_id or uuid.uuid4().hex
     backup = contract.backup_dir / f"backup-{operation_id}.sqlite"
     staging_dir = contract.staging_root / f"staging-{operation_id}"
     staging_db = staging_dir / "database.sqlite"
@@ -1111,6 +1116,7 @@ def execute_synthetic(
             MANUAL_RECOVERY_REQUIRED=True,
         )
         publish_state = "EXCHANGE_STARTED"
+        phase("exchange_started")
         exchange_started = True
         if _before_exchange_callback is not None:
             _before_exchange_callback()
@@ -1155,6 +1161,7 @@ def execute_synthetic(
         fail("displaced_target_identity_verification", publish_state=publish_state)
         publish_state = "EXCHANGE_VERIFIED_NOT_FSYNCED"
         manifest.checkpoint(PUBLISH_STATE=publish_state)
+        phase("exchange_verified")
 
         phase("before_target_dir_fsync")
         _fsync_publish_parents(source_pin, staging_pin)
@@ -1162,6 +1169,7 @@ def execute_synthetic(
         publish_state = "PARENT_FSYNCED"
         manifest.checkpoint(PUBLISH_STATE=publish_state)
         phase("after_target_dir_fsync")
+        phase("parent_fsynced")
 
         if _inode_at(source_pin.parent_fd, source_pin.path.name) != expected_target:
             raise OrchestratorError("PUBLISHED_TARGET_IDENTITY_CHANGED", publish_state=publish_state)
@@ -1178,11 +1186,13 @@ def execute_synthetic(
             MANUAL_RECOVERY_REQUIRED=False,
             DISPLACED_SOURCE_PATH=str(staging_db),
         )
+        phase("final_verified")
         _json_print(
             {
                 "status": "PASS",
-                "mode": "EXECUTE_SYNTHETIC",
-                "production_execution_enabled": False,
+                "mode": "EXECUTE_SYNTHETIC" if synthetic else "EXECUTE_PRODUCTION",
+                "operation_id": operation_id,
+                "production_execution_enabled": not synthetic,
                 "backup_created": True,
                 "backup_and_staging_source_match": True,
                 "migration_runs": 3,
@@ -1304,6 +1314,47 @@ def execute_synthetic(
             staging_pin.close()
         if source_pin is not None:
             source_pin.close()
+
+
+def execute_synthetic(
+    args: argparse.Namespace,
+    *,
+    _phase_callback: Callable[[str], None] | None = None,
+    _failure_callback: Callable[[str, str], None] | None = None,
+    _migration_runner: Callable[[Contract, Path], None] = _run_target_migration,
+    _compatibility_probe: Callable[[Contract, Path], Any] = _run_previous_image_probe,
+    _before_exchange_callback: Callable[[], None] | None = None,
+    _lifecycle_callback: Callable[[str, Path], None] | None = None,
+) -> int:
+    return _execute_staged(
+        args,
+        synthetic=True,
+        _phase_callback=_phase_callback,
+        _failure_callback=_failure_callback,
+        _migration_runner=_migration_runner,
+        _compatibility_probe=_compatibility_probe,
+        _before_exchange_callback=_before_exchange_callback,
+        _lifecycle_callback=_lifecycle_callback,
+    )
+
+
+def execute_production_staged(
+    args: argparse.Namespace,
+    *,
+    operation_id: str,
+    expected_source_identity: SourceIdentity,
+    phase_callback: Callable[[str], None] | None = None,
+) -> int:
+    """Run the staged implementation after an external production gate authorizes it."""
+    if re.fullmatch(r"[0-9a-f]{32}", operation_id) is None:
+        raise OrchestratorError("OPERATION_ID_INVALID")
+    return _execute_staged(
+        args,
+        synthetic=False,
+        operation_id=operation_id,
+        expected_source_identity=expected_source_identity,
+        _phase_callback=phase_callback,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

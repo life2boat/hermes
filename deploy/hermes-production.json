@@ -44,7 +44,9 @@
     "database_restore": false
   },
   "feature_gates": {
-    "HEALBITE_SHOPPING_LIST_ENABLED": "false",
+    "HEALBITE_HOUSEHOLDS_ENABLED": false,
+    "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+    "HEALBITE_SHOPPING_LIST_ENABLED": false,
     "HEALBITE_SHOPPING_LIST_ALLOWLIST": ""
   }
 }

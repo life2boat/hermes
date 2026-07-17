@@ -492,42 +492,69 @@ Do not print IDs or row payloads.
 
 ### D3 Weekly schema initialization
 
-Use the public migration-only CLI in a one-shot container from the exact immutable image. It is the only authoritative production migration interface; in-service execution and inline Python are prohibited.
+The authoritative architecture is staged copy plus atomic publish. Direct in-place
+migration of the production database is prohibited. The public migration-only CLI
+may receive only a disposable staging copy in a private writable directory; the
+production DB and its parent must never be mounted in the migration container.
+
+The public host entrypoint is `scripts/hermes_staged_schema_migrate.py`. This
+revision exposes read-only `plan` and test-only `execute-synthetic` modes. A
+production execute mode is deliberately absent and remains blocked until a later
+production execution gate reviews exact-image and host quiescence evidence.
+Inside the isolated staging container, that orchestrator invokes only
+`scripts/healbite_schema_migrate.py --staged-copy` from the exact image.
 
 Required contract:
 
-```bash
-set -euo pipefail
-
-docker run --rm \
-  --network none \
-  --user 10000:10000 \
-  --mount type=bind,src="/home/hermes/healbite.db",dst="/data/healbite.db",readonly=false \
-  "$EXACT_IMAGE_ID" \
-  /opt/hermes/.venv/bin/python /opt/hermes/scripts/healbite_schema_migrate.py \
-    --db-path /data/healbite.db \
-    --json
+```text
+host orchestrator requires explicit --source-db, --backup-dir, --staging-root,
+--target-image-id, --previous-image-id, and --expected-source-revision
+no path, image, or revision default comes from environment
+production execution is disabled in this source revision
+future production execution must stop the application and every DB user first
+no process may have the source DB open
+no -journal, -wal, or -shm source sidecar may exist
+source identity, mode, integrity, and foreign keys must match the approved plan
+automatic lock retry is prohibited
 ```
 
-The command must be run only after a fresh SQLite online backup and a read-only schema/count baseline. It must run before the Hermes service is recreated on the new image.
+The one-shot lock probe is only a preflight signal. Before backup creation, the
+orchestrator pins the source file and its parent directory descriptors and acquires
+an exclusive SQLite-compatible source lease on that exact inode. The lease remains
+held continuously through copy, migration, publish, parent fsync, and final
+verification. After validation and previous-image startup, the orchestrator acquires a
+second exclusive SQLite-compatible lease on the pinned staging inode and holds it
+through final verification. Poll-only quiescence and unrelated generic `flock`
+locks are not sufficient. Separate SQLite readers and writers must be refused at
+every lifecycle boundary. These controls do not claim protection from host root or
+another privileged administrator.
+
+After quiescence, the future root orchestrator must create and fsync a durable
+backup, then create a byte-identical staging copy on the same filesystem as the
+target. Both files must derive from the same quiesced source identity and hash.
+The staging parent is private, owned by `10000:10000`, and exactly mode `0700`;
+the staging DB is mode `0600`, has link count one, and has no symlink component.
 
 Path-security preconditions are part of the migration authorization, not a post-run
 check:
 
 ```text
-/data is supplied by the immutable image and owned by root
-/data and every relevant container-side ancestor are not writable by UID/GID 10000:10000
-/data/healbite.db is an exact read/write file bind mount, not a directory mount
-the DB file is a regular non-symlink file writable by UID/GID 10000:10000
-no path component is a symlink
-the CLI does not chmod, chown, copy, hardlink, or replace the DB
+only the disposable staging directory is mounted read/write at /migration
+the production DB path and production parent are not mounted
+the container runs by exact image ID with network none and UID/GID 10000:10000
+no production secrets are mounted
+the CLI receives /migration/database.sqlite with explicit --staged-copy
+--staged-copy and --synthetic-create are mutually exclusive
+the CLI reports PATH_MODE=STAGED_COPY
+the CLI performs no host publish operation
+normal SQLite DELETE journaling and synchronous FULL remain enabled
+journal_mode OFF, journal_mode MEMORY, and disabled synchronous are prohibited
 ```
 
-This contract prevents the unprivileged migration identity from substituting the
-database pathname before or during open. It does not claim protection against host
-root or a privileged container administrator; those actors remain outside this
-one-shot process threat boundary. Validate the image-side `/data` ownership and mode
-offline before production use.
+The writable directory is safe only because it contains a disposable copy and is
+private to one isolated one-shot process. A failed or substituted staging output
+cannot affect production and must be rejected before publish. Host root remains the
+only publish authority.
 
 Required command properties:
 
@@ -542,7 +569,7 @@ no Qdrant, Telegram, provider, scheduler, or background worker starts
 no feature flag is changed
 no snapshot or shopping backfill is performed
 no command is executed inside the running production service for migration
-existing-database mode is required; synthetic-create mode is forbidden
+staged-copy mode is required; synthetic-create and protected-existing modes are forbidden
 ```
 
 Expected migration sequence:
@@ -573,6 +600,7 @@ HOUSEHOLD schema_state = CURRENT
 WEEKLY schema_state = CURRENT
 SHOPPING schema_state = CURRENT
 data_backfilled = false
+path_mode = STAGED_COPY
 ```
 
 Public stable exit classifications and deterministic precedence (highest priority first after `SUCCESS`):
@@ -599,10 +627,9 @@ text is never used to infer a specific operational class. When structured metada
 is absent or insufficient, the CLI reports `MIGRATION_FAILED`; operators must not
 infer locked, read-only, or permission status from exception text.
 
-The production command requires an existing regular database file. No create-mode
-flag is permitted in production. Synthetic mode is limited to temporary local tests
-with an owned private `0700` parent and must never appear in a production execution
-manifest.
+The migration command requires an existing regular staging database file. No
+create-mode flag is permitted. Synthetic mode is limited to temporary local tests
+and must never appear in a production execution manifest.
 
 Any nonzero classification is terminal for this attempt. Do not retry automatically,
 do not repair DDL manually, and do not continue to service recreation.
@@ -623,8 +650,72 @@ item_count = 0 before first shopping feature use unless already present before m
 idempotency_count = 0 before first shopping feature use unless already present before migration
 nutrition/profile/weight/water/reminder counts unchanged
 DB owner and mode unchanged
-WAL/SHM files, if present, are not broad-readable
+staging journal, WAL, and SHM sidecars absent after close
+staging integrity_check = ok and foreign_key_check = 0
+expected schema complete and unknown schema objects = 0
+all pre-existing table counts unchanged
+new weekly snapshot and shopping business rows = 0
+three staged migration runs have zero schema and data delta after the first run
+previous production image reaches persisted gateway_state=running through its
+canonical /init entrypoint with both features disabled, network none, no production
+secrets, no automatic migration, no DB mutation, and a clean shutdown
 ```
+
+### D3 atomic publish boundary
+
+Only after all staging validations and previous-image compatibility pass may future
+production execution publish. Source DB, staging DB, target parent, and staging
+parent descriptors remain pinned. The Linux publish primitive is same-filesystem
+`renameat2(..., RENAME_EXCHANGE)` through the pinned directory descriptors;
+cross-filesystem publication fails closed, as does any platform without
+`RENAME_EXCHANGE`.
+There is no `os.replace` fallback. The migrated DB is fsynced before exchange and
+both affected parent directories are fsynced after exchange. Bytes are never copied
+over the live target and incomplete validation can never publish.
+
+Immediately after exchange, the displaced staging pathname must resolve to the
+previously pinned source inode and the live target pathname must resolve to the
+pinned migrated inode. An identity mismatch triggers one reverse exchange while
+both SQLite leases are still held, followed by parent fsync and `CONTRACT_DRIFT`.
+Automatic retry remains prohibited. If reversal cannot be proved, publish state is
+uncertain and manual recovery is mandatory.
+
+A durable sanitized manifest records only operation metadata and monotonic states:
+
+```text
+PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED
+FAILED is terminal for a known pre-publish failure
+unknown state fails closed
+PUBLISH_STATE=BEFORE_EXCHANGE before any exchange attempt
+PUBLISH_STATE=EXCHANGE_STARTED is durably recorded before the syscall
+PUBLISH_STATE=EXCHANGE_COMPLETED_NOT_VERIFIED after the syscall returns
+PUBLISH_STATE=EXCHANGE_VERIFIED_NOT_FSYNCED after inode verification
+PUBLISH_STATE=PARENT_FSYNCED after durable parent fsync
+PUBLISH_STATE=FINAL_VERIFIED only after pinned-inode SQLite verification
+Legacy PUBLISH_STATE=UNKNOWN is never emitted; any unrecognized state fails closed.
+automatic retry is prohibited
+manual recovery is required for every failure after EXCHANGE_STARTED
+```
+
+The manifest contains source/staging/backup paths, inode and SHA-256 values, but no
+DB contents, application identifiers, credentials, or user data. Every manifest
+transition and containing directory is fsynced.
+
+Failure before `EXCHANGE_STARTED` removes only the operation-owned staging tree and
+leaves the original target unchanged. Cleanup revalidates the saved staging-root and
+operation-directory device/inode, private ownership and modes, rejects symlink or
+nested-directory traversal, and refuses to unlink the live target or displaced
+source inode. Backup, manifest, and sanitized evidence are retained. A cleanup
+failure is reported separately and never masks the primary error.
+
+After `EXCHANGE_STARTED`, or whenever publish state is uncertain, automatic staging deletion is forbidden because the staging pathname may contain the displaced source
+DB required for recovery. The backup and manifest remain durable and no automatic
+retry is allowed.
+
+Image rollback after a successful additive migration uses the migrated DB and does
+not restore the pre-migration backup. Backup restore is an emergency manual action only.
+It is forbidden after new application writes unless the operator explicitly
+accepts the resulting data-loss window.
 
 Failure rules:
 

@@ -294,6 +294,177 @@ def test_synthetic_create_public_cli_end_to_end(tmp_path: Path) -> None:
     assert HealBiteShoppingStore(db_path=db_path).schema_state() is ShoppingSchemaState.CANONICAL
 
 
+def test_staged_copy_public_cli_end_to_end(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, 0o600)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--db-path", str(db_path), "--staged-copy", "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    payload = _json_result(result)
+
+    assert result.returncode == 0
+    assert payload["path_mode"] == "STAGED_COPY"
+    assert payload["database_path_classification"] == "absolute_existing_staged_copy_private_parent"
+    assert payload["migration_commit_state"] == "COMMITTED"
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+    assert db_path.stat().st_nlink == 1
+    assert not Path(f"{db_path}-journal").exists()
+    assert not Path(f"{db_path}-wal").exists()
+    assert not Path(f"{db_path}-shm").exists()
+
+
+@pytest.mark.parametrize(
+    ("parent_mode", "db_mode", "make_hardlink", "expected_error"),
+    [
+        (0o750, 0o600, False, "STAGED_PARENT_NOT_PRIVATE"),
+        (0o700, 0o640, False, "STAGED_DB_METADATA_INVALID"),
+        (0o700, 0o600, True, "STAGED_DB_LINK_COUNT_INVALID"),
+    ],
+)
+def test_staged_copy_rejects_unsafe_metadata(
+    tmp_path: Path,
+    parent_mode: int,
+    db_mode: int,
+    make_hardlink: bool,
+    expected_error: str,
+) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, parent_mode)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, db_mode)
+    if make_hardlink:
+        os.link(db_path, parent / "alias.sqlite")
+
+    result = healbite_schema_migrate.run_migration(db_path=str(db_path), staged_copy=True)
+
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == expected_error
+    assert db_path.stat().st_size == 0
+
+
+def test_transaction_hook_runs_after_begin_immediate_with_write_lock(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
+    os.chmod(db_path, 0o600)
+    before = db_path.read_bytes()
+    observed: dict[str, bool] = {}
+
+    def inspect_active_transaction(conn: sqlite3.Connection) -> None:
+        observed["begin_immediate"] = conn.in_transaction
+        competitor = sqlite3.connect(db_path, timeout=0)
+        try:
+            competitor.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            observed["write_lock_held"] = isinstance(code, int) and (code & 0xFF) in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            }
+        finally:
+            competitor.close()
+        raise RuntimeError("test-only transaction stop")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _transaction_hook=inspect_active_transaction,
+    )
+
+    assert observed == {"begin_immediate": True, "write_lock_held": True}
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert db_path.read_bytes() == before
+    assert result.migration_commit_state == "ROLLED_BACK"
+
+
+def test_component_hook_is_internal_and_runs_inside_real_transaction(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
+    os.chmod(db_path, 0o600)
+    observed: list[str] = []
+
+    def fail_at_weekly(name: str, conn: sqlite3.Connection) -> None:
+        assert conn.in_transaction is True
+        observed.append(name)
+        if name == "weekly":
+            raise RuntimeError("test-only component failure")
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _component_hook=fail_at_weekly,
+    )
+
+    assert observed == ["household", "weekly"]
+    assert result.exit_classification == "MIGRATION_FAILED"
+    assert result.migration_commit_state == "ROLLED_BACK"
+    with sqlite3.connect(db_path) as conn:
+        names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert names == {"legacy_rows"}
+
+
+def test_staged_copy_and_synthetic_create_are_mutually_exclusive(tmp_path: Path) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    db_path = parent / "database.sqlite"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--db-path",
+            str(db_path),
+            "--staged-copy",
+            "--synthetic-create",
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert not db_path.exists()
+
+
+def test_staged_copy_metadata_change_before_ddl_is_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "staging"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    db_path = parent / "database.sqlite"
+    db_path.touch(mode=0o600)
+    os.chmod(db_path, 0o600)
+
+    result = healbite_schema_migrate.run_migration(
+        db_path=str(db_path),
+        staged_copy=True,
+        _before_ddl_hook=lambda: os.chmod(db_path, 0o640),
+    )
+
+    assert result.exit_classification == "UNSAFE_PATH"
+    assert result.error_type == "STAGED_DB_METADATA_CHANGED"
+    assert result.migration_commit_state == "ROLLED_BACK"
+    assert not _table_exists(db_path, "households")
+
+
 def test_symlink_db_path_is_denied(tmp_path: Path) -> None:
     target = _fresh_db(tmp_path)
     link = tmp_path / "link.sqlite"
@@ -1129,11 +1300,14 @@ def test_runbook_uses_public_cli_instead_of_authoritative_inline_exec() -> None:
     assert "docker exec" not in d3
     assert "python - <<" not in d3
     assert "--allow-create" not in d3
-    assert "--synthetic-create" not in d3
+    assert "synthetic-create and protected-existing modes are forbidden" in d3
     assert ":latest" not in d3
-    assert "exact read/write file bind mount" in d3
-    assert "not writable by UID/GID 10000:10000" in d3
-    assert "privileged container administrator" in d3
+    assert "only the disposable staging directory is mounted read/write" in d3
+    assert "production DB path and production parent are not mounted" in d3
+    assert "--staged-copy" in d3
+    assert "PATH_MODE=STAGED_COPY" in d3
+    assert "production execute mode is deliberately absent" in d3
+    assert "Direct in-place" in d3
     assert "DATABASE_LOCKED" in d3
     assert "DATABASE_READ_ONLY" in d3
     assert "CLEANUP_FAILED" in d3
@@ -1166,3 +1340,33 @@ def test_runbook_has_no_secondary_production_migration_interface() -> None:
     ).read_text(encoding="utf-8")
     assert "docker exec" not in runbook
     assert "python - <<" not in runbook
+    assert "--mount type=bind,src=\"/home/hermes/healbite.db\"" not in runbook
+
+
+def test_runbook_documents_staged_atomic_publish_and_rollback_boundaries() -> None:
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+    ).read_text(encoding="utf-8")
+    required = (
+        "staged copy plus atomic publish",
+        "scripts/hermes_staged_schema_migrate.py",
+        "production execution is disabled",
+        "normal SQLite DELETE journaling and synchronous FULL remain enabled",
+        "same-filesystem",
+        "renameat2(..., RENAME_EXCHANGE)",
+        "There is no `os.replace` fallback",
+        "PUBLISH_STATE=EXCHANGE_STARTED",
+        "PUBLISH_STATE=FINAL_VERIFIED",
+        "exclusive SQLite-compatible source lease",
+        "second exclusive SQLite-compatible lease",
+        "reverse exchange",
+        "operation-owned staging tree",
+        "automatic staging deletion is forbidden",
+        "canonical /init entrypoint",
+        "automatic retry is prohibited",
+        "Image rollback after a successful additive migration uses the migrated DB",
+        "Backup restore is an emergency manual action only",
+    )
+    for marker in required:
+        assert marker in runbook

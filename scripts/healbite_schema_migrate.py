@@ -45,6 +45,12 @@ class MigrationCommitState(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class PathMode(str, Enum):
+    PROTECTED_EXISTING = "PROTECTED_EXISTING"
+    SYNTHETIC_CREATE = "SYNTHETIC_CREATE"
+    STAGED_COPY = "STAGED_COPY"
+
+
 EXIT_SUCCESS = 0
 EXIT_INVALID_ARGUMENTS = 2
 EXIT_UNSAFE_PATH = 3
@@ -126,6 +132,10 @@ class DatabaseTarget:
     mode_before: str | None
     owner_before: str | None
     identity_before: tuple[int, int] | None
+    path_mode: str = PathMode.PROTECTED_EXISTING.value
+    parent_identity_before: tuple[int, int] | None = None
+    parent_owner_before: tuple[int, int] | None = None
+    parent_mode_before: int | None = None
     synthetic_parent: Path | None = None
     synthetic_parent_identity: tuple[int, int] | None = None
     synthetic_parent_mode_before: int | None = None
@@ -167,6 +177,7 @@ class MigrationResult:
     mode_after: str | None = None
     owner_before: str | None = None
     owner_after: str | None = None
+    path_mode: str = PathMode.PROTECTED_EXISTING.value
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -184,6 +195,7 @@ class MigrationResult:
             "mode_after": self.mode_after,
             "owner_before": self.owner_before,
             "owner_after": self.owner_after,
+            "path_mode": self.path_mode,
         }
         if self.error_type is not None:
             payload["error_type"] = self.error_type
@@ -282,6 +294,67 @@ def _classify_existing_path(path: Path, identity: ProcessIdentity) -> DatabaseTa
         mode_before=_file_mode(metadata),
         owner_before=_file_owner(metadata),
         identity_before=(metadata.st_dev, metadata.st_ino),
+        path_mode=PathMode.PROTECTED_EXISTING.value,
+    )
+
+
+def _classify_staged_copy(path: Path, identity: ProcessIdentity) -> DatabaseTarget:
+    try:
+        metadata = path.lstat()
+        parent_metadata = path.parent.lstat()
+    except FileNotFoundError as exc:
+        raise MigrationError(ExitClassification.MISSING_DATABASE, detail_code="DB_PATH_MISSING") from exc
+    except OSError as exc:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_UNAVAILABLE") from exc
+    _validate_no_symlink_directory_chain(path.parent)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_DB_NOT_REGULAR")
+    if metadata.st_nlink != 1:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_DB_LINK_COUNT_INVALID")
+    if metadata.st_uid != identity.uid or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_DB_METADATA_INVALID")
+    if parent_metadata.st_uid != identity.uid or stat.S_IMODE(parent_metadata.st_mode) != 0o700:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PARENT_NOT_PRIVATE")
+    if not _identity_can_write(metadata, identity) or not _identity_can_write(parent_metadata, identity):
+        raise MigrationError(ExitClassification.DATABASE_PERMISSION_DENIED, detail_code="STAGED_PATH_NOT_WRITABLE")
+
+    parent_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        parent_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
+    target_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        target_flags |= os.O_NOFOLLOW
+    try:
+        parent_fd = os.open(path.parent, parent_flags)
+        try:
+            target_fd = os.open(path.name, target_flags, dir_fd=parent_fd)
+            try:
+                opened_parent = os.fstat(parent_fd)
+                opened_target = os.fstat(target_fd)
+            finally:
+                os.close(target_fd)
+        finally:
+            os.close(parent_fd)
+    except OSError as exc:
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PATH_OPEN_FAILED") from exc
+    if (
+        (opened_parent.st_dev, opened_parent.st_ino) != (parent_metadata.st_dev, parent_metadata.st_ino)
+        or (opened_target.st_dev, opened_target.st_ino) != (metadata.st_dev, metadata.st_ino)
+        or opened_target.st_nlink != 1
+    ):
+        raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PATH_REPLACED")
+    return DatabaseTarget(
+        path=path,
+        classification="absolute_existing_staged_copy_private_parent",
+        mode_before=_file_mode(metadata),
+        owner_before=_file_owner(metadata),
+        identity_before=(metadata.st_dev, metadata.st_ino),
+        path_mode=PathMode.STAGED_COPY.value,
+        parent_identity_before=(parent_metadata.st_dev, parent_metadata.st_ino),
+        parent_owner_before=(parent_metadata.st_uid, parent_metadata.st_gid),
+        parent_mode_before=stat.S_IMODE(parent_metadata.st_mode),
     )
 
 
@@ -388,6 +461,7 @@ def _resolve_synthetic_target(path: Path, identity: ProcessIdentity) -> Database
         mode_before=_file_mode(metadata),
         owner_before=_file_owner(metadata),
         identity_before=(metadata.st_dev, metadata.st_ino),
+        path_mode=PathMode.SYNTHETIC_CREATE.value,
         synthetic_parent=path.parent,
         synthetic_parent_identity=(parent_metadata.st_dev, parent_metadata.st_ino),
         synthetic_parent_mode_before=0o700,
@@ -399,6 +473,7 @@ def _resolve_db_path(
     raw_path: str | None,
     *,
     synthetic_create: bool,
+    staged_copy: bool = False,
     identity: ProcessIdentity | None = None,
 ) -> DatabaseTarget:
     if not raw_path:
@@ -407,8 +482,12 @@ def _resolve_db_path(
     if not path.is_absolute():
         raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="DB_PATH_NOT_ABSOLUTE")
     effective_identity = identity or _current_identity()
+    if synthetic_create and staged_copy:
+        raise MigrationError(ExitClassification.INVALID_ARGUMENT, detail_code="PATH_MODES_MUTUALLY_EXCLUSIVE")
     if synthetic_create:
         return _resolve_synthetic_target(path, effective_identity)
+    if staged_copy:
+        return _classify_staged_copy(path, effective_identity)
     return _classify_existing_path(path, effective_identity)
 
 
@@ -461,6 +540,25 @@ def _verify_identity_unchanged(target: DatabaseTarget) -> tuple[str | None, str 
         raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
     if (metadata.st_dev, metadata.st_ino) != target.identity_before:
         raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="DB_PATH_REPLACED")
+    if target.path_mode == PathMode.STAGED_COPY.value:
+        try:
+            parent_metadata = target.path.parent.lstat()
+        except OSError as exc:
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PARENT_LOST") from exc
+        if (
+            stat.S_ISLNK(parent_metadata.st_mode)
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or (parent_metadata.st_dev, parent_metadata.st_ino) != target.parent_identity_before
+            or (parent_metadata.st_uid, parent_metadata.st_gid) != target.parent_owner_before
+            or stat.S_IMODE(parent_metadata.st_mode) != target.parent_mode_before
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_PARENT_REPLACED")
+        if (
+            metadata.st_nlink != 1
+            or _file_mode(metadata) != "0600"
+            or (metadata.st_uid, metadata.st_gid) != target.parent_owner_before
+        ):
+            raise MigrationError(ExitClassification.UNSAFE_PATH, detail_code="STAGED_DB_METADATA_CHANGED")
     return _file_mode(metadata), _file_owner(metadata)
 
 
@@ -720,12 +818,16 @@ def _migrate_borrowed_connection(
     conn: sqlite3.Connection,
     *,
     selected: tuple[str, ...],
+    transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None = None,
+    component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     commit_attempted = False
     try:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN IMMEDIATE")
+        if transaction_hook is not None:
+            transaction_hook(conn)
         _sqlite_integrity(conn)
         plans = _preflight_all_schemas(conn)
         if before_ddl_hook is not None:
@@ -747,6 +849,8 @@ def _migrate_borrowed_connection(
             changed = before is not SchemaClassification.CURRENT
             changed_any = changed_any or changed
             phases.append(PhaseResult(name=name, status="success", schema_state=after.value, changed=changed))
+            if component_hook is not None:
+                component_hook(name, conn)
         commit_attempted = True
         conn.commit()
         return tuple(phases), changed_any
@@ -797,7 +901,9 @@ def _connect_target(
     selected: tuple[str, ...],
     connect_factory: Callable[..., sqlite3.Connection],
     before_open_hook: Callable[[], None] | None,
+    transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None,
+    component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     conn: sqlite3.Connection | None = None
     primary_error: Exception | None = None
@@ -811,7 +917,13 @@ def _connect_target(
         _verify_synthetic_parent_protected(target)
         _verify_identity_unchanged(target)
         conn = connect_factory(target.path, timeout=0.2, check_same_thread=False)
-        if target.synthetic_parent is not None:
+        if target.path_mode == PathMode.STAGED_COPY.value:
+            journal_mode = str(conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
+            conn.execute("PRAGMA synchronous=FULL")
+            synchronous = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+            if journal_mode != "delete" or synchronous != 2:
+                raise MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code="STAGED_SQLITE_DURABILITY_DRIFT")
+        elif target.synthetic_parent is not None:
             conn.execute("PRAGMA journal_mode=MEMORY")
             conn.execute("PRAGMA temp_store=MEMORY")
         _verify_synthetic_parent_protected(target)
@@ -826,7 +938,9 @@ def _connect_target(
         phases, schema_changed = _migrate_borrowed_connection(
             conn,
             selected=selected,
+            transaction_hook=transaction_hook,
             before_ddl_hook=guarded_before_ddl,
+            component_hook=component_hook,
         )
         migration_committed = True
         return phases, schema_changed
@@ -887,12 +1001,15 @@ def run_migration(
     *,
     db_path: str | None,
     synthetic_create: bool = False,
+    staged_copy: bool = False,
     components: str | None = None,
     _identity: ProcessIdentity | None = None,
     _connect_factory: Callable[..., sqlite3.Connection] = sqlite3.connect,
     _target_resolver: Callable[[str | None, bool, ProcessIdentity | None], DatabaseTarget] | None = None,
     _before_open_hook: Callable[[], None] | None = None,
+    _transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     _before_ddl_hook: Callable[[], None] | None = None,
+    _component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> MigrationResult:
     phases: tuple[PhaseResult, ...] = ()
     target: DatabaseTarget | None = None
@@ -900,15 +1017,27 @@ def run_migration(
     try:
         selected = _parse_components(components)
         if _target_resolver is None:
-            target = _resolve_db_path(db_path, synthetic_create=synthetic_create, identity=_identity)
+            target = _resolve_db_path(
+                db_path,
+                synthetic_create=synthetic_create,
+                staged_copy=staged_copy,
+                identity=_identity,
+            )
         else:
+            if staged_copy:
+                raise MigrationError(
+                    ExitClassification.CONTRACT_DRIFT,
+                    detail_code="STAGED_COPY_CUSTOM_RESOLVER_FORBIDDEN",
+                )
             target = _target_resolver(db_path, synthetic_create, _identity)
         phases, schema_changed = _connect_target(
             target,
             selected=selected,
             connect_factory=_connect_factory,
             before_open_hook=_before_open_hook,
+            transaction_hook=_transaction_hook,
             before_ddl_hook=_before_ddl_hook,
+            component_hook=_component_hook,
         )
         commit_completed = True
         mode_after, owner_after = _verify_identity_unchanged(target)
@@ -926,6 +1055,7 @@ def run_migration(
             mode_after=mode_after,
             owner_before=target.owner_before,
             owner_after=owner_after,
+            path_mode=target.path_mode,
         )
     except Exception as exc:
         migration_error = _as_migration_error(exc)
@@ -975,6 +1105,7 @@ def run_migration(
             mode_after=mode_after,
             owner_before=target.owner_before if target else None,
             owner_after=owner_after,
+            path_mode=target.path_mode if target else PathMode.PROTECTED_EXISTING.value,
         )
 
 
@@ -984,6 +1115,7 @@ def _print_text(result: MigrationResult) -> None:
     if result.error_type:
         print(f"error_type={result.error_type}")
     print(f"database_path_classification={result.database_path_classification}")
+    print(f"PATH_MODE={result.path_mode}")
     print(f"schema_changed={str(result.schema_changed).lower()}")
     print(f"data_backfilled={str(result.data_backfilled).lower()}")
     print(f"MIGRATION_COMMIT_STATE={result.migration_commit_state}")
@@ -1010,10 +1142,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--db-path", required=True, help="Absolute SQLite DB path to migrate")
-    parser.add_argument(
+    path_modes = parser.add_mutually_exclusive_group()
+    path_modes.add_argument(
         "--synthetic-create",
         action="store_true",
         help="Create a test-only DB in an owned private 0700 directory; forbidden for production",
+    )
+    path_modes.add_argument(
+        "--staged-copy",
+        action="store_true",
+        help="Migrate an existing disposable DB in an owned private 0700 directory",
     )
     parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping")
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
@@ -1026,6 +1164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = run_migration(
         db_path=args.db_path,
         synthetic_create=bool(args.synthetic_create),
+        staged_copy=bool(args.staged_copy),
         components=args.components,
     )
     if args.json:

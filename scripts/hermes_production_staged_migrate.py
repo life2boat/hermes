@@ -20,7 +20,7 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Sequence, TextIO
+from typing import Any, Callable, Sequence, TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +121,55 @@ class ProductionGateError(RuntimeError):
         self.code = code
 
 
+class _StructuredArgumentError(RuntimeError):
+    """An invalid public CLI invocation with no raw argument details."""
+
+
+class _CleanupFailure(RuntimeError):
+    """One or more sanitized cleanup operations failed."""
+
+    def __init__(self, codes: Sequence[str]) -> None:
+        self.codes = tuple(dict.fromkeys(codes))
+        super().__init__("CLEANUP_FAILED")
+
+
+class _PrimaryAndCleanupFailure(RuntimeError):
+    """Preserve a primary exception alongside cleanup failures."""
+
+    def __init__(
+        self,
+        primary: Exception,
+        cleanup_codes: Sequence[str],
+    ) -> None:
+        self.primary = primary
+        self.cleanup_codes = tuple(dict.fromkeys(cleanup_codes))
+        super().__init__("PRIMARY_AND_CLEANUP_FAILED")
+
+
+def _cleanup_codes(
+    exc: Exception,
+    fallback: str,
+) -> tuple[str, ...]:
+    if isinstance(exc, _CleanupFailure):
+        return exc.codes
+    if isinstance(exc, _PrimaryAndCleanupFailure):
+        return exc.cleanup_codes
+    return (fallback,)
+
+
+def _run_cleanup(
+    *steps: tuple[str, Callable[[], None]],
+) -> None:
+    failures: list[str] = []
+    for code, callback in steps:
+        try:
+            callback()
+        except Exception as exc:
+            failures.extend(_cleanup_codes(exc, code))
+    if failures:
+        raise _CleanupFailure(failures)
+
+
 @dataclass(frozen=True)
 class RootIdentity:
     effective_uid: int
@@ -152,8 +201,10 @@ class PinnedPlan:
         return (metadata.st_dev, metadata.st_ino) == (self.device, self.inode)
 
     def close(self) -> None:
-        os.close(self.file_fd)
-        os.close(self.parent_fd)
+        _run_cleanup(
+            ("PLAN_FILE_CLOSE_FAILED", lambda: os.close(self.file_fd)),
+            ("PLAN_PARENT_CLOSE_FAILED", lambda: os.close(self.parent_fd)),
+        )
 
 
 @dataclass
@@ -181,7 +232,9 @@ class PinnedDirectory:
         )
 
     def close(self) -> None:
-        os.close(self.fd)
+        _run_cleanup(
+            ("PINNED_DIRECTORY_CLOSE_FAILED", lambda: os.close(self.fd)),
+        )
 
 
 @dataclass
@@ -212,8 +265,16 @@ class PinnedDeploymentContract:
         ) == (self.device, self.inode, self.size)
 
     def close(self) -> None:
-        os.close(self.file_fd)
-        os.close(self.parent_fd)
+        _run_cleanup(
+            (
+                "DEPLOYMENT_CONTRACT_FILE_CLOSE_FAILED",
+                lambda: os.close(self.file_fd),
+            ),
+            (
+                "DEPLOYMENT_CONTRACT_PARENT_CLOSE_FAILED",
+                lambda: os.close(self.parent_fd),
+            ),
+        )
 
 
 @dataclass
@@ -221,6 +282,10 @@ class ExecutionEvidence:
     parent_fd: int
     name: str
     payload: dict[str, Any]
+
+    def checkpoint(self, **updates: Any) -> None:
+        self.payload.update(updates)
+        _write_json_durable_at(self.parent_fd, self.name, self.payload)
 
     def transition(self, state: str, **updates: Any) -> None:
         history = list(self.payload["STATE_HISTORY"])
@@ -254,10 +319,15 @@ class ValidatedExecution:
     target_schema_fingerprint: str
 
     def close(self) -> None:
-        self.deployment_contract.close()
-        self.evidence_parent.close()
-        self.staging_parent.close()
-        self.backup_parent.close()
+        _run_cleanup(
+            (
+                "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
+                self.deployment_contract.close,
+            ),
+            ("EVIDENCE_PARENT_CLOSE_FAILED", self.evidence_parent.close),
+            ("STAGING_PARENT_CLOSE_FAILED", self.staging_parent.close),
+            ("BACKUP_PARENT_CLOSE_FAILED", self.backup_parent.close),
+        )
 
 
 def _now() -> datetime:
@@ -1210,15 +1280,34 @@ def _revalidate_plan(
             target_schema_version=expected_target.version,
             target_schema_fingerprint=expected_target.fingerprint,
         )
-    except Exception:
+    except Exception as primary:
+        cleanup_steps: list[tuple[str, Callable[[], None]]] = []
         if deployment_contract is not None:
-            deployment_contract.close()
+            cleanup_steps.append(
+                (
+                    "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
+                    deployment_contract.close,
+                )
+            )
         if evidence_parent is not None:
-            evidence_parent.close()
+            cleanup_steps.append(
+                ("EVIDENCE_PARENT_CLOSE_FAILED", evidence_parent.close)
+            )
         if staging_parent is not None:
-            staging_parent.close()
+            cleanup_steps.append(
+                ("STAGING_PARENT_CLOSE_FAILED", staging_parent.close)
+            )
         if backup_parent is not None:
-            backup_parent.close()
+            cleanup_steps.append(
+                ("BACKUP_PARENT_CLOSE_FAILED", backup_parent.close)
+            )
+        try:
+            _run_cleanup(*cleanup_steps)
+        except _CleanupFailure as cleanup:
+            raise _PrimaryAndCleanupFailure(
+                primary,
+                cleanup.codes,
+            ) from primary
         raise
 
 
@@ -1232,6 +1321,7 @@ def _read_internal_manifest(
         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
         dir_fd=backup_parent.fd,
     )
+    primary: Exception | None = None
     try:
         metadata = os.fstat(fd)
         if (
@@ -1266,8 +1356,23 @@ def _read_internal_manifest(
         ):
             raise ProductionGateError("INTERNAL_MANIFEST_INVALID")
         return payload
+    except Exception as exc:
+        primary = exc
+        raise
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except Exception as cleanup:
+            codes = _cleanup_codes(
+                cleanup,
+                "INTERNAL_MANIFEST_CLOSE_FAILED",
+            )
+            if primary is not None:
+                raise _PrimaryAndCleanupFailure(
+                    primary,
+                    codes,
+                ) from primary
+            raise _CleanupFailure(codes) from cleanup
 
 
 def _parse_staged_output(value: str) -> dict[str, Any]:
@@ -1319,69 +1424,233 @@ def _record_failure(
             evidence.transition("MANUAL_RECOVERY_REQUIRED", **updates)
 
 
-def _emit_failure(
-    operation_id: str,
+@dataclass
+class _ExecutionOutcome:
+    exit_code: int
+    payload: dict[str, Any]
+    stream: TextIO
+    primary_error_type: str | None = None
+
+
+def _safe_exception_code(exc: Exception) -> str:
+    if isinstance(exc, _PrimaryAndCleanupFailure):
+        return _safe_exception_code(exc.primary)
+    if isinstance(exc, (ProductionGateError, OrchestratorError)):
+        return exc.code
+    if isinstance(exc, _CleanupFailure):
+        return "CLEANUP_FAILED"
+    return type(exc).__name__
+
+
+def _failure_outcome(
+    operation_id: str | None,
     result: dict[str, Any],
     *,
+    durable_evidence_updated: bool,
+    primary_error_type: str | None = None,
     stream: TextIO | None = None,
-) -> None:
-    stream = sys.stdout if stream is None else stream
+) -> _ExecutionOutcome:
     updates = _failure_updates(result)
-    _json_emit(
-        {
-            "status": "FAILED",
-            "error_type": updates["ERROR_TYPE"],
-            "exit_classification": updates["EXIT_CLASSIFICATION"],
-            "operation_id": operation_id,
-            "publish_state": updates["PUBLISH_STATE"],
-            "target_may_have_changed": updates["TARGET_MAY_HAVE_CHANGED"],
-            "database_mutated": updates["DATABASE_MUTATED"],
-            "backup_created": updates["BACKUP_CREATED"],
-            "automatic_retry_allowed": False,
-            "manual_recovery_required": updates[
-                "MANUAL_RECOVERY_REQUIRED"
-            ],
-        },
-        stream=stream,
+    payload: dict[str, Any] = {
+        "status": "FAILED",
+        "error_type": updates["ERROR_TYPE"],
+        "exit_classification": updates["EXIT_CLASSIFICATION"],
+        "publish_state": updates["PUBLISH_STATE"],
+        "target_may_have_changed": updates["TARGET_MAY_HAVE_CHANGED"],
+        "database_mutated": updates["DATABASE_MUTATED"],
+        "backup_created": updates["BACKUP_CREATED"],
+        "automatic_retry_allowed": False,
+        "manual_recovery_required": updates[
+            "MANUAL_RECOVERY_REQUIRED"
+        ],
+        "durable_evidence_updated": durable_evidence_updated,
+        "durable_evidence_persisted": durable_evidence_updated,
+        "primary_exception_preserved": False,
+        "cleanup_exception_recorded": False,
+        "cleanup_failure_codes": [],
+    }
+    if operation_id is not None:
+        payload["operation_id"] = operation_id
+    return _ExecutionOutcome(
+        exit_code=1,
+        payload=payload,
+        stream=sys.stdout if stream is None else stream,
+        primary_error_type=primary_error_type,
     )
 
 
-def _post_exchange_uncertain(
-    evidence: ExecutionEvidence,
-    operation_id: str,
-    reason: str,
+def _post_exchange_uncertain_outcome(
+    evidence: ExecutionEvidence | None,
+    operation_id: str | None,
+    reason: str | None,
     *,
-    publish_state: str = "EXCHANGE_COMPLETED_NOT_VERIFIED",
-) -> int:
+    publish_state: str,
+) -> _ExecutionOutcome:
     result = {
         "error_type": "PUBLISH_UNCERTAIN",
         "exit_classification": "PUBLISH_UNCERTAIN",
-        "failure_reason": reason,
         "publish_state": publish_state,
         "target_may_have_changed": True,
         "manual_recovery_required": True,
         "automatic_retry_allowed": False,
     }
-    evidence_persisted = True
-    try:
-        _record_failure(evidence, result)
-    except Exception:
-        evidence_persisted = False
-    _json_emit(
-        {
-            "status": "FAILED",
-            "error_type": "PUBLISH_UNCERTAIN",
-            "exit_classification": "PUBLISH_UNCERTAIN",
-            "operation_id": operation_id,
-            "publish_state": publish_state,
-            "target_may_have_changed": True,
-            "automatic_retry_allowed": False,
-            "manual_recovery_required": True,
-            "durable_evidence_persisted": evidence_persisted,
-        },
+    evidence_updated = False
+    if evidence is not None:
+        try:
+            _record_failure(evidence, result)
+            evidence_updated = True
+        except Exception:
+            evidence_updated = False
+    return _failure_outcome(
+        operation_id,
+        result,
+        durable_evidence_updated=evidence_updated,
+        primary_error_type=reason,
         stream=sys.stderr,
     )
-    return 1
+
+
+def _publish_state_requires_uncertainty(
+    publish_state: str,
+    target_may_have_changed: bool,
+) -> bool:
+    return target_may_have_changed or publish_state not in {
+        "BEFORE_EXCHANGE",
+        "EXCHANGE_REVERSED",
+    }
+
+
+def _apply_cleanup_failure(
+    outcome: _ExecutionOutcome,
+    codes: Sequence[str],
+    *,
+    evidence: ExecutionEvidence | None,
+    publish_state: str,
+) -> None:
+    combined = list(outcome.payload.get("cleanup_failure_codes", []))
+    combined.extend(codes)
+    combined = list(dict.fromkeys(combined))
+    prior_classification = str(
+        outcome.payload.get("exit_classification", "")
+    )
+    had_primary = (
+        outcome.exit_code != 0 and outcome.primary_error_type is not None
+    )
+    if had_primary:
+        outcome.payload["primary_error_type"] = outcome.primary_error_type
+    outcome.payload["primary_exception_preserved"] = had_primary
+    outcome.payload["cleanup_exception_recorded"] = True
+    outcome.payload["cleanup_failure_codes"] = combined
+
+    requires_uncertainty = _publish_state_requires_uncertainty(
+        publish_state,
+        bool(outcome.payload.get("target_may_have_changed")),
+    )
+    if requires_uncertainty:
+        outcome.exit_code = 1
+        outcome.stream = sys.stderr
+        outcome.payload.update(
+            {
+                "status": "FAILED",
+                "error_type": "PUBLISH_UNCERTAIN",
+                "exit_classification": "PUBLISH_UNCERTAIN",
+                "publish_state": publish_state,
+                "target_may_have_changed": True,
+                "database_mutated": None,
+                "automatic_retry_allowed": False,
+                "manual_recovery_required": True,
+            }
+        )
+    elif outcome.exit_code == 0:
+        outcome.exit_code = 1
+        outcome.payload.update(
+            {
+                "status": "FAILED",
+                "error_type": "CLEANUP_FAILED",
+                "exit_classification": "CLEANUP_FAILED",
+                "publish_state": "BEFORE_EXCHANGE",
+                "target_may_have_changed": False,
+                "database_mutated": False,
+                "automatic_retry_allowed": False,
+                "manual_recovery_required": False,
+            }
+        )
+    elif had_primary:
+        outcome.payload["exit_classification"] = prior_classification
+        outcome.payload["error_type"] = prior_classification
+
+    evidence_updated = False
+    if evidence is not None:
+        try:
+            if requires_uncertainty and evidence.payload.get("STATE") not in {
+                "PUBLISH_UNCERTAIN",
+                "MANUAL_RECOVERY_REQUIRED",
+            }:
+                _record_failure(
+                    evidence,
+                    {
+                        "error_type": "PUBLISH_UNCERTAIN",
+                        "exit_classification": "PUBLISH_UNCERTAIN",
+                        "publish_state": publish_state,
+                        "target_may_have_changed": True,
+                        "manual_recovery_required": True,
+                    },
+                )
+            evidence.checkpoint(
+                FINAL_EXIT_CLASSIFICATION=outcome.payload[
+                    "exit_classification"
+                ],
+                PRIMARY_ERROR_TYPE=outcome.primary_error_type,
+                PRIMARY_EXCEPTION_PRESERVED=had_primary,
+                CLEANUP_EXCEPTION_RECORDED=True,
+                CLEANUP_FAILURE_CODES=combined,
+                DURABLE_EVIDENCE_UPDATED=True,
+            )
+            evidence_updated = True
+        except Exception:
+            evidence_updated = False
+    outcome.payload["durable_evidence_updated"] = evidence_updated
+    outcome.payload["durable_evidence_persisted"] = evidence_updated
+
+
+def _finalize_execution_evidence(
+    outcome: _ExecutionOutcome,
+    evidence: ExecutionEvidence | None,
+    *,
+    publish_state: str,
+) -> None:
+    if evidence is None:
+        return
+    try:
+        evidence.checkpoint(
+            FINAL_EXIT_CLASSIFICATION=outcome.payload.get(
+                "exit_classification",
+                "PASS",
+            ),
+            PRIMARY_ERROR_TYPE=outcome.primary_error_type,
+            PRIMARY_EXCEPTION_PRESERVED=outcome.payload.get(
+                "primary_exception_preserved",
+                False,
+            ),
+            CLEANUP_EXCEPTION_RECORDED=outcome.payload.get(
+                "cleanup_exception_recorded",
+                False,
+            ),
+            CLEANUP_FAILURE_CODES=outcome.payload.get(
+                "cleanup_failure_codes",
+                [],
+            ),
+            DURABLE_EVIDENCE_UPDATED=True,
+        )
+        outcome.payload["durable_evidence_updated"] = True
+        outcome.payload["durable_evidence_persisted"] = True
+    except Exception:
+        _apply_cleanup_failure(
+            outcome,
+            ("EXECUTION_EVIDENCE_FINALIZATION_FAILED",),
+            evidence=None,
+            publish_state=publish_state,
+        )
 
 
 def _quiescence_error(exc: OrchestratorError) -> str:
@@ -1394,12 +1663,19 @@ def _quiescence_error(exc: OrchestratorError) -> str:
     return exc.code
 
 
-def execute_plan(args: argparse.Namespace) -> int:
-    root_identity = _root_identity()
-    pinned = _open_plan(args.plan, args.expected_plan_sha256)
+def _execute_plan_outcome(
+    args: argparse.Namespace,
+) -> _ExecutionOutcome:
+    pinned: PinnedPlan | None = None
     validated: ValidatedExecution | None = None
     prepared: Any = None
+    evidence: ExecutionEvidence | None = None
+    operation_id: str | None = None
+    publish_state = "BEFORE_EXCHANGE"
+    outcome: _ExecutionOutcome | None = None
     try:
+        root_identity = _root_identity()
+        pinned = _open_plan(args.plan, args.expected_plan_sha256)
         validated = _revalidate_plan(args, pinned, root_identity)
         plan = pinned.payload
         operation_id = str(plan["OPERATION_ID"])
@@ -1420,7 +1696,7 @@ def execute_plan(args: argparse.Namespace) -> int:
             )
         except OrchestratorError as exc:
             code = _quiescence_error(exc)
-            _emit_failure(
+            outcome = _failure_outcome(
                 operation_id,
                 {
                     "error_type": code,
@@ -1430,8 +1706,10 @@ def execute_plan(args: argparse.Namespace) -> int:
                     "manual_recovery_required": False,
                     "backup_available": False,
                 },
+                durable_evidence_updated=False,
+                primary_error_type=code,
             )
-            return 1
+            return outcome
         if (
             not pinned.path_matches()
             or not validated.deployment_contract.path_matches()
@@ -1478,165 +1756,270 @@ def execute_plan(args: argparse.Namespace) -> int:
         )
 
         captured = io.StringIO()
-        try:
-            with redirect_stdout(captured):
-                return_code = _execute_authorized_staged(
-                    validated.staged_args,
-                    prepared=prepared,
-                )
-            prepared = None
-            result = _parse_staged_output(captured.getvalue())
-        except Exception as exc:
-            reason = (
-                exc.code
-                if isinstance(exc, (ProductionGateError, OrchestratorError))
-                else type(exc).__name__
+        publish_state = "EXCHANGE_STARTED"
+        with redirect_stdout(captured):
+            return_code = _execute_authorized_staged(
+                validated.staged_args,
+                prepared=prepared,
             )
-            return _post_exchange_uncertain(
-                evidence,
-                operation_id,
-                reason,
-            )
+        prepared = None
+        result = _parse_staged_output(captured.getvalue())
+        publish_state = str(
+            result.get("publish_state", "EXCHANGE_STARTED")
+        )
         if return_code != 0 or result.get("status") != "PASS":
+            primary_error = str(
+                result.get("exit_classification")
+                or result.get("error_type")
+                or "STAGED_EXECUTION_FAILED"
+            )
             try:
                 _record_failure(evidence, result)
-            except Exception as exc:
-                publish_state = str(
-                    result.get("publish_state", "BEFORE_EXCHANGE")
+            except Exception:
+                outcome = _post_exchange_uncertain_outcome(
+                    evidence,
+                    operation_id,
+                    primary_error,
+                    publish_state=publish_state,
                 )
-                if (
-                    bool(result.get("target_may_have_changed"))
-                    or publish_state
-                    not in {"BEFORE_EXCHANGE", "EXCHANGE_REVERSED"}
-                ):
-                    reason = (
-                        exc.code
-                        if isinstance(
-                            exc, (ProductionGateError, OrchestratorError)
-                        )
-                        else type(exc).__name__
-                    )
-                    return _post_exchange_uncertain(
-                        evidence,
-                        operation_id,
-                        reason,
+                _apply_cleanup_failure(
+                    outcome,
+                    ("EXECUTION_EVIDENCE_UPDATE_FAILED",),
+                    evidence=None,
+                    publish_state=publish_state,
+                )
+                return outcome
+            outcome = _failure_outcome(
+                operation_id,
+                result,
+                durable_evidence_updated=True,
+                primary_error_type=primary_error,
+            )
+            return outcome
+
+        internal = _read_internal_manifest(
+            validated.backup_parent,
+            operation_id,
+        )
+        if (
+            internal.get("STATE") != "VERIFIED"
+            or internal.get("PUBLISH_STATE") != "FINAL_VERIFIED"
+        ):
+            raise ProductionGateError(
+                "INTERNAL_MANIFEST_NOT_FINAL_VERIFIED"
+            )
+        db_path = Path(str(plan["DB_CANONICAL_PATH"]))
+        final_identity, _whole_schema, integrity, foreign_keys = (
+            _read_only_source(db_path)
+        )
+        if integrity != "ok" or foreign_keys != 0:
+            raise ProductionGateError(
+                "FINAL_DATABASE_VALIDATION_FAILED"
+            )
+        actual_target_fingerprint = _target_schema_fingerprint(db_path)
+        if (
+            actual_target_fingerprint
+            != validated.target_schema_fingerprint
+        ):
+            raise ProductionGateError(
+                "FINAL_TARGET_SCHEMA_MISMATCH"
+            )
+        if (
+            not pinned.path_matches()
+            or not validated.deployment_contract.path_matches()
+            or not validated.backup_parent.path_matches()
+            or not validated.staging_parent.path_matches()
+            or not validated.evidence_parent.path_matches()
+        ):
+            raise ProductionGateError(
+                "PINNED_AUTHORITY_DRIFT_AFTER_EXCHANGE"
+            )
+        publish_state = "FINAL_VERIFIED"
+        evidence.transition(
+            "COMPLETED",
+            BACKUP_SHA256=internal.get("BACKUP_SHA256"),
+            STAGING_SHA256=internal.get("STAGING_SHA256"),
+            TARGET_SCHEMA_AFTER=actual_target_fingerprint,
+            PUBLISH_STATE="FINAL_VERIFIED",
+            TARGET_MAY_HAVE_CHANGED=True,
+            AUTOMATIC_RETRY_ALLOWED=False,
+            MANUAL_RECOVERY_REQUIRED=False,
+            FINAL_TARGET_SHA256=final_identity["SOURCE_SHA256"],
+            COMPLETED_AT=_timestamp(_now()),
+            BACKUP_CREATED=True,
+            BACKUP_FILE_FSYNCED=True,
+            BACKUP_PARENT_FSYNCED=True,
+            BACKUP_SOURCE_IDENTITY_MATCH=(
+                internal.get("BACKUP_SHA256")
+                == plan["SOURCE_SHA256"]
+            ),
+            FINAL_SCHEMA_MATCHES_PLANNED_TARGET=True,
+        )
+        outcome = _ExecutionOutcome(
+            exit_code=0,
+            payload={
+                "status": "PASS",
+                "mode": "EXECUTE",
+                "operation_id": operation_id,
+                "plan_sha256": pinned.sha256,
+                "publish_state": "FINAL_VERIFIED",
+                "manifest_state": "COMPLETED",
+                "target_schema_version": (
+                    validated.target_schema_version
+                ),
+                "target_schema_fingerprint_match": True,
+                "target_may_have_changed": True,
+                "automatic_retry_allowed": False,
+                "manual_recovery_required": False,
+                "production_execution_enabled": True,
+                "durable_evidence_updated": True,
+                "durable_evidence_persisted": True,
+                "primary_exception_preserved": False,
+                "cleanup_exception_recorded": False,
+                "cleanup_failure_codes": [],
+            },
+            stream=sys.stdout,
+        )
+        return outcome
+    except Exception as exc:
+        if isinstance(exc, _PrimaryAndCleanupFailure):
+            primary: Exception | None = exc.primary
+            embedded_cleanup = exc.cleanup_codes
+        elif isinstance(exc, _CleanupFailure):
+            primary = None
+            embedded_cleanup = exc.codes
+        else:
+            primary = exc
+            embedded_cleanup = ()
+        primary_code = (
+            _safe_exception_code(primary)
+            if primary is not None
+            else "CLEANUP_FAILED"
+        )
+        if _publish_state_requires_uncertainty(
+            publish_state,
+            publish_state != "BEFORE_EXCHANGE",
+        ):
+            outcome = _post_exchange_uncertain_outcome(
+                evidence,
+                operation_id,
+                primary_code if primary is not None else None,
+                publish_state=publish_state,
+            )
+        else:
+            outcome = _failure_outcome(
+                operation_id,
+                {
+                    "error_type": primary_code,
+                    "exit_classification": primary_code,
+                    "publish_state": "BEFORE_EXCHANGE",
+                    "target_may_have_changed": False,
+                    "manual_recovery_required": False,
+                    "backup_available": False,
+                },
+                durable_evidence_updated=False,
+                primary_error_type=(
+                    primary_code if primary is not None else None
+                ),
+            )
+        if embedded_cleanup:
+            _apply_cleanup_failure(
+                outcome,
+                embedded_cleanup,
+                evidence=evidence,
+                publish_state=publish_state,
+            )
+        return outcome
+    finally:
+        cleanup_codes: list[str] = []
+        if prepared is not None:
+            try:
+                prepared.close()
+            except Exception as exc:
+                cleanup_codes.extend(
+                    _cleanup_codes(exc, "PREPARED_EXECUTION_CLOSE_FAILED")
+                )
+        if validated is not None:
+            try:
+                validated.close()
+            except Exception as exc:
+                cleanup_codes.extend(
+                    _cleanup_codes(exc, "VALIDATED_EXECUTION_CLOSE_FAILED")
+                )
+        if outcome is not None and cleanup_codes:
+            _apply_cleanup_failure(
+                outcome,
+                cleanup_codes,
+                evidence=evidence,
+                publish_state=publish_state,
+            )
+        if outcome is not None:
+            _finalize_execution_evidence(
+                outcome,
+                evidence,
+                publish_state=publish_state,
+            )
+        if pinned is not None:
+            try:
+                pinned.close()
+            except Exception as exc:
+                if outcome is not None:
+                    _apply_cleanup_failure(
+                        outcome,
+                        _cleanup_codes(
+                            exc,
+                            "PINNED_PLAN_CLOSE_FAILED",
+                        ),
+                        evidence=evidence,
                         publish_state=publish_state,
                     )
-                raise
-            _emit_failure(operation_id, result)
-            return 1
 
-        try:
-            internal = _read_internal_manifest(
-                validated.backup_parent,
-                operation_id,
-            )
-            if (
-                internal.get("STATE") != "VERIFIED"
-                or internal.get("PUBLISH_STATE") != "FINAL_VERIFIED"
-            ):
-                raise ProductionGateError(
-                    "INTERNAL_MANIFEST_NOT_FINAL_VERIFIED"
-                )
-            db_path = Path(str(plan["DB_CANONICAL_PATH"]))
-            final_identity, _whole_schema, integrity, foreign_keys = (
-                _read_only_source(db_path)
-            )
-            if integrity != "ok" or foreign_keys != 0:
-                raise ProductionGateError(
-                    "FINAL_DATABASE_VALIDATION_FAILED"
-                )
-            actual_target_fingerprint = _target_schema_fingerprint(db_path)
-            if (
-                actual_target_fingerprint
-                != validated.target_schema_fingerprint
-            ):
-                raise ProductionGateError(
-                    "FINAL_TARGET_SCHEMA_MISMATCH"
-                )
-            if (
-                not pinned.path_matches()
-                or not validated.deployment_contract.path_matches()
-                or not validated.backup_parent.path_matches()
-                or not validated.staging_parent.path_matches()
-                or not validated.evidence_parent.path_matches()
-            ):
-                raise ProductionGateError(
-                    "PINNED_AUTHORITY_DRIFT_AFTER_EXCHANGE"
-                )
-            evidence.transition(
-                "COMPLETED",
-                BACKUP_SHA256=internal.get("BACKUP_SHA256"),
-                STAGING_SHA256=internal.get("STAGING_SHA256"),
-                TARGET_SCHEMA_AFTER=actual_target_fingerprint,
-                PUBLISH_STATE="FINAL_VERIFIED",
-                TARGET_MAY_HAVE_CHANGED=True,
-                AUTOMATIC_RETRY_ALLOWED=False,
-                MANUAL_RECOVERY_REQUIRED=False,
-                FINAL_TARGET_SHA256=final_identity["SOURCE_SHA256"],
-                COMPLETED_AT=_timestamp(_now()),
-                BACKUP_CREATED=True,
-                BACKUP_FILE_FSYNCED=True,
-                BACKUP_PARENT_FSYNCED=True,
-                BACKUP_SOURCE_IDENTITY_MATCH=(
-                    internal.get("BACKUP_SHA256")
-                    == plan["SOURCE_SHA256"]
-                ),
-                FINAL_SCHEMA_MATCHES_PLANNED_TARGET=True,
-            )
-        except Exception as exc:
-            reason = (
-                exc.code
-                if isinstance(exc, (ProductionGateError, OrchestratorError))
-                else type(exc).__name__
-            )
-            return _post_exchange_uncertain(
-                evidence,
-                operation_id,
-                reason,
-                publish_state="FINAL_VERIFIED",
-            )
-        try:
-            _json_emit(
-                {
-                    "status": "PASS",
-                    "mode": "EXECUTE",
-                    "operation_id": operation_id,
-                    "plan_sha256": pinned.sha256,
-                    "publish_state": "FINAL_VERIFIED",
-                    "manifest_state": "COMPLETED",
-                    "target_schema_version": (
-                        validated.target_schema_version
-                    ),
-                    "target_schema_fingerprint_match": True,
-                    "automatic_retry_allowed": False,
-                    "manual_recovery_required": False,
-                    "production_execution_enabled": True,
-                }
-            )
-        except Exception as exc:
-            reason = (
-                exc.code
-                if isinstance(exc, (ProductionGateError, OrchestratorError))
-                else type(exc).__name__
-            )
-            return _post_exchange_uncertain(
-                evidence,
-                operation_id,
-                reason,
-                publish_state="FINAL_VERIFIED",
-            )
-        return 0
-    finally:
-        if prepared is not None:
-            prepared.close()
-        if validated is not None:
-            validated.close()
-        pinned.close()
+
+def _sanitized_stderr_fallback(
+    outcome: _ExecutionOutcome,
+) -> None:
+    payload = {
+        "status": "FAILED",
+        "error_type": "PUBLISH_UNCERTAIN",
+        "exit_classification": "PUBLISH_UNCERTAIN",
+        "publish_state": str(
+            outcome.payload.get("publish_state", "EXECUTION_STATE_UNKNOWN")
+        ),
+        "target_may_have_changed": True,
+        "automatic_retry_allowed": False,
+        "manual_recovery_required": True,
+        "durable_evidence_updated": False,
+        "durable_evidence_persisted": False,
+        "primary_exception_preserved": outcome.exit_code != 0,
+        "cleanup_exception_recorded": True,
+        "cleanup_failure_codes": ["FINAL_RESULT_EMIT_FAILED"],
+    }
+    operation_id = outcome.payload.get("operation_id")
+    if isinstance(operation_id, str):
+        payload["operation_id"] = operation_id
+    print(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        file=sys.stderr,
+    )
+
+
+def execute_plan(args: argparse.Namespace) -> int:
+    outcome = _execute_plan_outcome(args)
+    try:
+        _json_emit(outcome.payload, stream=outcome.stream)
+    except Exception:
+        _sanitized_stderr_fallback(outcome)
+        return 1
+    return outcome.exit_code
+
+
+class _StructuredArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> None:
+        raise _StructuredArgumentError()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _StructuredArgumentParser(
         description="Explicit root-only production staged migration gate"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1685,8 +2068,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _argument_error_payload() -> dict[str, Any]:
+    return {
+        "status": "FAILED",
+        "error_type": "ARGUMENT_ERROR",
+        "exit_classification": "ARGUMENT_ERROR",
+        "publish_state": "BEFORE_EXCHANGE",
+        "target_may_have_changed": False,
+        "database_mutated": False,
+        "automatic_retry_allowed": False,
+        "manual_recovery_required": False,
+        "durable_evidence_updated": False,
+        "durable_evidence_persisted": False,
+        "production_execution_enabled": False,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except _StructuredArgumentError:
+        _json_emit(_argument_error_payload(), stream=sys.stderr)
+        return 2
     try:
         if args.command == "plan":
             return create_plan(args)
@@ -1694,11 +2097,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             return execute_plan(args)
         raise ProductionGateError("EXPLICIT_SUBCOMMAND_REQUIRED")
     except (ProductionGateError, OrchestratorError, OSError) as exc:
-        code = (
-            exc.code
-            if isinstance(exc, (ProductionGateError, OrchestratorError))
-            else type(exc).__name__
-        )
+        code = _safe_exception_code(exc)
+        if args.command == "execute":
+            _json_emit(
+                {
+                    "status": "FAILED",
+                    "error_type": "PUBLISH_UNCERTAIN",
+                    "exit_classification": "PUBLISH_UNCERTAIN",
+                    "primary_error_type": code,
+                    "publish_state": "EXECUTION_STATE_UNKNOWN",
+                    "target_may_have_changed": True,
+                    "automatic_retry_allowed": False,
+                    "manual_recovery_required": True,
+                    "durable_evidence_updated": False,
+                    "durable_evidence_persisted": False,
+                    "production_execution_enabled": False,
+                },
+                stream=sys.stderr,
+            )
+            return 1
         _json_emit(
             {
                 "status": "FAILED",

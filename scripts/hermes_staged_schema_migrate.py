@@ -2212,6 +2212,8 @@ def _execute_staged_body(
             if isinstance(primary, OrchestratorError)
             else OrchestratorError(type(primary).__name__)
         )
+        primary_error_type = _cleanup_error_type(primary)
+        primary_error_code = error.code
         if exchange_started and publish_state == "BEFORE_EXCHANGE":
             publish_state = error.publish_state
         publish_uncertain = (
@@ -2283,11 +2285,27 @@ def _execute_staged_body(
                     MANUAL_RECOVERY_REQUIRED=manual_recovery_required,
                     ERROR_TYPE=failure_code,
                     FAILURE_REASON=error.code if publish_uncertain else None,
+                    PRIMARY_ERROR_TYPE=primary_error_type,
+                    PRIMARY_ERROR_CODE=primary_error_code,
                     CLEANUP_FAILED=cleanup_failed,
                     CLEANUP_ERROR_TYPE=cleanup_error_type,
                 )
-            except Exception:
+            except Exception as manifest_error:
                 manifest_write_failed = True
+                manifest_cleanup_failures = (
+                    _cleanup_records_from_exception(
+                        "MANIFEST_FAILED_TRANSITION",
+                        "FAILED_MANIFEST_TRANSITION",
+                        "MANIFEST_FAILED_TRANSITION_WRITE_FAILED",
+                        manifest_error,
+                    )
+                )
+                cleanup_failures.extend(manifest_cleanup_failures)
+                cleanup_failed = True
+                if cleanup_error_type is None:
+                    cleanup_error_type = (
+                        manifest_cleanup_failures[0].error_code
+                    )
         else:
             target_may_have_changed = _target_may_have_changed(publish_state)
             if publish_uncertain:
@@ -2298,6 +2316,8 @@ def _execute_staged_body(
                 "error_type": failure_code,
                 "exit_classification": failure_code,
                 "failure_reason": error.code if publish_uncertain else None,
+                "primary_error_type": primary_error_type,
+                "primary_error_code": primary_error_code,
                 "publish_state": publish_state,
                 "target_may_have_changed": target_may_have_changed,
                 "automatic_retry_allowed": False,
@@ -2377,6 +2397,8 @@ def _execute_staged_body(
                     "error_type": classification,
                     "exit_classification": classification,
                     "failure_reason": None,
+                    "primary_error_type": None,
+                    "primary_error_code": None,
                     "publish_state": publish_state,
                     "target_may_have_changed": uncertain,
                     "automatic_retry_allowed": False,

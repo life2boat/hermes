@@ -612,6 +612,8 @@ def _root_identity() -> RootIdentity:
     if effective_uid != 0:
         raise ProductionGateError("ROOT_EUID_REQUIRED")
     effective_gid = int(getters[1]())
+    if effective_gid != 0:
+        raise ProductionGateError("ROOT_EGID_REQUIRED")
     try:
         username = pwd.getpwuid(effective_uid).pw_name
     except KeyError as exc:
@@ -955,6 +957,7 @@ def _open_evidence_document(
         raise
     try:
         owner_uid = os.geteuid()  # windows-footgun: ok
+        owner_gid = os.getegid()  # windows-footgun: ok
         parent_metadata = os.fstat(parent_fd)
         metadata = os.fstat(file_fd)
         if (
@@ -964,6 +967,7 @@ def _open_evidence_document(
             or not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
             or metadata.st_uid != owner_uid
+            or metadata.st_gid != owner_gid
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_size > MAX_DOCUMENT_BYTES
         ):

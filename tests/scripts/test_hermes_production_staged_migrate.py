@@ -1538,6 +1538,209 @@ def test_negative_matrix_contract_is_large_and_public() -> None:
 
 
 
+class _RealBoundaryCloseFailure:
+    def __init__(self, wrapped: Any, attempts: list[str]) -> None:
+        self._wrapped = wrapped
+        self._attempts = attempts
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    def close(self) -> None:
+        self._attempts.append("close")
+        self._wrapped.close()
+        raise OSError("sensitive-real-public-cleanup")
+
+
+PUBLIC_REAL_CLEANUP_RESOURCE_CLASSES = (
+    ("copy_descriptors_files", "COPY_SOURCE_DESCRIPTOR"),
+    ("fsync_descriptors_handles", "FSYNC_FILE_HANDLE"),
+    ("manifest_temporary_resources", "MANIFEST_TEMP_FILE_HANDLE"),
+    ("recovery_manifest", "RECOVERY_MANIFEST_FILE_HANDLE"),
+    ("sqlite_connections", "SQLITE_VALIDATION_CONNECTION"),
+)
+
+
+def _actual_cleanup_record_for_public_class(
+    resource_class: str,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, str]:
+    attempts: list[str] = []
+    with monkeypatch.context() as scoped:
+        if resource_class == "copy_descriptors_files":
+            source = root / "copy-source.sqlite"
+            source.write_bytes(b"synthetic")
+            destination = root / "copy-target.sqlite"
+            real_open = os.open
+            real_close = os.close
+            source_descriptors: set[int] = set()
+
+            def tracking_open(
+                path: object,
+                *args: Any,
+                **kwargs: Any,
+            ) -> int:
+                descriptor = real_open(path, *args, **kwargs)
+                if Path(path) == source:
+                    source_descriptors.add(descriptor)
+                    attempts.append("acquired")
+                return descriptor
+
+            def close_then_fail(descriptor: int) -> None:
+                if descriptor not in source_descriptors:
+                    real_close(descriptor)
+                    return
+                source_descriptors.remove(descriptor)
+                attempts.append("close")
+                real_close(descriptor)
+                raise OSError("sensitive-real-public-cleanup")
+
+            scoped.setattr(os, "open", tracking_open)
+            scoped.setattr(os, "close", close_then_fail)
+            uid_getter = getattr(os, "getuid", None)
+            gid_getter = getattr(os, "getgid", None)
+            assert callable(uid_getter)
+            assert callable(gid_getter)
+            with pytest.raises(staged._CleanupAggregateError) as captured:
+                staged._copy_durable(
+                    source,
+                    destination,
+                    uid=int(uid_getter()),
+                    gid=int(gid_getter()),
+                )
+        elif resource_class == "fsync_descriptors_handles":
+            target = root / "fsync-target.bin"
+            target.write_bytes(b"synthetic")
+            real_open = Path.open
+
+            def open_with_failing_close(
+                path: Path,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                handle = real_open(path, *args, **kwargs)
+                if path == target:
+                    attempts.append("acquired")
+                    return _RealBoundaryCloseFailure(handle, attempts)
+                return handle
+
+            scoped.setattr(Path, "open", open_with_failing_close)
+            with pytest.raises(staged._CleanupAggregateError) as captured:
+                staged._fsync_file(target)
+        elif resource_class == "manifest_temporary_resources":
+            real_fdopen = os.fdopen
+
+            def fdopen_with_failing_close(
+                descriptor: int,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                attempts.append("acquired")
+                return _RealBoundaryCloseFailure(
+                    real_fdopen(descriptor, *args, **kwargs),
+                    attempts,
+                )
+
+            scoped.setattr(os, "fdopen", fdopen_with_failing_close)
+            manifest = staged.DurableManifest(
+                path=root / "manifest.json",
+                payload={
+                    "STATE": "PLANNED",
+                    "PUBLISH_STATE": "BEFORE_EXCHANGE",
+                },
+            )
+            with pytest.raises(staged._CleanupAggregateError) as captured:
+                manifest.transition("FAILED")
+        elif resource_class == "recovery_manifest":
+            manifest_path = root / "recovery.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {"PUBLISH_STATE": "EXCHANGE_COMPLETED_NOT_VERIFIED"}
+                ),
+                encoding="ascii",
+            )
+            staging_root = _private_directory(root / "staging")
+            real_open = Path.open
+
+            def open_with_failing_close(
+                path: Path,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                handle = real_open(path, *args, **kwargs)
+                if path == manifest_path:
+                    attempts.append("acquired")
+                    return _RealBoundaryCloseFailure(handle, attempts)
+                return handle
+
+            scoped.setattr(Path, "open", open_with_failing_close)
+            with pytest.raises(staged._CleanupAggregateError) as captured:
+                staged._recover_pre_publish_staging(
+                    manifest_path,
+                    staging_root,
+                )
+        elif resource_class == "sqlite_connections":
+            source = _source(root / "sqlite" / "validation.sqlite")
+            real_connect = sqlite3.connect
+
+            def connect_with_failing_close(
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
+                attempts.append("acquired")
+                return _RealBoundaryCloseFailure(
+                    real_connect(*args, **kwargs),
+                    attempts,
+                )
+
+            scoped.setattr(sqlite3, "connect", connect_with_failing_close)
+            with pytest.raises(staged._CleanupAggregateError) as captured:
+                staged._sqlite_validation(source)
+        else:
+            raise AssertionError(resource_class)
+
+    primary, records = staged._split_primary_cleanup(captured.value)
+    assert isinstance(primary, staged.OrchestratorError)
+    assert primary.code == "CLEANUP_FAILED"
+    assert len(records) == 1
+    assert attempts == ["acquired", "close"]
+    serialized = json.dumps(records[0].as_payload(), ensure_ascii=True)
+    assert "sensitive" not in serialized
+    return records[0].as_payload()
+
+
+def _post_exchange_result_with_cleanup(
+    record: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "status": "FAILED",
+        "error_type": "PUBLISH_UNCERTAIN",
+        "exit_classification": "PUBLISH_UNCERTAIN",
+        "failure_reason": "PRIMARY_POST_EXCHANGE_FAILURE",
+        "primary_error_type": "OrchestratorError",
+        "primary_error_code": "PRIMARY_POST_EXCHANGE_FAILURE",
+        "publish_state": "EXCHANGE_COMPLETED_NOT_VERIFIED",
+        "target_may_have_changed": True,
+        "automatic_retry_allowed": False,
+        "manual_recovery_required": True,
+        "primary_exit_classification": "PRIMARY_POST_EXCHANGE_FAILURE",
+        "primary_publish_state": "EXCHANGE_COMPLETED_NOT_VERIFIED",
+        "primary_target_may_have_changed": True,
+        "primary_automatic_retry_allowed": False,
+        "primary_manual_recovery_required": True,
+        "primary_exception_present": True,
+        "primary_exception_preserved": True,
+        "cleanup_exception_recorded": True,
+        "cleanup_exception_count": 1,
+        "cleanup_failures": [record],
+        "cleanup_failure_codes": [record["error_code"]],
+        "backup_available": True,
+        "manifest_write_failed": True,
+        "durable_evidence_updated": False,
+    }
+
+
 PUBLIC_INTERNAL_CLEANUP_CASES = (
     (
         "pre_exchange_primary",
@@ -1740,6 +1943,150 @@ def test_public_entrypoint_preserves_internal_primary_and_cleanup(
     assert "sensitive" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("resource_class", "expected_resource_kind"),
+    PUBLIC_REAL_CLEANUP_RESOURCE_CLASSES,
+)
+def test_public_entrypoint_transports_real_cleanup_resource_class(
+    resource_class: str,
+    expected_resource_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    boundary_root = _private_directory(tmp_path / "boundary")
+    record = _actual_cleanup_record_for_public_class(
+        resource_class,
+        boundary_root,
+        monkeypatch,
+    )
+    assert record["resource_kind"] == expected_resource_kind
+    context = _unit_context(tmp_path / "gate", monkeypatch)
+    plan = _create_plan(context, capfd)
+    staged_result = _post_exchange_result_with_cleanup(record)
+
+    def return_structured_failure(
+        _args: Any,
+        *,
+        prepared: Any,
+    ) -> int:
+        prepared.close()
+        print(json.dumps(staged_result, ensure_ascii=True, sort_keys=True))
+        return 1
+
+    monkeypatch.setattr(
+        production,
+        "_execute_authorized_staged",
+        return_structured_failure,
+    )
+    before_hash = production._sha256(context.source)
+
+    assert production.main(_execute_argv(plan)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "PUBLISH_UNCERTAIN"
+    assert result["publish_state"] == "EXCHANGE_COMPLETED_NOT_VERIFIED"
+    assert result["target_may_have_changed"] is True
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["primary_exception_preserved"] is True
+    assert result["primary_error_type"] == "OrchestratorError"
+    assert result["primary_error_code"] == "PRIMARY_POST_EXCHANGE_FAILURE"
+    assert result["cleanup_exception_count"] == 1
+    assert result["cleanup_resource_kinds"] == [expected_resource_kind]
+    assert result["cleanup_failures"] == [record]
+    assert result["durable_evidence_updated"] is True
+    assert production._sha256(context.source) == before_hash
+
+    evidence = json.loads(
+        (plan.path.parent / "execution.json").read_text(encoding="ascii")
+    )
+    assert evidence["PRIMARY_EXCEPTION_PRESERVED"] is True
+    assert evidence["PRIMARY_ERROR_TYPE"] == "OrchestratorError"
+    assert evidence["PRIMARY_ERROR_CODE"] == "PRIMARY_POST_EXCHANGE_FAILURE"
+    assert evidence["CLEANUP_EXCEPTION_COUNT"] == 1
+    assert evidence["CLEANUP_RESOURCE_KINDS"] == [expected_resource_kind]
+    serialized = json.dumps([result, evidence], ensure_ascii=True)
+    assert "sensitive" not in serialized
+
+
+def test_durable_evidence_failure_preserves_real_manifest_cleanup_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    boundary_root = _private_directory(tmp_path / "boundary")
+    record = _actual_cleanup_record_for_public_class(
+        "manifest_temporary_resources",
+        boundary_root,
+        monkeypatch,
+    )
+    context = _unit_context(tmp_path / "gate", monkeypatch)
+    plan = _create_plan(context, capfd)
+    staged_result = _post_exchange_result_with_cleanup(record)
+
+    def return_structured_failure(
+        _args: Any,
+        *,
+        prepared: Any,
+    ) -> int:
+        prepared.close()
+        print(json.dumps(staged_result, ensure_ascii=True, sort_keys=True))
+        return 1
+
+    monkeypatch.setattr(
+        production,
+        "_execute_authorized_staged",
+        return_structured_failure,
+    )
+    original_writer = production._write_json_durable_at
+    evidence_writes = 0
+
+    def fail_evidence_update(
+        parent_fd: int,
+        name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        nonlocal evidence_writes
+        if name == "execution.json":
+            evidence_writes += 1
+            if evidence_writes >= 2:
+                raise OSError("sensitive-evidence-write-failure")
+        original_writer(parent_fd, name, payload)
+
+    monkeypatch.setattr(
+        production,
+        "_write_json_durable_at",
+        fail_evidence_update,
+    )
+
+    assert production.main(_execute_argv(plan)) == 1
+    result, stream = _json_result(capfd)
+    assert stream == "stderr"
+    assert result["exit_classification"] == "PUBLISH_UNCERTAIN"
+    assert result["publish_state"] == "EXCHANGE_COMPLETED_NOT_VERIFIED"
+    assert result["target_may_have_changed"] is True
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["durable_evidence_updated"] is False
+    assert result["primary_exception_present"] is True
+    assert result["primary_exception_preserved"] is True
+    assert result["primary_error_type"] == "OrchestratorError"
+    assert result["primary_error_code"] == "PRIMARY_POST_EXCHANGE_FAILURE"
+    assert result["cleanup_exception_count"] == 3
+    assert result["cleanup_resource_kinds"] == [
+        "MANIFEST_TEMP_FILE_HANDLE",
+        "PRODUCTION_GATE_RESOURCE",
+        "PRODUCTION_GATE_RESOURCE",
+    ]
+    assert result["cleanup_failure_codes"] == [
+        "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+        "EXECUTION_EVIDENCE_UPDATE_FAILED",
+        "EXECUTION_EVIDENCE_FINALIZATION_FAILED",
+    ]
+    serialized = json.dumps(result, ensure_ascii=True)
+    assert "sensitive" not in serialized
+
+
 def test_public_entrypoint_accepts_exceptional_preparation_transport(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1810,6 +2157,20 @@ def test_sanitized_stderr_fallback_includes_cleanup_count(
         payload={
             "publish_state": "EXCHANGE_STARTED",
             "cleanup_exception_count": 2,
+            "cleanup_failures": [
+                {
+                    "resource_kind": "MANIFEST_TEMP_FILE_HANDLE",
+                    "cleanup_phase": "FAILED_MANIFEST_TRANSITION",
+                    "error_type": "OSError",
+                    "error_code": "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+                },
+                {
+                    "resource_kind": "SOURCE_SQLITE_LEASE",
+                    "cleanup_phase": "FINAL_RESOURCE_RELEASE",
+                    "error_type": "OSError",
+                    "error_code": "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                },
+            ],
         },
         stream=production.sys.stdout,
         primary_error_type="PRIMARY_POST_EXCHANGE_FAILURE",
@@ -1824,3 +2185,13 @@ def test_sanitized_stderr_fallback_includes_cleanup_count(
     assert result["manual_recovery_required"] is True
     assert result["durable_evidence_updated"] is False
     assert result["cleanup_exception_count"] == 3
+    assert result["cleanup_resource_kinds"] == [
+        "MANIFEST_TEMP_FILE_HANDLE",
+        "SOURCE_SQLITE_LEASE",
+        "FINAL_RESULT_STREAM",
+    ]
+    assert result["cleanup_failure_codes"] == [
+        "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+        "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+        "FINAL_RESULT_EMIT_FAILED",
+    ]

@@ -97,7 +97,9 @@ def _arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = _arguments()
-    if os.geteuid() != 0 or os.getegid() != 0:
+    if (
+        os.geteuid() != 0 or os.getegid() != 0  # windows-footgun: ok
+    ):
         raise AssertionError("root integration container is not real root")
 
     runtime_root = Path(args.runtime_root)
@@ -229,7 +231,7 @@ def main() -> int:
         )
 
         checks = {
-            "root_context_real": os.geteuid() == 0,
+            "root_context_real": os.geteuid() == 0,  # windows-footgun: ok
             "root_check_monkeypatched": False,
             "public_entrypoint_used": True,
             "canonical_deployment_contract_used": True,

@@ -31,7 +31,9 @@ from scripts import hermes_production_deploy as deployment  # noqa: E402
 from scripts.hermes_staged_schema_migrate import (  # noqa: E402
     OrchestratorError,
     SourceIdentity,
+    _StagedCleanupTransport,
     _execute_authorized_staged,
+    _merge_cleanup_transport,
     _fsync_directory,
     _issue_production_authorization,
     _prepare_authorized_production_execution,
@@ -1442,6 +1444,48 @@ def _safe_exception_code(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def _safe_cleanup_metadata(value: object, fallback: str) -> str:
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_]{1,80}", value):
+        return value
+    return fallback
+
+
+def _sanitized_cleanup_failures(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    failures: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        failures.append(
+            {
+                "resource_kind": _safe_cleanup_metadata(
+                    item.get("resource_kind"),
+                    "UNKNOWN_RESOURCE",
+                ),
+                "cleanup_phase": _safe_cleanup_metadata(
+                    item.get("cleanup_phase"),
+                    "UNKNOWN_CLEANUP_PHASE",
+                ),
+                "error_type": _safe_cleanup_metadata(
+                    item.get("error_type"),
+                    "CleanupError",
+                ),
+                "error_code": _safe_cleanup_metadata(
+                    item.get("error_code"),
+                    "OWNED_RESOURCE_CLEANUP_FAILED",
+                ),
+            }
+        )
+    return failures
+
+
+def _cleanup_count(value: object, minimum: int) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= minimum:
+        return value
+    return minimum
+
+
 def _failure_outcome(
     operation_id: str | None,
     result: dict[str, Any],
@@ -1451,6 +1495,36 @@ def _failure_outcome(
     stream: TextIO | None = None,
 ) -> _ExecutionOutcome:
     updates = _failure_updates(result)
+    cleanup_failures = _sanitized_cleanup_failures(
+        result.get("cleanup_failures")
+    )
+    raw_cleanup_codes = result.get("cleanup_failure_codes", [])
+    if not isinstance(raw_cleanup_codes, (list, tuple)):
+        raw_cleanup_codes = []
+    cleanup_codes = [
+        _safe_cleanup_metadata(code, "OWNED_RESOURCE_CLEANUP_FAILED")
+        for code in raw_cleanup_codes
+        if isinstance(code, str)
+    ]
+    if not cleanup_codes:
+        cleanup_codes = [
+            failure["error_code"] for failure in cleanup_failures
+        ]
+    cleanup_count = _cleanup_count(
+        result.get("cleanup_exception_count"),
+        len(cleanup_failures),
+    )
+    primary_present = bool(
+        result.get(
+            "primary_exception_present",
+            primary_error_type is not None,
+        )
+    )
+    primary_classification = (
+        result.get("primary_exit_classification")
+        or primary_error_type
+        or (updates["EXIT_CLASSIFICATION"] if primary_present else None)
+    )
     payload: dict[str, Any] = {
         "status": "FAILED",
         "error_type": updates["ERROR_TYPE"],
@@ -1465,9 +1539,39 @@ def _failure_outcome(
         ],
         "durable_evidence_updated": durable_evidence_updated,
         "durable_evidence_persisted": durable_evidence_updated,
-        "primary_exception_preserved": False,
-        "cleanup_exception_recorded": False,
-        "cleanup_failure_codes": [],
+        "primary_exit_classification": primary_classification,
+        "primary_publish_state": result.get(
+            "primary_publish_state",
+            updates["PUBLISH_STATE"],
+        ),
+        "primary_target_may_have_changed": bool(
+            result.get(
+                "primary_target_may_have_changed",
+                updates["TARGET_MAY_HAVE_CHANGED"],
+            )
+        ),
+        "primary_automatic_retry_allowed": bool(
+            result.get("primary_automatic_retry_allowed", False)
+        ),
+        "primary_manual_recovery_required": bool(
+            result.get(
+                "primary_manual_recovery_required",
+                updates["MANUAL_RECOVERY_REQUIRED"],
+            )
+        ),
+        "primary_exception_present": primary_present,
+        "primary_exception_preserved": bool(
+            result.get("primary_exception_preserved", primary_present)
+        ),
+        "cleanup_exception_recorded": bool(
+            result.get(
+                "cleanup_exception_recorded",
+                cleanup_count > 0,
+            )
+        ),
+        "cleanup_exception_count": cleanup_count,
+        "cleanup_failures": cleanup_failures,
+        "cleanup_failure_codes": cleanup_codes,
     }
     if operation_id is not None:
         payload["operation_id"] = operation_id
@@ -1527,19 +1631,46 @@ def _apply_cleanup_failure(
     evidence: ExecutionEvidence | None,
     publish_state: str,
 ) -> None:
+    sanitized_codes = [
+        _safe_cleanup_metadata(code, "OUTER_RESOURCE_CLEANUP_FAILED")
+        for code in codes
+    ]
     combined = list(outcome.payload.get("cleanup_failure_codes", []))
-    combined.extend(codes)
-    combined = list(dict.fromkeys(combined))
+    combined.extend(sanitized_codes)
+    cleanup_failures = _sanitized_cleanup_failures(
+        outcome.payload.get("cleanup_failures")
+    )
+    cleanup_failures.extend(
+        {
+            "resource_kind": "PRODUCTION_GATE_RESOURCE",
+            "cleanup_phase": "OUTER_RESOURCE_RELEASE",
+            "error_type": "CleanupError",
+            "error_code": code,
+        }
+        for code in sanitized_codes
+    )
     prior_classification = str(
         outcome.payload.get("exit_classification", "")
     )
-    had_primary = (
-        outcome.exit_code != 0 and outcome.primary_error_type is not None
+    had_primary = bool(
+        outcome.payload.get("primary_exception_present")
+        or (
+            outcome.exit_code != 0
+            and outcome.primary_error_type is not None
+        )
     )
-    if had_primary:
+    if had_primary and outcome.primary_error_type is not None:
         outcome.payload["primary_error_type"] = outcome.primary_error_type
-    outcome.payload["primary_exception_preserved"] = had_primary
+    outcome.payload["primary_exception_present"] = had_primary
+    outcome.payload["primary_exception_preserved"] = bool(
+        outcome.payload.get("primary_exception_preserved") or had_primary
+    )
     outcome.payload["cleanup_exception_recorded"] = True
+    outcome.payload["cleanup_exception_count"] = _cleanup_count(
+        outcome.payload.get("cleanup_exception_count"),
+        len(cleanup_failures) - len(sanitized_codes),
+    ) + len(sanitized_codes)
+    outcome.payload["cleanup_failures"] = cleanup_failures
     outcome.payload["cleanup_failure_codes"] = combined
 
     requires_uncertainty = _publish_state_requires_uncertainty(
@@ -1601,8 +1732,22 @@ def _apply_cleanup_failure(
                     "exit_classification"
                 ],
                 PRIMARY_ERROR_TYPE=outcome.primary_error_type,
-                PRIMARY_EXCEPTION_PRESERVED=had_primary,
+                PRIMARY_EXIT_CLASSIFICATION=outcome.payload.get(
+                    "primary_exit_classification"
+                ),
+                PRIMARY_PUBLISH_STATE=outcome.payload.get(
+                    "primary_publish_state"
+                ),
+                PRIMARY_EXCEPTION_PRESENT=had_primary,
+                PRIMARY_EXCEPTION_PRESERVED=outcome.payload.get(
+                    "primary_exception_preserved",
+                    had_primary,
+                ),
                 CLEANUP_EXCEPTION_RECORDED=True,
+                CLEANUP_EXCEPTION_COUNT=outcome.payload[
+                    "cleanup_exception_count"
+                ],
+                CLEANUP_FAILURES=cleanup_failures,
                 CLEANUP_FAILURE_CODES=combined,
                 DURABLE_EVIDENCE_UPDATED=True,
             )
@@ -1628,6 +1773,25 @@ def _finalize_execution_evidence(
                 "PASS",
             ),
             PRIMARY_ERROR_TYPE=outcome.primary_error_type,
+            PRIMARY_EXIT_CLASSIFICATION=outcome.payload.get(
+                "primary_exit_classification"
+            ),
+            PRIMARY_PUBLISH_STATE=outcome.payload.get(
+                "primary_publish_state"
+            ),
+            PRIMARY_TARGET_MAY_HAVE_CHANGED=outcome.payload.get(
+                "primary_target_may_have_changed"
+            ),
+            PRIMARY_AUTOMATIC_RETRY_ALLOWED=outcome.payload.get(
+                "primary_automatic_retry_allowed"
+            ),
+            PRIMARY_MANUAL_RECOVERY_REQUIRED=outcome.payload.get(
+                "primary_manual_recovery_required"
+            ),
+            PRIMARY_EXCEPTION_PRESENT=outcome.payload.get(
+                "primary_exception_present",
+                False,
+            ),
             PRIMARY_EXCEPTION_PRESERVED=outcome.payload.get(
                 "primary_exception_preserved",
                 False,
@@ -1635,6 +1799,14 @@ def _finalize_execution_evidence(
             CLEANUP_EXCEPTION_RECORDED=outcome.payload.get(
                 "cleanup_exception_recorded",
                 False,
+            ),
+            CLEANUP_EXCEPTION_COUNT=outcome.payload.get(
+                "cleanup_exception_count",
+                0,
+            ),
+            CLEANUP_FAILURES=outcome.payload.get(
+                "cleanup_failures",
+                [],
             ),
             CLEANUP_FAILURE_CODES=outcome.payload.get(
                 "cleanup_failure_codes",
@@ -1694,6 +1866,20 @@ def _execute_plan_outcome(
                 expected_source_identity=validated.source_identity,
                 backup_parent_fd=validated.backup_parent.fd,
             )
+        except _StagedCleanupTransport as transport:
+            result = _merge_cleanup_transport(transport)
+            primary_error = str(
+                result.get("primary_exit_classification")
+                or result.get("exit_classification")
+                or "STAGED_PREPARATION_FAILED"
+            )
+            outcome = _failure_outcome(
+                operation_id,
+                result,
+                durable_evidence_updated=False,
+                primary_error_type=primary_error,
+            )
+            return outcome
         except OrchestratorError as exc:
             code = _quiescence_error(exc)
             outcome = _failure_outcome(
@@ -1768,10 +1954,19 @@ def _execute_plan_outcome(
             result.get("publish_state", "EXCHANGE_STARTED")
         )
         if return_code != 0 or result.get("status") != "PASS":
-            primary_error = str(
-                result.get("exit_classification")
-                or result.get("error_type")
-                or "STAGED_EXECUTION_FAILED"
+            primary_present = bool(
+                result.get("primary_exception_present", True)
+            )
+            primary_error = (
+                str(
+                    result.get("primary_exit_classification")
+                    or result.get("failure_reason")
+                    or result.get("exit_classification")
+                    or result.get("error_type")
+                    or "STAGED_EXECUTION_FAILED"
+                )
+                if primary_present
+                else None
             )
             try:
                 _record_failure(evidence, result)
@@ -1874,8 +2069,11 @@ def _execute_plan_outcome(
                 "production_execution_enabled": True,
                 "durable_evidence_updated": True,
                 "durable_evidence_persisted": True,
+                "primary_exception_present": False,
                 "primary_exception_preserved": False,
                 "cleanup_exception_recorded": False,
+                "cleanup_exception_count": 0,
+                "cleanup_failures": [],
                 "cleanup_failure_codes": [],
             },
             stream=sys.stdout,
@@ -1990,8 +2188,13 @@ def _sanitized_stderr_fallback(
         "manual_recovery_required": True,
         "durable_evidence_updated": False,
         "durable_evidence_persisted": False,
+        "primary_exception_present": outcome.exit_code != 0,
         "primary_exception_preserved": outcome.exit_code != 0,
         "cleanup_exception_recorded": True,
+        "cleanup_exception_count": _cleanup_count(
+            outcome.payload.get("cleanup_exception_count"),
+            0,
+        ) + 1,
         "cleanup_failure_codes": ["FINAL_RESULT_EMIT_FAILED"],
     }
     operation_id = outcome.payload.get("operation_id")

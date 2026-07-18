@@ -1530,8 +1530,297 @@ def test_execute_main_generic_fallback_never_reports_before_exchange(
 
 
 def test_negative_matrix_contract_is_large_and_public() -> None:
-    assert NEGATIVE_MATRIX_CASES >= 77
+    assert NEGATIVE_MATRIX_CASES >= 78
     source = Path(__file__).read_text(encoding="utf-8")
     assert "production.main(" in source
     direct_parser_call = "production.build_parser()" + ".parse_args("
     assert direct_parser_call not in source
+
+
+
+PUBLIC_INTERNAL_CLEANUP_CASES = (
+    (
+        "pre_exchange_primary",
+        {
+            "status": "FAILED",
+            "error_type": "PRIMARY_PRE_EXCHANGE_FAILURE",
+            "exit_classification": "PRIMARY_PRE_EXCHANGE_FAILURE",
+            "publish_state": "BEFORE_EXCHANGE",
+            "target_may_have_changed": False,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": True,
+            "primary_exit_classification": "PRIMARY_PRE_EXCHANGE_FAILURE",
+            "primary_publish_state": "BEFORE_EXCHANGE",
+            "primary_target_may_have_changed": False,
+            "primary_automatic_retry_allowed": False,
+            "primary_manual_recovery_required": False,
+            "primary_exception_present": True,
+            "primary_exception_preserved": True,
+            "cleanup_exception_recorded": True,
+            "cleanup_exception_count": 1,
+            "cleanup_failures": [
+                {
+                    "resource_kind": "SOURCE_SQLITE_LEASE",
+                    "cleanup_phase": "FINAL_RESOURCE_RELEASE",
+                    "error_type": "OSError",
+                    "error_code": "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                }
+            ],
+            "cleanup_failure_codes": [
+                "SOURCE_SQLITE_LEASE_CLOSE_FAILED"
+            ],
+            "backup_available": False,
+        },
+        "PRIMARY_PRE_EXCHANGE_FAILURE",
+        "BEFORE_EXCHANGE",
+        False,
+        True,
+        1,
+    ),
+    (
+        "post_exchange_primary",
+        {
+            "status": "FAILED",
+            "error_type": "PUBLISH_UNCERTAIN",
+            "exit_classification": "PUBLISH_UNCERTAIN",
+            "failure_reason": "PRIMARY_POST_EXCHANGE_FAILURE",
+            "publish_state": "EXCHANGE_COMPLETED_NOT_VERIFIED",
+            "target_may_have_changed": True,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": True,
+            "primary_exit_classification": "PRIMARY_POST_EXCHANGE_FAILURE",
+            "primary_publish_state": "EXCHANGE_COMPLETED_NOT_VERIFIED",
+            "primary_target_may_have_changed": True,
+            "primary_automatic_retry_allowed": False,
+            "primary_manual_recovery_required": True,
+            "primary_exception_present": True,
+            "primary_exception_preserved": True,
+            "cleanup_exception_recorded": True,
+            "cleanup_exception_count": 2,
+            "cleanup_failures": [
+                {
+                    "resource_kind": "STAGING_SQLITE_LEASE",
+                    "cleanup_phase": "FINAL_RESOURCE_RELEASE",
+                    "error_type": "OSError",
+                    "error_code": "STAGING_SQLITE_LEASE_CLOSE_FAILED",
+                },
+                {
+                    "resource_kind": "SOURCE_SQLITE_LEASE",
+                    "cleanup_phase": "FINAL_RESOURCE_RELEASE",
+                    "error_type": "OSError",
+                    "error_code": "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                },
+            ],
+            "cleanup_failure_codes": [
+                "STAGING_SQLITE_LEASE_CLOSE_FAILED",
+                "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+            ],
+            "backup_available": True,
+        },
+        "PUBLISH_UNCERTAIN",
+        "EXCHANGE_COMPLETED_NOT_VERIFIED",
+        True,
+        True,
+        2,
+    ),
+    (
+        "successful_body_cleanup_failure",
+        {
+            "status": "FAILED",
+            "error_type": "PUBLISH_UNCERTAIN",
+            "exit_classification": "PUBLISH_UNCERTAIN",
+            "publish_state": "FINAL_VERIFIED",
+            "target_may_have_changed": True,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": True,
+            "primary_exit_classification": "SUCCESS",
+            "primary_publish_state": "FINAL_VERIFIED",
+            "primary_target_may_have_changed": True,
+            "primary_automatic_retry_allowed": False,
+            "primary_manual_recovery_required": False,
+            "primary_exception_present": False,
+            "primary_exception_preserved": False,
+            "cleanup_exception_recorded": True,
+            "cleanup_exception_count": 1,
+            "cleanup_failures": [
+                {
+                    "resource_kind": "SOURCE_PINNED_DATABASE",
+                    "cleanup_phase": "FINAL_RESOURCE_RELEASE",
+                    "error_type": "OSError",
+                    "error_code": "SOURCE_PINNED_DATABASE_CLOSE_FAILED",
+                }
+            ],
+            "cleanup_failure_codes": [
+                "SOURCE_PINNED_DATABASE_CLOSE_FAILED"
+            ],
+            "backup_available": True,
+        },
+        "PUBLISH_UNCERTAIN",
+        "FINAL_VERIFIED",
+        True,
+        False,
+        1,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "staged_result",
+        "expected_classification",
+        "expected_publish_state",
+        "expected_target_changed",
+        "expected_primary_present",
+        "expected_cleanup_count",
+    ),
+    PUBLIC_INTERNAL_CLEANUP_CASES,
+)
+def test_public_entrypoint_preserves_internal_primary_and_cleanup(
+    case: str,
+    staged_result: dict[str, Any],
+    expected_classification: str,
+    expected_publish_state: str,
+    expected_target_changed: bool,
+    expected_primary_present: bool,
+    expected_cleanup_count: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+
+    def return_structured_failure(
+        _args: Any,
+        *,
+        prepared: Any,
+    ) -> int:
+        prepared.close()
+        print(json.dumps(staged_result, ensure_ascii=True, sort_keys=True))
+        return 1
+
+    monkeypatch.setattr(
+        production,
+        "_execute_authorized_staged",
+        return_structured_failure,
+    )
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+
+    assert production.main(_execute_argv(plan)) == 1, case
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == expected_classification
+    assert result["publish_state"] == expected_publish_state
+    assert result["target_may_have_changed"] is expected_target_changed
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["primary_exception_present"] is expected_primary_present
+    assert result["primary_exception_preserved"] is expected_primary_present
+    assert result["cleanup_exception_recorded"] is True
+    assert result["cleanup_exception_count"] == expected_cleanup_count
+    assert len(result["cleanup_failures"]) == expected_cleanup_count
+    assert result["durable_evidence_updated"] is True
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) - before_paths == {
+        str(
+            (plan.path.parent / "execution.json").relative_to(
+                context.runtime
+            )
+        )
+    }
+
+    evidence = json.loads(
+        (plan.path.parent / "execution.json").read_text(encoding="ascii")
+    )
+    assert evidence["CLEANUP_EXCEPTION_COUNT"] == expected_cleanup_count
+    assert len(evidence["CLEANUP_FAILURES"]) == expected_cleanup_count
+    assert evidence["PRIMARY_EXCEPTION_PRESENT"] is expected_primary_present
+    serialized = json.dumps(result, ensure_ascii=True)
+    assert "sensitive" not in serialized
+
+
+def test_public_entrypoint_accepts_exceptional_preparation_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    record = staged._CleanupFailureRecord(
+        resource_kind="MANIFEST_PARENT_DESCRIPTOR",
+        cleanup_phase="PREPARATION_FAILURE_RELEASE",
+        error_type="OSError",
+        error_code="MANIFEST_PARENT_CLOSE_FAILED",
+    )
+
+    def fail_preparation(*_args: Any, **_kwargs: Any) -> Any:
+        raise staged._StagedCleanupTransport(
+            result_snapshot={
+                "status": "FAILED",
+                "error_type": "PRIMARY_PREPARATION_FAILURE",
+                "exit_classification": "PRIMARY_PREPARATION_FAILURE",
+                "publish_state": "BEFORE_EXCHANGE",
+                "target_may_have_changed": False,
+                "automatic_retry_allowed": False,
+                "manual_recovery_required": False,
+                "backup_available": False,
+            },
+            publish_state="BEFORE_EXCHANGE",
+            exchange_started=False,
+            cleanup_failures=(record,),
+            durable_evidence_updated=False,
+        )
+
+    monkeypatch.setattr(
+        production,
+        "_prepare_authorized_production_execution",
+        fail_preparation,
+    )
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+
+    assert production.main(_execute_argv(plan)) == 1
+    result, stream = _json_result(capfd)
+    assert stream == "stdout"
+    assert result["exit_classification"] == "PRIMARY_PREPARATION_FAILURE"
+    assert result["publish_state"] == "BEFORE_EXCHANGE"
+    assert result["target_may_have_changed"] is False
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["primary_exception_present"] is True
+    assert result["primary_exception_preserved"] is True
+    assert result["primary_exit_classification"] == (
+        "PRIMARY_PREPARATION_FAILURE"
+    )
+    assert result["cleanup_exception_count"] == 1
+    assert result["cleanup_failure_codes"] == [
+        "MANIFEST_PARENT_CLOSE_FAILED"
+    ]
+    assert result["durable_evidence_updated"] is False
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) == before_paths
+
+
+def test_sanitized_stderr_fallback_includes_cleanup_count(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    outcome = production._ExecutionOutcome(
+        exit_code=1,
+        payload={
+            "publish_state": "EXCHANGE_STARTED",
+            "cleanup_exception_count": 2,
+        },
+        stream=production.sys.stdout,
+        primary_error_type="PRIMARY_POST_EXCHANGE_FAILURE",
+    )
+    production._sanitized_stderr_fallback(outcome)
+    result, stream = _json_result(capfd)
+    assert stream == "stderr"
+    assert result["exit_classification"] == "PUBLISH_UNCERTAIN"
+    assert result["publish_state"] == "EXCHANGE_STARTED"
+    assert result["target_may_have_changed"] is True
+    assert result["automatic_retry_allowed"] is False
+    assert result["manual_recovery_required"] is True
+    assert result["durable_evidence_updated"] is False
+    assert result["cleanup_exception_count"] == 3

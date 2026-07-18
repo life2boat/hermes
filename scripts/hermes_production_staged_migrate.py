@@ -42,7 +42,7 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
@@ -56,6 +56,53 @@ EXPECTED_FEATURE_FLAGS = {
     "HEALBITE_SHOPPING_LIST_ENABLED": "false",
     "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
 }
+OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset(
+    {
+        "APPROVAL_VERSION",
+        "CREATED_AT",
+        "EXPIRES_AT",
+        "TARGET_MAIN_SHA",
+        "APPROVED_REPOSITORY_ROOT",
+        "REPOSITORY_ROOT_DEVICE",
+        "REPOSITORY_ROOT_INODE",
+        "REPOSITORY_ROOT_UID",
+        "REPOSITORY_ROOT_GID",
+        "REPOSITORY_ROOT_MODE",
+        "REPOSITORY_ROOT_TREE_SHA",
+        "DEPLOYMENT_CONTRACT_PATH",
+        "DEPLOYMENT_CONTRACT_DEVICE",
+        "DEPLOYMENT_CONTRACT_INODE",
+        "DEPLOYMENT_CONTRACT_SHA256",
+        "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256",
+        "STAGED_IMPLEMENTATION_SHA256",
+        "RUNBOOK_SHA256",
+        "MIGRATION_IMAGE_ID",
+        "MIGRATION_IMAGE_REVISION",
+        "DIRTY_LEGACY_ROOT_PRESERVED",
+        "PRODUCTION_DB_ACCESS_AUTHORIZED",
+        "PRODUCTION_PLAN_ONLY_AUTHORIZED",
+        "PRODUCTION_EXECUTE_AUTHORIZED",
+        "DEPLOY_AUTHORIZED",
+    }
+)
+CLEAN_START_POLICY_FIELDS = frozenset(
+    {
+        "POLICY_VERSION",
+        "DATA_POLICY",
+        "CREATED_AT",
+        "TARGET_MAIN_SHA",
+        "MIGRATION_IMAGE_ID",
+        "PRODUCTION_DB_SOURCE_SHA256",
+        "FAMILY_SHOPPING_BACKFILL_REQUIRED",
+        "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET",
+        "MEMORY_OS_DATA_MUST_BE_PRESERVED",
+        "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED",
+        "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED",
+        "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED",
+        "EXECUTION_AUTHORIZED",
+        "DELETION_PERFORMED",
+    }
+)
 SUCCESS_STATES = ("QUIESCENCE_HELD", "COMPLETED")
 FAILURE_STATES = frozenset(
     {"PRE_PUBLISH_FAILED", "PUBLISH_UNCERTAIN", "MANUAL_RECOVERY_REQUIRED"}
@@ -100,6 +147,26 @@ PLAN_FIELDS = frozenset(
         "DEPLOYMENT_CONTRACT_SHA256",
         "DEPLOYMENT_CONTRACT_VERSION",
         "EXPECTED_FEATURE_FLAGS",
+        "OPERATIONS_ROOT_APPROVAL_PATH",
+        "OPERATIONS_ROOT_APPROVAL_DEVICE",
+        "OPERATIONS_ROOT_APPROVAL_INODE",
+        "OPERATIONS_ROOT_APPROVAL_SIZE",
+        "OPERATIONS_ROOT_APPROVAL_UID",
+        "OPERATIONS_ROOT_APPROVAL_GID",
+        "OPERATIONS_ROOT_APPROVAL_MODE",
+        "OPERATIONS_ROOT_APPROVAL_SHA256",
+        "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT",
+        "OPERATIONS_ROOT_APPROVAL_TREE_SHA",
+        "CLEAN_START_POLICY_PATH",
+        "CLEAN_START_POLICY_DEVICE",
+        "CLEAN_START_POLICY_INODE",
+        "CLEAN_START_POLICY_SIZE",
+        "CLEAN_START_POLICY_UID",
+        "CLEAN_START_POLICY_GID",
+        "CLEAN_START_POLICY_MODE",
+        "CLEAN_START_POLICY_SHA256",
+        "CLEAN_START_POLICY_VERSION",
+        "CLEAN_START_DATA_POLICY",
         "EXPECTED_FREE_BYTES",
         "EXPECTED_FILESYSTEM_DEVICE",
         "PLAN_STATE",
@@ -280,6 +347,69 @@ class PinnedDeploymentContract:
 
 
 @dataclass
+class PinnedEvidenceDocument:
+    path: Path
+    parent_fd: int
+    file_fd: int
+    device: int
+    inode: int
+    size: int
+    uid: int
+    gid: int
+    mode: int
+    sha256: str
+    payload: dict[str, Any]
+    code_prefix: str
+
+    def path_matches(self) -> bool:
+        try:
+            metadata = os.stat(
+                self.path.name,
+                dir_fd=self.parent_fd,
+                follow_symlinks=False,
+            )
+            descriptor_metadata = os.fstat(self.file_fd)
+            descriptor_sha = _sha256_fd(self.file_fd)
+        except OSError:
+            return False
+        identity = (
+            self.device,
+            self.inode,
+            self.size,
+            self.uid,
+            self.gid,
+            self.mode,
+        )
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_uid,
+            metadata.st_gid,
+            stat.S_IMODE(metadata.st_mode),
+        ) == identity and (
+            descriptor_metadata.st_dev,
+            descriptor_metadata.st_ino,
+            descriptor_metadata.st_size,
+            descriptor_metadata.st_uid,
+            descriptor_metadata.st_gid,
+            stat.S_IMODE(descriptor_metadata.st_mode),
+        ) == identity and descriptor_sha == self.sha256
+
+    def close(self) -> None:
+        _run_cleanup(
+            (
+                f"{self.code_prefix}_FILE_CLOSE_FAILED",
+                lambda: os.close(self.file_fd),
+            ),
+            (
+                f"{self.code_prefix}_PARENT_CLOSE_FAILED",
+                lambda: os.close(self.parent_fd),
+            ),
+        )
+
+
+@dataclass
 class ExecutionEvidence:
     parent_fd: int
     name: str
@@ -317,11 +447,21 @@ class ValidatedExecution:
     staging_parent: PinnedDirectory
     evidence_parent: PinnedDirectory
     deployment_contract: PinnedDeploymentContract
+    operations_root_approval: PinnedEvidenceDocument
+    clean_start_policy: PinnedEvidenceDocument
     target_schema_version: str
     target_schema_fingerprint: str
 
     def close(self) -> None:
         _run_cleanup(
+            (
+                "CLEAN_START_POLICY_CLOSE_FAILED",
+                self.clean_start_policy.close,
+            ),
+            (
+                "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
+                self.operations_root_approval.close,
+            ),
             (
                 "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
                 self.deployment_contract.close,
@@ -787,6 +927,279 @@ def _open_canonical_deployment_contract(
         raise
 
 
+def _open_evidence_document(
+    path_value: str,
+    expected_sha: str,
+    *,
+    code_prefix: str,
+    expected_fields: frozenset[str],
+) -> PinnedEvidenceDocument:
+    path = _absolute_path(path_value, f"{code_prefix}_PATH")
+    _no_symlink_chain(path)
+    if SHA_RE.fullmatch(expected_sha) is None:
+        raise ProductionGateError(f"EXPECTED_{code_prefix}_SHA256_INVALID")
+    parent_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    parent_fd = os.open(path.parent, parent_flags)
+    try:
+        file_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+    except Exception:
+        os.close(parent_fd)
+        raise
+    try:
+        owner_uid = os.geteuid()
+        parent_metadata = os.fstat(parent_fd)
+        metadata = os.fstat(file_fd)
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != owner_uid
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != owner_uid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > MAX_DOCUMENT_BYTES
+        ):
+            raise ProductionGateError(f"{code_prefix}_FILE_METADATA_INVALID")
+        data = _read_fd_bytes(
+            file_fd,
+            maximum=MAX_DOCUMENT_BYTES,
+            code=f"{code_prefix}_FILE_TOO_LARGE",
+        )
+        actual_sha = _sha256_bytes(data)
+        if actual_sha != expected_sha:
+            raise ProductionGateError(f"{code_prefix}_SHA256_MISMATCH")
+        try:
+            payload = json.loads(data.decode("ascii"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ProductionGateError(f"{code_prefix}_JSON_INVALID") from exc
+        if not isinstance(payload, dict) or _canonical_json(payload) != data:
+            raise ProductionGateError(f"{code_prefix}_JSON_NOT_CANONICAL")
+        if set(payload) != expected_fields:
+            raise ProductionGateError(f"{code_prefix}_FIELDS_INVALID")
+        current = os.fstat(file_fd)
+        path_metadata = os.stat(
+            path.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_uid,
+            metadata.st_gid,
+            stat.S_IMODE(metadata.st_mode),
+        )
+        if (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_uid,
+            current.st_gid,
+            stat.S_IMODE(current.st_mode),
+        ) != identity or (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+            path_metadata.st_size,
+            path_metadata.st_uid,
+            path_metadata.st_gid,
+            stat.S_IMODE(path_metadata.st_mode),
+        ) != identity:
+            raise ProductionGateError(f"{code_prefix}_PATH_SUBSTITUTION")
+        return PinnedEvidenceDocument(
+            path=path,
+            parent_fd=parent_fd,
+            file_fd=file_fd,
+            device=int(metadata.st_dev),
+            inode=int(metadata.st_ino),
+            size=int(metadata.st_size),
+            uid=int(metadata.st_uid),
+            gid=int(metadata.st_gid),
+            mode=stat.S_IMODE(metadata.st_mode),
+            sha256=actual_sha,
+            payload=payload,
+            code_prefix=code_prefix,
+        )
+    except Exception:
+        os.close(file_fd)
+        os.close(parent_fd)
+        raise
+
+
+def _repository_provenance(repository_root: Path) -> tuple[str, str]:
+    def git_value(*arguments: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repository_root), *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode != 0 or not value or "\n" in value:
+            raise ProductionGateError("APPROVED_REPOSITORY_PROVENANCE_INVALID")
+        return value
+
+    head = git_value("rev-parse", "--verify", "HEAD")
+    tree = git_value("rev-parse", "--verify", "HEAD^{tree}")
+    status = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise ProductionGateError("APPROVED_REPOSITORY_NOT_CLEAN")
+    return head, tree
+
+
+def _typed_mapping_matches(
+    payload: dict[str, Any],
+    expected: dict[str, Any],
+) -> bool:
+    return all(
+        type(payload.get(name)) is type(value) and payload.get(name) == value
+        for name, value in expected.items()
+    )
+
+
+def _validate_operations_root_approval(
+    document: PinnedEvidenceDocument,
+    *,
+    repository_root: Path,
+    migration_image_id: str,
+    migration_revision: str,
+    deployment_contract: PinnedDeploymentContract,
+) -> None:
+    payload = document.payload
+    if type(payload.get("APPROVAL_VERSION")) is not int or payload.get("APPROVAL_VERSION") != 1:
+        raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_VERSION_INVALID")
+    created_at = _parse_timestamp(
+        payload.get("CREATED_AT"),
+        "OPERATIONS_ROOT_APPROVAL_CREATED_AT_INVALID",
+    )
+    expires_at = _parse_timestamp(
+        payload.get("EXPIRES_AT"),
+        "OPERATIONS_ROOT_APPROVAL_EXPIRY_INVALID",
+    )
+    now = _now()
+    if (
+        created_at > now
+        or expires_at <= created_at
+        or expires_at - created_at > timedelta(days=1)
+        or now >= expires_at
+    ):
+        raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_EXPIRED")
+    head, tree = _repository_provenance(repository_root)
+    root_record = _directory_record(repository_root, private=False)
+    root_fields = {
+        "APPROVED_REPOSITORY_ROOT": str(repository_root),
+        "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
+        "REPOSITORY_ROOT_INODE": root_record["INODE"],
+        "REPOSITORY_ROOT_UID": root_record["UID"],
+        "REPOSITORY_ROOT_GID": root_record["GID"],
+        "REPOSITORY_ROOT_MODE": root_record["MODE"],
+        "REPOSITORY_ROOT_TREE_SHA": tree,
+        "TARGET_MAIN_SHA": head,
+        "MIGRATION_IMAGE_ID": migration_image_id,
+        "MIGRATION_IMAGE_REVISION": migration_revision,
+        "DEPLOYMENT_CONTRACT_PATH": str(deployment_contract.path),
+        "DEPLOYMENT_CONTRACT_DEVICE": deployment_contract.device,
+        "DEPLOYMENT_CONTRACT_INODE": deployment_contract.inode,
+        "DEPLOYMENT_CONTRACT_SHA256": deployment_contract.sha256,
+        "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256": _sha256(
+            repository_root / "scripts/hermes_production_staged_migrate.py"
+        ),
+        "STAGED_IMPLEMENTATION_SHA256": _sha256(
+            repository_root / "scripts/hermes_staged_schema_migrate.py"
+        ),
+        "RUNBOOK_SHA256": _sha256(
+            repository_root
+            / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+        ),
+    }
+    approval_flags = {
+        "DIRTY_LEGACY_ROOT_PRESERVED": True,
+        "PRODUCTION_DB_ACCESS_AUTHORIZED": False,
+        "PRODUCTION_PLAN_ONLY_AUTHORIZED": True,
+        "PRODUCTION_EXECUTE_AUTHORIZED": False,
+        "DEPLOY_AUTHORIZED": False,
+    }
+    if (
+        head != migration_revision
+        or not _typed_mapping_matches(payload, root_fields)
+        or any(payload.get(name) is not value for name, value in approval_flags.items())
+    ):
+        raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_MISMATCH")
+
+
+def _validate_clean_start_policy(
+    document: PinnedEvidenceDocument,
+    *,
+    source_sha256: str,
+    migration_image_id: str,
+    migration_revision: str,
+) -> None:
+    payload = document.payload
+    created_at = _parse_timestamp(
+        payload.get("CREATED_AT"),
+        "CLEAN_START_POLICY_CREATED_AT_INVALID",
+    )
+    if created_at > _now():
+        raise ProductionGateError("CLEAN_START_POLICY_CREATED_AT_INVALID")
+    expected = {
+        "POLICY_VERSION": 1,
+        "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
+        "TARGET_MAIN_SHA": migration_revision,
+        "MIGRATION_IMAGE_ID": migration_image_id,
+        "PRODUCTION_DB_SOURCE_SHA256": source_sha256,
+    }
+    policy_flags = {
+        "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
+        "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET": True,
+        "MEMORY_OS_DATA_MUST_BE_PRESERVED": True,
+        "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED": True,
+        "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED": True,
+        "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED": True,
+        "EXECUTION_AUTHORIZED": False,
+        "DELETION_PERFORMED": False,
+    }
+    if not _typed_mapping_matches(payload, expected) or any(
+        payload.get(name) is not value for name, value in policy_flags.items()
+    ):
+        raise ProductionGateError("CLEAN_START_POLICY_MISMATCH")
+
+
+def _document_plan_fields(
+    prefix: str,
+    document: PinnedEvidenceDocument,
+) -> dict[str, int | str]:
+    return {
+        f"{prefix}_PATH": str(document.path),
+        f"{prefix}_DEVICE": document.device,
+        f"{prefix}_INODE": document.inode,
+        f"{prefix}_SIZE": document.size,
+        f"{prefix}_UID": document.uid,
+        f"{prefix}_GID": document.gid,
+        f"{prefix}_MODE": document.mode,
+        f"{prefix}_SHA256": document.sha256,
+    }
+
+
 def _free_bytes(path: Path) -> int:
     values = os.statvfs(path)
     return int(values.f_bavail * values.f_frsize)
@@ -826,18 +1239,32 @@ def _nonnegative_int(value: str) -> int:
 
 def _validate_plan_inputs(
     args: argparse.Namespace,
-) -> tuple[Path, Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     repository_root = _canonical_repository_root(args.repository_root)
     db_path = _absolute_path(args.db_path, "DB_PATH")
     backup_parent = _absolute_path(args.backup_parent, "BACKUP_PARENT")
     staging_parent = _absolute_path(args.staging_parent, "STAGING_PARENT")
     evidence_parent = _absolute_path(args.evidence_parent, "EVIDENCE_PARENT")
+    operations_root_approval = _absolute_path(
+        args.operations_root_approval,
+        "OPERATIONS_ROOT_APPROVAL_PATH",
+    )
+    clean_start_policy = _absolute_path(
+        args.clean_start_policy,
+        "CLEAN_START_POLICY_PATH",
+    )
     if socket.gethostname() != args.expected_hostname:
         raise ProductionGateError("HOSTNAME_MISMATCH")
     if REVISION_RE.fullmatch(args.migration_image_revision) is None:
         raise ProductionGateError("MIGRATION_IMAGE_REVISION_INVALID")
     if SHA_RE.fullmatch(args.expected_source_sha256) is None:
         raise ProductionGateError("EXPECTED_SOURCE_SHA256_INVALID")
+    if SHA_RE.fullmatch(args.expected_operations_root_approval_sha256) is None:
+        raise ProductionGateError(
+            "EXPECTED_OPERATIONS_ROOT_APPROVAL_SHA256_INVALID"
+        )
+    if SHA_RE.fullmatch(args.expected_clean_start_policy_sha256) is None:
+        raise ProductionGateError("EXPECTED_CLEAN_START_POLICY_SHA256_INVALID")
     if args.expires_in_seconds < 60 or args.expires_in_seconds > 86400:
         raise ProductionGateError("PLAN_EXPIRY_INVALID")
     _pairwise_disjoint(
@@ -849,12 +1276,23 @@ def _validate_plan_inputs(
             repository_root,
         )
     )
+    _pairwise_disjoint((operations_root_approval, clean_start_policy))
+    for document in (operations_root_approval, clean_start_policy):
+        if (
+            document == db_path
+            or document.is_relative_to(repository_root)
+            or document.is_relative_to(backup_parent)
+            or document.is_relative_to(staging_parent)
+        ):
+            raise ProductionGateError("EVIDENCE_PATH_LOCATION_INVALID")
     return (
         repository_root,
         db_path,
         backup_parent,
         staging_parent,
         evidence_parent,
+        operations_root_approval,
+        clean_start_policy,
     )
 
 
@@ -866,31 +1304,64 @@ def create_plan(args: argparse.Namespace) -> int:
         backup_parent,
         staging_parent,
         evidence_parent,
+        operations_root_approval_path,
+        clean_start_policy_path,
     ) = _validate_plan_inputs(args)
     backup_record = _directory_record(backup_parent, private=True)
     staging_record = _directory_record(staging_parent, private=True)
     evidence_record = _directory_record(evidence_parent, private=True)
-    identity, schema_fingerprint, integrity, foreign_keys = _read_only_source(
-        db_path
-    )
-    expected_identity = {
-        "SOURCE_DEVICE": args.expected_source_device,
-        "SOURCE_INODE": args.expected_source_inode,
-        "SOURCE_SIZE": args.expected_source_size,
-        "SOURCE_SHA256": args.expected_source_sha256,
-    }
-    if any(identity[name] != value for name, value in expected_identity.items()):
-        raise ProductionGateError("EXPECTED_SOURCE_IDENTITY_MISMATCH")
-    if integrity != "ok" or foreign_keys != 0:
-        raise ProductionGateError("SOURCE_DATABASE_INVALID")
-    if identity["SOURCE_DEVICE"] != staging_record["DEVICE"]:
-        raise ProductionGateError("CROSS_FILESYSTEM_STAGING")
-    _require_free_bytes(staging_parent, args.expected_free_bytes)
     _inspect_image(args.migration_image_id, args.migration_image_revision)
     _inspect_image(args.previous_image_id, None)
     target_schema = _target_schema_contract()
-    deployment_contract = _open_canonical_deployment_contract(repository_root)
+    deployment_contract: PinnedDeploymentContract | None = None
+    operations_root_approval: PinnedEvidenceDocument | None = None
+    clean_start_policy: PinnedEvidenceDocument | None = None
     try:
+        deployment_contract = _open_canonical_deployment_contract(repository_root)
+        operations_root_approval = _open_evidence_document(
+            str(operations_root_approval_path),
+            args.expected_operations_root_approval_sha256,
+            code_prefix="OPERATIONS_ROOT_APPROVAL",
+            expected_fields=OPERATIONS_ROOT_APPROVAL_FIELDS,
+        )
+        _validate_operations_root_approval(
+            operations_root_approval,
+            repository_root=repository_root,
+            migration_image_id=args.migration_image_id,
+            migration_revision=args.migration_image_revision,
+            deployment_contract=deployment_contract,
+        )
+        clean_start_policy = _open_evidence_document(
+            str(clean_start_policy_path),
+            args.expected_clean_start_policy_sha256,
+            code_prefix="CLEAN_START_POLICY",
+            expected_fields=CLEAN_START_POLICY_FIELDS,
+        )
+        identity, schema_fingerprint, integrity, foreign_keys = (
+            _read_only_source(db_path)
+        )
+        expected_identity = {
+            "SOURCE_DEVICE": args.expected_source_device,
+            "SOURCE_INODE": args.expected_source_inode,
+            "SOURCE_SIZE": args.expected_source_size,
+            "SOURCE_SHA256": args.expected_source_sha256,
+        }
+        if any(
+            identity[name] != value
+            for name, value in expected_identity.items()
+        ):
+            raise ProductionGateError("EXPECTED_SOURCE_IDENTITY_MISMATCH")
+        _validate_clean_start_policy(
+            clean_start_policy,
+            source_sha256=str(identity["SOURCE_SHA256"]),
+            migration_image_id=args.migration_image_id,
+            migration_revision=args.migration_image_revision,
+        )
+        if integrity != "ok" or foreign_keys != 0:
+            raise ProductionGateError("SOURCE_DATABASE_INVALID")
+        if identity["SOURCE_DEVICE"] != staging_record["DEVICE"]:
+            raise ProductionGateError("CROSS_FILESYSTEM_STAGING")
+        _require_free_bytes(staging_parent, args.expected_free_bytes)
         operation_id = uuid.uuid4().hex
         operation_directory = evidence_parent / operation_id
         operation_directory.mkdir(mode=0o700)
@@ -938,6 +1409,26 @@ def create_plan(args: argparse.Namespace) -> int:
             "DEPLOYMENT_CONTRACT_SHA256": deployment_contract.sha256,
             "DEPLOYMENT_CONTRACT_VERSION": deployment_contract.version,
             "EXPECTED_FEATURE_FLAGS": deployment_contract.feature_flags,
+            **_document_plan_fields(
+                "OPERATIONS_ROOT_APPROVAL",
+                operations_root_approval,
+            ),
+            "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT": (
+                operations_root_approval.payload["EXPIRES_AT"]
+            ),
+            "OPERATIONS_ROOT_APPROVAL_TREE_SHA": (
+                operations_root_approval.payload["REPOSITORY_ROOT_TREE_SHA"]
+            ),
+            **_document_plan_fields(
+                "CLEAN_START_POLICY",
+                clean_start_policy,
+            ),
+            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload[
+                "POLICY_VERSION"
+            ],
+            "CLEAN_START_DATA_POLICY": clean_start_policy.payload[
+                "DATA_POLICY"
+            ],
             "EXPECTED_FREE_BYTES": args.expected_free_bytes,
             "EXPECTED_FILESYSTEM_DEVICE": identity["SOURCE_DEVICE"],
             "PLAN_STATE": "PLANNED",
@@ -970,7 +1461,26 @@ def create_plan(args: argparse.Namespace) -> int:
         )
         return 0
     finally:
-        deployment_contract.close()
+        cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+        if clean_start_policy is not None:
+            cleanup_steps.append(
+                ("CLEAN_START_POLICY_CLOSE_FAILED", clean_start_policy.close)
+            )
+        if operations_root_approval is not None:
+            cleanup_steps.append(
+                (
+                    "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
+                    operations_root_approval.close,
+                )
+            )
+        if deployment_contract is not None:
+            cleanup_steps.append(
+                (
+                    "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
+                    deployment_contract.close,
+                )
+            )
+        _run_cleanup(*cleanup_steps)
 
 
 def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
@@ -1110,12 +1620,31 @@ def _revalidate_plan(
         "MIGRATION_IMAGE_REVISION",
         REVISION_RE,
     )
+    migration_image = _expect_plan_string(
+        plan,
+        "MIGRATION_IMAGE_ID",
+        IMAGE_ID_RE,
+    )
+    approval_sha = _expect_plan_string(
+        plan, "OPERATIONS_ROOT_APPROVAL_SHA256", SHA_RE
+    )
+    policy_sha = _expect_plan_string(
+        plan, "CLEAN_START_POLICY_SHA256", SHA_RE
+    )
     if operation_id != args.confirm_operation_id:
         raise ProductionGateError("PLAN_OPERATION_ID_MISMATCH")
     if source_sha != args.confirm_source_sha256:
         raise ProductionGateError("PLAN_SOURCE_SHA256_CONFIRMATION_MISMATCH")
     if revision != args.confirm_image_revision:
         raise ProductionGateError("PLAN_IMAGE_REVISION_CONFIRMATION_MISMATCH")
+    if approval_sha != args.confirm_operations_root_approval_sha256:
+        raise ProductionGateError(
+            "PLAN_OPERATIONS_ROOT_APPROVAL_SHA256_CONFIRMATION_MISMATCH"
+        )
+    if policy_sha != args.confirm_clean_start_policy_sha256:
+        raise ProductionGateError(
+            "PLAN_CLEAN_START_POLICY_SHA256_CONFIRMATION_MISMATCH"
+        )
     expires_at = _parse_timestamp(plan.get("EXPIRES_AT"), "PLAN_EXPIRY_INVALID")
     created_at = _parse_timestamp(
         plan.get("CREATED_AT"),
@@ -1132,6 +1661,8 @@ def _revalidate_plan(
     staging_parent: PinnedDirectory | None = None
     evidence_parent: PinnedDirectory | None = None
     deployment_contract: PinnedDeploymentContract | None = None
+    operations_root_approval: PinnedEvidenceDocument | None = None
+    clean_start_policy: PinnedEvidenceDocument | None = None
     try:
         evidence_parent = _open_directory_record(
             plan.get("EVIDENCE_PARENT_IDENTITY"),
@@ -1182,8 +1713,60 @@ def _revalidate_plan(
             "DEPLOYMENT_CONTRACT_VERSION": deployment_contract.version,
             "EXPECTED_FEATURE_FLAGS": deployment_contract.feature_flags,
         }
-        if any(plan.get(name) != value for name, value in contract_fields.items()):
+        if not _typed_mapping_matches(plan, contract_fields):
             raise ProductionGateError("DEPLOYMENT_CONTRACT_DRIFT")
+
+        operations_root_approval = _open_evidence_document(
+            _expect_plan_string(plan, "OPERATIONS_ROOT_APPROVAL_PATH"),
+            approval_sha,
+            code_prefix="OPERATIONS_ROOT_APPROVAL",
+            expected_fields=OPERATIONS_ROOT_APPROVAL_FIELDS,
+        )
+        _validate_operations_root_approval(
+            operations_root_approval,
+            repository_root=repository_root,
+            migration_image_id=migration_image,
+            migration_revision=revision,
+            deployment_contract=deployment_contract,
+        )
+        approval_fields: dict[str, Any] = {
+            **_document_plan_fields(
+                "OPERATIONS_ROOT_APPROVAL",
+                operations_root_approval,
+            ),
+            "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT": (
+                operations_root_approval.payload["EXPIRES_AT"]
+            ),
+            "OPERATIONS_ROOT_APPROVAL_TREE_SHA": (
+                operations_root_approval.payload["REPOSITORY_ROOT_TREE_SHA"]
+            ),
+        }
+        if not _typed_mapping_matches(plan, approval_fields):
+            raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_IDENTITY_DRIFT")
+
+        clean_start_policy = _open_evidence_document(
+            _expect_plan_string(plan, "CLEAN_START_POLICY_PATH"),
+            policy_sha,
+            code_prefix="CLEAN_START_POLICY",
+            expected_fields=CLEAN_START_POLICY_FIELDS,
+        )
+        _validate_clean_start_policy(
+            clean_start_policy,
+            source_sha256=source_sha,
+            migration_image_id=migration_image,
+            migration_revision=revision,
+        )
+        policy_fields: dict[str, Any] = {
+            **_document_plan_fields("CLEAN_START_POLICY", clean_start_policy),
+            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload[
+                "POLICY_VERSION"
+            ],
+            "CLEAN_START_DATA_POLICY": clean_start_policy.payload[
+                "DATA_POLICY"
+            ],
+        }
+        if not _typed_mapping_matches(plan, policy_fields):
+            raise ProductionGateError("CLEAN_START_POLICY_IDENTITY_DRIFT")
 
         db_path = _absolute_path(
             _expect_plan_string(plan, "DB_CANONICAL_PATH"),
@@ -1227,11 +1810,6 @@ def _revalidate_plan(
         if expected_free <= 0:
             raise ProductionGateError("PLAN_FREE_SPACE_INVALID")
         _require_free_bytes(staging_parent.path, expected_free)
-        migration_image = _expect_plan_string(
-            plan,
-            "MIGRATION_IMAGE_ID",
-            IMAGE_ID_RE,
-        )
         previous_image = _expect_plan_string(
             plan,
             "PREVIOUS_IMAGE_ID",
@@ -1279,11 +1857,24 @@ def _revalidate_plan(
             staging_parent=staging_parent,
             evidence_parent=evidence_parent,
             deployment_contract=deployment_contract,
+            operations_root_approval=operations_root_approval,
+            clean_start_policy=clean_start_policy,
             target_schema_version=expected_target.version,
             target_schema_fingerprint=expected_target.fingerprint,
         )
     except Exception as primary:
         cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+        if clean_start_policy is not None:
+            cleanup_steps.append(
+                ("CLEAN_START_POLICY_CLOSE_FAILED", clean_start_policy.close)
+            )
+        if operations_root_approval is not None:
+            cleanup_steps.append(
+                (
+                    "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
+                    operations_root_approval.close,
+                )
+            )
         if deployment_contract is not None:
             cleanup_steps.append(
                 (
@@ -1877,6 +2468,21 @@ def _quiescence_error(exc: OrchestratorError) -> str:
     return exc.code
 
 
+def _pinned_authorities_match(
+    pinned: PinnedPlan,
+    validated: ValidatedExecution,
+) -> bool:
+    return (
+        pinned.path_matches()
+        and validated.deployment_contract.path_matches()
+        and validated.operations_root_approval.path_matches()
+        and validated.clean_start_policy.path_matches()
+        and validated.backup_parent.path_matches()
+        and validated.staging_parent.path_matches()
+        and validated.evidence_parent.path_matches()
+    )
+
+
 def _execute_plan_outcome(
     args: argparse.Namespace,
 ) -> _ExecutionOutcome:
@@ -1893,6 +2499,8 @@ def _execute_plan_outcome(
         validated = _revalidate_plan(args, pinned, root_identity)
         plan = pinned.payload
         operation_id = str(plan["OPERATION_ID"])
+        if not _pinned_authorities_match(pinned, validated):
+            raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
         authorization = _issue_production_authorization(
             operation_id=operation_id,
             plan_sha256=pinned.sha256,
@@ -1938,13 +2546,7 @@ def _execute_plan_outcome(
                 primary_error_type=code,
             )
             return outcome
-        if (
-            not pinned.path_matches()
-            or not validated.deployment_contract.path_matches()
-            or not validated.backup_parent.path_matches()
-            or not validated.staging_parent.path_matches()
-            or not validated.evidence_parent.path_matches()
-        ):
+        if not _pinned_authorities_match(pinned, validated):
             raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
 
         evidence = ExecutionEvidence(
@@ -1966,6 +2568,10 @@ def _execute_plan_outcome(
                     "MIGRATION_IMAGE_REVISION"
                 ],
                 "PREVIOUS_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
+                "OPERATIONS_ROOT_APPROVAL_SHA256": plan[
+                    "OPERATIONS_ROOT_APPROVAL_SHA256"
+                ],
+                "CLEAN_START_POLICY_SHA256": plan["CLEAN_START_POLICY_SHA256"],
                 "PUBLISH_STATE": "BEFORE_EXCHANGE",
                 "TARGET_MAY_HAVE_CHANGED": False,
                 "AUTOMATIC_RETRY_ALLOWED": False,
@@ -2074,13 +2680,7 @@ def _execute_plan_outcome(
             raise ProductionGateError(
                 "FINAL_TARGET_SCHEMA_MISMATCH"
             )
-        if (
-            not pinned.path_matches()
-            or not validated.deployment_contract.path_matches()
-            or not validated.backup_parent.path_matches()
-            or not validated.staging_parent.path_matches()
-            or not validated.evidence_parent.path_matches()
-        ):
+        if not _pinned_authorities_match(pinned, validated):
             raise ProductionGateError(
                 "PINNED_AUTHORITY_DRIFT_AFTER_EXCHANGE"
             )
@@ -2306,6 +2906,16 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--backup-parent", required=True)
     plan_parser.add_argument("--staging-parent", required=True)
     plan_parser.add_argument("--evidence-parent", required=True)
+    plan_parser.add_argument("--operations-root-approval", required=True)
+    plan_parser.add_argument(
+        "--expected-operations-root-approval-sha256",
+        required=True,
+    )
+    plan_parser.add_argument("--clean-start-policy", required=True)
+    plan_parser.add_argument(
+        "--expected-clean-start-policy-sha256",
+        required=True,
+    )
     plan_parser.add_argument("--migration-image-id", required=True)
     plan_parser.add_argument("--migration-image-revision", required=True)
     plan_parser.add_argument("--previous-image-id", required=True)
@@ -2342,6 +2952,14 @@ def build_parser() -> argparse.ArgumentParser:
     execute_parser.add_argument("--confirm-operation-id", required=True)
     execute_parser.add_argument("--confirm-source-sha256", required=True)
     execute_parser.add_argument("--confirm-image-revision", required=True)
+    execute_parser.add_argument(
+        "--confirm-operations-root-approval-sha256",
+        required=True,
+    )
+    execute_parser.add_argument(
+        "--confirm-clean-start-policy-sha256",
+        required=True,
+    )
     return parser
 
 

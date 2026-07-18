@@ -34,6 +34,21 @@ def _image_available(image: str) -> bool:
     return result.returncode == 0
 
 
+def _git_common_directory(repository_root: Path) -> Path:
+    result = subprocess.run(
+        ["git", "-C", str(repository_root), "rev-parse", "--git-common-dir"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise AssertionError("repository common Git directory unavailable")
+    path = Path(result.stdout.strip())
+    if not path.is_absolute():
+        path = repository_root / path
+    return path.resolve(strict=True)
+
+
 def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None:
     if shutil.which("docker") is None:
         pytest.skip("root integration capability skip: docker CLI unavailable")
@@ -56,6 +71,12 @@ def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None
             )
 
     repository_root = Path(__file__).resolve().parents[2]
+    git_common_directory = _git_common_directory(repository_root)
+    git_mount: list[str] = []
+    if not git_common_directory.is_relative_to(repository_root):
+        git_mount = [
+            "-v", f"{git_common_directory}:{git_common_directory}:ro"
+        ]
     runtime_root = Path(
         f"/tmp/hermes-root-gate-{uuid.uuid4().hex}"
     )
@@ -75,6 +96,7 @@ def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None
         "PYTHONPATH=/repo",
         "-v",
         f"{repository_root}:/repo:ro",
+        *git_mount,
         "-v",
         "/tmp:/tmp:rw",
         "-v",

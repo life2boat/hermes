@@ -12,6 +12,8 @@ import os
 import shutil
 import socket
 import sqlite3
+import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,11 @@ def _private_directory(path: Path) -> Path:
     path.mkdir(parents=True, mode=0o700)
     os.chmod(path, 0o700)
     return path
+
+
+def _write_canonical_document(path: Path, payload: dict[str, Any]) -> None:
+    path.write_bytes(production._canonical_json(payload))
+    os.chmod(path, 0o600)
 
 
 def _create_source(path: Path) -> None:
@@ -103,14 +110,34 @@ def main() -> int:
         raise AssertionError("root integration container is not real root")
 
     runtime_root = Path(args.runtime_root)
-    repository_root = Path(args.repository_root)
+    source_repository_root = Path(args.repository_root)
     if runtime_root.exists():
         shutil.rmtree(runtime_root)
     _private_directory(runtime_root)
+    repository_root = runtime_root / "approved-repository"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--no-local", str(source_repository_root), str(repository_root)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository_root), "checkout", "--quiet", "--detach", args.target_revision],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    os.chmod(repository_root, 0o700)
+    production.REPO_ROOT = repository_root
     source = runtime_root / "source" / "database.sqlite"
     backup = _private_directory(runtime_root / "backup")
     staging = _private_directory(runtime_root / "staging")
     evidence = _private_directory(runtime_root / "evidence")
+    evidence_inputs = _private_directory(runtime_root / "evidence-inputs")
+    approval_path = evidence_inputs / "approved-operations-root.json"
+    policy_path = evidence_inputs / "clean-start-data-policy.json"
 
     try:
         _create_source(source)
@@ -122,6 +149,69 @@ def main() -> int:
         ) = production._read_only_source(source)
         if source_integrity != "ok" or source_foreign_keys != 0:
             raise AssertionError("synthetic source is invalid")
+
+        root_record = production._directory_record(
+            repository_root,
+            private=True,
+        )
+        head, tree = production._repository_provenance(repository_root)
+        contract_path = (
+            repository_root / production.CANONICAL_CONTRACT_RELATIVE_PATH
+        )
+        contract_metadata = contract_path.stat()
+        created_at = production._now()
+        approval = {
+            "APPROVAL_VERSION": 1,
+            "CREATED_AT": production._timestamp(created_at),
+            "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+            "TARGET_MAIN_SHA": head,
+            "APPROVED_REPOSITORY_ROOT": str(repository_root),
+            "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
+            "REPOSITORY_ROOT_INODE": root_record["INODE"],
+            "REPOSITORY_ROOT_UID": root_record["UID"],
+            "REPOSITORY_ROOT_GID": root_record["GID"],
+            "REPOSITORY_ROOT_MODE": root_record["MODE"],
+            "REPOSITORY_ROOT_TREE_SHA": tree,
+            "DEPLOYMENT_CONTRACT_PATH": str(contract_path),
+            "DEPLOYMENT_CONTRACT_DEVICE": contract_metadata.st_dev,
+            "DEPLOYMENT_CONTRACT_INODE": contract_metadata.st_ino,
+            "DEPLOYMENT_CONTRACT_SHA256": _sha256(contract_path),
+            "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256": _sha256(
+                repository_root / "scripts/hermes_production_staged_migrate.py"
+            ),
+            "STAGED_IMPLEMENTATION_SHA256": _sha256(
+                repository_root / "scripts/hermes_staged_schema_migrate.py"
+            ),
+            "RUNBOOK_SHA256": _sha256(
+                repository_root
+                / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+            ),
+            "MIGRATION_IMAGE_ID": args.target_image_id,
+            "MIGRATION_IMAGE_REVISION": args.target_revision,
+            "DIRTY_LEGACY_ROOT_PRESERVED": True,
+            "PRODUCTION_DB_ACCESS_AUTHORIZED": False,
+            "PRODUCTION_PLAN_ONLY_AUTHORIZED": True,
+            "PRODUCTION_EXECUTE_AUTHORIZED": False,
+            "DEPLOY_AUTHORIZED": False,
+        }
+        policy = {
+            "POLICY_VERSION": 1,
+            "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
+            "CREATED_AT": production._timestamp(created_at),
+            "TARGET_MAIN_SHA": args.target_revision,
+            "MIGRATION_IMAGE_ID": args.target_image_id,
+            "PRODUCTION_DB_SOURCE_SHA256": source_identity["SOURCE_SHA256"],
+            "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
+            "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET": True,
+            "MEMORY_OS_DATA_MUST_BE_PRESERVED": True,
+            "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED": True,
+            "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED": True,
+            "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED": True,
+            "EXECUTION_AUTHORIZED": False,
+            "DELETION_PERFORMED": False,
+        }
+        _write_canonical_document(approval_path, approval)
+        _write_canonical_document(policy_path, policy)
 
         plan_argv = [
             "plan",
@@ -135,6 +225,14 @@ def main() -> int:
             str(staging),
             "--evidence-parent",
             str(evidence),
+            "--operations-root-approval",
+            str(approval_path),
+            "--expected-operations-root-approval-sha256",
+            _sha256(approval_path),
+            "--clean-start-policy",
+            str(policy_path),
+            "--expected-clean-start-policy-sha256",
+            _sha256(policy_path),
             "--migration-image-id",
             args.target_image_id,
             "--migration-image-revision",
@@ -198,6 +296,10 @@ def main() -> int:
             str(plan["SOURCE_SHA256"]),
             "--confirm-image-revision",
             str(plan["MIGRATION_IMAGE_REVISION"]),
+            "--confirm-operations-root-approval-sha256",
+            str(plan["OPERATIONS_ROOT_APPROVAL_SHA256"]),
+            "--confirm-clean-start-policy-sha256",
+            str(plan["CLEAN_START_POLICY_SHA256"]),
         ]
         execute_return_code, execute_result = _public_main(execute_argv)
         if (

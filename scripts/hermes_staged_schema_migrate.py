@@ -11,6 +11,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -76,6 +78,197 @@ class OrchestratorError(RuntimeError):
         self.publish_state = publish_state
 
 
+@dataclass(frozen=True)
+class _CleanupFailureRecord:
+    resource_kind: str
+    cleanup_phase: str
+    error_type: str
+    error_code: str
+
+    def as_payload(self) -> dict[str, str]:
+        return {
+            "resource_kind": self.resource_kind,
+            "cleanup_phase": self.cleanup_phase,
+            "error_type": self.error_type,
+            "error_code": self.error_code,
+        }
+
+
+class _CleanupAggregateError(RuntimeError):
+    def __init__(self, records: Sequence[_CleanupFailureRecord]) -> None:
+        self.records = tuple(records)
+        super().__init__("OWNED_RESOURCE_CLEANUP_FAILED")
+
+
+class _PrimaryAndCleanupError(RuntimeError):
+    def __init__(
+        self,
+        primary: Exception,
+        records: Sequence[_CleanupFailureRecord],
+    ) -> None:
+        self.primary = primary
+        self.records = tuple(records)
+        super().__init__("PRIMARY_AND_CLEANUP_FAILED")
+
+
+class _StagedCleanupTransport(RuntimeError):
+    def __init__(
+        self,
+        *,
+        result_snapshot: dict[str, Any],
+        publish_state: str,
+        exchange_started: bool,
+        cleanup_failures: Sequence[_CleanupFailureRecord],
+        durable_evidence_updated: bool,
+    ) -> None:
+        self.result_snapshot = dict(result_snapshot)
+        self.publish_state = publish_state
+        self.exchange_started = exchange_started
+        self.cleanup_failures = tuple(cleanup_failures)
+        self.durable_evidence_updated = durable_evidence_updated
+        super().__init__("STAGED_CLEANUP_TRANSPORT")
+
+
+def _cleanup_error_type(exc: Exception) -> str:
+    value = re.sub(r"[^A-Za-z0-9_]+", "_", type(exc).__name__)
+    return value[:80] or "Exception"
+
+
+def _cleanup_failure_record(
+    resource_kind: str,
+    cleanup_phase: str,
+    error_code: str,
+    exc: Exception,
+) -> _CleanupFailureRecord:
+    resolved_code = (
+        exc.code if isinstance(exc, OrchestratorError) else error_code
+    )
+    return _CleanupFailureRecord(
+        resource_kind=resource_kind,
+        cleanup_phase=cleanup_phase,
+        error_type=_cleanup_error_type(exc),
+        error_code=resolved_code,
+    )
+
+
+def _cleanup_records_from_exception(
+    resource_kind: str,
+    cleanup_phase: str,
+    error_code: str,
+    exc: Exception,
+) -> tuple[_CleanupFailureRecord, ...]:
+    if isinstance(exc, _PrimaryAndCleanupError):
+        return (
+            *_cleanup_records_from_exception(
+                resource_kind,
+                cleanup_phase,
+                error_code,
+                exc.primary,
+            ),
+            *exc.records,
+        )
+    if isinstance(exc, _CleanupAggregateError):
+        return exc.records
+    return (
+        _cleanup_failure_record(
+            resource_kind,
+            cleanup_phase,
+            error_code,
+            exc,
+        ),
+    )
+
+
+def _split_primary_cleanup(
+    exc: Exception,
+) -> tuple[Exception, tuple[_CleanupFailureRecord, ...]]:
+    failures: list[_CleanupFailureRecord] = []
+    primary = exc
+    while isinstance(primary, _PrimaryAndCleanupError):
+        failures.extend(primary.records)
+        primary = primary.primary
+    if isinstance(primary, _CleanupAggregateError):
+        failures.extend(primary.records)
+        primary = OrchestratorError("CLEANUP_FAILED")
+    return primary, tuple(failures)
+
+
+def _attempt_owned_cleanup(
+    resource_kind: str,
+    cleanup_phase: str,
+    error_code: str,
+    callback: Callable[[], None],
+) -> tuple[_CleanupFailureRecord, ...]:
+    try:
+        callback()
+    except Exception as exc:
+        return _cleanup_records_from_exception(
+            resource_kind,
+            cleanup_phase,
+            error_code,
+            exc,
+        )
+    return ()
+
+
+def _run_owned_cleanup(
+    *steps: tuple[str, str, str, Callable[[], None]],
+) -> None:
+    failures: list[_CleanupFailureRecord] = []
+    for resource_kind, cleanup_phase, error_code, callback in steps:
+        failures.extend(
+            _attempt_owned_cleanup(
+                resource_kind,
+                cleanup_phase,
+                error_code,
+                callback,
+            )
+        )
+    if failures:
+        raise _CleanupAggregateError(failures)
+
+
+def _run_body_with_owned_cleanup(
+    body: Callable[[], Any],
+    *steps: tuple[str, str, str, Callable[[], None]],
+) -> Any:
+    try:
+        result = body()
+    except Exception as primary:
+        failures: list[_CleanupFailureRecord] = []
+        for resource_kind, cleanup_phase, error_code, callback in steps:
+            failures.extend(
+                _attempt_owned_cleanup(
+                    resource_kind,
+                    cleanup_phase,
+                    error_code,
+                    callback,
+                )
+            )
+        if failures:
+            raise _PrimaryAndCleanupError(
+                primary,
+                failures,
+            ) from primary
+        raise
+    _run_owned_cleanup(*steps)
+    return result
+
+
+def _unlink_path_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _unlink_at_if_exists(parent_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
 def _effective_uid() -> int:
     getter = getattr(os, "geteuid", None)
     if not callable(getter):
@@ -120,8 +313,20 @@ class PinnedDatabase:
     identity: SourceIdentity
 
     def close(self) -> None:
-        os.close(self.file_fd)
-        os.close(self.parent_fd)
+        _run_owned_cleanup(
+            (
+                "PINNED_DATABASE_FILE_DESCRIPTOR",
+                "RESOURCE_RELEASE",
+                "PINNED_DATABASE_FILE_CLOSE_FAILED",
+                lambda: os.close(self.file_fd),
+            ),
+            (
+                "PINNED_DATABASE_PARENT_DESCRIPTOR",
+                "RESOURCE_RELEASE",
+                "PINNED_DATABASE_PARENT_CLOSE_FAILED",
+                lambda: os.close(self.parent_fd),
+            ),
+        )
 
 
 @dataclass
@@ -130,10 +335,20 @@ class SQLiteLease:
     label: str
 
     def close(self) -> None:
-        try:
-            self.connection.rollback()
-        finally:
-            self.connection.close()
+        _run_owned_cleanup(
+            (
+                f"{self.label}_SQLITE_LEASE",
+                "ROLLBACK",
+                f"{self.label}_SQLITE_ROLLBACK_FAILED",
+                self.connection.rollback,
+            ),
+            (
+                f"{self.label}_SQLITE_LEASE",
+                "CONNECTION_CLOSE",
+                f"{self.label}_SQLITE_CONNECTION_CLOSE_FAILED",
+                self.connection.close,
+            ),
+        )
 
 @dataclass(frozen=True)
 class _ProductionAuthorization:
@@ -173,15 +388,41 @@ class _PreparedProductionExecution:
         return source_pin, source_lease, backup_parent_fd
 
     def close(self) -> None:
+        steps: list[tuple[str, str, str, Callable[[], None]]] = []
         if self.source_lease is not None:
-            self.source_lease.close()
+            source_lease = self.source_lease
             self.source_lease = None
+            steps.append(
+                (
+                    "SOURCE_SQLITE_LEASE",
+                    "PREPARED_EXECUTION_RELEASE",
+                    "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                    source_lease.close,
+                )
+            )
         if self.source_pin is not None:
-            self.source_pin.close()
+            source_pin = self.source_pin
             self.source_pin = None
+            steps.append(
+                (
+                    "SOURCE_PINNED_DATABASE",
+                    "PREPARED_EXECUTION_RELEASE",
+                    "SOURCE_PINNED_DATABASE_CLOSE_FAILED",
+                    source_pin.close,
+                )
+            )
         if self.backup_parent_fd is not None:
-            os.close(self.backup_parent_fd)
+            backup_parent_fd = self.backup_parent_fd
             self.backup_parent_fd = None
+            steps.append(
+                (
+                    "MANIFEST_PARENT_DESCRIPTOR",
+                    "PREPARED_EXECUTION_RELEASE",
+                    "MANIFEST_PARENT_CLOSE_FAILED",
+                    lambda: os.close(backup_parent_fd),
+                )
+            )
+        _run_owned_cleanup(*steps)
 
 
 
@@ -223,10 +464,24 @@ def _json_print(payload: dict[str, Any]) -> None:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    handle = path.open("rb")
+
+    def read_hash() -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        return digest.hexdigest()
+
+    return str(
+        _run_body_with_owned_cleanup(
+            read_hash,
+            (
+                "HASH_SOURCE_FILE_HANDLE",
+                "SCOPED_RESOURCE_RELEASE",
+                "HASH_SOURCE_FILE_CLOSE_FAILED",
+                handle.close,
+            ),
+        )
+    )
 
 
 def _sha256_fd(fd: int) -> str:
@@ -241,8 +496,16 @@ def _sha256_fd(fd: int) -> str:
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
+    handle = path.open("rb")
+    _run_body_with_owned_cleanup(
+        lambda: os.fsync(handle.fileno()),
+        (
+            "FSYNC_FILE_HANDLE",
+            "SCOPED_RESOURCE_RELEASE",
+            "FSYNC_FILE_CLOSE_FAILED",
+            handle.close,
+        ),
+    )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -250,10 +513,15 @@ def _fsync_directory(path: Path) -> None:
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
     fd = os.open(path, flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _run_body_with_owned_cleanup(
+        lambda: os.fsync(fd),
+        (
+            "FSYNC_DIRECTORY_DESCRIPTOR",
+            "SCOPED_RESOURCE_RELEASE",
+            "FSYNC_DIRECTORY_CLOSE_FAILED",
+            lambda: os.close(fd),
+        ),
+    )
 
 
 def _fsync_fd(fd: int) -> None:
@@ -266,15 +534,53 @@ def _write_json_durable(path: Path, payload: dict[str, Any]) -> None:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     fd = os.open(temporary, flags, 0o600)
     try:
-        with os.fdopen(fd, "w", encoding="ascii") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
+        handle = os.fdopen(fd, "w", encoding="ascii")
+    except Exception as primary:
+        failures = [
+            *_attempt_owned_cleanup(
+                "MANIFEST_TEMP_FILE_DESCRIPTOR",
+                "ACQUISITION_FAILURE_RELEASE",
+                "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+                lambda: os.close(fd),
+            ),
+            *_attempt_owned_cleanup(
+                "MANIFEST_TEMP_FILE",
+                "ACQUISITION_FAILURE_RELEASE",
+                "MANIFEST_TEMP_FILE_UNLINK_FAILED",
+                lambda: _unlink_path_if_exists(temporary),
+            ),
+        ]
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
+        raise
+
+    def write_manifest() -> None:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    try:
+        _run_body_with_owned_cleanup(
+            write_manifest,
+            (
+                "MANIFEST_TEMP_FILE_HANDLE",
+                "SCOPED_RESOURCE_RELEASE",
+                "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+                handle.close,
+            ),
+        )
         os.replace(temporary, path)
         _fsync_directory(path.parent)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    except Exception as primary:
+        failures = _attempt_owned_cleanup(
+            "MANIFEST_TEMP_FILE",
+            "FAILURE_CLEANUP",
+            "MANIFEST_TEMP_FILE_UNLINK_FAILED",
+            lambda: _unlink_path_if_exists(temporary),
+        )
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
+        raise
 
 
 def _write_json_durable_at(
@@ -297,11 +603,41 @@ def _write_json_durable_at(
     fd = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        fd = -1
+        handle = os.fdopen(fd, "wb")
+    except Exception as primary:
+        failures = [
+            *_attempt_owned_cleanup(
+                "MANIFEST_TEMP_FILE_DESCRIPTOR",
+                "ACQUISITION_FAILURE_RELEASE",
+                "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+                lambda: os.close(fd),
+            ),
+            *_attempt_owned_cleanup(
+                "MANIFEST_TEMP_FILE",
+                "ACQUISITION_FAILURE_RELEASE",
+                "MANIFEST_TEMP_FILE_UNLINK_FAILED",
+                lambda: _unlink_at_if_exists(parent_fd, temporary),
+            ),
+        ]
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
+        raise
+
+    def write_manifest() -> None:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    try:
+        _run_body_with_owned_cleanup(
+            write_manifest,
+            (
+                "MANIFEST_TEMP_FILE_HANDLE",
+                "SCOPED_RESOURCE_RELEASE",
+                "MANIFEST_TEMP_FILE_CLOSE_FAILED",
+                handle.close,
+            ),
+        )
         os.replace(
             temporary,
             name,
@@ -309,13 +645,16 @@ def _write_json_durable_at(
             dst_dir_fd=parent_fd,
         )
         os.fsync(parent_fd)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.unlink(temporary, dir_fd=parent_fd)
-        except FileNotFoundError:
-            pass
+    except Exception as primary:
+        failures = _attempt_owned_cleanup(
+            "MANIFEST_TEMP_FILE",
+            "FAILURE_CLEANUP",
+            "MANIFEST_TEMP_FILE_UNLINK_FAILED",
+            lambda: _unlink_at_if_exists(parent_fd, temporary),
+        )
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
+        raise
     metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -341,21 +680,58 @@ def _copy_fd_durable(
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     destination_fd = os.open(destination, flags, 0o600)
     try:
+        destination_handle = os.fdopen(destination_fd, "wb")
+    except Exception as primary:
+        failures = [
+            *_attempt_owned_cleanup(
+                "COPY_DESTINATION_DESCRIPTOR",
+                "ACQUISITION_FAILURE_RELEASE",
+                "COPY_DESTINATION_CLOSE_FAILED",
+                lambda: os.close(destination_fd),
+            ),
+            *_attempt_owned_cleanup(
+                "COPY_DESTINATION_FILE",
+                "ACQUISITION_FAILURE_RELEASE",
+                "COPY_DESTINATION_UNLINK_FAILED",
+                lambda: _unlink_path_if_exists(destination),
+            ),
+        ]
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
+        raise
+
+    def copy_body() -> None:
         fail("creation")
         offset = 0
-        with os.fdopen(destination_fd, "wb") as destination_handle:
-            while True:
-                chunk = os.pread(source_fd, 1024 * 1024, offset)
-                if not chunk:
-                    break
-                destination_handle.write(chunk)
-                offset += len(chunk)
-            destination_handle.flush()
-            os.fsync(destination_handle.fileno())
-            fail("file_fsync")
-    except Exception:
-        if destination.exists():
-            destination.unlink()
+        while True:
+            chunk = os.pread(source_fd, 1024 * 1024, offset)
+            if not chunk:
+                break
+            destination_handle.write(chunk)
+            offset += len(chunk)
+        destination_handle.flush()
+        os.fsync(destination_handle.fileno())
+        fail("file_fsync")
+
+    try:
+        _run_body_with_owned_cleanup(
+            copy_body,
+            (
+                "COPY_DESTINATION_FILE_HANDLE",
+                "SCOPED_RESOURCE_RELEASE",
+                "COPY_DESTINATION_CLOSE_FAILED",
+                destination_handle.close,
+            ),
+        )
+    except Exception as primary:
+        failures = _attempt_owned_cleanup(
+            "COPY_DESTINATION_FILE",
+            "FAILURE_CLEANUP",
+            "COPY_DESTINATION_UNLINK_FAILED",
+            lambda: _unlink_path_if_exists(destination),
+        )
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
         raise
     os.chmod(destination, 0o600)
     os.chown(destination, uid, gid)
@@ -367,16 +743,21 @@ def _copy_fd_durable(
 def _copy_durable(source: Path, destination: Path, *, uid: int, gid: int) -> None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     source_fd = os.open(source, flags)
-    try:
-        _copy_fd_durable(
+    _run_body_with_owned_cleanup(
+        lambda: _copy_fd_durable(
             source_fd,
             destination,
             uid=uid,
             gid=gid,
             phase_prefix="copy",
-        )
-    finally:
-        os.close(source_fd)
+        ),
+        (
+            "COPY_SOURCE_DESCRIPTOR",
+            "SCOPED_RESOURCE_RELEASE",
+            "COPY_SOURCE_CLOSE_FAILED",
+            lambda: os.close(source_fd),
+        ),
+    )
 
 
 def _absolute_path(value: str, name: str) -> Path:
@@ -453,8 +834,15 @@ def _open_pinned_database(path: Path, *, expected: SourceIdentity | None = None)
     try:
         file_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         file_fd = os.open(path.name, file_flags, dir_fd=parent_fd)
-    except Exception:
-        os.close(parent_fd)
+    except Exception as primary:
+        failures = _attempt_owned_cleanup(
+            "PINNED_DATABASE_PARENT_DESCRIPTOR",
+            "ACQUISITION_FAILURE_RELEASE",
+            "PINNED_DATABASE_PARENT_CLOSE_FAILED",
+            lambda: os.close(parent_fd),
+        )
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
         raise
     try:
         identity = _identity_from_fd(file_fd)
@@ -464,9 +852,26 @@ def _open_pinned_database(path: Path, *, expected: SourceIdentity | None = None)
         if expected is not None and identity != expected:
             raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
         return PinnedDatabase(path=path, parent_fd=parent_fd, file_fd=file_fd, identity=identity)
-    except Exception:
-        os.close(file_fd)
-        os.close(parent_fd)
+    except Exception as primary:
+        failures: list[_CleanupFailureRecord] = []
+        failures.extend(
+            _attempt_owned_cleanup(
+                "PINNED_DATABASE_FILE_DESCRIPTOR",
+                "ACQUISITION_FAILURE_RELEASE",
+                "PINNED_DATABASE_FILE_CLOSE_FAILED",
+                lambda: os.close(file_fd),
+            )
+        )
+        failures.extend(
+            _attempt_owned_cleanup(
+                "PINNED_DATABASE_PARENT_DESCRIPTOR",
+                "ACQUISITION_FAILURE_RELEASE",
+                "PINNED_DATABASE_PARENT_CLOSE_FAILED",
+                lambda: os.close(parent_fd),
+            )
+        )
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
         raise
 
 
@@ -501,6 +906,29 @@ def _acquire_sqlite_lease(pin: PinnedDatabase, *, label: str) -> SQLiteLease:
     if _sidecars(pin.path):
         raise OrchestratorError(f"{label}_SQLITE_SIDECAR_PRESENT")
     connection: sqlite3.Connection | None = None
+
+    def release_connection() -> tuple[_CleanupFailureRecord, ...]:
+        if connection is None:
+            return ()
+        failures: list[_CleanupFailureRecord] = []
+        failures.extend(
+            _attempt_owned_cleanup(
+                f"{label}_SQLITE_LEASE",
+                "ACQUISITION_FAILURE_ROLLBACK",
+                f"{label}_SQLITE_ROLLBACK_FAILED",
+                connection.rollback,
+            )
+        )
+        failures.extend(
+            _attempt_owned_cleanup(
+                f"{label}_SQLITE_LEASE",
+                "ACQUISITION_FAILURE_CLOSE",
+                f"{label}_SQLITE_CONNECTION_CLOSE_FAILED",
+                connection.close,
+            )
+        )
+        return tuple(failures)
+
     try:
         connection = sqlite3.connect(str(pin.path), timeout=0, isolation_level=None)
         connection.execute("PRAGMA busy_timeout=0")
@@ -513,18 +941,21 @@ def _acquire_sqlite_lease(pin: PinnedDatabase, *, label: str) -> SQLiteLease:
             raise OrchestratorError(f"{label}_SQLITE_LEASE_IDENTITY_MISMATCH")
         return SQLiteLease(connection=connection, label=label)
     except sqlite3.Error as exc:
-        if connection is not None:
-            connection.close()
         code = getattr(exc, "sqlite_errorcode", None)
-        if isinstance(code, int) and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-            raise OrchestratorError(f"{label}_NOT_QUIESCENT") from exc
-        raise OrchestratorError(f"{label}_SQLITE_LEASE_FAILED") from exc
-    except Exception:
-        if connection is not None:
-            try:
-                connection.rollback()
-            finally:
-                connection.close()
+        error = (
+            OrchestratorError(f"{label}_NOT_QUIESCENT")
+            if isinstance(code, int)
+            and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+            else OrchestratorError(f"{label}_SQLITE_LEASE_FAILED")
+        )
+        failures = release_connection()
+        if failures:
+            raise _PrimaryAndCleanupError(error, failures) from exc
+        raise error from exc
+    except Exception as primary:
+        failures = release_connection()
+        if failures:
+            raise _PrimaryAndCleanupError(primary, failures) from primary
         raise
 
 
@@ -566,11 +997,20 @@ def _sqlite_validation_connection(conn: sqlite3.Connection) -> tuple[str, int]:
 def _sqlite_validation(path: Path) -> tuple[str, int]:
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    try:
+
+    def validate() -> tuple[str, int]:
         conn.execute("PRAGMA query_only=ON")
         return _sqlite_validation_connection(conn)
-    finally:
-        conn.close()
+
+    return _run_body_with_owned_cleanup(
+        validate,
+        (
+            "SQLITE_VALIDATION_CONNECTION",
+            "SCOPED_RESOURCE_RELEASE",
+            "SQLITE_VALIDATION_CONNECTION_CLOSE_FAILED",
+            conn.close,
+        ),
+    )
 
 
 def _database_snapshot_connection(
@@ -592,11 +1032,23 @@ def _database_snapshot_connection(
 def _database_snapshot(path: Path) -> tuple[tuple[tuple[str, str, str], ...], dict[str, int]]:
     uri = f"file:{path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    try:
+
+    def snapshot() -> tuple[
+        tuple[tuple[str, str, str], ...],
+        dict[str, int],
+    ]:
         conn.execute("PRAGMA query_only=ON")
         return _database_snapshot_connection(conn)
-    finally:
-        conn.close()
+
+    return _run_body_with_owned_cleanup(
+        snapshot,
+        (
+            "SQLITE_SNAPSHOT_CONNECTION",
+            "SCOPED_RESOURCE_RELEASE",
+            "SQLITE_SNAPSHOT_CONNECTION_CLOSE_FAILED",
+            conn.close,
+        ),
+    )
 
 
 def _expected_schema_names() -> set[str]:
@@ -709,11 +1161,22 @@ def _target_schema_fingerprint_connection(
 
 def _target_schema_fingerprint(path: Path) -> str:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
+
+    def fingerprint() -> str:
         conn.execute("PRAGMA query_only=ON")
         return _target_schema_fingerprint_connection(conn)
-    finally:
-        conn.close()
+
+    return str(
+        _run_body_with_owned_cleanup(
+            fingerprint,
+            (
+                "TARGET_FINGERPRINT_CONNECTION",
+                "SCOPED_RESOURCE_RELEASE",
+                "TARGET_FINGERPRINT_CONNECTION_CLOSE_FAILED",
+                conn.close,
+            ),
+        )
+    )
 
 def _inspect_image(image_id: str, expected_revision: str | None = None) -> str:
     if not IMAGE_ID_RE.fullmatch(image_id):
@@ -796,6 +1259,10 @@ def _cleanup_operation_staging(
 
     root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     root_fd = os.open(staging_root, root_flags)
+    operation_fd: int | None = None
+    operation_missing = False
+    primary: Exception | None = None
+    cleanup_failures: list[_CleanupFailureRecord] = []
     try:
         root_metadata = os.fstat(root_fd)
         expected_root = (
@@ -809,9 +1276,8 @@ def _cleanup_operation_staging(
         try:
             operation_fd = os.open(operation_path.name, root_flags, dir_fd=root_fd)
         except FileNotFoundError:
-            manifest.checkpoint(STAGING_CLEANED=True)
-            return True
-        try:
+            operation_missing = True
+        if operation_fd is not None:
             metadata = os.fstat(operation_fd)
             expected_operation = (
                 manifest.payload.get("STAGING_DIRECTORY_DEVICE"),
@@ -844,12 +1310,42 @@ def _cleanup_operation_staging(
                     raise OrchestratorError("STAGING_CLEANUP_LIVE_DATABASE_REFUSED")
                 os.unlink(name, dir_fd=operation_fd)
             _fsync_fd(operation_fd)
-        finally:
-            os.close(operation_fd)
-        os.rmdir(operation_path.name, dir_fd=root_fd)
-        _fsync_fd(root_fd)
-    finally:
-        os.close(root_fd)
+    except Exception as exc:
+        primary = exc
+
+    if operation_fd is not None:
+        cleanup_failures.extend(
+            _attempt_owned_cleanup(
+                "STAGING_OPERATION_DIRECTORY_DESCRIPTOR",
+                "STAGING_CLEANUP_RELEASE",
+                "STAGING_OPERATION_DIRECTORY_CLOSE_FAILED",
+                lambda: os.close(operation_fd),
+            )
+        )
+    if primary is None and not cleanup_failures and not operation_missing:
+        try:
+            os.rmdir(operation_path.name, dir_fd=root_fd)
+            _fsync_fd(root_fd)
+        except Exception as exc:
+            primary = exc
+    cleanup_failures.extend(
+        _attempt_owned_cleanup(
+            "STAGING_ROOT_DIRECTORY_DESCRIPTOR",
+            "STAGING_CLEANUP_RELEASE",
+            "STAGING_ROOT_DIRECTORY_CLOSE_FAILED",
+            lambda: os.close(root_fd),
+        )
+    )
+
+    if cleanup_failures:
+        if primary is not None:
+            raise _PrimaryAndCleanupError(
+                primary,
+                cleanup_failures,
+            ) from primary
+        raise _CleanupAggregateError(cleanup_failures)
+    if primary is not None:
+        raise primary
     manifest.checkpoint(STAGING_CLEANED=True)
     return True
 
@@ -859,8 +1355,16 @@ def _recover_pre_publish_staging(manifest_path: Path, staging_root: Path) -> boo
     metadata = manifest_path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
         raise OrchestratorError("RECOVERY_MANIFEST_NOT_REGULAR")
-    with manifest_path.open("r", encoding="ascii") as handle:
-        payload = json.load(handle)
+    handle = manifest_path.open("r", encoding="ascii")
+    payload = _run_body_with_owned_cleanup(
+        lambda: json.load(handle),
+        (
+            "RECOVERY_MANIFEST_FILE_HANDLE",
+            "SCOPED_RESOURCE_RELEASE",
+            "RECOVERY_MANIFEST_FILE_CLOSE_FAILED",
+            handle.close,
+        ),
+    )
     if not isinstance(payload, dict):
         raise OrchestratorError("RECOVERY_MANIFEST_INVALID")
     publish_state = str(payload.get("PUBLISH_STATE", "BEFORE_EXCHANGE"))
@@ -996,17 +1500,17 @@ def _prepare_authorized_production_execution(
     ):
         raise OrchestratorError("BACKUP_PARENT_PIN_INVALID")
     pinned_backup_parent_fd = os.dup(backup_parent_fd)
-    os.set_inheritable(pinned_backup_parent_fd, False)
-    source_identity = _preflight(
-        contract,
-        synthetic=False,
-        inspect_images=True,
-    )
-    if source_identity != expected_source_identity:
-        raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
     source_pin: PinnedDatabase | None = None
     source_lease: SQLiteLease | None = None
     try:
+        os.set_inheritable(pinned_backup_parent_fd, False)
+        source_identity = _preflight(
+            contract,
+            synthetic=False,
+            inspect_images=True,
+        )
+        if source_identity != expected_source_identity:
+            raise OrchestratorError("SOURCE_IDENTITY_CHANGED")
         source_pin = _open_pinned_database(
             contract.source_db,
             expected=source_identity,
@@ -1022,12 +1526,62 @@ def _prepare_authorized_production_execution(
             backup_parent_fd=pinned_backup_parent_fd,
             authorization=checked,
         )
-    except Exception:
-        os.close(pinned_backup_parent_fd)
+    except Exception as exc:
+        primary, nested_cleanup_failures = _split_primary_cleanup(exc)
+        cleanup_failures = list(nested_cleanup_failures)
         if source_lease is not None:
-            source_lease.close()
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "SOURCE_SQLITE_LEASE",
+                    "PREPARATION_FAILURE_RELEASE",
+                    "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                    source_lease.close,
+                )
+            )
         if source_pin is not None:
-            source_pin.close()
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "SOURCE_PINNED_DATABASE",
+                    "PREPARATION_FAILURE_RELEASE",
+                    "SOURCE_PINNED_DATABASE_CLOSE_FAILED",
+                    source_pin.close,
+                )
+            )
+        cleanup_failures.extend(
+            _attempt_owned_cleanup(
+                "MANIFEST_PARENT_DESCRIPTOR",
+                "PREPARATION_FAILURE_RELEASE",
+                "MANIFEST_PARENT_CLOSE_FAILED",
+                lambda: os.close(pinned_backup_parent_fd),
+            )
+        )
+        if cleanup_failures:
+            error = (
+                primary
+                if isinstance(primary, OrchestratorError)
+                else OrchestratorError(type(primary).__name__)
+            )
+            raise _StagedCleanupTransport(
+                result_snapshot={
+                    "status": "FAILED",
+                    "error_type": error.code,
+                    "exit_classification": error.code,
+                    "failure_reason": None,
+                    "publish_state": "BEFORE_EXCHANGE",
+                    "target_may_have_changed": False,
+                    "automatic_retry_allowed": False,
+                    "manual_recovery_required": False,
+                    "backup_available": False,
+                    "cleanup_failed": False,
+                    "cleanup_error_type": None,
+                    "manifest_write_failed": False,
+                    "false_rollback_reported": False,
+                },
+                publish_state="BEFORE_EXCHANGE",
+                exchange_started=False,
+                cleanup_failures=cleanup_failures,
+                durable_evidence_updated=False,
+            ) from primary
         raise
 
 
@@ -1256,7 +1810,7 @@ class _SyntheticExecutionHooks:
     lifecycle_callback: Callable[[str, Path], None] | None = None
 
 
-def _execute_staged(
+def _execute_staged_body(
     args: argparse.Namespace,
     *,
     synthetic: bool,
@@ -1338,6 +1892,8 @@ def _execute_staged(
     manifest: DurableManifest | None = None
     publish_state = "BEFORE_EXCHANGE"
     exchange_started = False
+    result_snapshot: dict[str, Any] | None = None
+    cleanup_failures: list[_CleanupFailureRecord] = []
     try:
         if _prepared_production is not None:
             (
@@ -1591,8 +2147,7 @@ def _execute_staged(
             TARGET_SCHEMA_FINGERPRINT=final_target_fingerprint,
         )
         phase("final_verified")
-        _json_print(
-            {
+        result_snapshot = {
                 "status": "PASS",
                 "mode": "EXECUTE_SYNTHETIC" if synthetic else "EXECUTE_PRODUCTION",
                 "operation_id": operation_id,
@@ -1647,10 +2202,16 @@ def _execute_staged(
                 "automatic_retry_allowed": False,
                 "manual_recovery_required": False,
             }
-        )
+        _json_print(result_snapshot)
         return 0
     except Exception as exc:
-        error = exc if isinstance(exc, OrchestratorError) else OrchestratorError(type(exc).__name__)
+        primary, nested_cleanup_failures = _split_primary_cleanup(exc)
+        cleanup_failures.extend(nested_cleanup_failures)
+        error = (
+            primary
+            if isinstance(primary, OrchestratorError)
+            else OrchestratorError(type(primary).__name__)
+        )
         if exchange_started and publish_state == "BEFORE_EXCHANGE":
             publish_state = error.publish_state
         publish_uncertain = (
@@ -1660,10 +2221,24 @@ def _execute_staged(
         failure_code = "PUBLISH_UNCERTAIN" if publish_uncertain else error.code
         if not exchange_started:
             if staging_lease is not None:
-                staging_lease.close()
+                cleanup_failures.extend(
+                    _attempt_owned_cleanup(
+                        "STAGING_SQLITE_LEASE",
+                        "PRE_EXCHANGE_RELEASE",
+                        "STAGING_SQLITE_LEASE_CLOSE_FAILED",
+                        staging_lease.close,
+                    )
+                )
                 staging_lease = None
             if staging_pin is not None:
-                staging_pin.close()
+                cleanup_failures.extend(
+                    _attempt_owned_cleanup(
+                        "STAGING_PINNED_DATABASE",
+                        "PRE_EXCHANGE_RELEASE",
+                        "STAGING_PINNED_DATABASE_CLOSE_FAILED",
+                        staging_pin.close,
+                    )
+                )
                 staging_pin = None
         cleanup_failed = False
         cleanup_error_type: str | None = None
@@ -1679,10 +2254,19 @@ def _execute_staged(
                     )
                 except Exception as cleanup_error:
                     cleanup_failed = True
+                    operation_cleanup_failures = (
+                        _cleanup_records_from_exception(
+                            "OPERATION_STAGING",
+                            "PRE_EXCHANGE_STAGING_CLEANUP",
+                            "OPERATION_STAGING_CLEANUP_FAILED",
+                            cleanup_error,
+                        )
+                    )
                     cleanup_error_type = (
-                        cleanup_error.code
-                        if isinstance(cleanup_error, OrchestratorError)
-                        else type(cleanup_error).__name__
+                        operation_cleanup_failures[0].error_code
+                    )
+                    cleanup_failures.extend(
+                        operation_cleanup_failures
                     )
             target_may_have_changed = _target_may_have_changed(publish_state)
             if publish_uncertain:
@@ -1709,8 +2293,7 @@ def _execute_staged(
             if publish_uncertain:
                 target_may_have_changed = True
             manual_recovery_required = publish_uncertain or publish_state == "EXCHANGE_REVERSED"
-        _json_print(
-            {
+        result_snapshot = {
                 "status": "FAILED",
                 "error_type": failure_code,
                 "exit_classification": failure_code,
@@ -1725,19 +2308,204 @@ def _execute_staged(
                 "manifest_write_failed": manifest_write_failed,
                 "false_rollback_reported": False,
             }
-        )
+        _json_print(result_snapshot)
         return 1
     finally:
         if staging_lease is not None:
-            staging_lease.close()
-        if source_lease is not None:
-            source_lease.close()
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "STAGING_SQLITE_LEASE",
+                    "FINAL_RESOURCE_RELEASE",
+                    "STAGING_SQLITE_LEASE_CLOSE_FAILED",
+                    staging_lease.close,
+                )
+            )
+            staging_lease = None
         if staging_pin is not None:
-            staging_pin.close()
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "STAGING_PINNED_DATABASE",
+                    "FINAL_RESOURCE_RELEASE",
+                    "STAGING_PINNED_DATABASE_CLOSE_FAILED",
+                    staging_pin.close,
+                )
+            )
+            staging_pin = None
+        if source_lease is not None:
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "SOURCE_SQLITE_LEASE",
+                    "FINAL_RESOURCE_RELEASE",
+                    "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
+                    source_lease.close,
+                )
+            )
+            source_lease = None
         if source_pin is not None:
-            source_pin.close()
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "SOURCE_PINNED_DATABASE",
+                    "FINAL_RESOURCE_RELEASE",
+                    "SOURCE_PINNED_DATABASE_CLOSE_FAILED",
+                    source_pin.close,
+                )
+            )
+            source_pin = None
         if manifest_parent_fd is not None:
-            os.close(manifest_parent_fd)
+            cleanup_failures.extend(
+                _attempt_owned_cleanup(
+                    "MANIFEST_PARENT_DESCRIPTOR",
+                    "FINAL_RESOURCE_RELEASE",
+                    "MANIFEST_PARENT_CLOSE_FAILED",
+                    lambda: os.close(manifest_parent_fd),
+                )
+            )
+            manifest_parent_fd = None
+        if cleanup_failures:
+            if result_snapshot is None:
+                uncertain = (
+                    exchange_started
+                    and publish_state != "EXCHANGE_REVERSED"
+                )
+                classification = (
+                    "PUBLISH_UNCERTAIN"
+                    if uncertain
+                    else "CLEANUP_FAILED"
+                )
+                result_snapshot = {
+                    "status": "FAILED",
+                    "error_type": classification,
+                    "exit_classification": classification,
+                    "failure_reason": None,
+                    "publish_state": publish_state,
+                    "target_may_have_changed": uncertain,
+                    "automatic_retry_allowed": False,
+                    "manual_recovery_required": uncertain,
+                    "backup_available": backup.exists(),
+                    "cleanup_failed": True,
+                    "cleanup_error_type": None,
+                    "manifest_write_failed": True,
+                    "false_rollback_reported": False,
+                }
+            raise _StagedCleanupTransport(
+                result_snapshot=result_snapshot,
+                publish_state=publish_state,
+                exchange_started=exchange_started,
+                cleanup_failures=cleanup_failures,
+                durable_evidence_updated=False,
+            )
+
+
+def _merge_cleanup_transport(
+    transport: _StagedCleanupTransport,
+) -> dict[str, Any]:
+    payload = dict(transport.result_snapshot)
+    primary_present = payload.get("status") != "PASS"
+    primary_classification = str(
+        payload.get("failure_reason")
+        or payload.get("exit_classification")
+        or payload.get("error_type")
+        or "SUCCESS"
+    )
+    primary_publish_state = str(
+        payload.get("publish_state", transport.publish_state)
+    )
+    primary_target_changed = bool(
+        payload.get("target_may_have_changed", False)
+    )
+    failures = [
+        failure.as_payload()
+        for failure in transport.cleanup_failures
+    ]
+    failure_codes = [
+        failure["error_code"]
+        for failure in failures
+    ]
+    post_exchange_uncertain = (
+        transport.exchange_started
+        and primary_publish_state != "EXCHANGE_REVERSED"
+    ) or primary_target_changed
+
+    payload.update(
+        {
+            "primary_exit_classification": primary_classification,
+            "primary_publish_state": primary_publish_state,
+            "primary_target_may_have_changed": primary_target_changed,
+            "primary_automatic_retry_allowed": bool(
+                payload.get("automatic_retry_allowed", False)
+            ),
+            "primary_manual_recovery_required": bool(
+                payload.get("manual_recovery_required", False)
+            ),
+            "primary_exception_present": primary_present,
+            "primary_exception_preserved": primary_present,
+            "cleanup_failed": True,
+            "cleanup_exception_recorded": True,
+            "cleanup_exception_count": len(failures),
+            "cleanup_failures": failures,
+            "cleanup_failure_codes": failure_codes,
+            "cleanup_error_type": (
+                payload.get("cleanup_error_type") or failure_codes[0]
+            ),
+            "automatic_retry_allowed": False,
+            "durable_evidence_updated": (
+                transport.durable_evidence_updated
+            ),
+            "false_rollback_reported": False,
+        }
+    )
+    if post_exchange_uncertain:
+        payload.update(
+            {
+                "status": "FAILED",
+                "error_type": "PUBLISH_UNCERTAIN",
+                "exit_classification": "PUBLISH_UNCERTAIN",
+                "publish_state": primary_publish_state,
+                "target_may_have_changed": True,
+                "manual_recovery_required": True,
+            }
+        )
+    elif not primary_present:
+        payload.update(
+            {
+                "status": "FAILED",
+                "error_type": "CLEANUP_FAILED",
+                "exit_classification": "CLEANUP_FAILED",
+                "publish_state": "BEFORE_EXCHANGE",
+                "target_may_have_changed": False,
+                "manual_recovery_required": True,
+            }
+        )
+    else:
+        payload["manual_recovery_required"] = True
+    return payload
+
+
+def _execute_staged(
+    args: argparse.Namespace,
+    *,
+    synthetic: bool,
+    operation_id: str | None = None,
+    expected_source_identity: SourceIdentity | None = None,
+    _prepared_production: _PreparedProductionExecution | None = None,
+    _synthetic_hooks: _SyntheticExecutionHooks | None = None,
+) -> int:
+    captured = io.StringIO()
+    try:
+        with redirect_stdout(captured):
+            return_code = _execute_staged_body(
+                args,
+                synthetic=synthetic,
+                operation_id=operation_id,
+                expected_source_identity=expected_source_identity,
+                _prepared_production=_prepared_production,
+                _synthetic_hooks=_synthetic_hooks,
+            )
+    except _StagedCleanupTransport as transport:
+        _json_print(_merge_cleanup_transport(transport))
+        return 1
+    sys.stdout.write(captured.getvalue())
+    return return_code
 
 
 def execute_synthetic(

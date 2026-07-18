@@ -954,7 +954,7 @@ def _open_evidence_document(
         os.close(parent_fd)
         raise
     try:
-        owner_uid = os.geteuid()
+        owner_uid = os.geteuid()  # windows-footgun: ok
         parent_metadata = os.fstat(parent_fd)
         metadata = os.fstat(file_fd)
         if (

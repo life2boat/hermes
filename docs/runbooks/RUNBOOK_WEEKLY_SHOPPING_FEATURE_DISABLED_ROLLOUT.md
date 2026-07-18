@@ -497,26 +497,203 @@ migration of the production database is prohibited. The public migration-only CL
 may receive only a disposable staging copy in a private writable directory; the
 production DB and its parent must never be mounted in the migration container.
 
-The public host entrypoint is `scripts/hermes_staged_schema_migrate.py`. This
-revision exposes read-only `plan` and test-only `execute-synthetic` modes. A
-production execute mode is deliberately absent and remains blocked until a later
-production execution gate reviews exact-image and host quiescence evidence.
-Inside the isolated staging container, that orchestrator invokes only
+The staged-copy implementation remains in
+`scripts/hermes_staged_schema_migrate.py`. The single public production
+authorization entrypoint is `scripts/hermes_production_staged_migrate.py`, with
+separate explicit `plan` and `execute` subcommands. The fail-closed default is
+explicit: production execution is disabled by default; there is no default database
+path, environment fallback,
+generic confirmation flag, in-place migration, or implicit container stop.
+A production execute mode is deliberately absent from the internal
+`scripts/hermes_staged_schema_migrate.py` CLI; only the separate hash-bound gate
+can authorize production execution. The production gate delegates the authorized
+mutation to the existing staged-copy implementation; inside the isolated staging
+container that implementation invokes only
 `scripts/healbite_schema_migrate.py --staged-copy` from the exact image.
 
 Required contract:
 
 ```text
-host orchestrator requires explicit --source-db, --backup-dir, --staging-root,
---target-image-id, --previous-image-id, and --expected-source-revision
-no path, image, or revision default comes from environment
-production execution is disabled in this source revision
-future production execution must stop the application and every DB user first
+plan and execute must run as root; the plan records and execute revalidates the
+creator UID, GID, username, process UID, and process GID
+production plan requires explicit --repository-root, --db-path, --backup-parent,
+--staging-parent, --evidence-parent, --migration-image-id,
+--migration-image-revision, --previous-image-id, --expected-hostname,
+--expected-source-device, --expected-source-inode, --expected-source-size,
+--expected-source-sha256, --expected-free-bytes, and --expires-in-seconds
+the only deployment authority is
+<repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
+by file descriptor; caller-selected contract paths are not accepted
+Household and Shopping enabled flags must both be explicit JSON booleans false,
+and both allowlists must be empty in that pinned canonical contract
+the target schema version and fingerprint are derived from trusted migration
+code, recorded in the plan, and independently recalculated during execute
+production execute requires exact --plan, --expected-plan-sha256,
+--confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
+plan and execute are separate and require an independent plan/SHA review gate
+no path, image, revision, confirmation, or authorization comes from environment
+plan, backup, staging, and evidence parents are canonical, non-symlink,
+root-owned, mode 0700 directories
+the operator must stop the application and every DB user through the canonical
+deployment source of truth before execute
 no process may have the source DB open
 no -journal, -wal, or -shm source sidecar may exist
 source identity, mode, integrity, and foreign keys must match the approved plan
+execute must acquire the real SQLite lifetime lease before creating its
+execution directory, execution.json, backup, staging, or internal manifest
+an active reader or writer must return QUIESCENCE_FAILED with zero execute
+filesystem delta; the separately approved immutable plan remains the only file
 automatic lock retry is prohibited
 ```
+
+### D3 production plan/execute gate (future example only)
+
+The following workflow is a deterministic **example for a separately authorized
+production task**. This PR does not authorize running any command in this section.
+The plan author and execute approver must be separate people or separate recorded
+review steps. The reviewer approves the exact canonical plan path, plan SHA-256,
+operation ID, source SHA-256, and migration image revision before service stop.
+
+1. Verify the exact-main image ID and OCI revision through the canonical deployment
+   source of truth.
+2. Create one immutable production plan while Hermes remains running.
+3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256.
+4. Stop only hermes-bot through the canonical deployment source of truth.
+5. Let execute independently prove real SQLite quiescence and hold both lifetime
+   leases; a generic flock or process-name check is not sufficient.
+6. Execute only the exact approved plan.
+7. Perform a separate read-only integrity, foreign-key, and schema verification.
+8. Start the exact image through scripts/hermes_production_deploy.py with all
+   manifest feature gates disabled and allowlists empty.
+9. Run the approved Telegram smoke while Household/Weekly/Shopping enablement is
+   unchanged.
+10. Retain the plan, execution evidence, displaced source, and durable backup.
+11. Do not enable Family, Weekly mutation, or Shopping in this workflow.
+
+Example plan preparation, not current production authorization:
+
+```bash
+set -euo pipefail
+
+HOST_PYTHON="<approved-host-python>"
+GATE="scripts/hermes_production_staged_migrate.py"
+REPOSITORY_ROOT="<exact-clean-repository-root>"
+DB_PATH="<explicit-approved-database-path>"
+BACKUP_PARENT="<explicit-private-backup-parent>"
+STAGING_PARENT="<explicit-private-same-filesystem-staging-parent>"
+EVIDENCE_PARENT="<explicit-private-evidence-parent>"
+MIGRATION_IMAGE_ID="<sha256-image-id>"
+MIGRATION_IMAGE_REVISION="<full-40-character-main-sha>"
+PREVIOUS_IMAGE_ID="<sha256-previous-image-id>"
+EXPECTED_HOSTNAME="<approved-hostname>"
+EXPECTED_FREE_BYTES="<approved-minimum-free-bytes>"
+
+SOURCE_DEVICE="$(stat --format='%d' "$DB_PATH")"
+SOURCE_INODE="$(stat --format='%i' "$DB_PATH")"
+SOURCE_SIZE="$(stat --format='%s' "$DB_PATH")"
+SOURCE_SHA256="$(sha256sum "$DB_PATH" | awk '{print $1}')"
+
+sudo "$HOST_PYTHON" "$GATE" plan \
+  --repository-root "$REPOSITORY_ROOT" \
+  --db-path "$DB_PATH" \
+  --backup-parent "$BACKUP_PARENT" \
+  --staging-parent "$STAGING_PARENT" \
+  --evidence-parent "$EVIDENCE_PARENT" \
+  --migration-image-id "$MIGRATION_IMAGE_ID" \
+  --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
+  --previous-image-id "$PREVIOUS_IMAGE_ID" \
+  --expected-hostname "$EXPECTED_HOSTNAME" \
+  --expected-source-device "$SOURCE_DEVICE" \
+  --expected-source-inode "$SOURCE_INODE" \
+  --expected-source-size "$SOURCE_SIZE" \
+  --expected-source-sha256 "$SOURCE_SHA256" \
+  --expected-free-bytes "$EXPECTED_FREE_BYTES" \
+  --expires-in-seconds 3600
+```
+
+The reviewer records the values below from the sanitized plan output. They must not
+be derived from ambient environment during execute:
+
+```text
+APPROVED_PLAN_PATH=<exact-plan-path>
+APPROVED_PLAN_SHA256=<exact-plan-sha256>
+APPROVED_OPERATION_ID=<exact-operation-id>
+APPROVED_SOURCE_SHA256=<exact-source-sha256>
+APPROVED_IMAGE_REVISION=<exact-image-revision>
+APPROVED_PLAN_CREATOR_UID=0
+APPROVED_PLAN_CREATOR_GID=<recorded-root-group>
+APPROVED_TARGET_SCHEMA_VERSION=<derived-version>
+APPROVED_TARGET_SCHEMA_FINGERPRINT=<derived-fingerprint>
+```
+
+Before execute, verify the plan hash and use the canonical deployment SOT to stop
+only hermes-bot. Do not hand-assemble an alternate Compose chain, stop Qdrant, or
+mount the production DB into a container. Execute is then limited to:
+
+```bash
+set -euo pipefail
+
+test "$(sha256sum "$APPROVED_PLAN_PATH" | awk '{print $1}')" = "$APPROVED_PLAN_SHA256"
+
+sudo "$HOST_PYTHON" "$GATE" execute \
+  --plan "$APPROVED_PLAN_PATH" \
+  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
+  --confirm-operation-id "$APPROVED_OPERATION_ID" \
+  --confirm-source-sha256 "$APPROVED_SOURCE_SHA256" \
+  --confirm-image-revision "$APPROVED_IMAGE_REVISION"
+```
+
+If execute cannot acquire the source SQLite lease, it must stop before creating
+`execution.json`, backup, staging, or internal-manifest artifacts. Do not treat
+the immutable plan from the separate plan command as execute-time filesystem
+mutation.
+
+A pre-publish failure leaves the original target live. A proved reverse exchange
+restores the original inode and fsyncs the parent. Any post-exchange uncertainty is
+PUBLISH_UNCERTAIN followed by MANUAL_RECOVERY_REQUIRED; automatic retry and blind
+DB restore are forbidden. DB restoration is a separate explicit recovery procedure.
+Image rollback is allowed only after the previous-image compatibility probe
+succeeds against the migrated schema.
+
+Successful public execution evidence has this monotonic state stream:
+
+```text
+QUIESCENCE_HELD -> COMPLETED
+```
+
+The separately pinned internal staged manifest has this monotonic state stream:
+
+```text
+PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED
+```
+
+Its publish-state stream is `BEFORE_EXCHANGE`, `EXCHANGE_STARTED`,
+`EXCHANGE_COMPLETED_NOT_VERIFIED`, `EXCHANGE_VERIFIED_NOT_FSYNCED`,
+`PARENT_FSYNCED`, and `FINAL_VERIFIED`. The plan path, deployment contract,
+operation parents, and internal manifest directory descriptors remain pinned
+through completion and are never reopened as unverified authority.
+
+It must also record backup/staging/final SHA-256 values without DB contents,
+identifiers, credentials, environment dumps, or raw logs. Evidence directory mode
+is 0700; plan and execution files are 0600. The durable backup and evidence are
+retained after success or failure.
+
+After a successful execute, perform read-only DB verification, then use only the
+canonical deployment entrypoint to start the exact image with feature gates still
+disabled. The command below remains an example requiring separate deploy approval:
+
+```bash
+set -euo pipefail
+
+sudo "$HOST_PYTHON" scripts/hermes_production_deploy.py execute-deploy \
+  --image "$MIGRATION_IMAGE_ID" \
+  --revision "$MIGRATION_IMAGE_REVISION" \
+  --confirm DEPLOY_HERMES_BOT
+```
+
+No inline Python, in-container exec-based migration, direct production DB bind
+mount, automatic
+feature enablement, automatic DB restore, or automatic retry is permitted.
 
 The one-shot lock probe is only a preflight signal. Before backup creation, the
 orchestrator pins the source file and its parent directory descriptors and acquires
@@ -529,11 +706,12 @@ locks are not sufficient. Separate SQLite readers and writers must be refused at
 every lifecycle boundary. These controls do not claim protection from host root or
 another privileged administrator.
 
-After quiescence, the future root orchestrator must create and fsync a durable
+After quiescence, the root orchestrator must create and fsync a durable
 backup, then create a byte-identical staging copy on the same filesystem as the
 target. Both files must derive from the same quiesced source identity and hash.
-The staging parent is private, owned by `10000:10000`, and exactly mode `0700`;
-the staging DB is mode `0600`, has link count one, and has no symlink component.
+The staging parent is root-owned and exactly mode `0700`; only its operation-owned
+child directory is owned by `10000:10000` and mode `0700`. The staging DB is mode
+`0600`, has link count one, and has no symlink component.
 
 Path-security preconditions are part of the migration authorization, not a post-run
 check:
@@ -697,6 +875,14 @@ automatic retry is prohibited
 manual recovery is required for every failure after EXCHANGE_STARTED
 ```
 
+Every exception after `EXCHANGE_STARTED`, including internal manifest I/O, final
+target validation or hashing, plan-path revalidation, external evidence I/O,
+completion transition, and operation cleanup, is classified centrally as
+`PUBLISH_UNCERTAIN`. If durable evidence persistence itself fails, the gate emits
+one sanitized machine-readable stderr result, does not claim persistence, forbids
+automatic retry, and requires manual inspection. Only a verified reverse exchange
+followed by parent fsync may report the original target restored.
+
 The manifest contains source/staging/backup paths, inode and SHA-256 values, but no
 DB contents, application identifiers, credentials, or user data. Every manifest
 transition and containing directory is fsynced.
@@ -706,7 +892,18 @@ leaves the original target unchanged. Cleanup revalidates the saved staging-root
 operation-directory device/inode, private ownership and modes, rejects symlink or
 nested-directory traversal, and refuses to unlink the live target or displaced
 source inode. Backup, manifest, and sanitized evidence are retained. A cleanup
-failure is reported separately and never masks the primary error.
+failure is reported separately and never masks the primary error. Machine-readable
+results preserve the last valid primary classification and publish state in
+`primary_exit_classification`, `primary_publish_state`,
+`primary_target_may_have_changed`, `primary_automatic_retry_allowed`,
+`primary_manual_recovery_required`, and `primary_exception_present`. Cleanup is
+reported independently through `cleanup_exception_count` and `cleanup_failures`;
+each cleanup record is restricted to `resource_kind`, `cleanup_phase`,
+`error_type`, and `error_code`. Exception messages, paths, identifiers, and
+credentials are never included. The durable evidence uses the corresponding
+uppercase field names. If evidence cannot be updated, the sanitized stderr result
+sets `durable_evidence_updated=false` and retains the same primary/cleanup
+separation.
 
 After `EXCHANGE_STARTED`, or whenever publish state is uncertain, automatic staging deletion is forbidden because the staging pathname may contain the displaced source
 DB required for recovery. The backup and manifest remain durable and no automatic

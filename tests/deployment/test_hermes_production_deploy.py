@@ -132,6 +132,7 @@ def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
 
 def test_manifest_is_canonical_and_secret_free() -> None:
     contract = deploy.load_contract()
+    assert contract.version == 1
     text = contract.manifest_path.read_text(encoding="utf-8")
     assert contract.project_name == "hermes-agent"
     assert contract.target_service == "hermes-bot"
@@ -143,6 +144,68 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.image_revision_label == REVISION_LABEL
     assert contract.allowed_revision_ref == "refs/remotes/healbite-project/main"
     assert FAKE_SECRET not in text
+
+
+def test_pinned_manifest_bytes_use_canonical_loader_without_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    manifest_bytes = (
+        REPO_ROOT / "deploy" / "hermes-production.json"
+    ).read_bytes()
+    monkeypatch.setattr(
+        deploy,
+        "_read_json_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manifest path was reopened")
+        ),
+    )
+    contract = deploy.load_contract(
+        root,
+        manifest_bytes=manifest_bytes,
+    )
+    assert contract.manifest_path == (
+        root / "deploy" / "hermes-production.json"
+    )
+    assert contract.version == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "remove"),
+    (
+        ("HEALBITE_HOUSEHOLDS_ENABLED", True, False),
+        ("HEALBITE_HOUSEHOLDS_ENABLED", "false", False),
+        ("HEALBITE_HOUSEHOLDS_ENABLED", False, True),
+        ("HEALBITE_SHOPPING_LIST_ENABLED", True, False),
+        ("HEALBITE_SHOPPING_LIST_ENABLED", "false", False),
+        ("HEALBITE_SHOPPING_LIST_ENABLED", False, True),
+    ),
+)
+def test_pinned_manifest_feature_gates_fail_closed(
+    name: str,
+    value: object,
+    remove: bool,
+) -> None:
+    payload = json.loads(
+        (REPO_ROOT / "deploy" / "hermes-production.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if remove:
+        del payload["feature_gates"][name]
+    else:
+        payload["feature_gates"][name] = value
+    manifest_bytes = json.dumps(payload).encode("utf-8")
+    with pytest.raises(
+        deploy.DeploymentContractError,
+        match="feature-gate-policy",
+    ):
+        deploy.load_contract(
+            REPO_ROOT,
+            manifest_bytes=manifest_bytes,
+        )
 
 
 def test_non_posix_runtime_fails_closed(monkeypatch) -> None:
@@ -1038,6 +1101,8 @@ def test_feature_flags_remain_disabled() -> None:
     contract = deploy.load_contract()
     override = json.loads(contract.production_override.read_text(encoding="utf-8"))
     assert override["services"]["hermes-bot"]["environment"] == {
+        "HEALBITE_HOUSEHOLDS_ENABLED": "false",
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
         "HEALBITE_SHOPPING_LIST_ENABLED": "false",
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }

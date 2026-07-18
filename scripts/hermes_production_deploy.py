@@ -42,6 +42,7 @@ class DeploymentContractError(RuntimeError):
 
 @dataclass(frozen=True)
 class DeploymentContract:
+    version: int
     root: Path
     manifest_path: Path
     base_compose: Path
@@ -75,19 +76,27 @@ def _effective_uid() -> int:
     return get_euid()
 
 
+def _decode_json_document(data: bytes, *, code: str) -> dict[str, object]:
+    try:
+        raw = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        _fail(f"{code}-invalid")
+    if not isinstance(raw, dict):
+        _fail(f"{code}-invalid")
+    return raw
+
+
 def _read_json_file(path: Path, *, code: str) -> dict[str, object]:
     try:
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             _fail(f"{code}-not-regular")
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        data = path.read_bytes()
     except DeploymentContractError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError:
         _fail(f"{code}-invalid")
-    if not isinstance(raw, dict):
-        _fail(f"{code}-invalid")
-    return raw
+    return _decode_json_document(data, code=code)
 
 
 def _mapping(value: object, *, code: str) -> dict[str, object]:
@@ -107,10 +116,18 @@ def _mode(value: object, *, expected: str, code: str) -> None:
         _fail(code)
 
 
-def load_contract(root: Path = REPOSITORY_ROOT) -> DeploymentContract:
+def load_contract(
+    root: Path = REPOSITORY_ROOT,
+    *,
+    manifest_bytes: bytes | None = None,
+) -> DeploymentContract:
     root = root.absolute()
     manifest_path = root / "deploy" / "hermes-production.json"
-    raw = _read_json_file(manifest_path, code="manifest")
+    raw = (
+        _read_json_file(manifest_path, code="manifest")
+        if manifest_bytes is None
+        else _decode_json_document(manifest_bytes, code="manifest")
+    )
     if set(raw) != {"version", "compose", "runtime", "secrets", "deployment", "rollback", "feature_gates"}:
         _fail("manifest-fields")
     if raw["version"] != 1:
@@ -178,14 +195,23 @@ def load_contract(root: Path = REPOSITORY_ROOT) -> DeploymentContract:
     ):
         _fail("rollback-policy")
     feature_gates = _mapping(raw["feature_gates"], code="manifest-feature-gates")
-    expected_gates = {
+    expected_manifest_gates: dict[str, object] = {
+        "HEALBITE_HOUSEHOLDS_ENABLED": False,
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+        "HEALBITE_SHOPPING_LIST_ENABLED": False,
+        "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
+    }
+    if feature_gates != expected_manifest_gates:
+        _fail("feature-gate-policy")
+    normalized_feature_gates = {
+        "HEALBITE_HOUSEHOLDS_ENABLED": "false",
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
         "HEALBITE_SHOPPING_LIST_ENABLED": "false",
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }
-    if feature_gates != expected_gates:
-        _fail("feature-gate-policy")
 
     return DeploymentContract(
+        version=1,
         root=root,
         manifest_path=manifest_path,
         base_compose=root / base_relative,
@@ -199,7 +225,7 @@ def load_contract(root: Path = REPOSITORY_ROOT) -> DeploymentContract:
         target_service="hermes-bot",
         image_revision_label="org.opencontainers.image.revision",
         allowed_revision_ref="refs/remotes/healbite-project/main",
-        feature_gates=dict(expected_gates),
+        feature_gates=normalized_feature_gates,
     )
 
 

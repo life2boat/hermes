@@ -131,7 +131,7 @@ def test_runbook_separates_image_and_db_rollbacks_and_forbids_destructive_shell_
             assert needle not in block, f"forbidden command leaked into executable runbook block: {needle}"
 
 
-def test_runbook_requires_staged_copy_and_disables_production_execution() -> None:
+def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
     text = _text(RUNBOOK)
     _require(
         text,
@@ -139,18 +139,78 @@ def test_runbook_requires_staged_copy_and_disables_production_execution() -> Non
             "staged copy plus atomic publish",
             "Direct in-place",
             "scripts/hermes_staged_schema_migrate.py",
-            "production execution is disabled",
+            "scripts/hermes_production_staged_migrate.py",
+            "single public production",
+            "separate explicit `plan` and `execute` subcommands",
+            "production execution is disabled by default",
+            "plan and execute are separate",
+            "plan and execute must run as root",
+            "--repository-root",
+            "<repository-root>/deploy/hermes-production.json",
+            "caller-selected contract paths are not accepted",
+            "explicit JSON booleans false",
+            "target schema version and fingerprint are derived",
+            "root-owned, mode 0700 directories",
+            "before creating its",
+            "QUIESCENCE_FAILED with zero execute",
+            "--expected-plan-sha256",
+            "--confirm-operation-id",
+            "--confirm-source-sha256",
+            "--confirm-image-revision",
+            "independent plan/SHA review gate",
             "production DB path and production parent are not mounted",
             "PATH_MODE=STAGED_COPY",
             "normal SQLite DELETE journaling and synchronous FULL remain enabled",
-            "os.replace",
+            "renameat2(..., RENAME_EXCHANGE)",
             "cross-filesystem publication fails closed",
-            "PUBLISH_STATE=UNKNOWN",
+            "PUBLISH_UNCERTAIN",
+            "MANUAL_RECOVERY_REQUIRED",
+            "automatic retry and blind",
+            "No inline Python, in-container exec-based migration",
             "Backup restore is an emergency manual action only",
         ],
-        label="staged-copy migration contract",
+        label="hash-bound production staged-copy contract",
     )
+    _require(
+        text,
+        [
+            "QUIESCENCE_HELD -> COMPLETED",
+            "PLANNED -> BACKED_UP -> MIGRATED -> VALIDATED -> PUBLISHED -> VERIFIED",
+            "internal manifest directory descriptors remain pinned",
+            "Every exception after `EXCHANGE_STARTED`",
+            "sanitized machine-readable stderr result",
+            "Only a verified reverse exchange",
+        ],
+        label="ordered execution and uncertainty contract",
+    )
+    assert "--deployment-contract" not in text
+    assert "--target-schema-version" not in text
     assert '--mount type=bind,src="/home/hermes/healbite.db"' not in text
+
+
+def test_runbook_documents_primary_and_cleanup_transport_contract() -> None:
+    text = _text(RUNBOOK)
+    _require(
+        text,
+        [
+            "primary_exit_classification",
+            "primary_publish_state",
+            "primary_target_may_have_changed",
+            "primary_automatic_retry_allowed",
+            "primary_manual_recovery_required",
+            "primary_exception_present",
+            "cleanup_exception_count",
+            "cleanup_failures",
+            "resource_kind",
+            "cleanup_phase",
+            "error_type",
+            "error_code",
+            "durable_evidence_updated=false",
+            "Exception messages, paths, identifiers, and",
+            "credentials are never included.",
+        ],
+        label="primary and cleanup transport contract",
+    )
 
 
 def test_runbook_prohibits_sensitive_ids_and_secrets() -> None:

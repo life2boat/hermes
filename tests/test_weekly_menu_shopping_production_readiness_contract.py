@@ -188,6 +188,31 @@ def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
     assert '--mount type=bind,src="/home/hermes/healbite.db"' not in text
 
 
+def test_runbook_documents_primary_and_cleanup_transport_contract() -> None:
+    text = _text(RUNBOOK)
+    _require(
+        text,
+        [
+            "primary_exit_classification",
+            "primary_publish_state",
+            "primary_target_may_have_changed",
+            "primary_automatic_retry_allowed",
+            "primary_manual_recovery_required",
+            "primary_exception_present",
+            "cleanup_exception_count",
+            "cleanup_failures",
+            "resource_kind",
+            "cleanup_phase",
+            "error_type",
+            "error_code",
+            "durable_evidence_updated=false",
+            "Exception messages, paths, identifiers, and",
+            "credentials are never included.",
+        ],
+        label="primary and cleanup transport contract",
+    )
+
+
 def test_runbook_prohibits_sensitive_ids_and_secrets() -> None:
     text = _text(RUNBOOK)
     _require(

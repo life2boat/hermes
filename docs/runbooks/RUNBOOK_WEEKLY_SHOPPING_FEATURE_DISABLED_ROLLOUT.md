@@ -892,7 +892,18 @@ leaves the original target unchanged. Cleanup revalidates the saved staging-root
 operation-directory device/inode, private ownership and modes, rejects symlink or
 nested-directory traversal, and refuses to unlink the live target or displaced
 source inode. Backup, manifest, and sanitized evidence are retained. A cleanup
-failure is reported separately and never masks the primary error.
+failure is reported separately and never masks the primary error. Machine-readable
+results preserve the last valid primary classification and publish state in
+`primary_exit_classification`, `primary_publish_state`,
+`primary_target_may_have_changed`, `primary_automatic_retry_allowed`,
+`primary_manual_recovery_required`, and `primary_exception_present`. Cleanup is
+reported independently through `cleanup_exception_count` and `cleanup_failures`;
+each cleanup record is restricted to `resource_kind`, `cleanup_phase`,
+`error_type`, and `error_code`. Exception messages, paths, identifiers, and
+credentials are never included. The durable evidence uses the corresponding
+uppercase field names. If evidence cannot be updated, the sanitized stderr result
+sets `durable_evidence_updated=false` and retains the same primary/cleanup
+separation.
 
 After `EXCHANGE_STARTED`, or whenever publish state is uncertain, automatic staging deletion is forbidden because the staging pathname may contain the displaced source
 DB required for recovery. The backup and manifest remain durable and no automatic

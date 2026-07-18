@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sqlite3
@@ -625,6 +626,96 @@ def test_scoped_body_success_reports_cleanup_failure() -> None:
     assert captured.value.records[0].error_code == "SCOPED_RESOURCE_CLOSE_FAILED"
     assert captured.value.records[0].error_type == "OSError"
     assert "private-cleanup-body" not in str(captured.value)
+
+
+INTERNAL_CLEANUP_RESOURCE_KINDS = (
+    "COPY_DESTINATION_DESCRIPTOR",
+    "COPY_DESTINATION_FILE",
+    "COPY_DESTINATION_FILE_HANDLE",
+    "COPY_SOURCE_DESCRIPTOR",
+    "FSYNC_DIRECTORY_DESCRIPTOR",
+    "FSYNC_FILE_HANDLE",
+    "HASH_SOURCE_FILE_HANDLE",
+    "MANIFEST_PARENT_DESCRIPTOR",
+    "MANIFEST_TEMP_FILE",
+    "MANIFEST_TEMP_FILE_DESCRIPTOR",
+    "MANIFEST_TEMP_FILE_HANDLE",
+    "PINNED_DATABASE_FILE_DESCRIPTOR",
+    "PINNED_DATABASE_PARENT_DESCRIPTOR",
+    "RECOVERY_MANIFEST_FILE_HANDLE",
+    "SOURCE_PINNED_DATABASE",
+    "SOURCE_SQLITE_LEASE",
+    "SQLITE_SNAPSHOT_CONNECTION",
+    "SQLITE_VALIDATION_CONNECTION",
+    "STAGING_OPERATION_DIRECTORY_DESCRIPTOR",
+    "STAGING_PINNED_DATABASE",
+    "STAGING_ROOT_DIRECTORY_DESCRIPTOR",
+    "STAGING_SQLITE_LEASE",
+    "TARGET_FINGERPRINT_CONNECTION",
+)
+
+
+def _literal_cleanup_resource_kinds() -> set[str]:
+    tree = ast.parse(Path(staged.__file__).read_text(encoding="utf-8"))
+    resources: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "_attempt_owned_cleanup" and node.args:
+            candidates = node.args[:1]
+        elif node.func.id == "_run_owned_cleanup":
+            candidates = node.args
+        elif node.func.id == "_run_body_with_owned_cleanup":
+            candidates = node.args[1:]
+        else:
+            continue
+        for candidate in candidates:
+            if isinstance(candidate, ast.Constant):
+                value = candidate.value
+            elif (
+                isinstance(candidate, ast.Tuple)
+                and candidate.elts
+                and isinstance(candidate.elts[0], ast.Constant)
+            ):
+                value = candidate.elts[0].value
+            else:
+                continue
+            if isinstance(value, str):
+                resources.add(value)
+    return resources
+
+
+def test_internal_cleanup_resource_inventory_is_complete() -> None:
+    assert _literal_cleanup_resource_kinds() == set(
+        INTERNAL_CLEANUP_RESOURCE_KINDS
+    )
+
+
+@pytest.mark.parametrize("resource_kind", INTERNAL_CLEANUP_RESOURCE_KINDS)
+def test_internal_cleanup_boundary_matrix_records_sanitized_failure(
+    resource_kind: str,
+) -> None:
+    attempts: list[str] = []
+
+    def fail_cleanup() -> None:
+        attempts.append(resource_kind)
+        raise OSError(f"private-{resource_kind}")
+
+    error_code = f"{resource_kind}_INJECTED_CLEANUP_FAILED"
+    records = staged._attempt_owned_cleanup(
+        resource_kind,
+        "INTERNAL_BOUNDARY_MATRIX",
+        error_code,
+        fail_cleanup,
+    )
+
+    assert attempts == [resource_kind]
+    assert len(records) == 1
+    assert records[0].resource_kind == resource_kind
+    assert records[0].cleanup_phase == "INTERNAL_BOUNDARY_MATRIX"
+    assert records[0].error_type == "OSError"
+    assert records[0].error_code == error_code
+    assert "private-" not in str(records[0].as_payload())
 
 
 def test_tracked_failure_matrix_contract_smoke(tmp_path: Path) -> None:

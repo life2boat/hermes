@@ -262,7 +262,7 @@ def list_index_candidate_entries(
         "--cached",
         "--name-only",
         "-z",
-        "--diff-filter=ACMR",
+        "--diff-filter=ACMRT",
         "--no-renames",
         "HEAD",
     )

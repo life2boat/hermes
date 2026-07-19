@@ -277,6 +277,68 @@ def test_real_callers_apply_identical_git_object_policy(
     assert b"source line" not in output.lower()
 
 
+@pytest.mark.parametrize(
+    ("kind", "mode"),
+    [("symlink", "120000"), ("gitlink", "160000")],
+)
+def test_real_callers_deny_staged_type_changes_identically(
+    tmp_path: Path,
+    kind: str,
+    mode: str,
+) -> None:
+    repository, _, _ = _init_repository(tmp_path)
+    candidate = repository / "candidate"
+    candidate.write_text("regular baseline\n", encoding="utf-8")
+    _git("add", "candidate", cwd=repository)
+    _git("commit", "--quiet", "-m", "regular candidate", cwd=repository)
+    base_sha = _git("rev-parse", "HEAD", cwd=repository)
+    base_tree = _git("rev-parse", f"{base_sha}^{{tree}}", cwd=repository)
+
+    if kind == "symlink":
+        oid = (
+            _run(
+                "git",
+                "hash-object",
+                "-w",
+                "--stdin",
+                cwd=repository,
+                input_bytes=b"synthetic-target",
+            )
+            .stdout.decode("ascii")
+            .strip()
+        )
+    else:
+        oid = base_sha
+    _git(
+        "update-index",
+        "--cacheinfo",
+        f"{mode},{oid},candidate",
+        cwd=repository,
+    )
+
+    assert _git("diff", "--cached", "--name-status", cwd=repository) == (
+        "T\tcandidate"
+    )
+    (
+        repository_result,
+        repository_exit_class,
+        repository_exit_code,
+        completed,
+    ) = _repository_result(repository)
+    context_result, context_exit_class, context_exit_code = _context_result(
+        repository=repository,
+        base_sha=base_sha,
+        base_tree=base_tree,
+        operation_root=tmp_path / "operation",
+    )
+
+    assert repository_result is policy.GitObjectResult.UNSUPPORTED_OBJECT
+    assert context_result is repository_result
+    assert repository_exit_class == context_exit_class == "SECURITY_DENIED"
+    assert repository_exit_code == context_exit_code == 1
+    assert b"synthetic-target" not in completed.stdout + completed.stderr
+
+
 def test_unstaged_worktree_bytes_do_not_replace_index_blob(
     tmp_path: Path,
 ) -> None:

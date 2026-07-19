@@ -38,6 +38,81 @@ rollback image must contain that same full SHA in the single authoritative OCI
 label `org.opencontainers.image.revision`. A missing, malformed, abbreviated, or
 mismatched label is a hard failure; tag text is never treated as provenance.
 
+## Verified Playwright image build prerequisite
+
+The Python package declared by the exact `google-meet` optional dependency in
+`pyproject.toml` and resolved with hashes in `uv.lock` is the single
+authoritative Playwright runtime. Node Playwright is not a browser-install
+authority. The browser family, revision, platform mapping, cache directory, and
+executable path must be derived from that installed package's bundled
+`browsers.json` metadata:
+
+```bash
+.venv/bin/python scripts/playwright_artifact_contract.py \
+  --platform linux/amd64
+```
+
+This command is read-only. It neither installs a browser nor makes a network
+request. A browser archive must be acquired and approved in a separate task.
+Its immutable manifest SHA-256 must be known and reviewed before a canonical
+build starts; computing a digest after an unreviewed download is not approval.
+Do not put an archive, an instantiated manifest, a credential, or a production
+secret in Git, the normal repository build context, or build arguments.
+
+The approved artifact directory must be an absolute path outside the
+repository, must not contain symlinks or group/world-writable paths, and must
+contain exactly these fixed names:
+
+```text
+manifest.json
+browser-archive
+```
+
+`manifest.json` must use the canonical schema in
+`schemas/playwright-artifact-manifest.schema.json`. Its package, revision,
+platform, cache root, archive size, archive SHA-256, and executable path are
+mandatory. The source reference is an opaque approval reference, not a URL.
+The build has no Playwright CDN fallback.
+
+Validate exact source and approved inputs without invoking Docker:
+
+```bash
+EXACT_SHA=<exact-40-character-source-sha>
+ARTIFACT_DIR=<absolute-approved-directory-outside-repository>
+MANIFEST_SHA256=<predeclared-reviewed-lowercase-sha256>
+IMAGE_REF="healbite-hermes:playwright-${EXACT_SHA:0:12}"
+
+.venv/bin/python scripts/build_verified_playwright_image.py check \
+  --expected-source-sha "$EXACT_SHA" \
+  --artifact-context "$ARTIFACT_DIR" \
+  --expected-manifest-sha256 "$MANIFEST_SHA256" \
+  --image-tag "$IMAGE_REF" \
+  --platform linux/amd64
+```
+
+Only a separately authorized image-build task may replace `check` with
+`build`. That mode uses one read-only BuildKit named context and embeds the
+exact OCI revision:
+
+```text
+playwright_artifact=<approved artifact directory>
+org.opencontainers.image.revision=<exact source SHA>
+```
+
+The canonical helper rejects a dirty or mismatched source tree, a mutable or
+unrelated image tag, a missing artifact context, a missing or incorrect
+manifest digest, additional context files, writable/symlinked inputs, and an
+archive whose size or digest differs from the manifest. The Docker installer
+then re-derives browser identity from the pinned package metadata, validates
+the canonical manifest and archive before extraction, rejects unsafe archive
+entries, and publishes the cache directory atomically. It never falls back to
+an external browser download.
+
+Direct `docker build`, `docker compose build`, an implicitly resolving `npx`,
+and a normal Playwright browser-install command are non-authoritative for a
+production image. Artifact acquisition, image build, image validation, and
+deployment remain separate approval gates.
+
 ## Repository validation
 
 Run from any directory; the wrapper resolves its own repository root:

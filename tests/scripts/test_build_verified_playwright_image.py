@@ -201,14 +201,13 @@ def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
     operation_root = tmp_path / "current-tree-operation"
     operation_root.mkdir()
 
+    # Manifest identity must remain testable from a depth-one CI checkout.
     context_root, manifest_path, _, count = build_helper.export_exact_git_context(
         repository_root=repository,
         source_sha=source_sha,
         source_tree_sha=tree_sha,
-        approved_base_sha=_run("git", "rev-parse", f"{source_sha}^", cwd=repository),
-        approved_base_tree_sha=_run(
-            "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
-        ),
+        approved_base_sha=source_sha,
+        approved_base_tree_sha=tree_sha,
         operation_root=operation_root,
     )
     document = json.loads(manifest_path.read_text(encoding="ascii"))
@@ -227,12 +226,8 @@ def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
             manifest_path=manifest_path,
             expected_source_sha=source_sha,
             expected_tree_sha=tree_sha,
-            expected_base_sha=_run(
-                "git", "rev-parse", f"{source_sha}^", cwd=repository
-            ),
-            expected_base_tree_sha=_run(
-                "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
-            ),
+            expected_base_sha=source_sha,
+            expected_base_tree_sha=tree_sha,
         )
         == count
     )

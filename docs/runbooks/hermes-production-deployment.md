@@ -82,11 +82,12 @@ Validate exact source and approved inputs without invoking Docker:
 
 ```bash
 EXACT_SHA=<exact-40-character-source-sha>
+APPROVED_BASE_SHA=<exact-40-character-approved-base-sha>
 ARTIFACT_DIR=<absolute-approved-directory-outside-repository>
 MANIFEST_SHA256=<predeclared-reviewed-lowercase-sha256>
 IMAGE_REF="healbite-hermes:playwright-${EXACT_SHA:0:12}"
 
-.venv/bin/python scripts/build_verified_playwright_image.py check   --expected-source-sha "$EXACT_SHA"   --artifact-context "$ARTIFACT_DIR"   --expected-manifest-sha256 "$MANIFEST_SHA256"   --image-tag "$IMAGE_REF"   --platform linux/amd64
+.venv/bin/python scripts/build_verified_playwright_image.py check   --expected-source-sha "$EXACT_SHA"   --approved-base-sha "$APPROVED_BASE_SHA"   --artifact-context "$ARTIFACT_DIR"   --expected-manifest-sha256 "$MANIFEST_SHA256"   --image-tag "$IMAGE_REF"   --platform linux/amd64
 ```
 
 Only a separately authorized image-build task may replace `check` with
@@ -96,8 +97,20 @@ re-read a context manifest, and reject submodules, Git LFS pointers, secrets,
 databases, patch files, caches, evidence, and local review mirrors. Ignored,
 untracked, and other raw-worktree content never enters the Docker context.
 
+The approved base SHA is mandatory, must resolve to an ancestor of the exact
+source SHA, and is recorded with its tree identity in the context manifest.
+Regular-file blob OIDs already present in that immutable approved base are
+provenance-bound. Every candidate object not present in the approved base is
+read from the commit tree with Git plumbing and passed through the same
+Git-object policy that reads staged candidates from the index. Worktree bytes
+are never the authority for either caller.
+
 Secret classification is deterministic and shared by the repository and
-exported-context checks. Credential variable names without assigned values,
+exported-context checks. Regular candidate blobs containing NUL bytes, invalid
+UTF-8, or content beyond the complete-scan limit are denied. Symlinks,
+gitlinks, unknown modes, missing objects, read failures, and internal scanner
+failures are also denied without following a worktree target or traversing a
+submodule. Credential variable names without assigned values,
 documented placeholders, redaction-pattern definitions, and marker-only test
 fixtures are not secret material. Complete private-key blocks,
 credential-bearing URLs with secret-shaped values, provider-token-shaped

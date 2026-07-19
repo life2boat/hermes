@@ -322,10 +322,10 @@ def scan_secret_text(text: str) -> tuple[SecretFinding, ...]:
 
 
 def scan_secret_bytes(data: bytes) -> tuple[SecretFinding, ...]:
+    if b"\x00" in data:
+        raise SecretScanError("SECRET_SCAN_BINARY_DENIED")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        if b"\x00" not in data:
-            raise SecretScanError("SECRET_SCAN_DECODING_FAILED") from exc
-        text = data.decode("utf-8", errors="ignore")
+        raise SecretScanError("SECRET_SCAN_DECODING_FAILED") from exc
     return scan_secret_text(text)

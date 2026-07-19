@@ -21,6 +21,7 @@ from scripts import hermes_staged_schema_migrate as staged
 REVISION = "1" * 40
 IMAGE_ID = "sha256:" + "2" * 64
 PREVIOUS_IMAGE_ID = "sha256:" + "3" * 64
+TREE_SHA = "4" * 40
 
 PARSER_CASES = (
     "missing_subcommand",
@@ -137,6 +138,8 @@ class UnitContext:
     backup: Path
     staging: Path
     evidence: Path
+    operations_root_approval: Path
+    clean_start_policy: Path
 
     @property
     def manifest(self) -> Path:
@@ -174,12 +177,78 @@ def _copy_repository(path: Path) -> Path:
         Path("deploy/hermes-production.json"),
         Path("deploy/docker-compose.production.yml"),
         Path("docker-compose.yml"),
+        Path("scripts/hermes_production_staged_migrate.py"),
+        Path("scripts/hermes_staged_schema_migrate.py"),
+        Path("docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"),
     ):
         destination = path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_root / relative, destination)
         os.chmod(destination, 0o600)
     return path
+
+
+def _write_canonical_document(path: Path, payload: dict[str, Any]) -> None:
+    path.write_bytes(production._canonical_json(payload))
+    os.chmod(path, 0o600)
+
+
+def _write_unit_evidence(context: UnitContext) -> None:
+    root_record = _fake_directory_record(context.repository, private=True)
+    contract_metadata = context.manifest.stat()
+    created_at = production._now()
+    approval = {
+        "APPROVAL_VERSION": 1,
+        "CREATED_AT": production._timestamp(created_at),
+        "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+        "TARGET_MAIN_SHA": REVISION,
+        "APPROVED_REPOSITORY_ROOT": str(context.repository),
+        "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
+        "REPOSITORY_ROOT_INODE": root_record["INODE"],
+        "REPOSITORY_ROOT_UID": root_record["UID"],
+        "REPOSITORY_ROOT_GID": root_record["GID"],
+        "REPOSITORY_ROOT_MODE": root_record["MODE"],
+        "REPOSITORY_ROOT_TREE_SHA": TREE_SHA,
+        "DEPLOYMENT_CONTRACT_PATH": str(context.manifest),
+        "DEPLOYMENT_CONTRACT_DEVICE": contract_metadata.st_dev,
+        "DEPLOYMENT_CONTRACT_INODE": contract_metadata.st_ino,
+        "DEPLOYMENT_CONTRACT_SHA256": production._sha256(context.manifest),
+        "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256": production._sha256(
+            context.repository / "scripts/hermes_production_staged_migrate.py"
+        ),
+        "STAGED_IMPLEMENTATION_SHA256": production._sha256(
+            context.repository / "scripts/hermes_staged_schema_migrate.py"
+        ),
+        "RUNBOOK_SHA256": production._sha256(
+            context.repository
+            / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+        ),
+        "MIGRATION_IMAGE_ID": IMAGE_ID,
+        "MIGRATION_IMAGE_REVISION": REVISION,
+        "DIRTY_LEGACY_ROOT_PRESERVED": True,
+        "PRODUCTION_DB_ACCESS_AUTHORIZED": False,
+        "PRODUCTION_PLAN_ONLY_AUTHORIZED": True,
+        "PRODUCTION_EXECUTE_AUTHORIZED": False,
+        "DEPLOY_AUTHORIZED": False,
+    }
+    policy = {
+        "POLICY_VERSION": 1,
+        "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
+        "CREATED_AT": production._timestamp(created_at),
+        "TARGET_MAIN_SHA": REVISION,
+        "MIGRATION_IMAGE_ID": IMAGE_ID,
+        "PRODUCTION_DB_SOURCE_SHA256": production._sha256(context.source),
+        "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
+        "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET": True,
+        "MEMORY_OS_DATA_MUST_BE_PRESERVED": True,
+        "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED": True,
+        "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED": True,
+        "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED": True,
+        "EXECUTION_AUTHORIZED": False,
+        "DELETION_PERFORMED": False,
+    }
+    _write_canonical_document(context.operations_root_approval, approval)
+    _write_canonical_document(context.clean_start_policy, policy)
 
 
 def _path_set(root: Path) -> set[str]:
@@ -354,6 +423,11 @@ def _install_unit_root(
     monkeypatch.setattr(production, "_write_json_durable_at", _unit_write_json_at)
     monkeypatch.setattr(production, "_open_plan", _unit_open_plan)
     monkeypatch.setattr(production, "_inspect_image", _fake_image_inspect)
+    monkeypatch.setattr(
+        production,
+        "_repository_provenance",
+        lambda _repository: (REVISION, TREE_SHA),
+    )
     monkeypatch.setattr(staged, "_inspect_image", _fake_image_inspect)
 
 
@@ -369,10 +443,11 @@ def _unit_context(
     backup = _private_directory(runtime / "backups")
     staging = _private_directory(runtime / "staging")
     evidence = _private_directory(runtime / "evidence")
+    evidence_inputs = _private_directory(runtime / "evidence-inputs")
     monkeypatch.setattr(production, "REPO_ROOT", repository)
     if root_context:
         _install_unit_root(monkeypatch, repository)
-    return UnitContext(
+    context = UnitContext(
         root=tmp_path,
         repository=repository,
         runtime=runtime,
@@ -380,7 +455,13 @@ def _unit_context(
         backup=backup,
         staging=staging,
         evidence=evidence,
+        operations_root_approval=(
+            evidence_inputs / "approved-operations-root.json"
+        ),
+        clean_start_policy=evidence_inputs / "clean-start-data-policy.json",
     )
+    _write_unit_evidence(context)
+    return context
 
 
 def _plan_argv(context: UnitContext) -> list[str]:
@@ -397,6 +478,14 @@ def _plan_argv(context: UnitContext) -> list[str]:
         str(context.staging),
         "--evidence-parent",
         str(context.evidence),
+        "--operations-root-approval",
+        str(context.operations_root_approval),
+        "--expected-operations-root-approval-sha256",
+        production._sha256(context.operations_root_approval),
+        "--clean-start-policy",
+        str(context.clean_start_policy),
+        "--expected-clean-start-policy-sha256",
+        production._sha256(context.clean_start_policy),
         "--migration-image-id",
         IMAGE_ID,
         "--migration-image-revision",
@@ -488,6 +577,12 @@ def _execute_argv(
         "confirm_operation_id": str(plan.payload["OPERATION_ID"]),
         "confirm_source_sha256": str(plan.payload["SOURCE_SHA256"]),
         "confirm_image_revision": str(plan.payload["MIGRATION_IMAGE_REVISION"]),
+        "confirm_operations_root_approval_sha256": str(
+            plan.payload["OPERATIONS_ROOT_APPROVAL_SHA256"]
+        ),
+        "confirm_clean_start_policy_sha256": str(
+            plan.payload["CLEAN_START_POLICY_SHA256"]
+        ),
     }
     values.update(overrides)
     return [
@@ -502,6 +597,10 @@ def _execute_argv(
         values["confirm_source_sha256"],
         "--confirm-image-revision",
         values["confirm_image_revision"],
+        "--confirm-operations-root-approval-sha256",
+        values["confirm_operations_root_approval_sha256"],
+        "--confirm-clean-start-policy-sha256",
+        values["confirm_clean_start_policy_sha256"],
     ]
 
 
@@ -608,6 +707,12 @@ def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     plan_help = choices["plan"].format_help()
     execute_help = choices["execute"].format_help()
     assert "--repository-root" in plan_help
+    assert "--operations-root-approval" in plan_help
+    assert "--expected-operations-root-approval-sha256" in plan_help
+    assert "--clean-start-policy" in plan_help
+    assert "--expected-clean-start-policy-sha256" in plan_help
+    assert "--confirm-operations-root-approval-sha256" in execute_help
+    assert "--confirm-clean-start-policy-sha256" in execute_help
     assert "--deployment-contract" not in plan_help
     assert "--target-schema-version" not in plan_help
     combined = f"{plan_help}\n{execute_help}"
@@ -636,6 +741,25 @@ def test_production_entrypoint_has_no_environment_or_test_hook_bypass() -> None:
     assert "execute_production_staged" not in source
 
 
+def test_runbook_documents_exact_evidence_binding_contract() -> None:
+    runbook = (
+        Path(__file__).resolve().parents[2]
+        / "docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "--operations-root-approval",
+        "--expected-operations-root-approval-sha256",
+        "--clean-start-policy",
+        "--expected-clean-start-policy-sha256",
+        "--confirm-operations-root-approval-sha256",
+        "--confirm-clean-start-policy-sha256",
+        "NO_CLIENTS_CLEAN_START",
+        "plan schema version 3",
+        "no generic force or skip-validation flag exists",
+    ):
+        assert required in runbook
+
+
 def test_valid_public_plan_records_root_and_canonical_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -654,6 +778,23 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["DEPLOYMENT_CONTRACT_CANONICAL_PATH"] == str(context.manifest)
     assert payload["DEPLOYMENT_CONTRACT_SHA256"] == production._sha256(context.manifest)
     assert payload["DEPLOYMENT_CONTRACT_VERSION"] == 1
+    assert payload["OPERATIONS_ROOT_APPROVAL_PATH"] == str(
+        context.operations_root_approval
+    )
+    assert payload["OPERATIONS_ROOT_APPROVAL_SHA256"] == production._sha256(
+        context.operations_root_approval
+    )
+    assert payload["OPERATIONS_ROOT_APPROVAL_MODE"] == 0o600
+    assert payload["OPERATIONS_ROOT_APPROVAL_TREE_SHA"] == TREE_SHA
+    assert payload["CLEAN_START_POLICY_PATH"] == str(
+        context.clean_start_policy
+    )
+    assert payload["CLEAN_START_POLICY_SHA256"] == production._sha256(
+        context.clean_start_policy
+    )
+    assert payload["CLEAN_START_POLICY_MODE"] == 0o600
+    assert payload["CLEAN_START_POLICY_VERSION"] == 1
+    assert payload["CLEAN_START_DATA_POLICY"] == "NO_CLIENTS_CLEAN_START"
     assert payload["EXPECTED_FEATURE_FLAGS"] == production.EXPECTED_FEATURE_FLAGS
     assert payload["TARGET_SCHEMA_VERSION"] == target.version
     assert payload["TARGET_SCHEMA_FINGERPRINT"] == target.fingerprint
@@ -662,6 +803,203 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert list(context.backup.iterdir()) == []
     assert list(context.staging.iterdir()) == []
     assert production._sha256(context.source) == before_hash
+
+
+@pytest.mark.parametrize(
+    "option",
+    (
+        "--operations-root-approval",
+        "--expected-operations-root-approval-sha256",
+        "--clean-start-policy",
+        "--expected-clean-start-policy-sha256",
+    ),
+)
+def test_plan_parser_requires_each_evidence_binding(
+    option: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    argv = _plan_argv(context)
+    index = argv.index(option)
+    del argv[index : index + 2]
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+    assert production.main(argv) == 2
+    result, stream = _json_result(capfd)
+    assert stream == "stderr"
+    assert result["exit_classification"] == "ARGUMENT_ERROR"
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) == before_paths
+
+
+def test_plan_rejects_expired_root_approval_before_source_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    approval = json.loads(
+        context.operations_root_approval.read_text(encoding="ascii")
+    )
+    approval["CREATED_AT"] = production._timestamp(
+        production._now() - timedelta(hours=2)
+    )
+    approval["EXPIRES_AT"] = production._timestamp(
+        production._now() - timedelta(hours=1)
+    )
+    _write_canonical_document(context.operations_root_approval, approval)
+    source_calls = 0
+
+    def forbidden_source_open(_path: Path) -> Any:
+        nonlocal source_calls
+        source_calls += 1
+        raise AssertionError("source DB must not open before approval")
+
+    monkeypatch.setattr(production, "_read_only_source", forbidden_source_open)
+    assert production.main(_plan_argv(context)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "OPERATIONS_ROOT_APPROVAL_EXPIRED"
+    assert source_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("document_name", "field", "expected_class"),
+    (
+        (
+            "operations_root_approval",
+            "PRODUCTION_DB_ACCESS_AUTHORIZED",
+            "OPERATIONS_ROOT_APPROVAL_MISMATCH",
+        ),
+        (
+            "clean_start_policy",
+            "DELETION_PERFORMED",
+            "CLEAN_START_POLICY_MISMATCH",
+        ),
+    ),
+)
+def test_evidence_boolean_fields_reject_integer_aliases(
+    document_name: str,
+    field: str,
+    expected_class: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    path = getattr(context, document_name)
+    payload = json.loads(path.read_text(encoding="ascii"))
+    payload[field] = int(bool(payload[field]))
+    _write_canonical_document(path, payload)
+    before_hash = production._sha256(context.source)
+    assert production.main(_plan_argv(context)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == expected_class
+    assert production._sha256(context.source) == before_hash
+    assert list(context.evidence.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_class"),
+    (
+        (
+            "confirm_operations_root_approval_sha256",
+            "PLAN_OPERATIONS_ROOT_APPROVAL_SHA256_CONFIRMATION_MISMATCH",
+        ),
+        (
+            "confirm_clean_start_policy_sha256",
+            "PLAN_CLEAN_START_POLICY_SHA256_CONFIRMATION_MISMATCH",
+        ),
+    ),
+)
+def test_execute_requires_exact_evidence_confirmation_before_source_open(
+    override: str,
+    expected_class: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    source_calls = 0
+
+    def forbidden_source_open(_path: Path) -> Any:
+        nonlocal source_calls
+        source_calls += 1
+        raise AssertionError("source DB must not open before confirmations")
+
+    monkeypatch.setattr(production, "_read_only_source", forbidden_source_open)
+    assert production.main(_execute_argv(plan, **{override: "f" * 64})) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == expected_class
+    assert source_calls == 0
+
+
+def test_execute_rejects_policy_replacement_before_source_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    policy = json.loads(context.clean_start_policy.read_text(encoding="ascii"))
+    policy["DELETION_PERFORMED"] = True
+    _write_canonical_document(context.clean_start_policy, policy)
+    monkeypatch.setattr(
+        production,
+        "_read_only_source",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("source DB must not open after policy replacement")
+        ),
+    )
+    assert production.main(_execute_argv(plan)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "CLEAN_START_POLICY_SHA256_MISMATCH"
+
+
+def test_execute_revalidates_expired_approval_before_source_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    approval = json.loads(
+        context.operations_root_approval.read_text(encoding="ascii")
+    )
+    approval["CREATED_AT"] = production._timestamp(
+        production._now() - timedelta(hours=2)
+    )
+    approval["EXPIRES_AT"] = production._timestamp(
+        production._now() - timedelta(hours=1)
+    )
+    _write_canonical_document(context.operations_root_approval, approval)
+    metadata = context.operations_root_approval.stat()
+    approval_sha = production._sha256(context.operations_root_approval)
+    plan.payload.update(
+        {
+            "OPERATIONS_ROOT_APPROVAL_SIZE": metadata.st_size,
+            "OPERATIONS_ROOT_APPROVAL_SHA256": approval_sha,
+            "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT": approval["EXPIRES_AT"],
+        }
+    )
+    _rewrite_plan(plan)
+    monkeypatch.setattr(
+        production,
+        "_read_only_source",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("source DB must not open after approval expiry")
+        ),
+    )
+    assert production.main(
+        _execute_argv(
+            plan,
+            confirm_operations_root_approval_sha256=approval_sha,
+        )
+    ) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "OPERATIONS_ROOT_APPROVAL_EXPIRED"
 
 
 @pytest.mark.parametrize("case", PARSER_CASES)
@@ -917,6 +1255,17 @@ def test_public_execute_gate_matrix_is_fail_closed_with_exact_deltas(
             argv_overrides["confirm_source_sha256"] = str(
                 plan.payload["SOURCE_SHA256"]
             )
+            policy = json.loads(
+                context.clean_start_policy.read_text(encoding="ascii")
+            )
+            policy["PRODUCTION_DB_SOURCE_SHA256"] = str(
+                plan.payload["SOURCE_SHA256"]
+            )
+            _write_canonical_document(context.clean_start_policy, policy)
+            policy_sha = production._sha256(context.clean_start_policy)
+            plan.payload["CLEAN_START_POLICY_SHA256"] = policy_sha
+            _rewrite_plan(plan)
+            argv_overrides["confirm_clean_start_policy_sha256"] = policy_sha
         elif case == "source_mode_drift":
             os.chmod(context.source, 0o640)
         elif case == "deployment_contract_replaced":
@@ -1226,7 +1575,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
             ) -> bool:
                 nonlocal calls
                 calls += 1
-                if calls >= 3:
+                if calls >= 4:
                     return False
                 return original_path_matches(self)
 
@@ -1514,6 +1863,10 @@ def test_execute_main_generic_fallback_never_reports_before_exchange(
         "0" * 64,
         "--confirm-image-revision",
         REVISION,
+        "--confirm-operations-root-approval-sha256",
+        "0" * 64,
+        "--confirm-clean-start-policy-sha256",
+        "0" * 64,
     ]
     assert production.main(argv) == 1
     results = _json_results(capfd)

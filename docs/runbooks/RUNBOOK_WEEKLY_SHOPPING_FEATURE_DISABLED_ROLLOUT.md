@@ -521,6 +521,23 @@ production plan requires explicit --repository-root, --db-path, --backup-parent,
 --migration-image-revision, --previous-image-id, --expected-hostname,
 --expected-source-device, --expected-source-inode, --expected-source-size,
 --expected-source-sha256, --expected-free-bytes, and --expires-in-seconds
+production plan additionally requires explicit --operations-root-approval,
+--expected-operations-root-approval-sha256, --clean-start-policy, and
+--expected-clean-start-policy-sha256; none has a default or environment fallback
+the operations-root approval must be root-owned canonical JSON, mode 0600 under a
+root-owned mode 0700 parent; the approved root must not be group/world writable;
+it must be no more than 24 hours old and bind the clean repository
+path/device/inode/owner/mode/tree, exact HEAD, canonical deployment
+contract identity/hash, migration entrypoint/staged implementation/runbook hashes,
+and exact image ID/revision
+the clean-start policy must be root-owned canonical JSON with the same descriptor
+controls and must bind NO_CLIENTS_CLEAN_START, exact source SHA-256, exact main and
+image, no Family/Shopping backfill, explicit legacy reset permission, preservation
+of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tables,
+and false execution/deletion state
+both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
+descriptors before production source inspection; their path, filesystem identity,
+mode and SHA-256 are recorded in plan schema version 3
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
@@ -530,8 +547,14 @@ the target schema version and fingerprint are derived from trusted migration
 code, recorded in the plan, and independently recalculated during execute
 production execute requires exact --plan, --expected-plan-sha256,
 --confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
+plus independent --confirm-operations-root-approval-sha256 and
+--confirm-clean-start-policy-sha256 values
+execute securely reopens both evidence files, confirms their recorded identities and
+hashes, revalidates approval expiry/repository provenance and all policy semantics,
+and pins their descriptors through authorization and staged execution
 plan and execute are separate and require an independent plan/SHA review gate
-no path, image, revision, confirmation, or authorization comes from environment
+no path, evidence, image, revision, confirmation, or authorization comes from
+environment; no generic force or skip-validation flag exists
 plan, backup, staging, and evidence parents are canonical, non-symlink,
 root-owned, mode 0700 directories
 the operator must stop the application and every DB user through the canonical
@@ -582,6 +605,10 @@ DB_PATH="<explicit-approved-database-path>"
 BACKUP_PARENT="<explicit-private-backup-parent>"
 STAGING_PARENT="<explicit-private-same-filesystem-staging-parent>"
 EVIDENCE_PARENT="<explicit-private-evidence-parent>"
+OPERATIONS_ROOT_APPROVAL="<reviewed-canonical-approval-path>"
+OPERATIONS_ROOT_APPROVAL_SHA256="<reviewed-approval-sha256>"
+CLEAN_START_POLICY="<reviewed-canonical-policy-path>"
+CLEAN_START_POLICY_SHA256="<reviewed-policy-sha256>"
 MIGRATION_IMAGE_ID="<sha256-image-id>"
 MIGRATION_IMAGE_REVISION="<full-40-character-main-sha>"
 PREVIOUS_IMAGE_ID="<sha256-previous-image-id>"
@@ -599,6 +626,10 @@ sudo "$HOST_PYTHON" "$GATE" plan \
   --backup-parent "$BACKUP_PARENT" \
   --staging-parent "$STAGING_PARENT" \
   --evidence-parent "$EVIDENCE_PARENT" \
+  --operations-root-approval "$OPERATIONS_ROOT_APPROVAL" \
+  --expected-operations-root-approval-sha256 "$OPERATIONS_ROOT_APPROVAL_SHA256" \
+  --clean-start-policy "$CLEAN_START_POLICY" \
+  --expected-clean-start-policy-sha256 "$CLEAN_START_POLICY_SHA256" \
   --migration-image-id "$MIGRATION_IMAGE_ID" \
   --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
   --previous-image-id "$PREVIOUS_IMAGE_ID" \
@@ -620,6 +651,8 @@ APPROVED_PLAN_SHA256=<exact-plan-sha256>
 APPROVED_OPERATION_ID=<exact-operation-id>
 APPROVED_SOURCE_SHA256=<exact-source-sha256>
 APPROVED_IMAGE_REVISION=<exact-image-revision>
+APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256=<exact-approval-sha256>
+APPROVED_CLEAN_START_POLICY_SHA256=<exact-policy-sha256>
 APPROVED_PLAN_CREATOR_UID=0
 APPROVED_PLAN_CREATOR_GID=<recorded-root-group>
 APPROVED_TARGET_SCHEMA_VERSION=<derived-version>
@@ -640,7 +673,9 @@ sudo "$HOST_PYTHON" "$GATE" execute \
   --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
   --confirm-operation-id "$APPROVED_OPERATION_ID" \
   --confirm-source-sha256 "$APPROVED_SOURCE_SHA256" \
-  --confirm-image-revision "$APPROVED_IMAGE_REVISION"
+  --confirm-image-revision "$APPROVED_IMAGE_REVISION" \
+  --confirm-operations-root-approval-sha256 "$APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256" \
+  --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256"
 ```
 
 If execute cannot acquire the source SQLite lease, it must stop before creating

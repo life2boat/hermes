@@ -781,8 +781,8 @@ def test_cmd_install_runs_pip_and_playwright(capsys):
     # First invocation: pip install
     pip_cmds = [c for c in calls if len(c) > 2 and c[1:4] == ["-m", "pip", "install"]]
     assert pip_cmds, f"no pip install run: {calls}"
-    assert "playwright" in pip_cmds[0]
-    assert "websockets" in pip_cmds[0]
+    assert "playwright==1.61.0" in pip_cmds[0]
+    assert "websockets==15.0.1" in pip_cmds[0]
     # Second: playwright install chromium
     pw_cmds = [c for c in calls if len(c) > 2 and c[1:4] == ["-m", "playwright", "install"]]
     assert pw_cmds, f"no playwright install run: {calls}"

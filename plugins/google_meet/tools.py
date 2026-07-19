@@ -265,7 +265,8 @@ def handle_meet_join(args: Dict[str, Any], **_kw) -> str:
     if not check_meet_requirements():
         return _err(
             "google_meet plugin prerequisites missing — install with "
-            "`pip install playwright && python -m playwright install "
+            "`pip install playwright==1.61.0 websockets==15.0.1 && "
+            "python -m playwright install "
             "chromium`. Plugin is supported on Linux and macOS only."
         )
     res = pm.start(

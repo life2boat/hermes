@@ -167,7 +167,7 @@ def _cmd_setup() -> int:
         pw_msg = "installed"
     except ImportError:
         pw_ok = False
-        pw_msg = "NOT installed — run: pip install playwright"
+        pw_msg = "NOT installed — run: pip install playwright==1.61.0"
     print(f"  playwright     : {pw_msg}")
 
     chromium_ok = False
@@ -214,7 +214,7 @@ def _cmd_setup() -> int:
 def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
     """Install the plugin's prerequisites.
 
-    Always: pip install playwright + websockets, then
+    Always: pip install exact-pinned playwright + websockets, then
     ``python -m playwright install chromium``.
 
     With ``--realtime``: also install the platform audio bridge deps.
@@ -247,7 +247,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
     print("-------------------")
 
     # 1) pip deps — always safe, venv-scoped.
-    pip_pkgs = ["playwright", "websockets"]
+    pip_pkgs = ["playwright==1.61.0", "websockets==15.0.1"]
     print(f"\n[1/3] pip install: {' '.join(pip_pkgs)}")
     try:
         res = _sp.run(
@@ -340,7 +340,8 @@ def _cmd_auth() -> int:
     except ImportError:
         print(
             "playwright is not installed. run:\n"
-            "  pip install playwright && python -m playwright install chromium"
+            "  pip install playwright==1.61.0 websockets==15.0.1 && "
+            "python -m playwright install chromium"
         )
         return 1
 

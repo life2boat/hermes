@@ -100,7 +100,7 @@ be a surprising side effect.
 
 On the node machine (e.g. user's Mac with a signed-in Chrome):
 ```bash
-pip install playwright websockets
+pip install playwright==1.61.0 websockets==15.0.1
 python -m playwright install chromium
 hermes plugins enable google_meet
 hermes meet node run --display-name my-mac --host 0.0.0.0 --port 18789

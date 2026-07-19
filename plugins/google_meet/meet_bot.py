@@ -516,7 +516,8 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
         state.set(error=f"playwright not installed: {e}", exited=True)
         sys.stderr.write(
             "google_meet bot: playwright is not installed. Run "
-            "`pip install playwright && python -m playwright install chromium`\n"
+            "`pip install playwright==1.61.0 websockets==15.0.1 && "
+            "python -m playwright install chromium`\n"
         )
         if rt["bridge"]:
             rt["bridge"].teardown()

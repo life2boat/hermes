@@ -57,7 +57,7 @@ System Settings yourself before starting a realtime meeting.
 
 Or do it manually:
 ```bash
-pip install playwright websockets && python -m playwright install chromium
+pip install playwright==1.61.0 websockets==15.0.1 && python -m playwright install chromium
 
 # For realtime mode, additionally:
 #   Linux:  sudo apt install pulseaudio-utils
@@ -69,7 +69,7 @@ pip install playwright websockets && python -m playwright install chromium
 For a remote node:
 ```bash
 # on the user's Mac (where Chrome is signed in):
-pip install playwright websockets && python -m playwright install chromium
+pip install playwright==1.61.0 websockets==15.0.1 && python -m playwright install chromium
 hermes plugins enable google_meet
 hermes meet node run --display-name my-mac    # persistent server
 # copy the printed token

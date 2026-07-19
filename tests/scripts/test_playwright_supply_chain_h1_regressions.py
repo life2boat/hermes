@@ -73,8 +73,7 @@ def test_real_reporter_ignores_tampered_installed_metadata(
             return tmp_path / "tampered-metadata.json"
 
     (tmp_path / "tampered-metadata.json").write_text(
-        '{"browsers":[{"name":"chromium-headless-shell",'
-        '"revision":"9999"}]}',
+        '{"browsers":[{"name":"chromium-headless-shell","revision":"9999"}]}',
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -83,16 +82,14 @@ def test_real_reporter_ignores_tampered_installed_metadata(
         lambda _name: TamperedDistribution(),
     )
 
-    result = contract_module.main(
-        [
-            "--lockfile",
-            str(lockfile),
-            "--wheel",
-            str(wheel),
-            "--platform",
-            "linux/amd64",
-        ]
-    )
+    result = contract_module.main([
+        "--lockfile",
+        str(lockfile),
+        "--wheel",
+        str(wheel),
+        "--platform",
+        "linux/amd64",
+    ])
 
     output = capsys.readouterr().out
     assert result == 0
@@ -199,6 +196,8 @@ def test_git_archive_mode_is_independent_of_repository_tar_umask(
         repository_root=repository,
         source_sha=source_sha,
         source_tree_sha=tree_sha,
+        approved_base_sha=source_sha,
+        approved_base_tree_sha=tree_sha,
         operation_root=operation_root,
     )
 
@@ -224,11 +223,15 @@ def test_private_key_marker_in_git_blob_is_denied(
 
     with pytest.raises(
         build_helper.BuildContractError,
-        match="^CONTEXT_SECRET_CONTENT_DENIED$",
+        match="^GIT_SECRET_CONTENT_DENIED$",
     ):
         build_helper.export_exact_git_context(
             repository_root=repository,
             source_sha=source_sha,
             source_tree_sha=tree_sha,
+            approved_base_sha=_git("rev-parse", f"{source_sha}^", cwd=repository),
+            approved_base_tree_sha=_git(
+                "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+            ),
             operation_root=operation_root,
         )

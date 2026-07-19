@@ -86,12 +86,11 @@ def _repository_and_context(
 
 @contextlib.contextmanager
 def _prepared(tmp_path: Path):
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     with build_helper.prepared_build_inputs(
         repository_root=repository,
         expected_source_sha=source_sha,
+        approved_base_sha=source_sha,
         artifact_context=context,
         expected_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -111,9 +110,7 @@ def test_build_command_uses_exact_git_export_not_raw_worktree(
             f"playwright_artifact={inputs.artifact_context}"
         )
         assert f"HERMES_GIT_SHA={inputs.source_sha}" in command
-        assert (
-            f"org.opencontainers.image.revision={inputs.source_sha}" in command
-        )
+        assert f"org.opencontainers.image.revision={inputs.source_sha}" in command
         assert command[-1] == str(inputs.build_context)
         assert inputs.build_context != inputs.repository_root
         assert inputs.source_tree_sha
@@ -133,9 +130,7 @@ def test_ignored_local_artifact_is_absent_from_exported_context(
     tmp_path: Path,
     relative_path: str,
 ) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     local_path = repository.joinpath(*relative_path.split("/"))
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_text("local only\n", encoding="utf-8")
@@ -143,6 +138,7 @@ def test_ignored_local_artifact_is_absent_from_exported_context(
     with build_helper.prepared_build_inputs(
         repository_root=repository,
         expected_source_sha=source_sha,
+        approved_base_sha=source_sha,
         artifact_context=context,
         expected_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -154,9 +150,7 @@ def test_ignored_local_artifact_is_absent_from_exported_context(
 def test_untracked_source_like_file_is_absent_from_exported_context(
     tmp_path: Path,
 ) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     (repository / "untracked.py").write_text(
         "raise RuntimeError('must not enter context')\n",
         encoding="utf-8",
@@ -165,6 +159,7 @@ def test_untracked_source_like_file_is_absent_from_exported_context(
     with build_helper.prepared_build_inputs(
         repository_root=repository,
         expected_source_sha=source_sha,
+        approved_base_sha=source_sha,
         artifact_context=context,
         expected_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -206,13 +201,15 @@ def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
     operation_root = tmp_path / "current-tree-operation"
     operation_root.mkdir()
 
-    context_root, manifest_path, _, count = (
-        build_helper.export_exact_git_context(
-            repository_root=repository,
-            source_sha=source_sha,
-            source_tree_sha=tree_sha,
-            operation_root=operation_root,
-        )
+    context_root, manifest_path, _, count = build_helper.export_exact_git_context(
+        repository_root=repository,
+        source_sha=source_sha,
+        source_tree_sha=tree_sha,
+        approved_base_sha=_run("git", "rev-parse", f"{source_sha}^", cwd=repository),
+        approved_base_tree_sha=_run(
+            "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+        ),
+        operation_root=operation_root,
     )
     document = json.loads(manifest_path.read_text(encoding="ascii"))
     paths = {record["path"] for record in document["files"]}
@@ -224,12 +221,21 @@ def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
     assert "untracked-local.py" not in paths
     assert "local-review.diff" not in paths
     assert count == len(paths)
-    assert build_helper.inspect_exported_context(
-        context_root=context_root,
-        manifest_path=manifest_path,
-        expected_source_sha=source_sha,
-        expected_tree_sha=tree_sha,
-    ) == count
+    assert (
+        build_helper.inspect_exported_context(
+            context_root=context_root,
+            manifest_path=manifest_path,
+            expected_source_sha=source_sha,
+            expected_tree_sha=tree_sha,
+            expected_base_sha=_run(
+                "git", "rev-parse", f"{source_sha}^", cwd=repository
+            ),
+            expected_base_tree_sha=_run(
+                "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+            ),
+        )
+        == count
+    )
 
     _run("git", "config", "user.name", "Synthetic Test", cwd=repository)
     _run(
@@ -257,12 +263,14 @@ def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
 
     with pytest.raises(
         build_helper.BuildContractError,
-        match="^CONTEXT_SECRET_CONTENT_DENIED$",
+        match="^GIT_SECRET_CONTENT_DENIED$",
     ):
         build_helper.export_exact_git_context(
             repository_root=repository,
             source_sha=denied_sha,
             source_tree_sha=denied_tree,
+            approved_base_sha=source_sha,
+            approved_base_tree_sha=tree_sha,
             operation_root=denied_operation,
         )
 
@@ -275,20 +283,23 @@ def test_synthetic_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
         assert document["source_sha"] == inputs.source_sha
         assert document["tree_sha"] == inputs.source_tree_sha
         assert paths == {".gitignore", "Dockerfile", "tracked.txt", "uv.lock"}
-        assert build_helper.inspect_exported_context(
-            context_root=inputs.build_context,
-            manifest_path=inputs.context_manifest,
-            expected_source_sha=inputs.source_sha,
-            expected_tree_sha=inputs.source_tree_sha,
-        ) == 4
+        assert (
+            build_helper.inspect_exported_context(
+                context_root=inputs.build_context,
+                manifest_path=inputs.context_manifest,
+                expected_source_sha=inputs.source_sha,
+                expected_tree_sha=inputs.source_tree_sha,
+                expected_base_sha=inputs.approved_base_sha,
+                expected_base_tree_sha=inputs.approved_base_tree_sha,
+            )
+            == 4
+        )
 
 
 def test_dirty_tracked_file_is_denied_before_context_export(
     tmp_path: Path,
 ) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     (repository / "tracked.txt").write_text("dirty\n", encoding="utf-8")
 
     with pytest.raises(
@@ -298,6 +309,7 @@ def test_dirty_tracked_file_is_denied_before_context_export(
         build_helper.validate_build_inputs(
             repository_root=repository,
             expected_source_sha=source_sha,
+            approved_base_sha=source_sha,
             artifact_context=context,
             expected_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -330,6 +342,12 @@ def test_submodule_tree_entry_fails_closed(tmp_path: Path) -> None:
             repository_root=repository,
             source_sha=source_sha,
             source_tree_sha=tree_sha,
+            approved_base_sha=_run(
+                "git", "rev-parse", f"{source_sha}^", cwd=repository
+            ),
+            approved_base_tree_sha=_run(
+                "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+            ),
             operation_root=operation_root,
         )
     assert context.is_dir()
@@ -357,6 +375,12 @@ def test_git_lfs_pointer_fails_closed(tmp_path: Path) -> None:
             repository_root=repository,
             source_sha=source_sha,
             source_tree_sha=tree_sha,
+            approved_base_sha=_run(
+                "git", "rev-parse", f"{source_sha}^", cwd=repository
+            ),
+            approved_base_tree_sha=_run(
+                "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+            ),
             operation_root=operation_root,
         )
 
@@ -428,13 +452,15 @@ def test_production_context_scanner_accepts_legitimate_markers(
         content=content,
     )
 
-    context_root, manifest_path, _, count = (
-        build_helper.export_exact_git_context(
-            repository_root=repository,
-            source_sha=source_sha,
-            source_tree_sha=tree_sha,
-            operation_root=operation_root,
-        )
+    context_root, manifest_path, _, count = build_helper.export_exact_git_context(
+        repository_root=repository,
+        source_sha=source_sha,
+        source_tree_sha=tree_sha,
+        approved_base_sha=_run("git", "rev-parse", f"{source_sha}^", cwd=repository),
+        approved_base_tree_sha=_run(
+            "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+        ),
+        operation_root=operation_root,
     )
 
     assert count > 0
@@ -451,27 +477,27 @@ def test_production_context_scanner_accepts_legitimate_markers(
         (
             "ordinary.py",
             synthetic_assignment(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "agent/redact.py",
             synthetic_assignment(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "tests/test_equivalent.py",
             synthetic_assignment(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "credential-url.py",
             synthetic_credential_url(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "credential.txt",
             synthetic_private_key_block(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "high-entropy.py",
@@ -479,24 +505,24 @@ def test_production_context_scanner_accepts_legitimate_markers(
                 key="SECRET",
                 value=synthetic_high_entropy_value(),
             ),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (
             "adjacent.py",
             'API_KEY = "<API_KEY>"\n' + synthetic_assignment(key="BACKUP_TOKEN"),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_SECRET_CONTENT_DENIED",
         ),
         (".env", "SAFE=1\n", "CONTEXT_SECRET_FILE_DENIED"),
         ("src/id_rsa", "synthetic marker\n", "CONTEXT_SECRET_FILE_DENIED"),
         (
             "binary.dat",
             b"\x00\xff" + synthetic_assignment().encode(),
-            "CONTEXT_SECRET_CONTENT_DENIED",
+            "GIT_BINARY_BLOB_DENIED",
         ),
         (
             "invalid-text.txt",
             b"\xff\xfeinvalid-text",
-            "CONTEXT_SECRET_SCAN_FAILED",
+            "GIT_BLOB_UTF8_DECODE_DENIED",
         ),
     ],
 )
@@ -520,6 +546,12 @@ def test_production_context_scanner_denies_secrets_and_fails_closed(
             repository_root=repository,
             source_sha=source_sha,
             source_tree_sha=tree_sha,
+            approved_base_sha=_run(
+                "git", "rev-parse", f"{source_sha}^", cwd=repository
+            ),
+            approved_base_tree_sha=_run(
+                "git", "rev-parse", f"{source_sha}^^{{tree}}", cwd=repository
+            ),
             operation_root=operation_root,
         )
 
@@ -548,6 +580,7 @@ def test_artifact_context_inside_repository_is_denied(tmp_path: Path) -> None:
         build_helper.validate_build_inputs(
             repository_root=repository,
             expected_source_sha=source_sha,
+            approved_base_sha=source_sha,
             artifact_context=context,
             expected_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -569,9 +602,7 @@ def test_invalid_artifact_context_is_denied(
     mutation: str,
     code: str,
 ) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     if mutation == "missing_archive":
         (context / "browser-archive").unlink()
     elif mutation == "missing_wheel":
@@ -586,6 +617,7 @@ def test_invalid_artifact_context_is_denied(
         build_helper.validate_build_inputs(
             repository_root=repository,
             expected_source_sha=source_sha,
+            approved_base_sha=source_sha,
             artifact_context=context,
             expected_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -595,9 +627,7 @@ def test_invalid_artifact_context_is_denied(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX artifact permission contract")
 def test_group_or_world_writable_artifact_context_is_denied(tmp_path: Path) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
     context.chmod(0o770)
 
     with pytest.raises(
@@ -607,6 +637,7 @@ def test_group_or_world_writable_artifact_context_is_denied(tmp_path: Path) -> N
         build_helper.validate_build_inputs(
             repository_root=repository,
             expected_source_sha=source_sha,
+            approved_base_sha=source_sha,
             artifact_context=context,
             expected_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
@@ -615,9 +646,7 @@ def test_group_or_world_writable_artifact_context_is_denied(tmp_path: Path) -> N
 
 
 def test_mutable_or_unrelated_image_tag_is_denied(tmp_path: Path) -> None:
-    repository, source_sha, context, manifest_sha = _repository_and_context(
-        tmp_path
-    )
+    repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
 
     for image_tag in ("healbite-hermes:latest", "healbite-hermes:p3a-other"):
         with pytest.raises(
@@ -627,6 +656,7 @@ def test_mutable_or_unrelated_image_tag_is_denied(tmp_path: Path) -> None:
             build_helper.validate_build_inputs(
                 repository_root=repository,
                 expected_source_sha=source_sha,
+                approved_base_sha=source_sha,
                 artifact_context=context,
                 expected_manifest_sha256=manifest_sha,
                 image_tag=image_tag,
@@ -655,21 +685,21 @@ def test_check_mode_never_invokes_docker(
             raise AssertionError("check mode must not invoke Docker")
 
         monkeypatch.setattr(build_helper.subprocess, "run", deny_subprocess)
-        result = build_helper.main(
-            [
-                "check",
-                "--expected-source-sha",
-                inputs.source_sha,
-                "--artifact-context",
-                str(inputs.artifact_context),
-                "--expected-manifest-sha256",
-                inputs.manifest_sha256,
-                "--image-tag",
-                inputs.image_tag,
-                "--platform",
-                inputs.platform,
-            ]
-        )
+        result = build_helper.main([
+            "check",
+            "--expected-source-sha",
+            inputs.source_sha,
+            "--approved-base-sha",
+            inputs.approved_base_sha,
+            "--artifact-context",
+            str(inputs.artifact_context),
+            "--expected-manifest-sha256",
+            inputs.manifest_sha256,
+            "--image-tag",
+            inputs.image_tag,
+            "--platform",
+            inputs.platform,
+        ])
 
     assert result == 0
     output = capsys.readouterr().out

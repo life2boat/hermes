@@ -51,9 +51,9 @@ def test_runbook_requires_separately_approved_external_artifact() -> None:
 
 def test_runbook_contract_report_requires_lockfile_and_verified_wheel() -> None:
     text = _text()
-    command = text.split(
-        ".venv/bin/python scripts/playwright_artifact_contract.py", 1
-    )[1].split("```", 1)[0]
+    command = text.split(".venv/bin/python scripts/playwright_artifact_contract.py", 1)[
+        1
+    ].split("```", 1)[0]
 
     assert "--lockfile uv.lock" in command
     assert '--wheel "$ARTIFACT_DIR/playwright-wheel"' in command
@@ -67,6 +67,8 @@ def test_runbook_check_command_requires_exact_source_manifest_and_context() -> N
     )[1].split("```", 1)[0]
 
     assert '--expected-source-sha "$EXACT_SHA"' in command
+    assert "APPROVED_BASE_SHA=<exact-40-character-approved-base-sha>" in text
+    assert '--approved-base-sha "$APPROVED_BASE_SHA"' in command
     assert '--artifact-context "$ARTIFACT_DIR"' in command
     assert '--expected-manifest-sha256 "$MANIFEST_SHA256"' in command
     assert '--image-tag "$IMAGE_REF"' in command
@@ -83,6 +85,10 @@ def test_runbook_requires_exact_git_tree_context_and_independent_inspection() ->
         "create and re-read a context manifest",
         "Ignored, untracked, and other raw-worktree content never enters",
         "reject submodules, Git LFS pointers, secrets, databases, patch files",
+        "approved base SHA is mandatory",
+        "recorded with its tree identity in the context manifest",
+        "candidate object not present in the approved base",
+        "Worktree bytes are never the authority",
     )
     for needle in required:
         assert needle in text
@@ -100,6 +106,11 @@ def test_runbook_documents_shared_context_aware_secret_policy() -> None:
         "high-entropy credential assignments are denied regardless of path",
         "No filename or directory allowlist",
         "scanner failures remain fail closed",
+        "containing NUL bytes, invalid UTF-8",
+        "Symlinks, gitlinks, unknown modes, missing objects",
+        "without following a worktree target",
+        "same Git-object policy",
+        "reads staged candidates from the index",
     )
     for needle in required:
         assert needle in text
@@ -131,10 +142,14 @@ def test_runbook_keeps_build_and_deployment_as_separate_gates() -> None:
         assert needle in text
 
 
-def test_runbook_does_not_embed_real_artifact_url_revision_or_download_command() -> None:
-    section = _text().split(
-        "## Verified Playwright image build prerequisite", 1
-    )[1].split("## Repository validation", 1)[0]
+def test_runbook_does_not_embed_real_artifact_url_revision_or_download_command() -> (
+    None
+):
+    section = (
+        _text()
+        .split("## Verified Playwright image build prerequisite", 1)[1]
+        .split("## Repository validation", 1)[0]
+    )
 
     assert "https://" not in section
     assert "http://" not in section

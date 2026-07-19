@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.git_object_secret_policy import GitObjectDescriptor, scan_git_object
 from scripts.secret_scanner import (
     SecretScanError,
     scan_secret_bytes,
@@ -80,7 +81,11 @@ def test_real_secret_shapes_are_denied(
 
 def test_binary_secret_marker_is_denied() -> None:
     data = b"\x00\xff" + synthetic_assignment().encode()
-    assert scan_secret_bytes(data)
+    with pytest.raises(
+        SecretScanError,
+        match="^SECRET_SCAN_BINARY_DENIED$",
+    ):
+        scan_secret_bytes(data)
 
 
 def test_non_binary_decode_failure_fails_closed() -> None:
@@ -112,10 +117,9 @@ def test_repository_and_context_callers_import_shared_policy() -> None:
         root / "scripts" / "build_verified_playwright_image.py"
     ).read_text(encoding="utf-8")
 
-    assert "from scripts.secret_scanner import scan_secret_text" in (repository_scanner)
-    assert "from scripts.secret_scanner import SecretScanError, scan_secret_bytes" in (
-        context_scanner
-    )
+    shared_import = "from scripts.git_object_secret_policy import ("
+    assert shared_import in repository_scanner
+    assert shared_import in context_scanner
     assert "patterns = [" not in repository_scanner
 
 
@@ -144,6 +148,10 @@ def test_repository_and_context_callers_classify_shared_fixtures_identically(
     shutil.copy2(
         source_root / "scripts" / "secret_scanner.py",
         scripts_dir / "secret_scanner.py",
+    )
+    shutil.copy2(
+        source_root / "scripts" / "git_object_secret_policy.py",
+        scripts_dir / "git_object_secret_policy.py",
     )
 
     def run(*arguments: str) -> subprocess.CompletedProcess[str]:
@@ -175,7 +183,16 @@ def test_repository_and_context_callers_classify_shared_fixtures_identically(
 
     completed = run("bash", "scripts/secret_check.sh")
     repository_denied = completed.returncode != 0
-    context_denied = bool(scan_secret_bytes(fixture.encode()))
+    descriptor = GitObjectDescriptor(
+        path="candidate.txt",
+        mode="100644",
+        object_type="blob",
+        oid="0" * 40,
+    )
+    context_denied = not scan_git_object(
+        descriptor,
+        lambda _oid: fixture.encode(),
+    ).clean
 
     assert repository_denied is context_denied
     assert fixture not in completed.stdout

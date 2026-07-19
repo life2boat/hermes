@@ -63,9 +63,7 @@ def test_playwright_runtime_is_exactly_pinned_and_locked_with_hashes() -> None:
     pyproject = _text(PYPROJECT)
     lock = _text(UV_LOCK)
 
-    assert 'google-meet = ["playwright==1.61.0", "websockets==15.0.1"]' in (
-        pyproject
-    )
+    assert 'google-meet = ["playwright==1.61.0", "websockets==15.0.1"]' in (pyproject)
     assert re.search(
         r'\[\[package\]\]\nname = "playwright"\nversion = "1\.61\.0"',
         lock,
@@ -109,12 +107,8 @@ def test_manifest_schema_is_strict_and_requires_wheel_and_layout_identity() -> N
     assert schema["properties"]["browser_family"]["const"] == (
         "chromium-headless-shell"
     )
-    assert schema["properties"]["archive_filename"]["const"] == (
-        "browser-archive"
-    )
-    assert schema["properties"]["archive_sha256"]["pattern"] == (
-        "^[0-9a-f]{64}$"
-    )
+    assert schema["properties"]["archive_filename"]["const"] == ("browser-archive")
+    assert schema["properties"]["archive_sha256"]["pattern"] == ("^[0-9a-f]{64}$")
     assert schema["properties"]["playwright_wheel_sha256"]["pattern"] == (
         "^[0-9a-f]{64}$"
     )
@@ -132,9 +126,13 @@ def test_browser_revision_is_derived_from_verified_wheel_not_hard_coded() -> Non
     assert "_metadata_from_wheel_bytes" in source_contract
     assert "revisionOverrides" in source_contract
     assert "load_installed_contract(args.platform)" not in source_installer
-    assert "1228" not in "\n".join(
-        (source_contract, source_installer, source_build, dockerfile, schema)
-    )
+    assert "1228" not in "\n".join((
+        source_contract,
+        source_installer,
+        source_build,
+        dockerfile,
+        schema,
+    ))
 
 
 def test_no_browser_archive_manifest_or_wheel_instance_is_committed() -> None:
@@ -165,12 +163,14 @@ def test_canonical_build_helper_exports_exact_git_tree_only() -> None:
     assert '"archive"' in source
     assert "inspect_exported_context" in source
     assert "inputs.build_context" in source
-    assert "str(inputs.repository_root)" not in source.split(
-        "def docker_build_command", 1
-    )[1].split("def _parser", 1)[0]
+    assert (
+        "str(inputs.repository_root)"
+        not in source.split("def docker_build_command", 1)[1].split("def _parser", 1)[0]
+    )
     assert "--artifact-context" in source
     assert "--expected-manifest-sha256" in source
     assert "--expected-source-sha" in source
+    assert "--approved-base-sha" in source
     assert "--image-tag" in source
     assert "--skip" not in source
     assert "--force" not in source

@@ -15,6 +15,9 @@ ENV PYTHONUNBUFFERED=1
 # Store Playwright browsers outside the volume mount so the build-time
 # install survives the /opt/data volume overlay at runtime.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+# Python package installation must never trigger an implicit browser download.
+# The browser arrives only through the verified BuildKit context below.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # Install system dependencies in one layer, clear APT cache.
 # tini was previously PID 1 to reap orphaned zombie processes (MCP stdio
@@ -105,8 +108,8 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && 
 WORKDIR /opt/hermes
 
 # ---------- Layer-cached dependency install ----------
-# Copy only package manifests first so npm install + Playwright are cached
-# unless the lockfiles themselves change.
+# Copy only package manifests first so npm install is cached unless the
+# lockfiles themselves change. Browser installation is handled separately.
 #
 # ui-tui/packages/hermes-ink/ is copied IN FULL (not just its manifests)
 # because it is referenced as a `file:` workspace dependency from
@@ -130,7 +133,6 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 ENV npm_config_install_links=false
 
 RUN npm install --prefer-offline --no-audit && \
-    npx playwright install --with-deps chromium --only-shell && \
     npm cache clean --force
 
 # ---------- Layer-cached Python dependency install ----------
@@ -144,7 +146,7 @@ RUN npm install --prefer-offline --no-audit && \
 # frontend stats the readme path during dep resolution, so we `touch` an
 # empty placeholder — the real README is restored by `COPY . .` below.
 #
-# `uv sync --frozen --no-install-project --extra all --extra messaging`
+# `uv sync --frozen --no-install-project --extra all --extra google-meet ...`
 # installs the deps reachable through the composite `[all]` extra
 # (handpicked set intended for the production image — excludes `[dev]`),
 # plus gateway messaging adapters that should work in the published image
@@ -173,8 +175,32 @@ RUN npm install --prefer-offline --no-audit && \
 #
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
+COPY scripts/playwright_artifact_contract.py scripts/install_pinned_playwright_artifact.py scripts/
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+
+# ---------- Verified Playwright browser artifact ----------
+# `playwright_artifact` is a mandatory read-only BuildKit named context with
+# exactly /manifest.json and /browser-archive. Acquisition and approval happen
+# outside this repository. The expected manifest digest has no default.
+ARG PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256
+RUN --mount=type=bind,from=playwright_artifact,source=/,target=/tmp/playwright-artifact,ro \
+    set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) playwright_platform="linux/amd64" ;; \
+        arm64) playwright_platform="linux/arm64" ;; \
+        *) echo "Unsupported TARGETARCH for Playwright artifact" >&2; exit 1 ;; \
+    esac; \
+    test -n "${PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256:-}" || { \
+        echo "PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256 is required" >&2; \
+        exit 1; \
+    }; \
+    .venv/bin/python -m playwright install-deps chromium; \
+    .venv/bin/python -m scripts.install_pinned_playwright_artifact \
+        --manifest /tmp/playwright-artifact/manifest.json \
+        --archive /tmp/playwright-artifact/browser-archive \
+        --expected-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256}" \
+        --platform "${playwright_platform}"
 
 # ---------- Frontend build (cached independently from Python source) ----------
 # Copy only the frontend source trees first so that Python-only changes don't

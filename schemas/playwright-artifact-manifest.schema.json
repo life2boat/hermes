@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/schemas/playwright-artifact-manifest.schema.json",
+  "title": "Hermes verified Playwright browser artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "playwright_package",
+    "playwright_package_version",
+    "browser_family",
+    "browser_revision",
+    "platform",
+    "archive_filename",
+    "archive_size",
+    "archive_sha256",
+    "archive_format",
+    "cache_root",
+    "expected_executable_relative_path",
+    "source_kind",
+    "source_reference"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": 1
+    },
+    "playwright_package": {
+      "const": "playwright"
+    },
+    "playwright_package_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[A-Za-z0-9.-]+)?$"
+    },
+    "browser_family": {
+      "const": "chromium-headless-shell"
+    },
+    "browser_revision": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "platform": {
+      "enum": ["linux/amd64", "linux/arm64"]
+    },
+    "archive_filename": {
+      "const": "browser-archive"
+    },
+    "archive_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483648
+    },
+    "archive_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "archive_format": {
+      "enum": ["zip", "tar.gz"]
+    },
+    "cache_root": {
+      "const": "/opt/hermes/.playwright"
+    },
+    "expected_executable_relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._/-]+$"
+    },
+    "source_kind": {
+      "const": "operator-approved-offline-artifact"
+    },
+    "source_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "not": {
+        "pattern": "[Ll][Aa][Tt][Ee][Ss][Tt]"
+      }
+    }
+  }
+}

@@ -24,6 +24,7 @@ from scripts.playwright_artifact_contract import (
     PlaywrightContractError,
     load_verified_wheel_contract,
 )
+from scripts.secret_scanner import SecretScanError, scan_secret_bytes
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -60,17 +61,6 @@ _FORBIDDEN_SUFFIXES = (
     ".sqlite-shm",
     ".p12",
     ".pfx",
-)
-_PEM_BOUNDARY_PREFIX = b"-----" + b"BEGIN "
-_PEM_BOUNDARY_SUFFIX = b"-----"
-_PRIVATE_KEY_MARKERS = tuple(
-    _PEM_BOUNDARY_PREFIX + key_type + _PEM_BOUNDARY_SUFFIX
-    for key_type in (
-        b"PRIVATE" + b" KEY",
-        b"RSA " + b"PRIVATE" + b" KEY",
-        b"OPENSSH " + b"PRIVATE" + b" KEY",
-        b"EC " + b"PRIVATE" + b" KEY",
-    )
 )
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 
@@ -399,7 +389,11 @@ def _git_blob_digest(data: bytes, object_format: str) -> str:
 def _assert_content_allowed(data: bytes) -> None:
     if data.startswith(_LFS_POINTER):
         _fail("GIT_LFS_POINTER_UNSUPPORTED")
-    if any(marker in data[:16384] for marker in _PRIVATE_KEY_MARKERS):
+    try:
+        findings = scan_secret_bytes(data)
+    except SecretScanError:
+        _fail("CONTEXT_SECRET_SCAN_FAILED")
+    if findings:
         _fail("CONTEXT_SECRET_CONTENT_DENIED")
 
 

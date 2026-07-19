@@ -11,9 +11,12 @@ python3 - <<'PY'
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 import subprocess
 import sys
 from pathlib import Path
+
+from scripts.secret_scanner import scan_secret_text
 
 repo_root = Path.cwd()
 
@@ -57,39 +60,6 @@ changed_lines.extend(_added_lines(_diff_text([
     "git", "diff", "--cached", "--unified=0", "--diff-filter=ACMR", "--no-ext-diff",
 ])))
 
-patterns = [
-    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    (
-        "telegram-token-assignment",
-        re.compile(r'(?i)\b(?:TELEGRAM_BOT_TOKEN|BOT_TOKEN)\b\s*[:=]\s*[\'"]?\d{8,}:[A-Za-z0-9_-]{20,}'),
-    ),
-    (
-        "openai-style-key-assignment",
-        re.compile(r'(?i)\b(?:OPENAI_API_KEY|NOUS_API_KEY|ANTHROPIC_API_KEY|MISTRAL_API_KEY|API_KEY)\b\s*[:=]\s*[\'"]?sk-[A-Za-z0-9_-]{16,}'),
-    ),
-    (
-        "github-token-assignment",
-        re.compile(r'(?i)\b(?:GITHUB_TOKEN|GH_TOKEN|GITHUB_PAT|TOKEN)\b\s*[:=]\s*[\'"]?(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})'),
-    ),
-    (
-        "generic-secret-assignment",
-        re.compile(r'(?i)\b(?:[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD))\b\s*[:=]\s*[\'"]?[A-Za-z0-9_:/\\-]{20,}'),
-    ),
-]
-
-placeholder_markers = (
-    "example",
-    "placeholder",
-    "changeme",
-    "dummy",
-    "sample",
-    "your_",
-    "your-",
-    "<redacted>",
-    "[redacted]",
-    "***",
-)
-
 findings: list[tuple[str, int, str]] = []
 seen: set[tuple[str, int, str]] = set()
 
@@ -97,17 +67,18 @@ if not changed_lines:
     print("secret_check: no changed tracked/staged lines to scan")
     sys.exit(0)
 
+changed_by_file: dict[str, list[tuple[int, str]]] = defaultdict(list)
 for rel, lineno, line in changed_lines:
-    lower = line.lower()
-    if any(marker in lower for marker in placeholder_markers):
-        continue
-    for label, pattern in patterns:
-        if pattern.search(line):
-            item = (rel, lineno, label)
-            if item not in seen:
-                seen.add(item)
-                findings.append(item)
-            break
+    changed_by_file[rel].append((lineno, line))
+
+for rel, rows in changed_by_file.items():
+    added_text = "\n".join(line for _, line in rows)
+    first_lineno = min(lineno for lineno, _ in rows)
+    for finding in scan_secret_text(added_text):
+        item = (rel, first_lineno, finding.rule_id)
+        if item not in seen:
+            seen.add(item)
+            findings.append(item)
 
 if findings:
     print("secret_check: potential tracked secrets detected:", file=sys.stderr)

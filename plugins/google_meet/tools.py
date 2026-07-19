@@ -19,28 +19,17 @@ from typing import Any, Dict, Optional
 from plugins.google_meet import process_manager as pm
 
 
+from scripts.playwright_artifact_contract import verify_packaged_browser_readiness
+
 # ---------------------------------------------------------------------------
 # Runtime gate
 # ---------------------------------------------------------------------------
 
 def check_meet_requirements() -> bool:
-    """Return True when the plugin can actually run LOCALLY.
-
-    Gates on:
-      * Python ``playwright`` package importable
-      * the plugin being on a supported platform (Linux or macOS)
-
-    Note: remote-node operation (``node=<name>``) only needs the
-    ``websockets`` dep on the gateway side — Chromium lives on the node.
-    But the plugin-level gate keeps the v1 semantics; individual tool
-    handlers relax the requirement when a node is addressed.
-    """
-    import platform as _p
-    if _p.system().lower() not in {"linux", "darwin"}:
-        return False
+    """Return True only when the verified packaged local browser is ready."""
     try:
-        import playwright  # noqa: F401
-    except ImportError:
+        verify_packaged_browser_readiness()
+    except Exception:
         return False
     return True
 
@@ -264,10 +253,8 @@ def handle_meet_join(args: Dict[str, Any], **_kw) -> str:
     # Local path — same as v1, with v2 params.
     if not check_meet_requirements():
         return _err(
-            "google_meet plugin prerequisites missing — install with "
-            "`pip install playwright==1.61.0 websockets==15.0.1 && "
-            "python -m playwright install "
-            "chromium`. Plugin is supported on Linux and macOS only."
+            "google_meet plugin prerequisites missing; use the canonical "
+            "verified image build and run `hermes meet setup`."
         )
     res = pm.start(
         url=url,

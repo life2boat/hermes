@@ -40,24 +40,12 @@ mismatched label is a hard failure; tag text is never treated as provenance.
 
 ## Verified Playwright image build prerequisite
 
-The Python package declared by the exact `google-meet` optional dependency in
-`pyproject.toml` and resolved with hashes in `uv.lock` is the single
-authoritative Playwright runtime. Node Playwright is not a browser-install
-authority. The browser family, revision, platform mapping, cache directory, and
-executable path must be derived from that installed package's bundled
-`browsers.json` metadata:
-
-```bash
-.venv/bin/python scripts/playwright_artifact_contract.py \
-  --platform linux/amd64
-```
-
-This command is read-only. It neither installs a browser nor makes a network
-request. A browser archive must be acquired and approved in a separate task.
-Its immutable manifest SHA-256 must be known and reviewed before a canonical
-build starts; computing a digest after an unreviewed download is not approval.
-Do not put an archive, an instantiated manifest, a credential, or a production
-secret in Git, the normal repository build context, or build arguments.
+The exact `playwright` package entry in `uv.lock` is the single authoritative
+Playwright runtime source. The canonical contract selects one platform wheel,
+requires the wheel filename, size, and SHA-256 to match that lock entry, and
+reads bundled `browsers.json` metadata directly from the verified wheel bytes.
+Installed package metadata may be compared at runtime, but it is never the
+sole browser identity authority.
 
 The approved artifact directory must be an absolute path outside the
 repository, must not contain symlinks or group/world-writable paths, and must
@@ -66,13 +54,29 @@ contain exactly these fixed names:
 ```text
 manifest.json
 browser-archive
+playwright-wheel
 ```
 
+The wheel and browser archive are acquired and approved in a separate task.
+Their immutable hashes must be known and reviewed before a canonical build
+starts. Computing a digest after an unreviewed acquisition is not approval.
+Do not put an archive, an instantiated manifest, a credential, or a production
+secret in Git, the ordinary Docker build context, or build arguments.
+
 `manifest.json` must use the canonical schema in
-`schemas/playwright-artifact-manifest.schema.json`. Its package, revision,
-platform, cache root, archive size, archive SHA-256, and executable path are
-mandatory. The source reference is an opaque approval reference, not a URL.
-The build has no Playwright CDN fallback.
+`schemas/playwright-artifact-manifest.schema.json`. Wheel identity, browser
+identity, the single approved archive root, platform, cache root, archive
+size/hash, and executable path are mandatory. The source reference is an
+opaque approval reference, not a URL. The build has no Playwright CDN fallback.
+
+Report the lock-bound browser contract without installing a browser or making
+a network request:
+
+```bash
+ARTIFACT_DIR=<absolute-approved-directory-outside-repository>
+
+.venv/bin/python scripts/playwright_artifact_contract.py   --lockfile uv.lock   --wheel "$ARTIFACT_DIR/playwright-wheel"   --platform linux/amd64
+```
 
 Validate exact source and approved inputs without invoking Docker:
 
@@ -82,36 +86,34 @@ ARTIFACT_DIR=<absolute-approved-directory-outside-repository>
 MANIFEST_SHA256=<predeclared-reviewed-lowercase-sha256>
 IMAGE_REF="healbite-hermes:playwright-${EXACT_SHA:0:12}"
 
-.venv/bin/python scripts/build_verified_playwright_image.py check \
-  --expected-source-sha "$EXACT_SHA" \
-  --artifact-context "$ARTIFACT_DIR" \
-  --expected-manifest-sha256 "$MANIFEST_SHA256" \
-  --image-tag "$IMAGE_REF" \
-  --platform linux/amd64
+.venv/bin/python scripts/build_verified_playwright_image.py check   --expected-source-sha "$EXACT_SHA"   --artifact-context "$ARTIFACT_DIR"   --expected-manifest-sha256 "$MANIFEST_SHA256"   --image-tag "$IMAGE_REF"   --platform linux/amd64
 ```
 
 Only a separately authorized image-build task may replace `check` with
-`build`. That mode uses one read-only BuildKit named context and embeds the
-exact OCI revision:
+`build`. Both modes export the exact requested Git tree into an operation-owned
+temporary directory, verify every path, mode, and blob identity, create and
+re-read a context manifest, and reject submodules, Git LFS pointers, secrets,
+databases, patch files, caches, evidence, and local review mirrors. Ignored,
+untracked, and other raw-worktree content never enters the Docker context.
+
+The Docker build receives the exported Git tree as its ordinary context and
+one read-only BuildKit named context:
 
 ```text
 playwright_artifact=<approved artifact directory>
 org.opencontainers.image.revision=<exact source SHA>
 ```
 
-The canonical helper rejects a dirty or mismatched source tree, a mutable or
-unrelated image tag, a missing artifact context, a missing or incorrect
-manifest digest, additional context files, writable/symlinked inputs, and an
-archive whose size or digest differs from the manifest. The Docker installer
-then re-derives browser identity from the pinned package metadata, validates
-the canonical manifest and archive before extraction, rejects unsafe archive
-entries, and publishes the cache directory atomically. It never falls back to
-an external browser download.
+The installer validates the manifest, lock-authorized wheel, single-root
+archive layout, and expected executable. It fsyncs regular files and created
+directories, atomically renames the complete cache, fsyncs the final parent,
+and re-opens the published identity before reporting success. A missing or
+mismatched packaged browser fails `hermes meet setup` closed and directs the
+operator to this controlled image-build process; Google Meet never downloads
+a browser at setup or runtime.
 
-Direct `docker build`, `docker compose build`, an implicitly resolving `npx`,
-and a normal Playwright browser-install command are non-authoritative for a
-production image. Artifact acquisition, image build, image validation, and
-deployment remain separate approval gates.
+Artifact acquisition, image build, image validation, deployment, and feature
+activation remain separate approval gates.
 
 ## Repository validation
 

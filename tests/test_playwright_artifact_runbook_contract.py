@@ -15,16 +15,17 @@ def _normalized() -> str:
     return " ".join(_text().split())
 
 
-def test_runbook_names_pinned_python_package_metadata_as_authority() -> None:
+def test_runbook_names_verified_locked_wheel_as_metadata_authority() -> None:
     text = _normalized()
 
     required = (
         "## Verified Playwright image build prerequisite",
-        "single authoritative Playwright runtime",
-        "bundled `browsers.json` metadata",
+        "single authoritative Playwright runtime source",
+        "wheel filename, size, and SHA-256",
+        "directly from the verified wheel bytes",
+        "never the sole browser identity authority",
         "scripts/playwright_artifact_contract.py",
-        "This command is read-only.",
-        "neither installs a browser nor makes a network request",
+        "without installing a browser or making a network request",
     )
     for needle in required:
         assert needle in text
@@ -39,6 +40,7 @@ def test_runbook_requires_separately_approved_external_artifact() -> None:
         "absolute path outside the repository",
         "manifest.json",
         "browser-archive",
+        "playwright-wheel",
         "schemas/playwright-artifact-manifest.schema.json",
         "opaque approval reference, not a URL",
         "no Playwright CDN fallback",
@@ -47,12 +49,23 @@ def test_runbook_requires_separately_approved_external_artifact() -> None:
         assert needle in text
 
 
+def test_runbook_contract_report_requires_lockfile_and_verified_wheel() -> None:
+    text = _text()
+    command = text.split(
+        ".venv/bin/python scripts/playwright_artifact_contract.py", 1
+    )[1].split("```", 1)[0]
+
+    assert "--lockfile uv.lock" in command
+    assert '--wheel "$ARTIFACT_DIR/playwright-wheel"' in command
+    assert "--platform linux/amd64" in command
+
+
 def test_runbook_check_command_requires_exact_source_manifest_and_context() -> None:
     text = _text()
-
     command = text.split(
         ".venv/bin/python scripts/build_verified_playwright_image.py check", 1
     )[1].split("```", 1)[0]
+
     assert '--expected-source-sha "$EXACT_SHA"' in command
     assert '--artifact-context "$ARTIFACT_DIR"' in command
     assert '--expected-manifest-sha256 "$MANIFEST_SHA256"' in command
@@ -62,21 +75,46 @@ def test_runbook_check_command_requires_exact_source_manifest_and_context() -> N
     assert "--force" not in command
 
 
-def test_runbook_keeps_build_and_deployment_as_separate_gates() -> None:
+def test_runbook_requires_exact_git_tree_context_and_independent_inspection() -> None:
     text = _normalized()
-
     required = (
-        "Only a separately authorized image-build task",
-        "read-only BuildKit named context",
-        "Artifact acquisition, image build, image validation, and",
-        "deployment remain separate approval gates.",
-        "It never falls back to an external browser download.",
+        "export the exact requested Git tree",
+        "verify every path, mode, and blob identity",
+        "create and re-read a context manifest",
+        "Ignored, untracked, and other raw-worktree content never enters",
+        "reject submodules, Git LFS pointers, secrets, databases, patch files",
     )
     for needle in required:
         assert needle in text
 
 
-def test_runbook_does_not_embed_real_artifact_url_or_checksum() -> None:
+def test_runbook_requires_durable_publication_and_fail_closed_readiness() -> None:
+    text = _normalized()
+    required = (
+        "fsyncs regular files and created directories",
+        "atomically renames the complete cache",
+        "fsyncs the final parent",
+        "re-opens the published identity",
+        "fails `hermes meet setup` closed",
+        "never downloads a browser at setup or runtime",
+    )
+    for needle in required:
+        assert needle in text
+
+
+def test_runbook_keeps_build_and_deployment_as_separate_gates() -> None:
+    text = _normalized()
+    required = (
+        "Only a separately authorized image-build task",
+        "one read-only BuildKit named context",
+        "Artifact acquisition, image build, image validation, deployment, and",
+        "activation remain separate approval gates.",
+    )
+    for needle in required:
+        assert needle in text
+
+
+def test_runbook_does_not_embed_real_artifact_url_revision_or_download_command() -> None:
     section = _text().split(
         "## Verified Playwright image build prerequisite", 1
     )[1].split("## Repository validation", 1)[0]
@@ -86,3 +124,4 @@ def test_runbook_does_not_embed_real_artifact_url_or_checksum() -> None:
     assert "1228" not in section
     assert "latest" not in section.lower()
     assert "npx playwright" not in section
+    assert "python -m playwright install" not in section

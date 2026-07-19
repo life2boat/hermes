@@ -96,6 +96,15 @@ re-read a context manifest, and reject submodules, Git LFS pointers, secrets,
 databases, patch files, caches, evidence, and local review mirrors. Ignored,
 untracked, and other raw-worktree content never enters the Docker context.
 
+Secret classification is deterministic and shared by the repository and
+exported-context checks. Credential variable names without assigned values,
+documented placeholders, redaction-pattern definitions, and marker-only test
+fixtures are not secret material. Complete private-key blocks,
+credential-bearing URLs with secret-shaped values, provider-token-shaped
+assignments, and high-entropy credential assignments are denied regardless of
+path. No filename or directory allowlist can bypass content classification,
+and scanner failures remain fail closed.
+
 The Docker build receives the exported Git tree as its ordinary context and
 one read-only BuildKit named context:
 

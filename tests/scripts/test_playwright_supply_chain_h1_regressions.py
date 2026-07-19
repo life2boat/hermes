@@ -12,6 +12,7 @@ import pytest
 from scripts import build_verified_playwright_image as build_helper
 from scripts import install_pinned_playwright_artifact as installer
 from scripts import playwright_artifact_contract as contract_module
+from tests.secret_scanner_support import synthetic_private_key_block
 from tests.playwright_supply_chain_support import (
     manifest_document,
     verified_contract,
@@ -210,8 +211,10 @@ def test_private_key_marker_in_git_blob_is_denied(
     tmp_path: Path,
 ) -> None:
     repository, _, _ = _synthetic_repository(tmp_path)
-    marker = b"-----" + b"BEGIN " + b"PRIVATE" + b" KEY" + b"-----\n"
-    (repository / "credential.txt").write_bytes(marker)
+    (repository / "credential.txt").write_text(
+        synthetic_private_key_block(),
+        encoding="utf-8",
+    )
     _git("add", "credential.txt", cwd=repository)
     _git("commit", "--quiet", "-m", "synthetic forbidden marker", cwd=repository)
     source_sha = _git("rev-parse", "HEAD", cwd=repository)

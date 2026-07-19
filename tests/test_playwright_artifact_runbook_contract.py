@@ -88,6 +88,23 @@ def test_runbook_requires_exact_git_tree_context_and_independent_inspection() ->
         assert needle in text
 
 
+def test_runbook_documents_shared_context_aware_secret_policy() -> None:
+    text = _normalized()
+    required = (
+        "Secret classification is deterministic and shared",
+        "Credential variable names without assigned values",
+        "redaction-pattern definitions",
+        "marker-only test fixtures are not secret material",
+        "Complete private-key blocks",
+        "credential-bearing URLs with secret-shaped values",
+        "high-entropy credential assignments are denied regardless of path",
+        "No filename or directory allowlist",
+        "scanner failures remain fail closed",
+    )
+    for needle in required:
+        assert needle in text
+
+
 def test_runbook_requires_durable_publication_and_fail_closed_readiness() -> None:
     text = _normalized()
     required = (

@@ -10,6 +10,15 @@ from pathlib import Path
 import pytest
 
 from scripts import build_verified_playwright_image as build_helper
+from scripts.playwright_artifact_contract import load_verified_wheel_contract
+from tests.secret_scanner_support import (
+    marker_only_private_key_fixture,
+    redaction_pattern_fixture,
+    synthetic_assignment,
+    synthetic_credential_url,
+    synthetic_high_entropy_value,
+    synthetic_private_key_block,
+)
 from tests.playwright_supply_chain_support import (
     manifest_document,
     write_browser_archive,
@@ -17,7 +26,6 @@ from tests.playwright_supply_chain_support import (
     write_manifest,
     write_wheel,
 )
-from scripts.playwright_artifact_contract import load_verified_wheel_contract
 
 
 def _run(*arguments: str, cwd: Path) -> str:
@@ -165,7 +173,101 @@ def test_untracked_source_like_file_is_absent_from_exported_context(
         assert not (inputs.build_context / "untracked.py").exists()
 
 
+@pytest.mark.timeout(120)
 def test_exact_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    source_sha = _run("git", "rev-parse", "HEAD", cwd=source_root)
+    repository = tmp_path / "exact-current-tree"
+    _run(
+        "git",
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        "--no-checkout",
+        str(source_root),
+        str(repository),
+        cwd=tmp_path,
+    )
+    _run("git", "checkout", "--quiet", "--detach", source_sha, cwd=repository)
+    tree_sha = _run(
+        "git",
+        "rev-parse",
+        f"{source_sha}^{{tree}}",
+        cwd=repository,
+    )
+    (repository / "untracked-local.py").write_text(
+        "raise RuntimeError('local only')\n",
+        encoding="utf-8",
+    )
+    (repository / "local-review.diff").write_text(
+        "local only\n",
+        encoding="utf-8",
+    )
+    operation_root = tmp_path / "current-tree-operation"
+    operation_root.mkdir()
+
+    context_root, manifest_path, _, count = (
+        build_helper.export_exact_git_context(
+            repository_root=repository,
+            source_sha=source_sha,
+            source_tree_sha=tree_sha,
+            operation_root=operation_root,
+        )
+    )
+    document = json.loads(manifest_path.read_text(encoding="ascii"))
+    paths = {record["path"] for record in document["files"]}
+
+    assert document["source_sha"] == source_sha
+    assert document["tree_sha"] == tree_sha
+    assert "agent/redact.py" in paths
+    assert "tests/gateway/test_platform_base.py" in paths
+    assert "untracked-local.py" not in paths
+    assert "local-review.diff" not in paths
+    assert count == len(paths)
+    assert build_helper.inspect_exported_context(
+        context_root=context_root,
+        manifest_path=manifest_path,
+        expected_source_sha=source_sha,
+        expected_tree_sha=tree_sha,
+    ) == count
+
+    _run("git", "config", "user.name", "Synthetic Test", cwd=repository)
+    _run(
+        "git",
+        "config",
+        "user.email",
+        "synthetic@example.invalid",
+        cwd=repository,
+    )
+    (repository / "000-synthetic-secret.py").write_text(
+        synthetic_assignment(key="TEST_API_KEY"),
+        encoding="utf-8",
+    )
+    _run("git", "add", "000-synthetic-secret.py", cwd=repository)
+    _run("git", "commit", "--quiet", "-m", "synthetic secret", cwd=repository)
+    denied_sha = _run("git", "rev-parse", "HEAD", cwd=repository)
+    denied_tree = _run(
+        "git",
+        "rev-parse",
+        f"{denied_sha}^{{tree}}",
+        cwd=repository,
+    )
+    denied_operation = tmp_path / "denied-current-tree-operation"
+    denied_operation.mkdir()
+
+    with pytest.raises(
+        build_helper.BuildContractError,
+        match="^CONTEXT_SECRET_CONTENT_DENIED$",
+    ):
+        build_helper.export_exact_git_context(
+            repository_root=repository,
+            source_sha=denied_sha,
+            source_tree_sha=denied_tree,
+            operation_root=denied_operation,
+        )
+
+
+def test_synthetic_git_tree_and_exported_manifest_match(tmp_path: Path) -> None:
     with _prepared(tmp_path) as inputs:
         document = json.loads(inputs.context_manifest.read_text(encoding="ascii"))
         paths = {record["path"] for record in document["files"]}
@@ -257,6 +359,173 @@ def test_git_lfs_pointer_fails_closed(tmp_path: Path) -> None:
             source_tree_sha=tree_sha,
             operation_root=operation_root,
         )
+
+
+def _guard_external_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, ...]]:
+    original_run = subprocess.run
+    calls: list[tuple[str, ...]] = []
+
+    def guarded_run(arguments, *args, **kwargs):
+        command = tuple(str(part) for part in arguments)
+        calls.append(command)
+        if not command or command[0] != "git":
+            raise AssertionError("non-Git command attempted")
+        return original_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(build_helper.subprocess, "run", guarded_run)
+    return calls
+
+
+def _commit_context_case(
+    tmp_path: Path,
+    *,
+    relative_path: str,
+    content: str | bytes,
+) -> tuple[Path, str, str, Path]:
+    repository, _, _, _ = _repository_and_context(tmp_path)
+    candidate = repository.joinpath(*relative_path.split("/"))
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        candidate.write_bytes(content)
+    else:
+        candidate.write_text(content, encoding="utf-8")
+    _run("git", "add", relative_path, cwd=repository)
+    _run("git", "commit", "--quiet", "-m", "synthetic context case", cwd=repository)
+    source_sha = _run("git", "rev-parse", "HEAD", cwd=repository)
+    tree_sha = _run(
+        "git",
+        "rev-parse",
+        f"{source_sha}^{{tree}}",
+        cwd=repository,
+    )
+    operation_root = tmp_path / "context-case-operation"
+    operation_root.mkdir()
+    return repository, source_sha, tree_sha, operation_root
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("variable-name.py", "GEMINI_API_KEY\n"),
+        ("redaction-pattern.py", redaction_pattern_fixture()),
+        ("placeholder.py", 'API_KEY = "<API_KEY>"\n'),
+        ("marker-only.py", marker_only_private_key_fixture()),
+    ],
+)
+def test_production_context_scanner_accepts_legitimate_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    relative_path: str,
+    content: str,
+) -> None:
+    calls = _guard_external_commands(monkeypatch)
+    repository, source_sha, tree_sha, operation_root = _commit_context_case(
+        tmp_path,
+        relative_path=relative_path,
+        content=content,
+    )
+
+    context_root, manifest_path, _, count = (
+        build_helper.export_exact_git_context(
+            repository_root=repository,
+            source_sha=source_sha,
+            source_tree_sha=tree_sha,
+            operation_root=operation_root,
+        )
+    )
+
+    assert count > 0
+    assert manifest_path.is_file()
+    assert context_root.joinpath(*relative_path.split("/")).is_file()
+    assert calls
+    assert all(command[0] == "git" for command in calls)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content", "error_code"),
+    [
+        (
+            "ordinary.py",
+            synthetic_assignment(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "agent/redact.py",
+            synthetic_assignment(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "tests/test_equivalent.py",
+            synthetic_assignment(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "credential-url.py",
+            synthetic_credential_url(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "credential.txt",
+            synthetic_private_key_block(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "high-entropy.py",
+            synthetic_assignment(
+                key="SECRET",
+                value=synthetic_high_entropy_value(),
+            ),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "adjacent.py",
+            'API_KEY = "<API_KEY>"\n' + synthetic_assignment(key="BACKUP_TOKEN"),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (".env", "SAFE=1\n", "CONTEXT_SECRET_FILE_DENIED"),
+        ("src/id_rsa", "synthetic marker\n", "CONTEXT_SECRET_FILE_DENIED"),
+        (
+            "binary.dat",
+            b"\x00\xff" + synthetic_assignment().encode(),
+            "CONTEXT_SECRET_CONTENT_DENIED",
+        ),
+        (
+            "invalid-text.txt",
+            b"\xff\xfeinvalid-text",
+            "CONTEXT_SECRET_SCAN_FAILED",
+        ),
+    ],
+)
+def test_production_context_scanner_denies_secrets_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    relative_path: str,
+    content: str | bytes,
+    error_code: str,
+) -> None:
+    calls = _guard_external_commands(monkeypatch)
+    repository, source_sha, tree_sha, operation_root = _commit_context_case(
+        tmp_path,
+        relative_path=relative_path,
+        content=content,
+    )
+
+    with pytest.raises(build_helper.BuildContractError, match=f"^{error_code}$"):
+        build_helper.export_exact_git_context(
+            repository_root=repository,
+            source_sha=source_sha,
+            source_tree_sha=tree_sha,
+            operation_root=operation_root,
+        )
+
+    assert calls
+    assert all(command[0] == "git" for command in calls)
+    assert capsys.readouterr() == ("", "")
 
 
 def test_artifact_context_inside_repository_is_denied(tmp_path: Path) -> None:

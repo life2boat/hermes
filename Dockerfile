@@ -181,7 +181,8 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
 
 # ---------- Verified Playwright browser artifact ----------
 # `playwright_artifact` is a mandatory read-only BuildKit named context with
-# exactly /manifest.json and /browser-archive. Acquisition and approval happen
+# exactly /manifest.json, /browser-archive, and /playwright-wheel.
+# The wheel hash must be authorized by uv.lock. Acquisition and approval happen
 # outside this repository. The expected manifest digest has no default.
 ARG PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256
 RUN --mount=type=bind,from=playwright_artifact,source=/,target=/tmp/playwright-artifact,ro \
@@ -199,6 +200,8 @@ RUN --mount=type=bind,from=playwright_artifact,source=/,target=/tmp/playwright-a
     .venv/bin/python -m scripts.install_pinned_playwright_artifact \
         --manifest /tmp/playwright-artifact/manifest.json \
         --archive /tmp/playwright-artifact/browser-archive \
+        --lockfile ./uv.lock \
+        --wheel /tmp/playwright-artifact/playwright-wheel \
         --expected-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256}" \
         --platform "${playwright_platform}"
 

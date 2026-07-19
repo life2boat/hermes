@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 UV_LOCK = REPO_ROOT / "uv.lock"
 SCHEMA = REPO_ROOT / "schemas" / "playwright-artifact-manifest.schema.json"
@@ -32,6 +33,8 @@ def test_dockerfile_uses_only_verified_named_artifact_context() -> None:
     )
     assert "--manifest /tmp/playwright-artifact/manifest.json" in text
     assert "--archive /tmp/playwright-artifact/browser-archive" in text
+    assert "--lockfile ./uv.lock" in text
+    assert "--wheel /tmp/playwright-artifact/playwright-wheel" in text
     assert "--expected-manifest-sha256" in text
     assert "COPY --from=playwright_artifact" not in text
     assert "rm -rf /tmp/playwright-artifact" not in text
@@ -72,14 +75,19 @@ def test_playwright_runtime_is_exactly_pinned_and_locked_with_hashes() -> None:
     )[1].split("[[package]]", 1)[0]
     assert "sha256:" in playwright_block
     assert "wheels = [" in playwright_block
+    assert "manylinux1_x86_64.whl" in playwright_block
+    assert "manylinux2014_aarch64.whl" in playwright_block
 
 
-def test_manifest_schema_is_strict_and_requires_every_identity_field() -> None:
+def test_manifest_schema_is_strict_and_requires_wheel_and_layout_identity() -> None:
     schema = json.loads(_text(SCHEMA))
     required = {
         "manifest_version",
         "playwright_package",
         "playwright_package_version",
+        "playwright_wheel_filename",
+        "playwright_wheel_size",
+        "playwright_wheel_sha256",
         "browser_family",
         "browser_revision",
         "platform",
@@ -87,6 +95,7 @@ def test_manifest_schema_is_strict_and_requires_every_identity_field() -> None:
         "archive_size",
         "archive_sha256",
         "archive_format",
+        "archive_root",
         "cache_root",
         "expected_executable_relative_path",
         "source_kind",
@@ -95,7 +104,7 @@ def test_manifest_schema_is_strict_and_requires_every_identity_field() -> None:
 
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == required
-    assert schema["properties"]["manifest_version"]["const"] == 1
+    assert schema["properties"]["manifest_version"]["const"] == 2
     assert schema["properties"]["playwright_package"]["const"] == "playwright"
     assert schema["properties"]["browser_family"]["const"] == (
         "chromium-headless-shell"
@@ -106,12 +115,12 @@ def test_manifest_schema_is_strict_and_requires_every_identity_field() -> None:
     assert schema["properties"]["archive_sha256"]["pattern"] == (
         "^[0-9a-f]{64}$"
     )
-    assert schema["properties"]["source_reference"]["not"]["pattern"] == (
-        "[Ll][Aa][Tt][Ee][Ss][Tt]"
+    assert schema["properties"]["playwright_wheel_sha256"]["pattern"] == (
+        "^[0-9a-f]{64}$"
     )
 
 
-def test_browser_revision_is_derived_and_not_encoded_as_previous_observation() -> None:
+def test_browser_revision_is_derived_from_verified_wheel_not_hard_coded() -> None:
     source_contract = _text(CONTRACT_SCRIPT)
     source_installer = _text(INSTALLER_SCRIPT)
     source_build = _text(BUILD_HELPER)
@@ -119,13 +128,16 @@ def test_browser_revision_is_derived_and_not_encoded_as_previous_observation() -
     schema = _text(SCHEMA)
 
     assert "browsers.json" in source_contract
+    assert "load_locked_wheel" in source_contract
+    assert "_metadata_from_wheel_bytes" in source_contract
     assert "revisionOverrides" in source_contract
+    assert "load_installed_contract(args.platform)" not in source_installer
     assert "1228" not in "\n".join(
         (source_contract, source_installer, source_build, dockerfile, schema)
     )
 
 
-def test_no_browser_archive_or_manifest_instance_is_committed() -> None:
+def test_no_browser_archive_manifest_or_wheel_instance_is_committed() -> None:
     completed = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files"],
         check=True,
@@ -135,22 +147,53 @@ def test_no_browser_archive_or_manifest_instance_is_committed() -> None:
     )
     tracked = set(completed.stdout.splitlines())
 
-    assert "browser-archive" not in tracked
-    assert not any(path.endswith("/browser-archive") for path in tracked)
+    for fixed_name in ("browser-archive", "playwright-wheel"):
+        assert fixed_name not in tracked
+        assert not any(path.endswith(f"/{fixed_name}") for path in tracked)
     assert not any(
         path.endswith("/manifest.json") and "playwright-artifact" in path
         for path in tracked
     )
 
 
-def test_canonical_build_helper_exposes_check_and_explicit_build_only() -> None:
+def test_canonical_build_helper_exports_exact_git_tree_only() -> None:
     source = _text(BUILD_HELPER)
 
     assert 'choices=("check", "build")' in source
     assert 'if args.mode == "build":' in source
+    assert "git-tree-context" in source
+    assert '"archive"' in source
+    assert "inspect_exported_context" in source
+    assert "inputs.build_context" in source
+    assert "str(inputs.repository_root)" not in source.split(
+        "def docker_build_command", 1
+    )[1].split("def _parser", 1)[0]
     assert "--artifact-context" in source
     assert "--expected-manifest-sha256" in source
     assert "--expected-source-sha" in source
     assert "--image-tag" in source
     assert "--skip" not in source
     assert "--force" not in source
+
+
+def test_dockerignore_contains_defense_in_depth_local_artifact_exclusions() -> None:
+    text = _text(DOCKERIGNORE)
+    required = (
+        "__pycache__/",
+        "*.pyc",
+        "*.pyo",
+        ".pytest_cache/",
+        ".pytest-cache/",
+        ".ruff_cache/",
+        "*.egg-info/",
+        "*.patch",
+        "*.diff",
+        ".codex-remote-edit/",
+        "evidence/",
+        "review-mirrors/",
+        "deploy/reviews/",
+        "Thumbs.db",
+        "$RECYCLE.BIN/",
+    )
+    for pattern in required:
+        assert pattern in text

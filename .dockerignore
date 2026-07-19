@@ -8,6 +8,7 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 *.pyc
+*.pyo
 *$py.class
 *.so
 .Python
@@ -38,6 +39,20 @@ ui-tui/packages/hermes-ink/dist/
 .github/
 .pytest_cache/
 **/.pytest_cache/
+.pytest-cache/
+**/.pytest-cache/
+.ruff_cache/
+**/.ruff_cache/
+.codex-remote-edit/
+**/.codex-remote-edit/
+*.patch
+*.diff
+evidence/
+**/evidence/
+review-mirrors/
+**/review-mirrors/
+deploy/reviews/
+**/deploy/reviews/
 .coverage
 htmlcov/
 
@@ -50,6 +65,11 @@ htmlcov/
 .idea/
 *.swp
 *.swo
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+System Volume Information/
+*.stackdump
 
 # Runtime and database artifacts
 *.db

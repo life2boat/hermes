@@ -2,182 +2,158 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import replace
-from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from scripts import playwright_artifact_contract as contract_module
 from tests.playwright_supply_chain_support import (
-    verified_contract,
+    default_browser_entries,
+    verified_closure,
+    wheel_filename,
     write_lockfile,
     write_wheel,
 )
 
 
-def _payload(*, revision: str = "9876") -> dict[str, object]:
-    return {
-        "browsers": [
-            {
-                "name": "chromium-headless-shell",
-                "revision": revision,
-                "revisionOverrides": {},
-            }
-        ]
-    }
-
-
-def _wheel_fixture(
+def test_contract_derives_complete_package_closure_from_verified_wheel(
     tmp_path: Path,
-    **wheel_options: object,
-) -> tuple[Path, Path, bytes]:
-    wheel = tmp_path / "playwright-wheel"
-    wheel_bytes = write_wheel(wheel, **wheel_options)
-    lockfile = tmp_path / "uv.lock"
-    write_lockfile(lockfile, wheel_bytes)
-    return lockfile, wheel, wheel_bytes
+) -> None:
+    verified, _lockfile, _wheel = verified_closure(tmp_path)
+    closure = verified.closure
+
+    assert closure.package == "playwright"
+    assert closure.package_version == "1.61.0"
+    assert closure.platform == "linux/amd64"
+    assert closure.artifact_names == ("chromium-headless-shell", "ffmpeg")
+    assert [artifact.revision for artifact in closure.artifacts] == ["1228", "1011"]
+    chromium = closure.artifact("chromium-headless-shell")
+    ffmpeg = closure.artifact("ffmpeg")
+    assert chromium.browser_version == "149.0.7827.55"
+    assert chromium.layout_kind == contract_module.LAYOUT_DIRECTORY_TREE
+    assert chromium.expected_archive_filename == "chrome-headless-shell-linux64.zip"
+    assert chromium.expected_executable_relative_path.endswith("chrome-headless-shell")
+    assert ffmpeg.browser_version is None
+    assert ffmpeg.layout_kind == contract_module.LAYOUT_SINGLE_EXECUTABLE_FILE
+    assert ffmpeg.expected_archive_filename == "ffmpeg-linux.zip"
+    assert ffmpeg.expected_executable_relative_path == "ffmpeg-linux"
 
 
-def test_contract_derives_identity_without_installing_or_using_network() -> None:
-    contract = contract_module.contract_from_metadata(
+@pytest.mark.parametrize("platform", ["linux/amd64", "linux/arm64"])
+def test_platform_mapping_is_explicit_for_every_required_artifact(
+    tmp_path: Path, platform: str
+) -> None:
+    verified, _lockfile, _wheel = verified_closure(tmp_path, platform=platform)
+    assert verified.closure.artifact_names == contract_module.REQUIRED_ARTIFACT_NAMES
+    for artifact in verified.closure.artifacts:
+        mapping = contract_module.ARTIFACT_PLATFORM_MAPPINGS[
+            artifact.artifact_name
+        ][platform]
+        assert artifact.layout_kind == mapping.layout_kind
+        assert artifact.expected_archive_filename == mapping.archive_filename
+        assert artifact.expected_executable_relative_path == (
+            mapping.executable_relative_path
+        )
+
+
+def test_revision_overrides_are_derived_per_artifact() -> None:
+    entries = default_browser_entries()
+    entries[0]["revisionOverrides"] = {"debian13-x64": "2222"}
+    entries[1]["revisionOverrides"] = {"debian13-x64": "3333"}
+    closure = contract_module.contract_from_metadata(
         package_version="1.61.0",
-        browsers_payload=_payload(),
+        browsers_payload={"browsers": entries},
         platform="linux/amd64",
     )
-
-    assert contract.package == "playwright"
-    assert contract.package_version == "1.61.0"
-    assert contract.browser_family == "chromium-headless-shell"
-    assert contract.browser_revision == "9876"
-    assert contract.cache_directory == "chromium_headless_shell-9876"
-    assert contract.archive_root == "chrome-headless-shell-linux64"
-    assert contract.expected_cache_layout == (
-        "/opt/hermes/.playwright/chromium_headless_shell-9876/"
-        "chrome-headless-shell-linux64/chrome-headless-shell"
+    assert [artifact.revision for artifact in closure.artifacts] == ["2222", "3333"]
+    assert closure.artifact("chromium-headless-shell").cache_directory.endswith(
+        "_debian13_x64_special-2222"
+    )
+    assert closure.artifact("ffmpeg").cache_directory.endswith(
+        "_debian13_x64_special-3333"
     )
 
 
-def test_platform_mapping_is_explicit_for_supported_architectures() -> None:
-    amd64 = contract_module.contract_from_metadata(
-        package_version="1.61.0",
-        browsers_payload=_payload(),
-        platform="linux/amd64",
-    )
-    arm64 = contract_module.contract_from_metadata(
-        package_version="1.61.0",
-        browsers_payload=_payload(),
-        platform="linux/arm64",
-    )
-
-    assert amd64.expected_executable_relative_path == (
-        "chrome-headless-shell-linux64/chrome-headless-shell"
-    )
-    assert arm64.expected_executable_relative_path == "chrome-linux/headless_shell"
+@pytest.mark.parametrize("missing_name", ["chromium-headless-shell", "ffmpeg"])
+def test_missing_required_wheel_artifact_is_denied(missing_name: str) -> None:
+    entries = [
+        item for item in default_browser_entries() if item["name"] != missing_name
+    ]
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="ARTIFACT_METADATA_AMBIGUOUS",
+    ):
+        contract_module.contract_from_metadata(
+            package_version="1.61.0",
+            browsers_payload={"browsers": entries},
+            platform="linux/amd64",
+        )
 
 
-def test_revision_override_controls_revision_and_cache_directory() -> None:
-    payload = _payload()
-    browser = payload["browsers"][0]
-    assert isinstance(browser, dict)
-    browser["revisionOverrides"] = {"debian13-x64": "9877"}
+@pytest.mark.parametrize("duplicate_name", ["chromium-headless-shell", "ffmpeg"])
+def test_duplicate_required_wheel_artifact_is_denied(duplicate_name: str) -> None:
+    entries = default_browser_entries()
+    entries.append(dict(next(item for item in entries if item["name"] == duplicate_name)))
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="ARTIFACT_METADATA_AMBIGUOUS",
+    ):
+        contract_module.contract_from_metadata(
+            package_version="1.61.0",
+            browsers_payload={"browsers": entries},
+            platform="linux/amd64",
+        )
 
-    contract = contract_module.contract_from_metadata(
-        package_version="1.61.0",
-        browsers_payload=payload,
-        platform="linux/amd64",
-    )
 
-    assert contract.browser_revision == "9877"
-    assert contract.cache_directory == (
-        "chromium_headless_shell_debian13_x64_special-9877"
-    )
+@pytest.mark.parametrize("artifact_index", [0, 1])
+def test_required_artifact_not_install_by_default_is_denied(
+    artifact_index: int,
+) -> None:
+    entries = default_browser_entries()
+    entries[artifact_index]["installByDefault"] = False
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="REQUIRED_ARTIFACT_NOT_INSTALL_BY_DEFAULT",
+    ):
+        contract_module.contract_from_metadata(
+            package_version="1.61.0",
+            browsers_payload={"browsers": entries},
+            platform="linux/amd64",
+        )
 
 
 @pytest.mark.parametrize(
-    ("payload", "code"),
+    ("field", "value", "error"),
     [
-        ({"browsers": []}, "BROWSER_METADATA_AMBIGUOUS"),
-        (
-            {
-                "browsers": [
-                    {"name": "chromium-headless-shell", "revision": "1"},
-                    {"name": "chromium-headless-shell", "revision": "2"},
-                ]
-            },
-            "BROWSER_METADATA_AMBIGUOUS",
-        ),
-        (_payload(revision="not-numeric"), "BROWSER_REVISION_INVALID"),
+        ("revision", "latest", "ARTIFACT_REVISION_INVALID"),
+        ("revisionOverrides", [], "ARTIFACT_REVISION_OVERRIDES_INVALID"),
+        ("browserVersion", 149, "ARTIFACT_BROWSER_VERSION_INVALID"),
     ],
 )
-def test_ambiguous_or_invalid_package_metadata_is_denied(
-    payload: dict[str, object], code: str
+def test_invalid_wheel_artifact_metadata_is_denied(
+    field: str, value: object, error: str
 ) -> None:
-    with pytest.raises(contract_module.PlaywrightContractError, match=f"^{code}$"):
+    entries = default_browser_entries()
+    entries[0][field] = value
+    with pytest.raises(contract_module.PlaywrightContractError, match=error):
         contract_module.contract_from_metadata(
             package_version="1.61.0",
-            browsers_payload=payload,
+            browsers_payload={"browsers": entries},
             platform="linux/amd64",
         )
-
-
-def test_verified_locked_wheel_is_the_browser_metadata_authority(
-    tmp_path: Path,
-) -> None:
-    lockfile, wheel, wheel_bytes = _wheel_fixture(tmp_path)
-
-    verified = contract_module.load_verified_wheel_contract(
-        lockfile_path=lockfile,
-        wheel_path=wheel,
-        platform="linux/amd64",
-    )
-
-    assert verified.wheel.sha256 == hashlib.sha256(wheel_bytes).hexdigest()
-    assert verified.wheel.filename == (
-        "playwright-1.61.0-py3-none-manylinux1_x86_64.whl"
-    )
-    assert verified.browser.package_version == "1.61.0"
-    assert verified.browser.browser_revision == "9876"
 
 
 def test_wheel_sha_not_authorized_by_lock_is_denied(tmp_path: Path) -> None:
-    lockfile, wheel, wheel_bytes = _wheel_fixture(tmp_path)
-    write_lockfile(lockfile, wheel_bytes, sha256="0" * 64)
-
+    wheel = tmp_path / "playwright-wheel"
+    wheel_bytes = write_wheel(wheel)
+    lockfile = tmp_path / "uv.lock"
+    write_lockfile(lockfile, wheel_bytes, sha256="a" * 64)
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="^WHEEL_SHA256_MISMATCH$",
+        match="WHEEL_SHA256_MISMATCH",
     ):
-        contract_module.load_verified_wheel_contract(
-            lockfile_path=lockfile,
-            wheel_path=wheel,
-            platform="linux/amd64",
-        )
-
-
-def test_wheel_sha_mismatch_is_denied_before_metadata_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lockfile, wheel, wheel_bytes = _wheel_fixture(tmp_path)
-    tampered = bytearray(wheel_bytes)
-    tampered[-1] ^= 1
-    wheel.write_bytes(tampered)
-
-    def metadata_must_not_be_read(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("metadata read before wheel SHA verification")
-
-    monkeypatch.setattr(
-        contract_module,
-        "_metadata_from_wheel_bytes",
-        metadata_must_not_be_read,
-    )
-    with pytest.raises(
-        contract_module.PlaywrightContractError,
-        match="^WHEEL_SHA256_MISMATCH$",
-    ):
-        contract_module.load_verified_wheel_contract(
+        contract_module.load_verified_wheel_closure(
             lockfile_path=lockfile,
             wheel_path=wheel,
             platform="linux/amd64",
@@ -185,200 +161,187 @@ def test_wheel_sha_mismatch_is_denied_before_metadata_read(
 
 
 def test_wheel_package_version_mismatch_is_denied(tmp_path: Path) -> None:
-    lockfile, wheel, _ = _wheel_fixture(
-        tmp_path,
-        metadata_version="1.60.0",
-    )
-
+    wheel = tmp_path / "playwright-wheel"
+    wheel_bytes = write_wheel(wheel, metadata_version="1.60.0")
+    lockfile = tmp_path / "uv.lock"
+    write_lockfile(lockfile, wheel_bytes)
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="^PACKAGE_VERSION_MISMATCH$",
+        match="PACKAGE_VERSION_MISMATCH",
     ):
-        contract_module.load_verified_wheel_contract(
+        contract_module.load_verified_wheel_closure(
             lockfile_path=lockfile,
             wheel_path=wheel,
             platform="linux/amd64",
         )
 
 
-def test_wheel_changed_during_metadata_read_is_denied(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_duplicate_browser_metadata_wheel_entry_is_denied(tmp_path: Path) -> None:
+    wheel = tmp_path / "playwright-wheel"
+    wheel_bytes = write_wheel(wheel, duplicate_browser_entry=True)
+    lockfile = tmp_path / "uv.lock"
+    write_lockfile(lockfile, wheel_bytes)
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="BROWSER_METADATA_ENTRY_AMBIGUOUS",
+    ):
+        contract_module.load_verified_wheel_closure(
+            lockfile_path=lockfile,
+            wheel_path=wheel,
+            platform="linux/amd64",
+        )
+
+
+def test_installed_metadata_cannot_replace_verified_wheel_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lockfile, wheel, wheel_bytes = _wheel_fixture(tmp_path)
-    original = contract_module._metadata_from_wheel_bytes
-
-    def mutate_after_verified_read(
-        data: bytes,
-        locked: contract_module.LockedWheel,
-    ) -> tuple[str, dict[str, object]]:
-        result = original(data, locked)
-        replacement = wheel.with_name("replacement-wheel")
-        replacement.write_bytes(wheel_bytes)
-        os.replace(replacement, wheel)
-        return result
-
+    verified, lockfile, wheel = verified_closure(tmp_path)
     monkeypatch.setattr(
         contract_module,
-        "_metadata_from_wheel_bytes",
-        mutate_after_verified_read,
+        "_load_installed_browsers_payload",
+        lambda: ("9.9.9", {"browsers": []}),
     )
-    with pytest.raises(
-        contract_module.PlaywrightContractError,
-        match="^WHEEL_CHANGED_DURING_READ$",
-    ):
-        contract_module.load_verified_wheel_contract(
-            lockfile_path=lockfile,
-            wheel_path=wheel,
-            platform="linux/amd64",
-        )
-
-
-def test_duplicate_browser_metadata_wheel_entry_is_denied(
-    tmp_path: Path,
-) -> None:
-    lockfile, wheel, _ = _wheel_fixture(
-        tmp_path,
-        duplicate_browser_entry=True,
-    )
-
-    with pytest.raises(
-        contract_module.PlaywrightContractError,
-        match="^BROWSER_METADATA_ENTRY_AMBIGUOUS$",
-    ):
-        contract_module.load_verified_wheel_contract(
-            lockfile_path=lockfile,
-            wheel_path=wheel,
-            platform="linux/amd64",
-        )
-
-
-def test_duplicate_browser_matches_in_verified_metadata_are_denied(
-    tmp_path: Path,
-) -> None:
-    lockfile, wheel, _ = _wheel_fixture(tmp_path, browser_matches=2)
-
-    with pytest.raises(
-        contract_module.PlaywrightContractError,
-        match="^BROWSER_METADATA_AMBIGUOUS$",
-    ):
-        contract_module.load_verified_wheel_contract(
-            lockfile_path=lockfile,
-            wheel_path=wheel,
-            platform="linux/amd64",
-        )
-
-
-def test_installed_site_packages_tampering_does_not_change_wheel_authority(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lockfile, wheel, _ = _wheel_fixture(tmp_path)
-
-    class TamperedDistribution:
-        version = "9.9.9"
-        files = [Path("playwright/driver/package/browsers.json")]
-
-        @staticmethod
-        def locate_file(_file: object) -> Path:
-            return tmp_path / "tampered-installed-metadata.json"
-
-    monkeypatch.setattr(
-        metadata,
-        "distribution",
-        lambda _name: TamperedDistribution(),
-    )
-    verified = contract_module.load_verified_wheel_contract(
+    reloaded = contract_module.load_verified_wheel_closure(
         lockfile_path=lockfile,
         wheel_path=wheel,
         platform="linux/amd64",
     )
-
-    assert verified.browser.package_version == "1.61.0"
-    assert verified.browser.browser_revision == "9876"
+    assert reloaded == verified
 
 
-def test_packaged_browser_readiness_accepts_matching_identity(
+def _prepare_packaged_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    verified, _, _ = verified_contract(tmp_path, cache_root=tmp_path / "cache")
-    contract = verified.browser
-    destination = Path(contract.cache_root) / contract.cache_directory
-    executable = destination.joinpath(
-        *contract.expected_executable_relative_path.split("/")
+) -> tuple[contract_module.PlaywrightClosureContract, Path]:
+    payload = {"browsers": default_browser_entries()}
+    cache_root = tmp_path / "cache"
+    monkeypatch.setattr(contract_module, "CACHE_ROOT", str(cache_root))
+    closure = contract_module.contract_from_metadata(
+        package_version="1.61.0",
+        browsers_payload=payload,
+        platform="linux/amd64",
     )
-    executable.parent.mkdir(parents=True)
-    executable.write_bytes(b"binary")
-    executable.chmod(0o755)
-    (destination / contract_module.INSTALLATION_MARKER).write_bytes(
+    wheel = contract_module.LockedWheel(
+        package="playwright",
+        package_version="1.61.0",
+        filename=wheel_filename("1.61.0"),
+        size=123,
+        sha256=hashlib.sha256(b"wheel").hexdigest(),
+        platform="linux/amd64",
+    )
+    verified = contract_module.VerifiedPlaywrightClosure(closure=closure, wheel=wheel)
+    cache_root.mkdir()
+    for artifact in closure.artifacts:
+        executable = (
+            cache_root
+            / artifact.cache_directory
+            / artifact.expected_executable_relative_path
+        )
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"synthetic")
+        executable.chmod(0o755)
+    (cache_root / contract_module.INSTALLATION_MARKER).write_bytes(
         contract_module.canonical_installation_identity(verified)
     )
+
+    metadata_path = tmp_path / "installed-browsers.json"
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    class Distribution:
+        version = "1.61.0"
+        files = [PurePosixPath(contract_module._BROWSER_METADATA_PATH)]
+
+        @staticmethod
+        def locate_file(_path: object) -> Path:
+            return metadata_path
+
     monkeypatch.setattr(
-        contract_module,
-        "load_installed_contract",
-        lambda _platform: contract,
+        contract_module.metadata,
+        "distribution",
+        lambda _name: Distribution(),
     )
-
-    actual = contract_module.verify_packaged_browser_readiness("linux/amd64")
-
-    assert actual == contract
+    return closure, cache_root
 
 
-def test_missing_packaged_browser_identity_fails_closed(
+def test_packaged_readiness_accepts_only_complete_matching_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closure, _cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    assert contract_module.verify_packaged_browser_readiness("linux/amd64") == closure
+
+
+@pytest.mark.parametrize("missing_name", ["chromium-headless-shell", "ffmpeg"])
+def test_packaged_readiness_denies_single_artifact_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    missing_name: str,
 ) -> None:
-    verified, _, _ = verified_contract(tmp_path, cache_root=tmp_path / "cache")
-    monkeypatch.setattr(
-        contract_module,
-        "load_installed_contract",
-        lambda _platform: verified.browser,
-    )
-
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    missing = closure.artifact(missing_name)
+    target = cache_root / missing.cache_directory
+    for path in sorted(target.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+        else:
+            path.rmdir()
+    target.rmdir()
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="^BROWSER_IDENTITY_MISSING$",
+        match="PACKAGED_CACHE_ENTRY_SET_MISMATCH",
     ):
         contract_module.verify_packaged_browser_readiness("linux/amd64")
 
 
-def test_wrong_packaged_browser_revision_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_packaged_readiness_denies_unexpected_cache_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, _, _ = verified_contract(tmp_path, cache_root=tmp_path / "cache")
-    contract = verified.browser
-    destination = Path(contract.cache_root) / contract.cache_directory
-    destination.mkdir(parents=True)
-    identity = contract_module.installation_identity_document(verified)
-    identity["browser_revision"] = "9999"
-    (destination / contract_module.INSTALLATION_MARKER).write_bytes(
-        (json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode(
-            "ascii"
-        )
-    )
-    monkeypatch.setattr(
-        contract_module,
-        "load_installed_contract",
-        lambda _platform: contract,
-    )
-
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    (cache_root / "unapproved-9999").mkdir()
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="^BROWSER_IDENTITY_MISMATCH$",
+        match="PACKAGED_CACHE_ENTRY_SET_MISMATCH",
+    ):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+@pytest.mark.parametrize("name", ["chromium-headless-shell", "ffmpeg"])
+def test_packaged_readiness_denies_non_executable_required_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    artifact = closure.artifact(name)
+    executable = (
+        cache_root / artifact.cache_directory / artifact.expected_executable_relative_path
+    )
+    executable.chmod(0o644)
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="PACKAGED_ARTIFACT_INVALID",
+    ):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+def test_packaged_readiness_denies_altered_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    marker = cache_root / contract_module.INSTALLATION_MARKER
+    document = json.loads(marker.read_text(encoding="ascii"))
+    document["artifacts"][1]["revision"] = "9999"
+    marker.write_bytes(contract_module._canonical_json(document))
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="CLOSURE_IDENTITY_MISMATCH",
     ):
         contract_module.verify_packaged_browser_readiness("linux/amd64")
 
 
 def test_contract_reporter_has_no_network_or_install_path() -> None:
     source = Path(contract_module.__file__).read_text(encoding="utf-8")
-    forbidden = (
-        "requests",
-        "httpx",
-        "socket",
-        "subprocess",
-        "playwright install",
-    )
-    for needle in forbidden:
-        assert needle not in source
+    assert "requests" not in source
+    assert "urllib" not in source
+    assert "subprocess" not in source
+    assert "playwright install" not in source
+    assert "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT" not in source

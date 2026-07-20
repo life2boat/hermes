@@ -1,641 +1,661 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
+import shutil
 import stat
-import tarfile
-import warnings
 import zipfile
-from dataclasses import replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from scripts import install_pinned_playwright_artifact as installer
-from scripts.playwright_artifact_contract import VerifiedBrowserContract
+from scripts.playwright_artifact_contract import VerifiedPlaywrightClosure
 from tests.playwright_supply_chain_support import (
-    manifest_document,
-    verified_contract,
-    write_browser_archive,
+    closure_manifest_document,
+    write_artifact_archive,
+    write_closure_archives,
+    write_closure_context,
     write_manifest,
+    verified_closure,
 )
 
 
-def _fixture(
-    tmp_path: Path,
-    *,
-    executable: bool = True,
-    include_executable: bool = True,
-    extra_entries: list[tuple[str, bytes, int, int]] | None = None,
-) -> tuple[
-    VerifiedBrowserContract,
-    Path,
-    Path,
-    dict[str, object],
-    str,
-]:
-    verified, _, _ = verified_contract(tmp_path, cache_root=tmp_path / "cache")
-    archive = tmp_path / "browser-archive"
-    write_browser_archive(
-        archive,
+@dataclass
+class ClosureFixture:
+    verified: VerifiedPlaywrightClosure
+    context: Path
+    artifacts_root: Path
+    manifest: Path
+    document: dict[str, object]
+    manifest_sha256: str
+    cache_root: Path
+
+
+def _fixture(tmp_path: Path) -> ClosureFixture:
+    cache_parent = tmp_path / "cache-parent"
+    cache_parent.mkdir(mode=0o700)
+    cache_root = cache_parent / "ms-playwright"
+    verified, _lockfile, wheel = verified_closure(
+        tmp_path,
+        cache_root=cache_root,
+    )
+    archives = write_closure_archives(tmp_path / "archives", verified)
+    document = closure_manifest_document(verified, archives)
+    context = tmp_path / "artifact-context"
+    manifest_sha256 = write_closure_context(
+        context,
         verified,
-        executable=executable,
-        include_executable=include_executable,
-        extra_entries=extra_entries,
+        wheel,
+        archives,
+        document=document,
     )
-    document = manifest_document(verified, archive)
-    manifest = tmp_path / "manifest.json"
-    manifest_sha = write_manifest(manifest, document)
-    return verified, manifest, archive, document, manifest_sha
+    return ClosureFixture(
+        verified=verified,
+        context=context,
+        artifacts_root=context / "artifacts",
+        manifest=context / "closure.json",
+        document=document,
+        manifest_sha256=manifest_sha256,
+        cache_root=cache_root,
+    )
 
 
-def _assert_failure(
-    code: str,
-    *,
-    verified: VerifiedBrowserContract,
-    manifest: Path,
-    archive: Path,
-    manifest_sha: str,
+def _artifact_item(env: ClosureFixture, name: str) -> dict[str, object]:
+    artifacts = env.document["artifacts"]
+    assert isinstance(artifacts, list)
+    return next(
+        item
+        for item in artifacts
+        if isinstance(item, dict) and item["artifact_name"] == name
+    )
+
+
+def _rewrite_manifest(env: ClosureFixture) -> str:
+    env.manifest_sha256 = write_manifest(env.manifest, env.document)
+    return env.manifest_sha256
+
+
+def _refresh_archive_identity(env: ClosureFixture, name: str) -> str:
+    archive = env.artifacts_root / name / "archive"
+    item = _artifact_item(env, name)
+    item["archive_size"] = archive.stat().st_size
+    item["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    return _rewrite_manifest(env)
+
+
+def _install(env: ClosureFixture) -> Path:
+    return installer.install_closure(
+        manifest_path=env.manifest,
+        artifacts_root=env.artifacts_root,
+        expected_manifest_sha256=env.manifest_sha256,
+        verified_closure=env.verified,
+    )
+
+
+def _assert_no_published_cache(env: ClosureFixture) -> None:
+    assert not env.cache_root.exists()
+    assert not env.cache_root.is_symlink()
+
+
+def _write_zip(
+    path: Path,
+    entries: list[tuple[str, bytes, int, int]],
 ) -> None:
-    contract = verified.browser
-    destination = Path(contract.cache_root) / contract.cache_directory
-    with pytest.raises(installer.ArtifactContractError, match=f"^{code}$"):
-        installer.install_artifact(
-            manifest_path=manifest,
-            archive_path=archive,
-            expected_manifest_sha256=manifest_sha,
-            verified_contract=verified,
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data, mode, file_type in entries:
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = (file_type | mode) << 16
+            archive.writestr(info, data)
+
+
+def test_valid_complete_closure_is_published_once_and_revalidated(
+    tmp_path: Path,
+) -> None:
+    env = _fixture(tmp_path)
+    result = _install(env)
+    assert result == env.cache_root
+    assert {child.name for child in result.iterdir()} == {
+        "INSTALLATION_COMPLETE",
+        *(artifact.cache_directory for artifact in env.verified.closure.artifacts),
+    }
+    for artifact in env.verified.closure.artifacts:
+        executable = (
+            result
+            / artifact.cache_directory
+            / artifact.expected_executable_relative_path
         )
-    assert not destination.exists()
-    assert not destination.is_symlink()
+        assert executable.is_file()
+        assert executable.stat().st_mode & 0o111
+    assert _install(env) == result
 
 
-def test_valid_real_layout_archive_is_durably_published(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
-
-    destination = installer.install_artifact(
-        manifest_path=manifest,
-        archive_path=archive,
-        expected_manifest_sha256=manifest_sha,
-        verified_contract=verified,
-    )
-
-    contract = verified.browser
-    executable = destination.joinpath(
-        *contract.expected_executable_relative_path.split("/")
-    )
-    marker = destination / "INSTALLATION_COMPLETE"
-    assert destination == Path(contract.cache_root) / contract.cache_directory
-    assert executable.is_file()
-    assert stat.S_IMODE(executable.stat().st_mode) & 0o111
-    assert marker.read_bytes()
-    assert stat.S_IMODE(marker.stat().st_mode) == 0o444
-    assert not list(Path(contract.cache_root).glob(f".{contract.cache_directory}.*"))
-
-
-def test_missing_expected_manifest_sha_is_denied(tmp_path: Path) -> None:
-    _, manifest, _, _, _ = _fixture(tmp_path)
+def test_missing_expected_closure_manifest_sha_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
     with pytest.raises(
         installer.ArtifactContractError,
-        match="^EXPECTED_MANIFEST_SHA256_INVALID$",
+        match="EXPECTED_CLOSURE_MANIFEST_SHA256_INVALID",
     ):
-        installer.load_verified_manifest(manifest, "")
+        installer.install_closure(
+            manifest_path=env.manifest,
+            artifacts_root=env.artifacts_root,
+            expected_manifest_sha256="",
+            verified_closure=env.verified,
+        )
+    _assert_no_published_cache(env)
 
 
-def test_manifest_sha_mismatch_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, _ = _fixture(tmp_path)
-    _assert_failure(
-        "MANIFEST_SHA256_MISMATCH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha="0" * 64,
+def test_closure_manifest_sha_mismatch_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    env.manifest_sha256 = "a" * 64
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="CLOSURE_MANIFEST_SHA256_MISMATCH",
+    ):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_legacy_single_artifact_manifest_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    env.manifest.write_text('{"manifest_version":1}\n', encoding="ascii")
+    env.manifest_sha256 = hashlib.sha256(env.manifest.read_bytes()).hexdigest()
+    with pytest.raises(installer.ArtifactContractError, match="MANIFEST_FIELDS_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+@pytest.mark.parametrize("missing_name", ["chromium-headless-shell", "ffmpeg"])
+def test_missing_required_manifest_artifact_is_denied(
+    tmp_path: Path, missing_name: str
+) -> None:
+    env = _fixture(tmp_path)
+    artifacts = env.document["artifacts"]
+    assert isinstance(artifacts, list)
+    env.document["artifacts"] = [
+        item for item in artifacts if item["artifact_name"] != missing_name
+    ]
+    env.document["artifact_count"] = 1
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="ARTIFACT_SET_MISMATCH"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_unexpected_third_manifest_artifact_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    extra = dict(_artifact_item(env, "ffmpeg"))
+    extra.update(
+        artifact_name="webkit",
+        browser_family="webkit",
+        revision="9999",
+        archive_filename="webkit.zip",
     )
+    artifacts = env.document["artifacts"]
+    assert isinstance(artifacts, list)
+    artifacts.append(extra)
+    artifacts.sort(key=lambda item: item["artifact_name"])
+    env.document["artifact_count"] = 3
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="ARTIFACT_SET_MISMATCH"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-def test_noncanonical_manifest_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    data = json.dumps(document, indent=2, sort_keys=True).encode("ascii")
-    manifest.write_bytes(data)
-    _assert_failure(
-        "MANIFEST_NOT_CANONICAL",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=hashlib.sha256(data).hexdigest(),
-    )
+def test_duplicate_manifest_artifact_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    artifacts = env.document["artifacts"]
+    assert isinstance(artifacts, list)
+    artifacts.insert(1, dict(artifacts[0]))
+    env.document["artifact_count"] = 3
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="DUPLICATE_ARTIFACT_NAME"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_duplicate_revision_policy_is_fail_closed(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    _artifact_item(env, "ffmpeg")["revision"] = "1228"
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="DUPLICATE_ARTIFACT_REVISION"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("artifact_count", 1, "ARTIFACT_COUNT_INVALID"),
+        ("playwright_package_version", "1.60.0", "CLOSURE_IDENTITY_MISMATCH"),
+        ("platform", "linux/arm64", "CLOSURE_IDENTITY_MISMATCH"),
+    ],
+)
+def test_wrong_closure_identity_is_denied(
+    tmp_path: Path, field: str, value: object, error: str
+) -> None:
+    env = _fixture(tmp_path)
+    env.document[field] = value
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match=error):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "value"),
+    [
+        ("chromium-headless-shell", "revision", "9999"),
+        ("ffmpeg", "revision", "9998"),
+        ("ffmpeg", "platform", "linux/arm64"),
+        ("ffmpeg", "layout_kind", "DIRECTORY_TREE"),
+    ],
+)
+def test_wrong_artifact_identity_is_denied(
+    tmp_path: Path, name: str, field: str, value: object
+) -> None:
+    env = _fixture(tmp_path)
+    _artifact_item(env, name)[field] = value
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="ARTIFACT_IDENTITY_MISMATCH"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_unknown_manifest_field_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document["unexpected"] = "denied"
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "MANIFEST_FIELDS_INVALID",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    env = _fixture(tmp_path)
+    env.document["optional_artifact"] = True
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="MANIFEST_FIELDS_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-def test_latest_source_reference_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document["source_reference"] = "approved-latest-fixture"
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "SOURCE_REFERENCE_INVALID",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
+@pytest.mark.parametrize("missing_name", ["chromium-headless-shell", "ffmpeg"])
+def test_missing_required_context_archive_is_denied(
+    tmp_path: Path, missing_name: str
+) -> None:
+    env = _fixture(tmp_path)
+    shutil.rmtree(env.artifacts_root / missing_name)
+    with pytest.raises(installer.ArtifactContractError, match="ARTIFACT_CONTEXT_SET_MISMATCH"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_unreferenced_context_file_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    (env.artifacts_root / "ffmpeg" / "extra").write_bytes(b"extra")
+    with pytest.raises(installer.ArtifactContractError, match="ARTIFACT_CONTEXT_ENTRY_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_chromium_single_file_layout_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    archive = env.artifacts_root / "chromium-headless-shell" / "archive"
+    _write_zip(
+        archive,
+        [("chrome-headless-shell", b"synthetic", 0o755, stat.S_IFREG)],
     )
+    _refresh_archive_identity(env, "chromium-headless-shell")
+    with pytest.raises(installer.ArtifactContractError, match="EXPECTED_EXECUTABLE_MISSING"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_ffmpeg_directory_layout_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("ffmpeg")
+    archive = env.artifacts_root / "ffmpeg" / "archive"
+    write_artifact_archive(
+        archive,
+        artifact,
+        force_layout="DIRECTORY_TREE",
+    )
+    _refresh_archive_identity(env, "ffmpeg")
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_PATH_CONFLICT"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_ffmpeg_second_top_level_entry_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("ffmpeg")
+    archive = env.artifacts_root / "ffmpeg" / "archive"
+    write_artifact_archive(
+        archive,
+        artifact,
+        extra_entries=[("second", b"extra", 0o644, stat.S_IFREG)],
+    )
+    _refresh_archive_identity(env, "ffmpeg")
+    with pytest.raises(installer.ArtifactContractError, match="SINGLE_EXECUTABLE_LAYOUT_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_ffmpeg_symlink_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    archive = env.artifacts_root / "ffmpeg" / "archive"
+    _write_zip(
+        archive,
+        [("ffmpeg-linux", b"target", 0o777, stat.S_IFLNK)],
+    )
+    _refresh_archive_identity(env, "ffmpeg")
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_SYMLINK_DENIED"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_chromium_sibling_top_level_file_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("chromium-headless-shell")
+    archive = env.artifacts_root / artifact.artifact_name / "archive"
+    write_artifact_archive(
+        archive,
+        artifact,
+        extra_entries=[("sibling", b"extra", 0o644, stat.S_IFREG)],
+    )
+    _refresh_archive_identity(env, artifact.artifact_name)
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_UNEXPECTED_TOP_LEVEL"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 @pytest.mark.parametrize(
-    ("field", "value", "code"),
-    [
-        ("playwright_package_version", "1.60.0", "PACKAGE_VERSION_MISMATCH"),
-        ("playwright_wheel_filename", "other.whl", "WHEEL_FILENAME_MISMATCH"),
-        ("playwright_wheel_sha256", "0" * 64, "WHEEL_SHA256_MISMATCH"),
-        ("browser_family", "chromium", "BROWSER_FAMILY_MISMATCH"),
-        ("browser_revision", "9999", "BROWSER_REVISION_MISMATCH"),
-        ("platform", "linux/arm64", "PLATFORM_MISMATCH"),
-        ("archive_root", "other-root", "ARCHIVE_ROOT_MISMATCH"),
-    ],
+    "unsafe_name",
+    ["../escape", "/absolute", "C:/drive", "root/../escape"],
 )
-def test_manifest_identity_mismatch_is_denied(
-    tmp_path: Path,
-    field: str,
-    value: str,
-    code: str,
+def test_unsafe_archive_paths_are_denied(
+    tmp_path: Path, unsafe_name: str
 ) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document[field] = value
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        code,
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("chromium-headless-shell")
+    archive = env.artifacts_root / artifact.artifact_name / "archive"
+    write_artifact_archive(
+        archive,
+        artifact,
+        extra_entries=[(unsafe_name, b"bad", 0o644, stat.S_IFREG)],
     )
-
-
-def test_archive_size_mismatch_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document["archive_size"] = archive.stat().st_size + 1
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "ARCHIVE_SIZE_MISMATCH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_archive_sha_mismatch_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document["archive_sha256"] = "0" * 64
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "ARCHIVE_SHA256_MISMATCH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-@pytest.mark.parametrize(
-    ("name", "code"),
-    [
-        ("../escape", "ARCHIVE_PATH_TRAVERSAL"),
-        ("/absolute", "ARCHIVE_ABSOLUTE_OR_INVALID_PATH"),
-        ("C:/absolute", "ARCHIVE_ABSOLUTE_OR_INVALID_PATH"),
-        (
-            "chrome-headless-shell-linux64/trailing.",
-            "ARCHIVE_PATH_NORMALIZATION_AMBIGUOUS",
-        ),
-    ],
-)
-def test_unsafe_zip_path_is_denied(
-    tmp_path: Path,
-    name: str,
-    code: str,
-) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        extra_entries=[(name, b"unsafe", 0o644, stat.S_IFREG)],
-    )
-    _assert_failure(
-        code,
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_extra_top_level_file_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        extra_entries=[("unexpected.txt", b"x", 0o644, stat.S_IFREG)],
-    )
-    _assert_failure(
-        "ARCHIVE_UNEXPECTED_TOP_LEVEL",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_extra_top_level_directory_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        extra_entries=[("unexpected/", b"", 0o755, stat.S_IFDIR)],
-    )
-    _assert_failure(
-        "ARCHIVE_UNEXPECTED_TOP_LEVEL",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_expected_executable_outside_declared_root_is_denied(
-    tmp_path: Path,
-) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    document["expected_executable_relative_path"] = "other-root/browser"
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "EXECUTABLE_PATH_MISMATCH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_normalization_alias_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        extra_entries=[
-            (
-                "chrome-headless-shell-linux64/e\u0301.txt",
-                b"x",
-                0o644,
-                stat.S_IFREG,
-            )
-        ],
-    )
-    _assert_failure(
-        "ARCHIVE_PATH_NORMALIZATION_AMBIGUOUS",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    _refresh_archive_identity(env, artifact.artifact_name)
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_case_collision_is_denied(tmp_path: Path) -> None:
-    root = "chrome-headless-shell-linux64"
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("chromium-headless-shell")
+    archive = env.artifacts_root / artifact.artifact_name / "archive"
+    write_artifact_archive(
+        archive,
+        artifact,
         extra_entries=[
-            (f"{root}/Case.txt", b"a", 0o644, stat.S_IFREG),
-            (f"{root}/case.txt", b"b", 0o644, stat.S_IFREG),
+            (f"{artifact.archive_root}/RESOURCES.PAK", b"collision", 0o644, stat.S_IFREG)
         ],
     )
-    _assert_failure(
-        "ARCHIVE_CASE_COLLISION",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    _refresh_archive_identity(env, artifact.artifact_name)
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_CASE_COLLISION"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-def test_duplicate_zip_path_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, document, _ = _fixture(tmp_path)
-    executable = verified.browser.expected_executable_relative_path
-    with zipfile.ZipFile(archive, "a") as zip_archive:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            info = zipfile.ZipInfo(executable)
-            info.create_system = 3
-            info.external_attr = (stat.S_IFREG | 0o755) << 16
-            zip_archive.writestr(info, b"duplicate")
-    document.update(manifest_document(verified, archive))
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        "ARCHIVE_DUPLICATE_PATH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_symlink_zip_entry_is_denied(tmp_path: Path) -> None:
-    root = "chrome-headless-shell-linux64"
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        extra_entries=[
-            (f"{root}/link", b"../../escape", 0o777, stat.S_IFLNK)
-        ],
-    )
-    _assert_failure(
-        "ARCHIVE_SYMLINK_DENIED",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def _write_tar_with_special_entry(
-    path: Path,
-    verified: VerifiedBrowserContract,
-    kind: bytes,
+@pytest.mark.parametrize("name", ["chromium-headless-shell", "ffmpeg"])
+def test_non_executable_required_artifact_is_denied(
+    tmp_path: Path, name: str
 ) -> None:
-    contract = verified.browser
-    with tarfile.open(path, "w:gz") as archive:
-        executable = tarfile.TarInfo(contract.expected_executable_relative_path)
-        payload = b"#!/bin/sh\nexit 0\n"
-        executable.size = len(payload)
-        executable.mode = 0o755
-        archive.addfile(executable, io.BytesIO(payload))
-        special = tarfile.TarInfo(f"{contract.archive_root}/special")
-        special.type = kind
-        special.mode = 0o600
-        if kind == tarfile.LNKTYPE:
-            special.linkname = "../../escape"
-        archive.addfile(special)
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact(name)
+    archive = env.artifacts_root / name / "archive"
+    write_artifact_archive(archive, artifact, executable=False)
+    _refresh_archive_identity(env, name)
+    with pytest.raises(installer.ArtifactContractError, match="EXPECTED_EXECUTABLE_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-@pytest.mark.parametrize(
-    ("kind", "code"),
-    [
-        (tarfile.LNKTYPE, "ARCHIVE_HARDLINK_DENIED"),
-        (tarfile.FIFOTYPE, "ARCHIVE_FIFO_DENIED"),
-        (tarfile.CHRTYPE, "ARCHIVE_DEVICE_DENIED"),
-    ],
-)
-def test_special_tar_entry_is_denied(
-    tmp_path: Path,
-    kind: bytes,
-    code: str,
+@pytest.mark.parametrize("field", ["archive_size", "archive_sha256"])
+def test_archive_identity_mismatch_is_denied(tmp_path: Path, field: str) -> None:
+    env = _fixture(tmp_path)
+    item = _artifact_item(env, "ffmpeg")
+    item[field] = item[field] + 1 if field == "archive_size" else "a" * 64
+    _rewrite_manifest(env)
+    with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_(SIZE|SHA256)_MISMATCH"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_all_archives_validate_before_first_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, _, _ = verified_contract(tmp_path, cache_root=tmp_path / "cache")
-    archive = tmp_path / "browser-archive"
-    _write_tar_with_special_entry(archive, verified, kind)
-    document = manifest_document(verified, archive, archive_format="tar.gz")
-    manifest = tmp_path / "manifest.json"
-    manifest_sha = write_manifest(manifest, document)
-    _assert_failure(
-        code,
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    env = _fixture(tmp_path)
+    artifact = env.verified.closure.artifact("ffmpeg")
+    archive = env.artifacts_root / "ffmpeg" / "archive"
+    write_artifact_archive(archive, artifact, executable=False)
+    _refresh_archive_identity(env, "ffmpeg")
+    extraction_calls = 0
+
+    def unexpected_extract(*_args: object, **_kwargs: object) -> None:
+        nonlocal extraction_calls
+        extraction_calls += 1
+
+    monkeypatch.setattr(installer, "_extract_archive", unexpected_extract)
+    with pytest.raises(installer.ArtifactContractError, match="EXPECTED_EXECUTABLE_INVALID"):
+        _install(env)
+    assert extraction_calls == 0
+    _assert_no_published_cache(env)
 
 
-def test_missing_executable_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        include_executable=False,
-    )
-    _assert_failure(
-        "EXPECTED_EXECUTABLE_MISSING",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+def test_second_extraction_failure_leaves_no_partial_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    original = installer._extract_archive
+    calls = 0
 
+    def fail_second(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise installer.ArtifactContractError("SECOND_EXTRACTION_FAILED")
+        original(*args, **kwargs)
 
-def test_non_executable_browser_file_is_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        executable=False,
-    )
-    _assert_failure(
-        "EXPECTED_EXECUTABLE_INVALID",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
-
-
-def test_preexisting_partial_cache_is_preserved_and_denied(tmp_path: Path) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
-    contract = verified.browser
-    destination = Path(contract.cache_root) / contract.cache_directory
-    destination.mkdir(parents=True)
-    sentinel = destination / "partial"
-    sentinel.write_bytes(b"unchanged")
-
-    with pytest.raises(
-        installer.ArtifactContractError,
-        match="^TARGET_CACHE_ALREADY_EXISTS$",
-    ):
-        installer.install_artifact(
-            manifest_path=manifest,
-            archive_path=archive,
-            expected_manifest_sha256=manifest_sha,
-            verified_contract=verified,
-        )
-
-    assert sentinel.read_bytes() == b"unchanged"
+    monkeypatch.setattr(installer, "_extract_archive", fail_second)
+    with pytest.raises(installer.ArtifactContractError, match="SECOND_EXTRACTION_FAILED"):
+        _install(env)
+    assert calls == 2
+    _assert_no_published_cache(env)
 
 
 def test_file_fsync_failure_leaves_no_published_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
-
-    def fail_file_fsync(_path: Path) -> None:
-        raise installer.ArtifactContractError("FILE_FSYNC_FAILED")
-
-    monkeypatch.setattr(installer, "_fsync_regular_file", fail_file_fsync)
-    _assert_failure(
-        "FILE_FSYNC_FAILED",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
+    env = _fixture(tmp_path)
+    monkeypatch.setattr(
+        installer,
+        "_fsync_regular_file",
+        lambda _path: (_ for _ in ()).throw(
+            installer.ArtifactContractError("FILE_FSYNC_FAILED")
+        ),
     )
+    with pytest.raises(installer.ArtifactContractError, match="FILE_FSYNC_FAILED"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_directory_fsync_failure_leaves_no_published_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
-    Path(verified.browser.cache_root).mkdir()
+    env = _fixture(tmp_path)
+    original = installer._fsync_directory
 
-    def fail_directory_fsync(
-        _path: Path,
-        code: str = "DIRECTORY_FSYNC_FAILED",
-    ) -> None:
-        raise installer.ArtifactContractError(code)
+    def fail_staging(path: Path, code: str = "DIRECTORY_FSYNC_FAILED") -> None:
+        if path.name.startswith(".playwright-closure."):
+            raise installer.ArtifactContractError(code)
+        original(path, code)
 
-    monkeypatch.setattr(installer, "_fsync_directory", fail_directory_fsync)
-    _assert_failure(
-        "DIRECTORY_FSYNC_FAILED",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    monkeypatch.setattr(installer, "_fsync_directory", fail_staging)
+    with pytest.raises(installer.ArtifactContractError, match="DIRECTORY_FSYNC_FAILED"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_atomic_rename_failure_leaves_no_published_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
-
-    def fail_publish(_source: object, _target: object) -> None:
-        raise OSError("synthetic publish failure")
-
-    monkeypatch.setattr(installer.os, "replace", fail_publish)
-    _assert_failure(
-        "ATOMIC_PUBLISH_FAILED",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
+    env = _fixture(tmp_path)
+    monkeypatch.setattr(
+        installer.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("synthetic")),
     )
+    with pytest.raises(installer.ArtifactContractError, match="ATOMIC_PUBLISH_FAILED"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-def test_final_parent_fsync_failure_invalidates_published_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_final_parent_fsync_failure_discards_complete_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
+    env = _fixture(tmp_path)
     original = installer._fsync_directory
 
-    def fail_final_parent(path: Path, code: str = "DIRECTORY_FSYNC_FAILED") -> None:
+    def fail_final(path: Path, code: str = "DIRECTORY_FSYNC_FAILED") -> None:
         if code == "FINAL_PARENT_FSYNC_FAILED":
             raise installer.ArtifactContractError(code)
         original(path, code)
 
-    monkeypatch.setattr(installer, "_fsync_directory", fail_final_parent)
-    _assert_failure(
-        "FINAL_PARENT_FSYNC_FAILED",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    monkeypatch.setattr(installer, "_fsync_directory", fail_final)
+    with pytest.raises(installer.ArtifactContractError, match="FINAL_PARENT_FSYNC_FAILED"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
-def test_post_publish_identity_mismatch_invalidates_cache(
+@pytest.mark.parametrize("name", ["chromium-headless-shell", "ffmpeg"])
+def test_post_publish_artifact_mismatch_discards_complete_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    name: str,
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(tmp_path)
+    env = _fixture(tmp_path)
+    original = installer._revalidate_complete_cache
 
-    def fail_revalidation(*_args: object, **_kwargs: object) -> None:
-        raise installer.ArtifactContractError("PUBLISHED_CACHE_IDENTITY_MISMATCH")
+    def tamper_then_validate(
+        cache_root: Path, identity: bytes, closure: object
+    ) -> None:
+        artifact = env.verified.closure.artifact(name)
+        executable = (
+            cache_root
+            / artifact.cache_directory
+            / artifact.expected_executable_relative_path
+        )
+        executable.chmod(0o644)
+        original(cache_root, identity, closure)
 
-    monkeypatch.setattr(
-        installer,
-        "_revalidate_published_cache",
-        fail_revalidation,
-    )
-    _assert_failure(
-        "PUBLISHED_CACHE_IDENTITY_MISMATCH",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
-    )
+    monkeypatch.setattr(installer, "_revalidate_complete_cache", tamper_then_validate)
+    with pytest.raises(installer.ArtifactContractError, match="EXPECTED_EXECUTABLE_INVALID"):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_cleanup_failure_does_not_mask_primary_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    verified, manifest, archive, _, manifest_sha = _fixture(
-        tmp_path,
-        include_executable=False,
+    env = _fixture(tmp_path)
+    monkeypatch.setattr(
+        installer,
+        "_extract_archive",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            installer.ArtifactContractError("PRIMARY_FAILURE")
+        ),
     )
-
-    def fail_cleanup(_path: object) -> None:
-        raise OSError("synthetic cleanup failure")
-
-    monkeypatch.setattr(installer.shutil, "rmtree", fail_cleanup)
-    _assert_failure(
-        "EXPECTED_EXECUTABLE_MISSING",
-        verified=verified,
-        manifest=manifest,
-        archive=archive,
-        manifest_sha=manifest_sha,
+    monkeypatch.setattr(
+        installer.shutil,
+        "rmtree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup")),
     )
+    with pytest.raises(installer.ArtifactContractError, match="PRIMARY_FAILURE"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_preexisting_partial_cache_is_preserved_and_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    env.cache_root.mkdir()
+    sentinel = env.cache_root / "sentinel"
+    sentinel.write_text("preserve", encoding="utf-8")
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",
+    ):
+        _install(env)
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_preexisting_mixed_revision_cache_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    _install(env)
+    marker = env.cache_root / "INSTALLATION_COMPLETE"
+    document = json.loads(marker.read_text(encoding="ascii"))
+    document["artifacts"][1]["revision"] = "9999"
+    marker.write_bytes(installer.canonical_json(document))
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",
+    ):
+        _install(env)
+
+
+def test_preexisting_extra_cache_entry_is_denied(tmp_path: Path) -> None:
+    env = _fixture(tmp_path)
+    _install(env)
+    (env.cache_root / "unapproved-9999").mkdir()
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",
+    ):
+        _install(env)
 
 
 def test_cli_error_is_sanitized(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    verified, _, archive, _, _ = _fixture(tmp_path)
-    canary = "PRIVATE-MANIFEST-CANARY"
-    manifest = tmp_path / canary
-    manifest.write_bytes(b"not-json")
-    expected_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    lockfile = tmp_path / "uv.lock"
-    wheel = tmp_path / "playwright-wheel"
+    env = _fixture(tmp_path)
     monkeypatch.setattr(
         installer,
-        "load_verified_wheel_contract",
-        lambda **_kwargs: verified,
+        "load_verified_wheel_closure",
+        lambda **_kwargs: env.verified,
     )
-
-    result = installer.main(
+    secret = "SENSITIVE_ARCHIVE_DETAIL"
+    env.manifest.write_text(secret, encoding="utf-8")
+    rc = installer.main(
         [
-            "--manifest",
-            str(manifest),
-            "--archive",
-            str(archive),
+            "--closure-manifest",
+            str(env.manifest),
+            "--artifacts-root",
+            str(env.artifacts_root),
             "--lockfile",
-            str(lockfile),
+            str(tmp_path / "uv.lock"),
             "--wheel",
-            str(wheel),
-            "--expected-manifest-sha256",
-            expected_sha,
+            str(tmp_path / "wheel"),
+            "--expected-closure-manifest-sha256",
+            hashlib.sha256(secret.encode()).hexdigest(),
             "--platform",
             "linux/amd64",
         ]
     )
-
-    output = capsys.readouterr()
-    assert result == 2
-    assert "ERROR_CLASS=MANIFEST_JSON_INVALID" in output.err
-    assert canary not in output.err
-    assert "not-json" not in output.err
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "ERROR_CLASS=" in captured.err
+    assert secret not in captured.err
 
 
 def test_installer_has_no_network_client_or_public_skip_path() -> None:
     source = Path(installer.__file__).read_text(encoding="utf-8")
-    for forbidden in (
-        "requests",
-        "httpx",
-        "socket",
-        "playwright.dev",
-        "--skip",
-        "--force",
-    ):
-        assert forbidden not in source
+    assert "requests" not in source
+    assert "urllib" not in source
+    assert "subprocess" not in source
+    assert "--skip" not in source
+    assert "legacy" not in source.lower()

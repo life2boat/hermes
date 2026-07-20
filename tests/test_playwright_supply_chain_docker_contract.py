@@ -21,31 +21,30 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_dockerfile_uses_only_verified_named_artifact_context() -> None:
+def test_dockerfile_uses_one_verified_closure_named_context() -> None:
     text = _text(DOCKERFILE)
-
     assert "ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1" in text
-    assert "ARG PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256\n" in text
-    assert "ARG PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256=" not in text
+    assert "ARG PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256\n" in text
+    assert "ARG PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256=" not in text
     assert (
-        "RUN --mount=type=bind,from=playwright_artifact,source=/,"
-        "target=/tmp/playwright-artifact,ro" in text
+        "RUN --mount=type=bind,from=playwright_artifacts,source=/,"
+        "target=/tmp/playwright-artifacts,ro" in text
     )
-    assert "--manifest /tmp/playwright-artifact/manifest.json" in text
-    assert "--archive /tmp/playwright-artifact/browser-archive" in text
+    assert "--closure-manifest /tmp/playwright-artifacts/closure.json" in text
+    assert "--artifacts-root /tmp/playwright-artifacts/artifacts" in text
     assert "--lockfile ./uv.lock" in text
-    assert "--wheel /tmp/playwright-artifact/playwright-wheel" in text
-    assert "--expected-manifest-sha256" in text
-    assert "COPY --from=playwright_artifact" not in text
-    assert "rm -rf /tmp/playwright-artifact" not in text
+    assert "--wheel /tmp/playwright-artifacts/playwright-wheel" in text
+    assert "--expected-closure-manifest-sha256" in text
+    assert "from=playwright_artifact," not in text
+    assert "browser-archive" not in text
+    assert "--expected-manifest-sha256" not in text
 
 
-def test_dockerfile_uses_pinned_python_runtime_without_cdn_fallback() -> None:
+def test_dockerfile_uses_locked_python_runtime_without_browser_cdn_fallback() -> None:
     text = _text(DOCKERFILE)
     verified_block = text.split(
-        "# ---------- Verified Playwright browser artifact ----------", 1
+        "# ---------- Verified Playwright artifact closure ----------", 1
     )[1].split("# ---------- Frontend build", 1)[0]
-
     assert "--extra google-meet" in text
     assert ".venv/bin/python -m playwright install-deps chromium" in verified_block
     assert ".venv/bin/python -m scripts.install_pinned_playwright_artifact" in (
@@ -62,8 +61,7 @@ def test_dockerfile_uses_pinned_python_runtime_without_cdn_fallback() -> None:
 def test_playwright_runtime_is_exactly_pinned_and_locked_with_hashes() -> None:
     pyproject = _text(PYPROJECT)
     lock = _text(UV_LOCK)
-
-    assert 'google-meet = ["playwright==1.61.0", "websockets==15.0.1"]' in (pyproject)
+    assert 'google-meet = ["playwright==1.61.0", "websockets==15.0.1"]' in pyproject
     assert re.search(
         r'\[\[package\]\]\nname = "playwright"\nversion = "1\.61\.0"',
         lock,
@@ -77,65 +75,74 @@ def test_playwright_runtime_is_exactly_pinned_and_locked_with_hashes() -> None:
     assert "manylinux2014_aarch64.whl" in playwright_block
 
 
-def test_manifest_schema_is_strict_and_requires_wheel_and_layout_identity() -> None:
+def test_aggregate_manifest_schema_is_strict_for_closure_and_artifacts() -> None:
     schema = json.loads(_text(SCHEMA))
-    required = {
+    top_required = {
         "manifest_version",
+        "manifest_kind",
         "playwright_package",
         "playwright_package_version",
         "playwright_wheel_filename",
         "playwright_wheel_size",
         "playwright_wheel_sha256",
+        "platform",
+        "cache_root",
+        "artifact_count",
+        "artifacts",
+    }
+    artifact_required = {
+        "artifact_name",
         "browser_family",
-        "browser_revision",
+        "revision",
+        "browser_version",
         "platform",
         "archive_filename",
         "archive_size",
         "archive_sha256",
         "archive_format",
+        "layout_kind",
         "archive_root",
-        "cache_root",
         "expected_executable_relative_path",
+        "executable_mode_required",
         "source_kind",
-        "source_reference",
+        "source_reference_sha256",
     }
-
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == required
+    assert set(schema["required"]) == top_required
     assert schema["properties"]["manifest_version"]["const"] == 2
-    assert schema["properties"]["playwright_package"]["const"] == "playwright"
-    assert schema["properties"]["browser_family"]["const"] == (
-        "chromium-headless-shell"
+    assert schema["properties"]["manifest_kind"]["const"] == (
+        "PLAYWRIGHT_ARTIFACT_CLOSURE"
     )
-    assert schema["properties"]["archive_filename"]["const"] == ("browser-archive")
-    assert schema["properties"]["archive_sha256"]["pattern"] == ("^[0-9a-f]{64}$")
-    assert schema["properties"]["playwright_wheel_sha256"]["pattern"] == (
+    artifact = schema["properties"]["artifacts"]["items"]
+    assert artifact["additionalProperties"] is False
+    assert set(artifact["required"]) == artifact_required
+    assert artifact["properties"]["layout_kind"]["enum"] == [
+        "DIRECTORY_TREE",
+        "SINGLE_EXECUTABLE_FILE",
+    ]
+    assert artifact["properties"]["archive_sha256"]["pattern"] == (
+        "^[0-9a-f]{64}$"
+    )
+    assert artifact["properties"]["source_reference_sha256"]["pattern"] == (
         "^[0-9a-f]{64}$"
     )
 
 
-def test_browser_revision_is_derived_from_verified_wheel_not_hard_coded() -> None:
-    source_contract = _text(CONTRACT_SCRIPT)
-    source_installer = _text(INSTALLER_SCRIPT)
-    source_build = _text(BUILD_HELPER)
-    dockerfile = _text(DOCKERFILE)
-    schema = _text(SCHEMA)
-
-    assert "browsers.json" in source_contract
-    assert "load_locked_wheel" in source_contract
-    assert "_metadata_from_wheel_bytes" in source_contract
-    assert "revisionOverrides" in source_contract
-    assert "load_installed_contract(args.platform)" not in source_installer
-    assert "1228" not in "\n".join((
-        source_contract,
-        source_installer,
-        source_build,
-        dockerfile,
-        schema,
-    ))
+def test_artifact_revisions_are_derived_from_verified_wheel_not_hard_coded() -> None:
+    sources = "\n".join(
+        _text(path)
+        for path in (CONTRACT_SCRIPT, INSTALLER_SCRIPT, BUILD_HELPER, DOCKERFILE, SCHEMA)
+    )
+    assert "browsers.json" in _text(CONTRACT_SCRIPT)
+    assert "load_locked_wheel" in _text(CONTRACT_SCRIPT)
+    assert "_metadata_from_wheel_bytes" in _text(CONTRACT_SCRIPT)
+    assert "revisionOverrides" in _text(CONTRACT_SCRIPT)
+    assert "load_installed_closure(args.platform)" not in _text(INSTALLER_SCRIPT)
+    assert "1228" not in sources
+    assert "1011" not in sources
 
 
-def test_no_browser_archive_manifest_or_wheel_instance_is_committed() -> None:
+def test_no_archive_manifest_or_wheel_instance_is_committed() -> None:
     completed = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files"],
         check=True,
@@ -144,34 +151,34 @@ def test_no_browser_archive_manifest_or_wheel_instance_is_committed() -> None:
         encoding="utf-8",
     )
     tracked = set(completed.stdout.splitlines())
-
-    for fixed_name in ("browser-archive", "playwright-wheel"):
+    for fixed_name in (
+        "archive",
+        "browser-archive",
+        "closure.json",
+        "playwright-wheel",
+    ):
         assert fixed_name not in tracked
         assert not any(path.endswith(f"/{fixed_name}") for path in tracked)
-    assert not any(
-        path.endswith("/manifest.json") and "playwright-artifact" in path
-        for path in tracked
-    )
+    assert not any("playwright-artifact" in path and path.endswith(".zip") for path in tracked)
 
 
-def test_canonical_build_helper_exports_exact_git_tree_only() -> None:
+def test_canonical_build_helper_exports_exact_git_tree_and_binds_closure() -> None:
     source = _text(BUILD_HELPER)
-
     assert 'choices=("check", "build")' in source
     assert 'if args.mode == "build":' in source
     assert "git-tree-context" in source
-    assert '"archive"' in source
     assert "inspect_exported_context" in source
     assert "inputs.build_context" in source
-    assert (
-        "str(inputs.repository_root)"
-        not in source.split("def docker_build_command", 1)[1].split("def _parser", 1)[0]
-    )
+    command_block = source.split("def docker_build_command", 1)[1].split(
+        "def _parser", 1
+    )[0]
+    assert "str(inputs.repository_root)" not in command_block
+    assert "playwright_artifacts=" in command_block
+    assert "PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256=" in command_block
+    assert "playwright_artifact=" not in command_block
     assert "--artifact-context" in source
-    assert "--expected-manifest-sha256" in source
-    assert "--expected-source-sha" in source
-    assert "--approved-base-sha" in source
-    assert "--image-tag" in source
+    assert "--expected-closure-manifest-sha256" in source
+    assert "--expected-manifest-sha256" not in source
     assert "--skip" not in source
     assert "--force" not in source
 

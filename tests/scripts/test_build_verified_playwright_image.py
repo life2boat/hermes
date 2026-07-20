@@ -4,13 +4,14 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from scripts import build_verified_playwright_image as build_helper
-from scripts.playwright_artifact_contract import load_verified_wheel_contract
+from scripts.playwright_artifact_contract import load_verified_wheel_closure
 from tests.secret_scanner_support import (
     marker_only_private_key_fixture,
     redaction_pattern_fixture,
@@ -20,10 +21,10 @@ from tests.secret_scanner_support import (
     synthetic_private_key_block,
 )
 from tests.playwright_supply_chain_support import (
-    manifest_document,
-    write_browser_archive,
+    closure_manifest_document,
+    write_closure_archives,
+    write_closure_context,
     write_lockfile,
-    write_manifest,
     write_wheel,
 )
 
@@ -58,25 +59,27 @@ def _repository_and_context(
         encoding="utf-8",
     )
 
-    context = tmp_path / "approved-artifact"
-    context.mkdir(mode=0o700)
-    wheel = context / "playwright-wheel"
+    wheel = tmp_path / "playwright-wheel"
     wheel_bytes = write_wheel(wheel)
-    wheel.chmod(0o600)
     lockfile = root / "uv.lock"
     write_lockfile(lockfile, wheel_bytes)
-    verified = load_verified_wheel_contract(
+    verified = load_verified_wheel_closure(
         lockfile_path=lockfile,
         wheel_path=wheel,
         platform="linux/amd64",
     )
-    archive = context / "browser-archive"
-    write_browser_archive(archive, verified)
-    archive.chmod(0o600)
-    document = manifest_document(verified, archive)
-    manifest = context / "manifest.json"
-    manifest_sha = write_manifest(manifest, document)
-    manifest.chmod(0o600)
+    archives = write_closure_archives(tmp_path / "archives", verified)
+    context = tmp_path / "approved-artifact-closure"
+    manifest_sha = write_closure_context(
+        context,
+        verified,
+        wheel,
+        archives,
+        document=closure_manifest_document(verified, archives),
+    )
+    context.chmod(0o700)
+    for path in context.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
 
     _run("git", "add", ".gitignore", "tracked.txt", "Dockerfile", "uv.lock", cwd=root)
     _run("git", "commit", "--quiet", "-m", "synthetic exact source", cwd=root)
@@ -92,7 +95,7 @@ def _prepared(tmp_path: Path):
         expected_source_sha=source_sha,
         approved_base_sha=source_sha,
         artifact_context=context,
-        expected_manifest_sha256=manifest_sha,
+        expected_closure_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
         platform="linux/amd64",
     ) as inputs:
@@ -107,7 +110,7 @@ def test_build_command_uses_exact_git_export_not_raw_worktree(
 
         assert command[:2] == ["docker", "build"]
         assert command[command.index("--build-context") + 1] == (
-            f"playwright_artifact={inputs.artifact_context}"
+            f"playwright_artifacts={inputs.artifact_context}"
         )
         assert f"HERMES_GIT_SHA={inputs.source_sha}" in command
         assert f"org.opencontainers.image.revision={inputs.source_sha}" in command
@@ -140,7 +143,7 @@ def test_ignored_local_artifact_is_absent_from_exported_context(
         expected_source_sha=source_sha,
         approved_base_sha=source_sha,
         artifact_context=context,
-        expected_manifest_sha256=manifest_sha,
+        expected_closure_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
         platform="linux/amd64",
     ) as inputs:
@@ -161,7 +164,7 @@ def test_untracked_source_like_file_is_absent_from_exported_context(
         expected_source_sha=source_sha,
         approved_base_sha=source_sha,
         artifact_context=context,
-        expected_manifest_sha256=manifest_sha,
+        expected_closure_manifest_sha256=manifest_sha,
         image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
         platform="linux/amd64",
     ) as inputs:
@@ -306,7 +309,7 @@ def test_dirty_tracked_file_is_denied_before_context_export(
             expected_source_sha=source_sha,
             approved_base_sha=source_sha,
             artifact_context=context,
-            expected_manifest_sha256=manifest_sha,
+            expected_closure_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
             platform="linux/amd64",
         )
@@ -558,15 +561,14 @@ def test_production_context_scanner_denies_secrets_and_fails_closed(
 def test_artifact_context_inside_repository_is_denied(tmp_path: Path) -> None:
     repository, source_sha, external_context, _ = _repository_and_context(tmp_path)
     context = repository / "approved-artifact"
-    context.mkdir()
-    for source in external_context.iterdir():
-        (context / source.name).write_bytes(source.read_bytes())
-        (context / source.name).chmod(0o600)
+    shutil.copytree(external_context, context)
+    for path in context.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
     (repository / ".git" / "info" / "exclude").write_text(
         "/approved-artifact/\n",
         encoding="utf-8",
     )
-    manifest_sha = hashlib.sha256((context / "manifest.json").read_bytes()).hexdigest()
+    manifest_sha = hashlib.sha256((context / "closure.json").read_bytes()).hexdigest()
 
     with pytest.raises(
         build_helper.BuildContractError,
@@ -577,7 +579,7 @@ def test_artifact_context_inside_repository_is_denied(tmp_path: Path) -> None:
             expected_source_sha=source_sha,
             approved_base_sha=source_sha,
             artifact_context=context,
-            expected_manifest_sha256=manifest_sha,
+            expected_closure_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
             platform="linux/amd64",
         )
@@ -586,9 +588,10 @@ def test_artifact_context_inside_repository_is_denied(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("mutation", "code"),
     [
-        ("missing_archive", "ARTIFACT_CONTEXT_CONTENTS_INVALID"),
+        ("missing_chromium", "ARTIFACT_CONTEXT_CONTENTS_INVALID"),
+        ("missing_ffmpeg", "ARTIFACT_CONTEXT_CONTENTS_INVALID"),
         ("missing_wheel", "ARTIFACT_CONTEXT_CONTENTS_INVALID"),
-        ("wrong_manifest_sha", "MANIFEST_SHA256_MISMATCH"),
+        ("wrong_manifest_sha", "CLOSURE_MANIFEST_SHA256_MISMATCH"),
         ("archive_tamper", "ARTIFACT_ARCHIVE_SIZE_MISMATCH"),
     ],
 )
@@ -598,14 +601,16 @@ def test_invalid_artifact_context_is_denied(
     code: str,
 ) -> None:
     repository, source_sha, context, manifest_sha = _repository_and_context(tmp_path)
-    if mutation == "missing_archive":
-        (context / "browser-archive").unlink()
+    if mutation == "missing_chromium":
+        shutil.rmtree(context / "artifacts" / "chromium-headless-shell")
+    elif mutation == "missing_ffmpeg":
+        shutil.rmtree(context / "artifacts" / "ffmpeg")
     elif mutation == "missing_wheel":
         (context / "playwright-wheel").unlink()
     elif mutation == "wrong_manifest_sha":
         manifest_sha = "0" * 64
     else:
-        with (context / "browser-archive").open("ab") as handle:
+        with (context / "artifacts" / "ffmpeg" / "archive").open("ab") as handle:
             handle.write(b"tamper")
 
     with pytest.raises(build_helper.BuildContractError, match=f"^{code}$"):
@@ -614,7 +619,7 @@ def test_invalid_artifact_context_is_denied(
             expected_source_sha=source_sha,
             approved_base_sha=source_sha,
             artifact_context=context,
-            expected_manifest_sha256=manifest_sha,
+            expected_closure_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
             platform="linux/amd64",
         )
@@ -634,7 +639,7 @@ def test_group_or_world_writable_artifact_context_is_denied(tmp_path: Path) -> N
             expected_source_sha=source_sha,
             approved_base_sha=source_sha,
             artifact_context=context,
-            expected_manifest_sha256=manifest_sha,
+            expected_closure_manifest_sha256=manifest_sha,
             image_tag=f"healbite-hermes:p3a-{source_sha[:12]}",
             platform="linux/amd64",
         )
@@ -653,7 +658,7 @@ def test_mutable_or_unrelated_image_tag_is_denied(tmp_path: Path) -> None:
                 expected_source_sha=source_sha,
                 approved_base_sha=source_sha,
                 artifact_context=context,
-                expected_manifest_sha256=manifest_sha,
+                expected_closure_manifest_sha256=manifest_sha,
                 image_tag=image_tag,
                 platform="linux/amd64",
             )
@@ -688,8 +693,8 @@ def test_check_mode_never_invokes_docker(
             inputs.approved_base_sha,
             "--artifact-context",
             str(inputs.artifact_context),
-            "--expected-manifest-sha256",
-            inputs.manifest_sha256,
+            "--expected-closure-manifest-sha256",
+            inputs.closure_manifest_sha256,
             "--image-tag",
             inputs.image_tag,
             "--platform",

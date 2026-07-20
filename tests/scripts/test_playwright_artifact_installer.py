@@ -600,7 +600,9 @@ def test_preexisting_mixed_revision_cache_is_denied(tmp_path: Path) -> None:
     marker = env.cache_root / "INSTALLATION_COMPLETE"
     document = json.loads(marker.read_text(encoding="ascii"))
     document["artifacts"][1]["revision"] = "9999"
+    marker.chmod(0o644)
     marker.write_bytes(installer.canonical_json(document))
+    marker.chmod(0o444)
     with pytest.raises(
         installer.ArtifactContractError,
         match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",

@@ -179,30 +179,29 @@ COPY scripts/playwright_artifact_contract.py scripts/install_pinned_playwright_a
 RUN touch ./README.md
 RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
 
-# ---------- Verified Playwright browser artifact ----------
-# `playwright_artifact` is a mandatory read-only BuildKit named context with
-# exactly /manifest.json, /browser-archive, and /playwright-wheel.
-# The wheel hash must be authorized by uv.lock. Acquisition and approval happen
-# outside this repository. The expected manifest digest has no default.
-ARG PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256
-RUN --mount=type=bind,from=playwright_artifact,source=/,target=/tmp/playwright-artifact,ro \
+# ---------- Verified Playwright artifact closure ----------
+# `playwright_artifacts` is one mandatory read-only BuildKit named context.
+# It contains closure.json, the lock-authorized wheel, and exactly one archive
+# for every package-required artifact. The closure digest has no default.
+ARG PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256
+RUN --mount=type=bind,from=playwright_artifacts,source=/,target=/tmp/playwright-artifacts,ro \
     set -eu; \
     case "${TARGETARCH}" in \
         amd64) playwright_platform="linux/amd64" ;; \
         arm64) playwright_platform="linux/arm64" ;; \
-        *) echo "Unsupported TARGETARCH for Playwright artifact" >&2; exit 1 ;; \
+        *) echo "Unsupported TARGETARCH for Playwright closure" >&2; exit 1 ;; \
     esac; \
-    test -n "${PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256:-}" || { \
-        echo "PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256 is required" >&2; \
+    test -n "${PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256:-}" || { \
+        echo "PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256 is required" >&2; \
         exit 1; \
     }; \
     .venv/bin/python -m playwright install-deps chromium; \
     .venv/bin/python -m scripts.install_pinned_playwright_artifact \
-        --manifest /tmp/playwright-artifact/manifest.json \
-        --archive /tmp/playwright-artifact/browser-archive \
+        --closure-manifest /tmp/playwright-artifacts/closure.json \
+        --artifacts-root /tmp/playwright-artifacts/artifacts \
         --lockfile ./uv.lock \
-        --wheel /tmp/playwright-artifact/playwright-wheel \
-        --expected-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256}" \
+        --wheel /tmp/playwright-artifacts/playwright-wheel \
+        --expected-closure-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256}" \
         --platform "${playwright_platform}"
 
 # ---------- Frontend build (cached independently from Python source) ----------

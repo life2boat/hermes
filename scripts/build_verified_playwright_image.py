@@ -23,12 +23,12 @@ from scripts.git_object_secret_policy import (
 )
 from scripts.install_pinned_playwright_artifact import (
     ArtifactContractError,
-    load_verified_manifest,
-    validate_manifest_contract,
+    load_verified_closure_manifest,
+    validate_closure_manifest_contract,
 )
 from scripts.playwright_artifact_contract import (
     PlaywrightContractError,
-    load_verified_wheel_contract,
+    load_verified_wheel_closure,
 )
 
 
@@ -37,9 +37,9 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TAG_RE = re.compile(
     r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$"
 )
-_FIXED_ARTIFACT_FILES = frozenset({
-    "manifest.json",
-    "browser-archive",
+_FIXED_ARTIFACT_CONTEXT_ENTRIES = frozenset({
+    "artifacts",
+    "closure.json",
     "playwright-wheel",
 })
 _FORBIDDEN_DIRECTORY_NAMES = frozenset({
@@ -88,7 +88,7 @@ class BuildRequest:
     approved_base_sha: str
     approved_base_tree_sha: str
     artifact_context: Path
-    manifest_sha256: str
+    closure_manifest_sha256: str
     image_tag: str
     platform: str
 
@@ -105,7 +105,7 @@ class BuildInputs:
     context_manifest_sha256: str
     context_file_count: int
     artifact_context: Path
-    manifest_sha256: str
+    closure_manifest_sha256: str
     image_tag: str
     platform: str
 
@@ -177,10 +177,56 @@ def _validate_repository(
     return tree_sha, base_tree_sha
 
 
+def _validate_regular_context_file(path: Path) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        _fail("ARTIFACT_FILE_METADATA_FAILED")
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        _fail("ARTIFACT_FILE_METADATA_INVALID")
+    return metadata
+
+
+def _validate_context_directory(path: Path) -> set[str]:
+    try:
+        metadata = path.lstat()
+        children = {child.name for child in path.iterdir()}
+    except OSError:
+        _fail("ARTIFACT_CONTEXT_READ_FAILED")
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_nlink < 2
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        _fail("ARTIFACT_CONTEXT_METADATA_INVALID")
+    return children
+
+
+def _manifest_artifacts(document: dict[str, object]) -> dict[str, dict[str, object]]:
+    raw_artifacts = document.get("artifacts")
+    if not isinstance(raw_artifacts, list):
+        _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
+    result: dict[str, dict[str, object]] = {}
+    for item in raw_artifacts:
+        if not isinstance(item, dict):
+            _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
+        name = item.get("artifact_name")
+        if not isinstance(name, str) or name in result:
+            _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
+        result[name] = item
+    return result
+
+
 def _validate_artifact_context(
     root: Path,
     repository_root: Path,
-    expected_manifest_sha256: str,
+    expected_closure_manifest_sha256: str,
     platform: str,
 ) -> None:
     if not root.is_absolute():
@@ -190,65 +236,53 @@ def _validate_artifact_context(
     resolved_repository = repository_root.resolve(strict=True)
     if _is_within(resolved_root, resolved_repository):
         _fail("ARTIFACT_CONTEXT_INSIDE_REPOSITORY")
-    try:
-        root_metadata = resolved_root.lstat()
-    except OSError:
-        _fail("ARTIFACT_CONTEXT_METADATA_FAILED")
-    if (
-        not stat.S_ISDIR(root_metadata.st_mode)
-        or root_metadata.st_nlink < 2
-        or stat.S_IMODE(root_metadata.st_mode) & 0o022
+    if _validate_context_directory(resolved_root) != (
+        _FIXED_ARTIFACT_CONTEXT_ENTRIES
     ):
-        _fail("ARTIFACT_CONTEXT_METADATA_INVALID")
-    try:
-        children = {child.name for child in resolved_root.iterdir()}
-    except OSError:
-        _fail("ARTIFACT_CONTEXT_READ_FAILED")
-    if children != _FIXED_ARTIFACT_FILES:
         _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
 
-    for name in sorted(_FIXED_ARTIFACT_FILES):
-        path = resolved_root / name
-        try:
-            file_metadata = path.lstat()
-        except OSError:
-            _fail("ARTIFACT_FILE_METADATA_FAILED")
-        if (
-            stat.S_ISLNK(file_metadata.st_mode)
-            or not stat.S_ISREG(file_metadata.st_mode)
-            or file_metadata.st_nlink != 1
-            or stat.S_IMODE(file_metadata.st_mode) & 0o022
-        ):
-            _fail("ARTIFACT_FILE_METADATA_INVALID")
+    closure_path = resolved_root / "closure.json"
+    wheel_path = resolved_root / "playwright-wheel"
+    _validate_regular_context_file(closure_path)
+    _validate_regular_context_file(wheel_path)
 
     try:
-        manifest = load_verified_manifest(
-            resolved_root / "manifest.json", expected_manifest_sha256
+        manifest = load_verified_closure_manifest(
+            closure_path, expected_closure_manifest_sha256
         )
-        verified = load_verified_wheel_contract(
+        verified = load_verified_wheel_closure(
             lockfile_path=resolved_repository / "uv.lock",
-            wheel_path=resolved_root / "playwright-wheel",
+            wheel_path=wheel_path,
             platform=platform,
         )
-        validate_manifest_contract(manifest, verified)
+        validate_closure_manifest_contract(manifest, verified)
     except (ArtifactContractError, PlaywrightContractError) as exc:
         raise BuildContractError(exc.code) from None
-    archive = resolved_root / "browser-archive"
-    try:
-        archive_size = archive.stat().st_size
-    except OSError:
-        _fail("ARTIFACT_ARCHIVE_READ_FAILED")
-    if archive_size != manifest["archive_size"]:
-        _fail("ARTIFACT_ARCHIVE_SIZE_MISMATCH")
-    digest = hashlib.sha256()
-    try:
-        with archive.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-    except OSError:
-        _fail("ARTIFACT_ARCHIVE_READ_FAILED")
-    if digest.hexdigest() != manifest["archive_sha256"]:
-        _fail("ARTIFACT_ARCHIVE_SHA256_MISMATCH")
+
+    artifacts_root = resolved_root / "artifacts"
+    if _validate_context_directory(artifacts_root) != set(
+        verified.closure.artifact_names
+    ):
+        _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
+    artifacts = _manifest_artifacts(manifest)
+    for artifact in verified.closure.artifacts:
+        artifact_root = artifacts_root / artifact.artifact_name
+        if _validate_context_directory(artifact_root) != {"archive"}:
+            _fail("ARTIFACT_CONTEXT_CONTENTS_INVALID")
+        archive = artifact_root / "archive"
+        archive_metadata = _validate_regular_context_file(archive)
+        artifact_manifest = artifacts[artifact.artifact_name]
+        if archive_metadata.st_size != artifact_manifest["archive_size"]:
+            _fail("ARTIFACT_ARCHIVE_SIZE_MISMATCH")
+        digest = hashlib.sha256()
+        try:
+            with archive.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            _fail("ARTIFACT_ARCHIVE_READ_FAILED")
+        if digest.hexdigest() != artifact_manifest["archive_sha256"]:
+            _fail("ARTIFACT_ARCHIVE_SHA256_MISMATCH")
 
 
 def _validate_image_tag(image_tag: str, source_sha: str) -> None:
@@ -266,12 +300,12 @@ def validate_build_inputs(
     expected_source_sha: str,
     approved_base_sha: str,
     artifact_context: Path,
-    expected_manifest_sha256: str,
+    expected_closure_manifest_sha256: str,
     image_tag: str,
     platform: str,
 ) -> BuildRequest:
-    if _SHA256_RE.fullmatch(expected_manifest_sha256) is None:
-        _fail("EXPECTED_MANIFEST_SHA256_INVALID")
+    if _SHA256_RE.fullmatch(expected_closure_manifest_sha256) is None:
+        _fail("EXPECTED_CLOSURE_MANIFEST_SHA256_INVALID")
     if platform not in {"linux/amd64", "linux/arm64"}:
         _fail("PLATFORM_UNSUPPORTED")
     resolved_repository = repository_root.resolve(strict=True)
@@ -283,7 +317,7 @@ def validate_build_inputs(
     _validate_artifact_context(
         artifact_context,
         resolved_repository,
-        expected_manifest_sha256,
+        expected_closure_manifest_sha256,
         platform,
     )
     _validate_image_tag(image_tag, expected_source_sha)
@@ -294,7 +328,7 @@ def validate_build_inputs(
         approved_base_sha=approved_base_sha,
         approved_base_tree_sha=approved_base_tree_sha,
         artifact_context=artifact_context.resolve(strict=True),
-        manifest_sha256=expected_manifest_sha256,
+        closure_manifest_sha256=expected_closure_manifest_sha256,
         image_tag=image_tag,
         platform=platform,
     )
@@ -673,7 +707,7 @@ def prepared_build_inputs(
     expected_source_sha: str,
     approved_base_sha: str,
     artifact_context: Path,
-    expected_manifest_sha256: str,
+    expected_closure_manifest_sha256: str,
     image_tag: str,
     platform: str,
 ) -> Iterator[BuildInputs]:
@@ -682,7 +716,7 @@ def prepared_build_inputs(
         expected_source_sha=expected_source_sha,
         approved_base_sha=approved_base_sha,
         artifact_context=artifact_context,
-        expected_manifest_sha256=expected_manifest_sha256,
+        expected_closure_manifest_sha256=expected_closure_manifest_sha256,
         image_tag=image_tag,
         platform=platform,
     )
@@ -710,7 +744,7 @@ def prepared_build_inputs(
             context_manifest_sha256=context_sha,
             context_file_count=file_count,
             artifact_context=request.artifact_context,
-            manifest_sha256=request.manifest_sha256,
+            closure_manifest_sha256=request.closure_manifest_sha256,
             image_tag=request.image_tag,
             platform=request.platform,
         )
@@ -723,11 +757,11 @@ def docker_build_command(inputs: BuildInputs) -> list[str]:
         "--platform",
         inputs.platform,
         "--build-context",
-        f"playwright_artifact={inputs.artifact_context}",
+        f"playwright_artifacts={inputs.artifact_context}",
         "--build-arg",
         f"HERMES_GIT_SHA={inputs.source_sha}",
         "--build-arg",
-        (f"PLAYWRIGHT_ARTIFACT_MANIFEST_SHA256={inputs.manifest_sha256}"),
+        (f"PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256={inputs.closure_manifest_sha256}"),
         "--label",
         f"org.opencontainers.image.revision={inputs.source_sha}",
         "--tag",
@@ -744,7 +778,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--approved-base-sha", required=True)
     parser.add_argument("--artifact-context", required=True, type=Path)
-    parser.add_argument("--expected-manifest-sha256", required=True)
+    parser.add_argument("--expected-closure-manifest-sha256", required=True)
     parser.add_argument("--image-tag", required=True)
     parser.add_argument(
         "--platform", required=True, choices=("linux/amd64", "linux/arm64")
@@ -761,7 +795,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_source_sha=args.expected_source_sha,
             approved_base_sha=args.approved_base_sha,
             artifact_context=args.artifact_context,
-            expected_manifest_sha256=args.expected_manifest_sha256,
+            expected_closure_manifest_sha256=args.expected_closure_manifest_sha256,
             image_tag=args.image_tag,
             platform=args.platform,
         ) as inputs:
@@ -783,8 +817,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"CONTEXT_FILE_COUNT={inputs.context_file_count}")
             print(f"PLATFORM={inputs.platform}")
             print("BUILD_CONTEXT_SOURCE=EXACT_GIT_TREE_EXPORT")
-            print("ARTIFACT_CONTEXT_VERIFIED=true")
-            print("MANIFEST_SHA256_VERIFIED=true")
+            print("ARTIFACT_CLOSURE_CONTEXT_VERIFIED=true")
+            print("CLOSURE_MANIFEST_SHA256_VERIFIED=true")
             print(f"IMAGE_BUILD_PERFORMED={str(args.mode == 'build').lower()}")
     except (BuildContractError, ArtifactContractError) as exc:
         print("PLAYWRIGHT_IMAGE_BUILD_CONTRACT=FAIL", file=sys.stderr)

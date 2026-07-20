@@ -18,15 +18,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
+
 PLAYWRIGHT_PACKAGE = "playwright"
-BROWSER_FAMILY = "chromium-headless-shell"
+PRIMARY_BROWSER_FAMILY = "chromium-headless-shell"
+FFMPEG_FAMILY = "ffmpeg"
 CACHE_ROOT = "/opt/hermes/.playwright"
 INSTALLATION_MARKER = "INSTALLATION_COMPLETE"
+LAYOUT_DIRECTORY_TREE = "DIRECTORY_TREE"
+LAYOUT_SINGLE_EXECUTABLE_FILE = "SINGLE_EXECUTABLE_FILE"
 _BROWSER_METADATA_PATH = "playwright/driver/package/browsers.json"
 _MAX_LOCKFILE_BYTES = 32 * 1024 * 1024
 _MAX_WHEEL_BYTES = 128 * 1024 * 1024
 _MAX_METADATA_BYTES = 128 * 1024
 _MAX_PACKAGE_METADATA_BYTES = 64 * 1024
+_MAX_IDENTITY_BYTES = 16 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.-]+)?$")
 _REVISION_RE = re.compile(r"^[0-9]+$")
@@ -36,16 +41,25 @@ _WHEEL_TAGS = {
 }
 _IDENTITY_FIELDS = frozenset(
     {
+        "identity_version",
         "playwright_package",
         "playwright_package_version",
         "playwright_wheel_filename",
         "playwright_wheel_size",
         "playwright_wheel_sha256",
-        "browser_family",
-        "browser_revision",
         "platform",
         "cache_root",
+        "artifacts",
+    }
+)
+_ARTIFACT_IDENTITY_FIELDS = frozenset(
+    {
+        "artifact_name",
+        "browser_family",
+        "revision",
+        "browser_version",
         "cache_directory",
+        "layout_kind",
         "expected_executable_relative_path",
     }
 )
@@ -62,34 +76,68 @@ class _DuplicateJsonKey(ValueError):
 
 
 @dataclass(frozen=True)
-class PlatformMapping:
+class ArtifactPlatformMapping:
     playwright_host_platform: str
     executable_relative_path: str
+    archive_filename: str
+    layout_kind: str
 
 
-PLATFORM_MAPPINGS = {
-    "linux/amd64": PlatformMapping(
-        playwright_host_platform="debian13-x64",
-        executable_relative_path=(
-            "chrome-headless-shell-linux64/chrome-headless-shell"
+ARTIFACT_PLATFORM_MAPPINGS = {
+    PRIMARY_BROWSER_FAMILY: {
+        "linux/amd64": ArtifactPlatformMapping(
+            playwright_host_platform="debian13-x64",
+            executable_relative_path=(
+                "chrome-headless-shell-linux64/chrome-headless-shell"
+            ),
+            archive_filename="chrome-headless-shell-linux64.zip",
+            layout_kind=LAYOUT_DIRECTORY_TREE,
         ),
-    ),
-    "linux/arm64": PlatformMapping(
-        playwright_host_platform="debian13-arm64",
-        executable_relative_path="chrome-linux/headless_shell",
-    ),
+        "linux/arm64": ArtifactPlatformMapping(
+            playwright_host_platform="debian13-arm64",
+            executable_relative_path="chrome-linux/headless_shell",
+            archive_filename="chromium-headless-shell-linux-arm64.zip",
+            layout_kind=LAYOUT_DIRECTORY_TREE,
+        ),
+    },
+    FFMPEG_FAMILY: {
+        "linux/amd64": ArtifactPlatformMapping(
+            playwright_host_platform="debian13-x64",
+            executable_relative_path="ffmpeg-linux",
+            archive_filename="ffmpeg-linux.zip",
+            layout_kind=LAYOUT_SINGLE_EXECUTABLE_FILE,
+        ),
+        "linux/arm64": ArtifactPlatformMapping(
+            playwright_host_platform="debian13-arm64",
+            executable_relative_path="ffmpeg-linux",
+            archive_filename="ffmpeg-linux-arm64.zip",
+            layout_kind=LAYOUT_SINGLE_EXECUTABLE_FILE,
+        ),
+    },
 }
+REQUIRED_ARTIFACT_NAMES = tuple(sorted(ARTIFACT_PLATFORM_MAPPINGS))
+SUPPORTED_PLATFORMS = tuple(
+    sorted(
+        set.intersection(
+            *(set(mappings) for mappings in ARTIFACT_PLATFORM_MAPPINGS.values())
+        )
+    )
+)
 
 
 @dataclass(frozen=True)
-class BrowserContract:
+class ArtifactContract:
     package: str
     package_version: str
+    artifact_name: str
     browser_family: str
-    browser_revision: str
+    revision: str
+    browser_version: str | None
     platform: str
     cache_root: str
     cache_directory: str
+    expected_archive_filename: str
+    layout_kind: str
     expected_executable_relative_path: str
 
     @property
@@ -106,6 +154,25 @@ class BrowserContract:
 
 
 @dataclass(frozen=True)
+class PlaywrightClosureContract:
+    package: str
+    package_version: str
+    platform: str
+    cache_root: str
+    artifacts: tuple[ArtifactContract, ...]
+
+    @property
+    def artifact_names(self) -> tuple[str, ...]:
+        return tuple(artifact.artifact_name for artifact in self.artifacts)
+
+    def artifact(self, name: str) -> ArtifactContract:
+        matches = [item for item in self.artifacts if item.artifact_name == name]
+        if len(matches) != 1:
+            _fail("ARTIFACT_METADATA_AMBIGUOUS")
+        return matches[0]
+
+
+@dataclass(frozen=True)
 class LockedWheel:
     package: str
     package_version: str
@@ -116,8 +183,8 @@ class LockedWheel:
 
 
 @dataclass(frozen=True)
-class VerifiedBrowserContract:
-    browser: BrowserContract
+class VerifiedPlaywrightClosure:
+    closure: PlaywrightClosureContract
     wheel: LockedWheel
 
 
@@ -154,11 +221,11 @@ def _canonical_json(document: dict[str, object]) -> bytes:
     ).encode("ascii")
 
 
+
 def contract_from_metadata(
     *, package_version: str, browsers_payload: object, platform: str
-) -> BrowserContract:
-    mapping = PLATFORM_MAPPINGS.get(platform)
-    if mapping is None:
+) -> PlaywrightClosureContract:
+    if platform not in SUPPORTED_PLATFORMS:
         _fail("PLATFORM_UNSUPPORTED")
     if _VERSION_RE.fullmatch(package_version) is None:
         _fail("PACKAGE_VERSION_INVALID")
@@ -168,47 +235,69 @@ def contract_from_metadata(
     if not isinstance(browsers, list):
         _fail("PACKAGE_METADATA_INVALID")
 
-    matches = [
-        item
-        for item in browsers
-        if isinstance(item, dict) and item.get("name") == BROWSER_FAMILY
-    ]
-    if len(matches) != 1:
-        _fail("BROWSER_METADATA_AMBIGUOUS")
-    browser = matches[0]
-    base_revision = _required_string(
-        browser.get("revision"), "BROWSER_REVISION_INVALID"
-    )
-    if _REVISION_RE.fullmatch(base_revision) is None:
-        _fail("BROWSER_REVISION_INVALID")
-
-    overrides = browser.get("revisionOverrides", {})
-    if not isinstance(overrides, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in overrides.items()
-    ):
-        _fail("BROWSER_REVISION_OVERRIDES_INVALID")
-    revision_override = overrides.get(mapping.playwright_host_platform)
-    revision = revision_override or base_revision
-    if _REVISION_RE.fullmatch(revision) is None:
-        _fail("BROWSER_REVISION_INVALID")
-
-    directory_prefix = BROWSER_FAMILY
-    if revision_override is not None:
-        directory_prefix = (
-            f"{BROWSER_FAMILY}_{mapping.playwright_host_platform}_special"
+    artifacts: list[ArtifactContract] = []
+    for artifact_name in REQUIRED_ARTIFACT_NAMES:
+        mapping = ARTIFACT_PLATFORM_MAPPINGS[artifact_name][platform]
+        matches = [
+            item
+            for item in browsers
+            if isinstance(item, dict) and item.get("name") == artifact_name
+        ]
+        if len(matches) != 1:
+            _fail("ARTIFACT_METADATA_AMBIGUOUS")
+        artifact_metadata = matches[0]
+        if artifact_metadata.get("installByDefault") is not True:
+            _fail("REQUIRED_ARTIFACT_NOT_INSTALL_BY_DEFAULT")
+        base_revision = _required_string(
+            artifact_metadata.get("revision"), "ARTIFACT_REVISION_INVALID"
         )
-    cache_directory = f"{directory_prefix.replace('-', '_')}-{revision}"
-
-    return BrowserContract(
+        if _REVISION_RE.fullmatch(base_revision) is None:
+            _fail("ARTIFACT_REVISION_INVALID")
+        overrides = artifact_metadata.get("revisionOverrides", {})
+        if not isinstance(overrides, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in overrides.items()
+        ):
+            _fail("ARTIFACT_REVISION_OVERRIDES_INVALID")
+        revision_override = overrides.get(mapping.playwright_host_platform)
+        revision = revision_override or base_revision
+        if _REVISION_RE.fullmatch(revision) is None:
+            _fail("ARTIFACT_REVISION_INVALID")
+        browser_version = artifact_metadata.get("browserVersion")
+        if browser_version is not None and (
+            not isinstance(browser_version, str) or not browser_version
+        ):
+            _fail("ARTIFACT_BROWSER_VERSION_INVALID")
+        directory_prefix = artifact_name
+        if revision_override is not None:
+            directory_prefix = (
+                f"{artifact_name}_{mapping.playwright_host_platform}_special"
+            )
+        cache_directory = f"{directory_prefix.replace('-', '_')}-{revision}"
+        artifacts.append(
+            ArtifactContract(
+                package=PLAYWRIGHT_PACKAGE,
+                package_version=package_version,
+                artifact_name=artifact_name,
+                browser_family=artifact_name,
+                revision=revision,
+                browser_version=browser_version,
+                platform=platform,
+                cache_root=CACHE_ROOT,
+                cache_directory=cache_directory,
+                expected_archive_filename=mapping.archive_filename,
+                layout_kind=mapping.layout_kind,
+                expected_executable_relative_path=(
+                    mapping.executable_relative_path
+                ),
+            )
+        )
+    return PlaywrightClosureContract(
         package=PLAYWRIGHT_PACKAGE,
         package_version=package_version,
-        browser_family=BROWSER_FAMILY,
-        browser_revision=revision,
         platform=platform,
         cache_root=CACHE_ROOT,
-        cache_directory=cache_directory,
-        expected_executable_relative_path=mapping.executable_relative_path,
+        artifacts=tuple(artifacts),
     )
 
 
@@ -388,12 +477,13 @@ def _metadata_from_wheel_bytes(
     return wheel.package_version, payload
 
 
-def load_verified_wheel_contract(
+
+def load_verified_wheel_closure(
     *,
     lockfile_path: Path,
     wheel_path: Path,
     platform: str,
-) -> VerifiedBrowserContract:
+) -> VerifiedPlaywrightClosure:
     wheel = load_locked_wheel(lockfile_path, platform)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -447,12 +537,12 @@ def load_verified_wheel_contract(
     finally:
         os.close(descriptor)
 
-    browser = contract_from_metadata(
+    closure = contract_from_metadata(
         package_version=package_version,
         browsers_payload=payload,
         platform=platform,
     )
-    return VerifiedBrowserContract(browser=browser, wheel=wheel)
+    return VerifiedPlaywrightClosure(closure=closure, wheel=wheel)
 
 
 def _load_installed_browsers_payload() -> tuple[str, dict[str, Any]]:
@@ -486,7 +576,8 @@ def _load_installed_browsers_payload() -> tuple[str, dict[str, Any]]:
     return distribution.version, payload
 
 
-def load_installed_contract(platform: str) -> BrowserContract:
+
+def load_installed_closure(platform: str) -> PlaywrightClosureContract:
     package_version, payload = _load_installed_browsers_payload()
     return contract_from_metadata(
         package_version=package_version,
@@ -495,55 +586,102 @@ def load_installed_contract(platform: str) -> BrowserContract:
     )
 
 
+def artifact_identity_document(artifact: ArtifactContract) -> dict[str, object]:
+    return {
+        "artifact_name": artifact.artifact_name,
+        "browser_family": artifact.browser_family,
+        "revision": artifact.revision,
+        "browser_version": artifact.browser_version,
+        "cache_directory": artifact.cache_directory,
+        "layout_kind": artifact.layout_kind,
+        "expected_executable_relative_path": (
+            artifact.expected_executable_relative_path
+        ),
+    }
+
+
 def installation_identity_document(
-    verified: VerifiedBrowserContract,
+    verified: VerifiedPlaywrightClosure,
 ) -> dict[str, object]:
-    contract = verified.browser
+    closure = verified.closure
     wheel = verified.wheel
     return {
-        "browser_family": contract.browser_family,
-        "browser_revision": contract.browser_revision,
-        "cache_directory": contract.cache_directory,
-        "cache_root": contract.cache_root,
-        "expected_executable_relative_path": (
-            contract.expected_executable_relative_path
-        ),
-        "platform": contract.platform,
-        "playwright_package": contract.package,
-        "playwright_package_version": contract.package_version,
+        "identity_version": 1,
+        "playwright_package": closure.package,
+        "playwright_package_version": closure.package_version,
         "playwright_wheel_filename": wheel.filename,
         "playwright_wheel_sha256": wheel.sha256,
         "playwright_wheel_size": wheel.size,
+        "platform": closure.platform,
+        "cache_root": closure.cache_root,
+        "artifacts": [
+            artifact_identity_document(artifact)
+            for artifact in closure.artifacts
+        ],
     }
 
 
 def canonical_installation_identity(
-    verified: VerifiedBrowserContract,
+    verified: VerifiedPlaywrightClosure,
 ) -> bytes:
     return _canonical_json(installation_identity_document(verified))
 
 
 def _parse_installation_identity(data: bytes) -> dict[str, object]:
-    if not data or len(data) > 4096:
-        _fail("BROWSER_IDENTITY_INVALID")
+    if not data or len(data) > _MAX_IDENTITY_BYTES:
+        _fail("CLOSURE_IDENTITY_INVALID")
     try:
         document = json.loads(
             data.decode("ascii"),
             object_pairs_hook=_object_without_duplicate_keys,
         )
     except (_DuplicateJsonKey, UnicodeError, json.JSONDecodeError):
-        _fail("BROWSER_IDENTITY_INVALID")
+        _fail("CLOSURE_IDENTITY_INVALID")
     if not isinstance(document, dict) or set(document) != _IDENTITY_FIELDS:
-        _fail("BROWSER_IDENTITY_INVALID")
+        _fail("CLOSURE_IDENTITY_INVALID")
     if _canonical_json(document) != data:
-        _fail("BROWSER_IDENTITY_INVALID")
-    strings = _IDENTITY_FIELDS - {"playwright_wheel_size"}
-    if any(not isinstance(document[field], str) for field in strings):
-        _fail("BROWSER_IDENTITY_INVALID")
+        _fail("CLOSURE_IDENTITY_INVALID")
+    if document["identity_version"] != 1:
+        _fail("CLOSURE_IDENTITY_INVALID")
+    string_fields = {
+        "playwright_package",
+        "playwright_package_version",
+        "playwright_wheel_filename",
+        "playwright_wheel_sha256",
+        "platform",
+        "cache_root",
+    }
+    if any(not isinstance(document[field], str) for field in string_fields):
+        _fail("CLOSURE_IDENTITY_INVALID")
     if type(document["playwright_wheel_size"]) is not int:
-        _fail("BROWSER_IDENTITY_INVALID")
+        _fail("CLOSURE_IDENTITY_INVALID")
     if _SHA256_RE.fullmatch(str(document["playwright_wheel_sha256"])) is None:
-        _fail("BROWSER_IDENTITY_INVALID")
+        _fail("CLOSURE_IDENTITY_INVALID")
+    artifacts = document["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != len(
+        REQUIRED_ARTIFACT_NAMES
+    ):
+        _fail("CLOSURE_IDENTITY_INVALID")
+    names: list[str] = []
+    revisions: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or set(artifact) != (
+            _ARTIFACT_IDENTITY_FIELDS
+        ):
+            _fail("CLOSURE_IDENTITY_INVALID")
+        required_strings = _ARTIFACT_IDENTITY_FIELDS - {"browser_version"}
+        if any(not isinstance(artifact[field], str) for field in required_strings):
+            _fail("CLOSURE_IDENTITY_INVALID")
+        browser_version = artifact["browser_version"]
+        if browser_version is not None and not isinstance(browser_version, str):
+            _fail("CLOSURE_IDENTITY_INVALID")
+        revision = str(artifact["revision"])
+        if _REVISION_RE.fullmatch(revision) is None or revision in revisions:
+            _fail("CLOSURE_IDENTITY_INVALID")
+        revisions.add(revision)
+        names.append(str(artifact["artifact_name"]))
+    if tuple(names) != REQUIRED_ARTIFACT_NAMES:
+        _fail("CLOSURE_IDENTITY_INVALID")
     return document
 
 
@@ -557,57 +695,80 @@ def current_runtime_platform() -> str:
     _fail("PLATFORM_UNSUPPORTED")
 
 
-def verify_packaged_browser_readiness(
-    platform: str | None = None,
-) -> BrowserContract:
-    selected_platform = platform or current_runtime_platform()
-    installed = load_installed_contract(selected_platform)
-    destination = Path(installed.cache_root) / installed.cache_directory
-    marker = destination / INSTALLATION_MARKER
-    marker_data = _read_regular_file(
-        marker,
-        maximum=4096,
-        code="BROWSER_IDENTITY_MISSING",
-    )
-    identity = _parse_installation_identity(marker_data)
-    expected = {
-        "browser_family": installed.browser_family,
-        "browser_revision": installed.browser_revision,
-        "cache_directory": installed.cache_directory,
-        "cache_root": installed.cache_root,
-        "expected_executable_relative_path": (
-            installed.expected_executable_relative_path
-        ),
-        "platform": installed.platform,
-        "playwright_package": installed.package,
-        "playwright_package_version": installed.package_version,
-    }
-    if any(identity[field] != value for field, value in expected.items()):
-        _fail("BROWSER_IDENTITY_MISMATCH")
+
+def _validate_packaged_executable(
+    cache_root: Path, artifact: ArtifactContract
+) -> None:
+    destination = cache_root / artifact.cache_directory
+    try:
+        destination_metadata = destination.lstat()
+    except OSError:
+        _fail("PACKAGED_ARTIFACT_MISSING")
+    if not stat.S_ISDIR(destination_metadata.st_mode) or destination.is_symlink():
+        _fail("PACKAGED_ARTIFACT_INVALID")
     executable = destination.joinpath(
-        *installed.expected_executable_relative_path.split("/")
+        *artifact.expected_executable_relative_path.split("/")
     )
     try:
         executable_stat = executable.lstat()
     except OSError:
-        _fail("PACKAGED_BROWSER_MISSING")
+        _fail("PACKAGED_ARTIFACT_MISSING")
     if (
         executable.is_symlink()
         or not stat.S_ISREG(executable_stat.st_mode)
         or stat.S_IMODE(executable_stat.st_mode) & 0o111 == 0
     ):
-        _fail("PACKAGED_BROWSER_INVALID")
+        _fail("PACKAGED_ARTIFACT_INVALID")
+
+
+def verify_packaged_browser_readiness(
+    platform: str | None = None,
+) -> PlaywrightClosureContract:
+    selected_platform = platform or current_runtime_platform()
+    installed = load_installed_closure(selected_platform)
+    cache_root = Path(installed.cache_root)
+    marker = cache_root / INSTALLATION_MARKER
+    marker_data = _read_regular_file(
+        marker,
+        maximum=_MAX_IDENTITY_BYTES,
+        code="CLOSURE_IDENTITY_MISSING",
+    )
+    identity = _parse_installation_identity(marker_data)
+    expected = {
+        "playwright_package": installed.package,
+        "playwright_package_version": installed.package_version,
+        "platform": installed.platform,
+        "cache_root": installed.cache_root,
+        "artifacts": [
+            artifact_identity_document(artifact)
+            for artifact in installed.artifacts
+        ],
+    }
+    if any(identity[field] != value for field, value in expected.items()):
+        _fail("CLOSURE_IDENTITY_MISMATCH")
+    try:
+        actual_children = {child.name for child in cache_root.iterdir()}
+    except OSError:
+        _fail("PACKAGED_CACHE_INVALID")
+    expected_children = {INSTALLATION_MARKER} | {
+        artifact.cache_directory for artifact in installed.artifacts
+    }
+    if actual_children != expected_children:
+        _fail("PACKAGED_CACHE_ENTRY_SET_MISMATCH")
+    for artifact in installed.artifacts:
+        _validate_packaged_executable(cache_root, artifact)
     return installed
+
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Report the lock-bound Playwright browser contract."
+        description="Report the lock-bound Playwright artifact closure."
     )
     parser.add_argument("--lockfile", required=True, type=Path)
     parser.add_argument("--wheel", required=True, type=Path)
     parser.add_argument(
-        "--platform", required=True, choices=sorted(PLATFORM_MAPPINGS)
+        "--platform", required=True, choices=SUPPORTED_PLATFORMS
     )
     return parser
 
@@ -615,7 +776,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        verified = load_verified_wheel_contract(
+        verified = load_verified_wheel_closure(
             lockfile_path=args.lockfile,
             wheel_path=args.wheel,
             platform=args.platform,
@@ -629,15 +790,22 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR_CLASS=INTERNAL_ERROR")
         return 2
 
-    contract = verified.browser
-    print(f"PLAYWRIGHT_PACKAGE={contract.package}")
-    print(f"PLAYWRIGHT_PACKAGE_VERSION={contract.package_version}")
+    closure = verified.closure
+    print(f"PLAYWRIGHT_PACKAGE={closure.package}")
+    print(f"PLAYWRIGHT_PACKAGE_VERSION={closure.package_version}")
     print(f"PLAYWRIGHT_WHEEL_FILENAME={verified.wheel.filename}")
     print(f"PLAYWRIGHT_WHEEL_SHA256={verified.wheel.sha256}")
-    print(f"BROWSER_FAMILY={contract.browser_family}")
-    print(f"BROWSER_REVISION={contract.browser_revision}")
-    print(f"PLATFORM={contract.platform}")
-    print(f"EXPECTED_CACHE_LAYOUT={contract.expected_cache_layout}")
+    print(f"PLATFORM={closure.platform}")
+    print(f"REQUIRED_ARTIFACT_COUNT={len(closure.artifacts)}")
+    print(f"REQUIRED_ARTIFACT_NAMES={','.join(closure.artifact_names)}")
+    for index, artifact in enumerate(closure.artifacts, start=1):
+        print(f"ARTIFACT_{index}_NAME={artifact.artifact_name}")
+        print(f"ARTIFACT_{index}_REVISION={artifact.revision}")
+        print(f"ARTIFACT_{index}_LAYOUT_KIND={artifact.layout_kind}")
+        print(
+            f"ARTIFACT_{index}_EXPECTED_CACHE_LAYOUT="
+            f"{artifact.expected_cache_layout}"
+        )
     return 0
 
 

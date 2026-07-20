@@ -17,43 +17,63 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
 
 from scripts.playwright_artifact_contract import (
+    LAYOUT_DIRECTORY_TREE,
+    LAYOUT_SINGLE_EXECUTABLE_FILE,
+    ArtifactContract,
+    PlaywrightClosureContract,
     PlaywrightContractError,
-    VerifiedBrowserContract,
+    VerifiedPlaywrightClosure,
     canonical_installation_identity,
-    load_verified_wheel_contract,
+    load_verified_wheel_closure,
 )
 
 
+
 MANIFEST_VERSION = 2
-MAX_MANIFEST_BYTES = 64 * 1024
+MANIFEST_KIND = "PLAYWRIGHT_ARTIFACT_CLOSURE"
+MAX_MANIFEST_BYTES = 128 * 1024
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 100_000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_SAFE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_ROOT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _SAFE_WHEEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}\.whl$")
+_SAFE_ARTIFACT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_SAFE_ARCHIVE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$")
+_SAFE_EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._+/-]{1,512}$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _MANIFEST_FIELDS = frozenset(
     {
         "manifest_version",
+        "manifest_kind",
         "playwright_package",
         "playwright_package_version",
         "playwright_wheel_filename",
         "playwright_wheel_size",
         "playwright_wheel_sha256",
+        "platform",
+        "cache_root",
+        "artifact_count",
+        "artifacts",
+    }
+)
+_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_name",
         "browser_family",
-        "browser_revision",
+        "revision",
+        "browser_version",
         "platform",
         "archive_filename",
         "archive_size",
         "archive_sha256",
         "archive_format",
+        "layout_kind",
         "archive_root",
-        "cache_root",
         "expected_executable_relative_path",
+        "executable_mode_required",
         "source_kind",
-        "source_reference",
+        "source_reference_sha256",
     }
 )
 
@@ -75,6 +95,13 @@ class ArchiveEntry:
     mode: int
     size: int
     source: object
+
+
+@dataclass(frozen=True)
+class ValidatedArchive:
+    artifact: ArtifactContract
+    manifest: dict[str, object]
+    path: Path
 
 
 def _fail(code: str) -> None:
@@ -108,77 +135,139 @@ def _is_exact_type(value: object, expected: type[object]) -> bool:
     return type(value) is expected
 
 
-def _validate_manifest_shape(document: object) -> dict[str, object]:
-    if not isinstance(document, dict) or set(document) != _MANIFEST_FIELDS:
-        _fail("MANIFEST_FIELDS_INVALID")
-    expected_types: dict[str, type[object]] = {
-        "manifest_version": int,
-        "playwright_package": str,
-        "playwright_package_version": str,
-        "playwright_wheel_filename": str,
-        "playwright_wheel_size": int,
-        "playwright_wheel_sha256": str,
+
+def _validate_artifact_shape(document: object) -> dict[str, object]:
+    if not isinstance(document, dict) or set(document) != _ARTIFACT_FIELDS:
+        _fail("ARTIFACT_MANIFEST_FIELDS_INVALID")
+    exact_types: dict[str, type[object]] = {
+        "artifact_name": str,
         "browser_family": str,
-        "browser_revision": str,
+        "revision": str,
         "platform": str,
         "archive_filename": str,
         "archive_size": int,
         "archive_sha256": str,
         "archive_format": str,
+        "layout_kind": str,
         "archive_root": str,
-        "cache_root": str,
         "expected_executable_relative_path": str,
+        "executable_mode_required": bool,
         "source_kind": str,
-        "source_reference": str,
+        "source_reference_sha256": str,
     }
-    for name, expected_type in expected_types.items():
+    for name, expected_type in exact_types.items():
         if not _is_exact_type(document[name], expected_type):
-            _fail("MANIFEST_FIELD_TYPE_INVALID")
-
-    if document["manifest_version"] != MANIFEST_VERSION:
-        _fail("MANIFEST_VERSION_INVALID")
-    if document["archive_filename"] != "browser-archive":
+            _fail("ARTIFACT_MANIFEST_FIELD_TYPE_INVALID")
+    browser_version = document["browser_version"]
+    if browser_version is not None and (
+        not isinstance(browser_version, str) or not browser_version
+    ):
+        _fail("ARTIFACT_BROWSER_VERSION_INVALID")
+    artifact_name = str(document["artifact_name"])
+    browser_family = str(document["browser_family"])
+    if (
+        _SAFE_ARTIFACT_RE.fullmatch(artifact_name) is None
+        or browser_family != artifact_name
+    ):
+        _fail("ARTIFACT_NAME_INVALID")
+    revision = str(document["revision"])
+    if not revision.isascii() or not revision.isdigit():
+        _fail("ARTIFACT_REVISION_INVALID")
+    archive_filename = str(document["archive_filename"])
+    if (
+        _SAFE_ARCHIVE_RE.fullmatch(archive_filename) is None
+        or "latest" in archive_filename.lower()
+    ):
         _fail("ARCHIVE_FILENAME_INVALID")
     archive_size = document["archive_size"]
     if not isinstance(archive_size, int) or not 0 < archive_size <= MAX_ARCHIVE_BYTES:
         _fail("ARCHIVE_SIZE_INVALID")
-    archive_sha = document["archive_sha256"]
-    if not isinstance(archive_sha, str) or _SHA256_RE.fullmatch(archive_sha) is None:
-        _fail("ARCHIVE_SHA256_INVALID")
-    wheel_filename = document["playwright_wheel_filename"]
+    _validate_lower_sha256(document["archive_sha256"], "ARCHIVE_SHA256_INVALID")
+    if document["archive_format"] not in {"zip", "tar.gz"}:
+        _fail("ARCHIVE_FORMAT_INVALID")
+    if document["layout_kind"] not in {
+        LAYOUT_DIRECTORY_TREE,
+        LAYOUT_SINGLE_EXECUTABLE_FILE,
+    }:
+        _fail("LAYOUT_KIND_INVALID")
+    archive_root = str(document["archive_root"])
     if (
-        not isinstance(wheel_filename, str)
-        or _SAFE_WHEEL_RE.fullmatch(wheel_filename) is None
+        _SAFE_ROOT_RE.fullmatch(archive_root) is None
+        or archive_root.endswith(".")
     ):
+        _fail("ARCHIVE_ROOT_INVALID")
+    executable = str(document["expected_executable_relative_path"])
+    if (
+        _SAFE_EXECUTABLE_RE.fullmatch(executable) is None
+        or executable.startswith("/")
+        or ".." in executable.split("/")
+    ):
+        _fail("EXPECTED_EXECUTABLE_PATH_INVALID")
+    if document["executable_mode_required"] is not True:
+        _fail("EXECUTABLE_MODE_POLICY_INVALID")
+    if document["source_kind"] != "operator-approved-offline-artifact":
+        _fail("SOURCE_KIND_INVALID")
+    _validate_lower_sha256(
+        document["source_reference_sha256"],
+        "SOURCE_REFERENCE_SHA256_INVALID",
+    )
+    return document
+
+
+def _validate_manifest_shape(document: object) -> dict[str, object]:
+    if not isinstance(document, dict) or set(document) != _MANIFEST_FIELDS:
+        _fail("MANIFEST_FIELDS_INVALID")
+    exact_types: dict[str, type[object]] = {
+        "manifest_version": int,
+        "manifest_kind": str,
+        "playwright_package": str,
+        "playwright_package_version": str,
+        "playwright_wheel_filename": str,
+        "playwright_wheel_size": int,
+        "playwright_wheel_sha256": str,
+        "platform": str,
+        "cache_root": str,
+        "artifact_count": int,
+        "artifacts": list,
+    }
+    for name, expected_type in exact_types.items():
+        if not _is_exact_type(document[name], expected_type):
+            _fail("MANIFEST_FIELD_TYPE_INVALID")
+    if document["manifest_version"] != MANIFEST_VERSION:
+        _fail("MANIFEST_VERSION_INVALID")
+    if document["manifest_kind"] != MANIFEST_KIND:
+        _fail("MANIFEST_KIND_INVALID")
+    wheel_filename = str(document["playwright_wheel_filename"])
+    if _SAFE_WHEEL_RE.fullmatch(wheel_filename) is None:
         _fail("WHEEL_FILENAME_INVALID")
     wheel_size = document["playwright_wheel_size"]
     if not isinstance(wheel_size, int) or wheel_size <= 0:
         _fail("WHEEL_SIZE_INVALID")
-    wheel_sha = document["playwright_wheel_sha256"]
-    if not isinstance(wheel_sha, str) or _SHA256_RE.fullmatch(wheel_sha) is None:
-        _fail("WHEEL_SHA256_INVALID")
-    if document["archive_format"] not in {"zip", "tar.gz"}:
-        _fail("ARCHIVE_FORMAT_INVALID")
-    archive_root = document["archive_root"]
+    _validate_lower_sha256(
+        document["playwright_wheel_sha256"], "WHEEL_SHA256_INVALID"
+    )
+    artifact_count = document["artifact_count"]
+    artifacts = document["artifacts"]
     if (
-        not isinstance(archive_root, str)
-        or _SAFE_ROOT_RE.fullmatch(archive_root) is None
-        or archive_root.endswith(".")
+        not isinstance(artifact_count, int)
+        or not isinstance(artifacts, list)
+        or not 0 < artifact_count <= 16
+        or len(artifacts) != artifact_count
     ):
-        _fail("ARCHIVE_ROOT_INVALID")
-    if document["source_kind"] != "operator-approved-offline-artifact":
-        _fail("SOURCE_KIND_INVALID")
-    source_reference = document["source_reference"]
-    if (
-        not isinstance(source_reference, str)
-        or _SAFE_REFERENCE_RE.fullmatch(source_reference) is None
-        or "latest" in source_reference.lower()
-    ):
-        _fail("SOURCE_REFERENCE_INVALID")
+        _fail("ARTIFACT_COUNT_INVALID")
+    validated_artifacts = [_validate_artifact_shape(item) for item in artifacts]
+    names = [str(item["artifact_name"]) for item in validated_artifacts]
+    revisions = [str(item["revision"]) for item in validated_artifacts]
+    if names != sorted(names):
+        _fail("ARTIFACT_ORDER_NONCANONICAL")
+    if len(set(names)) != len(names):
+        _fail("DUPLICATE_ARTIFACT_NAME")
+    if len(set(revisions)) != len(revisions):
+        _fail("DUPLICATE_ARTIFACT_REVISION")
     return document
 
 
-def parse_canonical_manifest(data: bytes) -> dict[str, object]:
+def parse_canonical_closure_manifest(data: bytes) -> dict[str, object]:
     if not data or len(data) > MAX_MANIFEST_BYTES:
         _fail("MANIFEST_SIZE_INVALID")
     try:
@@ -226,11 +315,14 @@ def _regular_file_metadata(path: Path, code: str) -> os.stat_result:
     return file_metadata
 
 
-def load_verified_manifest(path: Path, expected_sha256: str) -> dict[str, object]:
+
+def load_verified_closure_manifest(
+    path: Path, expected_sha256: str
+) -> dict[str, object]:
     expected = _validate_lower_sha256(
-        expected_sha256, "EXPECTED_MANIFEST_SHA256_INVALID"
+        expected_sha256, "EXPECTED_CLOSURE_MANIFEST_SHA256_INVALID"
     )
-    file_metadata = _regular_file_metadata(path, "MANIFEST_FILE_INVALID")
+    file_metadata = _regular_file_metadata(path, "CLOSURE_MANIFEST_FILE_INVALID")
     if not 0 < file_metadata.st_size <= MAX_MANIFEST_BYTES:
         _fail("MANIFEST_SIZE_INVALID")
     try:
@@ -238,50 +330,66 @@ def load_verified_manifest(path: Path, expected_sha256: str) -> dict[str, object
     except OSError:
         _fail("MANIFEST_READ_FAILED")
     if hashlib.sha256(data).hexdigest() != expected:
-        _fail("MANIFEST_SHA256_MISMATCH")
-    return parse_canonical_manifest(data)
+        _fail("CLOSURE_MANIFEST_SHA256_MISMATCH")
+    return parse_canonical_closure_manifest(data)
 
 
-def validate_manifest_contract(
-    document: dict[str, object], verified: VerifiedBrowserContract
+def _artifact_documents(
+    document: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    artifacts = document["artifacts"]
+    if not isinstance(artifacts, list):
+        _fail("ARTIFACT_COUNT_INVALID")
+    result: dict[str, dict[str, object]] = {}
+    for item in artifacts:
+        if not isinstance(item, dict):
+            _fail("ARTIFACT_MANIFEST_FIELDS_INVALID")
+        name = str(item["artifact_name"])
+        if name in result:
+            _fail("DUPLICATE_ARTIFACT_NAME")
+        result[name] = item
+    return result
+
+
+def validate_closure_manifest_contract(
+    document: dict[str, object], verified: VerifiedPlaywrightClosure
 ) -> None:
-    contract = verified.browser
+    closure = verified.closure
     wheel = verified.wheel
-    exact_matches = {
-        "playwright_package": contract.package,
-        "playwright_package_version": contract.package_version,
+    exact_top_level = {
+        "playwright_package": closure.package,
+        "playwright_package_version": closure.package_version,
         "playwright_wheel_filename": wheel.filename,
         "playwright_wheel_size": wheel.size,
         "playwright_wheel_sha256": wheel.sha256,
-        "browser_family": contract.browser_family,
-        "browser_revision": contract.browser_revision,
-        "platform": contract.platform,
-        "archive_root": contract.archive_root,
-        "cache_root": contract.cache_root,
-        "expected_executable_relative_path": (
-            contract.expected_executable_relative_path
-        ),
+        "platform": closure.platform,
+        "cache_root": closure.cache_root,
     }
-    error_codes = {
-        "playwright_package": "PACKAGE_NAME_MISMATCH",
-        "playwright_package_version": "PACKAGE_VERSION_MISMATCH",
-        "playwright_wheel_filename": "WHEEL_FILENAME_MISMATCH",
-        "playwright_wheel_size": "WHEEL_SIZE_MISMATCH",
-        "playwright_wheel_sha256": "WHEEL_SHA256_MISMATCH",
-        "browser_family": "BROWSER_FAMILY_MISMATCH",
-        "browser_revision": "BROWSER_REVISION_MISMATCH",
-        "platform": "PLATFORM_MISMATCH",
-        "archive_root": "ARCHIVE_ROOT_MISMATCH",
-        "cache_root": "CACHE_ROOT_MISMATCH",
-        "expected_executable_relative_path": "EXECUTABLE_PATH_MISMATCH",
-    }
-    for name, expected in exact_matches.items():
-        if document[name] != expected:
-            _fail(error_codes[name])
-    executable = str(document["expected_executable_relative_path"])
-    archive_root = str(document["archive_root"])
-    if not executable.startswith(f"{archive_root}/"):
-        _fail("EXPECTED_EXECUTABLE_OUTSIDE_ARCHIVE_ROOT")
+    for field, expected in exact_top_level.items():
+        if document[field] != expected:
+            _fail("CLOSURE_IDENTITY_MISMATCH")
+    manifest_artifacts = _artifact_documents(document)
+    if set(manifest_artifacts) != set(closure.artifact_names):
+        _fail("ARTIFACT_SET_MISMATCH")
+    for artifact in closure.artifacts:
+        item = manifest_artifacts[artifact.artifact_name]
+        exact_artifact = {
+            "artifact_name": artifact.artifact_name,
+            "browser_family": artifact.browser_family,
+            "revision": artifact.revision,
+            "browser_version": artifact.browser_version,
+            "platform": artifact.platform,
+            "archive_filename": artifact.expected_archive_filename,
+            "layout_kind": artifact.layout_kind,
+            "archive_root": artifact.archive_root,
+            "expected_executable_relative_path": (
+                artifact.expected_executable_relative_path
+            ),
+            "executable_mode_required": True,
+        }
+        for field, expected in exact_artifact.items():
+            if item[field] != expected:
+                _fail("ARTIFACT_IDENTITY_MISMATCH")
 
 
 def _safe_member_name(raw_name: str, *, is_directory: bool) -> str:
@@ -317,13 +425,15 @@ def _validate_mode(mode: int, *, is_directory: bool) -> int:
     return permissions
 
 
-def _validate_entry_set(entries: list[ArchiveEntry], archive_root: str) -> None:
+
+def _validate_entry_set(
+    entries: list[ArchiveEntry], artifact: ArtifactContract
+) -> None:
     if not entries or len(entries) > MAX_ARCHIVE_ENTRIES:
         _fail("ARCHIVE_ENTRY_COUNT_INVALID")
     names: set[str] = set()
     casefold_names: set[str] = set()
     files: set[str] = set()
-    top_level: set[str] = set()
     expanded_size = 0
     for entry in entries:
         if entry.name in names:
@@ -333,30 +443,51 @@ def _validate_entry_set(entries: list[ArchiveEntry], archive_root: str) -> None:
         if folded in casefold_names:
             _fail("ARCHIVE_CASE_COLLISION")
         casefold_names.add(folded)
-        top_level.add(entry.name.split("/", 1)[0])
-        if not (
-            entry.name == archive_root
-            or entry.name.startswith(f"{archive_root}/")
-        ):
-            _fail("ARCHIVE_UNEXPECTED_TOP_LEVEL")
-        if entry.name == archive_root and not entry.is_directory:
-            _fail("ARCHIVE_ROOT_NOT_DIRECTORY")
         if not entry.is_directory:
             files.add(entry.name)
             expanded_size += entry.size
             if expanded_size > MAX_EXPANDED_BYTES:
                 _fail("ARCHIVE_EXPANDED_SIZE_INVALID")
-    if top_level != {archive_root}:
-        _fail("ARCHIVE_UNEXPECTED_TOP_LEVEL")
     for name in names:
         parts = name.split("/")
         for index in range(1, len(parts)):
             if "/".join(parts[:index]) in files:
                 _fail("ARCHIVE_PATH_CONFLICT")
 
+    expected_executable = artifact.expected_executable_relative_path
+    executable_entries = [
+        entry for entry in entries if entry.name == expected_executable
+    ]
+    if len(executable_entries) != 1 or executable_entries[0].is_directory:
+        _fail("EXPECTED_EXECUTABLE_MISSING")
+    if executable_entries[0].mode & 0o111 == 0:
+        _fail("EXPECTED_EXECUTABLE_INVALID")
+
+    if artifact.layout_kind == LAYOUT_DIRECTORY_TREE:
+        top_level = {entry.name.split("/", 1)[0] for entry in entries}
+        if top_level != {artifact.archive_root}:
+            _fail("ARCHIVE_UNEXPECTED_TOP_LEVEL")
+        root_entries = [entry for entry in entries if entry.name == artifact.archive_root]
+        if root_entries and any(not entry.is_directory for entry in root_entries):
+            _fail("ARCHIVE_ROOT_NOT_DIRECTORY")
+        if not expected_executable.startswith(f"{artifact.archive_root}/"):
+            _fail("EXPECTED_EXECUTABLE_OUTSIDE_ARCHIVE_ROOT")
+        return
+    if artifact.layout_kind == LAYOUT_SINGLE_EXECUTABLE_FILE:
+        if (
+            len(entries) != 1
+            or entries[0].is_directory
+            or entries[0].name != artifact.archive_root
+            or artifact.archive_root != expected_executable
+            or "/" in expected_executable
+        ):
+            _fail("SINGLE_EXECUTABLE_LAYOUT_INVALID")
+        return
+    _fail("LAYOUT_KIND_INVALID")
+
 
 def _zip_entries(
-    archive: zipfile.ZipFile, archive_root: str
+    archive: zipfile.ZipFile, artifact: ArtifactContract
 ) -> list[ArchiveEntry]:
     entries: list[ArchiveEntry] = []
     try:
@@ -388,12 +519,12 @@ def _zip_entries(
                 source=info,
             )
         )
-    _validate_entry_set(entries, archive_root)
+    _validate_entry_set(entries, artifact)
     return entries
 
 
 def _tar_entries(
-    archive: tarfile.TarFile, archive_root: str
+    archive: tarfile.TarFile, artifact: ArtifactContract
 ) -> list[ArchiveEntry]:
     entries: list[ArchiveEntry] = []
     try:
@@ -423,7 +554,7 @@ def _tar_entries(
                 source=member,
             )
         )
-    _validate_entry_set(entries, archive_root)
+    _validate_entry_set(entries, artifact)
     return entries
 
 
@@ -514,16 +645,43 @@ def _extract_entries(
             _fail("ARCHIVE_EXTRACTION_FAILED")
 
 
+
+def _validate_archive_layout(
+    archive_path: Path,
+    archive_format: str,
+    artifact: ArtifactContract,
+) -> None:
+    if archive_format == "zip":
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                _zip_entries(archive, artifact)
+        except ArtifactContractError:
+            raise
+        except (OSError, zipfile.BadZipFile, RuntimeError):
+            _fail("ARCHIVE_INVALID")
+        return
+    if archive_format == "tar.gz":
+        try:
+            with tarfile.open(archive_path, mode="r:gz") as archive:
+                _tar_entries(archive, artifact)
+        except ArtifactContractError:
+            raise
+        except (OSError, tarfile.TarError):
+            _fail("ARCHIVE_INVALID")
+        return
+    _fail("ARCHIVE_FORMAT_INVALID")
+
+
 def _extract_archive(
     archive_path: Path,
     archive_format: str,
-    archive_root: str,
+    artifact: ArtifactContract,
     destination: Path,
 ) -> None:
     if archive_format == "zip":
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                entries = _zip_entries(archive, archive_root)
+                entries = _zip_entries(archive, artifact)
                 _extract_entries(
                     entries,
                     destination,
@@ -537,7 +695,7 @@ def _extract_archive(
     if archive_format == "tar.gz":
         try:
             with tarfile.open(archive_path, mode="r:gz") as archive:
-                entries = _tar_entries(archive, archive_root)
+                entries = _tar_entries(archive, artifact)
                 _extract_entries(
                     entries,
                     destination,
@@ -565,47 +723,23 @@ def _assert_no_symlink_components(path: Path) -> None:
             _fail("CACHE_PATH_SYMLINK_DENIED")
 
 
-def _prepare_cache_root(cache_root: Path) -> bool:
+
+def _validate_cache_parent(cache_root: Path) -> Path:
     if not cache_root.is_absolute():
         _fail("CACHE_ROOT_NOT_ABSOLUTE")
     _assert_no_symlink_components(cache_root)
+    parent = cache_root.parent
     try:
-        root_metadata = cache_root.lstat()
-    except FileNotFoundError:
-        try:
-            parent_metadata = cache_root.parent.lstat()
-            if not stat.S_ISDIR(parent_metadata.st_mode) or stat.S_ISLNK(
-                parent_metadata.st_mode
-            ):
-                _fail("CACHE_ROOT_PARENT_INVALID")
-            cache_root.mkdir(mode=0o755)
-            _fsync_directory(cache_root.parent)
-            return True
-        except ArtifactContractError:
-            raise
-        except OSError:
-            _fail("CACHE_ROOT_CREATE_FAILED")
+        parent_metadata = parent.lstat()
     except OSError:
-        _fail("CACHE_ROOT_METADATA_FAILED")
-    if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
-        _fail("CACHE_ROOT_INVALID")
-    if stat.S_IMODE(root_metadata.st_mode) & 0o022:
-        _fail("CACHE_ROOT_WRITABLE_BY_OTHERS")
-    return False
-
-
-def _remove_cache_root_if_empty(cache_root: Path, created: bool) -> None:
-    if not created:
-        return
-    try:
-        cache_root.rmdir()
-        _fsync_directory(cache_root.parent)
-    except FileNotFoundError:
-        return
-    except ArtifactContractError:
-        raise
-    except OSError:
-        _fail("CACHE_ROOT_CLEANUP_FAILED")
+        _fail("CACHE_ROOT_PARENT_INVALID")
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+    ):
+        _fail("CACHE_ROOT_PARENT_INVALID")
+    return parent
 
 
 def _validate_executable(root: Path, relative_path: str) -> None:
@@ -657,45 +791,64 @@ def _read_identity_marker(path: Path) -> bytes:
         _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
 
 
-def _revalidate_published_cache(
-    destination: Path,
+
+def _revalidate_complete_cache(
+    cache_root: Path,
     identity: bytes,
-    executable_relative_path: str,
+    closure: PlaywrightClosureContract,
 ) -> None:
     try:
-        destination_metadata = destination.lstat()
+        root_metadata = cache_root.lstat()
     except OSError:
         _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    if not stat.S_ISDIR(destination_metadata.st_mode) or destination.is_symlink():
+    if not stat.S_ISDIR(root_metadata.st_mode) or cache_root.is_symlink():
         _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    marker = destination / "INSTALLATION_COMPLETE"
+    marker = cache_root / "INSTALLATION_COMPLETE"
     if _read_identity_marker(marker) != identity:
         _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    _validate_executable(destination, executable_relative_path)
+    try:
+        children = {child.name for child in cache_root.iterdir()}
+    except OSError:
+        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
+    expected_children = {"INSTALLATION_COMPLETE"} | {
+        artifact.cache_directory for artifact in closure.artifacts
+    }
+    if children != expected_children:
+        _fail("PUBLISHED_CACHE_ENTRY_SET_MISMATCH")
+    for artifact in closure.artifacts:
+        destination = cache_root / artifact.cache_directory
+        try:
+            metadata = destination.lstat()
+        except OSError:
+            _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
+        if not stat.S_ISDIR(metadata.st_mode) or destination.is_symlink():
+            _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
+        _validate_executable(
+            destination,
+            artifact.expected_executable_relative_path,
+        )
 
 
-def _discard_published_destination(
-    destination: Path, cache_root: Path
-) -> None:
+def _discard_published_destination(destination: Path, parent: Path) -> None:
     if not destination.exists() and not destination.is_symlink():
         return
     holder: Path | None = None
     quarantine: Path | None = None
     try:
-        holder = Path(tempfile.mkdtemp(prefix=".failed-publish.", dir=cache_root))
+        holder = Path(tempfile.mkdtemp(prefix=".failed-publish.", dir=parent))
         quarantine = holder / "cache"
         os.replace(destination, quarantine)
-        _fsync_directory(cache_root)
+        _fsync_directory(parent)
     except (OSError, ArtifactContractError):
         try:
             shutil.rmtree(destination)
-            _fsync_directory(cache_root)
+            _fsync_directory(parent)
         except (OSError, ArtifactContractError):
             return
     if holder is not None:
         try:
             shutil.rmtree(holder)
-            _fsync_directory(cache_root)
+            _fsync_directory(parent)
         except (OSError, ArtifactContractError):
             if quarantine is not None:
                 try:
@@ -704,98 +857,159 @@ def _discard_published_destination(
                     pass
 
 
-def install_artifact(
+def _validate_artifact_context_layout(
+    artifacts_root: Path,
+    closure: PlaywrightClosureContract,
+) -> None:
+    if not artifacts_root.is_absolute():
+        _fail("ARTIFACTS_ROOT_NOT_ABSOLUTE")
+    _assert_no_symlink_components(artifacts_root)
+    try:
+        root_metadata = artifacts_root.lstat()
+        children = {child.name for child in artifacts_root.iterdir()}
+    except OSError:
+        _fail("ARTIFACTS_ROOT_INVALID")
+    if not stat.S_ISDIR(root_metadata.st_mode) or artifacts_root.is_symlink():
+        _fail("ARTIFACTS_ROOT_INVALID")
+    if children != set(closure.artifact_names):
+        _fail("ARTIFACT_CONTEXT_SET_MISMATCH")
+    for artifact in closure.artifacts:
+        directory = artifacts_root / artifact.artifact_name
+        try:
+            directory_metadata = directory.lstat()
+            artifact_children = {child.name for child in directory.iterdir()}
+        except OSError:
+            _fail("ARTIFACT_CONTEXT_ENTRY_INVALID")
+        if (
+            not stat.S_ISDIR(directory_metadata.st_mode)
+            or directory.is_symlink()
+            or artifact_children != {"archive"}
+        ):
+            _fail("ARTIFACT_CONTEXT_ENTRY_INVALID")
+
+
+def _validate_all_archives(
+    document: dict[str, object],
+    artifacts_root: Path,
+    verified: VerifiedPlaywrightClosure,
+) -> tuple[ValidatedArchive, ...]:
+    closure = verified.closure
+    _validate_artifact_context_layout(artifacts_root, closure)
+    manifest_artifacts = _artifact_documents(document)
+    validated: list[ValidatedArchive] = []
+    for artifact in closure.artifacts:
+        item = manifest_artifacts[artifact.artifact_name]
+        archive_path = artifacts_root / artifact.artifact_name / "archive"
+        archive_metadata = _regular_file_metadata(
+            archive_path, "ARCHIVE_FILE_INVALID"
+        )
+        if archive_metadata.st_size != item["archive_size"]:
+            _fail("ARCHIVE_SIZE_MISMATCH")
+        if _sha256_file(archive_path) != item["archive_sha256"]:
+            _fail("ARCHIVE_SHA256_MISMATCH")
+        _validate_archive_layout(
+            archive_path,
+            str(item["archive_format"]),
+            artifact,
+        )
+        validated.append(
+            ValidatedArchive(
+                artifact=artifact,
+                manifest=item,
+                path=archive_path,
+            )
+        )
+    return tuple(validated)
+
+
+
+def install_closure(
     *,
     manifest_path: Path,
-    archive_path: Path,
+    artifacts_root: Path,
     expected_manifest_sha256: str,
-    verified_contract: VerifiedBrowserContract,
+    verified_closure: VerifiedPlaywrightClosure,
 ) -> Path:
-    document = load_verified_manifest(manifest_path, expected_manifest_sha256)
-    validate_manifest_contract(document, verified_contract)
-
-    archive_metadata = _regular_file_metadata(
-        archive_path, "ARCHIVE_FILE_INVALID"
+    document = load_verified_closure_manifest(
+        manifest_path, expected_manifest_sha256
     )
-    if archive_path.name != document["archive_filename"]:
-        _fail("ARCHIVE_FILENAME_MISMATCH")
-    if archive_metadata.st_size != document["archive_size"]:
-        _fail("ARCHIVE_SIZE_MISMATCH")
-    if _sha256_file(archive_path) != document["archive_sha256"]:
-        _fail("ARCHIVE_SHA256_MISMATCH")
+    validate_closure_manifest_contract(document, verified_closure)
+    archives = _validate_all_archives(
+        document,
+        artifacts_root,
+        verified_closure,
+    )
 
-    contract = verified_contract.browser
-    cache_root = Path(contract.cache_root)
-    destination = cache_root / contract.cache_directory
-    if destination.exists() or destination.is_symlink():
-        _fail("TARGET_CACHE_ALREADY_EXISTS")
+    closure = verified_closure.closure
+    cache_root = Path(closure.cache_root)
+    parent = _validate_cache_parent(cache_root)
+    identity = canonical_installation_identity(verified_closure)
+    if cache_root.exists() or cache_root.is_symlink():
+        try:
+            _revalidate_complete_cache(cache_root, identity, closure)
+        except ArtifactContractError:
+            _fail("EXISTING_CACHE_INCOMPLETE_OR_MISMATCH")
+        return cache_root
 
-    cache_root_created = _prepare_cache_root(cache_root)
     temporary: Path | None = None
     published = False
     primary_failure = False
-    identity = canonical_installation_identity(verified_contract)
     try:
         try:
             temporary = Path(
-                tempfile.mkdtemp(
-                    prefix=f".{contract.cache_directory}.",
-                    dir=cache_root,
-                )
+                tempfile.mkdtemp(prefix=".playwright-closure.", dir=parent)
             )
             temporary.chmod(0o700)
-            if temporary.stat().st_dev != cache_root.stat().st_dev:
+            if temporary.stat().st_dev != parent.stat().st_dev:
                 _fail("CACHE_FILESYSTEM_MISMATCH")
         except ArtifactContractError:
             raise
         except OSError:
             _fail("TEMP_DIRECTORY_CREATE_FAILED")
 
-        _extract_archive(
-            archive_path,
-            str(document["archive_format"]),
-            str(document["archive_root"]),
-            temporary,
-        )
-        _validate_executable(
-            temporary,
-            contract.expected_executable_relative_path,
-        )
+        for validated in archives:
+            destination = temporary / validated.artifact.cache_directory
+            try:
+                destination.mkdir(mode=0o700)
+            except OSError:
+                _fail("ARTIFACT_STAGING_CREATE_FAILED")
+            _extract_archive(
+                validated.path,
+                str(validated.manifest["archive_format"]),
+                validated.artifact,
+                destination,
+            )
+            _validate_executable(
+                destination,
+                validated.artifact.expected_executable_relative_path,
+            )
+
         marker = temporary / "INSTALLATION_COMPLETE"
         if marker.exists() or marker.is_symlink():
             _fail("INSTALLATION_MARKER_COLLISION")
         _write_identity_marker(marker, identity)
         _fsync_tree_directories(temporary)
         try:
-            os.replace(temporary, destination)
+            os.replace(temporary, cache_root)
         except OSError:
             _fail("ATOMIC_PUBLISH_FAILED")
         temporary = None
         published = True
-        _fsync_directory(cache_root, "FINAL_PARENT_FSYNC_FAILED")
-        _revalidate_published_cache(
-            destination,
-            identity,
-            contract.expected_executable_relative_path,
-        )
-        return destination
+        _fsync_directory(parent, "FINAL_PARENT_FSYNC_FAILED")
+        _revalidate_complete_cache(cache_root, identity, closure)
+        return cache_root
     except BaseException:
         primary_failure = True
         if published:
-            _discard_published_destination(destination, cache_root)
+            _discard_published_destination(cache_root, parent)
         raise
     finally:
         cleanup_error = False
         if temporary is not None:
             try:
                 shutil.rmtree(temporary)
-                _fsync_directory(cache_root)
+                _fsync_directory(parent)
             except (OSError, ArtifactContractError):
-                cleanup_error = True
-        if primary_failure:
-            try:
-                _remove_cache_root_if_empty(cache_root, cache_root_created)
-            except ArtifactContractError:
                 cleanup_error = True
         if cleanup_error and not primary_failure:
             _fail("TEMP_CLEANUP_FAILED")
@@ -803,13 +1017,13 @@ def install_artifact(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Install a verified offline Playwright browser artifact."
+        description="Install a verified offline Playwright artifact closure."
     )
-    parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--archive", required=True, type=Path)
+    parser.add_argument("--closure-manifest", required=True, type=Path)
+    parser.add_argument("--artifacts-root", required=True, type=Path)
     parser.add_argument("--lockfile", required=True, type=Path)
     parser.add_argument("--wheel", required=True, type=Path)
-    parser.add_argument("--expected-manifest-sha256", required=True)
+    parser.add_argument("--expected-closure-manifest-sha256", required=True)
     parser.add_argument(
         "--platform", required=True, choices=("linux/amd64", "linux/arm64")
     )
@@ -819,16 +1033,18 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        verified = load_verified_wheel_contract(
+        verified = load_verified_wheel_closure(
             lockfile_path=args.lockfile,
             wheel_path=args.wheel,
             platform=args.platform,
         )
-        install_artifact(
-            manifest_path=args.manifest,
-            archive_path=args.archive,
-            expected_manifest_sha256=args.expected_manifest_sha256,
-            verified_contract=verified,
+        install_closure(
+            manifest_path=args.closure_manifest,
+            artifacts_root=args.artifacts_root,
+            expected_manifest_sha256=(
+                args.expected_closure_manifest_sha256
+            ),
+            verified_closure=verified,
         )
     except (ArtifactContractError, PlaywrightContractError) as exc:
         print("PLAYWRIGHT_ARTIFACT_INSTALL=FAIL", file=sys.stderr)
@@ -839,13 +1055,13 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR_CLASS=INTERNAL_ERROR", file=sys.stderr)
         return 2
 
-    contract = verified.browser
+    closure = verified.closure
     print("PLAYWRIGHT_ARTIFACT_INSTALL=PASS")
-    print(f"PLAYWRIGHT_PACKAGE={contract.package}")
-    print(f"PLAYWRIGHT_PACKAGE_VERSION={contract.package_version}")
-    print(f"BROWSER_FAMILY={contract.browser_family}")
-    print(f"BROWSER_REVISION={contract.browser_revision}")
-    print(f"PLATFORM={contract.platform}")
+    print(f"PLAYWRIGHT_PACKAGE={closure.package}")
+    print(f"PLAYWRIGHT_PACKAGE_VERSION={closure.package_version}")
+    print(f"ARTIFACT_COUNT={len(closure.artifacts)}")
+    print(f"ARTIFACT_NAMES={','.join(closure.artifact_names)}")
+    print(f"PLATFORM={closure.platform}")
     return 0
 
 

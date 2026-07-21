@@ -400,6 +400,39 @@ def _artifact_file(
     return cache_root / artifact.cache_directory / relative_path
 
 
+def test_packaged_readiness_rejects_premature_eof_before_expected_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    chromium = closure.artifact("chromium-headless-shell")
+    executable = _artifact_file(
+        closure,
+        cache_root,
+        chromium.artifact_name,
+        chromium.expected_executable_relative_path,
+    )
+    expected = executable.stat()
+    original_read = installed.os.read
+    reads = 0
+
+    def read_prefix_then_eof(descriptor: int, count: int) -> bytes:
+        nonlocal reads
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            return original_read(descriptor, count)
+        reads += 1
+        if reads == 1:
+            return original_read(descriptor, 1)
+        return b""
+
+    monkeypatch.setattr(installed.os, "read", read_prefix_then_eof)
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="INSTALLED_TREE_PREMATURE_EOF",
+    ):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
 @pytest.mark.parametrize(
     "case",
     [

@@ -376,11 +376,23 @@ def _hash_regular_file(
         if _metadata_identity(before) != _metadata_identity(metadata):
             _fail("INSTALLED_TREE_CHANGED_DURING_HASH")
         digest = hashlib.sha256()
-        while chunk := os.read(descriptor, 1024 * 1024):
+        expected_size = before.st_size
+        consumed_bytes = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            consumed_bytes += len(chunk)
+            if consumed_bytes > expected_size:
+                _fail("INSTALLED_TREE_SIZE_CONTRACT_VIOLATION")
             digest.update(chunk)
         after = os.fstat(descriptor)
         if _metadata_identity(after) != _metadata_identity(before):
             _fail("INSTALLED_TREE_CHANGED_DURING_HASH")
+        if consumed_bytes < expected_size:
+            _fail("INSTALLED_TREE_PREMATURE_EOF")
+        if consumed_bytes > expected_size:
+            _fail("INSTALLED_TREE_SIZE_CONTRACT_VIOLATION")
         return digest.hexdigest()
     except InstalledClosureError:
         raise

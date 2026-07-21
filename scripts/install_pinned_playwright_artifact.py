@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Iterable
 
 from scripts.playwright_artifact_contract import (
+    ARTIFACT_PLATFORM_MAPPINGS,
     LAYOUT_DIRECTORY_TREE,
     LAYOUT_SINGLE_EXECUTABLE_FILE,
     ArtifactContract,
@@ -105,6 +106,29 @@ class ArchiveEntry:
     mode: int
     size: int
     source: object
+
+
+LAYOUT_EXACT_ROOT_FILE_SET = "EXACT_ROOT_FILE_SET"
+
+
+@dataclass(frozen=True)
+class ExactRootFileSetProfile:
+    layout_kind: str
+    revision: str
+    required_member_names: frozenset[str]
+    designated_executable: str
+
+
+# Revision remains authoritative from the SHA-verified wheel metadata.
+_EXACT_ROOT_FILE_SET_MEMBER_POLICIES = {
+    (
+        "playwright",
+        "1.61.0",
+        "debian13-x64",
+        "ffmpeg",
+        "ffmpeg-linux.zip",
+    ): frozenset({"ffmpeg-linux", "COPYING.LGPLv2.1"}),
+}
 
 
 @dataclass(frozen=True)
@@ -435,6 +459,61 @@ def _validate_mode(mode: int, *, is_directory: bool) -> int:
     return permissions
 
 
+def _exact_root_file_set_profile(
+    artifact: ArtifactContract,
+) -> ExactRootFileSetProfile | None:
+    try:
+        host_platform = ARTIFACT_PLATFORM_MAPPINGS[artifact.artifact_name][
+            artifact.platform
+        ].playwright_host_platform
+    except KeyError:
+        return None
+    required_member_names = _EXACT_ROOT_FILE_SET_MEMBER_POLICIES.get(
+        (
+            artifact.package,
+            artifact.package_version,
+            host_platform,
+            artifact.artifact_name,
+            artifact.expected_archive_filename,
+        )
+    )
+    if required_member_names is None:
+        return None
+    return ExactRootFileSetProfile(
+        layout_kind=LAYOUT_EXACT_ROOT_FILE_SET,
+        revision=artifact.revision,
+        required_member_names=required_member_names,
+        designated_executable=artifact.expected_executable_relative_path,
+    )
+
+
+def _validate_exact_root_file_set(
+    entries: list[ArchiveEntry],
+    artifact: ArtifactContract,
+    profile: ExactRootFileSetProfile,
+) -> None:
+    if (
+        profile.layout_kind != LAYOUT_EXACT_ROOT_FILE_SET
+        or profile.revision != artifact.revision
+    ):
+        _fail("EXACT_ROOT_FILE_SET_INVALID")
+    names = frozenset(entry.name for entry in entries)
+    if (
+        len(entries) != len(profile.required_member_names)
+        or names != profile.required_member_names
+    ):
+        _fail("EXACT_ROOT_FILE_SET_INVALID")
+    if any(entry.is_directory or "/" in entry.name for entry in entries):
+        _fail("EXACT_ROOT_FILE_SET_INVALID")
+    companions = [
+        entry
+        for entry in entries
+        if entry.name != profile.designated_executable
+    ]
+    if any(entry.mode & 0o111 for entry in companions):
+        _fail("EXACT_ROOT_FILE_SET_COMPANION_EXECUTABLE")
+
+
 
 def _validate_entry_set(
     entries: list[ArchiveEntry], artifact: ArtifactContract
@@ -484,6 +563,16 @@ def _validate_entry_set(
             _fail("EXPECTED_EXECUTABLE_OUTSIDE_ARCHIVE_ROOT")
         return
     if artifact.layout_kind == LAYOUT_SINGLE_EXECUTABLE_FILE:
+        profile = _exact_root_file_set_profile(artifact)
+        if profile is not None:
+            if (
+                artifact.archive_root != expected_executable
+                or expected_executable != profile.designated_executable
+                or "/" in expected_executable
+            ):
+                _fail("EXACT_ROOT_FILE_SET_INVALID")
+            _validate_exact_root_file_set(entries, artifact, profile)
+            return
         if (
             len(entries) != 1
             or entries[0].is_directory

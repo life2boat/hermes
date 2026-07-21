@@ -172,6 +172,17 @@ def write_artifact_archive(
                 b"#!/bin/sh\nexit 0\n",
                 mode=0o755 if executable else 0o644,
             )
+        profile = installer._exact_root_file_set_profile(artifact)
+        if layout == artifact.layout_kind and profile is not None:
+            for member_name in sorted(
+                profile.required_member_names - {profile.designated_executable}
+            ):
+                _zip_entry(
+                    archive,
+                    member_name,
+                    b"synthetic license companion\n",
+                    mode=0o644,
+                )
         if layout == contract_module.LAYOUT_DIRECTORY_TREE:
             _zip_entry(
                 archive,

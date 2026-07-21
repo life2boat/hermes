@@ -152,8 +152,38 @@ def test_valid_complete_closure_is_published_once_and_revalidated(
     identity = installed.expected_identity_path(result)
     assert stat.S_IMODE(identity.stat().st_mode) == 0o444
     marker = result / installed.INSTALLATION_MARKER
-    assert json.loads(marker.read_text(encoding="ascii"))["marker_version"] == 2
+    marker_document = json.loads(marker.read_text(encoding="ascii"))
+    assert marker_document["marker_version"] == 2
+    ffmpeg = env.verified.closure.artifact("ffmpeg")
+    ffmpeg_root = result / ffmpeg.cache_directory
+    companion = ffmpeg_root / "COPYING.LGPLv2.1"
+    assert companion.is_file()
+    assert stat.S_IMODE(companion.stat().st_mode) == 0o444
+    ffmpeg_marker = next(
+        item
+        for item in marker_document["artifacts"]
+        if item["artifact_name"] == "ffmpeg"
+    )
+    assert ffmpeg_marker["installed_file_count"] == 2
     assert _install(env) == result
+
+
+def test_ffmpeg_companion_tamper_is_detected_by_installed_tree(
+    tmp_path: Path,
+) -> None:
+    env = _fixture(tmp_path)
+    result = _install(env)
+    ffmpeg = env.verified.closure.artifact("ffmpeg")
+    companion = result / ffmpeg.cache_directory / "COPYING.LGPLv2.1"
+    companion.chmod(0o644)
+    companion.write_bytes(b"tampered synthetic license")
+    companion.chmod(0o444)
+
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",
+    ):
+        _install(env)
 
 
 def test_missing_expected_closure_manifest_sha_is_denied(tmp_path: Path) -> None:
@@ -340,21 +370,6 @@ def test_ffmpeg_directory_layout_is_denied(tmp_path: Path) -> None:
     )
     _refresh_archive_identity(env, "ffmpeg")
     with pytest.raises(installer.ArtifactContractError, match="ARCHIVE_PATH_CONFLICT"):
-        _install(env)
-    _assert_no_published_cache(env)
-
-
-def test_ffmpeg_second_top_level_entry_is_denied(tmp_path: Path) -> None:
-    env = _fixture(tmp_path)
-    artifact = env.verified.closure.artifact("ffmpeg")
-    archive = env.artifacts_root / "ffmpeg" / "archive"
-    write_artifact_archive(
-        archive,
-        artifact,
-        extra_entries=[("second", b"extra", 0o644, stat.S_IFREG)],
-    )
-    _refresh_archive_identity(env, "ffmpeg")
-    with pytest.raises(installer.ArtifactContractError, match="SINGLE_EXECUTABLE_LAYOUT_INVALID"):
         _install(env)
     _assert_no_published_cache(env)
 

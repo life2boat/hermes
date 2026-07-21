@@ -110,6 +110,20 @@ def test_runbook_requires_all_archives_before_atomic_publication() -> None:
         assert needle in text
 
 
+
+def test_runbook_keeps_runtime_state_outside_immutable_browser_cache() -> None:
+    text = _normalized()
+    required = (
+        "separate root-owned expected-closure identity",
+        "cache, marker, and expected identity are sealed against runtime writes",
+        "Browser profiles, user data, and temporary launch state remain",
+        "outside `/opt/hermes/.playwright`",
+        "immutable cache is never made writable to launch Chromium",
+    )
+    for needle in required:
+        assert needle in text
+
+
 def test_runbook_defines_fail_closed_existing_cache_policy() -> None:
     text = _normalized()
     required = (

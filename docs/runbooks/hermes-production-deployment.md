@@ -162,11 +162,23 @@ bottom-up, and atomically publishes the complete cache root with one rename.
 The final parent is fsynced and both published artifacts are reopened and
 revalidated. No artifact is published before the full closure validates.
 
+The immutable installed marker binds the aggregate closure-manifest digest,
+both archive digests, and deterministic full-tree digests for Chromium and
+FFmpeg. A separate root-owned expected-closure identity beside the cache is the
+build-time trust anchor; it is never sourced from an environment variable or
+from the marker itself. The cache, marker, and expected identity are sealed
+against runtime writes. Post-publication validation and runtime readiness hash
+every installed regular file and bind directory structure and modes. Browser
+profiles, user data, and temporary launch state remain in runtime-owned paths
+outside `/opt/hermes/.playwright`; the immutable cache is never made writable
+to launch Chromium.
+
 A complete matching existing cache is accepted after full revalidation. An
-incomplete cache, mixed revision, package mismatch, missing executable, or
-unexpected cache entry is denied and is never merged with staged content. A
-Chromium-only or FFmpeg-only cache is not Ready. Packaged Google Meet readiness
-requires both exact artifacts and performs no download attempt.
+incomplete cache, mixed revision, package mismatch, missing executable, altered
+file, extra file, permission change, or unexpected cache entry is denied and is
+never merged with staged content. A Chromium-only or FFmpeg-only cache is not
+Ready. Packaged Google Meet readiness requires both exact artifacts and performs
+no download attempt.
 
 Artifact acquisition, image build, image validation, deployment, and feature
 activation remain separate approval gates.

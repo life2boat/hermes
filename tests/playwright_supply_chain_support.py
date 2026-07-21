@@ -174,6 +174,7 @@ def write_artifact_archive(
             )
         profile = installer._exact_root_file_set_profile(artifact)
         if layout == artifact.layout_kind and profile is not None:
+            expected_modes = dict(profile.required_member_modes)
             for member_name in sorted(
                 profile.required_member_names - {profile.designated_executable}
             ):
@@ -181,7 +182,7 @@ def write_artifact_archive(
                     archive,
                     member_name,
                     b"synthetic license companion\n",
-                    mode=0o644,
+                    mode=expected_modes[member_name],
                 )
         if layout == contract_module.LAYOUT_DIRECTORY_TREE:
             _zip_entry(

@@ -117,6 +117,7 @@ class ExactRootFileSetProfile:
     revision: str
     required_member_names: frozenset[str]
     designated_executable: str
+    required_member_modes: tuple[tuple[str, int], ...]
 
 
 # Revision remains authoritative from the SHA-verified wheel metadata.
@@ -127,7 +128,10 @@ _EXACT_ROOT_FILE_SET_MEMBER_POLICIES = {
         "debian13-x64",
         "ffmpeg",
         "ffmpeg-linux.zip",
-    ): frozenset({"ffmpeg-linux", "COPYING.LGPLv2.1"}),
+    ): (
+        ("COPYING.LGPLv2.1", 0o644),
+        ("ffmpeg-linux", 0o755),
+    ),
 }
 
 
@@ -468,7 +472,7 @@ def _exact_root_file_set_profile(
         ].playwright_host_platform
     except KeyError:
         return None
-    required_member_names = _EXACT_ROOT_FILE_SET_MEMBER_POLICIES.get(
+    required_member_modes = _EXACT_ROOT_FILE_SET_MEMBER_POLICIES.get(
         (
             artifact.package,
             artifact.package_version,
@@ -477,13 +481,16 @@ def _exact_root_file_set_profile(
             artifact.expected_archive_filename,
         )
     )
-    if required_member_names is None:
+    if required_member_modes is None:
         return None
     return ExactRootFileSetProfile(
         layout_kind=LAYOUT_EXACT_ROOT_FILE_SET,
         revision=artifact.revision,
-        required_member_names=required_member_names,
+        required_member_names=frozenset(
+            name for name, _mode in required_member_modes
+        ),
         designated_executable=artifact.expected_executable_relative_path,
+        required_member_modes=required_member_modes,
     )
 
 
@@ -496,6 +503,9 @@ def _validate_exact_root_file_set(
         profile.layout_kind != LAYOUT_EXACT_ROOT_FILE_SET
         or profile.revision != artifact.revision
     ):
+        _fail("EXACT_ROOT_FILE_SET_INVALID")
+    expected_modes = dict(profile.required_member_modes)
+    if frozenset(expected_modes) != profile.required_member_names:
         _fail("EXACT_ROOT_FILE_SET_INVALID")
     names = frozenset(entry.name for entry in entries)
     if (
@@ -512,6 +522,8 @@ def _validate_exact_root_file_set(
     ]
     if any(entry.mode & 0o111 for entry in companions):
         _fail("EXACT_ROOT_FILE_SET_COMPANION_EXECUTABLE")
+    if any(entry.mode != expected_modes[entry.name] for entry in entries):
+        _fail("EXACT_ROOT_FILE_SET_MODE_INVALID")
 
 
 

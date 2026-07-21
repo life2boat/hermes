@@ -186,6 +186,41 @@ def test_ffmpeg_companion_tamper_is_detected_by_installed_tree(
         _install(env)
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "extra", "renamed", "mode_changed"],
+)
+def test_ffmpeg_companion_tree_shape_tamper_is_rejected(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    env = _fixture(tmp_path)
+    result = _install(env)
+    ffmpeg = env.verified.closure.artifact("ffmpeg")
+    ffmpeg_root = result / ffmpeg.cache_directory
+    companion = ffmpeg_root / "COPYING.LGPLv2.1"
+
+    if mutation == "mode_changed":
+        companion.chmod(0o400)
+    else:
+        ffmpeg_root.chmod(0o755)
+        if mutation == "missing":
+            companion.unlink()
+        elif mutation == "extra":
+            extra = ffmpeg_root / "unexpected-extra"
+            extra.write_bytes(b"unexpected")
+            extra.chmod(0o444)
+        else:
+            companion.rename(ffmpeg_root / "renamed-companion")
+        ffmpeg_root.chmod(0o555)
+
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",
+    ):
+        _install(env)
+
+
 def test_missing_expected_closure_manifest_sha_is_denied(tmp_path: Path) -> None:
     env = _fixture(tmp_path)
     with pytest.raises(

@@ -10,7 +10,11 @@ import pytest
 
 from scripts import install_pinned_playwright_artifact as installer
 from scripts.playwright_artifact_contract import ArtifactContract
-from tests.playwright_supply_chain_support import verified_closure
+from tests.playwright_supply_chain_support import (
+    closure_manifest_document,
+    verified_closure,
+    write_closure_archives,
+)
 
 
 EXECUTABLE = "ffmpeg-linux"
@@ -109,6 +113,23 @@ def test_exact_ffmpeg_root_file_set_is_accepted(tmp_path: Path) -> None:
             "EXACT_ROOT_FILE_SET_INVALID",
         ),
         (
+            "nested_executable",
+            [_executable(name=f"nested/{EXECUTABLE}"), _companion()],
+            "EXPECTED_EXECUTABLE_MISSING",
+        ),
+        (
+            "executable_directory",
+            [
+                _executable(
+                    name=f"{EXECUTABLE}/",
+                    mode=0o755,
+                    file_type=stat.S_IFDIR,
+                ),
+                _companion(),
+            ],
+            "EXPECTED_EXECUTABLE_MISSING",
+        ),
+        (
             "companion_directory",
             [
                 _executable(),
@@ -166,6 +187,16 @@ def test_exact_ffmpeg_root_file_set_is_accepted(tmp_path: Path) -> None:
             "EXACT_ROOT_FILE_SET_COMPANION_EXECUTABLE",
         ),
         (
+            "unexpected_companion_mode",
+            [_executable(), _companion(mode=0o600)],
+            "EXACT_ROOT_FILE_SET_MODE_INVALID",
+        ),
+        (
+            "unexpected_executable_mode",
+            [_executable(mode=0o744), _companion()],
+            "EXACT_ROOT_FILE_SET_MODE_INVALID",
+        ),
+        (
             "path_traversal",
             [_executable(), _companion(name=f"../{COMPANION}")],
             "ARCHIVE_PATH_TRAVERSAL",
@@ -179,20 +210,34 @@ def test_exact_ffmpeg_root_file_set_is_accepted(tmp_path: Path) -> None:
 )
 def test_ffmpeg_exact_root_file_set_denies_noncanonical_shapes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     case: str,
     entries: list[tuple[str, bytes, int, int]],
     error_code: str,
 ) -> None:
     del case
     archive = tmp_path / "ffmpeg.zip"
+    destination = tmp_path / "installed"
     _write_archive(archive, entries)
+    extraction_started = False
+
+    def extraction_must_not_start(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        nonlocal extraction_started
+        extraction_started = True
+        raise AssertionError("extraction started before complete validation")
+
+    monkeypatch.setattr(installer, "_extract_entries", extraction_must_not_start)
 
     with pytest.raises(installer.ArtifactContractError, match=error_code):
-        installer._validate_archive_layout(
+        installer._extract_archive(
             archive,
             "zip",
             _artifact(tmp_path),
+            destination,
         )
+    assert extraction_started is False
+    assert not destination.exists()
 
 
 def test_ffmpeg_exact_profile_is_version_revision_and_platform_bound(
@@ -208,6 +253,10 @@ def test_ffmpeg_exact_profile_is_version_revision_and_platform_bound(
     assert profile.revision == artifact.revision
     assert profile.required_member_names == {EXECUTABLE, COMPANION}
     assert profile.designated_executable == EXECUTABLE
+    assert dict(profile.required_member_modes) == {
+        EXECUTABLE: 0o755,
+        COMPANION: 0o644,
+    }
     assert (
         installer._exact_root_file_set_profile(
             replace(artifact, package_version="1.61.1")
@@ -220,3 +269,65 @@ def test_ffmpeg_exact_profile_is_version_revision_and_platform_bound(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("case", "field_name", "field_value"),
+    [
+        (
+            "manifest_adds_third_member",
+            "required_member_names",
+            [EXECUTABLE, COMPANION, "unexpected-third"],
+        ),
+        (
+            "manifest_renames_companion",
+            "companion_member_name",
+            "renamed-companion",
+        ),
+        (
+            "manifest_removes_companion",
+            "companion_required",
+            False,
+        ),
+    ],
+)
+def test_manifest_cannot_change_trusted_ffmpeg_member_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    field_name: str,
+    field_value: object,
+) -> None:
+    del case
+    cache_root = tmp_path / "cache-parent" / "ms-playwright"
+    verified, _lockfile, _wheel = verified_closure(
+        tmp_path,
+        cache_root=cache_root,
+    )
+    archives = write_closure_archives(tmp_path / "archives", verified)
+    document = closure_manifest_document(verified, archives)
+    artifacts = document["artifacts"]
+    assert isinstance(artifacts, list)
+    ffmpeg = next(
+        item for item in artifacts if item["artifact_name"] == "ffmpeg"
+    )
+    ffmpeg[field_name] = field_value
+    extraction_started = False
+
+    def extraction_must_not_start(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        nonlocal extraction_started
+        extraction_started = True
+        raise AssertionError("extraction started for an invalid manifest")
+
+    monkeypatch.setattr(installer, "_extract_archive", extraction_must_not_start)
+
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="ARTIFACT_MANIFEST_FIELDS_INVALID",
+    ):
+        installer.parse_canonical_closure_manifest(
+            installer.canonical_json(document)
+        )
+    assert extraction_started is False
+    assert not cache_root.exists()

@@ -23,8 +23,18 @@ from scripts.playwright_artifact_contract import (
     PlaywrightClosureContract,
     PlaywrightContractError,
     VerifiedPlaywrightClosure,
-    canonical_installation_identity,
     load_verified_wheel_closure,
+)
+from scripts.playwright_installed_closure import (
+    IMMUTABLE_DIRECTORY_MODE,
+    InstalledClosureError,
+    build_expected_identity_document,
+    build_installed_marker_document,
+    canonical_json as canonical_installed_json,
+    expected_identity_path,
+    read_expected_identity,
+    seal_installed_artifact_tree,
+    verify_installed_closure,
 )
 
 
@@ -781,52 +791,91 @@ def _fsync_tree_directories(root: Path) -> None:
         _fsync_directory(directory)
 
 
-def _read_identity_marker(path: Path) -> bytes:
-    file_metadata = _regular_file_metadata(path, "PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    if not 0 < file_metadata.st_size <= 4096:
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    try:
-        return path.read_bytes()
-    except OSError:
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
+def _artifact_cache_directories(
+    closure: PlaywrightClosureContract,
+) -> dict[str, str]:
+    return {
+        artifact.artifact_name: artifact.cache_directory
+        for artifact in closure.artifacts
+    }
 
+
+
+def _current_owner_identity() -> tuple[int, int]:
+    uid_provider = getattr(os, "geteuid", None)
+    gid_provider = getattr(os, "getegid", None)
+    if not callable(uid_provider) or not callable(gid_provider):
+        _fail("OWNER_IDENTITY_UNSUPPORTED")
+    return uid_provider(), gid_provider()
+
+
+def _build_expected_identity(
+    document: dict[str, object],
+    expected_manifest_sha256: str,
+    closure: PlaywrightClosureContract,
+) -> dict[str, object]:
+    manifest_artifacts = _artifact_documents(document)
+    return build_expected_identity_document(
+        closure_manifest_sha256=expected_manifest_sha256,
+        playwright_package=closure.package,
+        playwright_package_version=closure.package_version,
+        platform=closure.platform,
+        artifacts=[
+            {
+                "artifact_name": artifact.artifact_name,
+                "revision": artifact.revision,
+                "archive_sha256": manifest_artifacts[
+                    artifact.artifact_name
+                ]["archive_sha256"],
+                "layout_kind": artifact.layout_kind,
+                "expected_executable_relative_path": (
+                    artifact.expected_executable_relative_path
+                ),
+            }
+            for artifact in closure.artifacts
+        ],
+    )
 
 
 def _revalidate_complete_cache(
     cache_root: Path,
-    identity: bytes,
+    independent_identity: Path,
     closure: PlaywrightClosureContract,
+    *,
+    owner_uid: int,
+    owner_gid: int,
 ) -> None:
     try:
-        root_metadata = cache_root.lstat()
-    except OSError:
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    if not stat.S_ISDIR(root_metadata.st_mode) or cache_root.is_symlink():
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    marker = cache_root / "INSTALLATION_COMPLETE"
-    if _read_identity_marker(marker) != identity:
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    try:
-        children = {child.name for child in cache_root.iterdir()}
-    except OSError:
-        _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-    expected_children = {"INSTALLATION_COMPLETE"} | {
-        artifact.cache_directory for artifact in closure.artifacts
-    }
-    if children != expected_children:
-        _fail("PUBLISHED_CACHE_ENTRY_SET_MISMATCH")
-    for artifact in closure.artifacts:
-        destination = cache_root / artifact.cache_directory
-        try:
-            metadata = destination.lstat()
-        except OSError:
-            _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-        if not stat.S_ISDIR(metadata.st_mode) or destination.is_symlink():
-            _fail("PUBLISHED_CACHE_IDENTITY_MISMATCH")
-        _validate_executable(
-            destination,
-            artifact.expected_executable_relative_path,
+        expected = read_expected_identity(
+            independent_identity,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
         )
+        verify_installed_closure(
+            cache_root=cache_root,
+            expected_identity=expected,
+            artifact_cache_directories=_artifact_cache_directories(closure),
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+    except InstalledClosureError as exc:
+        _fail(exc.code)
+
+
+def _make_tree_removable(root: Path) -> None:
+    try:
+        for current, directory_names, _file_names in os.walk(
+            root, topdown=True, followlinks=False
+        ):
+            current_path = Path(current)
+            current_path.chmod(0o700)
+            directory_names[:] = [
+                name
+                for name in directory_names
+                if not (current_path / name).is_symlink()
+            ]
+    except OSError:
+        _fail("FAILED_PUBLICATION_CLEANUP_FAILED")
 
 
 def _discard_published_destination(destination: Path, parent: Path) -> None:
@@ -837,24 +886,55 @@ def _discard_published_destination(destination: Path, parent: Path) -> None:
     try:
         holder = Path(tempfile.mkdtemp(prefix=".failed-publish.", dir=parent))
         quarantine = holder / "cache"
+        destination.chmod(0o700)
         os.replace(destination, quarantine)
         _fsync_directory(parent)
+        _make_tree_removable(quarantine)
+        shutil.rmtree(quarantine)
+        holder.rmdir()
+        _fsync_directory(parent)
     except (OSError, ArtifactContractError):
+        failed_root = (
+            quarantine
+            if quarantine is not None and quarantine.exists()
+            else destination
+        )
         try:
-            shutil.rmtree(destination)
+            if failed_root.exists() or failed_root.is_symlink():
+                failed_root.chmod(0o700)
+                marker = failed_root / "INSTALLATION_COMPLETE"
+                if marker.exists() or marker.is_symlink():
+                    marker.chmod(0o600)
+                    marker.unlink()
+                _make_tree_removable(failed_root)
+                shutil.rmtree(failed_root)
+            if holder is not None and holder.exists():
+                holder.rmdir()
             _fsync_directory(parent)
         except (OSError, ArtifactContractError):
-            return
-    if holder is not None:
-        try:
-            shutil.rmtree(holder)
-            _fsync_directory(parent)
-        except (OSError, ArtifactContractError):
-            if quarantine is not None:
-                try:
-                    (quarantine / "INSTALLATION_COMPLETE").unlink(missing_ok=True)
-                except OSError:
-                    pass
+            try:
+                marker = failed_root / "INSTALLATION_COMPLETE"
+                marker.chmod(0o600)
+                marker.unlink(missing_ok=True)
+                _fsync_directory(parent)
+            except OSError:
+                pass
+
+
+def _discard_expected_identity(path: Path, parent: Path) -> None:
+    try:
+        metadata = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            _fail("EXPECTED_IDENTITY_CLEANUP_FAILED")
+        path.chmod(0o600)
+        path.unlink()
+        _fsync_directory(parent)
+    except FileNotFoundError:
+        return
+    except ArtifactContractError:
+        raise
+    except OSError:
+        _fail("EXPECTED_IDENTITY_CLEANUP_FAILED")
 
 
 def _validate_artifact_context_layout(
@@ -943,16 +1023,35 @@ def install_closure(
     closure = verified_closure.closure
     cache_root = Path(closure.cache_root)
     parent = _validate_cache_parent(cache_root)
-    identity = canonical_installation_identity(verified_closure)
+    owner_uid, owner_gid = _current_owner_identity()
+    try:
+        expected_document = _build_expected_identity(
+            document,
+            expected_manifest_sha256,
+            closure,
+        )
+    except InstalledClosureError as exc:
+        _fail(exc.code)
+    expected_bytes = canonical_installed_json(expected_document)
+    independent_identity = expected_identity_path(cache_root)
     if cache_root.exists() or cache_root.is_symlink():
         try:
-            _revalidate_complete_cache(cache_root, identity, closure)
+            _revalidate_complete_cache(
+                cache_root,
+                independent_identity,
+                closure,
+                owner_uid=owner_uid,
+                owner_gid=owner_gid,
+            )
         except ArtifactContractError:
             _fail("EXISTING_CACHE_INCOMPLETE_OR_MISMATCH")
         return cache_root
+    if independent_identity.exists() or independent_identity.is_symlink():
+        _fail("EXPECTED_IDENTITY_COLLISION")
 
     temporary: Path | None = None
     published = False
+    expected_identity_published = False
     primary_failure = False
     try:
         try:
@@ -967,6 +1066,7 @@ def install_closure(
         except OSError:
             _fail("TEMP_DIRECTORY_CREATE_FAILED")
 
+        artifact_roots: dict[str, Path] = {}
         for validated in archives:
             destination = temporary / validated.artifact.cache_directory
             try:
@@ -983,12 +1083,43 @@ def install_closure(
                 destination,
                 validated.artifact.expected_executable_relative_path,
             )
+            try:
+                seal_installed_artifact_tree(
+                    destination,
+                    owner_uid=owner_uid,
+                    owner_gid=owner_gid,
+                )
+            except InstalledClosureError as exc:
+                _fail(exc.code)
+            artifact_roots[validated.artifact.artifact_name] = destination
 
+        try:
+            marker_document = build_installed_marker_document(
+                expected_identity=expected_document,
+                artifact_roots=artifact_roots,
+                owner_uid=owner_uid,
+                owner_gid=owner_gid,
+            )
+        except InstalledClosureError as exc:
+            _fail(exc.code)
         marker = temporary / "INSTALLATION_COMPLETE"
         if marker.exists() or marker.is_symlink():
             _fail("INSTALLATION_MARKER_COLLISION")
-        _write_identity_marker(marker, identity)
+        _write_identity_marker(marker, canonical_installed_json(marker_document))
+        staged_expected_identity = temporary / "EXPECTED_CLOSURE_IDENTITY"
+        _write_identity_marker(staged_expected_identity, expected_bytes)
         _fsync_tree_directories(temporary)
+        try:
+            os.replace(staged_expected_identity, independent_identity)
+        except OSError:
+            _fail("EXPECTED_IDENTITY_PUBLISH_FAILED")
+        expected_identity_published = True
+        try:
+            temporary.chmod(IMMUTABLE_DIRECTORY_MODE)
+        except OSError:
+            _fail("CACHE_PERMISSION_SEAL_FAILED")
+        _fsync_directory(temporary)
+        _fsync_directory(parent, "EXPECTED_IDENTITY_PARENT_FSYNC_FAILED")
         try:
             os.replace(temporary, cache_root)
         except OSError:
@@ -996,17 +1127,29 @@ def install_closure(
         temporary = None
         published = True
         _fsync_directory(parent, "FINAL_PARENT_FSYNC_FAILED")
-        _revalidate_complete_cache(cache_root, identity, closure)
+        _revalidate_complete_cache(
+            cache_root,
+            independent_identity,
+            closure,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
         return cache_root
     except BaseException:
         primary_failure = True
         if published:
             _discard_published_destination(cache_root, parent)
+        if expected_identity_published:
+            try:
+                _discard_expected_identity(independent_identity, parent)
+            except ArtifactContractError:
+                pass
         raise
     finally:
         cleanup_error = False
         if temporary is not None:
             try:
+                _make_tree_removable(temporary)
                 shutil.rmtree(temporary)
                 _fsync_directory(parent)
             except (OSError, ArtifactContractError):

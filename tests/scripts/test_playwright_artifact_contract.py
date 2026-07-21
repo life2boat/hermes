@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from scripts import playwright_artifact_contract as contract_module
+from scripts import playwright_installed_closure as installed
 from tests.playwright_supply_chain_support import (
     default_browser_entries,
     verified_closure,
@@ -216,33 +219,68 @@ def _prepare_packaged_closure(
     payload = {"browsers": default_browser_entries()}
     cache_root = tmp_path / "cache"
     monkeypatch.setattr(contract_module, "CACHE_ROOT", str(cache_root))
+    monkeypatch.setattr(contract_module, "_IMMUTABLE_OWNER_UID", os.geteuid())
+    monkeypatch.setattr(contract_module, "_IMMUTABLE_OWNER_GID", os.getegid())
     closure = contract_module.contract_from_metadata(
         package_version="1.61.0",
         browsers_payload=payload,
         platform="linux/amd64",
     )
-    wheel = contract_module.LockedWheel(
-        package="playwright",
-        package_version="1.61.0",
-        filename=wheel_filename("1.61.0"),
-        size=123,
-        sha256=hashlib.sha256(b"wheel").hexdigest(),
-        platform="linux/amd64",
-    )
-    verified = contract_module.VerifiedPlaywrightClosure(closure=closure, wheel=wheel)
-    cache_root.mkdir()
+    cache_root.mkdir(mode=0o700)
+    artifact_roots: dict[str, Path] = {}
     for artifact in closure.artifacts:
-        executable = (
-            cache_root
-            / artifact.cache_directory
-            / artifact.expected_executable_relative_path
+        destination = cache_root / artifact.cache_directory
+        executable = destination.joinpath(
+            *artifact.expected_executable_relative_path.split("/")
         )
         executable.parent.mkdir(parents=True)
-        executable.write_bytes(b"synthetic")
+        executable.write_bytes(b"synthetic executable")
         executable.chmod(0o755)
-    (cache_root / contract_module.INSTALLATION_MARKER).write_bytes(
-        contract_module.canonical_installation_identity(verified)
+        if artifact.artifact_name == "chromium-headless-shell":
+            resource = destination / artifact.archive_root / "resources.pak"
+            resource.write_bytes(b"synthetic resource")
+            resource.chmod(0o644)
+        installed.seal_installed_artifact_tree(
+            destination,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+        )
+        artifact_roots[artifact.artifact_name] = destination
+    expected = installed.build_expected_identity_document(
+        closure_manifest_sha256=hashlib.sha256(
+            b"synthetic closure manifest"
+        ).hexdigest(),
+        playwright_package=closure.package,
+        playwright_package_version=closure.package_version,
+        platform=closure.platform,
+        artifacts=[
+            {
+                "artifact_name": artifact.artifact_name,
+                "revision": artifact.revision,
+                "archive_sha256": hashlib.sha256(
+                    f"archive:{artifact.artifact_name}".encode()
+                ).hexdigest(),
+                "layout_kind": artifact.layout_kind,
+                "expected_executable_relative_path": (
+                    artifact.expected_executable_relative_path
+                ),
+            }
+            for artifact in closure.artifacts
+        ],
     )
+    expected_path = installed.expected_identity_path(cache_root)
+    expected_path.write_bytes(installed.canonical_json(expected))
+    expected_path.chmod(0o444)
+    marker = installed.build_installed_marker_document(
+        expected_identity=expected,
+        artifact_roots=artifact_roots,
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+    )
+    marker_path = cache_root / contract_module.INSTALLATION_MARKER
+    marker_path.write_bytes(installed.canonical_json(marker))
+    marker_path.chmod(0o444)
+    cache_root.chmod(0o555)
 
     metadata_path = tmp_path / "installed-browsers.json"
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -263,6 +301,12 @@ def _prepare_packaged_closure(
     return closure, cache_root
 
 
+def _make_test_tree_removable(path: Path) -> None:
+    for current, _directories, _files in os.walk(path, topdown=True):
+        Path(current).chmod(0o700)
+    shutil.rmtree(path)
+
+
 def test_packaged_readiness_accepts_only_complete_matching_closure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,12 +323,9 @@ def test_packaged_readiness_denies_single_artifact_cache(
     closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
     missing = closure.artifact(missing_name)
     target = cache_root / missing.cache_directory
-    for path in sorted(target.rglob("*"), reverse=True):
-        if path.is_file():
-            path.unlink()
-        else:
-            path.rmdir()
-    target.rmdir()
+    cache_root.chmod(0o755)
+    _make_test_tree_removable(target)
+    cache_root.chmod(0o555)
     with pytest.raises(
         contract_module.PlaywrightContractError,
         match="PACKAGED_CACHE_ENTRY_SET_MISMATCH",
@@ -296,7 +337,9 @@ def test_packaged_readiness_denies_unexpected_cache_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    cache_root.chmod(0o755)
     (cache_root / "unapproved-9999").mkdir()
+    cache_root.chmod(0o555)
     with pytest.raises(
         contract_module.PlaywrightContractError,
         match="PACKAGED_CACHE_ENTRY_SET_MISMATCH",
@@ -318,7 +361,7 @@ def test_packaged_readiness_denies_non_executable_required_artifact(
     executable.chmod(0o644)
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="PACKAGED_ARTIFACT_INVALID",
+        match="INSTALLED_TREE_ENTRY_INVALID",
     ):
         contract_module.verify_packaged_browser_readiness("linux/amd64")
 
@@ -330,12 +373,308 @@ def test_packaged_readiness_denies_altered_identity(
     marker = cache_root / contract_module.INSTALLATION_MARKER
     document = json.loads(marker.read_text(encoding="ascii"))
     document["artifacts"][1]["revision"] = "9999"
-    marker.write_bytes(contract_module._canonical_json(document))
+    marker.chmod(0o644)
+    marker.write_bytes(installed.canonical_json(document))
+    marker.chmod(0o444)
     with pytest.raises(
         contract_module.PlaywrightContractError,
-        match="CLOSURE_IDENTITY_MISMATCH",
+        match="INSTALLED_MARKER_EXPECTED_IDENTITY_MISMATCH",
     ):
         contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+
+def _rewrite_readonly_json(path: Path, document: dict[str, object]) -> None:
+    path.chmod(0o644)
+    path.write_bytes(installed.canonical_json(document))
+    path.chmod(0o444)
+
+
+def _artifact_file(
+    closure: contract_module.PlaywrightClosureContract,
+    cache_root: Path,
+    artifact_name: str,
+    relative_path: str,
+) -> Path:
+    artifact = closure.artifact(artifact_name)
+    return cache_root / artifact.cache_directory / relative_path
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "chromium_executable_bytes",
+        "ffmpeg_executable_bytes",
+        "chromium_non_executable_bytes",
+        "extra_chromium_file",
+        "missing_chromium_file",
+        "executable_mode",
+        "directory_mode",
+        "marker_closure_sha",
+        "marker_chromium_archive_sha",
+        "marker_ffmpeg_archive_sha",
+        "marker_tree_sha",
+        "canonical_different_marker",
+        "marker_runtime_writable",
+        "artifact_directory_runtime_writable",
+        "alter_after_successful_readiness",
+    ],
+)
+def test_packaged_readiness_rejects_complete_byte_tamper_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    chromium = closure.artifact("chromium-headless-shell")
+    ffmpeg = closure.artifact("ffmpeg")
+    chromium_executable = _artifact_file(
+        closure,
+        cache_root,
+        chromium.artifact_name,
+        chromium.expected_executable_relative_path,
+    )
+    ffmpeg_executable = _artifact_file(
+        closure,
+        cache_root,
+        ffmpeg.artifact_name,
+        ffmpeg.expected_executable_relative_path,
+    )
+    chromium_resource = _artifact_file(
+        closure,
+        cache_root,
+        chromium.artifact_name,
+        f"{chromium.archive_root}/resources.pak",
+    )
+    marker_path = cache_root / installed.INSTALLATION_MARKER
+    if case == "alter_after_successful_readiness":
+        assert contract_module.verify_packaged_browser_readiness(
+            "linux/amd64"
+        ) == closure
+        case = "chromium_executable_bytes"
+    if case == "chromium_executable_bytes":
+        chromium_executable.chmod(0o755)
+        chromium_executable.write_bytes(b"altered chromium")
+        chromium_executable.chmod(0o555)
+    elif case == "ffmpeg_executable_bytes":
+        ffmpeg_executable.chmod(0o755)
+        ffmpeg_executable.write_bytes(b"altered ffmpeg")
+        ffmpeg_executable.chmod(0o555)
+    elif case == "chromium_non_executable_bytes":
+        chromium_resource.chmod(0o644)
+        chromium_resource.write_bytes(b"altered resource")
+        chromium_resource.chmod(0o444)
+    elif case == "extra_chromium_file":
+        chromium_root = cache_root / chromium.cache_directory
+        chromium_root.chmod(0o755)
+        extra = chromium_root / "extra.bin"
+        extra.write_bytes(b"extra")
+        extra.chmod(0o444)
+        chromium_root.chmod(0o555)
+    elif case == "missing_chromium_file":
+        chromium_resource.parent.chmod(0o755)
+        chromium_resource.unlink()
+        chromium_resource.parent.chmod(0o555)
+    elif case == "executable_mode":
+        chromium_executable.chmod(0o444)
+    elif case == "directory_mode":
+        chromium_resource.parent.chmod(0o500)
+    elif case in {
+        "marker_closure_sha",
+        "marker_chromium_archive_sha",
+        "marker_ffmpeg_archive_sha",
+        "marker_tree_sha",
+        "canonical_different_marker",
+    }:
+        marker = json.loads(marker_path.read_text(encoding="ascii"))
+        if case == "marker_closure_sha":
+            marker["closure_manifest_sha256"] = "a" * 64
+        elif case == "marker_chromium_archive_sha":
+            marker["artifacts"][0]["archive_sha256"] = "a" * 64
+        elif case == "marker_ffmpeg_archive_sha":
+            marker["artifacts"][1]["archive_sha256"] = "b" * 64
+        elif case == "marker_tree_sha":
+            marker["artifacts"][0]["installed_tree_sha256"] = "c" * 64
+        else:
+            marker["complete_installed_closure_sha256"] = "d" * 64
+        _rewrite_readonly_json(marker_path, marker)
+    elif case == "marker_runtime_writable":
+        marker_path.chmod(0o644)
+    elif case == "artifact_directory_runtime_writable":
+        (cache_root / chromium.cache_directory).chmod(0o755)
+    else:
+        raise AssertionError(case)
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+def test_distinct_manifest_identities_are_not_cross_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    expected_path = installed.expected_identity_path(cache_root)
+    marker_path = cache_root / installed.INSTALLATION_MARKER
+    expected_a = json.loads(expected_path.read_text(encoding="ascii"))
+    marker_a = marker_path.read_bytes()
+    assert contract_module.verify_packaged_browser_readiness("linux/amd64") == closure
+
+    expected_b = json.loads(installed.canonical_json(expected_a))
+    expected_b["closure_manifest_sha256"] = "e" * 64
+    expected_b["artifacts"][1]["archive_sha256"] = "f" * 64
+    marker_b_document = installed.build_installed_marker_document(
+        expected_identity=expected_b,
+        artifact_roots={
+            artifact.artifact_name: cache_root / artifact.cache_directory
+            for artifact in closure.artifacts
+        },
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+    )
+    marker_b = installed.canonical_json(marker_b_document)
+    assert marker_a != marker_b
+
+    _rewrite_readonly_json(expected_path, expected_b)
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+    marker_path.chmod(0o644)
+    marker_path.write_bytes(marker_b)
+    marker_path.chmod(0o444)
+    assert contract_module.verify_packaged_browser_readiness("linux/amd64") == closure
+    _rewrite_readonly_json(expected_path, expected_a)
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+@pytest.mark.parametrize(
+    "target", ["expected_identity", "cache_root", "cache_parent"]
+)
+def test_runtime_writable_trust_boundaries_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    path = {
+        "expected_identity": installed.expected_identity_path(cache_root),
+        "cache_root": cache_root,
+        "cache_parent": cache_root.parent,
+    }[target]
+    path.chmod(0o777 if target == "cache_parent" else (0o755 if path.is_dir() else 0o644))
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+
+def test_installed_marker_v2_binds_complete_tree_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    marker = installed.parse_installed_marker(
+        (cache_root / installed.INSTALLATION_MARKER).read_bytes()
+    )
+    assert marker["marker_version"] == 2
+    assert marker["marker_kind"] == "PLAYWRIGHT_INSTALLED_CLOSURE"
+    assert marker["artifact_count"] == 2
+    artifacts = marker["artifacts"]
+    assert isinstance(artifacts, list)
+    counts = {
+        item["artifact_name"]: item["installed_file_count"]
+        for item in artifacts
+    }
+    assert counts == {"chromium-headless-shell": 2, "ffmpeg": 1}
+    assert all(item["installed_total_bytes"] > 0 for item in artifacts)
+    assert all(len(item["installed_tree_sha256"]) == 64 for item in artifacts)
+    assert len(marker["complete_installed_closure_sha256"]) == 64
+    assert installed.expected_identity_path(cache_root).parent == cache_root.parent
+    assert not installed.expected_identity_path(cache_root).is_relative_to(cache_root)
+    assert contract_module.verify_packaged_browser_readiness("linux/amd64") == closure
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("marker_version", 1),
+        ("marker_kind", "LEGACY"),
+        ("artifact_count", True),
+        ("complete_installed_closure_sha256", "not-a-sha"),
+    ],
+)
+def test_installed_marker_v2_schema_is_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    marker_path = cache_root / installed.INSTALLATION_MARKER
+    marker = json.loads(marker_path.read_text(encoding="ascii"))
+    marker[field] = value
+    _rewrite_readonly_json(marker_path, marker)
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+def test_installed_marker_v2_unknown_fields_are_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    marker_path = cache_root / installed.INSTALLATION_MARKER
+    marker = json.loads(marker_path.read_text(encoding="ascii"))
+    marker["unexpected"] = False
+    _rewrite_readonly_json(marker_path, marker)
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="INSTALLED_MARKER_FIELDS_INVALID",
+    ):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "hardlink"])
+def test_runtime_tree_forbidden_entries_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_kind: str,
+) -> None:
+    closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    chromium = closure.artifact("chromium-headless-shell")
+    root = cache_root / chromium.cache_directory
+    root.chmod(0o755)
+    candidate = root / "forbidden-entry"
+    if entry_kind == "symlink":
+        candidate.symlink_to("chrome-headless-shell-linux64/resources.pak")
+    else:
+        candidate.hardlink_to(
+            root / chromium.archive_root / "resources.pak"
+        )
+    root.chmod(0o555)
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+def test_runtime_readiness_requires_build_owner_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _closure, _cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        contract_module, "_IMMUTABLE_OWNER_UID", os.geteuid() + 1
+    )
+    with pytest.raises(contract_module.PlaywrightContractError):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
+
+
+def test_legacy_readiness_marker_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _closure, cache_root = _prepare_packaged_closure(tmp_path, monkeypatch)
+    marker = cache_root / installed.INSTALLATION_MARKER
+    _rewrite_readonly_json(marker, {"identity_version": 1})
+    with pytest.raises(
+        contract_module.PlaywrightContractError,
+        match="INSTALLED_MARKER_FIELDS_INVALID",
+    ):
+        contract_module.verify_packaged_browser_readiness("linux/amd64")
+
 
 
 def test_contract_reporter_has_no_network_or_install_path() -> None:

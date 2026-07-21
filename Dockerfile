@@ -175,7 +175,7 @@ RUN npm install --prefer-offline --no-audit && \
 #
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
-COPY scripts/playwright_artifact_contract.py scripts/install_pinned_playwright_artifact.py scripts/
+COPY scripts/playwright_artifact_contract.py scripts/playwright_installed_closure.py scripts/install_pinned_playwright_artifact.py scripts/
 RUN touch ./README.md
 RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
 
@@ -233,7 +233,11 @@ COPY --chown=hermes:hermes . .
 # fail to load.  See tools/lazy_deps.py.
 USER root
 RUN chmod -R a+rX /opt/hermes && \
-    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/gateway /opt/hermes/node_modules
+    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/gateway /opt/hermes/node_modules && \
+    chown root:root /opt/hermes /opt/hermes/.playwright /opt/hermes/.playwright.expected-closure.json && \
+    chmod 0755 /opt/hermes && \
+    chmod 0555 /opt/hermes/.playwright && \
+    chmod 0444 /opt/hermes/.playwright.expected-closure.json /opt/hermes/.playwright/INSTALLATION_COMPLETE
 # Start as root so the s6-overlay stage2 hook can usermod/groupmod and chown
 # the data volume. Each supervised service then drops to the hermes user via
 # `s6-setuidgid hermes` in its run script. If HERMES_UID is unset, services

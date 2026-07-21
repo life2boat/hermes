@@ -13,6 +13,9 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 UV_LOCK = REPO_ROOT / "uv.lock"
 SCHEMA = REPO_ROOT / "schemas" / "playwright-artifact-manifest.schema.json"
 CONTRACT_SCRIPT = REPO_ROOT / "scripts" / "playwright_artifact_contract.py"
+INSTALLED_CLOSURE_SCRIPT = (
+    REPO_ROOT / "scripts" / "playwright_installed_closure.py"
+)
 INSTALLER_SCRIPT = REPO_ROOT / "scripts" / "install_pinned_playwright_artifact.py"
 BUILD_HELPER = REPO_ROOT / "scripts" / "build_verified_playwright_image.py"
 
@@ -56,6 +59,26 @@ def test_dockerfile_uses_locked_python_runtime_without_browser_cdn_fallback() ->
     assert "https://" not in verified_block
     assert "cdn" not in verified_block.lower()
     assert "latest" not in verified_block.lower()
+
+
+
+def test_dockerfile_packages_root_owned_immutable_installed_closure() -> None:
+    text = _text(DOCKERFILE)
+    assert (
+        "COPY scripts/playwright_artifact_contract.py "
+        "scripts/playwright_installed_closure.py "
+        "scripts/install_pinned_playwright_artifact.py scripts/"
+    ) in text
+    assert (
+        "chown root:root /opt/hermes /opt/hermes/.playwright "
+        "/opt/hermes/.playwright.expected-closure.json"
+    ) in text
+    assert "chmod 0755 /opt/hermes" in text
+    assert "chmod 0555 /opt/hermes/.playwright" in text
+    assert (
+        "chmod 0444 /opt/hermes/.playwright.expected-closure.json "
+        "/opt/hermes/.playwright/INSTALLATION_COMPLETE"
+    ) in text
 
 
 def test_playwright_runtime_is_exactly_pinned_and_locked_with_hashes() -> None:
@@ -131,7 +154,14 @@ def test_aggregate_manifest_schema_is_strict_for_closure_and_artifacts() -> None
 def test_artifact_revisions_are_derived_from_verified_wheel_not_hard_coded() -> None:
     sources = "\n".join(
         _text(path)
-        for path in (CONTRACT_SCRIPT, INSTALLER_SCRIPT, BUILD_HELPER, DOCKERFILE, SCHEMA)
+        for path in (
+            CONTRACT_SCRIPT,
+            INSTALLED_CLOSURE_SCRIPT,
+            INSTALLER_SCRIPT,
+            BUILD_HELPER,
+            DOCKERFILE,
+            SCHEMA,
+        )
     )
     assert "browsers.json" in _text(CONTRACT_SCRIPT)
     assert "load_locked_wheel" in _text(CONTRACT_SCRIPT)

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from scripts import install_pinned_playwright_artifact as installer
+from scripts import playwright_installed_closure as installed
 from scripts.playwright_artifact_contract import VerifiedPlaywrightClosure
 from tests.playwright_supply_chain_support import (
     closure_manifest_document,
@@ -98,6 +99,9 @@ def _install(env: ClosureFixture) -> Path:
 def _assert_no_published_cache(env: ClosureFixture) -> None:
     assert not env.cache_root.exists()
     assert not env.cache_root.is_symlink()
+    identity = installed.expected_identity_path(env.cache_root)
+    assert not identity.exists()
+    assert not identity.is_symlink()
 
 
 def _write_zip(
@@ -110,6 +114,20 @@ def _write_zip(
             info.create_system = 3
             info.external_attr = (file_type | mode) << 16
             archive.writestr(info, data)
+
+
+
+def test_owner_identity_unavailable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    monkeypatch.setattr(installer.os, "geteuid", None)
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="OWNER_IDENTITY_UNSUPPORTED",
+    ):
+        _install(env)
+    _assert_no_published_cache(env)
 
 
 def test_valid_complete_closure_is_published_once_and_revalidated(
@@ -130,6 +148,11 @@ def test_valid_complete_closure_is_published_once_and_revalidated(
         )
         assert executable.is_file()
         assert executable.stat().st_mode & 0o111
+    assert stat.S_IMODE(result.stat().st_mode) == 0o555
+    identity = installed.expected_identity_path(result)
+    assert stat.S_IMODE(identity.stat().st_mode) == 0o444
+    marker = result / installed.INSTALLATION_MARKER
+    assert json.loads(marker.read_text(encoding="ascii"))["marker_version"] == 2
     assert _install(env) == result
 
 
@@ -506,11 +529,14 @@ def test_atomic_rename_failure_leaves_no_published_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env = _fixture(tmp_path)
-    monkeypatch.setattr(
-        installer.os,
-        "replace",
-        lambda *_args: (_ for _ in ()).throw(OSError("synthetic")),
-    )
+    original = installer.os.replace
+
+    def fail_cache_publish(source: object, destination: object) -> None:
+        if Path(destination) == env.cache_root:
+            raise OSError("synthetic")
+        original(source, destination)
+
+    monkeypatch.setattr(installer.os, "replace", fail_cache_publish)
     with pytest.raises(installer.ArtifactContractError, match="ATOMIC_PUBLISH_FAILED"):
         _install(env)
     _assert_no_published_cache(env)
@@ -543,7 +569,12 @@ def test_post_publish_artifact_mismatch_discards_complete_cache(
     original = installer._revalidate_complete_cache
 
     def tamper_then_validate(
-        cache_root: Path, identity: bytes, closure: object
+        cache_root: Path,
+        independent_identity: Path,
+        closure: object,
+        *,
+        owner_uid: int,
+        owner_gid: int,
     ) -> None:
         artifact = env.verified.closure.artifact(name)
         executable = (
@@ -551,13 +582,157 @@ def test_post_publish_artifact_mismatch_discards_complete_cache(
             / artifact.cache_directory
             / artifact.expected_executable_relative_path
         )
-        executable.chmod(0o644)
-        original(cache_root, identity, closure)
+        executable.chmod(0o755)
+        executable.write_bytes(b"post-publish tamper")
+        executable.chmod(0o555)
+        original(
+            cache_root,
+            independent_identity,
+            closure,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
 
     monkeypatch.setattr(installer, "_revalidate_complete_cache", tamper_then_validate)
-    with pytest.raises(installer.ArtifactContractError, match="EXPECTED_EXECUTABLE_INVALID"):
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="INSTALLED_CLOSURE_DIGEST_MISMATCH",
+    ):
         _install(env)
     _assert_no_published_cache(env)
+
+
+
+
+def test_quarantine_rename_failure_uses_direct_safe_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    original_revalidate = installer._revalidate_complete_cache
+    original_replace = installer.os.replace
+
+    def tamper_then_validate(
+        cache_root: Path,
+        independent_identity: Path,
+        closure: object,
+        *,
+        owner_uid: int,
+        owner_gid: int,
+    ) -> None:
+        artifact = env.verified.closure.artifact("ffmpeg")
+        executable = (
+            cache_root
+            / artifact.cache_directory
+            / artifact.expected_executable_relative_path
+        )
+        executable.chmod(0o755)
+        executable.write_bytes(b"tampered")
+        executable.chmod(0o555)
+        original_revalidate(
+            cache_root,
+            independent_identity,
+            closure,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+
+    def fail_quarantine_rename(source: object, destination: object) -> None:
+        if Path(destination).parent.name.startswith(".failed-publish."):
+            raise OSError("synthetic quarantine failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(installer, "_revalidate_complete_cache", tamper_then_validate)
+    monkeypatch.setattr(installer.os, "replace", fail_quarantine_rename)
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="INSTALLED_CLOSURE_DIGEST_MISMATCH",
+    ):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+
+def test_marker_write_failure_leaves_no_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    original = installer._write_identity_marker
+
+    def fail_marker(path: Path, data: bytes) -> None:
+        if path.name == installed.INSTALLATION_MARKER:
+            raise installer.ArtifactContractError("MARKER_WRITE_FAILURE")
+        original(path, data)
+
+    monkeypatch.setattr(installer, "_write_identity_marker", fail_marker)
+    with pytest.raises(installer.ArtifactContractError, match="MARKER_WRITE_FAILURE"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_marker_fsync_failure_leaves_no_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    original = installer._fsync_regular_file
+
+    def fail_marker_fsync(path: Path) -> None:
+        if path.name == installed.INSTALLATION_MARKER:
+            raise installer.ArtifactContractError("MARKER_FSYNC_FAILURE")
+        original(path)
+
+    monkeypatch.setattr(installer, "_fsync_regular_file", fail_marker_fsync)
+    with pytest.raises(installer.ArtifactContractError, match="MARKER_FSYNC_FAILURE"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_tree_digest_failure_leaves_no_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    monkeypatch.setattr(
+        installer,
+        "build_installed_marker_document",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            installed.InstalledClosureError("TREE_DIGEST_FAILURE")
+        ),
+    )
+    with pytest.raises(installer.ArtifactContractError, match="TREE_DIGEST_FAILURE"):
+        _install(env)
+    _assert_no_published_cache(env)
+
+
+def test_independent_identity_read_failure_reverses_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _fixture(tmp_path)
+    original = installer._revalidate_complete_cache
+
+    def deny_identity_read(
+        cache_root: Path,
+        independent_identity: Path,
+        closure: object,
+        *,
+        owner_uid: int,
+        owner_gid: int,
+    ) -> None:
+        independent_identity.chmod(0o000)
+        original(
+            cache_root,
+            independent_identity,
+            closure,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+
+    monkeypatch.setattr(installer, "_revalidate_complete_cache", deny_identity_read)
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="EXPECTED_IDENTITY_FILE_INVALID",
+    ):
+        _install(env)
+    _assert_no_published_cache(env)
+
 
 
 def test_cleanup_failure_does_not_mask_primary_failure(
@@ -613,7 +788,9 @@ def test_preexisting_mixed_revision_cache_is_denied(tmp_path: Path) -> None:
 def test_preexisting_extra_cache_entry_is_denied(tmp_path: Path) -> None:
     env = _fixture(tmp_path)
     _install(env)
+    env.cache_root.chmod(0o755)
     (env.cache_root / "unapproved-9999").mkdir()
+    env.cache_root.chmod(0o555)
     with pytest.raises(
         installer.ArtifactContractError,
         match="EXISTING_CACHE_INCOMPLETE_OR_MISMATCH",

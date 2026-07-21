@@ -17,13 +17,20 @@ from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from scripts.playwright_installed_closure import (
+    INSTALLATION_MARKER,
+    InstalledClosureError,
+    expected_identity_path,
+    read_expected_identity,
+    verify_installed_closure,
+)
+
 
 
 PLAYWRIGHT_PACKAGE = "playwright"
 PRIMARY_BROWSER_FAMILY = "chromium-headless-shell"
 FFMPEG_FAMILY = "ffmpeg"
 CACHE_ROOT = "/opt/hermes/.playwright"
-INSTALLATION_MARKER = "INSTALLATION_COMPLETE"
 LAYOUT_DIRECTORY_TREE = "DIRECTORY_TREE"
 LAYOUT_SINGLE_EXECUTABLE_FILE = "SINGLE_EXECUTABLE_FILE"
 _BROWSER_METADATA_PATH = "playwright/driver/package/browsers.json"
@@ -31,7 +38,6 @@ _MAX_LOCKFILE_BYTES = 32 * 1024 * 1024
 _MAX_WHEEL_BYTES = 128 * 1024 * 1024
 _MAX_METADATA_BYTES = 128 * 1024
 _MAX_PACKAGE_METADATA_BYTES = 64 * 1024
-_MAX_IDENTITY_BYTES = 16 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.-]+)?$")
 _REVISION_RE = re.compile(r"^[0-9]+$")
@@ -39,30 +45,8 @@ _WHEEL_TAGS = {
     "linux/amd64": "manylinux1_x86_64",
     "linux/arm64": "manylinux_2_17_aarch64.manylinux2014_aarch64",
 }
-_IDENTITY_FIELDS = frozenset(
-    {
-        "identity_version",
-        "playwright_package",
-        "playwright_package_version",
-        "playwright_wheel_filename",
-        "playwright_wheel_size",
-        "playwright_wheel_sha256",
-        "platform",
-        "cache_root",
-        "artifacts",
-    }
-)
-_ARTIFACT_IDENTITY_FIELDS = frozenset(
-    {
-        "artifact_name",
-        "browser_family",
-        "revision",
-        "browser_version",
-        "cache_directory",
-        "layout_kind",
-        "expected_executable_relative_path",
-    }
-)
+_IMMUTABLE_OWNER_UID = 0
+_IMMUTABLE_OWNER_GID = 0
 
 
 class PlaywrightContractError(RuntimeError):
@@ -586,105 +570,6 @@ def load_installed_closure(platform: str) -> PlaywrightClosureContract:
     )
 
 
-def artifact_identity_document(artifact: ArtifactContract) -> dict[str, object]:
-    return {
-        "artifact_name": artifact.artifact_name,
-        "browser_family": artifact.browser_family,
-        "revision": artifact.revision,
-        "browser_version": artifact.browser_version,
-        "cache_directory": artifact.cache_directory,
-        "layout_kind": artifact.layout_kind,
-        "expected_executable_relative_path": (
-            artifact.expected_executable_relative_path
-        ),
-    }
-
-
-def installation_identity_document(
-    verified: VerifiedPlaywrightClosure,
-) -> dict[str, object]:
-    closure = verified.closure
-    wheel = verified.wheel
-    return {
-        "identity_version": 1,
-        "playwright_package": closure.package,
-        "playwright_package_version": closure.package_version,
-        "playwright_wheel_filename": wheel.filename,
-        "playwright_wheel_sha256": wheel.sha256,
-        "playwright_wheel_size": wheel.size,
-        "platform": closure.platform,
-        "cache_root": closure.cache_root,
-        "artifacts": [
-            artifact_identity_document(artifact)
-            for artifact in closure.artifacts
-        ],
-    }
-
-
-def canonical_installation_identity(
-    verified: VerifiedPlaywrightClosure,
-) -> bytes:
-    return _canonical_json(installation_identity_document(verified))
-
-
-def _parse_installation_identity(data: bytes) -> dict[str, object]:
-    if not data or len(data) > _MAX_IDENTITY_BYTES:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    try:
-        document = json.loads(
-            data.decode("ascii"),
-            object_pairs_hook=_object_without_duplicate_keys,
-        )
-    except (_DuplicateJsonKey, UnicodeError, json.JSONDecodeError):
-        _fail("CLOSURE_IDENTITY_INVALID")
-    if not isinstance(document, dict) or set(document) != _IDENTITY_FIELDS:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    if _canonical_json(document) != data:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    if document["identity_version"] != 1:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    string_fields = {
-        "playwright_package",
-        "playwright_package_version",
-        "playwright_wheel_filename",
-        "playwright_wheel_sha256",
-        "platform",
-        "cache_root",
-    }
-    if any(not isinstance(document[field], str) for field in string_fields):
-        _fail("CLOSURE_IDENTITY_INVALID")
-    if type(document["playwright_wheel_size"]) is not int:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    if _SHA256_RE.fullmatch(str(document["playwright_wheel_sha256"])) is None:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    artifacts = document["artifacts"]
-    if not isinstance(artifacts, list) or len(artifacts) != len(
-        REQUIRED_ARTIFACT_NAMES
-    ):
-        _fail("CLOSURE_IDENTITY_INVALID")
-    names: list[str] = []
-    revisions: set[str] = set()
-    for artifact in artifacts:
-        if not isinstance(artifact, dict) or set(artifact) != (
-            _ARTIFACT_IDENTITY_FIELDS
-        ):
-            _fail("CLOSURE_IDENTITY_INVALID")
-        required_strings = _ARTIFACT_IDENTITY_FIELDS - {"browser_version"}
-        if any(not isinstance(artifact[field], str) for field in required_strings):
-            _fail("CLOSURE_IDENTITY_INVALID")
-        browser_version = artifact["browser_version"]
-        if browser_version is not None and not isinstance(browser_version, str):
-            _fail("CLOSURE_IDENTITY_INVALID")
-        revision = str(artifact["revision"])
-        if _REVISION_RE.fullmatch(revision) is None or revision in revisions:
-            _fail("CLOSURE_IDENTITY_INVALID")
-        revisions.add(revision)
-        names.append(str(artifact["artifact_name"]))
-    if tuple(names) != REQUIRED_ARTIFACT_NAMES:
-        _fail("CLOSURE_IDENTITY_INVALID")
-    return document
-
-
 def current_runtime_platform() -> str:
     system = host_platform.system()
     machine = host_platform.machine().lower()
@@ -696,67 +581,66 @@ def current_runtime_platform() -> str:
 
 
 
-def _validate_packaged_executable(
-    cache_root: Path, artifact: ArtifactContract
-) -> None:
-    destination = cache_root / artifact.cache_directory
-    try:
-        destination_metadata = destination.lstat()
-    except OSError:
-        _fail("PACKAGED_ARTIFACT_MISSING")
-    if not stat.S_ISDIR(destination_metadata.st_mode) or destination.is_symlink():
-        _fail("PACKAGED_ARTIFACT_INVALID")
-    executable = destination.joinpath(
-        *artifact.expected_executable_relative_path.split("/")
-    )
-    try:
-        executable_stat = executable.lstat()
-    except OSError:
-        _fail("PACKAGED_ARTIFACT_MISSING")
-    if (
-        executable.is_symlink()
-        or not stat.S_ISREG(executable_stat.st_mode)
-        or stat.S_IMODE(executable_stat.st_mode) & 0o111 == 0
-    ):
-        _fail("PACKAGED_ARTIFACT_INVALID")
-
-
 def verify_packaged_browser_readiness(
     platform: str | None = None,
 ) -> PlaywrightClosureContract:
     selected_platform = platform or current_runtime_platform()
     installed = load_installed_closure(selected_platform)
     cache_root = Path(installed.cache_root)
-    marker = cache_root / INSTALLATION_MARKER
-    marker_data = _read_regular_file(
-        marker,
-        maximum=_MAX_IDENTITY_BYTES,
-        code="CLOSURE_IDENTITY_MISSING",
-    )
-    identity = _parse_installation_identity(marker_data)
-    expected = {
-        "playwright_package": installed.package,
-        "playwright_package_version": installed.package_version,
-        "platform": installed.platform,
-        "cache_root": installed.cache_root,
-        "artifacts": [
-            artifact_identity_document(artifact)
-            for artifact in installed.artifacts
-        ],
-    }
-    if any(identity[field] != value for field, value in expected.items()):
-        _fail("CLOSURE_IDENTITY_MISMATCH")
     try:
-        actual_children = {child.name for child in cache_root.iterdir()}
-    except OSError:
-        _fail("PACKAGED_CACHE_INVALID")
-    expected_children = {INSTALLATION_MARKER} | {
-        artifact.cache_directory for artifact in installed.artifacts
-    }
-    if actual_children != expected_children:
-        _fail("PACKAGED_CACHE_ENTRY_SET_MISMATCH")
-    for artifact in installed.artifacts:
-        _validate_packaged_executable(cache_root, artifact)
+        expected = read_expected_identity(
+            expected_identity_path(cache_root),
+            owner_uid=_IMMUTABLE_OWNER_UID,
+            owner_gid=_IMMUTABLE_OWNER_GID,
+        )
+        expected_top_level = {
+            "playwright_package": installed.package,
+            "playwright_package_version": installed.package_version,
+            "platform": installed.platform,
+            "artifact_count": len(installed.artifacts),
+        }
+        if any(
+            expected[field] != value
+            for field, value in expected_top_level.items()
+        ):
+            _fail("EXPECTED_IDENTITY_RUNTIME_MISMATCH")
+        raw_artifacts = expected["artifacts"]
+        if not isinstance(raw_artifacts, list):
+            _fail("EXPECTED_IDENTITY_RUNTIME_MISMATCH")
+        expected_artifacts = {
+            str(item["artifact_name"]): item
+            for item in raw_artifacts
+            if isinstance(item, dict)
+        }
+        if set(expected_artifacts) != set(installed.artifact_names):
+            _fail("EXPECTED_IDENTITY_RUNTIME_MISMATCH")
+        for artifact in installed.artifacts:
+            expected_artifact = expected_artifacts[artifact.artifact_name]
+            runtime_identity = {
+                "artifact_name": artifact.artifact_name,
+                "revision": artifact.revision,
+                "layout_kind": artifact.layout_kind,
+                "expected_executable_relative_path": (
+                    artifact.expected_executable_relative_path
+                ),
+            }
+            if any(
+                expected_artifact[field] != value
+                for field, value in runtime_identity.items()
+            ):
+                _fail("EXPECTED_IDENTITY_RUNTIME_MISMATCH")
+        verify_installed_closure(
+            cache_root=cache_root,
+            expected_identity=expected,
+            artifact_cache_directories={
+                artifact.artifact_name: artifact.cache_directory
+                for artifact in installed.artifacts
+            },
+            owner_uid=_IMMUTABLE_OWNER_UID,
+            owner_gid=_IMMUTABLE_OWNER_GID,
+        )
+    except InstalledClosureError as exc:
+        _fail(exc.code)
     return installed
 
 

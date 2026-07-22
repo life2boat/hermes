@@ -23,6 +23,11 @@ from plugins.google_meet import process_manager as pm
 from plugins.google_meet.meet_bot import _is_safe_meet_url
 
 
+from scripts.playwright_artifact_contract import (
+    PlaywrightContractError,
+    verify_packaged_browser_readiness,
+)
+
 def _auth_state_path() -> Path:
     return Path(get_hermes_home()) / "workspace" / "meetings" / "auth.json"
 
@@ -151,6 +156,22 @@ def meet_command(args: argparse.Namespace) -> int:
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
+def _packaged_browser_status() -> tuple[bool, str]:
+    try:
+        verify_packaged_browser_readiness()
+    except PlaywrightContractError as exc:
+        return (
+            False,
+            f"not ready ({exc.code}); use the canonical verified image build",
+        )
+    except Exception:
+        return (
+            False,
+            "not ready (INTERNAL_ERROR); use the canonical verified image build",
+        )
+    return True, "verified packaged browser ready"
+
+
 def _cmd_setup() -> int:
     import platform as _p
 
@@ -158,72 +179,49 @@ def _cmd_setup() -> int:
     print("---------------------")
 
     system = _p.system()
-    system_ok = system in {"Linux", "Darwin"}
+    system_ok = system == "Linux"
     print(f"  platform       : {system}  [{'ok' if system_ok else 'unsupported'}]")
 
     try:
         import playwright  # noqa: F401
-        pw_ok = True
-        pw_msg = "installed"
-    except ImportError:
-        pw_ok = False
-        pw_msg = "NOT installed — run: pip install playwright"
-    print(f"  playwright     : {pw_msg}")
 
-    chromium_ok = False
-    chromium_msg = "unknown"
-    if pw_ok:
-        try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                try:
-                    exe = p.chromium.executable_path
-                    if exe and Path(exe).exists():
-                        chromium_ok = True
-                        chromium_msg = f"ok ({exe})"
-                    else:
-                        chromium_msg = (
-                            "not installed — run: "
-                            "python -m playwright install chromium"
-                        )
-                except Exception as e:
-                    chromium_msg = f"probe failed: {e}"
-        except Exception as e:
-            chromium_msg = f"probe failed: {e}"
-    print(f"  chromium       : {chromium_msg}")
+        package_ok = True
+        package_msg = "installed"
+    except ImportError:
+        package_ok = False
+        package_msg = "not installed; use the canonical verified image build"
+    print(f"  playwright     : {package_msg}")
+
+    browser_ok = False
+    browser_msg = "not checked"
+    if package_ok:
+        browser_ok, browser_msg = _packaged_browser_status()
+    print(f"  chromium       : {browser_msg}")
 
     auth_path = _auth_state_path()
     auth_ok = auth_path.is_file()
     print(
         "  google auth    : "
-        + (f"ok ({auth_path})" if auth_ok else "not saved — run: hermes meet auth")
+        + (f"ok ({auth_path})" if auth_ok else "not saved; run: hermes meet auth")
     )
 
     print()
-    all_ok = system_ok and pw_ok and chromium_ok
+    all_ok = system_ok and package_ok and browser_ok
     if all_ok:
         print(
             "ready. Join a meeting:  "
             "hermes meet join https://meet.google.com/abc-defg-hij"
         )
     else:
-        print("not ready yet — fix the items above.")
+        print("not ready yet; use the canonical verified image build.")
     return 0 if all_ok else 1
 
 
 def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
-    """Install the plugin's prerequisites.
+    """Install pinned Python/audio prerequisites and verify the packaged browser.
 
-    Always: pip install playwright + websockets, then
-    ``python -m playwright install chromium``.
-
-    With ``--realtime``: also install the platform audio bridge deps.
-      Linux : ``sudo apt-get install -y pulseaudio-utils``
-      macOS : ``brew install blackhole-2ch ffmpeg``  (+ remind the user
-              to select BlackHole as the default input device manually)
-
-    Prompts before every package-manager invocation unless ``--yes``.
-    Refuses to run on Windows.
+    Browser acquisition is deliberately excluded. The browser must come from
+    the separately approved, lock-bound canonical image-build process.
     """
     import platform as _p
     import shutil as _shutil
@@ -238,69 +236,67 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
         if assume_yes:
             return True
         try:
-            ans = input(f"{prompt} [y/N] ").strip().lower()
+            answer = input(f"{prompt} [y/N] ").strip().lower()
         except EOFError:
             return False
-        return ans in {"y", "yes"}
+        return answer in {"y", "yes"}
 
     print("google_meet install")
     print("-------------------")
 
-    # 1) pip deps — always safe, venv-scoped.
-    pip_pkgs = ["playwright", "websockets"]
-    print(f"\n[1/3] pip install: {' '.join(pip_pkgs)}")
+    pip_packages = ["playwright==1.61.0", "websockets==15.0.1"]
+    print(f"\n[1/3] pip install: {' '.join(pip_packages)}")
     try:
-        res = _sp.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", *pip_pkgs],
+        result = _sp.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", *pip_packages],
             check=False,
         )
-        if res.returncode != 0:
+        if result.returncode != 0:
             print("  pip install failed")
             return 1
-    except Exception as e:
-        print(f"  pip install failed: {e}")
+    except Exception:
+        print("  pip install failed")
         return 1
 
-    # 2) Playwright browsers — pulls chromium (~300MB first run).
-    print("\n[2/3] python -m playwright install chromium")
-    try:
-        res = _sp.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=False,
-        )
-        if res.returncode != 0:
-            print("  playwright install failed (may already be installed)")
-    except Exception as e:
-        print(f"  playwright install failed: {e}")
+    print("\n[2/3] verify packaged Playwright browser")
+    browser_ok, browser_message = _packaged_browser_status()
+    print(f"  {browser_message}")
+    if not browser_ok:
         return 1
 
-    # 3) Platform audio deps for realtime mode.
     if realtime:
         print("\n[3/3] realtime audio deps")
         if system == "Linux":
             if _shutil.which("paplay") and _shutil.which("pactl"):
                 print("  pulseaudio-utils already installed.")
+            elif not _confirm(
+                "  install pulseaudio-utils? this runs "
+                "`sudo apt-get install -y pulseaudio-utils`"
+            ):
+                print("  skipped (you can run it manually later)")
             else:
-                if not _confirm(
-                    "  install pulseaudio-utils? this runs `sudo apt-get install -y pulseaudio-utils`"
-                ):
-                    print("  skipped (you can run it manually later)")
-                else:
-                    cmd = ["sudo", "apt-get", "install", "-y", "pulseaudio-utils"]
-                    print(f"  $ {' '.join(cmd)}")
-                    res = _sp.run(cmd, check=False)
-                    if res.returncode != 0:
-                        print("  apt install failed — install pulseaudio-utils manually")
+                command = [
+                    "sudo",
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "pulseaudio-utils",
+                ]
+                result = _sp.run(command, check=False)
+                if result.returncode != 0:
+                    print("  apt install failed; install pulseaudio-utils manually")
         elif system == "Darwin":
-            have_bh = False
+            have_blackhole = False
             try:
-                out = _sp.check_output(["system_profiler", "SPAudioDataType"], text=True)
-                have_bh = "BlackHole" in out
+                output = _sp.check_output(
+                    ["system_profiler", "SPAudioDataType"], text=True
+                )
+                have_blackhole = "BlackHole" in output
             except Exception:
                 pass
             have_ffmpeg = bool(_shutil.which("ffmpeg"))
             needs = []
-            if not have_bh:
+            if not have_blackhole:
                 needs.append("blackhole-2ch")
             if not have_ffmpeg:
                 needs.append("ffmpeg")
@@ -308,23 +304,20 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
                 print("  BlackHole and ffmpeg already installed.")
             elif not _shutil.which("brew"):
                 print(
-                    "  missing: " + ", ".join(needs) + "\n"
-                    "  install Homebrew first (https://brew.sh) or install the packages manually."
+                    "  missing: "
+                    + ", ".join(needs)
+                    + "\n  install Homebrew first or install packages manually."
                 )
+            elif not _confirm(f"  install via brew: {' '.join(needs)}?"):
+                print("  skipped (you can run it manually later)")
             else:
-                if not _confirm(f"  install via brew: {' '.join(needs)}?"):
-                    print("  skipped (you can run it manually later)")
-                else:
-                    cmd = ["brew", "install", *needs]
-                    print(f"  $ {' '.join(cmd)}")
-                    res = _sp.run(cmd, check=False)
-                    if res.returncode != 0:
-                        print("  brew install failed — install them manually")
+                result = _sp.run(["brew", "install", *needs], check=False)
+                if result.returncode != 0:
+                    print("  brew install failed; install the packages manually")
             print(
                 "\n  NOTE: macOS does not auto-route audio. Open\n"
-                "    System Settings → Sound → Input\n"
-                "  and select 'BlackHole 2ch' before starting a realtime meeting.\n"
-                "  hermes will not switch your default input for you."
+                "    System Settings > Sound > Input\n"
+                "  and select 'BlackHole 2ch' before realtime use."
             )
     else:
         print("\n[3/3] skipped (pass --realtime to install audio tooling too)")
@@ -335,13 +328,14 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
 
 def _cmd_auth() -> int:
     """Open a headed Chromium, let the user sign in, save storage_state."""
+    browser_ok, browser_message = _packaged_browser_status()
+    if not browser_ok:
+        print(browser_message)
+        return 1
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print(
-            "playwright is not installed. run:\n"
-            "  pip install playwright && python -m playwright install chromium"
-        )
+        print("playwright is not installed; use the canonical verified image build")
         return 1
 
     path = _auth_state_path()

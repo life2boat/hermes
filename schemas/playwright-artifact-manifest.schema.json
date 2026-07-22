@@ -1,0 +1,160 @@
+{
+  "$id": "https://hermes.local/schemas/playwright-artifact-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_count": {
+      "maximum": 16,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "artifacts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "archive_filename": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$",
+            "type": "string"
+          },
+          "archive_format": {
+            "enum": [
+              "zip",
+              "tar.gz"
+            ]
+          },
+          "archive_root": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$",
+            "type": "string"
+          },
+          "archive_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "archive_size": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "artifact_name": {
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+            "type": "string"
+          },
+          "browser_family": {
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+            "type": "string"
+          },
+          "browser_version": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "executable_mode_required": {
+            "const": true
+          },
+          "expected_executable_relative_path": {
+            "pattern": "^[A-Za-z0-9._+/-]{1,512}$",
+            "type": "string"
+          },
+          "layout_kind": {
+            "enum": [
+              "DIRECTORY_TREE",
+              "SINGLE_EXECUTABLE_FILE"
+            ]
+          },
+          "platform": {
+            "enum": [
+              "linux/amd64",
+              "linux/arm64"
+            ]
+          },
+          "revision": {
+            "pattern": "^[0-9]+$",
+            "type": "string"
+          },
+          "source_kind": {
+            "const": "operator-approved-offline-artifact"
+          },
+          "source_reference_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_name",
+          "browser_family",
+          "revision",
+          "browser_version",
+          "platform",
+          "archive_filename",
+          "archive_size",
+          "archive_sha256",
+          "archive_format",
+          "layout_kind",
+          "archive_root",
+          "expected_executable_relative_path",
+          "executable_mode_required",
+          "source_kind",
+          "source_reference_sha256"
+        ],
+        "type": "object"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "type": "array"
+    },
+    "cache_root": {
+      "const": "/opt/hermes/.playwright"
+    },
+    "manifest_kind": {
+      "const": "PLAYWRIGHT_ARTIFACT_CLOSURE"
+    },
+    "manifest_version": {
+      "const": 2
+    },
+    "platform": {
+      "enum": [
+        "linux/amd64",
+        "linux/arm64"
+      ]
+    },
+    "playwright_package": {
+      "const": "playwright"
+    },
+    "playwright_package_version": {
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[A-Za-z0-9.-]+)?$",
+      "type": "string"
+    },
+    "playwright_wheel_filename": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}\\.whl$",
+      "type": "string"
+    },
+    "playwright_wheel_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "playwright_wheel_size": {
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "manifest_kind",
+    "playwright_package",
+    "playwright_package_version",
+    "playwright_wheel_filename",
+    "playwright_wheel_size",
+    "playwright_wheel_sha256",
+    "platform",
+    "cache_root",
+    "artifact_count",
+    "artifacts"
+  ],
+  "title": "Verified Playwright artifact closure manifest",
+  "type": "object"
+}

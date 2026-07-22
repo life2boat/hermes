@@ -15,6 +15,9 @@ ENV PYTHONUNBUFFERED=1
 # Store Playwright browsers outside the volume mount so the build-time
 # install survives the /opt/data volume overlay at runtime.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+# Python package installation must never trigger an implicit browser download.
+# The browser arrives only through the verified BuildKit context below.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # Install system dependencies in one layer, clear APT cache.
 # tini was previously PID 1 to reap orphaned zombie processes (MCP stdio
@@ -105,8 +108,8 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && 
 WORKDIR /opt/hermes
 
 # ---------- Layer-cached dependency install ----------
-# Copy only package manifests first so npm install + Playwright are cached
-# unless the lockfiles themselves change.
+# Copy only package manifests first so npm install is cached unless the
+# lockfiles themselves change. Browser installation is handled separately.
 #
 # ui-tui/packages/hermes-ink/ is copied IN FULL (not just its manifests)
 # because it is referenced as a `file:` workspace dependency from
@@ -130,7 +133,6 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 ENV npm_config_install_links=false
 
 RUN npm install --prefer-offline --no-audit && \
-    npx playwright install --with-deps chromium --only-shell && \
     npm cache clean --force
 
 # ---------- Layer-cached Python dependency install ----------
@@ -144,7 +146,7 @@ RUN npm install --prefer-offline --no-audit && \
 # frontend stats the readme path during dep resolution, so we `touch` an
 # empty placeholder — the real README is restored by `COPY . .` below.
 #
-# `uv sync --frozen --no-install-project --extra all --extra messaging`
+# `uv sync --frozen --no-install-project --extra all --extra google-meet ...`
 # installs the deps reachable through the composite `[all]` extra
 # (handpicked set intended for the production image — excludes `[dev]`),
 # plus gateway messaging adapters that should work in the published image
@@ -173,8 +175,34 @@ RUN npm install --prefer-offline --no-audit && \
 #
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
+COPY scripts/playwright_artifact_contract.py scripts/playwright_installed_closure.py scripts/install_pinned_playwright_artifact.py scripts/
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+
+# ---------- Verified Playwright artifact closure ----------
+# `playwright_artifacts` is one mandatory read-only BuildKit named context.
+# It contains closure.json, the lock-authorized wheel, and exactly one archive
+# for every package-required artifact. The closure digest has no default.
+ARG PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256
+RUN --mount=type=bind,from=playwright_artifacts,source=/,target=/tmp/playwright-artifacts,ro \
+    set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) playwright_platform="linux/amd64" ;; \
+        arm64) playwright_platform="linux/arm64" ;; \
+        *) echo "Unsupported TARGETARCH for Playwright closure" >&2; exit 1 ;; \
+    esac; \
+    test -n "${PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256:-}" || { \
+        echo "PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256 is required" >&2; \
+        exit 1; \
+    }; \
+    .venv/bin/python -m playwright install-deps chromium; \
+    .venv/bin/python -m scripts.install_pinned_playwright_artifact \
+        --closure-manifest /tmp/playwright-artifacts/closure.json \
+        --artifacts-root /tmp/playwright-artifacts/artifacts \
+        --lockfile ./uv.lock \
+        --wheel /tmp/playwright-artifacts/playwright-wheel \
+        --expected-closure-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256}" \
+        --platform "${playwright_platform}"
 
 # ---------- Frontend build (cached independently from Python source) ----------
 # Copy only the frontend source trees first so that Python-only changes don't
@@ -205,7 +233,11 @@ COPY --chown=hermes:hermes . .
 # fail to load.  See tools/lazy_deps.py.
 USER root
 RUN chmod -R a+rX /opt/hermes && \
-    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/gateway /opt/hermes/node_modules
+    chown -R hermes:hermes /opt/hermes/.venv /opt/hermes/ui-tui /opt/hermes/gateway /opt/hermes/node_modules && \
+    chown root:root /opt/hermes /opt/hermes/.playwright /opt/hermes/.playwright.expected-closure.json && \
+    chmod 0755 /opt/hermes && \
+    chmod 0555 /opt/hermes/.playwright && \
+    chmod 0444 /opt/hermes/.playwright.expected-closure.json /opt/hermes/.playwright/INSTALLATION_COMPLETE
 # Start as root so the s6-overlay stage2 hook can usermod/groupmod and chown
 # the data volume. Each supervised service then drops to the hermes user via
 # `s6-setuidgid hermes` in its run script. If HERMES_UID is unset, services

@@ -38,6 +38,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from scripts.playwright_artifact_contract import (
+    PlaywrightContractError,
+    verify_packaged_browser_readiness,
+)
+
 # Match ``https://meet.google.com/abc-defg-hij`` or ``.../lookup/...`` — the
 # short three-segment code or a lookup URL. Anything else is rejected.
 MEET_URL_RE = re.compile(
@@ -511,12 +516,33 @@ def run_bot() -> int:  # noqa: C901 — orchestration, explicit branches
                 rt["enabled"] = False
 
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as e:
-        state.set(error=f"playwright not installed: {e}", exited=True)
+        verify_packaged_browser_readiness()
+    except PlaywrightContractError as exc:
+        state.set(error=f"packaged browser unavailable: {exc.code}", exited=True)
         sys.stderr.write(
-            "google_meet bot: playwright is not installed. Run "
-            "`pip install playwright && python -m playwright install chromium`\n"
+            "google_meet bot: packaged browser unavailable; "
+            "use the canonical verified image build\n"
+        )
+        if rt["bridge"]:
+            rt["bridge"].teardown()
+        return 3
+    except Exception:
+        state.set(error="packaged browser unavailable: INTERNAL_ERROR", exited=True)
+        sys.stderr.write(
+            "google_meet bot: packaged browser unavailable; "
+            "use the canonical verified image build\n"
+        )
+        if rt["bridge"]:
+            rt["bridge"].teardown()
+        return 3
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        state.set(error="playwright not installed", exited=True)
+        sys.stderr.write(
+            "google_meet bot: playwright is not installed; "
+            "use the canonical verified image build\n"
         )
         if rt["bridge"]:
             rt["bridge"].teardown()

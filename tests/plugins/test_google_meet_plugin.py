@@ -761,32 +761,41 @@ def test_cmd_install_refuses_windows(capsys):
     assert "Windows" in out
 
 
-def test_cmd_install_runs_pip_and_playwright(capsys):
-    """End-to-end wiring: pip + playwright install invoked, returncodes handled."""
+def test_cmd_install_runs_pip_and_offline_browser_readiness(capsys):
+    """The install path never invokes Playwright browser acquisition."""
     from plugins.google_meet.cli import _cmd_install
 
     calls = []
-    class _FakeRes:
-        def __init__(self, rc=0): self.returncode = rc
 
-    def _fake_run(argv, **kwargs):
+    class _FakeRes:
+        def __init__(self, rc=0):
+            self.returncode = rc
+
+    def _fake_run(argv, **_kwargs):
         calls.append(list(argv))
         return _FakeRes(0)
 
     with patch("platform.system", return_value="Linux"), \
          patch("subprocess.run", side_effect=_fake_run), \
-         patch("shutil.which", return_value="/usr/bin/paplay"):
+         patch("shutil.which", return_value="/usr/bin/paplay"), \
+         patch(
+             "plugins.google_meet.cli._packaged_browser_status",
+             return_value=(True, "verified packaged browser ready"),
+         ):
         rc = _cmd_install(realtime=False, assume_yes=True)
     assert rc == 0
-    # First invocation: pip install
-    pip_cmds = [c for c in calls if len(c) > 2 and c[1:4] == ["-m", "pip", "install"]]
-    assert pip_cmds, f"no pip install run: {calls}"
-    assert "playwright" in pip_cmds[0]
-    assert "websockets" in pip_cmds[0]
-    # Second: playwright install chromium
-    pw_cmds = [c for c in calls if len(c) > 2 and c[1:4] == ["-m", "playwright", "install"]]
-    assert pw_cmds, f"no playwright install run: {calls}"
-    assert "chromium" in pw_cmds[0]
+    pip_cmds = [
+        call
+        for call in calls
+        if len(call) > 2 and call[1:4] == ["-m", "pip", "install"]
+    ]
+    assert pip_cmds
+    assert "playwright==1.61.0" in pip_cmds[0]
+    assert "websockets==15.0.1" in pip_cmds[0]
+    assert not any(
+        len(call) > 3 and call[1:4] == ["-m", "playwright", "install"]
+        for call in calls
+    )
 
 
 def test_cmd_install_realtime_skips_when_deps_present(capsys):
@@ -803,7 +812,11 @@ def test_cmd_install_realtime_skips_when_deps_present(capsys):
 
     with patch("platform.system", return_value="Linux"), \
          patch("subprocess.run", side_effect=_fake_run), \
-         patch("shutil.which", return_value="/usr/bin/paplay"):
+         patch("shutil.which", return_value="/usr/bin/paplay"), \
+         patch(
+             "plugins.google_meet.cli._packaged_browser_status",
+             return_value=(True, "verified packaged browser ready"),
+         ):
         rc = _cmd_install(realtime=True, assume_yes=True)
     assert rc == 0
     # No sudo apt-get call — paplay was already on PATH.
@@ -811,3 +824,82 @@ def test_cmd_install_realtime_skips_when_deps_present(capsys):
     assert sudo_calls == [], f"unexpected sudo invocation: {sudo_calls}"
     out = capsys.readouterr().out
     assert "already installed" in out
+
+
+def test_cmd_setup_uses_offline_readiness_and_no_network(capsys):
+    from plugins.google_meet.cli import _cmd_setup
+
+    with patch("platform.system", return_value="Linux"), \
+         patch.dict("sys.modules", {"playwright": object()}), \
+         patch(
+             "plugins.google_meet.cli._packaged_browser_status",
+             return_value=(True, "verified packaged browser ready"),
+         ) as readiness, \
+         patch("subprocess.run", side_effect=AssertionError("network forbidden")):
+        rc = _cmd_setup()
+
+    assert rc == 0
+    readiness.assert_called_once_with()
+    assert "verified packaged browser ready" in capsys.readouterr().out
+
+
+def test_cmd_setup_missing_packaged_browser_fails_closed(capsys):
+    from plugins.google_meet.cli import _cmd_setup
+
+    with patch("platform.system", return_value="Linux"), \
+         patch.dict("sys.modules", {"playwright": object()}), \
+         patch(
+             "plugins.google_meet.cli._packaged_browser_status",
+             return_value=(
+                 False,
+                 "not ready (PACKAGED_BROWSER_MISSING); "
+                 "use the canonical verified image build",
+             ),
+         ):
+        rc = _cmd_setup()
+
+    assert rc == 1
+    output = capsys.readouterr().out
+    assert "PACKAGED_BROWSER_MISSING" in output
+    assert "canonical verified image build" in output
+
+
+def test_cmd_setup_wrong_browser_revision_fails_closed(capsys):
+    from plugins.google_meet.cli import _cmd_setup
+
+    with patch("platform.system", return_value="Linux"), \
+         patch.dict("sys.modules", {"playwright": object()}), \
+         patch(
+             "plugins.google_meet.cli._packaged_browser_status",
+             return_value=(
+                 False,
+                 "not ready (BROWSER_IDENTITY_MISMATCH); "
+                 "use the canonical verified image build",
+             ),
+         ):
+        rc = _cmd_setup()
+
+    assert rc == 1
+    assert "BROWSER_IDENTITY_MISMATCH" in capsys.readouterr().out
+
+
+def test_google_meet_has_no_reachable_browser_install_command() -> None:
+    root = Path(__file__).resolve().parents[2] / "plugins" / "google_meet"
+    paths = (
+        root / "cli.py",
+        root / "tools.py",
+        root / "meet_bot.py",
+        root / "README.md",
+        root / "SKILL.md",
+    )
+    forbidden = (
+        "python -m playwright install",
+        "npx playwright install",
+        "playwright install chromium",
+        "PLAYWRIGHT_DOWNLOAD_HOST",
+        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST",
+    )
+    for source_path in paths:
+        source = source_path.read_text(encoding="utf-8")
+        for needle in forbidden:
+            assert needle not in source

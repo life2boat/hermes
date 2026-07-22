@@ -154,6 +154,35 @@ class PlannedContext:
     sha256: str
 
 
+class _UnitExecutionAuthority:
+    def __init__(self) -> None:
+        self.final_authority = type(
+            "FinalAuthority",
+            (),
+            {"sha256": "a" * 64},
+        )()
+
+    def path_matches(self) -> bool:
+        return True
+
+    def runtime_matches(self) -> bool:
+        return True
+
+    def validate_source(
+        self,
+        *,
+        identity: dict[str, int | str],
+        schema_fingerprint: str,
+        parent_identity: dict[str, int | str],
+    ) -> None:
+        assert identity["SOURCE_USER_VERSION"] == 0
+        assert len(schema_fingerprint) == 64
+        assert parent_identity["PATH"]
+
+    def close(self) -> None:
+        return None
+
+
 def _private_directory(path: Path) -> Path:
     path.mkdir(parents=True, mode=0o700)
     os.chmod(path, 0o700)
@@ -428,6 +457,11 @@ def _install_unit_root(
         "_repository_provenance",
         lambda _repository: (REVISION, TREE_SHA),
     )
+    monkeypatch.setattr(
+        production,
+        "load_execution_authority",
+        lambda **_kwargs: _UnitExecutionAuthority(),
+    )
     monkeypatch.setattr(staged, "_inspect_image", _fake_image_inspect)
 
 
@@ -583,6 +617,10 @@ def _execute_argv(
         "confirm_clean_start_policy_sha256": str(
             plan.payload["CLEAN_START_POLICY_SHA256"]
         ),
+        "final_authority": str(
+            plan.unit.root / "synthetic-final-authority.json"
+        ),
+        "expected_final_authority_sha256": "a" * 64,
     }
     values.update(overrides)
     return [
@@ -601,6 +639,10 @@ def _execute_argv(
         values["confirm_operations_root_approval_sha256"],
         "--confirm-clean-start-policy-sha256",
         values["confirm_clean_start_policy_sha256"],
+        "--final-authority",
+        values["final_authority"],
+        "--expected-final-authority-sha256",
+        values["expected_final_authority_sha256"],
     ]
 
 
@@ -700,6 +742,56 @@ def _install_staged_success(
     )
 
 
+@pytest.mark.parametrize("helper", ("sha256", "document"))
+def test_descriptor_reads_reject_premature_eof(
+    helper: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "descriptor.bin"
+    path.write_bytes(b"complete-descriptor")
+    fd = os.open(path, os.O_RDONLY)
+    original_pread = os.pread
+    calls = 0
+
+    def premature_eof(
+        target_fd: int,
+        size: int,
+        offset: int,
+    ) -> bytes:
+        nonlocal calls
+        if target_fd != fd:
+            return original_pread(target_fd, size, offset)
+        calls += 1
+        if calls == 1:
+            return original_pread(target_fd, min(4, size), offset)
+        return b""
+
+    monkeypatch.setattr(production.os, "pread", premature_eof)
+    try:
+        with pytest.raises(
+            production.ProductionGateError,
+            match=(
+                "SOURCE_READ_CONTRACT_VIOLATION"
+                if helper == "sha256"
+                else "DOCUMENT_READ_CONTRACT_VIOLATION"
+            ),
+        ):
+            if helper == "sha256":
+                production._sha256_fd(
+                    fd,
+                    code="SOURCE_READ_CONTRACT_VIOLATION",
+                )
+            else:
+                production._read_fd_bytes(
+                    fd,
+                    maximum=1024,
+                    code="DOCUMENT_READ_CONTRACT_VIOLATION",
+                )
+    finally:
+        os.close(fd)
+
+
 def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     parser = production.build_parser()
     choices = parser._subparsers._group_actions[0].choices
@@ -713,6 +805,8 @@ def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     assert "--expected-clean-start-policy-sha256" in plan_help
     assert "--confirm-operations-root-approval-sha256" in execute_help
     assert "--confirm-clean-start-policy-sha256" in execute_help
+    assert "--final-authority" in execute_help
+    assert "--expected-final-authority-sha256" in execute_help
     assert "--deployment-contract" not in plan_help
     assert "--target-schema-version" not in plan_help
     combined = f"{plan_help}\n{execute_help}"
@@ -753,8 +847,10 @@ def test_runbook_documents_exact_evidence_binding_contract() -> None:
         "--expected-clean-start-policy-sha256",
         "--confirm-operations-root-approval-sha256",
         "--confirm-clean-start-policy-sha256",
+        "--final-authority",
+        "--expected-final-authority-sha256",
         "NO_CLIENTS_CLEAN_START",
-        "plan schema version 3",
+        "plan schema version 4",
         "no generic force or skip-validation flag exists",
     ):
         assert required in runbook
@@ -798,6 +894,10 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["EXPECTED_FEATURE_FLAGS"] == production.EXPECTED_FEATURE_FLAGS
     assert payload["TARGET_SCHEMA_VERSION"] == target.version
     assert payload["TARGET_SCHEMA_FINGERPRINT"] == target.fingerprint
+    assert payload["SOURCE_USER_VERSION"] == 0
+    assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(
+        context.source.parent
+    )
     assert payload["PLAN_READ_ONLY"] is True
     assert payload["PLAN_DATABASE_MUTATION"] is False
     assert list(context.backup.iterdir()) == []
@@ -830,6 +930,72 @@ def test_plan_parser_requires_each_evidence_binding(
     result, stream = _json_result(capfd)
     assert stream == "stderr"
     assert result["exit_classification"] == "ARGUMENT_ERROR"
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) == before_paths
+
+
+@pytest.mark.parametrize(
+    "option",
+    ("--final-authority", "--expected-final-authority-sha256"),
+)
+def test_execute_parser_requires_final_authority_binding(
+    option: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    argv = _execute_argv(plan)
+    index = argv.index(option)
+    del argv[index : index + 2]
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+    assert production.main(argv) == 2
+    result, stream = _json_result(capfd)
+    assert stream == "stderr"
+    assert result["exit_classification"] == "ARGUMENT_ERROR"
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) == before_paths
+
+
+def test_execution_authority_failure_precedes_source_and_quiescence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    source_reads = 0
+    quiescence_calls = 0
+
+    def deny_authority(**_kwargs: Any) -> Any:
+        raise production.ExecutionAuthorityError("FINAL_AUTHORITY_SHA256_MISMATCH")
+
+    def forbidden_source_read(_path: Path) -> Any:
+        nonlocal source_reads
+        source_reads += 1
+        raise AssertionError("source DB opened after static authority denial")
+
+    def forbidden_quiescence(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal quiescence_calls
+        quiescence_calls += 1
+        raise AssertionError("quiescence reached after static authority denial")
+
+    monkeypatch.setattr(production, "load_execution_authority", deny_authority)
+    monkeypatch.setattr(production, "_read_only_source", forbidden_source_read)
+    monkeypatch.setattr(
+        production,
+        "_prepare_authorized_production_execution",
+        forbidden_quiescence,
+    )
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+    assert production.main(_execute_argv(plan)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "FINAL_AUTHORITY_SHA256_MISMATCH"
+    assert source_reads == 0
+    assert quiescence_calls == 0
     assert production._sha256(context.source) == before_hash
     assert _path_set(context.runtime) == before_paths
 
@@ -1866,6 +2032,10 @@ def test_execute_main_generic_fallback_never_reports_before_exchange(
         "--confirm-operations-root-approval-sha256",
         "0" * 64,
         "--confirm-clean-start-policy-sha256",
+        "0" * 64,
+        "--final-authority",
+        "/synthetic/final-authority.json",
+        "--expected-final-authority-sha256",
         "0" * 64,
     ]
     assert production.main(argv) == 1

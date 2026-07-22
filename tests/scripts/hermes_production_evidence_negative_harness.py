@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from scripts import hermes_execution_authority as execution_authority
 from scripts import hermes_production_staged_migrate as production
 
 
@@ -174,6 +175,7 @@ EXECUTE_CASES = (
     ),
     ("legacy_plan_v1", 1, "PLAN_VERSION_OR_STATE_INVALID"),
     ("legacy_plan_v2", 1, "PLAN_VERSION_OR_STATE_INVALID"),
+    ("legacy_plan_v3", 1, "PLAN_VERSION_OR_STATE_INVALID"),
     (
         "root_approval_confirmation_mismatch",
         1,
@@ -229,6 +231,38 @@ def _write_document(path: Path, payload: dict[str, Any]) -> None:
     os.chown(path, 0, 0)
 
 
+def _write_bytes(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+    os.chmod(path, 0o600)
+    os.chown(path, 0, 0)
+
+
+def _directory_identity(path: Path) -> dict[str, int | str]:
+    metadata = path.stat()
+    return {
+        "PATH": str(path),
+        "DEVICE": int(metadata.st_dev),
+        "INODE": int(metadata.st_ino),
+        "UID": int(metadata.st_uid),
+        "GID": int(metadata.st_gid),
+        "MODE": stat.S_IMODE(metadata.st_mode),
+    }
+
+
+def _secret_identity(path: Path) -> dict[str, int | str]:
+    metadata = path.stat()
+    return {
+        "PATH": str(path),
+        "DEVICE": int(metadata.st_dev),
+        "INODE": int(metadata.st_ino),
+        "SIZE": int(metadata.st_size),
+        "UID": int(metadata.st_uid),
+        "GID": int(metadata.st_gid),
+        "MODE": stat.S_IMODE(metadata.st_mode),
+        "SHA256": _sha256(path),
+    }
+
+
 def _atomic_replace(path: Path, data: bytes) -> None:
     replacement = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     replacement.write_bytes(data)
@@ -239,14 +273,12 @@ def _atomic_replace(path: Path, data: bytes) -> None:
 
 def _run_git(repository: Path, *arguments: str) -> str:
     environment = dict(os.environ)
-    environment.update(
-        {
-            "GIT_AUTHOR_NAME": "Hermes Test",
-            "GIT_AUTHOR_EMAIL": "hermes-test@example.invalid",
-            "GIT_COMMITTER_NAME": "Hermes Test",
-            "GIT_COMMITTER_EMAIL": "hermes-test@example.invalid",
-        }
-    )
+    environment.update({
+        "GIT_AUTHOR_NAME": "Hermes Test",
+        "GIT_AUTHOR_EMAIL": "hermes-test@example.invalid",
+        "GIT_COMMITTER_NAME": "Hermes Test",
+        "GIT_COMMITTER_EMAIL": "hermes-test@example.invalid",
+    })
     result = subprocess.run(
         ["git", "-C", str(repository), *arguments],
         text=True,
@@ -267,15 +299,12 @@ def _copy_repository(source_root: Path, target: Path) -> tuple[str, str]:
         Path("docker-compose.yml"),
         Path("scripts/hermes_production_staged_migrate.py"),
         Path("scripts/hermes_staged_schema_migrate.py"),
-        Path(
-            "docs/runbooks/"
-            "RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
-        ),
+        Path("docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"),
     ):
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_root / relative, destination)
-        os.chmod(destination, 0o600)
+        os.chmod(destination, 0o644)
         os.chown(destination, 0, 0)
     _run_git(target, "init", "--quiet")
     _run_git(target, "add", "--all")
@@ -311,9 +340,7 @@ def _new_context(root: Path, name: str) -> CaseContext:
         staging=staging,
         evidence=evidence,
         evidence_inputs=evidence_inputs,
-        operations_root_approval=(
-            evidence_inputs / "approved-operations-root.json"
-        ),
+        operations_root_approval=(evidence_inputs / "approved-operations-root.json"),
         clean_start_policy=evidence_inputs / "clean-start-data-policy.json",
     )
 
@@ -351,8 +378,7 @@ def _write_valid_evidence(
             repository / "scripts/hermes_staged_schema_migrate.py"
         ),
         "RUNBOOK_SHA256": _sha256(
-            repository
-            / "docs/runbooks/"
+            repository / "docs/runbooks/"
             "RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md"
         ),
         "MIGRATION_IMAGE_ID": TARGET_IMAGE_ID,
@@ -432,14 +458,18 @@ def _plan_argv(
     ]
 
 
-def _execute_argv(plan: PlanContext, **overrides: str) -> list[str]:
+def _execute_argv(
+    plan: PlanContext,
+    *,
+    final_authority_path: Path,
+    final_authority_sha256: str,
+    **overrides: str,
+) -> list[str]:
     values = {
         "expected_plan_sha256": plan.sha256,
         "confirm_operation_id": str(plan.payload["OPERATION_ID"]),
         "confirm_source_sha256": str(plan.payload["SOURCE_SHA256"]),
-        "confirm_image_revision": str(
-            plan.payload["MIGRATION_IMAGE_REVISION"]
-        ),
+        "confirm_image_revision": str(plan.payload["MIGRATION_IMAGE_REVISION"]),
         "confirm_operations_root_approval_sha256": str(
             plan.payload["OPERATIONS_ROOT_APPROVAL_SHA256"]
         ),
@@ -452,6 +482,10 @@ def _execute_argv(plan: PlanContext, **overrides: str) -> list[str]:
         "execute",
         "--plan",
         str(plan.path),
+        "--final-authority",
+        str(final_authority_path),
+        "--expected-final-authority-sha256",
+        final_authority_sha256,
         "--expected-plan-sha256",
         values["expected_plan_sha256"],
         "--confirm-operation-id",
@@ -490,9 +524,7 @@ def _create_plan(
     repository: Path,
     revision: str,
 ) -> PlanContext:
-    return_code, result = _public_main(
-        _plan_argv(context, repository, revision)
-    )
+    return_code, result = _public_main(_plan_argv(context, repository, revision))
     if return_code != 0 or result.get("status") != "PASS":
         raise AssertionError("synthetic public plan failed")
     path = Path(str(result["plan_path"]))
@@ -502,6 +534,158 @@ def _create_plan(
         payload=payload,
         sha256=str(result["plan_sha256"]),
     )
+
+
+def _create_final_authority(
+    context: CaseContext,
+    repository: Path,
+    plan: PlanContext,
+) -> tuple[Path, str]:
+    artifacts = context.evidence_inputs
+    revision = str(plan.payload["MIGRATION_IMAGE_REVISION"])
+    tree = _run_git(repository, "rev-parse", "HEAD^{tree}")
+    created_at = production._now()
+    base_compose = repository / "docker-compose.yml"
+    p5b = artifacts / "p5b-evidence.md"
+    p6a_f1 = artifacts / "p6a-f1-evidence.md"
+    override = artifacts / "production-db-override.yml"
+    secret = artifacts / "secrets-override.yml"
+    descriptor = artifacts / "invocation-descriptor.json"
+    envelope = artifacts / "approval-envelope.json"
+    final = artifacts / "final-authority.json"
+
+    _write_bytes(p5b, b"synthetic p5b evidence\n")
+    _write_bytes(p6a_f1, b"synthetic p6a-f1 evidence\n")
+    _write_document(
+        override,
+        {
+            "services": {
+                "hermes-bot": {
+                    "volumes": [
+                        {
+                            "bind": {"create_host_path": True},
+                            "source": str(context.source),
+                            "target": "/home/hermes/healbite.db",
+                            "type": "bind",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    _write_bytes(secret, b"services: {}\n")
+    _write_document(
+        descriptor,
+        {
+            "DESCRIPTOR_VERSION": (execution_authority.INVOCATION_DESCRIPTOR_VERSION),
+            "CREATED_AT": production._timestamp(created_at),
+            "COMPOSE_PROJECT_NAME": "hermes-agent",
+            "PROJECT_DIRECTORY": str(repository),
+            "COMPOSE_FILE_ORDER": [
+                str(base_compose),
+                str(override),
+                str(secret),
+            ],
+            "NON_SECRET_COMPOSE_SHA256": {
+                str(base_compose): _sha256(base_compose),
+                str(override): _sha256(override),
+            },
+            "SECRETS_OVERRIDE": _secret_identity(secret),
+            "ENVIRONMENT_SOURCE_CLASS": ("EXISTING_PRODUCTION_ENV_FILE_METADATA_ONLY"),
+            "APPLICATION_SERVICE": "hermes-bot",
+            "CANONICAL_DB_SOURCE": str(context.source),
+            "CANONICAL_DB_TARGET": "/home/hermes/healbite.db",
+            "CURRENT_PRODUCTION_IMAGE_ID": PREVIOUS_IMAGE_ID,
+            "TARGET_IMAGE_ID": TARGET_IMAGE_ID,
+            "SOURCE_SHA": revision,
+            "TREE_SHA": tree,
+            "CONTAINS_SECRET_VALUES": False,
+        },
+    )
+    root_metadata = repository.stat()
+    _write_document(
+        envelope,
+        {
+            "ENVELOPE_VERSION": 1,
+            "CREATED_AT": production._timestamp(created_at),
+            "PUBLIC_OPERATIONS_ROOT_APPROVAL_PATH": str(
+                context.operations_root_approval
+            ),
+            "PUBLIC_OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(
+                context.operations_root_approval
+            ),
+            "OPERATIONS_ROOT_PATH": str(repository),
+            "OPERATIONS_ROOT_HEAD_SHA": revision,
+            "OPERATIONS_ROOT_TREE_SHA": tree,
+            "OPERATIONS_ROOT_MODE": stat.S_IMODE(root_metadata.st_mode),
+            "OPERATIONS_ROOT_UID": int(root_metadata.st_uid),
+            "OPERATIONS_ROOT_GID": int(root_metadata.st_gid),
+            "OPERATIONS_ROOT_CLEAN": True,
+            "OBJECT_ALTERNATES_ABSENT": True,
+            "P5B_EVIDENCE_SHA256": _sha256(p5b),
+            "P6A_F1_EVIDENCE_SHA256": _sha256(p6a_f1),
+            "EXACT_MAIN_IMAGE_ID": TARGET_IMAGE_ID,
+            "CANONICAL_DB_PATH": str(context.source),
+            "CANONICAL_DB_DEVICE": int(plan.payload["SOURCE_DEVICE"]),
+            "CANONICAL_DB_INODE": int(plan.payload["SOURCE_INODE"]),
+            "CANONICAL_DB_SIZE": int(plan.payload["SOURCE_SIZE"]),
+            "CANONICAL_DB_SHA256": str(plan.payload["SOURCE_SHA256"]),
+            "PERSISTENT_DB_OVERRIDE_SHA256": _sha256(override),
+            "INVOCATION_DESCRIPTOR_SHA256": _sha256(descriptor),
+            "CLEAN_START_POLICY_SHA256": _sha256(context.clean_start_policy),
+            "PLAN_ONLY_AUTHORIZED": True,
+            "EXECUTION_AUTHORIZED": False,
+            "DEPLOY_AUTHORIZED": False,
+            "CONTAINS_SECRETS": False,
+        },
+    )
+    _write_document(
+        final,
+        {
+            "EXECUTION_AUTHORITY_VERSION": (
+                execution_authority.EXECUTION_AUTHORITY_VERSION
+            ),
+            "CREATED_AT": production._timestamp(created_at),
+            "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+            "PLAN_PATH": str(plan.path),
+            "PLAN_SHA256": plan.sha256,
+            "OPERATIONS_ROOT_APPROVAL_PATH": str(context.operations_root_approval),
+            "OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(
+                context.operations_root_approval
+            ),
+            "CLEAN_START_POLICY_PATH": str(context.clean_start_policy),
+            "CLEAN_START_POLICY_SHA256": _sha256(context.clean_start_policy),
+            "APPROVAL_ENVELOPE_PATH": str(envelope),
+            "APPROVAL_ENVELOPE_SHA256": _sha256(envelope),
+            "INVOCATION_DESCRIPTOR_PATH": str(descriptor),
+            "INVOCATION_DESCRIPTOR_SHA256": _sha256(descriptor),
+            "PERSISTENT_DB_OVERRIDE_PATH": str(override),
+            "PERSISTENT_DB_OVERRIDE_SHA256": _sha256(override),
+            "P5B_EVIDENCE_PATH": str(p5b),
+            "P5B_EVIDENCE_SHA256": _sha256(p5b),
+            "P6A_F1_EVIDENCE_PATH": str(p6a_f1),
+            "P6A_F1_EVIDENCE_SHA256": _sha256(p6a_f1),
+            "SOURCE_SHA": revision,
+            "SOURCE_TREE_SHA": tree,
+            "TARGET_IMAGE_ID": TARGET_IMAGE_ID,
+            "CURRENT_RUNTIME_IMAGE_ID": PREVIOUS_IMAGE_ID,
+            "CANONICAL_PRODUCTION_DB_PATH": str(context.source),
+            "SOURCE_DB_SHA256": str(plan.payload["SOURCE_SHA256"]),
+            "SOURCE_DB_SIZE": int(plan.payload["SOURCE_SIZE"]),
+            "SOURCE_DB_USER_VERSION": int(plan.payload["SOURCE_USER_VERSION"]),
+            "SOURCE_DB_SCHEMA_FINGERPRINT": str(
+                plan.payload["SOURCE_SCHEMA_FINGERPRINT"]
+            ),
+            "SOURCE_DB_PARENT_IDENTITY": plan.payload["SOURCE_PARENT_IDENTITY"],
+            "OPERATIONS_ROOT_PATH": str(repository),
+            "OPERATIONS_ROOT_HEAD_SHA": revision,
+            "OPERATIONS_ROOT_TREE_SHA": tree,
+            "EXECUTION_AUTHORIZED": True,
+            "DEPLOY_AUTHORIZED": False,
+            "CONTAINS_SECRETS": False,
+        },
+    )
+    return final, _sha256(final)
 
 
 def _rewrite_plan(plan: PlanContext) -> None:
@@ -717,8 +901,17 @@ def _prepare_execute_case(
     repository: Path,
     revision: str,
 ) -> list[str]:
+    global _ACTIVE_SOURCE
+    _ACTIVE_SOURCE = context.source
     plan = _create_plan(context, repository, revision)
     overrides: dict[str, str] = {}
+    authority_before_mutation = case not in {
+        "legacy_plan_v1",
+        "legacy_plan_v2",
+        "legacy_plan_v3",
+    }
+    if authority_before_mutation:
+        final_path, final_sha256 = _create_final_authority(context, repository, plan)
     if case == "root_approval_replacement_after_plan":
         payload = json.loads(
             context.operations_root_approval.read_text(encoding="ascii")
@@ -729,9 +922,7 @@ def _prepare_execute_case(
             production._canonical_json(payload),
         )
     elif case == "policy_replacement_after_plan":
-        payload = json.loads(
-            context.clean_start_policy.read_text(encoding="ascii")
-        )
+        payload = json.loads(context.clean_start_policy.read_text(encoding="ascii"))
         payload["DELETION_PERFORMED"] = True
         _atomic_replace(
             context.clean_start_policy,
@@ -757,13 +948,27 @@ def _prepare_execute_case(
     elif case == "legacy_plan_v2":
         plan.payload["PLAN_VERSION"] = 2
         _rewrite_plan(plan)
+    elif case == "legacy_plan_v3":
+        plan.payload["PLAN_VERSION"] = 3
+        _rewrite_plan(plan)
     elif case == "root_approval_confirmation_mismatch":
         overrides["confirm_operations_root_approval_sha256"] = "f" * 64
     elif case == "policy_confirmation_mismatch":
         overrides["confirm_clean_start_policy_sha256"] = "f" * 64
     else:
         raise AssertionError(f"unknown execute case: {case}")
-    return _execute_argv(plan, **overrides)
+    if not authority_before_mutation:
+        final_path, final_sha256 = _create_final_authority(
+            context,
+            repository,
+            plan,
+        )
+    return _execute_argv(
+        plan,
+        final_authority_path=final_path,
+        final_authority_sha256=final_sha256,
+        **overrides,
+    )
 
 
 def _assert_rejection(
@@ -801,10 +1006,7 @@ def _assert_rejection(
         raise AssertionError(f"{case}: execution filesystem changed")
     if _PREPARE_CALLS != prepare_calls_before:
         raise AssertionError(f"{case}: migration preparation reached")
-    if any(
-        path.name == "execution.json"
-        for path in context.evidence.rglob("*")
-    ):
+    if any(path.name == "execution.json" for path in context.evidence.rglob("*")):
         raise AssertionError(f"{case}: execution evidence created")
 
 
@@ -835,6 +1037,7 @@ def _positive_plan_control(
 
 
 _ACTIVE_REVISION = ""
+_ACTIVE_SOURCE: Path | None = None
 _PREPARE_CALLS = 0
 
 
@@ -847,6 +1050,21 @@ def _strict_image_inspect(
     if image_id == PREVIOUS_IMAGE_ID and expected_revision is None:
         return _ACTIVE_REVISION
     raise production.ProductionGateError("IMAGE_NOT_AVAILABLE")
+
+
+def _synthetic_runtime(service_name: str) -> dict[str, Any]:
+    if service_name != "hermes-bot" or _ACTIVE_SOURCE is None:
+        raise execution_authority.ExecutionAuthorityError("CURRENT_RUNTIME_UNAVAILABLE")
+    return {
+        "State": {"Running": True},
+        "Image": PREVIOUS_IMAGE_ID,
+        "Mounts": [
+            {
+                "Source": str(_ACTIVE_SOURCE),
+                "Destination": "/home/hermes/healbite.db",
+            }
+        ],
+    }
 
 
 def _forbid_migration_prepare(*_args: Any, **_kwargs: Any) -> Any:
@@ -864,12 +1082,14 @@ def _arguments() -> argparse.Namespace:
 def main() -> int:
     global _ACTIVE_REVISION
     args = _arguments()
-    if os.geteuid() != 0 or os.getegid() != 0:
+    if os.geteuid() != 0 or os.getegid() != 0:  # windows-footgun: ok
         raise AssertionError("evidence matrix requires real root:root")
     source_root = Path(args.repository_root).resolve(strict=True)
     original_repository_root = production.REPO_ROOT
     original_inspect = production._inspect_image
     original_prepare = production._prepare_authorized_production_execution
+    original_authority_inspect = execution_authority._inspect_image
+    original_runtime_inspect = execution_authority._inspect_runtime
     with tempfile.TemporaryDirectory(prefix="hermes-evidence-matrix-") as value:
         root = Path(value)
         os.chmod(root, 0o700)
@@ -877,10 +1097,10 @@ def main() -> int:
         revision, tree = _copy_repository(source_root, repository)
         production.REPO_ROOT = repository
         production._inspect_image = _strict_image_inspect
-        production._prepare_authorized_production_execution = (
-            _forbid_migration_prepare
-        )
+        production._prepare_authorized_production_execution = _forbid_migration_prepare
         _ACTIVE_REVISION = revision
+        execution_authority._inspect_image = _strict_image_inspect
+        execution_authority._inspect_runtime = _synthetic_runtime
         try:
             for case, expected_code, expected_class in PLAN_CASES:
                 context = _new_context(root, f"plan-{case}")
@@ -917,12 +1137,19 @@ def main() -> int:
                     _PREPARE_CALLS,
                 )
             _positive_plan_control(root, repository, revision, tree)
+            bytecode_sidecars = [
+                path
+                for path in repository.rglob("*")
+                if path.name == "__pycache__" or path.suffix == ".pyc"
+            ]
+            if bytecode_sidecars:
+                raise AssertionError("plan or execute created bytecode sidecars")
         finally:
             production.REPO_ROOT = original_repository_root
             production._inspect_image = original_inspect
-            production._prepare_authorized_production_execution = (
-                original_prepare
-            )
+            production._prepare_authorized_production_execution = original_prepare
+            execution_authority._inspect_image = original_authority_inspect
+            execution_authority._inspect_runtime = original_runtime_inspect
     print(
         json.dumps(
             {
@@ -933,6 +1160,7 @@ def main() -> int:
                 "fstat_monkeypatched": False,
                 "gid_check_from_pinned_fd": True,
                 "migration_container_started": False,
+                "no_bytecode_files_created": True,
                 "negative_evidence_cases": NEGATIVE_CASE_COUNT,
                 "production_database_used": False,
                 "public_execute_main_used": True,

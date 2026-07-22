@@ -17,8 +17,7 @@ import pytest
 def test_public_evidence_negative_matrix_uses_real_root_security() -> None:
     repository_root = Path(__file__).resolve().parents[2]
     harness = (
-        repository_root
-        / "tests/scripts/hermes_production_evidence_negative_harness.py"
+        repository_root / "tests/scripts/hermes_production_evidence_negative_harness.py"
     )
     base_command = [
         sys.executable,
@@ -61,7 +60,8 @@ def test_public_evidence_negative_matrix_uses_real_root_security() -> None:
         "fstat_monkeypatched": False,
         "gid_check_from_pinned_fd": True,
         "migration_container_started": False,
-        "negative_evidence_cases": 39,
+        "no_bytecode_files_created": True,
+        "negative_evidence_cases": 40,
         "production_database_used": False,
         "public_execute_main_used": True,
         "public_plan_main_used": True,

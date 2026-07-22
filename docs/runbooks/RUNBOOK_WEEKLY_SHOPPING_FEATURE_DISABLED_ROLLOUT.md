@@ -537,7 +537,7 @@ of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tab
 and false execution/deletion state
 both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
 descriptors before production source inspection; their path, filesystem identity,
-mode and SHA-256 are recorded in plan schema version 3
+mode and SHA-256 are recorded in plan schema version 4
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
@@ -549,21 +549,47 @@ production execute requires exact --plan, --expected-plan-sha256,
 --confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
 plus independent --confirm-operations-root-approval-sha256 and
 --confirm-clean-start-policy-sha256 values
+production execute also requires --final-authority and
+--expected-final-authority-sha256; plan schema version 3 and any execute without
+these arguments are audit-only and denied before quiescence
+execution authority schema version 1 binds the exact plan, native approval,
+clean-start policy, approval envelope, invocation descriptor, persistent DB
+override, P5B and P6A-F1 evidence, source HEAD/tree, both image IDs, canonical DB
+path/hash/size/user_version/schema fingerprint/parent identity, operations-root
+identity, and expiry; unknown fields and environment fallbacks are denied
+invocation descriptor schema version 2 binds the Compose project, project
+directory, exact three-file order, SHA-256 of both non-secret Compose files,
+secret-safe secrets-override identity, service, DB bind source/target, both image
+IDs, source HEAD/tree, and contains no secret values
+the persistent DB override and all final-authority companion documents live outside
+the approved operations root under dedicated root-owned mode 0700 parents; an
+override inside the operations root is denied
+the approved operations root must be root-owned mode 0700 and equal the complete
+Git tree on the filesystem; ignored, excluded, untracked, empty-directory,
+symlink, hardlink, special-file, __pycache__, and *.pyc drift is denied
+all operations-root plan and execute invocations use both
+PYTHONDONTWRITEBYTECODE=1 and the Python -B option
 execute securely reopens both evidence files, confirms their recorded identities and
 hashes, revalidates approval expiry/repository provenance and all policy semantics,
-and pins their descriptors through authorization and staged execution
+then independently opens and pins every final-authority companion artifact through
+authorization and staged execution; exact byte count, canonical JSON, owner, mode,
+hardlink, symlink, path and SHA-256 checks fail closed
+source DB user_version, schema fingerprint and parent identity are independently
+revalidated after all static authority checks and before backup, staging or mutation
 plan and execute are separate and require an independent plan/SHA review gate
 no path, evidence, image, revision, confirmation, or authorization comes from
 environment; no generic force or skip-validation flag exists
 plan, backup, staging, and evidence parents are canonical, non-symlink,
 root-owned, mode 0700 directories
-the operator must stop the application and every DB user through the canonical
-deployment source of truth before execute
+the exact current Hermes runtime identity is revalidated while it remains running;
+in a separately approved quiet window, execute may then acquire the SQLite
+lifetime lease; this migration command does not stop, recreate, or deploy a
+container
 no process may have the source DB open
 no -journal, -wal, or -shm source sidecar may exist
 source identity, mode, integrity, and foreign keys must match the approved plan
-execute must acquire the real SQLite lifetime lease before creating its
-execution directory, execution.json, backup, staging, or internal manifest
+execute must acquire the real SQLite lifetime lease before creating its execution
+directory, execution.json, backup, staging, or internal manifest
 an active reader or writer must return QUIESCENCE_FAILED with zero execute
 filesystem delta; the separately approved immutable plan remains the only file
 automatic lock retry is prohibited
@@ -580,10 +606,13 @@ operation ID, source SHA-256, and migration image revision before service stop.
 1. Verify the exact-main image ID and OCI revision through the canonical deployment
    source of truth.
 2. Create one immutable production plan while Hermes remains running.
-3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256.
-4. Stop only hermes-bot through the canonical deployment source of truth.
-5. Let execute independently prove real SQLite quiescence and hold both lifetime
-   leases; a generic flock or process-name check is not sufficient.
+3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256;
+   create and independently approve one complete final-authority v1 artifact.
+4. Keep the exact current Hermes runtime running for execute-time identity proof.
+5. Use a separately approved quiet window in which hermes-bot makes no database
+   accesses. Execute must prove real SQLite quiescence and hold both lifetime
+   leases; a generic flock or process-name check is not sufficient. This command
+   does not stop or recreate hermes-bot.
 6. Execute only the exact approved plan.
 7. Perform a separate read-only integrity, foreign-key, and schema verification.
 8. Start the exact image through scripts/hermes_production_deploy.py with all
@@ -609,6 +638,8 @@ OPERATIONS_ROOT_APPROVAL="<reviewed-canonical-approval-path>"
 OPERATIONS_ROOT_APPROVAL_SHA256="<reviewed-approval-sha256>"
 CLEAN_START_POLICY="<reviewed-canonical-policy-path>"
 CLEAN_START_POLICY_SHA256="<reviewed-policy-sha256>"
+FINAL_AUTHORITY="<reviewed-final-authority-v1-path>"
+FINAL_AUTHORITY_SHA256="<reviewed-final-authority-sha256>"
 MIGRATION_IMAGE_ID="<sha256-image-id>"
 MIGRATION_IMAGE_REVISION="<full-40-character-main-sha>"
 PREVIOUS_IMAGE_ID="<sha256-previous-image-id>"
@@ -620,7 +651,7 @@ SOURCE_INODE="$(stat --format='%i' "$DB_PATH")"
 SOURCE_SIZE="$(stat --format='%s' "$DB_PATH")"
 SOURCE_SHA256="$(sha256sum "$DB_PATH" | awk '{print $1}')"
 
-sudo "$HOST_PYTHON" "$GATE" plan \
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" plan \
   --repository-root "$REPOSITORY_ROOT" \
   --db-path "$DB_PATH" \
   --backup-parent "$BACKUP_PARENT" \
@@ -653,29 +684,35 @@ APPROVED_SOURCE_SHA256=<exact-source-sha256>
 APPROVED_IMAGE_REVISION=<exact-image-revision>
 APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256=<exact-approval-sha256>
 APPROVED_CLEAN_START_POLICY_SHA256=<exact-policy-sha256>
+APPROVED_FINAL_AUTHORITY_PATH=<exact-authority-path>
+APPROVED_FINAL_AUTHORITY_SHA256=<exact-authority-sha256>
 APPROVED_PLAN_CREATOR_UID=0
 APPROVED_PLAN_CREATOR_GID=<recorded-root-group>
 APPROVED_TARGET_SCHEMA_VERSION=<derived-version>
 APPROVED_TARGET_SCHEMA_FINGERPRINT=<derived-fingerprint>
 ```
 
-Before execute, verify the plan hash and use the canonical deployment SOT to stop
-only hermes-bot. Do not hand-assemble an alternate Compose chain, stop Qdrant, or
-mount the production DB into a container. Execute is then limited to:
+Before execute, verify both approved hashes and leave the exact current Hermes
+runtime running for identity revalidation. Do not hand-assemble an alternate
+Compose chain, stop Qdrant, or mount the production DB into a container. Execute
+is then limited to:
 
 ```bash
 set -euo pipefail
 
 test "$(sha256sum "$APPROVED_PLAN_PATH" | awk '{print $1}')" = "$APPROVED_PLAN_SHA256"
+test "$(sha256sum "$APPROVED_FINAL_AUTHORITY_PATH" | awk '{print $1}')" = "$APPROVED_FINAL_AUTHORITY_SHA256"
 
-sudo "$HOST_PYTHON" "$GATE" execute \
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" execute \
   --plan "$APPROVED_PLAN_PATH" \
   --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
   --confirm-operation-id "$APPROVED_OPERATION_ID" \
   --confirm-source-sha256 "$APPROVED_SOURCE_SHA256" \
   --confirm-image-revision "$APPROVED_IMAGE_REVISION" \
   --confirm-operations-root-approval-sha256 "$APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256" \
-  --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256"
+  --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256" \
+  --final-authority "$APPROVED_FINAL_AUTHORITY_PATH" \
+  --expected-final-authority-sha256 "$APPROVED_FINAL_AUTHORITY_SHA256"
 ```
 
 If execute cannot acquire the source SQLite lease, it must stop before creating

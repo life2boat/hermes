@@ -459,7 +459,7 @@ def _validate_mode(mode: int, *, is_directory: bool) -> int:
     if permissions & 0o7000 or permissions & 0o022:
         _fail("ARCHIVE_MODE_UNSAFE")
     if permissions == 0:
-        permissions = 0o755 if is_directory else 0o644
+        _fail("ARCHIVE_MODE_METADATA_INVALID")
     return permissions
 
 
@@ -608,8 +608,12 @@ def _zip_entries(
     for info in infos:
         if info.flag_bits & 0x1:
             _fail("ARCHIVE_ENCRYPTED")
+        if info.create_system != 3:
+            _fail("ARCHIVE_UNIX_MODE_METADATA_INVALID")
         raw_mode = info.external_attr >> 16
         file_type = stat.S_IFMT(raw_mode)
+        if file_type == 0 or stat.S_IMODE(raw_mode) == 0:
+            _fail("ARCHIVE_UNIX_MODE_METADATA_INVALID")
         is_directory = info.is_dir()
         if file_type == stat.S_IFLNK:
             _fail("ARCHIVE_SYMLINK_DENIED")

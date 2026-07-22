@@ -39,12 +39,20 @@ def _entry(
 def _write_archive(
     path: Path,
     entries: list[tuple[str, bytes, int, int]],
+    *,
+    create_system_overrides: dict[str, int] | None = None,
+    external_attr_overrides: dict[str, int] | None = None,
 ) -> None:
+    create_system_overrides = create_system_overrides or {}
+    external_attr_overrides = external_attr_overrides or {}
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data, mode, file_type in entries:
             info = zipfile.ZipInfo(name)
-            info.create_system = 3
-            info.external_attr = (file_type | mode) << 16
+            info.create_system = create_system_overrides.get(name, 3)
+            info.external_attr = external_attr_overrides.get(
+                name,
+                (file_type | mode) << 16,
+            )
             archive.writestr(info, data)
 
 
@@ -230,6 +238,85 @@ def test_ffmpeg_exact_root_file_set_denies_noncanonical_shapes(
     monkeypatch.setattr(installer, "_extract_entries", extraction_must_not_start)
 
     with pytest.raises(installer.ArtifactContractError, match=error_code):
+        installer._extract_archive(
+            archive,
+            "zip",
+            _artifact(tmp_path),
+            destination,
+        )
+    assert extraction_started is False
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    (
+        "case",
+        "create_system_overrides",
+        "external_attr_overrides",
+    ),
+    [
+        (
+            "companion_missing_unix_mode_metadata",
+            {},
+            {COMPANION: 1},
+        ),
+        (
+            "companion_dos_only_mode_metadata",
+            {COMPANION: 0},
+            {COMPANION: (stat.S_IFREG | 0o644) << 16},
+        ),
+        (
+            "companion_zero_permission_bits",
+            {},
+            {COMPANION: stat.S_IFREG << 16},
+        ),
+        (
+            "companion_missing_file_type_bits",
+            {},
+            {COMPANION: 0o644 << 16},
+        ),
+        (
+            "executable_missing_unix_mode_metadata",
+            {},
+            {EXECUTABLE: 1},
+        ),
+        (
+            "executable_dos_only_mode_metadata",
+            {EXECUTABLE: 0},
+            {EXECUTABLE: (stat.S_IFREG | 0o755) << 16},
+        ),
+    ],
+)
+def test_ffmpeg_exact_root_file_set_requires_explicit_unix_mode_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    create_system_overrides: dict[str, int],
+    external_attr_overrides: dict[str, int],
+) -> None:
+    del case
+    archive = tmp_path / "ffmpeg.zip"
+    destination = tmp_path / "installed"
+    _write_archive(
+        archive,
+        [_executable(), _companion()],
+        create_system_overrides=create_system_overrides,
+        external_attr_overrides=external_attr_overrides,
+    )
+    extraction_started = False
+
+    def extraction_must_not_start(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        nonlocal extraction_started
+        extraction_started = True
+        raise AssertionError("extraction started before Unix mode validation")
+
+    monkeypatch.setattr(installer, "_extract_entries", extraction_must_not_start)
+
+    with pytest.raises(
+        installer.ArtifactContractError,
+        match="ARCHIVE_UNIX_MODE_METADATA_INVALID",
+    ):
         installer._extract_archive(
             archive,
             "zip",

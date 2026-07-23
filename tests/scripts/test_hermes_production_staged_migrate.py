@@ -453,6 +453,16 @@ def _install_unit_root(
     monkeypatch.setattr(production, "REPO_ROOT", repository)
     monkeypatch.setattr(
         production,
+        "validate_trusted_parent_chain",
+        lambda path, *, expected_uid=None: (
+            authority.validate_trusted_parent_chain(
+                path,
+                expected_uid=os.geteuid(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        production,
         "_root_identity",
         lambda: production.RootIdentity(
             effective_uid=0,

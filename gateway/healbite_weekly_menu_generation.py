@@ -4,7 +4,8 @@ import hashlib
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
@@ -33,6 +34,21 @@ from gateway.healbite_households import (
     HouseholdValidationError,
 )
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
+from gateway.healbite_inventory import (
+    HealBiteInventoryStore,
+    InventoryAccessError,
+    InventoryItemInput,
+    InventoryNotFoundError,
+    InventoryOwnerScope,
+    InventorySnapshotView,
+    InventoryStateError,
+    MissingIngredientDelta,
+    calculate_missing_ingredients,
+)
+from gateway.healbite_inventory_menu_contract import (
+    InventoryMenuContractError,
+    parse_inventory_menu_response,
+)
 from gateway.healbite_runtime_resources import RuntimeResource, borrowed_runtime_resource
 from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
@@ -42,6 +58,7 @@ from gateway.healbite_weekly_menu_generation_types import (
     WeeklyMenuGeneratedEntry,
     WeeklyMenuGenerationRequest,
     WeeklyMenuGenerationResponse,
+    WeeklyMenuInventoryItem,
     WeeklyMenuMemberGenerationSnapshot,
 )
 from gateway.healbite_weekly_menu_schema import (
@@ -57,6 +74,7 @@ from gateway.healbite_weekly_menus import (
     HouseholdAuthorizationContext,
     WeeklyMenuConflictError,
     WeeklyMenuEntryInput,
+    WeeklyMenuIngredientInput,
     WeeklyMenuRevisionStatus,
     WeeklyMenuRevisionView,
     WeeklyMenuStateError,
@@ -97,6 +115,7 @@ class WeeklyMenuGenerationStatus(str, Enum):
     GENERATOR_UNAVAILABLE = "generator_unavailable"
     GENERATOR_VALIDATION_FAILED = "generator_validation_failed"
     STORAGE_FAILURE = "storage_failure"
+    INVENTORY_NOT_CONFIRMED = "inventory_not_confirmed"
     CLEANUP_FAILURE = "cleanup_failure"
 
 
@@ -105,6 +124,7 @@ class WeeklyMenuGenerationResult:
     status: WeeklyMenuGenerationStatus
     revision_view: WeeklyMenuRevisionView | None = None
     feature_status: FeatureAvailabilityStatus | None = None
+    missing_ingredients: MissingIngredientDelta | None = None
 
     @property
     def success(self) -> bool:
@@ -191,6 +211,18 @@ def _request_payload_fingerprint(request: WeeklyMenuGenerationRequest) -> str:
         ],
         "household_dietary_notes": list(request.household_dietary_notes),
         "max_entries": request.max_entries,
+        "inventory_snapshot_id": request.inventory_snapshot_id,
+        "inventory_items": [
+            {
+                "normalized_name": item.normalized_name,
+                "display_name": item.display_name,
+                "quantity_value": item.quantity_value,
+                "unit": item.unit,
+                "category": item.category,
+            }
+            for item in request.inventory_items
+        ],
+        "inventory_only": request.inventory_only,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -315,6 +347,17 @@ class AuxiliaryWeeklyMenuGenerator:
             "household_dietary_notes": list(request.household_dietary_notes),
             "max_entries": request.max_entries,
         }
+        if request.inventory_only:
+            prompt_payload["confirmed_inventory"] = [
+                {
+                    "normalized_name": item.normalized_name,
+                    "display_name": item.display_name,
+                    "quantity_value": item.quantity_value,
+                    "unit": item.unit,
+                    "category": item.category,
+                }
+                for item in request.inventory_items
+            ]
         messages = [
             {
                 "role": "system",
@@ -330,6 +373,13 @@ class AuxiliaryWeeklyMenuGenerator:
                 "content": json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
             },
         ]
+        if request.inventory_only:
+            messages[0]["content"] = (
+                "Return only a JSON object with the sole key days. Each day must contain exactly the allowed meals. "
+                "Each meal must contain meal_type, title, instructions, servings, estimated_calories_per_serving, "
+                "macros_per_serving, and ingredients. Ingredients must contain only name, quantity_value, and unit. "
+                "Use confirmed_inventory, do not assume staples, and treat dietary restrictions as hard exclusions."
+            )
         telemetry = ExternalRequestTelemetry()
         outcome = "provider_failure"
         try:
@@ -348,11 +398,18 @@ class AuxiliaryWeeklyMenuGenerator:
             )
             content = extract_content_or_reasoning(response)
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(content, parse_float=Decimal)
             except json.JSONDecodeError as exc:
                 outcome = "validation_failure"
                 raise WeeklyMenuGeneratorValidationError("weekly menu generator returned malformed json") from exc
-            result = _parse_generation_response(parsed, request=request)
+            try:
+                result = (
+                    parse_inventory_menu_response(parsed, request=request)
+                    if request.inventory_only
+                    else _parse_generation_response(parsed, request=request)
+                )
+            except InventoryMenuContractError as exc:
+                raise WeeklyMenuGeneratorValidationError("inventory menu generator returned invalid json") from exc
             outcome = "success"
             return result
         except LLMServiceUnavailableError as exc:
@@ -471,6 +528,7 @@ class HealBiteWeeklyMenuGenerationService:
         generator: WeeklyMenuGenerator,
         member_snapshot_provider: WeeklyMenuMemberSnapshotProvider,
         config: FeatureGateConfig | None = None,
+        inventory_config: FeatureGateConfig | None = None,
         db_path: str | Path | None = None,
         household_store_factory: HouseholdStoreResourceFactory | None = None,
         weekly_menu_store_factory: WeeklyMenuStoreResourceFactory | None = None,
@@ -478,6 +536,9 @@ class HealBiteWeeklyMenuGenerationService:
         self._generator = generator
         self._member_snapshot_provider = member_snapshot_provider
         self._config = config if config is not None else load_feature_gate_config("HEALBITE_WEEKLY_MENU")
+        self._inventory_config = (
+            inventory_config if inventory_config is not None else load_feature_gate_config("HEALBITE_WEEKLY_MENU_INVENTORY")
+        )
         self._db_path = resolve_healbite_db_path(db_path)
         self._household_store_factory = household_store_factory or self._default_household_store_factory
         self._weekly_menu_store_factory = weekly_menu_store_factory or self._default_weekly_menu_store_factory
@@ -613,9 +674,19 @@ class HealBiteWeeklyMenuGenerationService:
                 meal_slot=entry.meal_slot,
                 position=entry.position,
                 title=entry.title,
-                description=entry.description,
+                description=entry.description or "\n".join(entry.instructions) or None,
                 servings=entry.servings,
                 origin=WeeklyMenuEntryOrigin.GENERATED,
+                ingredients=tuple(
+                    WeeklyMenuIngredientInput(
+                        display_name=ingredient.name,
+                        quantity_value=ingredient.quantity_value,
+                        quantity_unit=ingredient.unit,
+                        recipe_base_servings=entry.servings or "1",
+                        position=index,
+                    )
+                    for index, ingredient in enumerate(entry.ingredients, start=1)
+                ),
             )
             for entry in response.entries
         ]
@@ -654,6 +725,7 @@ class HealBiteWeeklyMenuGenerationService:
         idempotency_key: str,
         locale: str = "ru-RU",
         max_entries: int = 21,
+        inventory_snapshot_id: str | None = None,
     ) -> WeeklyMenuGenerationResult:
         try:
             context = self._resolve_owner_context(actor_user_id)
@@ -663,6 +735,40 @@ class HealBiteWeeklyMenuGenerationService:
                 locale=locale,
                 max_entries=max_entries,
             )
+            inventory: InventorySnapshotView | None = None
+            if inventory_snapshot_id is not None:
+                if max_entries != 21:
+                    return WeeklyMenuGenerationResult(status=WeeklyMenuGenerationStatus.VALIDATION_FAILED)
+                decision = evaluate_feature_gate(
+                    self._inventory_config,
+                    actor_user_id,
+                )
+                if not decision.ready:
+                    return _gate_failure_result(decision)
+                inventory_store = HealBiteInventoryStore(db_path=self._db_path)
+                try:
+                    inventory = inventory_store.get_confirmed_snapshot(
+                        InventoryOwnerScope(household_id=context.household_id),
+                        inventory_snapshot_id,
+                    )
+                except (InventoryNotFoundError, InventoryAccessError, InventoryStateError):
+                    return WeeklyMenuGenerationResult(status=WeeklyMenuGenerationStatus.INVENTORY_NOT_CONFIRMED)
+                request = replace(
+                    request,
+                    inventory_snapshot_id=inventory.snapshot.id,
+                    allowed_meal_slots=("breakfast", "lunch", "dinner"),
+                    inventory_items=tuple(
+                        WeeklyMenuInventoryItem(
+                            item.normalized_name,
+                            item.display_name,
+                            item.quantity_value,
+                            item.unit.value,
+                            item.category,
+                        )
+                        for item in inventory.items
+                    ),
+                    inventory_only=True,
+                )
             payload_hash = _request_payload_fingerprint(request)
             internal_idempotency_key = _generation_idempotency_key(idempotency_key)
             snapshot, replay = self._capture_generation_state(
@@ -678,6 +784,19 @@ class HealBiteWeeklyMenuGenerationService:
                     revision_view=replay,
                 )
             generated = self._generator.generate(request)
+            missing_ingredients = None
+            if inventory is not None:
+                missing_ingredients = calculate_missing_ingredients(
+                    tuple(
+                        (
+                            f"{entry.local_date}:{entry.meal_slot}:{entry.position}",
+                            InventoryItemInput(ingredient.name, ingredient.quantity_value, ingredient.unit),
+                        )
+                        for entry in generated.entries
+                        for ingredient in entry.ingredients
+                    ),
+                    inventory,
+                )
             revision_view = self._apply_generation_result(
                 context,
                 snapshot=snapshot,
@@ -689,6 +808,7 @@ class HealBiteWeeklyMenuGenerationService:
             return WeeklyMenuGenerationResult(
                 status=WeeklyMenuGenerationStatus.SUCCESS,
                 revision_view=revision_view,
+                missing_ingredients=missing_ingredients,
             )
         except _WeeklyMenuGenerationRuntimeUnavailableError as exc:
             return exc.result

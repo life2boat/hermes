@@ -23,11 +23,21 @@ from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
 
+# This entrypoint must not leave ignored bytecode inside an approved root.
+sys.dont_write_bytecode = True
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import hermes_production_deploy as deployment  # noqa: E402
+from scripts.hermes_execution_authority import (  # noqa: E402
+    ExecutionAuthorityBundle,
+    ExecutionAuthorityError,
+    exact_repository_provenance,
+    load_execution_authority,
+    validate_trusted_parent_chain,
+)
 from scripts.hermes_staged_schema_migrate import (  # noqa: E402
     OrchestratorError,
     SourceIdentity,
@@ -42,7 +52,7 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 3
+PLAN_VERSION = 4
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
@@ -127,7 +137,9 @@ PLAN_FIELDS = frozenset(
         "SOURCE_UID",
         "SOURCE_GID",
         "SOURCE_SHA256",
+        "SOURCE_USER_VERSION",
         "SOURCE_SCHEMA_FINGERPRINT",
+        "SOURCE_PARENT_IDENTITY",
         "BACKUP_PARENT",
         "STAGING_PARENT",
         "EVIDENCE_PARENT",
@@ -253,21 +265,68 @@ class PinnedPlan:
     path: Path
     parent_fd: int
     file_fd: int
-    device: int
-    inode: int
+    parent_identity: tuple[int, int]
+    identity: tuple[int, int, int, int, int, int, int]
+    expected_uid: int
     payload: dict[str, Any]
     sha256: str
 
+    @property
+    def device(self) -> int:
+        return self.identity[0]
+
+    @property
+    def inode(self) -> int:
+        return self.identity[1]
+
     def path_matches(self) -> bool:
         try:
-            metadata = os.stat(
+            trusted_parent = validate_trusted_parent_chain(
+                self.path.parent,
+                expected_uid=self.expected_uid,
+            )
+            path_metadata = os.stat(
                 self.path.name,
                 dir_fd=self.parent_fd,
                 follow_symlinks=False,
             )
-        except OSError:
+            descriptor_metadata = os.fstat(self.file_fd)
+            parent_metadata = os.fstat(self.parent_fd)
+            actual_sha = _sha256_fd(
+                self.file_fd,
+                code="PLAN_FINAL_READ_CONTRACT_VIOLATION",
+            )
+        except (OSError, ExecutionAuthorityError, ProductionGateError):
             return False
-        return (metadata.st_dev, metadata.st_ino) == (self.device, self.inode)
+        path_identity = (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+            path_metadata.st_size,
+            path_metadata.st_uid,
+            path_metadata.st_gid,
+            stat.S_IMODE(path_metadata.st_mode),
+            path_metadata.st_nlink,
+        )
+        descriptor_identity = (
+            descriptor_metadata.st_dev,
+            descriptor_metadata.st_ino,
+            descriptor_metadata.st_size,
+            descriptor_metadata.st_uid,
+            descriptor_metadata.st_gid,
+            stat.S_IMODE(descriptor_metadata.st_mode),
+            descriptor_metadata.st_nlink,
+        )
+        return (
+            trusted_parent == self.parent_identity
+            and (
+                parent_metadata.st_dev,
+                parent_metadata.st_ino,
+            )
+            == self.parent_identity
+            and path_identity == self.identity
+            and descriptor_identity == self.identity
+            and actual_sha == self.sha256
+        )
 
     def close(self) -> None:
         _run_cleanup(
@@ -449,11 +508,16 @@ class ValidatedExecution:
     deployment_contract: PinnedDeploymentContract
     operations_root_approval: PinnedEvidenceDocument
     clean_start_policy: PinnedEvidenceDocument
+    execution_authority: ExecutionAuthorityBundle
     target_schema_version: str
     target_schema_fingerprint: str
 
     def close(self) -> None:
         _run_cleanup(
+            (
+                "EXECUTION_AUTHORITY_CLOSE_FAILED",
+                self.execution_authority.close,
+            ),
             (
                 "CLEAN_START_POLICY_CLOSE_FAILED",
                 self.clean_start_policy.close,
@@ -510,15 +574,38 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_fd(fd: int) -> str:
+def _sha256_fd(
+    fd: int,
+    *,
+    code: str = "FILE_READ_CONTRACT_VIOLATION",
+) -> str:
+    before = os.fstat(fd)
     digest = hashlib.sha256()
     offset = 0
-    while True:
-        chunk = os.pread(fd, 1024 * 1024, offset)
+    while offset < before.st_size:
+        chunk = os.pread(fd, min(1024 * 1024, before.st_size - offset), offset)
         if not chunk:
-            return digest.hexdigest()
+            raise ProductionGateError(code)
         digest.update(chunk)
         offset += len(chunk)
+    if os.pread(fd, 1, offset):
+        raise ProductionGateError(code)
+    after = os.fstat(fd)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mode,
+        before.st_nlink,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mode,
+        after.st_nlink,
+    ):
+        raise ProductionGateError(code)
+    return digest.hexdigest()
 
 
 def _sha256(path: Path) -> str:
@@ -531,18 +618,37 @@ def _sha256(path: Path) -> str:
 
 
 def _read_fd_bytes(fd: int, *, maximum: int, code: str) -> bytes:
-    metadata = os.fstat(fd)
-    if metadata.st_size > maximum:
+    before = os.fstat(fd)
+    if before.st_size > maximum:
         raise ProductionGateError(code)
     data = b""
     offset = 0
-    while len(data) <= maximum:
-        chunk = os.pread(fd, min(65536, maximum + 1 - len(data)), offset)
+    while offset < before.st_size:
+        chunk = os.pread(fd, min(65536, before.st_size - offset), offset)
         if not chunk:
-            break
+            raise ProductionGateError(code)
         data += chunk
         offset += len(chunk)
-    if len(data) > maximum:
+    if os.pread(fd, 1, offset):
+        raise ProductionGateError(code)
+    after = os.fstat(fd)
+    if (
+        offset != before.st_size
+        or (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mode,
+            before.st_nlink,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mode,
+            after.st_nlink,
+        )
+    ):
         raise ProductionGateError(code)
     return data
 
@@ -649,6 +755,10 @@ def _no_symlink_chain(path: Path) -> None:
 def _canonical_repository_root(value: str) -> Path:
     root = _absolute_path(value, "REPOSITORY_ROOT")
     _no_symlink_chain(root)
+    try:
+        validate_trusted_parent_chain(root, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if root != REPO_ROOT or root.resolve(strict=True) != REPO_ROOT:
         raise ProductionGateError("REPOSITORY_ROOT_MISMATCH")
     return root
@@ -764,6 +874,13 @@ def _read_only_source(path: Path) -> tuple[dict[str, int | str], str, str, int]:
         if journal_mode != "delete":
             raise ProductionGateError("SOURCE_JOURNAL_MODE_UNSUPPORTED")
         connection.execute("BEGIN")
+        user_version_row = connection.execute("PRAGMA user_version").fetchone()
+        if (
+            user_version_row is None
+            or not isinstance(user_version_row[0], int)
+            or user_version_row[0] < 0
+        ):
+            raise ProductionGateError("SOURCE_USER_VERSION_INVALID")
         objects = tuple(
             (str(row[0]), str(row[1]), str(row[2] or ""))
             for row in connection.execute(
@@ -777,7 +894,10 @@ def _read_only_source(path: Path) -> tuple[dict[str, int | str], str, str, int]:
         foreign_keys = len(
             connection.execute("PRAGMA foreign_key_check").fetchall()
         )
-        source_sha = _sha256_fd(fd)
+        source_sha = _sha256_fd(
+            fd,
+            code="SOURCE_READ_CONTRACT_VIOLATION",
+        )
         current = os.fstat(fd)
         current_path = path.lstat()
         if (
@@ -798,6 +918,7 @@ def _read_only_source(path: Path) -> tuple[dict[str, int | str], str, str, int]:
             "SOURCE_UID": int(metadata.st_uid),
             "SOURCE_GID": int(metadata.st_gid),
             "SOURCE_SHA256": source_sha,
+            "SOURCE_USER_VERSION": int(user_version_row[0]),
         }
         return identity, schema_fingerprint, integrity, foreign_keys
     except sqlite3.Error as exc:
@@ -849,6 +970,10 @@ def _open_canonical_deployment_contract(
 ) -> PinnedDeploymentContract:
     path = repository_root / CANONICAL_CONTRACT_RELATIVE_PATH
     _no_symlink_chain(path)
+    try:
+        validate_trusted_parent_chain(path.parent, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     parent_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -938,6 +1063,10 @@ def _open_evidence_document(
 ) -> PinnedEvidenceDocument:
     path = _absolute_path(path_value, f"{code_prefix}_PATH")
     _no_symlink_chain(path)
+    try:
+        validate_trusted_parent_chain(path.parent, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError(f"EXPECTED_{code_prefix}_SHA256_INVALID")
     parent_flags = (
@@ -1039,36 +1168,10 @@ def _open_evidence_document(
 
 
 def _repository_provenance(repository_root: Path) -> tuple[str, str]:
-    def git_value(*arguments: str) -> str:
-        result = subprocess.run(
-            ["git", "-C", str(repository_root), *arguments],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        value = result.stdout.strip()
-        if result.returncode != 0 or not value or "\n" in value:
-            raise ProductionGateError("APPROVED_REPOSITORY_PROVENANCE_INVALID")
-        return value
-
-    head = git_value("rev-parse", "--verify", "HEAD")
-    tree = git_value("rev-parse", "--verify", "HEAD^{tree}")
-    status = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository_root),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if status.returncode != 0 or status.stdout:
-        raise ProductionGateError("APPROVED_REPOSITORY_NOT_CLEAN")
-    return head, tree
+    try:
+        return exact_repository_provenance(repository_root)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
 
 
 def _typed_mapping_matches(
@@ -1392,6 +1495,9 @@ def create_plan(args: argparse.Namespace) -> int:
             "DB_CANONICAL_PATH": str(db_path),
             **identity,
             "SOURCE_SCHEMA_FINGERPRINT": schema_fingerprint,
+            "SOURCE_PARENT_IDENTITY": _directory_record(
+                db_path.parent, private=False
+            ),
             "BACKUP_PARENT": str(backup_parent),
             "STAGING_PARENT": str(staging_parent),
             "EVIDENCE_PARENT": str(evidence_parent),
@@ -1490,6 +1596,13 @@ def create_plan(args: argparse.Namespace) -> int:
 def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
     path = _absolute_path(path_value, "PLAN_PATH")
     _no_symlink_chain(path)
+    try:
+        trusted_parent = validate_trusted_parent_chain(
+            path.parent,
+            expected_uid=0,
+        )
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError("EXPECTED_PLAN_SHA256_INVALID")
     parent_flags = (
@@ -1518,6 +1631,7 @@ def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
             or metadata.st_nlink != 1
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_uid != 0
+            or metadata.st_gid != 0
             or metadata.st_size > MAX_DOCUMENT_BYTES
         ):
             raise ProductionGateError("PLAN_FILE_METADATA_INVALID")
@@ -1540,17 +1654,54 @@ def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
             dir_fd=parent_fd,
             follow_symlinks=False,
         )
-        if (path_metadata.st_dev, path_metadata.st_ino) != (
-            metadata.st_dev,
-            metadata.st_ino,
+        final_metadata = os.fstat(file_fd)
+        try:
+            final_parent = validate_trusted_parent_chain(
+                path.parent,
+                expected_uid=0,
+            )
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
+        identity = (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_uid),
+            int(metadata.st_gid),
+            stat.S_IMODE(metadata.st_mode),
+            int(metadata.st_nlink),
+        )
+        path_identity = (
+            int(path_metadata.st_dev),
+            int(path_metadata.st_ino),
+            int(path_metadata.st_size),
+            int(path_metadata.st_uid),
+            int(path_metadata.st_gid),
+            stat.S_IMODE(path_metadata.st_mode),
+            int(path_metadata.st_nlink),
+        )
+        final_identity = (
+            int(final_metadata.st_dev),
+            int(final_metadata.st_ino),
+            int(final_metadata.st_size),
+            int(final_metadata.st_uid),
+            int(final_metadata.st_gid),
+            stat.S_IMODE(final_metadata.st_mode),
+            int(final_metadata.st_nlink),
+        )
+        if (
+            path_identity != identity
+            or final_identity != identity
+            or final_parent != trusted_parent
         ):
             raise ProductionGateError("PLAN_PATH_SUBSTITUTION")
         return PinnedPlan(
             path=path,
             parent_fd=parent_fd,
             file_fd=file_fd,
-            device=int(metadata.st_dev),
-            inode=int(metadata.st_ino),
+            parent_identity=trusted_parent,
+            identity=identity,
+            expected_uid=0,
             payload=payload,
             sha256=actual_sha,
         )
@@ -1667,6 +1818,7 @@ def _revalidate_plan(
     deployment_contract: PinnedDeploymentContract | None = None
     operations_root_approval: PinnedEvidenceDocument | None = None
     clean_start_policy: PinnedEvidenceDocument | None = None
+    execution_authority: ExecutionAuthorityBundle | None = None
     try:
         evidence_parent = _open_directory_record(
             plan.get("EVIDENCE_PARENT_IDENTITY"),
@@ -1772,6 +1924,18 @@ def _revalidate_plan(
         if not _typed_mapping_matches(plan, policy_fields):
             raise ProductionGateError("CLEAN_START_POLICY_IDENTITY_DRIFT")
 
+        try:
+            execution_authority = load_execution_authority(
+                authority_path=args.final_authority,
+                authority_sha256=args.expected_final_authority_sha256,
+                plan_path=pinned.path,
+                plan_sha256=pinned.sha256,
+                plan=plan,
+                repository_root=repository_root,
+            )
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
+
         db_path = _absolute_path(
             _expect_plan_string(plan, "DB_CANONICAL_PATH"),
             "DB_PATH",
@@ -1796,6 +1960,7 @@ def _revalidate_plan(
             "SOURCE_UID",
             "SOURCE_GID",
             "SOURCE_SHA256",
+            "SOURCE_USER_VERSION",
         ):
             if plan.get(name) != identity[name]:
                 raise ProductionGateError("SOURCE_IDENTITY_DRIFT")
@@ -1803,6 +1968,19 @@ def _revalidate_plan(
             raise ProductionGateError("SOURCE_SCHEMA_DRIFT")
         if integrity != "ok" or foreign_keys != 0:
             raise ProductionGateError("SOURCE_DATABASE_INVALID")
+        source_parent_identity = _directory_record(
+            db_path.parent, private=False
+        )
+        if plan.get("SOURCE_PARENT_IDENTITY") != source_parent_identity:
+            raise ProductionGateError("SOURCE_PARENT_IDENTITY_DRIFT")
+        try:
+            execution_authority.validate_source(
+                identity=identity,
+                schema_fingerprint=source_schema,
+                parent_identity=source_parent_identity,
+            )
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
         if (
             plan.get("EXPECTED_FILESYSTEM_DEVICE")
             != identity["SOURCE_DEVICE"]
@@ -1863,11 +2041,19 @@ def _revalidate_plan(
             deployment_contract=deployment_contract,
             operations_root_approval=operations_root_approval,
             clean_start_policy=clean_start_policy,
+            execution_authority=execution_authority,
             target_schema_version=expected_target.version,
             target_schema_fingerprint=expected_target.fingerprint,
         )
     except Exception as primary:
         cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+        if execution_authority is not None:
+            cleanup_steps.append(
+                (
+                    "EXECUTION_AUTHORITY_CLOSE_FAILED",
+                    execution_authority.close,
+                )
+            )
         if clean_start_policy is not None:
             cleanup_steps.append(
                 ("CLEAN_START_POLICY_CLOSE_FAILED", clean_start_policy.close)
@@ -2481,10 +2667,30 @@ def _pinned_authorities_match(
         and validated.deployment_contract.path_matches()
         and validated.operations_root_approval.path_matches()
         and validated.clean_start_policy.path_matches()
+        and validated.execution_authority.path_matches()
         and validated.backup_parent.path_matches()
         and validated.staging_parent.path_matches()
         and validated.evidence_parent.path_matches()
     )
+
+
+def _final_mutation_checkpoint(
+    pinned: PinnedPlan,
+    validated: ValidatedExecution,
+    prepared: Any,
+) -> None:
+    if not _pinned_authorities_match(pinned, validated):
+        raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+    try:
+        validated.execution_authority.validate_not_expired()
+        validated.execution_authority.revalidate_operations_root()
+        validated.execution_authority.validate_runtime()
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
+    if prepared.source_identity != validated.source_identity:
+        raise ProductionGateError(
+            "SOURCE_IDENTITY_DRIFT_AT_FINAL_CHECKPOINT"
+        )
 
 
 def _execute_plan_outcome(
@@ -2505,6 +2711,12 @@ def _execute_plan_outcome(
         operation_id = str(plan["OPERATION_ID"])
         if not _pinned_authorities_match(pinned, validated):
             raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+        try:
+            runtime_matches = validated.execution_authority.runtime_matches()
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
+        if not runtime_matches:
+            raise ProductionGateError("CURRENT_RUNTIME_IMAGE_DRIFT")
         authorization = _issue_production_authorization(
             operation_id=operation_id,
             plan_sha256=pinned.sha256,
@@ -2550,8 +2762,11 @@ def _execute_plan_outcome(
                 primary_error_type=code,
             )
             return outcome
-        if not _pinned_authorities_match(pinned, validated):
-            raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+        _final_mutation_checkpoint(
+            pinned,
+            validated,
+            prepared,
+        )
 
         evidence = ExecutionEvidence(
             parent_fd=pinned.parent_fd,
@@ -2576,6 +2791,9 @@ def _execute_plan_outcome(
                     "OPERATIONS_ROOT_APPROVAL_SHA256"
                 ],
                 "CLEAN_START_POLICY_SHA256": plan["CLEAN_START_POLICY_SHA256"],
+                "FINAL_AUTHORITY_SHA256": (
+                    validated.execution_authority.final_authority.sha256
+                ),
                 "PUBLISH_STATE": "BEFORE_EXCHANGE",
                 "TARGET_MAY_HAVE_CHANGED": False,
                 "AUTOMATIC_RETRY_ALLOWED": False,
@@ -2964,6 +3182,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-clean-start-policy-sha256",
         required=True,
     )
+    execute_parser.add_argument("--final-authority", required=True)
+    execute_parser.add_argument("--expected-final-authority-sha256", required=True)
     return parser
 
 

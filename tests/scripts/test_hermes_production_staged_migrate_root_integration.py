@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Iterator
 
 import pytest
+
+from scripts import hermes_execution_authority as authority
 
 
 TARGET_IMAGE_ENV = "HERMES_ROOT_INTEGRATION_TARGET_IMAGE_ID"
@@ -49,6 +54,48 @@ def _git_common_directory(repository_root: Path) -> Path:
     return path.resolve(strict=True)
 
 
+@contextlib.contextmanager
+def _trusted_operation_parent() -> Iterator[Path]:
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        pytest.skip("root integration capability skip: POSIX root required")
+    operation_parent = Path(
+        f"/run/hermes-integration-tests-{uuid.uuid4().hex}"
+    )
+    operation_parent.mkdir(mode=0o700)
+    try:
+        metadata = operation_parent.lstat()
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert metadata.st_uid == 0
+        assert metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) == 0o700
+        authority.validate_trusted_parent_chain(
+            operation_parent,
+            expected_uid=0,
+        )
+        yield operation_parent
+    finally:
+        shutil.rmtree(operation_parent)
+
+
+def test_world_writable_tmp_parent_remains_untrusted() -> None:
+    tmp = Path("/tmp")
+    if (
+        os.name != "posix"
+        or not tmp.is_dir()
+        or stat.S_IMODE(tmp.stat().st_mode) & 0o022 == 0
+    ):
+        pytest.skip("world-writable /tmp contract is unavailable")
+
+    with pytest.raises(authority.ExecutionAuthorityError) as exc_info:
+        authority.validate_trusted_parent_chain(
+            tmp,
+            expected_uid=os.geteuid(),
+        )
+
+    assert exc_info.value.code == "AUTHORITY_PARENT_CHAIN_UNTRUSTED"
+
+
+@pytest.mark.timeout(240)
 def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None:
     if shutil.which("docker") is None:
         pytest.skip("root integration capability skip: docker CLI unavailable")
@@ -77,52 +124,53 @@ def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None
         git_mount = [
             "-v", f"{git_common_directory}:{git_common_directory}:ro"
         ]
-    runtime_root = Path(
-        f"/tmp/hermes-root-gate-{uuid.uuid4().hex}"
-    )
-    command = [
-        "docker",
-        "run",
-        "--rm",
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--user",
-        "0:0",
-        "--entrypoint",
-        "/opt/hermes/.venv/bin/python",
-        "-e",
-        "PYTHONPATH=/repo",
-        "-v",
-        f"{repository_root}:/repo:ro",
-        *git_mount,
-        "-v",
-        "/tmp:/tmp:rw",
-        "-v",
-        "/var/run/docker.sock:/var/run/docker.sock",
-        "-v",
-        "/usr/bin/docker:/usr/bin/docker:ro",
-        outer_image,
-        "/repo/tests/scripts/hermes_production_staged_migrate_root_harness.py",
-        "--runtime-root",
-        str(runtime_root),
-        "--repository-root",
-        "/repo",
-        "--target-image-id",
-        target_image,
-        "--target-revision",
-        target_revision,
-        "--previous-image-id",
-        previous_image,
-    ]
-    result = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        timeout=180,
-        check=False,
-    )
+    with _trusted_operation_parent() as operation_parent:
+        runtime_root = operation_parent / "runtime"
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--entrypoint",
+            "/opt/hermes/.venv/bin/python",
+            "-e",
+            "PYTHONPATH=/repo",
+            "-v",
+            f"{repository_root}:/repo:ro",
+            *git_mount,
+            "-v",
+            f"{operation_parent}:{operation_parent}:rw",
+            "-v",
+            "/var/run/docker.sock:/var/run/docker.sock",
+            "-v",
+            "/usr/bin/docker:/usr/bin/docker:ro",
+            outer_image,
+            "/repo/tests/scripts/hermes_production_staged_migrate_root_harness.py",
+            "--runtime-root",
+            str(runtime_root),
+            "--repository-root",
+            "/repo",
+            "--target-image-id",
+            target_image,
+            "--target-revision",
+            target_revision,
+            "--previous-image-id",
+            previous_image,
+        ]
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+
+    assert not operation_parent.exists()
     assert result.returncode == 0, (
         f"root integration failed: {result.stderr[-2000:]}"
     )
@@ -147,6 +195,9 @@ def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None
         "quiescence_before_execution_evidence": True,
         "root_check_monkeypatched": False,
         "root_context_real": True,
+        "runtime_inspection_redirected": True,
         "status": "PASS",
         "synthetic_db_only": True,
+        "synthetic_runtime_only": True,
+        "production_runtime_inspected": False,
     }

@@ -567,6 +567,15 @@ override inside the operations root is denied
 the approved operations root must be root-owned mode 0700 and equal the complete
 Git tree on the filesystem; ignored, excluded, untracked, empty-directory,
 symlink, hardlink, special-file, __pycache__, and *.pyc drift is denied
+every ancestor of the operations root, plan and execute-authority artifacts must
+be a real root-owned directory that is not group/world writable; execute authority
+under /home/hermes is denied even when the immediate parent is otherwise private
+after the SQLite lifetime lease is acquired and before execution evidence, backup,
+staging or mutation, one final checkpoint rehashes the descriptor-pinned plan,
+revalidates its full metadata and SHA-256, repeats the exact operations-root closure
+check, confirms authority expiry and source DB identity, and validates structured
+container metadata for exact image, Compose project/service, one writable canonical
+DB bind source/target, with historical or conflicting DB mounts denied
 all operations-root plan and execute invocations use both
 PYTHONDONTWRITEBYTECODE=1 and the Python -B option
 execute securely reopens both evidence files, confirms their recorded identities and

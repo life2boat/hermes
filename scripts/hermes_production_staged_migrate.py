@@ -36,6 +36,7 @@ from scripts.hermes_execution_authority import (  # noqa: E402
     ExecutionAuthorityError,
     exact_repository_provenance,
     load_execution_authority,
+    validate_trusted_parent_chain,
 )
 from scripts.hermes_staged_schema_migrate import (  # noqa: E402
     OrchestratorError,
@@ -264,21 +265,68 @@ class PinnedPlan:
     path: Path
     parent_fd: int
     file_fd: int
-    device: int
-    inode: int
+    parent_identity: tuple[int, int]
+    identity: tuple[int, int, int, int, int, int, int]
+    expected_uid: int
     payload: dict[str, Any]
     sha256: str
 
+    @property
+    def device(self) -> int:
+        return self.identity[0]
+
+    @property
+    def inode(self) -> int:
+        return self.identity[1]
+
     def path_matches(self) -> bool:
         try:
-            metadata = os.stat(
+            trusted_parent = validate_trusted_parent_chain(
+                self.path.parent,
+                expected_uid=self.expected_uid,
+            )
+            path_metadata = os.stat(
                 self.path.name,
                 dir_fd=self.parent_fd,
                 follow_symlinks=False,
             )
-        except OSError:
+            descriptor_metadata = os.fstat(self.file_fd)
+            parent_metadata = os.fstat(self.parent_fd)
+            actual_sha = _sha256_fd(
+                self.file_fd,
+                code="PLAN_FINAL_READ_CONTRACT_VIOLATION",
+            )
+        except (OSError, ExecutionAuthorityError, ProductionGateError):
             return False
-        return (metadata.st_dev, metadata.st_ino) == (self.device, self.inode)
+        path_identity = (
+            path_metadata.st_dev,
+            path_metadata.st_ino,
+            path_metadata.st_size,
+            path_metadata.st_uid,
+            path_metadata.st_gid,
+            stat.S_IMODE(path_metadata.st_mode),
+            path_metadata.st_nlink,
+        )
+        descriptor_identity = (
+            descriptor_metadata.st_dev,
+            descriptor_metadata.st_ino,
+            descriptor_metadata.st_size,
+            descriptor_metadata.st_uid,
+            descriptor_metadata.st_gid,
+            stat.S_IMODE(descriptor_metadata.st_mode),
+            descriptor_metadata.st_nlink,
+        )
+        return (
+            trusted_parent == self.parent_identity
+            and (
+                parent_metadata.st_dev,
+                parent_metadata.st_ino,
+            )
+            == self.parent_identity
+            and path_identity == self.identity
+            and descriptor_identity == self.identity
+            and actual_sha == self.sha256
+        )
 
     def close(self) -> None:
         _run_cleanup(
@@ -707,6 +755,10 @@ def _no_symlink_chain(path: Path) -> None:
 def _canonical_repository_root(value: str) -> Path:
     root = _absolute_path(value, "REPOSITORY_ROOT")
     _no_symlink_chain(root)
+    try:
+        validate_trusted_parent_chain(root, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if root != REPO_ROOT or root.resolve(strict=True) != REPO_ROOT:
         raise ProductionGateError("REPOSITORY_ROOT_MISMATCH")
     return root
@@ -918,6 +970,10 @@ def _open_canonical_deployment_contract(
 ) -> PinnedDeploymentContract:
     path = repository_root / CANONICAL_CONTRACT_RELATIVE_PATH
     _no_symlink_chain(path)
+    try:
+        validate_trusted_parent_chain(path.parent, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     parent_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -1007,6 +1063,10 @@ def _open_evidence_document(
 ) -> PinnedEvidenceDocument:
     path = _absolute_path(path_value, f"{code_prefix}_PATH")
     _no_symlink_chain(path)
+    try:
+        validate_trusted_parent_chain(path.parent, expected_uid=0)
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError(f"EXPECTED_{code_prefix}_SHA256_INVALID")
     parent_flags = (
@@ -1536,6 +1596,13 @@ def create_plan(args: argparse.Namespace) -> int:
 def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
     path = _absolute_path(path_value, "PLAN_PATH")
     _no_symlink_chain(path)
+    try:
+        trusted_parent = validate_trusted_parent_chain(
+            path.parent,
+            expected_uid=0,
+        )
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError("EXPECTED_PLAN_SHA256_INVALID")
     parent_flags = (
@@ -1564,6 +1631,7 @@ def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
             or metadata.st_nlink != 1
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_uid != 0
+            or metadata.st_gid != 0
             or metadata.st_size > MAX_DOCUMENT_BYTES
         ):
             raise ProductionGateError("PLAN_FILE_METADATA_INVALID")
@@ -1586,17 +1654,54 @@ def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
             dir_fd=parent_fd,
             follow_symlinks=False,
         )
-        if (path_metadata.st_dev, path_metadata.st_ino) != (
-            metadata.st_dev,
-            metadata.st_ino,
+        final_metadata = os.fstat(file_fd)
+        try:
+            final_parent = validate_trusted_parent_chain(
+                path.parent,
+                expected_uid=0,
+            )
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
+        identity = (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_uid),
+            int(metadata.st_gid),
+            stat.S_IMODE(metadata.st_mode),
+            int(metadata.st_nlink),
+        )
+        path_identity = (
+            int(path_metadata.st_dev),
+            int(path_metadata.st_ino),
+            int(path_metadata.st_size),
+            int(path_metadata.st_uid),
+            int(path_metadata.st_gid),
+            stat.S_IMODE(path_metadata.st_mode),
+            int(path_metadata.st_nlink),
+        )
+        final_identity = (
+            int(final_metadata.st_dev),
+            int(final_metadata.st_ino),
+            int(final_metadata.st_size),
+            int(final_metadata.st_uid),
+            int(final_metadata.st_gid),
+            stat.S_IMODE(final_metadata.st_mode),
+            int(final_metadata.st_nlink),
+        )
+        if (
+            path_identity != identity
+            or final_identity != identity
+            or final_parent != trusted_parent
         ):
             raise ProductionGateError("PLAN_PATH_SUBSTITUTION")
         return PinnedPlan(
             path=path,
             parent_fd=parent_fd,
             file_fd=file_fd,
-            device=int(metadata.st_dev),
-            inode=int(metadata.st_ino),
+            parent_identity=trusted_parent,
+            identity=identity,
+            expected_uid=0,
             payload=payload,
             sha256=actual_sha,
         )
@@ -2569,6 +2674,25 @@ def _pinned_authorities_match(
     )
 
 
+def _final_mutation_checkpoint(
+    pinned: PinnedPlan,
+    validated: ValidatedExecution,
+    prepared: Any,
+) -> None:
+    if not _pinned_authorities_match(pinned, validated):
+        raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+    try:
+        validated.execution_authority.validate_not_expired()
+        validated.execution_authority.revalidate_operations_root()
+        validated.execution_authority.validate_runtime()
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError(exc.code) from exc
+    if prepared.source_identity != validated.source_identity:
+        raise ProductionGateError(
+            "SOURCE_IDENTITY_DRIFT_AT_FINAL_CHECKPOINT"
+        )
+
+
 def _execute_plan_outcome(
     args: argparse.Namespace,
 ) -> _ExecutionOutcome:
@@ -2638,8 +2762,11 @@ def _execute_plan_outcome(
                 primary_error_type=code,
             )
             return outcome
-        if not _pinned_authorities_match(pinned, validated):
-            raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+        _final_mutation_checkpoint(
+            pinned,
+            validated,
+            prepared,
+        )
 
         evidence = ExecutionEvidence(
             parent_fd=pinned.parent_fd,

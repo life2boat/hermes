@@ -310,6 +310,7 @@ def _copy_repository(source_root: Path, target: Path) -> tuple[str, str]:
     _run_git(target, "add", "--all")
     _run_git(target, "commit", "--quiet", "-m", "synthetic evidence root")
     head = _run_git(target, "rev-parse", "HEAD")
+    _run_git(target, "checkout", "--detach", "--quiet", head)
     tree = _run_git(target, "rev-parse", "HEAD^{tree}")
     if len(head) != 40 or len(tree) != 40:
         raise AssertionError("synthetic repository identity invalid")
@@ -1058,10 +1059,18 @@ def _synthetic_runtime(service_name: str) -> dict[str, Any]:
     return {
         "State": {"Running": True},
         "Image": PREVIOUS_IMAGE_ID,
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project": "hermes-agent",
+                "com.docker.compose.service": "hermes-bot",
+            }
+        },
         "Mounts": [
             {
                 "Source": str(_ACTIVE_SOURCE),
                 "Destination": "/home/hermes/healbite.db",
+                "Type": "bind",
+                "RW": True,
             }
         ],
     }
@@ -1090,7 +1099,10 @@ def main() -> int:
     original_prepare = production._prepare_authorized_production_execution
     original_authority_inspect = execution_authority._inspect_image
     original_runtime_inspect = execution_authority._inspect_runtime
-    with tempfile.TemporaryDirectory(prefix="hermes-evidence-matrix-") as value:
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-evidence-matrix-",
+        dir="/run",
+    ) as value:
         root = Path(value)
         os.chmod(root, 0o700)
         repository = root / "repository"

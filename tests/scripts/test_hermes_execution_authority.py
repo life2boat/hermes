@@ -101,6 +101,8 @@ def _authority_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> AuthorityContext:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
     repository = _private(tmp_path / "operations-root")
     _write(repository / ".gitignore", b"*.pyc\n__pycache__/\nops/\n", 0o644)
     _write(repository / "docker-compose.yml", b"services: {}\n", 0o644)
@@ -112,6 +114,7 @@ def _authority_context(
     _git(repository, "commit", "-q", "-m", "synthetic authority tree")
     head = _git(repository, "rev-parse", "HEAD")
     tree = _git(repository, "rev-parse", "HEAD^{tree}")
+    _git(repository, "checkout", "--detach", "-q", head)
 
     artifacts = _private(tmp_path / "artifacts")
     plan_dir = _private(tmp_path / "plans")
@@ -264,10 +267,18 @@ def _authority_context(
     runtime_payload = {
         "State": {"Running": True},
         "Image": CURRENT_IMAGE,
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project": "hermes-agent",
+                "com.docker.compose.service": "hermes-bot",
+            }
+        },
         "Mounts": [
             {
                 "Source": str(database),
                 "Destination": "/home/hermes/healbite.db",
+                "Type": "bind",
+                "RW": True,
             }
         ],
     }
@@ -337,6 +348,9 @@ def test_complete_execution_authority_passes(
             parent_identity=context.plan["SOURCE_PARENT_IDENTITY"],
         )
         assert bundle.path_matches()
+        bundle.validate_not_expired()
+        bundle.revalidate_operations_root()
+        bundle.validate_runtime()
         assert bundle.runtime_matches()
     finally:
         bundle.close()
@@ -530,3 +544,176 @@ def test_no_bytecode_invocation_contract_is_explicit() -> None:
     )
     source = entrypoint.read_text(encoding="utf-8")
     assert "sys.dont_write_bytecode = True" in source
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("tracked", "ignored", "pyc", "symlink"),
+)
+def test_operations_root_final_revalidation_denies_drift(
+    drift: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _authority_context(tmp_path, monkeypatch)
+    bundle = _load(context)
+    try:
+        if drift == "tracked":
+            (context.repository / "tracked.txt").write_bytes(b"changed\n")
+        elif drift == "ignored":
+            ops = context.repository / "ops"
+            ops.mkdir()
+            _write(ops / "ignored.txt", b"ignored\n", 0o644)
+        elif drift == "pyc":
+            _write(context.repository / "ignored.pyc", b"bytecode", 0o644)
+        elif drift == "symlink":
+            (context.repository / "late-link").symlink_to("tracked.txt")
+        else:
+            raise AssertionError(drift)
+        with pytest.raises(authority.ExecutionAuthorityError):
+            bundle.revalidate_operations_root()
+    finally:
+        bundle.close()
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("source", "target", "duplicate", "historical", "read_only", "compose"),
+)
+def test_final_runtime_mount_validation_denies_drift(
+    drift: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _authority_context(tmp_path, monkeypatch)
+    bundle = _load(context)
+    try:
+        mount = context.runtime_payload["Mounts"][0]
+        if drift == "source":
+            mount["Source"] = str(tmp_path / "historical" / "healbite.db")
+        elif drift == "target":
+            mount["Destination"] = "/home/hermes/other.db"
+        elif drift == "duplicate":
+            context.runtime_payload["Mounts"].append(dict(mount))
+        elif drift == "historical":
+            context.runtime_payload["Mounts"].append(
+                {
+                    "Source": str(tmp_path / "old" / "healbite.db"),
+                    "Destination": "/archive/healbite.db",
+                    "Type": "bind",
+                    "RW": True,
+                }
+            )
+        elif drift == "read_only":
+            mount["RW"] = False
+        elif drift == "compose":
+            context.runtime_payload["Config"]["Labels"][
+                "com.docker.compose.project"
+            ] = "wrong-project"
+        else:
+            raise AssertionError(drift)
+        with pytest.raises(authority.ExecutionAuthorityError):
+            bundle.validate_runtime()
+        assert not bundle.runtime_matches()
+    finally:
+        bundle.close()
+
+
+def test_trusted_parent_chain_accepts_complete_safe_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
+    first = _private(tmp_path / "first")
+    second = _private(first / "second")
+    identity = authority.validate_trusted_parent_chain(second)
+    metadata = second.stat()
+    assert identity == (metadata.st_dev, metadata.st_ino)
+
+
+def test_trusted_parent_chain_denies_unsafe_higher_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
+    unsafe = _private(tmp_path / "unsafe")
+    target = _private(unsafe / "target")
+    os.chmod(unsafe, 0o770)
+    with pytest.raises(authority.ExecutionAuthorityError):
+        authority.validate_trusted_parent_chain(target)
+
+
+def test_trusted_parent_chain_denies_unsafe_higher_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
+    ancestor = _private(tmp_path / "ancestor")
+    target = _private(ancestor / "target")
+    original_fstat = authority.os.fstat
+    ancestor_inode = ancestor.stat().st_ino
+
+    def mismatched_owner(fd: int) -> os.stat_result:
+        metadata = original_fstat(fd)
+        if metadata.st_ino == ancestor_inode:
+            values = list(metadata)
+            values[4] = metadata.st_uid + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(authority.os, "fstat", mismatched_owner)
+    with pytest.raises(authority.ExecutionAuthorityError):
+        authority.validate_trusted_parent_chain(target)
+
+
+def test_trusted_parent_chain_denies_ancestor_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
+    real = _private(tmp_path / "real")
+    _private(real / "target")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(authority.ExecutionAuthorityError):
+        authority.validate_trusted_parent_chain(link / "target")
+
+
+def test_trusted_parent_chain_denies_replacement_during_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
+    ancestor = _private(tmp_path / "ancestor")
+    target = _private(ancestor / "target")
+    original_stat = authority.os.stat
+    calls = 0
+
+    def replaced_stat(
+        path: object,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal calls
+        metadata = original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        if path == "ancestor":
+            calls += 1
+            if calls == 2:
+                values = list(metadata)
+                values[1] = metadata.st_ino + 1
+                return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(authority.os, "stat", replaced_stat)
+    with pytest.raises(authority.ExecutionAuthorityError):
+        authority.validate_trusted_parent_chain(target)

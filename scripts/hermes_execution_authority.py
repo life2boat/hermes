@@ -20,6 +20,7 @@ REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 EXECUTION_AUTHORITY_VERSION = 1
 INVOCATION_DESCRIPTOR_VERSION = 2
+TRUSTED_FILESYSTEM_ANCHOR = Path("/")
 
 EXECUTION_AUTHORITY_FIELDS = frozenset({
     "EXECUTION_AUTHORITY_VERSION",
@@ -167,6 +168,123 @@ def _timestamp(value: object, code: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def validate_trusted_parent_chain(
+    path: Path,
+    *,
+    expected_uid: int | None = None,
+) -> tuple[int, int]:
+    """Validate every directory component using no-follow descriptors."""
+
+    canonical = _absolute_path(str(path), "AUTHORITY_PARENT_PATH_INVALID")
+    anchor = _absolute_path(
+        str(TRUSTED_FILESYSTEM_ANCHOR),
+        "AUTHORITY_TRUSTED_ANCHOR_INVALID",
+    )
+    try:
+        relative = canonical.relative_to(anchor)
+    except ValueError as exc:
+        raise ExecutionAuthorityError(
+            "AUTHORITY_PATH_OUTSIDE_TRUSTED_ANCHOR"
+        ) from exc
+    current_uid, _current_gid = _effective_identity()
+    expected_uid = current_uid if expected_uid is None else expected_uid
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptors: list[int] = []
+    component_names: list[str] = []
+    primary_failure = False
+
+    def validate_directory(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != expected_uid
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise ExecutionAuthorityError("AUTHORITY_PARENT_CHAIN_UNTRUSTED")
+
+    try:
+        descriptors.append(os.open(anchor, flags))
+        validate_directory(os.fstat(descriptors[0]))
+        for component in relative.parts:
+            parent_fd = descriptors[-1]
+            child_fd = os.open(component, flags, dir_fd=parent_fd)
+            try:
+                path_metadata = os.stat(
+                    component,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                descriptor_metadata = os.fstat(child_fd)
+                validate_directory(descriptor_metadata)
+                if (
+                    path_metadata.st_dev,
+                    path_metadata.st_ino,
+                    path_metadata.st_mode,
+                    path_metadata.st_uid,
+                ) != (
+                    descriptor_metadata.st_dev,
+                    descriptor_metadata.st_ino,
+                    descriptor_metadata.st_mode,
+                    descriptor_metadata.st_uid,
+                ):
+                    raise ExecutionAuthorityError(
+                        "AUTHORITY_PARENT_CHAIN_REPLACED"
+                    )
+            except Exception:
+                os.close(child_fd)
+                raise
+            descriptors.append(child_fd)
+            component_names.append(component)
+
+        for index, component in enumerate(component_names, start=1):
+            path_metadata = os.stat(
+                component,
+                dir_fd=descriptors[index - 1],
+                follow_symlinks=False,
+            )
+            descriptor_metadata = os.fstat(descriptors[index])
+            validate_directory(descriptor_metadata)
+            if (
+                path_metadata.st_dev,
+                path_metadata.st_ino,
+                path_metadata.st_mode,
+                path_metadata.st_uid,
+            ) != (
+                descriptor_metadata.st_dev,
+                descriptor_metadata.st_ino,
+                descriptor_metadata.st_mode,
+                descriptor_metadata.st_uid,
+            ):
+                raise ExecutionAuthorityError(
+                    "AUTHORITY_PARENT_CHAIN_REPLACED"
+                )
+
+        final_metadata = os.fstat(descriptors[-1])
+        return int(final_metadata.st_dev), int(final_metadata.st_ino)
+    except ExecutionAuthorityError:
+        primary_failure = True
+        raise
+    except OSError as exc:
+        primary_failure = True
+        raise ExecutionAuthorityError(
+            "AUTHORITY_PARENT_CHAIN_UNTRUSTED"
+        ) from exc
+    finally:
+        close_failed = False
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                close_failed = True
+        if close_failed and not primary_failure:
+            raise ExecutionAuthorityError(
+                "AUTHORITY_PARENT_CHAIN_CLOSE_FAILED"
+            )
+
+
 def _no_symlink_chain(path: Path) -> None:
     current = Path(path.anchor)
     for part in path.parts[1:]:
@@ -203,18 +321,25 @@ class BoundArtifact:
     parent_fd: int
     file_fd: int
     identity: tuple[int, int, int, int, int, int, int]
+    parent_identity: tuple[int, int]
+    parent_uid: int
     sha256: str
     data: bytes
     code_prefix: str
 
     def path_matches(self) -> bool:
         try:
+            trusted_parent = validate_trusted_parent_chain(
+                self.path.parent,
+                expected_uid=self.parent_uid,
+            )
             path_metadata = os.stat(
                 self.path.name,
                 dir_fd=self.parent_fd,
                 follow_symlinks=False,
             )
             descriptor_metadata = os.fstat(self.file_fd)
+            parent_metadata = os.fstat(self.parent_fd)
             data = _read_exact(
                 self.file_fd,
                 self.identity[2],
@@ -241,7 +366,13 @@ class BoundArtifact:
             descriptor_metadata.st_nlink,
         )
         return (
-            actual == self.identity
+            trusted_parent == self.parent_identity
+            and (
+                parent_metadata.st_dev,
+                parent_metadata.st_ino,
+            )
+            == self.parent_identity
+            and actual == self.identity
             and descriptor == self.identity
             and hashlib.sha256(data).hexdigest() == self.sha256
         )
@@ -289,29 +420,49 @@ def _open_bound_artifact(
     path = _absolute_path(path_value, f"{code_prefix}_PATH_INVALID")
     if not isinstance(expected_sha, str) or SHA_RE.fullmatch(expected_sha) is None:
         raise ExecutionAuthorityError(f"{code_prefix}_SHA256_INVALID")
-    _no_symlink_chain(path)
     current_uid, current_gid = _effective_identity()
     expected_uid = current_uid if expected_uid is None else expected_uid
     expected_gid = current_gid if expected_gid is None else expected_gid
-    parent_fd = os.open(
+    trusted_parent = validate_trusted_parent_chain(
         path.parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        expected_uid=current_uid,
     )
+    try:
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise ExecutionAuthorityError(
+            f"{code_prefix}_PARENT_OPEN_FAILED"
+        ) from exc
     try:
         file_fd = os.open(
             path.name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
             dir_fd=parent_fd,
         )
-    except Exception:
-        os.close(parent_fd)
-        raise
+    except OSError as exc:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+        raise ExecutionAuthorityError(
+            f"{code_prefix}_OPEN_FAILED"
+        ) from exc
     try:
         parent_metadata = os.fstat(parent_fd)
         metadata = os.fstat(file_fd)
         if (
-            not stat.S_ISDIR(parent_metadata.st_mode)
-            or parent_metadata.st_uid != expected_uid
+            (
+                parent_metadata.st_dev,
+                parent_metadata.st_ino,
+            )
+            != trusted_parent
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != current_uid
             or stat.S_IMODE(parent_metadata.st_mode) != 0o700
             or not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
@@ -353,11 +504,21 @@ def _open_bound_artifact(
             path_metadata.st_nlink,
         ) != identity:
             raise ExecutionAuthorityError(f"{code_prefix}_PATH_SUBSTITUTION")
+        final_parent = validate_trusted_parent_chain(
+            path.parent,
+            expected_uid=current_uid,
+        )
+        if final_parent != trusted_parent:
+            raise ExecutionAuthorityError(
+                f"{code_prefix}_PARENT_SUBSTITUTION"
+            )
         return BoundArtifact(
             path=path,
             parent_fd=parent_fd,
             file_fd=file_fd,
             identity=identity,
+            parent_identity=trusted_parent,
+            parent_uid=current_uid,
             sha256=actual_sha,
             data=data,
             code_prefix=code_prefix,
@@ -461,11 +622,16 @@ def _read_repository_file(path: Path, expected_size: int) -> bytes:
         os.close(fd)
 
 
-def exact_repository_provenance(repository_root: Path) -> tuple[str, str]:
-    """Return exact HEAD/tree only when filesystem closure equals the Git tree."""
+def _exact_repository_snapshot(
+    repository_root: Path,
+) -> tuple[str, str, str]:
+    """Return immutable repository provenance and inventory digest."""
 
-    _no_symlink_chain(repository_root)
     current_uid, current_gid = _effective_identity()
+    validate_trusted_parent_chain(
+        repository_root,
+        expected_uid=current_uid,
+    )
     root_metadata = repository_root.lstat()
     if (
         not stat.S_ISDIR(root_metadata.st_mode)
@@ -474,6 +640,18 @@ def exact_repository_provenance(repository_root: Path) -> tuple[str, str]:
         or stat.S_IMODE(root_metadata.st_mode) != 0o700
     ):
         raise ExecutionAuthorityError("OPERATIONS_ROOT_METADATA_INVALID")
+    if (
+        str(
+            _git(
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+                root=repository_root,
+            )
+        ).strip()
+        != "HEAD"
+    ):
+        raise ExecutionAuthorityError("OPERATIONS_ROOT_NOT_DETACHED")
     head = str(_git("rev-parse", "--verify", "HEAD", root=repository_root)).strip()
     tree = str(
         _git("rev-parse", "--verify", "HEAD^{tree}", root=repository_root)
@@ -547,6 +725,25 @@ def exact_repository_provenance(repository_root: Path) -> tuple[str, str]:
         data = _read_repository_file(path, metadata.st_size)
         if _blob_oid(data, object_format) != oid:
             raise ExecutionAuthorityError("OPERATIONS_ROOT_FILE_CONTENT_DRIFT")
+    inventory_payload = {
+        "HEAD": head,
+        "TREE": tree,
+        "TRACKED": [
+            [relative, mode, oid]
+            for relative, (mode, oid) in sorted(tracked.items())
+        ],
+        "FILESYSTEM": sorted(actual_paths),
+    }
+    inventory_digest = hashlib.sha256(
+        _canonical_json(inventory_payload)
+    ).hexdigest()
+    return head, tree, inventory_digest
+
+
+def exact_repository_provenance(repository_root: Path) -> tuple[str, str]:
+    """Return exact HEAD/tree only when filesystem closure equals the Git tree."""
+
+    head, tree, _inventory_digest = _exact_repository_snapshot(repository_root)
     return head, tree
 
 
@@ -603,6 +800,68 @@ def _inspect_runtime(service_name: str) -> dict[str, Any]:
     return payload[0]
 
 
+def _validate_runtime_payload(
+    runtime: dict[str, Any],
+    descriptor: dict[str, Any],
+    runtime_image_id: str,
+) -> None:
+    state = runtime.get("State")
+    config = runtime.get("Config")
+    mounts = runtime.get("Mounts")
+    if (
+        not isinstance(state, dict)
+        or not isinstance(config, dict)
+        or not isinstance(mounts, list)
+        or not state.get("Running")
+        or runtime.get("Image") != runtime_image_id
+    ):
+        raise ExecutionAuthorityError("CURRENT_RUNTIME_IDENTITY_DRIFT")
+    labels = config.get("Labels")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("com.docker.compose.project")
+        != descriptor["COMPOSE_PROJECT_NAME"]
+        or labels.get("com.docker.compose.service")
+        != descriptor["APPLICATION_SERVICE"]
+    ):
+        raise ExecutionAuthorityError(
+            "CURRENT_RUNTIME_COMPOSE_IDENTITY_DRIFT"
+        )
+
+    expected_source = str(descriptor["CANONICAL_DB_SOURCE"])
+    expected_target = str(descriptor["CANONICAL_DB_TARGET"])
+    target_mounts: list[dict[str, Any]] = []
+    historical_mount = False
+    for item in mounts:
+        if not isinstance(item, dict):
+            raise ExecutionAuthorityError(
+                "CURRENT_RUNTIME_MOUNT_METADATA_INVALID"
+            )
+        source = item.get("Source")
+        destination = item.get("Destination")
+        if destination == expected_target:
+            target_mounts.append(item)
+        if (
+            isinstance(source, str)
+            and source != expected_source
+            and Path(source).name == Path(expected_source).name
+        ):
+            historical_mount = True
+    if historical_mount:
+        raise ExecutionAuthorityError("HISTORICAL_DB_MOUNT_DENIED")
+    if len(target_mounts) != 1:
+        raise ExecutionAuthorityError(
+            "CURRENT_RUNTIME_DB_MOUNT_COUNT_DRIFT"
+        )
+    mount = target_mounts[0]
+    if mount.get("Source") != expected_source:
+        raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_SOURCE_DRIFT")
+    if mount.get("Destination") != expected_target:
+        raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_TARGET_DRIFT")
+    if mount.get("Type") != "bind" or mount.get("RW") is not True:
+        raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_MODE_DRIFT")
+
+
 def _validate_override(artifact: BoundArtifact, source: str, target: str) -> None:
     try:
         payload = json.loads(artifact.data.decode("ascii"))
@@ -633,6 +892,11 @@ class ExecutionAuthorityBundle:
     invocation_descriptor: BoundJsonArtifact
     bound_files: tuple[BoundArtifact, ...]
     runtime_image_id: str
+    repository_root: Path
+    repository_head: str
+    repository_tree: str
+    repository_inventory_digest: str
+    expires_at: datetime
 
     def path_matches(self) -> bool:
         return (
@@ -670,13 +934,36 @@ class ExecutionAuthorityBundle:
             "APPROVAL_ENVELOPE_SOURCE_DRIFT",
         )
 
-    def runtime_matches(self) -> bool:
+    def validate_not_expired(self) -> None:
+        if datetime.now(timezone.utc) >= self.expires_at:
+            raise ExecutionAuthorityError("FINAL_AUTHORITY_EXPIRED")
+
+    def revalidate_operations_root(self) -> None:
+        head, tree, inventory_digest = _exact_repository_snapshot(
+            self.repository_root
+        )
+        if (
+            head != self.repository_head
+            or tree != self.repository_tree
+            or inventory_digest != self.repository_inventory_digest
+        ):
+            raise ExecutionAuthorityError("OPERATIONS_ROOT_AUTHORITY_DRIFT")
+
+    def validate_runtime(self) -> None:
         descriptor = self.invocation_descriptor.payload
         runtime = _inspect_runtime(str(descriptor["APPLICATION_SERVICE"]))
-        return (
-            bool(runtime.get("State", {}).get("Running"))
-            and runtime.get("Image") == self.runtime_image_id
+        _validate_runtime_payload(
+            runtime,
+            descriptor,
+            self.runtime_image_id,
         )
+
+    def runtime_matches(self) -> bool:
+        try:
+            self.validate_runtime()
+        except ExecutionAuthorityError:
+            return False
+        return True
 
     def close(self) -> None:
         errors: list[str] = []
@@ -784,7 +1071,9 @@ def load_execution_authority(
             raise ExecutionAuthorityError("FINAL_AUTHORITY_TREE_BINDING_MISMATCH")
         if authority["OPERATIONS_ROOT_HEAD_SHA"] != authority["SOURCE_SHA"]:
             raise ExecutionAuthorityError("FINAL_AUTHORITY_HEAD_BINDING_MISMATCH")
-        head, tree = exact_repository_provenance(repository_root)
+        head, tree, inventory_digest = _exact_repository_snapshot(
+            repository_root
+        )
         current_uid, current_gid = _effective_identity()
         if (
             head != authority["OPERATIONS_ROOT_HEAD_SHA"]
@@ -952,18 +1241,7 @@ def load_execution_authority(
         _inspect_image(target_image, str(plan["MIGRATION_IMAGE_REVISION"]))
         _inspect_image(current_image, None)
         runtime = _inspect_runtime(str(desc["APPLICATION_SERVICE"]))
-        mounts = [
-            item
-            for item in runtime.get("Mounts", [])
-            if item.get("Destination") == desc["CANONICAL_DB_TARGET"]
-        ]
-        if (
-            not runtime.get("State", {}).get("Running")
-            or runtime.get("Image") != current_image
-            or len(mounts) != 1
-            or mounts[0].get("Source") != plan["DB_CANONICAL_PATH"]
-        ):
-            raise ExecutionAuthorityError("CURRENT_RUNTIME_IDENTITY_DRIFT")
+        _validate_runtime_payload(runtime, desc, current_image)
 
         return ExecutionAuthorityBundle(
             final_authority=final,
@@ -971,6 +1249,11 @@ def load_execution_authority(
             invocation_descriptor=descriptor,
             bound_files=(p5b, p6a_f1, base_compose, override, secret),
             runtime_image_id=current_image,
+            repository_root=repository_root,
+            repository_head=head,
+            repository_tree=tree,
+            repository_inventory_digest=inventory_digest,
+            expires_at=expires,
         )
     except Exception:
         for item in reversed(opened):

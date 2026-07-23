@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from scripts import hermes_execution_authority as authority
 from scripts import hermes_production_staged_migrate as production
 from scripts import hermes_staged_schema_migrate as staged
 
@@ -167,6 +168,15 @@ class _UnitExecutionAuthority:
 
     def runtime_matches(self) -> bool:
         return True
+
+    def validate_not_expired(self) -> None:
+        return None
+
+    def revalidate_operations_root(self) -> None:
+        return None
+
+    def validate_runtime(self) -> None:
+        return None
 
     def validate_source(
         self,
@@ -396,12 +406,26 @@ def _unit_open_plan(path_value: str, expected_sha: str) -> production.PinnedPlan
             metadata.st_ino,
         ):
             raise production.ProductionGateError("PLAN_PATH_SUBSTITUTION")
+        parent_identity = (
+            int(parent_metadata.st_dev),
+            int(parent_metadata.st_ino),
+        )
+        identity = (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_uid),
+            int(metadata.st_gid),
+            stat.S_IMODE(metadata.st_mode),
+            int(metadata.st_nlink),
+        )
         return production.PinnedPlan(
             path=path,
             parent_fd=parent_fd,
             file_fd=file_fd,
-            device=int(metadata.st_dev),
-            inode=int(metadata.st_ino),
+            parent_identity=parent_identity,
+            identity=identity,
+            expected_uid=int(metadata.st_uid),
             payload=payload,
             sha256=actual_sha,
         )
@@ -471,6 +495,9 @@ def _unit_context(
     *,
     root_context: bool = True,
 ) -> UnitContext:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    os.chmod(tmp_path, 0o700)
+    monkeypatch.setattr(authority, "TRUSTED_FILESYSTEM_ANCHOR", tmp_path)
     repository = _copy_repository(tmp_path / "repository")
     runtime = _private_directory(tmp_path / "runtime")
     source = _source(runtime / "source" / "database.sqlite")
@@ -2718,3 +2745,143 @@ def test_sanitized_stderr_fallback_includes_cleanup_count(
         "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
         "FINAL_RESULT_EMIT_FAILED",
     ]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ("same_size", "different_size", "atomic", "symlink", "hardlink"),
+)
+def test_pinned_plan_final_byte_revalidation_denies_drift(
+    drift: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    pinned = _unit_open_plan(str(plan.path), plan.sha256)
+    try:
+        original = plan.path.read_bytes()
+        if drift == "same_size":
+            replacement = bytearray(original)
+            replacement[len(replacement) // 2] ^= 1
+            plan.path.write_bytes(bytes(replacement))
+        elif drift == "different_size":
+            plan.path.write_bytes(original + b" ")
+        elif drift == "atomic":
+            replacement_path = plan.path.with_name("replacement.json")
+            replacement_path.write_bytes(original)
+            os.chmod(replacement_path, 0o600)
+            os.replace(replacement_path, plan.path)
+        elif drift == "symlink":
+            target = plan.path.with_name("plan-target.json")
+            target.write_bytes(original)
+            os.chmod(target, 0o600)
+            plan.path.unlink()
+            plan.path.symlink_to(target)
+        elif drift == "hardlink":
+            linked = plan.path.with_name("plan-hardlink.json")
+            os.link(plan.path, linked)
+        else:
+            raise AssertionError(drift)
+        assert not pinned.path_matches()
+    finally:
+        pinned.close()
+
+
+def test_plan_modification_during_descriptor_read_is_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    original_pread = production.os.pread
+    modified = False
+
+    def changing_pread(fd: int, size: int, offset: int) -> bytes:
+        nonlocal modified
+        chunk = original_pread(fd, size, offset)
+        if not modified:
+            modified = True
+            with plan.path.open("ab") as handle:
+                handle.write(b" ")
+        return chunk
+
+    monkeypatch.setattr(production.os, "pread", changing_pread)
+    with pytest.raises(production.ProductionGateError):
+        _unit_open_plan(str(plan.path), plan.sha256)
+
+
+def test_complete_final_mutation_checkpoint_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    pinned = _unit_open_plan(str(plan.path), plan.sha256)
+    calls: list[str] = []
+
+    class FinalAuthority(_UnitExecutionAuthority):
+        def validate_not_expired(self) -> None:
+            calls.append("expiry")
+
+        def revalidate_operations_root(self) -> None:
+            calls.append("operations_root")
+
+        def validate_runtime(self) -> None:
+            calls.append("runtime")
+
+    source_identity = object()
+    validated = type(
+        "Validated",
+        (),
+        {
+            "execution_authority": FinalAuthority(),
+            "source_identity": source_identity,
+        },
+    )()
+    prepared = type("Prepared", (), {"source_identity": source_identity})()
+    monkeypatch.setattr(
+        production,
+        "_pinned_authorities_match",
+        lambda _pinned, _validated: True,
+    )
+    try:
+        production._final_mutation_checkpoint(pinned, validated, prepared)
+    finally:
+        pinned.close()
+    assert calls == ["expiry", "operations_root", "runtime"]
+
+
+def test_public_execute_final_checkpoint_failure_preserves_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan = _create_plan(context, capfd)
+    before_hash = production._sha256(context.source)
+    before_paths = _path_set(context.runtime)
+
+    def deny_final_checkpoint(*_args: Any, **_kwargs: Any) -> None:
+        raise production.ProductionGateError("FINAL_CHECKPOINT_TEST_DENIAL")
+
+    monkeypatch.setattr(
+        production,
+        "_final_mutation_checkpoint",
+        deny_final_checkpoint,
+    )
+    assert production.main(_execute_argv(plan)) == 1
+    result, _stream = _json_result(capfd)
+    assert result["exit_classification"] == "FINAL_CHECKPOINT_TEST_DENIAL"
+    assert production._sha256(context.source) == before_hash
+    assert _path_set(context.runtime) == before_paths
+
+
+def test_public_execute_has_one_final_checkpoint_call() -> None:
+    source = Path(production.__file__).read_text(encoding="utf-8")
+    execute_source = source.split("def _execute_plan_outcome(", 1)[1]
+    execute_source = execute_source.split("def execute_plan(", 1)[0]
+    assert execute_source.count("_final_mutation_checkpoint(") == 1

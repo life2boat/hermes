@@ -14,6 +14,29 @@ class WeeklyMenuMemberGenerationSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class WeeklyMenuInventoryItem:
+    normalized_name: str
+    display_name: str
+    quantity_value: str | None
+    unit: str
+    category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeeklyMenuIngredient:
+    name: str
+    quantity_value: str
+    unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class WeeklyMenuMacros:
+    protein_g: str
+    carbs_g: str
+    fat_g: str
+
+
+@dataclass(frozen=True, slots=True)
 class WeeklyMenuGenerationRequest:
     week_start: str
     dates: tuple[str, ...]
@@ -23,6 +46,9 @@ class WeeklyMenuGenerationRequest:
     members: tuple[WeeklyMenuMemberGenerationSnapshot, ...]
     household_dietary_notes: tuple[str, ...]
     max_entries: int
+    inventory_snapshot_id: str | None = None
+    inventory_items: tuple[WeeklyMenuInventoryItem, ...] = ()
+    inventory_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +59,10 @@ class WeeklyMenuGeneratedEntry:
     title: str
     description: str | None = None
     servings: str | None = None
+    instructions: tuple[str, ...] = ()
+    estimated_calories_per_serving: int | None = None
+    macros_per_serving: WeeklyMenuMacros | None = None
+    ingredients: tuple[WeeklyMenuIngredient, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

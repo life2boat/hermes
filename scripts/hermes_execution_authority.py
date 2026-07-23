@@ -10,7 +10,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
@@ -800,6 +800,38 @@ def _inspect_runtime(service_name: str) -> dict[str, Any]:
     return payload[0]
 
 
+def _normalize_container_mount_destination(value: object) -> PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("/")
+        or "\x00" in value
+    ):
+        raise ExecutionAuthorityError(
+            "CURRENT_RUNTIME_MOUNT_METADATA_INVALID"
+        )
+    components: list[str] = []
+    for component in value.split("/"):
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            raise ExecutionAuthorityError(
+                "CURRENT_RUNTIME_MOUNT_METADATA_INVALID"
+            )
+        components.append(component)
+    return PurePosixPath("/").joinpath(*components)
+
+
+def _mount_destinations_conflict(
+    destination: PurePosixPath,
+    canonical_target: PurePosixPath,
+) -> bool:
+    return (
+        destination == canonical_target
+        or destination in canonical_target.parents
+        or canonical_target in destination.parents
+    )
+
+
 def _validate_runtime_payload(
     runtime: dict[str, Any],
     descriptor: dict[str, Any],
@@ -829,18 +861,37 @@ def _validate_runtime_payload(
         )
 
     expected_source = str(descriptor["CANONICAL_DB_SOURCE"])
-    expected_target = str(descriptor["CANONICAL_DB_TARGET"])
+    try:
+        expected_target = _normalize_container_mount_destination(
+            descriptor["CANONICAL_DB_TARGET"]
+        )
+    except ExecutionAuthorityError as exc:
+        raise ExecutionAuthorityError(
+            "CURRENT_RUNTIME_DB_TARGET_DRIFT"
+        ) from exc
     target_mounts: list[dict[str, Any]] = []
     historical_mount = False
+    seen_destinations: set[PurePosixPath] = set()
     for item in mounts:
         if not isinstance(item, dict):
             raise ExecutionAuthorityError(
                 "CURRENT_RUNTIME_MOUNT_METADATA_INVALID"
             )
         source = item.get("Source")
-        destination = item.get("Destination")
+        destination = _normalize_container_mount_destination(
+            item.get("Destination")
+        )
+        if destination in seen_destinations:
+            raise ExecutionAuthorityError(
+                "CURRENT_RUNTIME_MOUNT_METADATA_INVALID"
+            )
+        seen_destinations.add(destination)
         if destination == expected_target:
             target_mounts.append(item)
+        elif _mount_destinations_conflict(destination, expected_target):
+            raise ExecutionAuthorityError(
+                "CURRENT_RUNTIME_DB_MOUNT_HIERARCHY_CONFLICT"
+            )
         if (
             isinstance(source, str)
             and source != expected_source
@@ -856,7 +907,10 @@ def _validate_runtime_payload(
     mount = target_mounts[0]
     if mount.get("Source") != expected_source:
         raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_SOURCE_DRIFT")
-    if mount.get("Destination") != expected_target:
+    if (
+        _normalize_container_mount_destination(mount.get("Destination"))
+        != expected_target
+    ):
         raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_TARGET_DRIFT")
     if mount.get("Type") != "bind" or mount.get("RW") is not True:
         raise ExecutionAuthorityError("CURRENT_RUNTIME_DB_MODE_DRIFT")

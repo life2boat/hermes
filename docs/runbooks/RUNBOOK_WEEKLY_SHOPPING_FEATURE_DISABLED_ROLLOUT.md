@@ -575,7 +575,8 @@ staging or mutation, one final checkpoint rehashes the descriptor-pinned plan,
 revalidates its full metadata and SHA-256, repeats the exact operations-root closure
 check, confirms authority expiry and source DB identity, and validates structured
 container metadata for exact image, Compose project/service, one writable canonical
-DB bind source/target, with historical or conflicting DB mounts denied
+DB bind source/target, with historical mounts and every normalized ancestor,
+descendant or duplicate canonical-target mount denied across all mount types
 all operations-root plan and execute invocations use both
 PYTHONDONTWRITEBYTECODE=1 and the Python -B option
 execute securely reopens both evidence files, confirms their recorded identities and

@@ -619,6 +619,147 @@ def test_final_runtime_mount_validation_denies_drift(
         bundle.close()
 
 
+@pytest.mark.parametrize(
+    ("case", "accepted"),
+    (
+        ("exact_only", True),
+        ("duplicate_exact", False),
+        ("duplicate_unrelated_destination", False),
+        ("direct_parent", False),
+        ("grandparent", False),
+        ("root", False),
+        ("direct_child", False),
+        ("deep_descendant", False),
+        ("parent_before", False),
+        ("parent_after", False),
+        ("conflicting_bind", False),
+        ("conflicting_named_volume", False),
+        ("conflicting_tmpfs", False),
+        ("similar_db2", True),
+        ("similar_database", True),
+        ("repeated_separators", False),
+        ("dot_segment", False),
+        ("unsafe_dotdot", False),
+        ("relative_destination", False),
+        ("missing_destination", False),
+        ("malformed_metadata", False),
+        ("historical_source", False),
+    ),
+)
+def test_runtime_mount_hierarchy_contract(
+    case: str,
+    accepted: bool,
+) -> None:
+    source = "/synthetic/canonical/healbite.db"
+    target = "/opt/hermes/data/db"
+    parent_target = "/opt/hermes/data"
+    grandparent_target = "/opt/hermes"
+    child_target = f"{target}/child"
+    deep_child_target = f"{child_target}/deep"
+    image = "sha256:" + "6" * 64
+    descriptor = {
+        "COMPOSE_PROJECT_NAME": "hermes-agent",
+        "APPLICATION_SERVICE": "hermes-bot",
+        "CANONICAL_DB_SOURCE": source,
+        "CANONICAL_DB_TARGET": target,
+    }
+    canonical = {
+        "Source": source,
+        "Destination": target,
+        "Type": "bind",
+        "RW": True,
+    }
+    runtime = {
+        "State": {"Running": True},
+        "Image": image,
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project": "hermes-agent",
+                "com.docker.compose.service": "hermes-bot",
+            }
+        },
+        "Mounts": [canonical],
+    }
+
+    def extra(
+        destination: str,
+        *,
+        mount_type: str = "bind",
+        extra_source: str = "/synthetic/unrelated",
+    ) -> dict[str, Any]:
+        return {
+            "Source": extra_source,
+            "Destination": destination,
+            "Type": mount_type,
+            "RW": True,
+        }
+
+    if case == "duplicate_exact":
+        runtime["Mounts"].append(dict(canonical))
+    elif case == "duplicate_unrelated_destination":
+        duplicate = extra("/unrelated")
+        runtime["Mounts"].extend((duplicate, dict(duplicate)))
+    elif case == "direct_parent":
+        runtime["Mounts"].append(extra(parent_target))
+    elif case == "grandparent":
+        runtime["Mounts"].append(extra(grandparent_target))
+    elif case == "root":
+        runtime["Mounts"].insert(0, extra("/"))
+    elif case == "direct_child":
+        runtime["Mounts"].append(extra(child_target))
+    elif case == "deep_descendant":
+        runtime["Mounts"].append(extra(deep_child_target))
+    elif case == "parent_before":
+        runtime["Mounts"].insert(0, extra(parent_target))
+    elif case == "parent_after":
+        runtime["Mounts"].append(extra(parent_target))
+    elif case == "conflicting_bind":
+        runtime["Mounts"].append(extra(child_target, mount_type="bind"))
+    elif case == "conflicting_named_volume":
+        runtime["Mounts"].append(
+            extra(parent_target, mount_type="volume", extra_source="named-volume")
+        )
+    elif case == "conflicting_tmpfs":
+        runtime["Mounts"].append(
+            extra(child_target, mount_type="tmpfs", extra_source="")
+        )
+    elif case == "similar_db2":
+        runtime["Mounts"].append(extra(f"{target}2", mount_type="volume"))
+    elif case == "similar_database":
+        runtime["Mounts"].append(
+            extra(f"{parent_target}/database", mount_type="tmpfs")
+        )
+    elif case == "repeated_separators":
+        runtime["Mounts"].append(extra("/opt//hermes/data/db"))
+    elif case == "dot_segment":
+        runtime["Mounts"].append(extra("/opt/hermes/./data/db"))
+    elif case == "unsafe_dotdot":
+        runtime["Mounts"].append(extra(f"{target}/../db"))
+    elif case == "relative_destination":
+        runtime["Mounts"].append(extra(target.removeprefix("/")))
+    elif case == "missing_destination":
+        runtime["Mounts"].append(
+            {"Source": "/synthetic/unrelated", "Type": "bind", "RW": True}
+        )
+    elif case == "malformed_metadata":
+        runtime["Mounts"].append("not-structured-mount-metadata")
+    elif case == "historical_source":
+        runtime["Mounts"].append(
+            extra(
+                "/archive/unrelated.db",
+                extra_source="/legacy/healbite.db",
+            )
+        )
+    elif case != "exact_only":
+        raise AssertionError(case)
+
+    if accepted:
+        authority._validate_runtime_payload(runtime, descriptor, image)
+    else:
+        with pytest.raises(authority.ExecutionAuthorityError):
+            authority._validate_runtime_payload(runtime, descriptor, image)
+
+
 def test_trusted_parent_chain_accepts_complete_safe_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

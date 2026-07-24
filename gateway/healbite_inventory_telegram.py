@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -196,9 +197,33 @@ class HealBiteInventoryTelegramController:
         self._generation_attempts_lock = threading.Lock()
 
     async def _default_vision_analyze(self, image_path: str, prompt: str) -> object:
-        from tools.vision_tools import vision_analyze_tool
+        from agent.auxiliary_client import (
+            VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
+            async_call_llm,
+        )
 
-        return await vision_analyze_tool(image_path, prompt)
+        image_data_url = "data:image/jpeg;base64," + base64.b64encode(
+            Path(image_path).read_bytes()
+        ).decode("ascii")
+        response = await async_call_llm(
+            task="vision",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                }
+            ],
+            temperature=0,
+            max_tokens=1000,
+            call_policy=VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
+        )
+        content = getattr(response.choices[0].message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("vision response unavailable")
+        return {"success": True, "analysis": content}
 
     def _default_generation_service(self) -> HealBiteWeeklyMenuGenerationService:
         return HealBiteWeeklyMenuGenerationService(

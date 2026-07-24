@@ -364,16 +364,28 @@ def _empty_migrated_rows(path: Path) -> bool:
 
 
 def _inventory_schema_object_count(path: Path) -> int:
+    from scripts import healbite_schema_migrate
+
+    expected = healbite_schema_migrate._expected_schema_objects(
+        healbite_schema_migrate._component_statements()["inventory"]
+    )
+    placeholders = ",".join("?" for _ in expected)
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         connection.execute("PRAGMA query_only=ON")
-        return int(
-            connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE name LIKE 'healbite_inventory_%' "
-                "OR name LIKE 'idx_healbite_inventory_%' "
-                "OR name LIKE 'sqlite_autoindex_healbite_inventory_%'"
-            ).fetchone()[0]
-        )
+        rows = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            f"WHERE name IN ({placeholders})",
+            tuple(expected),
+        ).fetchall()
+    observed = {
+        str(name): str(object_type).lower()
+        for object_type, name, _sql in rows
+    }
+    if observed != {
+        name: object_type for name, (object_type, _sql) in expected.items()
+    }:
+        return -1
+    return len(expected)
 
 
 def _arguments() -> argparse.Namespace:
@@ -729,7 +741,7 @@ def main() -> int:
             or checks["backfill_rows_created"] != 0
         ):
             raise AssertionError("root integration value contract failed")
-        if checks["inventory_schema_object_count"] != 8:
+        if checks["inventory_schema_object_count"] != 5:
             raise AssertionError("inventory schema object contract failed")
         print(
             json.dumps(

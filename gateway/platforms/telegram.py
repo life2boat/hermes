@@ -113,6 +113,13 @@ from gateway.healbite_weekly_menu_telegram import (
     build_weekly_menu_presentation_for_now,
 )
 from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
+from gateway.healbite_inventory_telegram import (
+    INVENTORY_CALLBACK_PREFIX,
+    INVENTORY_CALLBACK_ROOT,
+    INVENTORY_COMMAND,
+    InventoryTelegramResult,
+    build_inventory_telegram_controller,
+)
 from gateway.healbite_family_telegram import (
     FAMILY_CALLBACK_ROOT,
     FAMILY_CALLBACK_PREFIX,
@@ -189,6 +196,7 @@ MAX_COMMANDS_PER_SCOPE = 30
 HEALBITE_REPLY_KEYBOARD_ROWS = [
     ["👤 Мой профиль", "🍎 Дневник еды"],
     ["📋 Меню на неделю", "🛒 Список покупок"],
+    ["🥕 Продукты дома"],
     ["⚖️ Трекер веса", "💧 Трекер воды"],
     ["👨‍👩‍👧 Семья", "📈 Отчет за неделю"],
     ["⚙️ Ограничения", "❓ Помощь"],
@@ -198,6 +206,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "🍎 Дневник еды": "/diary",
     "📋 Меню на неделю": WEEKLY_MENU_COMMAND,
     "🛒 Список покупок": SHOPPING_COMMAND,
+    "🥕 Продукты дома": INVENTORY_COMMAND,
     "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
     "👨‍👩‍👧 Семья": FAMILY_COMMAND,
@@ -560,6 +569,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._family_telegram = build_family_telegram_controller()
+        self._inventory_telegram = build_inventory_telegram_controller()
         self._shopping_telegram = build_shopping_telegram_controller()
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
@@ -3500,6 +3510,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite Family callbacks (always consumed locally) ---
         if data.startswith(FAMILY_CALLBACK_ROOT):
             await self._handle_healbite_family_callback(query, data)
+            return
+
+        # --- HealBite Inventory callbacks (always consumed locally) ---
+        if data.startswith(INVENTORY_CALLBACK_ROOT):
+            await self._handle_healbite_inventory_callback(query, data)
             return
 
         # --- HealBite Shopping callbacks (always consumed locally) ---
@@ -7025,6 +7040,254 @@ class TelegramAdapter(BasePlatformAdapter):
             if message is not None:
                 await self._send_healbite_family_result(message, result)
 
+    def _healbite_inventory_keyboard(
+        self,
+        result: InventoryTelegramResult,
+    ) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not result.screen.rows:
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=callback_data)
+                    for label, callback_data in row
+                ]
+                for row in result.screen.rows
+            ]
+        )
+
+    async def _send_healbite_inventory_continuations(
+        self,
+        msg: Message,
+        result: InventoryTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        for text in result.continuations:
+            kwargs: Dict[str, Any] = {
+                "chat_id": str(getattr(chat, "id", "")),
+                "text": text,
+                "message_thread_id": getattr(msg, "message_thread_id", None),
+            }
+            if result.screen.parse_mode == "HTML" and ParseMode is not None:
+                kwargs["parse_mode"] = ParseMode.HTML
+            await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _send_healbite_inventory_result(
+        self,
+        msg: Message,
+        result: InventoryTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        kwargs: Dict[str, Any] = {
+            "chat_id": str(getattr(chat, "id", "")),
+            "text": result.screen.text,
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_inventory_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+        await self._send_healbite_inventory_continuations(msg, result)
+
+    async def _maybe_handle_healbite_inventory_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (
+            text_override
+            if text_override is not None
+            else getattr(msg, "text", None) or ""
+        ).strip()
+        command_token = (
+            text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        )
+        if command_token != INVENTORY_COMMAND:
+            return False
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        result = self._inventory_telegram.home(actor_user_id)
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="inventory",
+                action="open",
+                result=result.state,
+            )
+        await self._send_healbite_inventory_result(msg, result)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="inventory",
+            action="open",
+            outcome=result.state,
+            error_type=result.error_class,
+        )
+        return True
+
+    async def _maybe_handle_healbite_inventory_pending_text(
+        self,
+        msg: Message,
+    ) -> bool:
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if self._inventory_telegram.pending_input_kind(actor_user_id) is None:
+            return False
+        result = self._inventory_telegram.handle_text(
+            actor_user_id,
+            getattr(msg, "text", None) or "",
+        )
+        if result is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="inventory_input",
+            action="text",
+            result=result.state,
+        )
+        await self._send_healbite_inventory_result(msg, result)
+        return True
+
+    async def _maybe_handle_healbite_inventory_photo(
+        self,
+        msg: Message,
+    ) -> bool:
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if self._inventory_telegram.pending_input_kind(actor_user_id) != "photo":
+            return False
+        photo = self._largest_photo_size(msg)
+        if photo is None:
+            return False
+        image_bytes = b""
+        try:
+            allowed, _note = self._telegram_media_size_allowed(
+                photo,
+                "inventory photo",
+            )
+            if allowed:
+                file_obj = await photo.get_file()
+                image_bytes = bytes(await file_obj.download_as_bytearray())
+        except Exception:
+            image_bytes = b""
+        result = await self._inventory_telegram.handle_photo_bytes(
+            actor_user_id,
+            image_bytes,
+        )
+        if result is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="inventory_input",
+            action="photo",
+            result=result.state,
+        )
+        await self._send_healbite_inventory_result(msg, result)
+        return True
+
+    @staticmethod
+    def _healbite_inventory_source_message(query: Any) -> Optional[Message]:
+        message = getattr(query, "message", None)
+        if message is None:
+            return None
+        if (
+            isinstance(MaybeInaccessibleMessage, type)
+            and isinstance(message, MaybeInaccessibleMessage)
+            and not isinstance(message, Message)
+        ):
+            return None
+        chat = getattr(message, "chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
+            return None
+        if getattr(message, "message_id", None) is None:
+            return None
+        return message
+
+    async def _handle_healbite_inventory_callback(
+        self,
+        query: Any,
+        data: str,
+    ) -> None:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        message = self._healbite_inventory_source_message(query)
+        if message is None:
+            try:
+                await query.answer(text="Эта кнопка больше недоступна.")
+            except Exception:
+                pass
+            return
+        generation_requested = data.startswith(
+            (
+                f"{INVENTORY_CALLBACK_PREFIX}g:",
+                f"{INVENTORY_CALLBACK_PREFIX}rg:",
+            )
+        )
+        if generation_requested:
+            try:
+                await query.answer(text="Составляю черновик меню…")
+            except Exception:
+                pass
+            result = await asyncio.to_thread(
+                self._inventory_telegram.handle_callback,
+                actor_user_id,
+                data,
+            )
+        else:
+            result = self._inventory_telegram.handle_callback(actor_user_id, data)
+        self._log_healbite_route_selected(
+            msg=message,
+            route="inventory_callback",
+            action=result.state,
+            lane="healbite_public",
+            result=(
+                "blocked"
+                if result.state in {"disabled", "stale", "unavailable"}
+                else "allowed"
+            ),
+        )
+        if result.state == "back":
+            try:
+                await query.answer(text="Главное меню.")
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_menu_message(message, command="/menu")
+            return
+
+        answer_text = (
+            "Раздел пока недоступен."
+            if result.state == "disabled"
+            else "Действие недоступно."
+            if result.state in {
+                "stale",
+                "unavailable",
+                "invalid_input",
+                "vision_unavailable",
+                "generation_failed",
+                "generation_limited",
+            }
+            else "Обновлено."
+        )
+        if not generation_requested:
+            try:
+                await query.answer(text=answer_text)
+            except Exception:
+                pass
+        kwargs: Dict[str, Any] = {
+            "text": result.screen.text,
+            "reply_markup": self._healbite_inventory_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            await self._send_healbite_inventory_result(message, result)
+            return
+        await self._send_healbite_inventory_continuations(message, result)
+
     def _healbite_shopping_keyboard(
         self,
         result: ShoppingTelegramResult,
@@ -7222,6 +7485,20 @@ class TelegramAdapter(BasePlatformAdapter):
         if normalized_action == "/menu":
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
+        if normalized_action == INVENTORY_COMMAND:
+            return await self._maybe_handle_healbite_inventory_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if (
+            normalized_action == "/cancel"
+            and self._inventory_telegram.pending_input_kind(
+                getattr(getattr(msg, "from_user", None), "id", None)
+            )
+            is not None
+        ):
+            return await self._maybe_handle_healbite_inventory_pending_text(msg)
         if normalized_action == "/weight":
             return await self._maybe_handle_healbite_weight_command(
                 msg,
@@ -7331,6 +7608,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
+            return
+        if await self._maybe_handle_healbite_inventory_pending_text(msg):
             return
         if await self._maybe_handle_healbite_weight_pending_reply(msg):
             return
@@ -8027,6 +8306,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return
 
         msg = update.message
+
+        if msg.photo and await self._maybe_handle_healbite_inventory_photo(msg):
+            return
 
         msg_type = self._media_message_type(msg)
 

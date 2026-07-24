@@ -464,11 +464,34 @@ class HealBiteInventoryStore:
             raise InventoryStateError("inventory snapshot is not confirmed")
         return view
 
+    def get_latest_confirmed_snapshot(
+        self,
+        scope: InventoryOwnerScope,
+    ) -> InventorySnapshotView | None:
+        owner_column = "owner_user_id" if scope.user_id is not None else "household_id"
+        owner_value = scope.user_id if scope.user_id is not None else scope.household_id
+        with self._connection_scope() as conn:
+            row = conn.execute(
+                f"""
+                SELECT id
+                FROM {INVENTORY_SNAPSHOTS_TABLE}
+                WHERE {owner_column} = ? AND status = ?
+                ORDER BY confirmed_at DESC, id DESC
+                LIMIT 1
+                """,
+                (owner_value, InventoryStatus.CONFIRMED.value),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._load_snapshot(conn, str(row["id"]), scope)
+
     def replace_pending_items(
         self,
         scope: InventoryOwnerScope,
         snapshot_id: str,
         items: Sequence[InventoryItemInput],
+        *,
+        expected_source_revision: int | None = None,
     ) -> InventorySnapshotView:
         normalized_items = [_normalize_item_input(item) for item in items]
         if not normalized_items:
@@ -477,6 +500,11 @@ class HealBiteInventoryStore:
             view = self._load_snapshot(conn, snapshot_id, scope)
             if view.snapshot.status is not InventoryStatus.PENDING:
                 raise InventoryStateError("only pending inventory snapshots may be edited")
+            if (
+                expected_source_revision is not None
+                and view.snapshot.source_revision != int(expected_source_revision)
+            ):
+                raise InventoryStateError("inventory snapshot revision changed")
             conn.execute(f"DELETE FROM {INVENTORY_ITEMS_TABLE} WHERE snapshot_id = ?", (view.snapshot.id,))
             now = _timestamp()
             for position, item in enumerate(normalized_items, start=1):
@@ -494,9 +522,20 @@ class HealBiteInventoryStore:
             )
             return self._load_snapshot(conn, view.snapshot.id, scope)
 
-    def confirm_snapshot(self, scope: InventoryOwnerScope, snapshot_id: str) -> InventorySnapshotView:
+    def confirm_snapshot(
+        self,
+        scope: InventoryOwnerScope,
+        snapshot_id: str,
+        *,
+        expected_source_revision: int | None = None,
+    ) -> InventorySnapshotView:
         with self._write_transaction() as conn:
             view = self._load_snapshot(conn, snapshot_id, scope)
+            if (
+                expected_source_revision is not None
+                and view.snapshot.source_revision != int(expected_source_revision)
+            ):
+                raise InventoryStateError("inventory snapshot revision changed")
             if view.snapshot.status is InventoryStatus.CONFIRMED:
                 return view
             if view.snapshot.status is not InventoryStatus.PENDING:
@@ -507,9 +546,20 @@ class HealBiteInventoryStore:
             )
             return self._load_snapshot(conn, view.snapshot.id, scope)
 
-    def cancel_snapshot(self, scope: InventoryOwnerScope, snapshot_id: str) -> InventorySnapshotView:
+    def cancel_snapshot(
+        self,
+        scope: InventoryOwnerScope,
+        snapshot_id: str,
+        *,
+        expected_source_revision: int | None = None,
+    ) -> InventorySnapshotView:
         with self._write_transaction() as conn:
             view = self._load_snapshot(conn, snapshot_id, scope)
+            if (
+                expected_source_revision is not None
+                and view.snapshot.source_revision != int(expected_source_revision)
+            ):
+                raise InventoryStateError("inventory snapshot revision changed")
             if view.snapshot.status is InventoryStatus.CANCELLED:
                 return view
             if view.snapshot.status is not InventoryStatus.PENDING:

@@ -537,20 +537,23 @@ of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tab
 and false execution/deletion state
 both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
 descriptors before production source inspection; their path, filesystem identity,
-mode and SHA-256 are recorded in plan schema version 4
+mode and SHA-256 are recorded in plan schema version 5
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
 Household and Shopping enabled flags must both be explicit JSON booleans false,
 and both allowlists must be empty in that pinned canonical contract
 the target schema version and fingerprint are derived from trusted migration
-code, recorded in the plan, and independently recalculated during execute
+code, recorded in the plan, and independently recalculated during execute;
+the same plan records the ordered canonical migration registry with component
+identity and SHA-256, including the Inventory migration, and execute rejects
+any registry drift
 production execute requires exact --plan, --expected-plan-sha256,
 --confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
 plus independent --confirm-operations-root-approval-sha256 and
 --confirm-clean-start-policy-sha256 values
 production execute also requires --final-authority and
---expected-final-authority-sha256; plan schema version 3 and any execute without
+--expected-final-authority-sha256; plan schema version 4 and any execute without
 these arguments are audit-only and denied before quiescence
 execution authority schema version 1 binds the exact plan, native approval,
 clean-start policy, approval envelope, invocation descriptor, persistent DB

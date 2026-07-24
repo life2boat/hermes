@@ -25,6 +25,8 @@ from gateway.healbite_shopping_schema import ShoppingUnit
 
 INVENTORY_SNAPSHOTS_TABLE = "healbite_inventory_snapshots"
 INVENTORY_ITEMS_TABLE = "healbite_inventory_items"
+INVENTORY_SCHEMA_MIGRATION_ID = "healbite-inventory-schema-d883e0993c9b-v1"
+INVENTORY_SCHEMA_MIGRATION_SHA256 = "42961668c91ded98cd0252636a322a962264bda73b797222c10c1505d540c9f7"
 _MAX_NAME_LENGTH = 200
 _MAX_CATEGORY_LENGTH = 80
 _MAX_UNCERTAINTY_LENGTH = 200
@@ -182,7 +184,7 @@ _SUFFIX_QUANTITY_RE = re.compile(rf"^(?P<name>.+?)\s+(?P<quantity>{_DECIMAL_TOKE
 _COUNT_PREFIX_RE = re.compile(rf"^(?P<quantity>{_DECIMAL_TOKEN})\s+(?P<name>.+)$", re.IGNORECASE)
 
 
-_SCHEMA_SQL = f"""
+INVENTORY_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {INVENTORY_SNAPSHOTS_TABLE} (
     id TEXT PRIMARY KEY,
     owner_user_id INTEGER NULL,
@@ -219,6 +221,7 @@ CREATE TABLE IF NOT EXISTS {INVENTORY_ITEMS_TABLE} (
 CREATE INDEX IF NOT EXISTS idx_healbite_inventory_items_snapshot
     ON {INVENTORY_ITEMS_TABLE} (snapshot_id, position);
 """
+_SCHEMA_SQL = INVENTORY_SCHEMA_SQL
 
 
 def _timestamp() -> str:
@@ -391,9 +394,18 @@ class HealBiteInventoryStore:
                 if self._owns_connection:
                     conn.commit()
 
+    @staticmethod
+    def schema_statements() -> tuple[str, ...]:
+        """Return authoritative Inventory DDL without applying it."""
+        return tuple(
+            statement.strip()
+            for statement in INVENTORY_SCHEMA_SQL.split(";")
+            if statement.strip()
+        )
+
     def initialize_schema(self) -> None:
         with self._connection_scope() as conn:
-            conn.executescript(_SCHEMA_SQL)
+            conn.executescript(INVENTORY_SCHEMA_SQL)
             if self._owns_connection:
                 conn.commit()
 

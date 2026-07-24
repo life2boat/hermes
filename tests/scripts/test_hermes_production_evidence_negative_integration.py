@@ -61,7 +61,7 @@ def test_public_evidence_negative_matrix_uses_real_root_security() -> None:
         "gid_check_from_pinned_fd": True,
         "migration_container_started": False,
         "no_bytecode_files_created": True,
-        "negative_evidence_cases": 40,
+        "negative_evidence_cases": 41,
         "production_database_used": False,
         "public_execute_main_used": True,
         "public_plan_main_used": True,

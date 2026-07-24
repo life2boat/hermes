@@ -47,12 +47,13 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
     _fsync_directory,
     _issue_production_authorization,
     _prepare_authorized_production_execution,
+    _target_migration_registry,
     _target_schema_contract,
     _target_schema_fingerprint,
 )
 
 
-PLAN_VERSION = 4
+PLAN_VERSION = 5
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
@@ -151,6 +152,7 @@ PLAN_FIELDS = frozenset(
         "PREVIOUS_IMAGE_ID",
         "TARGET_SCHEMA_VERSION",
         "TARGET_SCHEMA_FINGERPRINT",
+        "MIGRATION_REGISTRY",
         "REPOSITORY_ROOT",
         "DEPLOYMENT_CONTRACT_CANONICAL_PATH",
         "DEPLOYMENT_CONTRACT_DEVICE",
@@ -1420,6 +1422,7 @@ def create_plan(args: argparse.Namespace) -> int:
     _inspect_image(args.migration_image_id, args.migration_image_revision)
     _inspect_image(args.previous_image_id, None)
     target_schema = _target_schema_contract()
+    migration_registry = _target_migration_registry()
     deployment_contract: PinnedDeploymentContract | None = None
     operations_root_approval: PinnedEvidenceDocument | None = None
     clean_start_policy: PinnedEvidenceDocument | None = None
@@ -1509,6 +1512,7 @@ def create_plan(args: argparse.Namespace) -> int:
             "PREVIOUS_IMAGE_ID": args.previous_image_id,
             "TARGET_SCHEMA_VERSION": target_schema.version,
             "TARGET_SCHEMA_FINGERPRINT": target_schema.fingerprint,
+            "MIGRATION_REGISTRY": migration_registry,
             "REPOSITORY_ROOT": str(repository_root),
             "DEPLOYMENT_CONTRACT_CANONICAL_PATH": str(
                 deployment_contract.path
@@ -1999,6 +2003,10 @@ def _revalidate_plan(
         )
         _inspect_image(migration_image, revision)
         _inspect_image(previous_image, None)
+        if plan.get("MIGRATION_REGISTRY") != _target_migration_registry():
+            raise ProductionGateError(
+                "TARGET_MIGRATION_REGISTRY_MISMATCH"
+            )
         expected_target = _target_schema_contract()
         if (
             plan.get("TARGET_SCHEMA_VERSION") != expected_target.version

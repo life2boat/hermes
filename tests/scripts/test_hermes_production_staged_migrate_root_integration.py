@@ -187,7 +187,7 @@ def test_public_plan_inspect_execute_runs_as_real_root_without_network() -> None
         "foreign_key_check": 0,
         "integrity_check": "ok",
         "network_none": True,
-        "inventory_schema_object_count": 8,
+        "inventory_schema_object_count": 5,
         "plan_creator_gid_recorded": True,
         "plan_creator_uid": 0,
         "production_db_used": False,

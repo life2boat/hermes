@@ -42,15 +42,26 @@ def _fresh_db(tmp_path: Path) -> Path:
 
 
 def _inventory_schema_object_count(path: Path) -> int:
+    expected = schema_migrate._expected_schema_objects(
+        schema_migrate._component_statements()["inventory"]
+    )
+    placeholders = ",".join("?" for _ in expected)
     with sqlite3.connect(path) as connection:
-        return int(
-            connection.execute(
-                "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE name LIKE 'healbite_inventory_%' "
-                "OR name LIKE 'idx_healbite_inventory_%' "
-                "OR name LIKE 'sqlite_autoindex_healbite_inventory_%'"
-            ).fetchone()[0]
-        )
+        rows = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            f"WHERE name IN ({placeholders})",
+            tuple(expected),
+        ).fetchall()
+    observed = {
+        str(name): (str(object_type).lower(), sql or "")
+        for object_type, name, sql in rows
+    }
+    assert set(observed) == set(expected)
+    for name, (expected_type, expected_sql) in expected.items():
+        actual_type, actual_sql = observed[name]
+        assert actual_type == expected_type
+        assert schema_migrate._normalize_schema_sql(actual_sql) == expected_sql
+    return len(expected)
 
 
 def test_registry_has_deterministic_inventory_identity_and_order() -> None:
@@ -142,7 +153,20 @@ def test_inventory_migration_is_atomic_and_idempotent(tmp_path: Path) -> None:
     assert first.exit_classification == "SUCCESS"
     assert second.exit_classification == "SUCCESS"
     assert second.schema_changed is False
-    assert _inventory_schema_object_count(db_path) == 8
+    with sqlite3.connect(db_path) as connection:
+        autoindexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE name LIKE 'sqlite_autoindex_healbite_inventory_%'"
+            )
+        }
+    assert len(autoindexes) == 3
+    assert _inventory_schema_object_count(db_path) == 5
+    expected_names = schema_migrate._expected_schema_objects(
+        schema_migrate._component_statements()["inventory"]
+    )
+    assert all(name not in expected_names for name in autoindexes)
 
 
 def test_target_plan_payload_uses_canonical_registry() -> None:

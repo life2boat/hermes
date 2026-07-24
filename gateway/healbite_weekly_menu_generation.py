@@ -235,6 +235,25 @@ def _generation_idempotency_key(idempotency_key: str) -> str:
     return "generate:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _generated_entry_description(
+    entry: WeeklyMenuGeneratedEntry,
+    *,
+    inventory_only: bool,
+) -> str | None:
+    detail = entry.description or "\n".join(entry.instructions) or None
+    if not inventory_only:
+        return detail
+    macros = entry.macros_per_serving
+    calories = entry.estimated_calories_per_serving
+    if macros is None or calories is None:
+        return detail
+    summary = (
+        f"КБЖУ на порцию: {calories} ккал; "
+        f"Б {macros.protein_g} г; Ж {macros.fat_g} г; У {macros.carbs_g} г"
+    )
+    return summary if detail is None else f"{summary}\n{detail}"
+
+
 class CanonicalWeeklyMenuMemberSnapshotProvider:
     def __init__(
         self,
@@ -674,7 +693,10 @@ class HealBiteWeeklyMenuGenerationService:
                 meal_slot=entry.meal_slot,
                 position=entry.position,
                 title=entry.title,
-                description=entry.description or "\n".join(entry.instructions) or None,
+                description=_generated_entry_description(
+                    entry,
+                    inventory_only=request.inventory_only,
+                ),
                 servings=entry.servings,
                 origin=WeeklyMenuEntryOrigin.GENERATED,
                 ingredients=tuple(

@@ -97,6 +97,43 @@ def test_snapshot_lifecycle_is_confirmed_idempotent_and_isolated(tmp_path):
     assert replay.items[0].quantity_value == "0.1"
 
 
+def test_mutations_revalidate_source_revision_inside_transaction(tmp_path):
+    store = HealBiteInventoryStore(db_path=tmp_path / "revision.db")
+    scope = InventoryOwnerScope(user_id=101)
+    initial = store.create_text_snapshot(scope, "rice 1 kg")
+    updated = store.replace_pending_items(
+        scope,
+        initial.snapshot.id,
+        [InventoryItemInput("brown rice", "1", "kg")],
+        expected_source_revision=initial.snapshot.source_revision,
+    )
+
+    with pytest.raises(InventoryStateError):
+        store.replace_pending_items(
+            scope,
+            initial.snapshot.id,
+            [InventoryItemInput("stale edit", "1", "kg")],
+            expected_source_revision=initial.snapshot.source_revision,
+        )
+    with pytest.raises(InventoryStateError):
+        store.confirm_snapshot(
+            scope,
+            initial.snapshot.id,
+            expected_source_revision=initial.snapshot.source_revision,
+        )
+    with pytest.raises(InventoryStateError):
+        store.cancel_snapshot(
+            scope,
+            initial.snapshot.id,
+            expected_source_revision=initial.snapshot.source_revision,
+        )
+
+    current = store.get_snapshot(scope, initial.snapshot.id)
+    assert current.snapshot.status is InventoryStatus.PENDING
+    assert current.snapshot.source_revision == updated.snapshot.source_revision
+    assert [item.display_name for item in current.items] == ["brown rice"]
+
+
 def test_photo_candidate_stays_pending_editable_and_gate_fails_closed(tmp_path):
     store = HealBiteInventoryStore(db_path=tmp_path / "inventory.db")
     scope = InventoryOwnerScope(user_id=101)
@@ -114,6 +151,33 @@ def test_photo_candidate_stays_pending_editable_and_gate_fails_closed(tmp_path):
     assert pending.snapshot.status is InventoryStatus.PENDING
     assert edited.snapshot.source_revision == 2
     assert edited.items[0].quantity_value == "2"
+
+
+def test_owned_inventory_transaction_rolls_back_partial_snapshot(tmp_path):
+    db_path = tmp_path / "rollback.db"
+    store = HealBiteInventoryStore(db_path=db_path)
+    store.initialize_schema()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_inventory_item
+            BEFORE INSERT ON healbite_inventory_items
+            BEGIN
+                SELECT RAISE(ABORT, 'synthetic item failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_text_snapshot(InventoryOwnerScope(user_id=101), "rice 1 kg")
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM healbite_inventory_snapshots"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM healbite_inventory_items"
+        ).fetchone()[0] == 0
 
 
 def test_local_delta_uses_decimal_known_compatible_inventory_only(tmp_path):
@@ -225,5 +289,9 @@ def test_existing_generation_service_accepts_only_confirmed_household_inventory(
     assert result.success is True
     assert result.revision_view is not None
     assert result.revision_view.revision.status.value == "draft"
+    assert result.revision_view.entries[0].description is not None
+    assert result.revision_view.entries[0].description.startswith(
+        "КБЖУ на порцию: 500 ккал; Б 30 г; Ж 15 г; У 40 г"
+    )
     assert result.missing_ingredients is not None
     assert [(item.normalized_name, item.quantity_value) for item in result.missing_ingredients.items] == [("chicken", "200")]

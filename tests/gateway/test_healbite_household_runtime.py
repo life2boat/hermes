@@ -307,6 +307,7 @@ def test_existing_telegram_keyboard_contract_routes_family_through_its_feature_g
     diary = "\U0001f34e \u0414\u043d\u0435\u0432\u043d\u0438\u043a \u0435\u0434\u044b"
     weekly_menu = "\U0001f4cb \u041c\u0435\u043d\u044e \u043d\u0430 \u043d\u0435\u0434\u0435\u043b\u044e"
     shopping = "\U0001f6d2 \u0421\u043f\u0438\u0441\u043e\u043a \u043f\u043e\u043a\u0443\u043f\u043e\u043a"
+    inventory = "\U0001f955 \u041f\u0440\u043e\u0434\u0443\u043a\u0442\u044b \u0434\u043e\u043c\u0430"
     weight = "\u2696\ufe0f \u0422\u0440\u0435\u043a\u0435\u0440 \u0432\u0435\u0441\u0430"
     water = "\U0001f4a7 \u0422\u0440\u0435\u043a\u0435\u0440 \u0432\u043e\u0434\u044b"
     family = "\U0001f468\u200d\U0001f469\u200d\U0001f467 \u0421\u0435\u043c\u044c\u044f"
@@ -317,11 +318,13 @@ def test_existing_telegram_keyboard_contract_routes_family_through_its_feature_g
     assert HEALBITE_REPLY_KEYBOARD_ROWS == [
         [profile, diary],
         [weekly_menu, shopping],
+        [inventory],
         [weight, water],
         [family, weekly_report],
         [restrictions, help_button],
     ]
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[weekly_menu] == "/weekly_menu"
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[shopping] == "/shopping"
+    assert HEALBITE_REPLY_KEYBOARD_ACTIONS[inventory] == "/inventory"
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS[family] == "/family"
     assert HEALBITE_PLACEHOLDER_REPLY == "\u0412 \u0440\u0430\u0437\u0440\u0430\u0431\u043e\u0442\u043a\u0435"

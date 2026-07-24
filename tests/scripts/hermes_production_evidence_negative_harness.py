@@ -176,6 +176,7 @@ EXECUTE_CASES = (
     ("legacy_plan_v1", 1, "PLAN_VERSION_OR_STATE_INVALID"),
     ("legacy_plan_v2", 1, "PLAN_VERSION_OR_STATE_INVALID"),
     ("legacy_plan_v3", 1, "PLAN_VERSION_OR_STATE_INVALID"),
+    ("legacy_plan_v4", 1, "PLAN_VERSION_OR_STATE_INVALID"),
     (
         "root_approval_confirmation_mismatch",
         1,
@@ -910,6 +911,7 @@ def _prepare_execute_case(
         "legacy_plan_v1",
         "legacy_plan_v2",
         "legacy_plan_v3",
+        "legacy_plan_v4",
     }
     if authority_before_mutation:
         final_path, final_sha256 = _create_final_authority(context, repository, plan)
@@ -951,6 +953,9 @@ def _prepare_execute_case(
         _rewrite_plan(plan)
     elif case == "legacy_plan_v3":
         plan.payload["PLAN_VERSION"] = 3
+        _rewrite_plan(plan)
+    elif case == "legacy_plan_v4":
+        plan.payload["PLAN_VERSION"] = 4
         _rewrite_plan(plan)
     elif case == "root_approval_confirmation_mismatch":
         overrides["confirm_operations_root_approval_sha256"] = "f" * 64

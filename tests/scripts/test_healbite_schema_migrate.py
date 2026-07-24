@@ -784,7 +784,7 @@ def test_borrowed_connection_is_not_closed(tmp_path: Path) -> None:
         selected=healbite_schema_migrate.ALL_COMPONENTS,
     )
     assert changed is True
-    assert len(phases) == 3
+    assert len(phases) == 4
     assert tracker.close_count == 0
     assert tracker.execute("SELECT 1").fetchone() == (1,)
     tracker.close()
@@ -959,7 +959,7 @@ def test_fresh_db_full_migration_order_and_sanitized_output(tmp_path: Path) -> N
     result = _run_cli(db_path)
     payload = _json_result(result)
     assert result.returncode == 0
-    assert [phase["name"] for phase in payload["phases"]] == ["household", "weekly", "shopping"]
+    assert [phase["name"] for phase in payload["phases"]] == ["household", "weekly", "shopping", "inventory"]
     assert payload["data_backfilled"] is False
     assert str(db_path) not in result.stdout
     assert "id" not in payload

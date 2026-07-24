@@ -363,6 +363,19 @@ def _empty_migrated_rows(path: Path) -> bool:
     return True
 
 
+def _inventory_schema_object_count(path: Path) -> int:
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE name LIKE 'healbite_inventory_%' "
+                "OR name LIKE 'idx_healbite_inventory_%' "
+                "OR name LIKE 'sqlite_autoindex_healbite_inventory_%'"
+            ).fetchone()[0]
+        )
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-root", required=True)
@@ -668,6 +681,7 @@ def main() -> int:
             "backfill_rows_created": 0
             if _empty_migrated_rows(source)
             else -1,
+            "inventory_schema_object_count": _inventory_schema_object_count(source),
             "final_schema_matches_planned_target": (
                 actual_target_fingerprint
                 == plan["TARGET_SCHEMA_FINGERPRINT"]
@@ -715,6 +729,8 @@ def main() -> int:
             or checks["backfill_rows_created"] != 0
         ):
             raise AssertionError("root integration value contract failed")
+        if checks["inventory_schema_object_count"] != 8:
+            raise AssertionError("inventory schema object contract failed")
         print(
             json.dumps(
                 {"status": "PASS", **checks},

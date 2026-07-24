@@ -16,6 +16,7 @@ import pytest
 
 from scripts import hermes_execution_authority as authority
 from scripts import hermes_production_staged_migrate as production
+from scripts import healbite_schema_migrate as schema_migrate
 from scripts import hermes_staged_schema_migrate as staged
 
 
@@ -85,6 +86,7 @@ EXECUTE_GATE_CASES = (
     ("deployment_contract_replaced", "DEPLOYMENT_CONTRACT_DRIFT"),
     ("target_schema_version_mismatch", "TARGET_SCHEMA_CONTRACT_MISMATCH"),
     ("target_schema_fingerprint_mismatch", "TARGET_SCHEMA_CONTRACT_MISMATCH"),
+    ("migration_registry_mismatch", "TARGET_MIGRATION_REGISTRY_MISMATCH"),
     ("active_sqlite_reader", "QUIESCENCE_FAILED"),
     ("active_sqlite_writer", "QUIESCENCE_FAILED"),
     ("unsupported_sidecar_after_plan", "UNSUPPORTED_SQLITE_SIDECAR"),
@@ -887,7 +889,7 @@ def test_runbook_documents_exact_evidence_binding_contract() -> None:
         "--final-authority",
         "--expected-final-authority-sha256",
         "NO_CLIENTS_CLEAN_START",
-        "plan schema version 4",
+        "plan schema version 5",
         "no generic force or skip-validation flag exists",
     ):
         assert required in runbook
@@ -931,6 +933,10 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["EXPECTED_FEATURE_FLAGS"] == production.EXPECTED_FEATURE_FLAGS
     assert payload["TARGET_SCHEMA_VERSION"] == target.version
     assert payload["TARGET_SCHEMA_FINGERPRINT"] == target.fingerprint
+    assert payload["MIGRATION_REGISTRY"] == (
+        schema_migrate.migration_registry_manifest()
+    )
+    assert payload["MIGRATION_REGISTRY"][-1]["component"] == "inventory"
     assert payload["SOURCE_USER_VERSION"] == 0
     assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(
         context.source.parent
@@ -1481,6 +1487,9 @@ def test_public_execute_gate_matrix_is_fail_closed_with_exact_deltas(
             _rewrite_plan(plan)
         elif case == "target_schema_fingerprint_mismatch":
             plan.payload["TARGET_SCHEMA_FINGERPRINT"] = "f" * 64
+            _rewrite_plan(plan)
+        elif case == "migration_registry_mismatch":
+            plan.payload["MIGRATION_REGISTRY"] = plan.payload["MIGRATION_REGISTRY"][:-1]
             _rewrite_plan(plan)
         elif case == "active_sqlite_reader":
             reader = sqlite3.connect(context.source, timeout=0)

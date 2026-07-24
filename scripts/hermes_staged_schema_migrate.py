@@ -1068,6 +1068,12 @@ def _expected_schema_names() -> set[str]:
     return names
 
 
+def _target_migration_registry() -> list[dict[str, str]]:
+    from scripts.healbite_schema_migrate import migration_registry_manifest
+
+    return migration_registry_manifest()
+
+
 def _target_schema_payload() -> dict[str, Any]:
     from scripts.healbite_schema_migrate import (
         _component_statements,
@@ -1085,6 +1091,7 @@ def _target_schema_payload() -> dict[str, Any]:
             objects[name] = contract
     return {
         "components": sorted(components),
+        "migrations": _target_migration_registry(),
         "objects": [
             {
                 "name": name,
@@ -1138,6 +1145,7 @@ def _target_schema_fingerprint_connection(
         raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
     actual_payload = {
         "components": payload["components"],
+        "migrations": payload["migrations"],
         "objects": [
             {
                 "name": name,

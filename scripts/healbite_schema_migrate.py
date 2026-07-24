@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Public migration-only CLI for HealBite household, weekly, and shopping schemas."""
+"""Public migration-only CLI for registered HealBite schemas."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from gateway.healbite_inventory import (
+    INVENTORY_SCHEMA_MIGRATION_ID,
+    INVENTORY_SCHEMA_MIGRATION_SHA256,
+    INVENTORY_SCHEMA_SQL,
+    HealBiteInventoryStore,
+)
 from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_shopping import HealBiteShoppingStore
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
@@ -93,8 +100,6 @@ _EXIT_PRECEDENCE_RANK = {
     classification: rank for rank, classification in enumerate(EXIT_CLASSIFICATION_PRECEDENCE)
 }
 
-ALL_COMPONENTS = ("household", "weekly", "shopping")
-
 
 class SchemaClassification(str, Enum):
     ABSENT = "ABSENT"
@@ -123,6 +128,14 @@ class ProcessIdentity:
     uid: int
     gid: int
     groups: frozenset[int]
+
+
+@dataclass(frozen=True)
+class MigrationComponent:
+    name: str
+    statements: tuple[str, ...]
+    migration_id: str
+    migration_sha256: str
 
 
 @dataclass(frozen=True)
@@ -642,11 +655,110 @@ def _classify_component_schema(
     return SchemaClassification.INCOMPATIBLE
 
 
+def _canonical_statement_bytes(statements: Sequence[str]) -> bytes:
+    normalized = tuple(statement.strip() for statement in statements if statement.strip())
+    if not normalized:
+        raise MigrationError(
+            ExitClassification.CONTRACT_DRIFT,
+            detail_code="MIGRATION_COMPONENT_EMPTY",
+        )
+    return (";\n".join(normalized) + ";\n").encode("utf-8")
+
+
+def _component(
+    name: str,
+    statements: Sequence[str],
+    *,
+    migration_id: str,
+    source_sql: str | None = None,
+    expected_sha256: str | None = None,
+) -> MigrationComponent:
+    normalized = tuple(statement.strip() for statement in statements if statement.strip())
+    source = (
+        (source_sql.strip() + "\n").encode("utf-8")
+        if source_sql is not None
+        else _canonical_statement_bytes(normalized)
+    )
+    migration_sha256 = hashlib.sha256(source).hexdigest()
+    if expected_sha256 is not None and migration_sha256 != expected_sha256:
+        raise MigrationError(
+            ExitClassification.CONTRACT_DRIFT,
+            detail_code="MIGRATION_COMPONENT_HASH_MISMATCH",
+            phase=name,
+        )
+    return MigrationComponent(
+        name=name,
+        statements=normalized,
+        migration_id=migration_id,
+        migration_sha256=migration_sha256,
+    )
+
+
+def _validate_component_registry(
+    registry: Sequence[MigrationComponent],
+) -> tuple[MigrationComponent, ...]:
+    normalized = tuple(registry)
+    names = tuple(component.name for component in normalized)
+    if len(names) != len(set(names)):
+        raise MigrationError(
+            ExitClassification.CONTRACT_DRIFT,
+            detail_code="MIGRATION_COMPONENT_DUPLICATE",
+        )
+    if any(not component.name or not component.migration_id for component in normalized):
+        raise MigrationError(
+            ExitClassification.CONTRACT_DRIFT,
+            detail_code="MIGRATION_COMPONENT_IDENTITY_INVALID",
+        )
+    return normalized
+
+
+def _component_registry() -> tuple[MigrationComponent, ...]:
+    return _validate_component_registry(
+        (
+            _component(
+                "household",
+                HealBiteHouseholdStore.schema_statements(),
+                migration_id="healbite-household-schema-v1",
+            ),
+            _component(
+                "weekly",
+                HealBiteWeeklyMenuStore.schema_statements(),
+                migration_id="healbite-weekly-schema-v1",
+            ),
+            _component(
+                "shopping",
+                HealBiteShoppingStore.schema_statements(),
+                migration_id="healbite-shopping-schema-v1",
+            ),
+            _component(
+                "inventory",
+                HealBiteInventoryStore.schema_statements(),
+                migration_id=INVENTORY_SCHEMA_MIGRATION_ID,
+                source_sql=INVENTORY_SCHEMA_SQL,
+                expected_sha256=INVENTORY_SCHEMA_MIGRATION_SHA256,
+            ),
+        )
+    )
+
+
+ALL_COMPONENTS = tuple(component.name for component in _component_registry())
+
+
+def migration_registry_manifest() -> list[dict[str, str]]:
+    return [
+        {
+            "component": component.name,
+            "migration_id": component.migration_id,
+            "migration_sha256": component.migration_sha256,
+        }
+        for component in _component_registry()
+    ]
+
+
 def _component_statements() -> dict[str, tuple[str, ...]]:
     return {
-        "household": HealBiteHouseholdStore.schema_statements(),
-        "weekly": HealBiteWeeklyMenuStore.schema_statements(),
-        "shopping": HealBiteShoppingStore.schema_statements(),
+        component.name: component.statements
+        for component in _component_registry()
     }
 
 

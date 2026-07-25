@@ -7087,8 +7087,22 @@ class TelegramAdapter(BasePlatformAdapter):
         }
         if result.screen.parse_mode == "HTML" and ParseMode is not None:
             kwargs["parse_mode"] = ParseMode.HTML
-        await self._send_message_with_thread_fallback(**kwargs)
-        await self._send_healbite_inventory_continuations(msg, result)
+        try:
+            await self._send_message_with_thread_fallback(**kwargs)
+            await self._send_healbite_inventory_continuations(msg, result)
+        except Exception:
+            log_inventory_text_observability(
+                action="reply_send",
+                lane="inventory_local",
+                result="failure",
+                safe_error_type="send_error",
+            )
+            raise
+        log_inventory_text_observability(
+            action="reply_send",
+            lane="inventory_local",
+            result="success",
+        )
 
     async def _maybe_handle_healbite_inventory_command(
         self,

@@ -88,6 +88,7 @@ _INVENTORY_OBSERVABILITY_ACTIONS = frozenset(
         "parse_result",
         "local_write",
         "review_result",
+        "reply_send",
         "generic_dispatch_detected",
     }
 )
@@ -102,6 +103,7 @@ _INVENTORY_OBSERVABILITY_ERROR_TYPES = frozenset(
         "feature_disabled",
         "local_unavailable",
         "render_error",
+        "send_error",
         "scope_unavailable",
         "validation_error",
     }

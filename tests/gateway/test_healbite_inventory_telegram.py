@@ -826,12 +826,14 @@ async def test_inventory_text_observability_records_local_sequence_without_priva
     actions = [field["action"] for field in fields]
     assert actions == [
         "command_accepted",
+        "reply_send",
         "pending_write",
         "text_callback_accepted",
         "next_text_classified",
         "local_handler_enter",
         "parse_result",
         "review_result",
+        "reply_send",
     ]
     assert all(
         record.levelno == logging.INFO
@@ -851,7 +853,10 @@ async def test_inventory_text_observability_records_local_sequence_without_priva
     }
     assert all(set(field) <= allowed_fields for field in fields)
     assert fields[-1]["result"] == "success"
-    assert fields[-1]["item_count"] == "1"
+    assert fields[-1]["action"] == "reply_send"
+    review_index = actions.index("review_result")
+    assert review_index < len(actions) - 1
+    assert fields[review_index]["item_count"] == "1"
 
     rendered = "\n".join(messages)
     for private_value in (
@@ -867,6 +872,44 @@ async def test_inventory_text_observability_records_local_sequence_without_priva
     assert "corr=" not in rendered
     adapter._enqueue_text_event.assert_not_called()
     adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inventory_send_observability_masks_failure_and_reraises(
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "observability-send-failure.db"
+    _seed_household(db_path)
+    adapter = _adapter(_controller(db_path))
+    private_text = "PRIVATE_SEND_TEXT 17 kg"
+    private_error = "PRIVATE_SEND_EXCEPTION credential-like-value"
+    failure = RuntimeError(private_error)
+    adapter._send_message_with_thread_fallback = AsyncMock(side_effect=failure)
+
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError) as raised:
+        await adapter._send_healbite_inventory_result(
+            _message(text=private_text, message_id=987654),
+            adapter._inventory_telegram.home(ACTOR),
+        )
+
+    assert raised.value is failure
+    fields = [
+        _inventory_observability_fields(message)
+        for message in _inventory_observability_messages(caplog)
+    ]
+    assert fields == [
+        {
+            "route": "inventory",
+            "action": "reply_send",
+            "lane": "inventory_local",
+            "result": "failure",
+            "safe_error_type": "send_error",
+        }
+    ]
+    rendered = "\n".join(_inventory_observability_messages(caplog))
+    for private_value in (private_text, private_error, str(ACTOR), "555", "987654"):
+        assert private_value not in rendered
 
 
 @pytest.mark.asyncio

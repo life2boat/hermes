@@ -167,13 +167,20 @@ _UNIT_ALIASES = {
     "package": ShoppingUnit.PACKAGE,
     "pack": ShoppingUnit.PACKAGE,
     "\u0433": ShoppingUnit.G,
+    "\u0433.": ShoppingUnit.G,
     "\u0433\u0440": ShoppingUnit.G,
     "\u0433\u0440.": ShoppingUnit.G,
     "\u043a\u0433": ShoppingUnit.KG,
+    "\u043a\u0433.": ShoppingUnit.KG,
     "\u043c\u043b": ShoppingUnit.ML,
+    "\u043c\u043b.": ShoppingUnit.ML,
     "\u043b": ShoppingUnit.L,
+    "\u043b.": ShoppingUnit.L,
     "\u0448\u0442": ShoppingUnit.PIECE,
     "\u0448\u0442.": ShoppingUnit.PIECE,
+    "\u0448\u0442\u0443\u043a\u0430": ShoppingUnit.PIECE,
+    "\u0448\u0442\u0443\u043a\u0438": ShoppingUnit.PIECE,
+    "\u0448\u0442\u0443\u043a": ShoppingUnit.PIECE,
     "\u0443\u043f": ShoppingUnit.PACKAGE,
     "\u0443\u043f.": ShoppingUnit.PACKAGE,
 }
@@ -323,7 +330,7 @@ def parse_inventory_text(text: str) -> tuple[InventoryItemInput, ...]:
                 InventoryItemInput(
                     display_name=match.group("name"),
                     quantity_value=match.group("quantity"),
-                    unit=match.group("unit"),
+                    unit=_normalize_unit(match.group("unit")),
                 )
             )
             continue

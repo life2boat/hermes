@@ -72,11 +72,38 @@ def test_text_parser_handles_lines_commas_quantity_units_and_unknown_values():
     parsed = parse_inventory_text("500 \u0433 \u043a\u0443\u0440\u0438\u0446\u044b, \u0440\u0438\u0441 1 \u043a\u0433\n3 \u044f\u0439\u0446\u0430\n\u0437\u0435\u043b\u0435\u043d\u044c")
 
     assert [(item.quantity_value, item.unit) for item in parsed] == [
-        ("500", "\u0433"),
-        ("1", "\u043a\u0433"),
+        ("500", ShoppingUnit.G),
+        ("1", ShoppingUnit.KG),
         ("3", ShoppingUnit.PIECE),
         (None, ShoppingUnit.UNKNOWN),
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "display_name", "quantity", "unit"),
+    [
+        ("рис 1 кг", "рис", "1", ShoppingUnit.KG),
+        ("рис 1 кг.", "рис", "1", ShoppingUnit.KG),
+        ("рис 500 г", "рис", "500", ShoppingUnit.G),
+        ("рис 500 г.", "рис", "500", ShoppingUnit.G),
+        ("яйца 3 шт", "яйца", "3", ShoppingUnit.PIECE),
+        ("яйца 3 шт.", "яйца", "3", ShoppingUnit.PIECE),
+        ("яйца 3 штуки", "яйца", "3", ShoppingUnit.PIECE),
+        ("морковь", "морковь", None, ShoppingUnit.UNKNOWN),
+    ],
+)
+def test_text_parser_normalizes_russian_units_with_trailing_periods(
+    text: str,
+    display_name: str,
+    quantity: str | None,
+    unit: ShoppingUnit,
+) -> None:
+    parsed = parse_inventory_text(text)
+
+    assert len(parsed) == 1
+    assert parsed[0].display_name == display_name
+    assert parsed[0].quantity_value == quantity
+    assert parsed[0].unit is unit
 
 
 def test_snapshot_lifecycle_is_confirmed_idempotent_and_isolated(tmp_path):

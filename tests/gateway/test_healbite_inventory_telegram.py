@@ -276,6 +276,33 @@ def test_text_review_edit_delete_confirm_and_isolation_state_machine(tmp_path):
     )
 
 
+def test_text_edit_reparses_period_unit_and_renders_russian_unit_labels(tmp_path):
+    db_path = tmp_path / "period-edit.db"
+    _seed_household(db_path)
+    controller = _controller(db_path)
+
+    home = controller.home(ACTOR)
+    waiting = controller.handle_callback(
+        ACTOR,
+        _find_callback(home, "Ввести список текстом"),
+    )
+    assert waiting.state == "awaiting_text"
+    review = controller.handle_text(ACTOR, "рис 500 г, яйца 3 шт")
+    assert review is not None and review.state == "review"
+    assert "рис — 500 г" in review.screen.text
+    assert "яйца — 3 шт." in review.screen.text
+    assert "piece" not in review.screen.text
+
+    awaiting_edit = controller.handle_callback(ACTOR, _find_callback(review, "Изм. 1"))
+    assert awaiting_edit.state == "awaiting_edit"
+
+    edited = controller.handle_text(ACTOR, "рис 1 кг.")
+    assert edited is not None and edited.state == "review"
+    assert "рис — 1 кг" in edited.screen.text
+    assert "яйца — 3 шт." in edited.screen.text
+    assert "количество не указано" not in edited.screen.text
+
+
 def test_text_ui_rejects_unbounded_item_count(tmp_path):
     db_path = tmp_path / "bounded.db"
     _seed_household(db_path)

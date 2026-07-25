@@ -873,6 +873,8 @@ async def test_inventory_text_observability_records_local_sequence_without_priva
 async def test_non_inventory_text_observability_reaches_only_generic_lane(tmp_path, caplog):
     controller = _controller(tmp_path / "observability-generic.db")
     adapter = _adapter(controller)
+    adapter._maybe_handle_healbite_weight_pending_reply = AsyncMock(return_value=False)
+    adapter._maybe_handle_healbite_water_pending_reply = AsyncMock(return_value=False)
     private_text = "PRIVATE_GENERIC_TEXT 884"
 
     with caplog.at_level(logging.INFO):

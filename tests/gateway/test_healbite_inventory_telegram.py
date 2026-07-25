@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+import gateway.healbite_inventory_telegram as inventory_telegram
 from gateway.config import PlatformConfig
 from gateway.healbite_feature_gates import FeatureGateConfig
 from gateway.healbite_households import HealBiteHouseholdStore
@@ -18,11 +19,13 @@ from gateway.healbite_inventory import (
     HealBiteInventoryStore,
     InventoryOwnerScope,
     InventoryStatus,
+    InventoryValidationError,
 )
 from gateway.healbite_inventory_telegram import (
     INVENTORY_COMMAND,
     INVENTORY_MAX_GENERATION_ATTEMPTS,
     INVENTORY_PLACEHOLDER_REPLY,
+    INVENTORY_TEXT_OBSERVABILITY_MARKER,
     HealBiteInventoryTelegramController,
     InventoryTelegramResult,
     build_inventory_telegram_controller,
@@ -121,8 +124,9 @@ def _message(
             id=actor,
             username="ignored",
             first_name="Ignored",
+            full_name="Ignored",
         ),
-        chat=SimpleNamespace(id=555, type="private"),
+        chat=SimpleNamespace(id=555, type="private", title=None, full_name=None),
         chat_id=555,
         message_thread_id=None,
         reply_to_message=None,
@@ -134,6 +138,7 @@ def _message(
         sticker=None,
         caption=None,
         media_group_id=None,
+        date=datetime(2026, 7, 25, tzinfo=timezone.utc),
     )
 
 
@@ -151,6 +156,19 @@ def _adapter(
     adapter._should_process_message = lambda msg, is_command=False: True
     adapter._ensure_forum_commands = AsyncMock()
     return adapter
+
+
+def _inventory_observability_messages(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if INVENTORY_TEXT_OBSERVABILITY_MARKER in record.getMessage()
+    ]
+
+
+def _inventory_observability_fields(message: str) -> dict[str, str]:
+    _, _, body = message.partition(INVENTORY_TEXT_OBSERVABILITY_MARKER)
+    return dict(part.split("=", 1) for part in body.strip().split())
 
 
 class _GenerationService:
@@ -760,3 +778,200 @@ async def test_inventory_callback_is_consumed_locally_without_payload_logging(
     rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert callback_data not in rendered_logs
     assert "секретный продукт" not in rendered_logs
+
+
+
+@pytest.mark.asyncio
+async def test_inventory_text_observability_records_local_sequence_without_private_data(
+    tmp_path,
+    caplog,
+):
+    db_path = tmp_path / "observability-sequence.db"
+    _seed_household(db_path)
+    controller = _controller(db_path)
+    adapter = _adapter(controller)
+    private_text = "PRIVATE_INVENTORY_PRODUCT 17 kg"
+    command = _message(text=INVENTORY_COMMAND)
+    callback_data = inventory_telegram.INVENTORY_CALLBACK_PREFIX + "t"
+    query = SimpleNamespace(
+        id="PRIVATE_SESSION_IDENTIFIER",
+        data=callback_data,
+        from_user=SimpleNamespace(id=ACTOR, first_name="Ignored"),
+        message=_message(text="old"),
+        answer=AsyncMock(),
+        edit_message_text=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        await adapter._handle_command(
+            SimpleNamespace(update_id=901, message=command, effective_message=None),
+            SimpleNamespace(),
+        )
+        await adapter._handle_callback_query(
+            SimpleNamespace(callback_query=query),
+            SimpleNamespace(),
+        )
+        await adapter._handle_text_message(
+            SimpleNamespace(
+                update_id=902,
+                message=_message(text=private_text),
+                effective_message=None,
+            ),
+            SimpleNamespace(),
+        )
+
+    messages = _inventory_observability_messages(caplog)
+    fields = [_inventory_observability_fields(message) for message in messages]
+    actions = [field["action"] for field in fields]
+    assert actions == [
+        "command_accepted",
+        "pending_write",
+        "text_callback_accepted",
+        "next_text_classified",
+        "local_handler_enter",
+        "parse_result",
+        "review_result",
+    ]
+    assert all(
+        record.levelno == logging.INFO
+        for record in caplog.records
+        if INVENTORY_TEXT_OBSERVABILITY_MARKER in record.getMessage()
+    )
+    allowed_fields = {
+        "route",
+        "action",
+        "lane",
+        "result",
+        "pending_present",
+        "canary_allowed",
+        "content_shape",
+        "item_count",
+        "safe_error_type",
+    }
+    assert all(set(field) <= allowed_fields for field in fields)
+    assert fields[-1]["result"] == "success"
+    assert fields[-1]["item_count"] == "1"
+
+    rendered = "\n".join(messages)
+    for private_value in (
+        str(ACTOR),
+        "555",
+        private_text,
+        callback_data,
+        "PRIVATE_SESSION_IDENTIFIER",
+        "kg",
+        "old",
+    ):
+        assert private_value not in rendered
+    assert "corr=" not in rendered
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_inventory_text_observability_reaches_only_generic_lane(tmp_path, caplog):
+    controller = _controller(tmp_path / "observability-generic.db")
+    adapter = _adapter(controller)
+    adapter._maybe_handle_healbite_weight_pending_reply = AsyncMock(return_value=False)
+    adapter._maybe_handle_healbite_water_pending_reply = AsyncMock(return_value=False)
+    private_text = "PRIVATE_GENERIC_TEXT 884"
+
+    with caplog.at_level(logging.INFO):
+        await adapter._handle_text_message(
+            SimpleNamespace(
+                update_id=903,
+                message=_message(text=private_text),
+                effective_message=None,
+            ),
+            SimpleNamespace(),
+        )
+
+    fields = [
+        _inventory_observability_fields(message)
+        for message in _inventory_observability_messages(caplog)
+    ]
+    assert [field["action"] for field in fields] == [
+        "next_text_classified",
+        "generic_dispatch_detected",
+    ]
+    assert all(field["lane"] == "generic" for field in fields)
+    assert all(field["pending_present"] == "false" for field in fields)
+    assert all(field["action"] != "local_handler_enter" for field in fields)
+    rendered = "\n".join(_inventory_observability_messages(caplog))
+    assert private_text not in rendered
+    assert str(ACTOR) not in rendered
+    adapter._enqueue_text_event.assert_called_once()
+
+
+def test_inventory_text_observability_masks_parser_errors(tmp_path, caplog, monkeypatch):
+    db_path = tmp_path / "observability-error.db"
+    _seed_household(db_path)
+    controller = _controller(db_path)
+    callback_data = inventory_telegram.INVENTORY_CALLBACK_PREFIX + "t"
+    assert controller.handle_callback(ACTOR, callback_data).state == "awaiting_text"
+    private_text = "PRIVATE_PARSE_TEXT 42"
+    private_error = "PRIVATE_PARSE_EXCEPTION"
+
+    def fail_parse(_text: str):
+        raise InventoryValidationError(private_error)
+
+    monkeypatch.setattr(inventory_telegram, "parse_inventory_text", fail_parse)
+    with caplog.at_level(logging.INFO):
+        result = controller.handle_text(ACTOR, private_text)
+
+    assert result is not None
+    assert result.state == "invalid_input"
+    fields = [
+        _inventory_observability_fields(message)
+        for message in _inventory_observability_messages(caplog)
+    ]
+    assert fields[-1] == {
+        "route": "inventory",
+        "action": "parse_result",
+        "lane": "inventory_local",
+        "result": "failure",
+        "pending_present": "true",
+        "content_shape": "plain_text",
+        "safe_error_type": "validation_error",
+    }
+    rendered = "\n".join(_inventory_observability_messages(caplog))
+    assert private_text not in rendered
+    assert private_error not in rendered
+    assert str(ACTOR) not in rendered
+
+
+
+def test_inventory_text_observability_masks_review_errors(tmp_path, caplog, monkeypatch):
+    db_path = tmp_path / "observability-review-error.db"
+    _seed_household(db_path)
+    controller = _controller(db_path)
+    callback_data = inventory_telegram.INVENTORY_CALLBACK_PREFIX + "t"
+    assert controller.handle_callback(ACTOR, callback_data).state == "awaiting_text"
+    private_text = "PRIVATE_REVIEW_TEXT 19 kg"
+    private_error = "PRIVATE_REVIEW_EXCEPTION"
+
+    def fail_review(_view):
+        raise RuntimeError(private_error)
+
+    monkeypatch.setattr(controller, "_review", fail_review)
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match=private_error):
+        controller.handle_text(ACTOR, private_text)
+
+    fields = [
+        _inventory_observability_fields(message)
+        for message in _inventory_observability_messages(caplog)
+    ]
+    assert fields[-1] == {
+        "route": "inventory",
+        "action": "review_result",
+        "lane": "inventory_local",
+        "result": "failure",
+        "pending_present": "false",
+        "item_count": "1",
+        "safe_error_type": "render_error",
+    }
+    rendered = "\n".join(_inventory_observability_messages(caplog))
+    assert private_text not in rendered
+    assert private_error not in rendered
+    assert str(ACTOR) not in rendered

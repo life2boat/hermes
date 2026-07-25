@@ -74,6 +74,15 @@ INVENTORY_ADD_PROMPT = (
 )
 INVENTORY_EMPTY_REPLY = "Подтверждённого списка пока нет."
 
+_RUSSIAN_UNIT_LABELS = {
+    "g": "\u0433",
+    "kg": "\u043a\u0433",
+    "ml": "\u043c\u043b",
+    "l": "\u043b",
+    "piece": "\u0448\u0442.",
+    "package": "\u0443\u043f.",
+    "unitless": "\u0435\u0434.",
+}
 
 @dataclass(frozen=True, slots=True)
 class InventoryTelegramScreen:
@@ -324,13 +333,15 @@ class HealBiteInventoryTelegramController:
     @staticmethod
     def _item_text(item: object) -> str:
         unit = getattr(item, "unit", None)
+        unit_value = str(getattr(unit, "value", unit))
         if (
             getattr(item, "quantity_value", None) is None
-            or getattr(unit, "value", unit) == "unknown"
+            or unit_value == "unknown"
         ):
             amount = "количество не указано"
         else:
-            amount = f"{escape(str(item.quantity_value))} {escape(str(unit.value))}"
+            unit_label = _RUSSIAN_UNIT_LABELS.get(unit_value, "\u0435\u0434.")
+            amount = f"{escape(str(item.quantity_value))} {escape(unit_label)}"
         uncertain = " · нужно уточнить" if getattr(item, "uncertainty", None) else ""
         return f"{escape(str(item.display_name))} — {amount}{uncertain}"
 

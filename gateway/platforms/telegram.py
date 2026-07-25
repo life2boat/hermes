@@ -119,6 +119,7 @@ from gateway.healbite_inventory_telegram import (
     INVENTORY_COMMAND,
     InventoryTelegramResult,
     build_inventory_telegram_controller,
+    log_inventory_text_observability,
 )
 from gateway.healbite_family_telegram import (
     FAMILY_CALLBACK_ROOT,
@@ -7108,6 +7109,12 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         result = self._inventory_telegram.home(actor_user_id)
+        log_inventory_text_observability(
+            action="command_accepted",
+            lane="inventory_local",
+            result="accepted" if result.state != "disabled" else "blocked",
+            canary_allowed=result.state != "disabled",
+        )
         if emit_route_marker:
             self._log_healbite_route_selected(
                 msg=msg,
@@ -7131,7 +7138,17 @@ class TelegramAdapter(BasePlatformAdapter):
         msg: Message,
     ) -> bool:
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
-        if self._inventory_telegram.pending_input_kind(actor_user_id) is None:
+        pending_present = (
+            self._inventory_telegram.pending_input_kind(actor_user_id) is not None
+        )
+        log_inventory_text_observability(
+            action="next_text_classified",
+            lane="inventory_local" if pending_present else "generic",
+            result="consumed" if pending_present else "continued",
+            pending_present=pending_present,
+            content_shape="plain_text",
+        )
+        if not pending_present:
             return False
         result = self._inventory_telegram.handle_text(
             actor_user_id,
@@ -7233,6 +7250,20 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         else:
             result = self._inventory_telegram.handle_callback(actor_user_id, data)
+        if data == f"{INVENTORY_CALLBACK_PREFIX}t":
+            pending_present = (
+                self._inventory_telegram.pending_input_kind(actor_user_id) == "text"
+            )
+            log_inventory_text_observability(
+                action="text_callback_accepted",
+                lane="inventory_local",
+                result="accepted" if pending_present else "failure",
+                pending_present=pending_present,
+                canary_allowed=result.state != "disabled",
+                safe_error_type=(
+                    None if pending_present else "callback_unavailable"
+                ),
+            )
         self._log_healbite_route_selected(
             msg=message,
             route="inventory_callback",
@@ -7635,6 +7666,13 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         event = self._apply_telegram_group_observe_attribution(event)
+        log_inventory_text_observability(
+            action="generic_dispatch_detected",
+            lane="generic",
+            result="selected",
+            pending_present=False,
+            content_shape="plain_text",
+        )
         self._log_healbite_route_selected(
             msg=msg,
             update_id=update.update_id,

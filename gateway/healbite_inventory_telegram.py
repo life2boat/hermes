@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -73,6 +74,92 @@ INVENTORY_ADD_PROMPT = (
     "Отправьте один продукт: название [количество] [единица]. /cancel — отменить."
 )
 INVENTORY_EMPTY_REPLY = "Подтверждённого списка пока нет."
+INVENTORY_TEXT_OBSERVABILITY_MARKER = "[HealBite][inventory_text_observability]"
+
+logger = logging.getLogger(__name__)
+
+_INVENTORY_OBSERVABILITY_ACTIONS = frozenset(
+    {
+        "command_accepted",
+        "text_callback_accepted",
+        "pending_write",
+        "next_text_classified",
+        "local_handler_enter",
+        "parse_result",
+        "local_write",
+        "review_result",
+        "generic_dispatch_detected",
+    }
+)
+_INVENTORY_OBSERVABILITY_LANES = frozenset({"inventory_local", "generic"})
+_INVENTORY_OBSERVABILITY_RESULTS = frozenset(
+    {"accepted", "blocked", "consumed", "continued", "failure", "selected", "success"}
+)
+_INVENTORY_OBSERVABILITY_CONTENT_SHAPES = frozenset({"plain_text"})
+_INVENTORY_OBSERVABILITY_ERROR_TYPES = frozenset(
+    {
+        "callback_unavailable",
+        "feature_disabled",
+        "local_unavailable",
+        "render_error",
+        "scope_unavailable",
+        "validation_error",
+    }
+)
+
+
+def _inventory_observability_token(value: str, allowed: frozenset[str]) -> str:
+    return value if value in allowed else "unknown"
+
+
+def log_inventory_text_observability(
+    *,
+    action: str,
+    lane: str,
+    result: str,
+    pending_present: bool | None = None,
+    canary_allowed: bool | None = None,
+    content_shape: str | None = None,
+    item_count: int | None = None,
+    safe_error_type: str | None = None,
+) -> None:
+    """Emit a fixed-shape marker without request, identity, or exception data."""
+    fields: list[tuple[str, str]] = [
+        ("route", "inventory"),
+        ("action", _inventory_observability_token(action, _INVENTORY_OBSERVABILITY_ACTIONS)),
+        ("lane", _inventory_observability_token(lane, _INVENTORY_OBSERVABILITY_LANES)),
+        ("result", _inventory_observability_token(result, _INVENTORY_OBSERVABILITY_RESULTS)),
+    ]
+    if pending_present is not None:
+        fields.append(("pending_present", str(pending_present).lower()))
+    if canary_allowed is not None:
+        fields.append(("canary_allowed", str(canary_allowed).lower()))
+    if content_shape is not None:
+        fields.append(
+            (
+                "content_shape",
+                _inventory_observability_token(
+                    content_shape, _INVENTORY_OBSERVABILITY_CONTENT_SHAPES
+                ),
+            )
+        )
+    if item_count is not None:
+        fields.append(("item_count", str(item_count)))
+    if safe_error_type is not None:
+        fields.append(
+            (
+                "safe_error_type",
+                _inventory_observability_token(
+                    safe_error_type, _INVENTORY_OBSERVABILITY_ERROR_TYPES
+                ),
+            )
+        )
+    logger.info(
+        "%s %s",
+        INVENTORY_TEXT_OBSERVABILITY_MARKER,
+        " ".join(f"{key}={value}" for key, value in fields),
+    )
+
 
 _RUSSIAN_UNIT_LABELS = {
     "g": "\u0433",
@@ -547,6 +634,15 @@ class HealBiteInventoryTelegramController:
         if callback.action in {"t", "p"}:
             kind = "text" if callback.action == "t" else "photo"
             if not self._gate(kind, actor_user_id).ready:
+                if kind == "text":
+                    log_inventory_text_observability(
+                        action="pending_write",
+                        lane="inventory_local",
+                        result="failure",
+                        pending_present=False,
+                        canary_allowed=False,
+                        safe_error_type="feature_disabled",
+                    )
                 return self._result(
                     "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
                 )
@@ -559,12 +655,29 @@ class HealBiteInventoryTelegramController:
                 HouseholdValidationError,
                 OSError,
             ):
+                if kind == "text":
+                    log_inventory_text_observability(
+                        action="pending_write",
+                        lane="inventory_local",
+                        result="failure",
+                        pending_present=False,
+                        canary_allowed=True,
+                        safe_error_type="scope_unavailable",
+                    )
                 return self._result(
                     "unavailable",
                     INVENTORY_UNAVAILABLE_REPLY,
                     error_class="household_unavailable",
                 )
             self._pending[actor] = _PendingInput(kind)
+            if kind == "text":
+                log_inventory_text_observability(
+                    action="pending_write",
+                    lane="inventory_local",
+                    result="success",
+                    pending_present=True,
+                    canary_allowed=True,
+                )
             return self._result(
                 "awaiting_" + kind,
                 INVENTORY_TEXT_PROMPT if kind == "text" else INVENTORY_PHOTO_PROMPT,
@@ -748,12 +861,37 @@ class HealBiteInventoryTelegramController:
         if str(text).lstrip().startswith("/"):
             return None
         if not self._gate("text", actor).ready:
+            log_inventory_text_observability(
+                action="local_handler_enter",
+                lane="inventory_local",
+                result="failure",
+                pending_present=True,
+                canary_allowed=False,
+                content_shape="plain_text",
+                safe_error_type="feature_disabled",
+            )
             return self._result(
                 "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
             )
+        log_inventory_text_observability(
+            action="local_handler_enter",
+            lane="inventory_local",
+            result="success",
+            pending_present=True,
+            canary_allowed=True,
+            content_shape="plain_text",
+        )
         try:
             _actor, scope, _context = self._resolve_scope(actor)
             parsed = parse_inventory_text(text)
+            log_inventory_text_observability(
+                action="parse_result",
+                lane="inventory_local",
+                result="success",
+                pending_present=True,
+                content_shape="plain_text",
+                item_count=len(parsed),
+            )
             if len(parsed) > INVENTORY_MAX_ITEMS:
                 raise InventoryValidationError("inventory item limit exceeded")
             store = self._store()
@@ -807,6 +945,14 @@ class HealBiteInventoryTelegramController:
                     expected_source_revision=pending.source_revision,
                 )
         except (InventoryValidationError, ValueError):
+            log_inventory_text_observability(
+                action="parse_result",
+                lane="inventory_local",
+                result="failure",
+                pending_present=True,
+                content_shape="plain_text",
+                safe_error_type="validation_error",
+            )
             prompt = (
                 INVENTORY_TEXT_PROMPT
                 if pending.mode == "text"
@@ -824,11 +970,37 @@ class HealBiteInventoryTelegramController:
             InventoryStateError,
             OSError,
         ):
+            log_inventory_text_observability(
+                action="local_write",
+                lane="inventory_local",
+                result="failure",
+                pending_present=True,
+                safe_error_type="local_unavailable",
+            )
             return self._result(
                 "unavailable", INVENTORY_UNAVAILABLE_REPLY, error_class="unavailable"
             )
         self._pending.pop(actor, None)
-        return self._review(view)
+        try:
+            review = self._review(view)
+        except Exception:
+            log_inventory_text_observability(
+                action="review_result",
+                lane="inventory_local",
+                result="failure",
+                pending_present=False,
+                item_count=len(view.items),
+                safe_error_type="render_error",
+            )
+            raise
+        log_inventory_text_observability(
+            action="review_result",
+            lane="inventory_local",
+            result="success",
+            pending_present=False,
+            item_count=len(view.items),
+        )
+        return review
 
     async def handle_photo_bytes(
         self, actor_user_id: object, image_bytes: bytes

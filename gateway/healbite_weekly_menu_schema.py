@@ -23,6 +23,7 @@ class WeeklyMenuSchemaState(str, Enum):
 
 class WeeklyMenuRevisionStatus(str, Enum):
     DRAFT = "draft"
+    APPROVED = "approved"
     PUBLISHED = "published"
     ARCHIVED = "archived"
 
@@ -43,6 +44,7 @@ class WeeklyMenuEntryOrigin(str, Enum):
 class WeeklyMenuIdempotencyOperation(str, Enum):
     CREATE_DRAFT = "create_draft"
     REPLACE_DRAFT_ENTRIES = "replace_draft_entries"
+    APPROVE_REVISION = "approve_revision"
     PUBLISH_REVISION = "publish_revision"
     ARCHIVE_REVISION = "archive_revision"
 
@@ -71,6 +73,7 @@ EXPECTED_INDEXES = {
     "idx_weekly_menu_revisions_series_revision_unique",
     "idx_weekly_menu_revisions_id_household",
     "idx_weekly_menu_revisions_single_draft",
+    "idx_weekly_menu_revisions_single_approved",
     "idx_weekly_menu_revisions_single_published",
     "idx_weekly_menu_entries_menu_slot_position_unique",
     "idx_weekly_menu_entries_menu_local_date_slot_position",
@@ -221,6 +224,7 @@ EXPECTED_INDEX_DETAILS = {
     "idx_weekly_menu_revisions_series_revision_unique": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 0, "columns": ("series_id", "revision_number"), "where": None},
     "idx_weekly_menu_revisions_id_household": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 0, "columns": ("id", "household_id"), "where": None},
     "idx_weekly_menu_revisions_single_draft": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 1, "columns": ("series_id",), "where": "status = 'draft'"},
+    "idx_weekly_menu_revisions_single_approved": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 1, "columns": ("series_id",), "where": "status = 'approved'"},
     "idx_weekly_menu_revisions_single_published": {"table": WEEKLY_MENU_REVISIONS_TABLE, "unique": 1, "partial": 1, "columns": ("series_id",), "where": "status = 'published'"},
     "idx_weekly_menu_entries_menu_slot_position_unique": {"table": WEEKLY_MENU_ENTRIES_TABLE, "unique": 1, "partial": 0, "columns": ("menu_id", "local_date", "meal_slot", "position"), "where": None},
     "idx_weekly_menu_entries_menu_local_date_slot_position": {"table": WEEKLY_MENU_ENTRIES_TABLE, "unique": 0, "partial": 0, "columns": ("menu_id", "local_date", "meal_slot", "position"), "where": None},
@@ -229,7 +233,7 @@ EXPECTED_INDEX_DETAILS = {
 }
 EXPECTED_CHECK_SNIPPETS = {
     WEEKLY_MENU_SERIES_TABLE: ("strftime('%w', week_start) = '1'", "CHECK (version >= 1)"),
-    WEEKLY_MENU_REVISIONS_TABLE: ("status IN ('draft', 'published', 'archived')", "revision_number >= 1", "status = 'draft'", "status = 'published'", "status = 'archived'"),
+    WEEKLY_MENU_REVISIONS_TABLE: ("status IN ('draft', 'approved', 'published', 'archived')", "revision_number >= 1", "status = 'draft'", "status = 'approved'", "status = 'published'", "status = 'archived'"),
     WEEKLY_MENU_ENTRIES_TABLE: ("meal_slot IN ('breakfast', 'lunch', 'dinner', 'snack')", "position >= 1", "length(trim(title)) > 0", "origin IN ('generated', 'manual', 'copied')"),
     WEEKLY_MENU_INGREDIENTS_TABLE: (
         "position >= 1",
@@ -238,8 +242,27 @@ EXPECTED_CHECK_SNIPPETS = {
         "length(trim(quantity_value)) > 0",
         "length(trim(recipe_base_servings)) > 0",
     ),
-    WEEKLY_MENU_IDEMPOTENCY_TABLE: ("operation IN ('create_draft', 'replace_draft_entries', 'publish_revision', 'archive_revision')", "length(trim(idempotency_key)) BETWEEN 1 AND 128", "length(payload_fingerprint) = 64"),
+    WEEKLY_MENU_IDEMPOTENCY_TABLE: ("operation IN ('create_draft', 'replace_draft_entries', 'approve_revision', 'publish_revision', 'archive_revision')", "length(trim(idempotency_key)) BETWEEN 1 AND 128", "length(payload_fingerprint) = 64"),
 }
+
+LEGACY_V1_EXPECTED_CHECK_SNIPPETS = {
+    **EXPECTED_CHECK_SNIPPETS,
+    WEEKLY_MENU_REVISIONS_TABLE: (
+        "status IN ('draft', 'published', 'archived')",
+        "revision_number >= 1",
+        "status = 'draft'",
+        "status = 'published'",
+        "status = 'archived'",
+    ),
+    WEEKLY_MENU_IDEMPOTENCY_TABLE: (
+        "operation IN ('create_draft', 'replace_draft_entries', 'publish_revision', 'archive_revision')",
+        "length(trim(idempotency_key)) BETWEEN 1 AND 128",
+        "length(payload_fingerprint) = 64",
+    ),
+}
+
+_MIGRATION_REVISIONS_TABLE = "household_weekly_menus__approval_v2"
+_MIGRATION_IDEMPOTENCY_TABLE = "household_weekly_menu_idempotency__approval_v2"
 
 
 def _quoted(values: tuple[str, ...]) -> str:
@@ -286,6 +309,7 @@ CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_REVISIONS_TABLE} (
     FOREIGN KEY (created_by_member_id) REFERENCES household_members(id) ON DELETE RESTRICT,
     CHECK (
         (status = 'draft' AND published_at IS NULL AND archived_at IS NULL)
+        OR (status = 'approved' AND published_at IS NULL AND archived_at IS NULL)
         OR (status = 'published' AND published_at IS NOT NULL AND archived_at IS NULL)
         OR (status = 'archived' AND archived_at IS NOT NULL)
     )
@@ -297,6 +321,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_revisions_id_household
 CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_revisions_single_draft
     ON {WEEKLY_MENU_REVISIONS_TABLE} (series_id)
     WHERE status = 'draft';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_revisions_single_approved
+    ON {WEEKLY_MENU_REVISIONS_TABLE} (series_id)
+    WHERE status = 'approved';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_revisions_single_published
     ON {WEEKLY_MENU_REVISIONS_TABLE} (series_id)
     WHERE status = 'published';
@@ -536,9 +563,20 @@ def _matches_index_metadata(actual: dict[str, dict[str, object]], expected: dict
     return True
 
 
-def _matches_check_snippets(conn: sqlite3.Connection, table: str) -> bool:
+def _matches_check_snippets_for(
+    conn: sqlite3.Connection,
+    table: str,
+    snippets_by_table: dict[str, tuple[str, ...]],
+) -> bool:
     sql = _normalized_create_sql(conn, table)
-    return all(" ".join(snippet.lower().split()) in sql for snippet in EXPECTED_CHECK_SNIPPETS[table])
+    return all(
+        " ".join(snippet.lower().split()) in sql
+        for snippet in snippets_by_table[table]
+    )
+
+
+def _matches_check_snippets(conn: sqlite3.Connection, table: str) -> bool:
+    return _matches_check_snippets_for(conn, table, EXPECTED_CHECK_SNIPPETS)
 
 
 def _partial_weekly_schema_is_compatible(conn: sqlite3.Connection, present: set[str]) -> bool:
@@ -623,6 +661,191 @@ def detect_weekly_menu_schema_state(conn: sqlite3.Connection) -> WeeklyMenuSchem
     if not _matches_check_snippets(conn, WEEKLY_MENU_IDEMPOTENCY_TABLE):
         return WeeklyMenuSchemaState.INCOMPATIBLE
     return WeeklyMenuSchemaState.CANONICAL
+
+
+def is_weekly_menu_schema_v1(conn: sqlite3.Connection) -> bool:
+    if EXPECTED_TABLES.intersection(_table_names(conn)) != EXPECTED_TABLES:
+        return False
+    table_details = {
+        WEEKLY_MENU_SERIES_TABLE: EXPECTED_SERIES_COLUMN_DETAILS,
+        WEEKLY_MENU_REVISIONS_TABLE: EXPECTED_REVISION_COLUMN_DETAILS,
+        WEEKLY_MENU_ENTRIES_TABLE: EXPECTED_ENTRY_COLUMN_DETAILS,
+        WEEKLY_MENU_INGREDIENTS_TABLE: EXPECTED_INGREDIENT_COLUMN_DETAILS,
+        WEEKLY_MENU_IDEMPOTENCY_TABLE: EXPECTED_IDEMPOTENCY_COLUMN_DETAILS,
+    }
+    if any(
+        not _matches_column_details(_table_column_details(conn, table), details)
+        for table, details in table_details.items()
+    ):
+        return False
+    if any(
+        _foreign_keys(conn, table) != EXPECTED_FOREIGN_KEYS[table]
+        for table in EXPECTED_TABLES
+    ):
+        return False
+    legacy_indexes = EXPECTED_INDEXES - {
+        "idx_weekly_menu_revisions_single_approved"
+    }
+    names = _index_names(conn)
+    if (
+        "idx_weekly_menu_revisions_single_approved" in names
+        or not legacy_indexes.issubset(names)
+    ):
+        return False
+    if not _matches_index_metadata(
+        _index_metadata(conn),
+        {name: EXPECTED_INDEX_DETAILS[name] for name in legacy_indexes},
+    ):
+        return False
+    return all(
+        _matches_check_snippets_for(
+            conn,
+            table,
+            LEGACY_V1_EXPECTED_CHECK_SNIPPETS,
+        )
+        for table in EXPECTED_TABLES
+    )
+
+
+def migrate_weekly_menu_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError("weekly schema migration requires transaction")
+    if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 0:
+        raise sqlite3.OperationalError("weekly schema migration requires suspended foreign keys")
+    if not is_weekly_menu_schema_v1(conn):
+        raise sqlite3.OperationalError("weekly schema v1 migration precondition failed")
+    existing_tables = _table_names(conn)
+    if {
+        _MIGRATION_REVISIONS_TABLE,
+        _MIGRATION_IDEMPOTENCY_TABLE,
+    }.intersection(existing_tables):
+        raise sqlite3.OperationalError("weekly schema migration staging collision")
+
+    revision_count = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {WEEKLY_MENU_REVISIONS_TABLE}"
+        ).fetchone()[0]
+    )
+    idempotency_count = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE}"
+        ).fetchone()[0]
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE {_MIGRATION_REVISIONS_TABLE} (
+            id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+            series_id TEXT NOT NULL,
+            household_id TEXT NOT NULL,
+            revision_number INTEGER NOT NULL CHECK (revision_number >= 1),
+            status TEXT NOT NULL CHECK (
+                status IN ({_quoted(WEEKLY_MENU_REVISION_STATUSES)})
+            ),
+            source_revision_id TEXT NULL,
+            created_by_member_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            published_at TEXT NULL,
+            archived_at TEXT NULL,
+            version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+            FOREIGN KEY (series_id, household_id)
+                REFERENCES {WEEKLY_MENU_SERIES_TABLE}(id, household_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (source_revision_id)
+                REFERENCES {_MIGRATION_REVISIONS_TABLE}(id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (created_by_member_id)
+                REFERENCES household_members(id)
+                ON DELETE RESTRICT,
+            CHECK (
+                (status = 'draft' AND published_at IS NULL AND archived_at IS NULL)
+                OR (status = 'approved' AND published_at IS NULL AND archived_at IS NULL)
+                OR (status = 'published' AND published_at IS NOT NULL AND archived_at IS NULL)
+                OR (status = 'archived' AND archived_at IS NOT NULL)
+            )
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {_MIGRATION_REVISIONS_TABLE}
+            (id, series_id, household_id, revision_number, status,
+             source_revision_id, created_by_member_id, created_at, updated_at,
+             published_at, archived_at, version)
+        SELECT id, series_id, household_id, revision_number, status,
+               source_revision_id, created_by_member_id, created_at, updated_at,
+               published_at, archived_at, version
+        FROM {WEEKLY_MENU_REVISIONS_TABLE}
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE {_MIGRATION_IDEMPOTENCY_TABLE} (
+            id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+            household_id TEXT NOT NULL,
+            actor_member_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK (
+                operation IN ({_quoted(WEEKLY_MENU_IDEMPOTENCY_OPERATIONS)})
+            ),
+            idempotency_key TEXT NOT NULL CHECK (
+                length(trim(idempotency_key)) BETWEEN 1 AND 128
+            ),
+            payload_fingerprint TEXT NOT NULL CHECK (
+                length(payload_fingerprint) = 64
+            ),
+            series_id TEXT NULL,
+            revision_id TEXT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (household_id)
+                REFERENCES households(id) ON DELETE RESTRICT,
+            FOREIGN KEY (actor_member_id)
+                REFERENCES household_members(id) ON DELETE RESTRICT,
+            FOREIGN KEY (series_id)
+                REFERENCES {WEEKLY_MENU_SERIES_TABLE}(id) ON DELETE RESTRICT,
+            FOREIGN KEY (revision_id)
+                REFERENCES {_MIGRATION_REVISIONS_TABLE}(id) ON DELETE RESTRICT
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {_MIGRATION_IDEMPOTENCY_TABLE}
+            (id, household_id, actor_member_id, operation, idempotency_key,
+             payload_fingerprint, series_id, revision_id, created_at)
+        SELECT id, household_id, actor_member_id, operation, idempotency_key,
+               payload_fingerprint, series_id, revision_id, created_at
+        FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE}
+        """
+    )
+    if int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {_MIGRATION_REVISIONS_TABLE}"
+        ).fetchone()[0]
+    ) != revision_count:
+        raise sqlite3.IntegrityError("weekly revision migration row-count mismatch")
+    if int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {_MIGRATION_IDEMPOTENCY_TABLE}"
+        ).fetchone()[0]
+    ) != idempotency_count:
+        raise sqlite3.IntegrityError("weekly idempotency migration row-count mismatch")
+
+    conn.execute(f"DROP TABLE {WEEKLY_MENU_IDEMPOTENCY_TABLE}")
+    conn.execute(f"DROP TABLE {WEEKLY_MENU_REVISIONS_TABLE}")
+    conn.execute(
+        f"ALTER TABLE {_MIGRATION_REVISIONS_TABLE} "
+        f"RENAME TO {WEEKLY_MENU_REVISIONS_TABLE}"
+    )
+    conn.execute(
+        f"ALTER TABLE {_MIGRATION_IDEMPOTENCY_TABLE} "
+        f"RENAME TO {WEEKLY_MENU_IDEMPOTENCY_TABLE}"
+    )
+    conn.execute(
+        f"CREATE UNIQUE INDEX idx_weekly_menu_revisions_id_household "
+        f"ON {WEEKLY_MENU_REVISIONS_TABLE} (id, household_id)"
+    )
+    if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise sqlite3.IntegrityError("weekly schema migration foreign-key failure")
 
 
 def is_legacy_weekly_menu_schema_without_ingredients(conn: sqlite3.Connection) -> bool:

@@ -23,9 +23,17 @@ from gateway.healbite_shopping_schema import (
     ShoppingSchemaState,
 )
 from gateway.healbite_weekly_menu_schema import (
+    WEEKLY_MENU_ENTRIES_TABLE,
+    WEEKLY_MENU_IDEMPOTENCY_TABLE,
     WEEKLY_MENU_INGREDIENTS_TABLE,
+    WEEKLY_MENU_REVISIONS_TABLE,
+    WEEKLY_MENU_SCHEMA_SQL,
     WEEKLY_MENU_SERIES_TABLE,
+    WeeklyMenuRevisionStatus,
     WeeklyMenuSchemaState,
+    detect_weekly_menu_schema_state,
+    is_weekly_menu_schema_v1,
+    migrate_weekly_menu_schema_v1_to_v2,
 )
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
 from scripts import healbite_schema_migrate
@@ -148,6 +156,102 @@ def _init_weekly(db_path: Path) -> None:
 
 def _init_shopping(db_path: Path) -> None:
     HealBiteShoppingStore(db_path=db_path).initialize_schema()
+
+
+def _weekly_v1_schema_sql() -> str:
+    sql = WEEKLY_MENU_SCHEMA_SQL.replace(
+        "status IN ('draft', 'approved', 'published', 'archived')",
+        "status IN ('draft', 'published', 'archived')",
+    ).replace(
+        "        OR (status = 'approved' AND published_at IS NULL AND archived_at IS NULL)\n",
+        "",
+    ).replace(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_menu_revisions_single_approved\n"
+        "    ON household_weekly_menus (series_id)\n"
+        "    WHERE status = 'approved';\n",
+        "",
+    ).replace(
+        "operation IN ('create_draft', 'replace_draft_entries', 'approve_revision', 'publish_revision', 'archive_revision')",
+        "operation IN ('create_draft', 'replace_draft_entries', 'publish_revision', 'archive_revision')",
+    )
+    assert "approved" not in sql
+    return sql
+
+
+def _insert_weekly_v1_data(db_path: Path) -> tuple[int, int, int]:
+    _init_household(db_path)
+    household_id = str(uuid4())
+    member_id = str(uuid4())
+    now = "2026-07-13 00:00:00"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(_weekly_v1_schema_sql())
+        conn.execute(
+            "INSERT INTO households "
+            "(id, owner_user_id, name, status, default_timezone, created_at, updated_at, version) "
+            "VALUES (?, 1001, NULL, 'active', 'UTC', ?, ?, 1)",
+            (household_id, now, now),
+        )
+        conn.execute(
+            "INSERT INTO household_members "
+            "(id, household_id, linked_user_id, display_name, member_type, role, status, age_band, created_at, updated_at, version) "
+            "VALUES (?, ?, 1001, NULL, 'primary', 'owner', 'active', NULL, ?, ?, 1)",
+            (member_id, household_id, now, now),
+        )
+        revision_ids: list[str] = []
+        series_ids: list[str] = []
+        for week, status in (
+            ("2026-07-06", WeeklyMenuRevisionStatus.PUBLISHED.value),
+            ("2026-07-13", WeeklyMenuRevisionStatus.DRAFT.value),
+        ):
+            series_id = str(uuid4())
+            revision_id = str(uuid4())
+            series_ids.append(series_id)
+            revision_ids.append(revision_id)
+            conn.execute(
+                f"INSERT INTO {WEEKLY_MENU_SERIES_TABLE} "
+                "(id, household_id, week_start, created_at, updated_at, version) "
+                "VALUES (?, ?, ?, ?, ?, 1)",
+                (series_id, household_id, week, now, now),
+            )
+            conn.execute(
+                f"INSERT INTO {WEEKLY_MENU_REVISIONS_TABLE} "
+                "(id, series_id, household_id, revision_number, status, source_revision_id, created_by_member_id, "
+                "created_at, updated_at, published_at, archived_at, version) "
+                "VALUES (?, ?, ?, 1, ?, NULL, ?, ?, ?, ?, NULL, 1)",
+                (
+                    revision_id,
+                    series_id,
+                    household_id,
+                    status,
+                    member_id,
+                    now,
+                    now,
+                    now if status == WeeklyMenuRevisionStatus.PUBLISHED.value else None,
+                ),
+            )
+            conn.execute(
+                f"INSERT INTO {WEEKLY_MENU_ENTRIES_TABLE} "
+                "(id, menu_id, household_id, local_date, meal_slot, position, title, description, servings, origin, created_at, updated_at, version) "
+                "VALUES (?, ?, ?, ?, 'breakfast', 1, 'Synthetic', NULL, NULL, 'manual', ?, ?, 1)",
+                (str(uuid4()), revision_id, household_id, week, now, now),
+            )
+        conn.execute(
+            f"INSERT INTO {WEEKLY_MENU_IDEMPOTENCY_TABLE} "
+            "(id, household_id, actor_member_id, operation, idempotency_key, payload_fingerprint, series_id, revision_id, created_at) "
+            "VALUES (?, ?, ?, 'publish_revision', 'legacy-publish', ?, ?, ?, ?)",
+            (
+                str(uuid4()),
+                household_id,
+                member_id,
+                "0" * 64,
+                series_ids[0],
+                revision_ids[0],
+                now,
+            ),
+        )
+        conn.commit()
+    return len(revision_ids), len(revision_ids), 1
 
 
 def _insert_legacy_weekly_data(db_path: Path) -> None:
@@ -966,6 +1070,75 @@ def test_fresh_db_full_migration_order_and_sanitized_output(tmp_path: Path) -> N
     assert _table_count(db_path, SHOPPING_LISTS_TABLE) == 0
     assert _table_count(db_path, SHOPPING_ITEMS_TABLE) == 0
 
+
+def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    revision_count, entry_count, idempotency_count = _insert_weekly_v1_data(
+        db_path
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert is_weekly_menu_schema_v1(conn)
+        statuses_before = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT status FROM {WEEKLY_MENU_REVISIONS_TABLE} ORDER BY status"
+            ).fetchall()
+        )
+
+    result = _run_cli(db_path)
+
+    assert result.returncode == 0
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        assert detect_weekly_menu_schema_state(conn) is WeeklyMenuSchemaState.CANONICAL
+        assert not is_weekly_menu_schema_v1(conn)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert _table_count(db_path, WEEKLY_MENU_REVISIONS_TABLE) == revision_count
+        assert _table_count(db_path, WEEKLY_MENU_ENTRIES_TABLE) == entry_count
+        assert _table_count(db_path, WEEKLY_MENU_IDEMPOTENCY_TABLE) == idempotency_count
+        statuses_after = tuple(
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT status FROM {WEEKLY_MENU_REVISIONS_TABLE} ORDER BY status"
+            ).fetchall()
+        )
+        assert statuses_after == statuses_before
+        draft_id = str(
+            conn.execute(
+                f"SELECT id FROM {WEEKLY_MENU_REVISIONS_TABLE} WHERE status = 'draft'"
+            ).fetchone()[0]
+        )
+        conn.execute(
+            f"UPDATE {WEEKLY_MENU_REVISIONS_TABLE} "
+            "SET status = 'approved' WHERE id = ?",
+            (draft_id,),
+        )
+        conn.rollback()
+
+
+def test_weekly_v1_status_schema_upgrade_rolls_back_atomically(
+    tmp_path: Path,
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    _insert_weekly_v1_data(db_path)
+    before = _database_snapshot(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        migrate_weekly_menu_schema_v1_to_v2(conn)
+        HealBiteWeeklyMenuStore.apply_schema(conn)
+        assert detect_weekly_menu_schema_state(conn) is WeeklyMenuSchemaState.CANONICAL
+        conn.rollback()
+
+    assert _database_snapshot(db_path) == before
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        assert is_weekly_menu_schema_v1(conn)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 def test_legacy_weekly_schema_is_migrated_without_backfill(tmp_path: Path) -> None:
     db_path = _fresh_db(tmp_path)

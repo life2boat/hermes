@@ -394,7 +394,7 @@ def test_preview_is_read_only_and_does_not_publish_or_create_shopping(tmp_path):
     assert delta.approval_token
 
 
-def test_approval_applies_only_missing_delta_and_publishes_atomically(tmp_path):
+def test_approval_applies_only_missing_delta_without_publishing(tmp_path):
     (
         _db_path,
         _personal,
@@ -419,14 +419,25 @@ def test_approval_applies_only_missing_delta_and_publishes_atomically(tmp_path):
         idempotency_key="approval-1",
     )
 
-    published = weekly.get_weekly_menu_revision(
+    approved = weekly.get_weekly_menu_revision(
         context,
         draft.revision.id,
     )
     rice = next(item for item in result.shopping.items if item.display_name == "Рис")
-    assert published.revision.status is WeeklyMenuRevisionStatus.PUBLISHED
+    assert approved.revision.status is WeeklyMenuRevisionStatus.APPROVED
+    assert approved.revision.published_at is None
     assert rice.quantity_value == "400"
     assert result.shopping.shopping_list.source_menu_id == draft.revision.id
+    with sqlite3.connect(_db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM household_weekly_menus WHERE status = ?",
+            (WeeklyMenuRevisionStatus.PUBLISHED.value,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT operation FROM household_weekly_menu_idempotency "
+            "WHERE revision_id = ? AND operation = 'approve_revision'",
+            (draft.revision.id,),
+        ).fetchone()[0] == "approve_revision"
 
 
 def test_double_approval_is_idempotent(tmp_path):
@@ -619,6 +630,17 @@ def test_replacement_approval_reconciles_without_accumulation(tmp_path):
         idempotency_key="approval-replacement-menu",
     )
 
+    previous = weekly.get_weekly_menu_revision(
+        context,
+        first_delta.weekly_revision_id,
+    )
+    current = weekly.get_weekly_menu_revision(
+        context,
+        replacement.revision.id,
+    )
+    assert previous.revision.status is WeeklyMenuRevisionStatus.ARCHIVED
+    assert current.revision.status is WeeklyMenuRevisionStatus.APPROVED
+    assert current.revision.published_at is None
     milk = [item for item in approved.shopping.items if item.display_name == "Молоко"]
     assert len(milk) == 1
     assert milk[0].quantity_value == "1000"

@@ -458,6 +458,13 @@ prompt_caching:
 #     download_timeout: 30   # Image HTTP download timeout (seconds)
 #                            # Increase for slow connections or self-hosted image servers
 #
+#   # HealBite Weekly generation: independent from text and Vision routing.
+#   weekly_menu_generation:
+#     provider: "deepseek"
+#     model: "deepseek-v4-flash"
+#     timeout: 45
+#     extra_body: {response_format: {type: json_object}}
+#
 #   # Web page scraping / summarization + browser page text extraction
 #   web_extract:
 #     provider: "auto"

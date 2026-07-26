@@ -50,6 +50,13 @@ from gateway.healbite_weekly_menu_telegram import (
     WEEKLY_MENU_PARSE_MODE,
     current_week_start,
 )
+from gateway.healbite_weekly_shopping import (
+    HealBiteWeeklyShoppingService,
+    WeeklyShoppingStaleError,
+    WeeklyShoppingStorageError,
+    WeeklyShoppingUnavailableError,
+    WeeklyShoppingValidationError,
+)
 from gateway.healbite_weekly_menus import (
     HealBiteWeeklyMenuStore,
     WeeklyMenuRevisionStatus,
@@ -78,36 +85,38 @@ INVENTORY_TEXT_OBSERVABILITY_MARKER = "[HealBite][inventory_text_observability]"
 
 logger = logging.getLogger(__name__)
 
-_INVENTORY_OBSERVABILITY_ACTIONS = frozenset(
-    {
-        "command_accepted",
-        "text_callback_accepted",
-        "pending_write",
-        "next_text_classified",
-        "local_handler_enter",
-        "parse_result",
-        "local_write",
-        "review_result",
-        "reply_send",
-        "generic_dispatch_detected",
-    }
-)
+_INVENTORY_OBSERVABILITY_ACTIONS = frozenset({
+    "command_accepted",
+    "text_callback_accepted",
+    "pending_write",
+    "next_text_classified",
+    "local_handler_enter",
+    "parse_result",
+    "local_write",
+    "review_result",
+    "reply_send",
+    "generic_dispatch_detected",
+})
 _INVENTORY_OBSERVABILITY_LANES = frozenset({"inventory_local", "generic"})
-_INVENTORY_OBSERVABILITY_RESULTS = frozenset(
-    {"accepted", "blocked", "consumed", "continued", "failure", "selected", "success"}
-)
+_INVENTORY_OBSERVABILITY_RESULTS = frozenset({
+    "accepted",
+    "blocked",
+    "consumed",
+    "continued",
+    "failure",
+    "selected",
+    "success",
+})
 _INVENTORY_OBSERVABILITY_CONTENT_SHAPES = frozenset({"plain_text"})
-_INVENTORY_OBSERVABILITY_ERROR_TYPES = frozenset(
-    {
-        "callback_unavailable",
-        "feature_disabled",
-        "local_unavailable",
-        "render_error",
-        "send_error",
-        "scope_unavailable",
-        "validation_error",
-    }
-)
+_INVENTORY_OBSERVABILITY_ERROR_TYPES = frozenset({
+    "callback_unavailable",
+    "feature_disabled",
+    "local_unavailable",
+    "render_error",
+    "send_error",
+    "scope_unavailable",
+    "validation_error",
+})
 
 
 def _inventory_observability_token(value: str, allowed: frozenset[str]) -> str:
@@ -128,34 +137,36 @@ def log_inventory_text_observability(
     """Emit a fixed-shape marker without request, identity, or exception data."""
     fields: list[tuple[str, str]] = [
         ("route", "inventory"),
-        ("action", _inventory_observability_token(action, _INVENTORY_OBSERVABILITY_ACTIONS)),
+        (
+            "action",
+            _inventory_observability_token(action, _INVENTORY_OBSERVABILITY_ACTIONS),
+        ),
         ("lane", _inventory_observability_token(lane, _INVENTORY_OBSERVABILITY_LANES)),
-        ("result", _inventory_observability_token(result, _INVENTORY_OBSERVABILITY_RESULTS)),
+        (
+            "result",
+            _inventory_observability_token(result, _INVENTORY_OBSERVABILITY_RESULTS),
+        ),
     ]
     if pending_present is not None:
         fields.append(("pending_present", str(pending_present).lower()))
     if canary_allowed is not None:
         fields.append(("canary_allowed", str(canary_allowed).lower()))
     if content_shape is not None:
-        fields.append(
-            (
-                "content_shape",
-                _inventory_observability_token(
-                    content_shape, _INVENTORY_OBSERVABILITY_CONTENT_SHAPES
-                ),
-            )
-        )
+        fields.append((
+            "content_shape",
+            _inventory_observability_token(
+                content_shape, _INVENTORY_OBSERVABILITY_CONTENT_SHAPES
+            ),
+        ))
     if item_count is not None:
         fields.append(("item_count", str(item_count)))
     if safe_error_type is not None:
-        fields.append(
-            (
-                "safe_error_type",
-                _inventory_observability_token(
-                    safe_error_type, _INVENTORY_OBSERVABILITY_ERROR_TYPES
-                ),
-            )
-        )
+        fields.append((
+            "safe_error_type",
+            _inventory_observability_token(
+                safe_error_type, _INVENTORY_OBSERVABILITY_ERROR_TYPES
+            ),
+        ))
     logger.info(
         "%s %s",
         INVENTORY_TEXT_OBSERVABILITY_MARKER,
@@ -172,6 +183,7 @@ _RUSSIAN_UNIT_LABELS = {
     "package": "\u0443\u043f.",
     "unitless": "\u0435\u0434.",
 }
+
 
 @dataclass(frozen=True, slots=True)
 class InventoryTelegramScreen:
@@ -205,6 +217,7 @@ class _InventoryCallback:
     source_revision: int | None = None
     position: int | None = None
     page: int = 0
+    approval_token: str | None = None
 
 
 VisionAnalyzeFn = Callable[[str, str], Awaitable[object]]
@@ -244,8 +257,15 @@ def parse_inventory_callback(value: object) -> _InventoryCallback | None:
             )
         except ValueError:
             return None
+    if action == "ap" and len(parts) == 4:
+        token = parts[3].lower()
+        if len(token) != 32 or any(
+            character not in "0123456789abcdef" for character in token
+        ):
+            return None
+        return _InventoryCallback(action, approval_token=token)
     if (
-        action in {"a", "c", "x", "g", "v", "rg", "ap"}
+        action in {"a", "c", "x", "g", "v", "rg"}
         and len(parts) == 5
         and _uuid(parts[3])
     ):
@@ -272,6 +292,9 @@ class HealBiteInventoryTelegramController:
         vision_analyze_fn: VisionAnalyzeFn | None = None,
         generation_service_factory: Callable[[], HealBiteWeeklyMenuGenerationService]
         | None = None,
+        shopping_config: FeatureGateConfig | None = None,
+        weekly_shopping_service_factory: Callable[[], HealBiteWeeklyShoppingService]
+        | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self._text_config = text_config or load_feature_gate_config(
@@ -284,10 +307,19 @@ class HealBiteInventoryTelegramController:
             weekly_generation_config
             or load_feature_gate_config("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI")
         )
+        self._shopping_config = shopping_config or load_feature_gate_config(
+            "HEALBITE_SHOPPING_LIST"
+        )
         self._db_path = db_path
         self._vision_analyze_fn = vision_analyze_fn or self._default_vision_analyze
         self._generation_service_factory = (
             generation_service_factory or self._default_generation_service
+        )
+        self._weekly_shopping_service_factory = weekly_shopping_service_factory or (
+            lambda: HealBiteWeeklyShoppingService(
+                db_path=self._db_path,
+                config=self._shopping_config,
+            )
         )
         self._now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._pending: dict[int, _PendingInput] = {}
@@ -338,6 +370,7 @@ class HealBiteInventoryTelegramController:
                 "text": self._text_config,
                 "photo": self._photo_config,
                 "weekly": self._weekly_generation_config,
+                "shopping": self._shopping_config,
             }[kind],
             actor,
         )
@@ -385,8 +418,11 @@ class HealBiteInventoryTelegramController:
         *,
         position: int | None = None,
         page: int = 0,
+        approval_token: str | None = None,
     ) -> str:
         parts = ["inventory", "v1", action]
+        if approval_token is not None:
+            parts.append(approval_token)
         if view is not None:
             parts.extend((view.snapshot.id, str(view.snapshot.source_revision)))
         if position is not None:
@@ -423,10 +459,7 @@ class HealBiteInventoryTelegramController:
     def _item_text(item: object) -> str:
         unit = getattr(item, "unit", None)
         unit_value = str(getattr(unit, "value", unit))
-        if (
-            getattr(item, "quantity_value", None) is None
-            or unit_value == "unknown"
-        ):
+        if getattr(item, "quantity_value", None) is None or unit_value == "unknown":
             amount = "количество не указано"
         else:
             unit_label = _RUSSIAN_UNIT_LABELS.get(unit_value, "\u0435\u0434.")
@@ -562,19 +595,69 @@ class HealBiteInventoryTelegramController:
         return tuple(chunks)
 
     def _draft(
-        self, draft: WeeklyMenuRevisionView, snapshot: InventorySnapshotView
+        self,
+        actor_user_id: object,
+        draft: WeeklyMenuRevisionView,
+        snapshot: InventorySnapshotView,
     ) -> InventoryTelegramResult:
-        chunks = self._draft_chunks(draft)
+        chunks = list(self._draft_chunks(draft))
+        approval_token: str | None = None
+        if self._gate("shopping", actor_user_id).ready:
+            try:
+                delta = self._weekly_shopping_service_factory().preview(
+                    actor_user_id,
+                    revision_id=draft.revision.id,
+                    inventory_snapshot_id=snapshot.snapshot.id,
+                )
+            except (
+                AttributeError,
+                WeeklyShoppingStaleError,
+                WeeklyShoppingStorageError,
+                WeeklyShoppingUnavailableError,
+                WeeklyShoppingValidationError,
+            ):
+                delta = None
+        else:
+            delta = None
+        if delta is not None:
+            approval_token = delta.approval_token
+            preview_lines = ["<b>Нужно докупить для этого меню:</b>"]
+            if not delta.items:
+                preview_lines.append("Всё необходимое уже есть дома.")
+            for item in delta.items:
+                if item.needs_review:
+                    amount = "нужно уточнить"
+                else:
+                    unit_label = _RUSSIAN_UNIT_LABELS.get(
+                        item.unit.value,
+                        "ед.",
+                    )
+                    amount = f"{escape(str(item.quantity_value))} {escape(unit_label)}"
+                preview_lines.append(f"{escape(item.display_name)} — {amount}")
+            preview = "\n".join(preview_lines)
+            addition = "\n\n" + preview
+            if len(chunks[-1]) + len(addition) <= WEEKLY_MENU_MAX_CHUNK_LENGTH:
+                chunks[-1] += addition
+            else:
+                chunks.extend(self._chunk_lines(preview_lines))
+        rows = []
+        if approval_token is not None:
+            rows.append((
+                (
+                    "✅ Одобрить меню",
+                    self._callback("ap", approval_token=approval_token),
+                ),
+            ))
+        rows.extend((
+            (("🔄 Перегенерировать", self._callback("rg", snapshot)),),
+            (("🥕 Изменить продукты", self._callback("h")),),
+            (("Отмена", self._callback("b")),),
+        ))
         return self._result(
             "draft",
             chunks[0],
-            continuations=chunks[1:],
-            rows=(
-                (("✅ Одобрить меню", self._callback("ap", snapshot)),),
-                (("🔄 Перегенерировать", self._callback("rg", snapshot)),),
-                (("🥕 Изменить продукты", self._callback("h")),),
-                (("Отмена", self._callback("b")),),
-            ),
+            continuations=tuple(chunks[1:]),
+            rows=tuple(rows),
             item_count=len(draft.entries),
         )
 
@@ -633,6 +716,17 @@ class HealBiteInventoryTelegramController:
             return self.home(actor_user_id)
         if callback.action == "b":
             return self._result("back", "Главное меню.")
+        if callback.action == "ap":
+            if (
+                not self._gate("weekly", actor_user_id).ready
+                or not self._gate("shopping", actor_user_id).ready
+            ):
+                return self._result(
+                    "disabled",
+                    INVENTORY_PLACEHOLDER_REPLY,
+                    error_class="disabled",
+                )
+            return self._approve(actor_user_id, callback)
         if callback.action in {"t", "p"}:
             kind = "text" if callback.action == "t" else "photo"
             if not self._gate(kind, actor_user_id).ready:
@@ -715,7 +809,7 @@ class HealBiteInventoryTelegramController:
                     "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
                 )
             return self._confirmed(view)
-        if callback.action not in {"r", "a", "e", "d", "c", "x", "g", "rg", "v", "ap"}:
+        if callback.action not in {"r", "a", "e", "d", "c", "x", "g", "rg", "v"}:
             return self._result(
                 "stale", INVENTORY_UNAVAILABLE_REPLY, error_class="invalid_callback"
             )
@@ -742,7 +836,7 @@ class HealBiteInventoryTelegramController:
                 "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
             )
         if (
-            callback.action in {"g", "rg", "v", "ap"}
+            callback.action in {"g", "rg", "v"}
             and not self._gate("weekly", actor).ready
         ):
             return self._result(
@@ -840,13 +934,64 @@ class HealBiteInventoryTelegramController:
         if callback.action == "v":
             draft = self._current_draft(context)
             return (
-                self._draft(draft, view) if draft is not None else self._confirmed(view)
-            )
-        if callback.action == "ap":
-            return self._result(
-                "approval_unavailable", "Публикация меню пока недоступна."
+                self._draft(actor, draft, view)
+                if draft is not None
+                else self._confirmed(view)
             )
         return self._generate(actor, view)
+
+    def _approve(
+        self,
+        actor_user_id: object,
+        callback: _InventoryCallback,
+    ) -> InventoryTelegramResult:
+        if callback.approval_token is None:
+            return self._result(
+                "stale",
+                INVENTORY_UNAVAILABLE_REPLY,
+                error_class="stale",
+            )
+        try:
+            approved = self._weekly_shopping_service_factory().approve(
+                actor_user_id,
+                week_start=current_week_start(now=self._now_factory()),
+                approval_token=callback.approval_token,
+                idempotency_key=("weekly-approval:" + callback.approval_token),
+            )
+        except WeeklyShoppingUnavailableError:
+            return self._result(
+                "disabled",
+                INVENTORY_PLACEHOLDER_REPLY,
+                error_class="disabled",
+            )
+        except WeeklyShoppingStaleError:
+            return self._result(
+                "stale",
+                INVENTORY_UNAVAILABLE_REPLY,
+                error_class="stale",
+            )
+        except WeeklyShoppingValidationError:
+            return self._result(
+                "approval_needs_review",
+                "Список покупок нужно уточнить перед одобрением меню.",
+                error_class="needs_review",
+            )
+        except (WeeklyShoppingStorageError, OSError):
+            return self._result(
+                "unavailable",
+                INVENTORY_UNAVAILABLE_REPLY,
+                error_class="unavailable",
+            )
+        notice = (
+            "Меню уже одобрено.\nСписок покупок не изменился повторно."
+            if approved.already_applied
+            else "Меню одобрено.\nНедостающие продукты добавлены в список покупок."
+        )
+        return self._result(
+            "approved",
+            notice,
+            item_count=len(approved.shopping.items),
+        )
 
     def handle_text(
         self, actor_user_id: object, text: str
@@ -1173,7 +1318,7 @@ class HealBiteInventoryTelegramController:
                 INVENTORY_UNAVAILABLE_REPLY,
                 error_class="generation_" + result.status.value,
             )
-        return self._draft(result.revision_view, snapshot)
+        return self._draft(actor, result.revision_view, snapshot)
 
 
 def build_inventory_telegram_controller(
@@ -1185,5 +1330,6 @@ def build_inventory_telegram_controller(
         weekly_generation_config=load_feature_gate_config(
             "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI", env=env
         ),
+        shopping_config=load_feature_gate_config("HEALBITE_SHOPPING_LIST", env=env),
         db_path=db_path,
     )

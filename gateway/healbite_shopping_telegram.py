@@ -24,7 +24,10 @@ from gateway.healbite_shopping_runtime import (
     ShoppingRuntimeUnavailableError,
     build_shopping_runtime_service,
 )
-from gateway.healbite_shopping_schema import require_shopping_item_id
+from gateway.healbite_shopping_schema import (
+    ShoppingUnit,
+    require_shopping_item_id,
+)
 from gateway.healbite_weekly_menu_schema import is_valid_week_start
 from gateway.healbite_weekly_menu_telegram import current_week_start
 
@@ -379,6 +382,11 @@ class HealBiteShoppingTelegramController:
                 quantity = f" — {escape(item.quantity_value)}"
                 if unit:
                     quantity = f"{quantity} {unit}"
+            elif (
+                item.origin is ShoppingItemOrigin.MENU_GENERATED
+                and item.quantity_unit_normalized is ShoppingUnit.UNKNOWN
+            ):
+                quantity = " — нужно уточнить"
             lines.append(f"{marker} {index}. {name}{quantity}")
             rows.append((
                 (

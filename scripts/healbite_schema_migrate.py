@@ -28,6 +28,12 @@ from gateway.healbite_inventory import (
 )
 from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_shopping import HealBiteShoppingStore
+from gateway.healbite_weekly_menu_schema import (
+    WeeklyMenuSchemaState,
+    detect_weekly_menu_schema_state,
+    is_weekly_menu_schema_v1,
+    migrate_weekly_menu_schema_v1_to_v2,
+)
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
 
 
@@ -723,7 +729,7 @@ def _component_registry() -> tuple[MigrationComponent, ...]:
             _component(
                 "weekly",
                 HealBiteWeeklyMenuStore.schema_statements(),
-                migration_id="healbite-weekly-schema-v1",
+                migration_id="healbite-weekly-schema-v2",
             ),
             _component(
                 "shopping",
@@ -767,6 +773,14 @@ def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassifi
         name: _classify_component_schema(conn, name, statements)
         for name, statements in _component_statements().items()
     }
+    weekly_state = detect_weekly_menu_schema_state(conn)
+    if weekly_state is WeeklyMenuSchemaState.CANONICAL:
+        plans["weekly"] = SchemaClassification.CURRENT
+    elif (
+        plans["weekly"] is SchemaClassification.INCOMPATIBLE
+        and is_weekly_menu_schema_v1(conn)
+    ):
+        plans["weekly"] = SchemaClassification.KNOWN_COMPATIBLE_PARTIAL
     incompatible = next((name for name, state in plans.items() if state is SchemaClassification.INCOMPATIBLE), None)
     if incompatible is not None:
         raise MigrationError(
@@ -935,8 +949,20 @@ def _migrate_borrowed_connection(
     component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
 ) -> tuple[tuple[PhaseResult, ...], bool]:
     commit_attempted = False
+    weekly_v1_upgrade = False
     try:
         conn.execute("PRAGMA foreign_keys=ON")
+        weekly_v1_upgrade = (
+            "weekly" in selected and is_weekly_menu_schema_v1(conn)
+        )
+        if weekly_v1_upgrade:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 0:
+                raise MigrationError(
+                    ExitClassification.CONTRACT_DRIFT,
+                    detail_code="WEEKLY_V2_FOREIGN_KEYS_NOT_SUSPENDED",
+                    phase="weekly",
+                )
         conn.execute("BEGIN IMMEDIATE")
         if transaction_hook is not None:
             transaction_hook(conn)
@@ -949,9 +975,21 @@ def _migrate_borrowed_connection(
         statements_by_component = _component_statements()
         for name in selected:
             before = plans[name]
+            if name == "weekly" and is_weekly_menu_schema_v1(conn):
+                migrate_weekly_menu_schema_v1_to_v2(conn)
             if before is not SchemaClassification.CURRENT:
                 _apply_component(conn, name, statements_by_component[name])
-            after = _classify_component_schema(conn, name, statements_by_component[name])
+            after = _classify_component_schema(
+                conn,
+                name,
+                statements_by_component[name],
+            )
+            if (
+                name == "weekly"
+                and detect_weekly_menu_schema_state(conn)
+                is WeeklyMenuSchemaState.CANONICAL
+            ):
+                after = SchemaClassification.CURRENT
             if after is not SchemaClassification.CURRENT:
                 raise MigrationError(
                     ExitClassification.CONTRACT_DRIFT,
@@ -963,11 +1001,33 @@ def _migrate_borrowed_connection(
             phases.append(PhaseResult(name=name, status="success", schema_state=after.value, changed=changed))
             if component_hook is not None:
                 component_hook(name, conn)
+        if (
+            weekly_v1_upgrade
+            and conn.execute("PRAGMA foreign_key_check").fetchone() is not None
+        ):
+            raise MigrationError(
+                ExitClassification.MIGRATION_FAILED,
+                detail_code="WEEKLY_V2_FOREIGN_KEY_CHECK_FAILED",
+                phase="weekly",
+            )
         commit_attempted = True
         conn.commit()
+        if weekly_v1_upgrade:
+            conn.execute("PRAGMA foreign_keys=ON")
+            if int(conn.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                raise MigrationError(
+                    ExitClassification.CONTRACT_DRIFT,
+                    detail_code="WEEKLY_V2_FOREIGN_KEYS_NOT_RESTORED",
+                    phase="weekly",
+                )
         return tuple(phases), changed_any
     except Exception as exc:
         _rollback_preserving_primary(conn, exc, commit_attempted=commit_attempted)
+        if weekly_v1_upgrade:
+            try:
+                conn.execute("PRAGMA foreign_keys=ON")
+            except Exception:
+                _mark_cleanup_failure(exc, "foreign_keys_restore")
         raise
 
 

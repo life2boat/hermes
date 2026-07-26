@@ -692,14 +692,14 @@ class HealBiteWeeklyShoppingService:
                         ],
                     }
                 )
-                self._publish_revision(
+                self._approve_revision(
                     conn,
                     auth=auth,
                     revision=revision,
                     idempotency_key=normalized_idempotency_key,
                     payload_hash=payload_hash,
                 )
-                self._fault("after_menu_publish")
+                self._fault("after_menu_approval")
                 shopping = self._reconcile_shopping(
                     conn,
                     shopping_store=shopping_store,
@@ -787,7 +787,7 @@ class HealBiteWeeklyShoppingService:
         return shopping_store._build_list_view(conn, shopping_list)
 
     @staticmethod
-    def _publish_revision(
+    def _approve_revision(
         conn: sqlite3.Connection,
         *,
         auth: HouseholdAuthorizationContext,
@@ -798,7 +798,7 @@ class HealBiteWeeklyShoppingService:
         if str(revision["status"]) != WeeklyMenuRevisionStatus.DRAFT.value:
             raise WeeklyShoppingStaleError("weekly revision is not a draft")
         now = _sqlite_timestamp()
-        current_published = conn.execute(
+        current_approved = conn.execute(
             f"""
             SELECT id
             FROM {WEEKLY_MENU_REVISIONS_TABLE}
@@ -807,14 +807,14 @@ class HealBiteWeeklyShoppingService:
             """,
             (
                 str(revision["series_id"]),
-                WeeklyMenuRevisionStatus.PUBLISHED.value,
+                WeeklyMenuRevisionStatus.APPROVED.value,
             ),
         ).fetchone()
         if (
-            current_published is not None
-            and str(current_published["id"]) != str(revision["id"])
+            current_approved is not None
+            and str(current_approved["id"]) != str(revision["id"])
         ):
-            conn.execute(
+            archived = conn.execute(
                 f"""
                 UPDATE {WEEKLY_MENU_REVISIONS_TABLE}
                 SET status = ?, archived_at = ?, updated_at = ?,
@@ -825,20 +825,23 @@ class HealBiteWeeklyShoppingService:
                     WeeklyMenuRevisionStatus.ARCHIVED.value,
                     now,
                     now,
-                    str(current_published["id"]),
-                    WeeklyMenuRevisionStatus.PUBLISHED.value,
+                    str(current_approved["id"]),
+                    WeeklyMenuRevisionStatus.APPROVED.value,
                 ),
             )
+            if archived.rowcount != 1:
+                raise WeeklyShoppingStaleError(
+                    "approved weekly revision changed"
+                )
         cursor = conn.execute(
             f"""
             UPDATE {WEEKLY_MENU_REVISIONS_TABLE}
-            SET status = ?, published_at = ?, archived_at = NULL,
+            SET status = ?, published_at = NULL, archived_at = NULL,
                 updated_at = ?, version = version + 1
             WHERE id = ? AND household_id = ? AND status = ? AND version = ?
             """,
             (
-                WeeklyMenuRevisionStatus.PUBLISHED.value,
-                now,
+                WeeklyMenuRevisionStatus.APPROVED.value,
                 now,
                 str(revision["id"]),
                 auth.household_id,
@@ -875,7 +878,7 @@ class HealBiteWeeklyShoppingService:
                 new_weekly_menu_idempotency_id(),
                 auth.household_id,
                 auth.household_member_id,
-                WeeklyMenuIdempotencyOperation.PUBLISH_REVISION.value,
+                WeeklyMenuIdempotencyOperation.APPROVE_REVISION.value,
                 idempotency_key,
                 payload_hash,
                 str(revision["series_id"]),
@@ -883,7 +886,6 @@ class HealBiteWeeklyShoppingService:
                 now,
             ),
         )
-
     def _reconcile_shopping(
         self,
         conn: sqlite3.Connection,

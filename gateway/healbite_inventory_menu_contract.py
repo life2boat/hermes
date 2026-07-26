@@ -11,12 +11,66 @@ from gateway.healbite_weekly_menu_generation_types import (
 )
 
 
+INVENTORY_MENU_RESPONSE_CONTRACT = {
+    "top_level": {
+        "type": "object",
+        "required_keys": ["days"],
+        "additional_keys": False,
+    },
+    "days": {
+        "type": "array",
+        "length": 7,
+        "required_keys": ["day", "meals"],
+        "additional_keys": False,
+        "day_values": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+        "meals_per_day": 3,
+    },
+    "meal": {
+        "type": "object",
+        "required_keys": [
+            "meal_type",
+            "title",
+            "instructions",
+            "servings",
+            "estimated_calories_per_serving",
+            "macros_per_serving",
+            "ingredients",
+        ],
+        "additional_keys": False,
+        "meal_type_values": ["breakfast", "lunch", "dinner"],
+        "field_types": {
+            "title": "string length 1..200",
+            "instructions": "array length 1..12 of strings length 1..500",
+            "servings": "integer 1..100",
+            "estimated_calories_per_serving": "integer 1..5000",
+            "ingredients": "array length 1..32",
+        },
+    },
+    "macros_per_serving": {
+        "type": "object",
+        "required_keys": ["protein_g", "carbs_g", "fat_g"],
+        "additional_keys": False,
+        "values": "finite non-negative numbers",
+    },
+    "ingredient": {
+        "type": "object",
+        "required_keys": ["name", "quantity_value", "unit"],
+        "additional_keys": False,
+        "field_types": {
+            "name": "string length 1..200 that obeys dietary exclusions",
+            "quantity_value": "finite positive number",
+        },
+        "unit_values": ["g", "kg", "ml", "l", "piece", "package", "unitless"],
+    },
+}
+
+
 class InventoryMenuContractError(ValueError):
     pass
 
 
-_WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-_INVENTORY_UNITS = {"g", "kg", "ml", "l", "piece", "package", "unitless"}
+_WEEKDAY_NAMES = tuple(INVENTORY_MENU_RESPONSE_CONTRACT["days"]["day_values"])
+_INVENTORY_UNITS = set(INVENTORY_MENU_RESPONSE_CONTRACT["ingredient"]["unit_values"])
 
 
 def _strict_decimal(value: object, *, label: str, allow_zero: bool = False) -> str:

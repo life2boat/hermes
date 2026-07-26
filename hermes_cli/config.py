@@ -1259,6 +1259,15 @@ DEFAULT_CONFIG = {
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
         },
+        # HealBite Weekly generation is pinned independently from the main,
+        # Vision, and generic auxiliary lanes. DeepSeek retired the legacy
+        # deepseek-chat alias; JSON Output also requires json_object mode.
+        "weekly_menu_generation": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "timeout": 45,
+            "extra_body": {"response_format": {"type": "json_object"}},
+        },
         "web_extract": {
             "provider": "auto",
             "model": "",

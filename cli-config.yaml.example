@@ -463,7 +463,9 @@ prompt_caching:
 #     provider: "deepseek"
 #     model: "deepseek-v4-flash"
 #     timeout: 45
-#     extra_body: {response_format: {type: json_object}}
+#     extra_body:
+#       thinking: {type: disabled}
+#       response_format: {type: json_object}
 #
 #   # Web page scraping / summarization + browser page text extraction
 #   web_extract:

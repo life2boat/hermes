@@ -46,6 +46,7 @@ from gateway.healbite_inventory import (
     calculate_missing_ingredients,
 )
 from gateway.healbite_inventory_menu_contract import (
+    INVENTORY_MENU_RESPONSE_CONTRACT,
     InventoryMenuContractError,
     parse_inventory_menu_response,
 )
@@ -323,6 +324,95 @@ class CanonicalWeeklyMenuMemberSnapshotProvider:
         )
 
 
+_INVENTORY_SCHEMA_REASON_BY_MESSAGE = {
+    "confirmed inventory is required": "MISSING_CONFIRMED_INVENTORY",
+    "payload shape is invalid": "INVALID_TOP_LEVEL_SHAPE",
+    "days are invalid": "INVALID_DAY_COUNT_OR_TYPE",
+    "day shape is invalid": "INVALID_DAY_STRUCTURE",
+    "day is invalid": "INVALID_DAY_VALUE",
+    "meals are invalid": "MISSING_OR_INVALID_MEAL_SLOTS",
+    "meal shape is invalid": "INVALID_MEAL_STRUCTURE",
+    "meal type is invalid": "INVALID_MEAL_SLOT",
+    "meal title is invalid": "INVALID_MEAL_TITLE",
+    "meal instructions are invalid": "INVALID_INSTRUCTIONS",
+    "servings are invalid": "INVALID_SERVINGS",
+    "calories are invalid": "INVALID_CALORIES",
+    "macros are invalid": "INVALID_MACROS",
+    "ingredients are invalid": "INVALID_INGREDIENTS",
+    "ingredient shape is invalid": "INVALID_INGREDIENT_STRUCTURE",
+    "ingredient is forbidden": "FORBIDDEN_INGREDIENT",
+    "ingredient unit is invalid": "INVALID_INGREDIENT_UNIT",
+    "ingredient quantity is invalid": "INVALID_INGREDIENT_QUANTITY",
+    "entry count is invalid": "INVALID_ENTRY_COUNT",
+}
+
+
+def _normalize_inventory_schema_failure(exc: InventoryMenuContractError) -> str:
+    message = str(exc)
+    if message in _INVENTORY_SCHEMA_REASON_BY_MESSAGE:
+        return _INVENTORY_SCHEMA_REASON_BY_MESSAGE[message]
+    if message.endswith(" is invalid"):
+        return "INVALID_FIELD_VALUE"
+    return "OTHER_SCHEMA_VALIDATION_FAILURE"
+
+
+def _provider_failure_classification(exc: LLMServiceUnavailableError) -> tuple[str, str]:
+    cause = exc.cause
+    status = getattr(cause, "status_code", None)
+    if not isinstance(status, int):
+        response = getattr(cause, "response", None)
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return "http_rejection", f"HTTP_{status // 100}XX"
+    cause_name = type(cause).__name__.lower() if cause is not None else ""
+    if "timeout" in cause_name or "connection" in cause_name or "transport" in cause_name:
+        return "transport_failure", "TRANSPORT_ERROR"
+    return "provider_failure", "PROVIDER_ERROR"
+
+
+def _inventory_weekly_system_prompt() -> str:
+    contract = json.dumps(
+        INVENTORY_MENU_RESPONSE_CONTRACT,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    example_meal = json.dumps(
+        {
+            "meal_type": "breakfast",
+            "title": "synthetic meal",
+            "instructions": ["synthetic preparation step"],
+            "servings": 2,
+            "estimated_calories_per_serving": 500,
+            "macros_per_serving": {
+                "protein_g": 30,
+                "carbs_g": 40,
+                "fat_g": 15,
+            },
+            "ingredients": [
+                {
+                    "name": "synthetic ingredient",
+                    "quantity_value": "100",
+                    "unit": "g",
+                }
+            ],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return (
+        "Return exactly one JSON object and nothing else. Do not use markdown, code fences, prose, or comments. "
+        "Follow this response contract exactly; every listed key is required and no additional keys are allowed "
+        f"at any level: {contract}. "
+        "Return all seven canonical days and exactly breakfast, lunch, and dinner once per day. "
+        f"This is a synthetic example of one meal object shape only: {example_meal}. "
+        "Replace all synthetic values, use confirmed_inventory only, do not assume staples, and treat dietary "
+        "restrictions as hard exclusions. Use the requested locale for all human-readable values; for ru-RU, "
+        "write titles, instructions, and ingredient names in Russian."
+    )
+
+
 class AuxiliaryWeeklyMenuGenerator:
     def __init__(
         self,
@@ -393,14 +483,10 @@ class AuxiliaryWeeklyMenuGenerator:
             },
         ]
         if request.inventory_only:
-            messages[0]["content"] = (
-                "Return only a JSON object with the sole key days. Each day must contain exactly the allowed meals. "
-                "Each meal must contain meal_type, title, instructions, servings, estimated_calories_per_serving, "
-                "macros_per_serving, and ingredients. Ingredients must contain only name, quantity_value, and unit. "
-                "Use confirmed_inventory, do not assume staples, and treat dietary restrictions as hard exclusions."
-            )
+            messages[0]["content"] = _inventory_weekly_system_prompt()
         telemetry = ExternalRequestTelemetry()
         outcome = "provider_failure"
+        safe_reason = "PROVIDER_ERROR"
         try:
             response = self._call_llm_fn(
                 task="weekly_menu_generation",
@@ -416,10 +502,15 @@ class AuxiliaryWeeklyMenuGenerator:
                 request_telemetry=telemetry,
             )
             content = extract_content_or_reasoning(response)
+            if not content:
+                outcome = "empty_provider_response"
+                safe_reason = "EMPTY_PROVIDER_RESPONSE"
+                raise WeeklyMenuGeneratorValidationError("weekly menu generator returned empty response")
             try:
                 parsed = json.loads(content, parse_float=Decimal)
             except json.JSONDecodeError as exc:
-                outcome = "validation_failure"
+                outcome = "json_parse_failure"
+                safe_reason = "MALFORMED_JSON"
                 raise WeeklyMenuGeneratorValidationError("weekly menu generator returned malformed json") from exc
             try:
                 result = (
@@ -428,10 +519,18 @@ class AuxiliaryWeeklyMenuGenerator:
                     else _parse_generation_response(parsed, request=request)
                 )
             except InventoryMenuContractError as exc:
+                outcome = "schema_validation_failure"
+                safe_reason = _normalize_inventory_schema_failure(exc)
                 raise WeeklyMenuGeneratorValidationError("inventory menu generator returned invalid json") from exc
+            except WeeklyMenuGeneratorValidationError:
+                outcome = "schema_validation_failure"
+                safe_reason = "INVALID_RESPONSE_SCHEMA"
+                raise
             outcome = "success"
+            safe_reason = "NONE"
             return result
         except LLMServiceUnavailableError as exc:
+            outcome, safe_reason = _provider_failure_classification(exc)
             raise WeeklyMenuGeneratorUnavailableError("weekly menu generator unavailable") from exc
         except WeeklyMenuGeneratorValidationError:
             raise
@@ -439,13 +538,14 @@ class AuxiliaryWeeklyMenuGenerator:
             raise WeeklyMenuGeneratorUnavailableError("weekly menu generator unavailable") from exc
         finally:
             logger.info(
-                "weekly_menu_provider_call_complete external_request_attempts=%s "
-                "external_request_budget=%s outcome=%s retry_performed=%s fallback_performed=%s",
+                "weekly_menu_provider_call_complete task=weekly_menu_generation external_request_attempts=%s "
+                "external_request_budget=%s outcome=%s retry_performed=%s fallback_performed=%s safe_reason=%s",
                 telemetry.external_request_attempts,
                 telemetry.external_request_budget,
                 outcome,
                 bool(telemetry.retry_performed),
                 bool(telemetry.fallback_performed),
+                safe_reason,
             )
 
 

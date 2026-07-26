@@ -5320,6 +5320,27 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
     return {}
 
 
+def _enforce_weekly_v4_thinking_contract(
+    *,
+    task: str | None,
+    provider: str | None,
+    model: str | None,
+    extra_body: Dict[str, Any],
+) -> None:
+    """Keep Weekly V4 Flash on the legacy non-thinking execution path."""
+    if (
+        task != "weekly_menu_generation"
+        or provider != "deepseek"
+        or model != "deepseek-v4-flash"
+    ):
+        return
+    thinking = extra_body.get("thinking")
+    if not isinstance(thinking, dict) or thinking.get("type") != "disabled":
+        raise RuntimeError(
+            "Weekly deepseek-v4-flash requires explicit thinking=disabled"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Anthropic-compatible endpoint detection + image block conversion
 # ---------------------------------------------------------------------------
@@ -5600,6 +5621,12 @@ def call_llm(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
+    _enforce_weekly_v4_thinking_contract(
+        task=task,
+        provider=resolved_provider,
+        model=resolved_model,
+        extra_body=effective_extra_body,
+    )
 
     if task == "vision":
         resolved_provider, client, final_model = _resolve_vision_call_backend(
@@ -6119,6 +6146,12 @@ async def async_call_llm(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
+    _enforce_weekly_v4_thinking_contract(
+        task=task,
+        provider=resolved_provider,
+        model=resolved_model,
+        extra_body=effective_extra_body,
+    )
 
     if task == "vision":
         resolved_provider, client, final_model = _resolve_vision_call_backend(

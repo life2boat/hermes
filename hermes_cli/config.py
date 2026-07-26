@@ -1261,12 +1261,16 @@ DEFAULT_CONFIG = {
         },
         # HealBite Weekly generation is pinned independently from the main,
         # Vision, and generic auxiliary lanes. DeepSeek retired the legacy
-        # deepseek-chat alias; JSON Output also requires json_object mode.
+        # deepseek-chat alias; V4 Flash must explicitly preserve its legacy
+        # non-thinking behavior. JSON Output also requires json_object mode.
         "weekly_menu_generation": {
             "provider": "deepseek",
             "model": "deepseek-v4-flash",
             "timeout": 45,
-            "extra_body": {"response_format": {"type": "json_object"}},
+            "extra_body": {
+                "thinking": {"type": "disabled"},
+                "response_format": {"type": "json_object"},
+            },
         },
         "web_extract": {
             "provider": "auto",

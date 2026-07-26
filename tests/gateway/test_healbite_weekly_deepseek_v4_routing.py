@@ -4,6 +4,8 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from agent.auxiliary_client import (
     ExternalRequestTelemetry,
     WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
@@ -80,7 +82,10 @@ def test_weekly_call_uses_v4_flash_json_object_without_retry_or_fallback():
     assert get_client.call_args.args[:2] == ("deepseek", "deepseek-v4-flash")
     kwargs = recorder.calls[0]
     assert kwargs["model"] == "deepseek-v4-flash"
-    assert kwargs["extra_body"] == {"response_format": {"type": "json_object"}}
+    assert kwargs["extra_body"] == {
+        "thinking": {"type": "disabled"},
+        "response_format": {"type": "json_object"},
+    }
     assert kwargs["temperature"] == 0.2
     assert kwargs["timeout"] == 45.0
     assert "tools" not in kwargs
@@ -89,6 +94,38 @@ def test_weekly_call_uses_v4_flash_json_object_without_retry_or_fallback():
     assert telemetry.external_request_budget == 1
     assert telemetry.retry_performed is False
     assert telemetry.fallback_performed is False
+
+
+def test_weekly_v4_flash_requires_explicit_disabled_thinking():
+    invalid_extra_bodies = (
+        {"response_format": {"type": "json_object"}},
+        {
+            "thinking": {"type": "enabled"},
+            "response_format": {"type": "json_object"},
+        },
+    )
+
+    for extra_body in invalid_extra_bodies:
+        recorder = _Recorder()
+        config = deepcopy(DEFAULT_CONFIG)
+        config["auxiliary"]["weekly_menu_generation"]["extra_body"] = extra_body
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(_client(recorder), "deepseek-v4-flash"),
+            ) as get_client,
+        ):
+            with pytest.raises(RuntimeError, match="thinking=disabled"):
+                call_llm(
+                    task="weekly_menu_generation",
+                    messages=[{"role": "user", "content": "synthetic"}],
+                    call_policy=WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
+                )
+
+        get_client.assert_not_called()
+        assert recorder.calls == []
 
 
 def test_unrelated_auxiliary_defaults_are_unchanged():

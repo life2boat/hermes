@@ -38,6 +38,12 @@ from scripts.hermes_execution_authority import (  # noqa: E402
     load_execution_authority,
     validate_trusted_parent_chain,
 )
+from scripts.hermes_runtime_attestation import (  # noqa: E402
+    RUNTIME_ATTESTATION_VERSION,
+    build_runtime_attestation_payload,
+    open_runtime_attestation,
+    validate_stopped_runtime_attestation,
+)
 from scripts.hermes_staged_schema_migrate import (  # noqa: E402
     OrchestratorError,
     SourceIdentity,
@@ -53,7 +59,7 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 5
+PLAN_VERSION = 6
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
@@ -189,6 +195,9 @@ PLAN_FIELDS = frozenset(
         "PLAN_BACKUP_CREATED",
         "PLAN_STAGING_CREATED",
         "PLAN_CONTAINER_STOPPED",
+        "PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP",
+        "RUNTIME_ATTESTATION_REQUIRED",
+        "RUNTIME_ATTESTATION_VERSION",
         "PLAN_CONTAINS_SECRETS",
         "AUTOMATIC_RETRY_ALLOWED",
         "AUTOMATIC_DB_RESTORE_IMPLEMENTED",
@@ -511,11 +520,21 @@ class ValidatedExecution:
     operations_root_approval: PinnedEvidenceDocument
     clean_start_policy: PinnedEvidenceDocument
     execution_authority: ExecutionAuthorityBundle
+    runtime_attestation: Any | None
     target_schema_version: str
     target_schema_fingerprint: str
 
     def close(self) -> None:
-        _run_cleanup(
+        cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+        if self.runtime_attestation is not None:
+            cleanup_steps.append(
+                (
+                    "RUNTIME_ATTESTATION_CLOSE_FAILED",
+                    self.runtime_attestation.close,
+                )
+            )
+        cleanup_steps.extend(
+            (
             (
                 "EXECUTION_AUTHORITY_CLOSE_FAILED",
                 self.execution_authority.close,
@@ -535,7 +554,9 @@ class ValidatedExecution:
             ("EVIDENCE_PARENT_CLOSE_FAILED", self.evidence_parent.close),
             ("STAGING_PARENT_CLOSE_FAILED", self.staging_parent.close),
             ("BACKUP_PARENT_CLOSE_FAILED", self.backup_parent.close),
+            )
         )
+        _run_cleanup(*cleanup_steps)
 
 
 def _now() -> datetime:
@@ -1551,6 +1572,9 @@ def create_plan(args: argparse.Namespace) -> int:
             "PLAN_BACKUP_CREATED": False,
             "PLAN_STAGING_CREATED": False,
             "PLAN_CONTAINER_STOPPED": False,
+            "PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP": True,
+            "RUNTIME_ATTESTATION_REQUIRED": True,
+            "RUNTIME_ATTESTATION_VERSION": RUNTIME_ATTESTATION_VERSION,
             "PLAN_CONTAINS_SECRETS": False,
             "AUTOMATIC_RETRY_ALLOWED": False,
             "AUTOMATIC_DB_RESTORE_IMPLEMENTED": False,
@@ -1739,6 +1763,8 @@ def _revalidate_plan(
     args: argparse.Namespace,
     pinned: PinnedPlan,
     root_identity: RootIdentity,
+    *,
+    expected_runtime_running: bool,
 ) -> ValidatedExecution:
     plan = pinned.payload
     if set(plan) != PLAN_FIELDS:
@@ -1754,6 +1780,8 @@ def _revalidate_plan(
         "PLAN_BACKUP_CREATED": False,
         "PLAN_STAGING_CREATED": False,
         "PLAN_CONTAINER_STOPPED": False,
+        "PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP": True,
+        "RUNTIME_ATTESTATION_REQUIRED": True,
         "PLAN_CONTAINS_SECRETS": False,
         "AUTOMATIC_RETRY_ALLOWED": False,
         "AUTOMATIC_DB_RESTORE_IMPLEMENTED": False,
@@ -1763,6 +1791,11 @@ def _revalidate_plan(
         for name, value in expected_booleans.items()
     ):
         raise ProductionGateError("PLAN_SAFETY_CONTRACT_INVALID")
+    if (
+        plan.get("RUNTIME_ATTESTATION_VERSION")
+        != RUNTIME_ATTESTATION_VERSION
+    ):
+        raise ProductionGateError("PLAN_RUNTIME_ATTESTATION_CONTRACT_INVALID")
     if (
         plan.get("PLAN_CREATOR_UID") != 0
         or plan.get("PLAN_CREATOR_UID") != root_identity.effective_uid
@@ -1936,6 +1969,7 @@ def _revalidate_plan(
                 plan_sha256=pinned.sha256,
                 plan=plan,
                 repository_root=repository_root,
+                expected_runtime_running=expected_runtime_running,
             )
         except ExecutionAuthorityError as exc:
             raise ProductionGateError(exc.code) from exc
@@ -2050,6 +2084,7 @@ def _revalidate_plan(
             operations_root_approval=operations_root_approval,
             clean_start_policy=clean_start_policy,
             execution_authority=execution_authority,
+            runtime_attestation=None,
             target_schema_version=expected_target.version,
             target_schema_fingerprint=expected_target.fingerprint,
         )
@@ -2676,6 +2711,10 @@ def _pinned_authorities_match(
         and validated.operations_root_approval.path_matches()
         and validated.clean_start_policy.path_matches()
         and validated.execution_authority.path_matches()
+        and (
+            validated.runtime_attestation is None
+            or validated.runtime_attestation.path_matches()
+        )
         and validated.backup_parent.path_matches()
         and validated.staging_parent.path_matches()
         and validated.evidence_parent.path_matches()
@@ -2692,7 +2731,18 @@ def _final_mutation_checkpoint(
     try:
         validated.execution_authority.validate_not_expired()
         validated.execution_authority.revalidate_operations_root()
-        validated.execution_authority.validate_runtime()
+        validated.execution_authority.validate_runtime(
+            expected_running=False
+        )
+        if validated.runtime_attestation is None:
+            raise ProductionGateError("RUNTIME_ATTESTATION_REQUIRED")
+        validate_stopped_runtime_attestation(
+            artifact=validated.runtime_attestation,
+            bundle=validated.execution_authority,
+            plan_path=pinned.path,
+            plan_sha256=pinned.sha256,
+            plan=pinned.payload,
+        )
     except ExecutionAuthorityError as exc:
         raise ProductionGateError(exc.code) from exc
     if prepared.source_identity != validated.source_identity:
@@ -2714,13 +2764,44 @@ def _execute_plan_outcome(
     try:
         root_identity = _root_identity()
         pinned = _open_plan(args.plan, args.expected_plan_sha256)
-        validated = _revalidate_plan(args, pinned, root_identity)
+        validated = _revalidate_plan(
+            args,
+            pinned,
+            root_identity,
+            expected_runtime_running=False,
+        )
         plan = pinned.payload
         operation_id = str(plan["OPERATION_ID"])
+        runtime_attestation = open_runtime_attestation(
+            args.runtime_pin,
+            args.expected_runtime_pin_sha256,
+        )
+        try:
+            expected_pin_path = pinned.path.parent / "runtime-pin.json"
+            if (
+                runtime_attestation.path != expected_pin_path
+                or not runtime_attestation.path_matches()
+            ):
+                raise ProductionGateError(
+                    "RUNTIME_ATTESTATION_PATH_SUBSTITUTION"
+                )
+            validate_stopped_runtime_attestation(
+                artifact=runtime_attestation,
+                bundle=validated.execution_authority,
+                plan_path=pinned.path,
+                plan_sha256=pinned.sha256,
+                plan=plan,
+            )
+        except Exception:
+            runtime_attestation.close()
+            raise
+        validated.runtime_attestation = runtime_attestation
         if not _pinned_authorities_match(pinned, validated):
             raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
         try:
-            runtime_matches = validated.execution_authority.runtime_matches()
+            runtime_matches = validated.execution_authority.runtime_matches(
+                expected_running=False
+            )
         except ExecutionAuthorityError as exc:
             raise ProductionGateError(exc.code) from exc
         if not runtime_matches:
@@ -3120,6 +3201,73 @@ def execute_plan(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+def attest_runtime(args: argparse.Namespace) -> int:
+    pinned: PinnedPlan | None = None
+    validated: ValidatedExecution | None = None
+    try:
+        root_identity = _root_identity()
+        pinned = _open_plan(args.plan, args.expected_plan_sha256)
+        validated = _revalidate_plan(
+            args,
+            pinned,
+            root_identity,
+            expected_runtime_running=True,
+        )
+        if not _pinned_authorities_match(pinned, validated):
+            raise ProductionGateError("PINNED_AUTHORITY_DRIFT")
+        runtime_pin_path = pinned.path.parent / "runtime-pin.json"
+        if runtime_pin_path.exists() or runtime_pin_path.is_symlink():
+            raise ProductionGateError("RUNTIME_ATTESTATION_COLLISION")
+        try:
+            payload = build_runtime_attestation_payload(
+                bundle=validated.execution_authority,
+                plan_path=pinned.path,
+                plan_sha256=pinned.sha256,
+                plan=pinned.payload,
+            )
+        except ExecutionAuthorityError as exc:
+            raise ProductionGateError(exc.code) from exc
+        _write_json_durable_at(
+            pinned.parent_fd,
+            runtime_pin_path.name,
+            payload,
+        )
+        runtime_pin_sha256 = _sha256(runtime_pin_path)
+        artifact = open_runtime_attestation(
+            str(runtime_pin_path),
+            runtime_pin_sha256,
+        )
+        try:
+            if (
+                artifact.path != runtime_pin_path
+                or not artifact.path_matches()
+            ):
+                raise ProductionGateError(
+                    "RUNTIME_ATTESTATION_PATH_SUBSTITUTION"
+                )
+        finally:
+            artifact.close()
+        _json_emit(
+            {
+                "status": "PASS",
+                "mode": "ATTEST_RUNTIME",
+                "operation_id": pinned.payload["OPERATION_ID"],
+                "runtime_pin_path": str(runtime_pin_path),
+                "runtime_pin_sha256": runtime_pin_sha256,
+                "runtime_state_attested": "running",
+                "expected_runtime_transition": "running_to_stopped",
+                "contains_secrets": False,
+                "production_execution_enabled": False,
+            }
+        )
+        return 0
+    finally:
+        if validated is not None:
+            validated.close()
+        if pinned is not None:
+            pinned.close()
+
+
 class _StructuredArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> None:
         raise _StructuredArgumentError()
@@ -3176,6 +3324,25 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         type=_positive_int,
     )
+    attest_parser = subparsers.add_parser("attest-runtime")
+    attest_parser.add_argument("--plan", required=True)
+    attest_parser.add_argument("--expected-plan-sha256", required=True)
+    attest_parser.add_argument("--confirm-operation-id", required=True)
+    attest_parser.add_argument("--confirm-source-sha256", required=True)
+    attest_parser.add_argument("--confirm-image-revision", required=True)
+    attest_parser.add_argument(
+        "--confirm-operations-root-approval-sha256",
+        required=True,
+    )
+    attest_parser.add_argument(
+        "--confirm-clean-start-policy-sha256",
+        required=True,
+    )
+    attest_parser.add_argument("--final-authority", required=True)
+    attest_parser.add_argument(
+        "--expected-final-authority-sha256",
+        required=True,
+    )
     execute_parser = subparsers.add_parser("execute")
     execute_parser.add_argument("--plan", required=True)
     execute_parser.add_argument("--expected-plan-sha256", required=True)
@@ -3192,6 +3359,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execute_parser.add_argument("--final-authority", required=True)
     execute_parser.add_argument("--expected-final-authority-sha256", required=True)
+    execute_parser.add_argument("--runtime-pin", required=True)
+    execute_parser.add_argument("--expected-runtime-pin-sha256", required=True)
     return parser
 
 
@@ -3220,6 +3389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "plan":
             return create_plan(args)
+        if args.command == "attest-runtime":
+            return attest_runtime(args)
         if args.command == "execute":
             return execute_plan(args)
         raise ProductionGateError("EXPLICIT_SUBCOMMAND_REQUIRED")

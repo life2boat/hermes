@@ -755,7 +755,7 @@ def _typed_fields(payload: dict[str, Any], expected: dict[str, Any], code: str) 
         raise ExecutionAuthorityError(code)
 
 
-def _inspect_image(image_id: str, revision: str | None) -> None:
+def _inspect_image(image_id: str, revision: str | None) -> str:
     if IMAGE_ID_RE.fullmatch(image_id) is None:
         raise ExecutionAuthorityError("AUTHORITY_IMAGE_ID_INVALID")
     result = subprocess.run(
@@ -774,8 +774,10 @@ def _inspect_image(image_id: str, revision: str | None) -> None:
     lines = result.stdout.splitlines()
     if result.returncode != 0 or not lines or lines[0] != image_id:
         raise ExecutionAuthorityError("AUTHORITY_IMAGE_IDENTITY_DRIFT")
-    if revision is not None and (len(lines) < 2 or lines[1] != revision):
+    actual_revision = lines[1] if len(lines) >= 2 else ""
+    if revision is not None and actual_revision != revision:
         raise ExecutionAuthorityError("AUTHORITY_IMAGE_REVISION_DRIFT")
+    return actual_revision
 
 
 def _inspect_runtime(service_name: str) -> dict[str, Any]:
@@ -836,6 +838,8 @@ def _validate_runtime_payload(
     runtime: dict[str, Any],
     descriptor: dict[str, Any],
     runtime_image_id: str,
+    *,
+    expected_running: bool = True,
 ) -> None:
     state = runtime.get("State")
     config = runtime.get("Config")
@@ -844,10 +848,22 @@ def _validate_runtime_payload(
         not isinstance(state, dict)
         or not isinstance(config, dict)
         or not isinstance(mounts, list)
-        or not state.get("Running")
         or runtime.get("Image") != runtime_image_id
     ):
         raise ExecutionAuthorityError("CURRENT_RUNTIME_IDENTITY_DRIFT")
+    if expected_running:
+        if state.get("Running") is not True:
+            raise ExecutionAuthorityError("CURRENT_RUNTIME_IDENTITY_DRIFT")
+    elif (
+        state.get("Running") is not False
+        or state.get("Status") != "exited"
+        or state.get("Paused") is True
+        or state.get("Restarting") is True
+        or state.get("Dead") is True
+        or state.get("OOMKilled") is True
+        or state.get("Error") not in {None, ""}
+    ):
+        raise ExecutionAuthorityError("EXPECTED_RUNTIME_STOP_NOT_PROVEN")
     labels = config.get("Labels")
     if (
         not isinstance(labels, dict)
@@ -1003,18 +1019,19 @@ class ExecutionAuthorityBundle:
         ):
             raise ExecutionAuthorityError("OPERATIONS_ROOT_AUTHORITY_DRIFT")
 
-    def validate_runtime(self) -> None:
+    def validate_runtime(self, *, expected_running: bool = True) -> None:
         descriptor = self.invocation_descriptor.payload
         runtime = _inspect_runtime(str(descriptor["APPLICATION_SERVICE"]))
         _validate_runtime_payload(
             runtime,
             descriptor,
             self.runtime_image_id,
+            expected_running=expected_running,
         )
 
-    def runtime_matches(self) -> bool:
+    def runtime_matches(self, *, expected_running: bool = True) -> bool:
         try:
-            self.validate_runtime()
+            self.validate_runtime(expected_running=expected_running)
         except ExecutionAuthorityError:
             return False
         return True
@@ -1043,6 +1060,7 @@ def load_execution_authority(
     plan_sha256: str,
     plan: dict[str, Any],
     repository_root: Path,
+    expected_runtime_running: bool = True,
 ) -> ExecutionAuthorityBundle:
     """Load every execution input from top-level authority and validate it."""
 
@@ -1295,7 +1313,12 @@ def load_execution_authority(
         _inspect_image(target_image, str(plan["MIGRATION_IMAGE_REVISION"]))
         _inspect_image(current_image, None)
         runtime = _inspect_runtime(str(desc["APPLICATION_SERVICE"]))
-        _validate_runtime_payload(runtime, desc, current_image)
+        _validate_runtime_payload(
+            runtime,
+            desc,
+            current_image,
+            expected_running=expected_runtime_running,
+        )
 
         return ExecutionAuthorityBundle(
             final_authority=final,

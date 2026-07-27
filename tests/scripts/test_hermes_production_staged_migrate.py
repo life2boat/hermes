@@ -168,7 +168,7 @@ class _UnitExecutionAuthority:
     def path_matches(self) -> bool:
         return True
 
-    def runtime_matches(self) -> bool:
+    def runtime_matches(self, *, expected_running: bool = True) -> bool:
         return True
 
     def validate_not_expired(self) -> None:
@@ -177,7 +177,7 @@ class _UnitExecutionAuthority:
     def revalidate_operations_root(self) -> None:
         return None
 
-    def validate_runtime(self) -> None:
+    def validate_runtime(self, *, expected_running: bool = True) -> None:
         return None
 
     def validate_source(
@@ -190,6 +190,17 @@ class _UnitExecutionAuthority:
         assert identity["SOURCE_USER_VERSION"] == 0
         assert len(schema_fingerprint) == 64
         assert parent_identity["PATH"]
+
+    def close(self) -> None:
+        return None
+
+
+class _UnitRuntimeAttestation:
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+
+    def path_matches(self) -> bool:
+        return True
 
     def close(self) -> None:
         return None
@@ -498,6 +509,26 @@ def _install_unit_root(
         "load_execution_authority",
         lambda **_kwargs: _UnitExecutionAuthority(),
     )
+    original_require_free_bytes = production._require_free_bytes
+    monkeypatch.setattr(
+        production,
+        "_require_free_bytes",
+        lambda path, minimum: (
+            None
+            if minimum == 1
+            else original_require_free_bytes(path, minimum)
+        ),
+    )
+    monkeypatch.setattr(
+        production,
+        "open_runtime_attestation",
+        lambda path, _expected_sha256: _UnitRuntimeAttestation(path),
+    )
+    monkeypatch.setattr(
+        production,
+        "validate_stopped_runtime_attestation",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(staged, "_inspect_image", _fake_image_inspect)
 
 
@@ -660,6 +691,8 @@ def _execute_argv(
             plan.unit.root / "synthetic-final-authority.json"
         ),
         "expected_final_authority_sha256": "a" * 64,
+        "runtime_pin": str(plan.path.parent / "runtime-pin.json"),
+        "expected_runtime_pin_sha256": "b" * 64,
     }
     values.update(overrides)
     return [
@@ -682,6 +715,10 @@ def _execute_argv(
         values["final_authority"],
         "--expected-final-authority-sha256",
         values["expected_final_authority_sha256"],
+        "--runtime-pin",
+        values["runtime_pin"],
+        "--expected-runtime-pin-sha256",
+        values["expected_runtime_pin_sha256"],
     ]
 
 
@@ -834,8 +871,9 @@ def test_descriptor_reads_reject_premature_eof(
 def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     parser = production.build_parser()
     choices = parser._subparsers._group_actions[0].choices
-    assert set(choices) == {"plan", "execute"}
+    assert set(choices) == {"plan", "attest-runtime", "execute"}
     plan_help = choices["plan"].format_help()
+    attest_help = choices["attest-runtime"].format_help()
     execute_help = choices["execute"].format_help()
     assert "--repository-root" in plan_help
     assert "--operations-root-approval" in plan_help
@@ -846,6 +884,9 @@ def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     assert "--confirm-clean-start-policy-sha256" in execute_help
     assert "--final-authority" in execute_help
     assert "--expected-final-authority-sha256" in execute_help
+    assert "--final-authority" in attest_help
+    assert "--expected-final-authority-sha256" in attest_help
+    assert "--runtime-pin" in execute_help
     assert "--deployment-contract" not in plan_help
     assert "--target-schema-version" not in plan_help
     combined = f"{plan_help}\n{execute_help}"
@@ -888,8 +929,11 @@ def test_runbook_documents_exact_evidence_binding_contract() -> None:
         "--confirm-clean-start-policy-sha256",
         "--final-authority",
         "--expected-final-authority-sha256",
+        "--runtime-pin",
+        "--expected-runtime-pin-sha256",
+        "attest-runtime",
         "NO_CLIENTS_CLEAN_START",
-        "plan schema version 5",
+        "plan schema version 6",
         "no generic force or skip-validation flag exists",
     ):
         assert required in runbook
@@ -904,6 +948,10 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     before_hash = production._sha256(context.source)
     plan = _create_plan(context, capfd)
     payload = plan.payload
+    assert payload["PLAN_VERSION"] == production.PLAN_VERSION
+    assert payload["PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP"] is True
+    assert payload["RUNTIME_ATTESTATION_REQUIRED"] is True
+    assert payload["RUNTIME_ATTESTATION_VERSION"] == 1
     target = staged._target_schema_contract()
     assert payload["PLAN_CREATOR_UID"] == 0
     assert payload["PLAN_CREATOR_GID"] == 0
@@ -979,7 +1027,12 @@ def test_plan_parser_requires_each_evidence_binding(
 
 @pytest.mark.parametrize(
     "option",
-    ("--final-authority", "--expected-final-authority-sha256"),
+    (
+        "--final-authority",
+        "--expected-final-authority-sha256",
+        "--runtime-pin",
+        "--expected-runtime-pin-sha256",
+    ),
 )
 def test_execute_parser_requires_final_authority_binding(
     option: str,
@@ -2083,6 +2136,10 @@ def test_execute_main_generic_fallback_never_reports_before_exchange(
         "/synthetic/final-authority.json",
         "--expected-final-authority-sha256",
         "0" * 64,
+        "--runtime-pin",
+        "/synthetic/runtime-pin.json",
+        "--expected-runtime-pin-sha256",
+        "0" * 64,
     ]
     assert production.main(argv) == 1
     results = _json_results(capfd)
@@ -2849,7 +2906,7 @@ def test_complete_final_mutation_checkpoint_passes(
         def revalidate_operations_root(self) -> None:
             calls.append("operations_root")
 
-        def validate_runtime(self) -> None:
+        def validate_runtime(self, *, expected_running: bool = True) -> None:
             calls.append("runtime")
 
     source_identity = object()
@@ -2858,6 +2915,9 @@ def test_complete_final_mutation_checkpoint_passes(
         (),
         {
             "execution_authority": FinalAuthority(),
+            "runtime_attestation": _UnitRuntimeAttestation(
+                str(plan.path.parent / "runtime-pin.json")
+            ),
             "source_identity": source_identity,
         },
     )()

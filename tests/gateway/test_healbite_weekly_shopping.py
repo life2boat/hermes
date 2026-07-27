@@ -758,10 +758,18 @@ def test_new_confirmed_inventory_invalidates_old_delta(tmp_path):
         [InventoryItemInput("Рис", "500", "g")],
     )
     with sqlite3.connect(db_path) as conn:
+        latest_confirmed_at = conn.execute(
+            "SELECT MAX(confirmed_at) FROM healbite_inventory_snapshots "
+            "WHERE household_id = ?",
+            (personal.household.id,),
+        ).fetchone()[0]
+        replacement_confirmed_at = (
+            datetime.fromisoformat(str(latest_confirmed_at)) + timedelta(seconds=1)
+        ).strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
             "UPDATE healbite_inventory_snapshots "
-            "SET confirmed_at = '2026-07-26 23:59:59' WHERE id = ?",
-            (replacement.snapshot.id,),
+            "SET confirmed_at = ? WHERE id = ?",
+            (replacement_confirmed_at, replacement.snapshot.id),
         )
 
     with pytest.raises(WeeklyShoppingStaleError):

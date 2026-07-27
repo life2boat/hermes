@@ -500,7 +500,7 @@ production DB and its parent must never be mounted in the migration container.
 The staged-copy implementation remains in
 `scripts/hermes_staged_schema_migrate.py`. The single public production
 authorization entrypoint is `scripts/hermes_production_staged_migrate.py`, with
-separate explicit `plan` and `execute` subcommands. The fail-closed default is
+separate explicit `plan`, `attest-runtime`, and `execute` subcommands. The fail-closed default is
 explicit: production execution is disabled by default; there is no default database
 path, environment fallback,
 generic confirmation flag, in-place migration, or implicit container stop.
@@ -537,7 +537,7 @@ of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tab
 and false execution/deletion state
 both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
 descriptors before production source inspection; their path, filesystem identity,
-mode and SHA-256 are recorded in plan schema version 5
+mode and SHA-256 are recorded in plan schema version 6
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
@@ -555,6 +555,16 @@ plus independent --confirm-operations-root-approval-sha256 and
 production execute also requires --final-authority and
 --expected-final-authority-sha256; plan schema version 4 and any execute without
 these arguments are audit-only and denied before quiescence
+the explicit attest-runtime subcommand requires the same exact plan, authority,
+source, image, operations-root and clean-start confirmations as execute; it
+validates the current Hermes container while Running and writes one root-owned
+0600 runtime-pin.json beside the exact plan; the pin contains only immutable
+container/image/revision, Compose project/config-file, mount, DB identity,
+approved-config and credential fingerprints, never raw environment values
+production execute additionally requires --runtime-pin and
+--expected-runtime-pin-sha256; it reopens the exact adjacent pin after the
+authorized Hermes stop and accepts only Running=false with Status=exited and no
+immutable identity drift or missing pre-stop pin before quiescence, backup, staging or mutation
 execution authority schema version 1 binds the exact plan, native approval,
 clean-start policy, approval envelope, invocation descriptor, persistent DB
 override, P5B and P6A-F1 evidence, source HEAD/tree, both image IDs, canonical DB
@@ -621,14 +631,14 @@ operation ID, source SHA-256, and migration image revision before service stop.
 2. Create one immutable production plan while Hermes remains running.
 3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256;
    create and independently approve one complete final-authority v1 artifact.
-4. Keep the exact current Hermes runtime running for execute-time identity proof.
+4. Run the explicit `attest-runtime` command while Hermes is still running and
+   review the adjacent runtime pin with the plan and final authority.
 5. Use a separately approved quiet window in which hermes-bot makes no database
    accesses. Execute must prove real SQLite quiescence and hold both lifetime
    leases; a generic flock or process-name check is not sufficient. This command
-   does not stop or recreate hermes-bot.
-6. Execute only the exact approved plan.
-7. Perform a separate read-only integrity, foreign-key, and schema verification.
-8. Start the exact image through scripts/hermes_production_deploy.py with all
+   stops only hermes-bot before executing the exact plan with its exact runtime pin.
+6. Perform a separate read-only integrity, foreign-key, and schema verification.
+7. Start the exact image through scripts/hermes_production_deploy.py with all
    manifest feature gates disabled and allowlists empty.
 9. Run the approved Telegram smoke while Household/Weekly/Shopping enablement is
    unchanged.
@@ -643,6 +653,8 @@ set -euo pipefail
 HOST_PYTHON="<approved-host-python>"
 GATE="scripts/hermes_production_staged_migrate.py"
 REPOSITORY_ROOT="<exact-clean-repository-root>"
+RUNTIME_PIN="<exact-plan-adjacent-runtime-pin-path>"
+RUNTIME_PIN_SHA256="<exact-runtime-pin-sha256>"
 DB_PATH="<explicit-approved-database-path>"
 BACKUP_PARENT="<explicit-private-backup-parent>"
 STAGING_PARENT="<explicit-private-same-filesystem-staging-parent>"
@@ -677,6 +689,23 @@ sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" plan \
   --migration-image-id "$MIGRATION_IMAGE_ID" \
   --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
   --previous-image-id "$PREVIOUS_IMAGE_ID" \
+The reviewer then runs the pre-stop attestation before the maintenance stop:
+
+```bash
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" attest-runtime \
+  --plan "$APPROVED_PLAN_PATH" \
+  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
+  --confirm-operation-id "$APPROVED_OPERATION_ID" \
+  --confirm-source-sha256 "$APPROVED_SOURCE_SHA256" \
+  --confirm-image-revision "$APPROVED_IMAGE_REVISION" \
+  --confirm-operations-root-approval-sha256 "$APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256" \
+  --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256" \
+  --final-authority "$APPROVED_FINAL_AUTHORITY_PATH" \
+  --expected-final-authority-sha256 "$APPROVED_FINAL_AUTHORITY_SHA256"
+```
+The command is read-only with respect to the production database and creates
+only the durable plan-adjacent runtime pin.
+
   --expected-hostname "$EXPECTED_HOSTNAME" \
   --expected-source-device "$SOURCE_DEVICE" \
   --expected-source-inode "$SOURCE_INODE" \
@@ -725,7 +754,9 @@ sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" execute \
   --confirm-operations-root-approval-sha256 "$APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256" \
   --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256" \
   --final-authority "$APPROVED_FINAL_AUTHORITY_PATH" \
-  --expected-final-authority-sha256 "$APPROVED_FINAL_AUTHORITY_SHA256"
+  --expected-final-authority-sha256 "$APPROVED_FINAL_AUTHORITY_SHA256" \
+  --runtime-pin "$RUNTIME_PIN" \
+  --expected-runtime-pin-sha256 "$RUNTIME_PIN_SHA256"
 ```
 
 If execute cannot acquire the source SQLite lease, it must stop before creating

@@ -85,10 +85,8 @@ def _runtime_file_record(path_value: str) -> dict[str, int | str]:
             raise authority.ExecutionAuthorityError(
                 "RUNTIME_COMPOSE_FILE_INVALID"
             )
-        data = authority._read_fd_bytes(
-            fd,
-            maximum=authority.MAX_ARTIFACT_BYTES,
-            code="RUNTIME_COMPOSE_FILE_INVALID",
+        data = authority._read_exact(
+            fd, int(before.st_size), "RUNTIME_COMPOSE_FILE_INVALID"
         )
         path_metadata = os.stat(path, follow_symlinks=False)
         after = os.fstat(fd)

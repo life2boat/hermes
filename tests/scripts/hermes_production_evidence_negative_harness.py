@@ -465,6 +465,8 @@ def _execute_argv(
     *,
     final_authority_path: Path,
     final_authority_sha256: str,
+    runtime_pin_path: Path,
+    runtime_pin_sha256: str,
     **overrides: str,
 ) -> list[str]:
     values = {
@@ -478,6 +480,8 @@ def _execute_argv(
         "confirm_clean_start_policy_sha256": str(
             plan.payload["CLEAN_START_POLICY_SHA256"]
         ),
+        "runtime_pin_path": str(runtime_pin_path),
+        "runtime_pin_sha256": runtime_pin_sha256,
     }
     values.update(overrides)
     return [
@@ -488,6 +492,10 @@ def _execute_argv(
         str(final_authority_path),
         "--expected-final-authority-sha256",
         final_authority_sha256,
+        "--runtime-pin",
+        values["runtime_pin_path"],
+        "--expected-runtime-pin-sha256",
+        values["runtime_pin_sha256"],
         "--expected-plan-sha256",
         values["expected_plan_sha256"],
         "--confirm-operation-id",
@@ -543,6 +551,7 @@ def _create_final_authority(
     repository: Path,
     plan: PlanContext,
 ) -> tuple[Path, str]:
+    global _ACTIVE_CONFIG_FILES
     artifacts = context.evidence_inputs
     revision = str(plan.payload["MIGRATION_IMAGE_REVISION"])
     tree = _run_git(repository, "rev-parse", "HEAD^{tree}")
@@ -687,7 +696,47 @@ def _create_final_authority(
             "CONTAINS_SECRETS": False,
         },
     )
+    _ACTIVE_CONFIG_FILES = [
+        str(base_compose),
+        str(override),
+        str(secret),
+    ]
     return final, _sha256(final)
+
+
+def _create_runtime_pin(
+    plan: PlanContext,
+    final_authority_path: Path,
+    final_authority_sha256: str,
+) -> tuple[Path, str]:
+    return_code, result = _public_main(
+        [
+            "attest-runtime",
+            "--plan",
+            str(plan.path),
+            "--expected-plan-sha256",
+            plan.sha256,
+            "--confirm-operation-id",
+            str(plan.payload["OPERATION_ID"]),
+            "--confirm-source-sha256",
+            str(plan.payload["SOURCE_SHA256"]),
+            "--confirm-image-revision",
+            str(plan.payload["MIGRATION_IMAGE_REVISION"]),
+            "--confirm-operations-root-approval-sha256",
+            str(plan.payload["OPERATIONS_ROOT_APPROVAL_SHA256"]),
+            "--confirm-clean-start-policy-sha256",
+            str(plan.payload["CLEAN_START_POLICY_SHA256"]),
+            "--final-authority",
+            str(final_authority_path),
+            "--expected-final-authority-sha256",
+            final_authority_sha256,
+        ]
+    )
+    if return_code != 0 or result.get("status") != "PASS":
+        raise AssertionError("synthetic runtime attestation failed")
+    return Path(str(result["runtime_pin_path"])), str(
+        result["runtime_pin_sha256"]
+    )
 
 
 def _rewrite_plan(plan: PlanContext) -> None:
@@ -903,7 +952,8 @@ def _prepare_execute_case(
     repository: Path,
     revision: str,
 ) -> list[str]:
-    global _ACTIVE_SOURCE
+    global _ACTIVE_SOURCE, _RUNTIME_RUNNING
+    _RUNTIME_RUNNING = True
     _ACTIVE_SOURCE = context.source
     plan = _create_plan(context, repository, revision)
     overrides: dict[str, str] = {}
@@ -915,6 +965,11 @@ def _prepare_execute_case(
     }
     if authority_before_mutation:
         final_path, final_sha256 = _create_final_authority(context, repository, plan)
+        runtime_pin_path, runtime_pin_sha256 = _create_runtime_pin(
+            plan,
+            final_path,
+            final_sha256,
+        )
     if case == "root_approval_replacement_after_plan":
         payload = json.loads(
             context.operations_root_approval.read_text(encoding="ascii")
@@ -969,10 +1024,15 @@ def _prepare_execute_case(
             repository,
             plan,
         )
+        runtime_pin_path = context.evidence / "unused-runtime-pin.json"
+        runtime_pin_sha256 = "0" * 64
+    _RUNTIME_RUNNING = False
     return _execute_argv(
         plan,
         final_authority_path=final_path,
         final_authority_sha256=final_sha256,
+        runtime_pin_path=runtime_pin_path,
+        runtime_pin_sha256=runtime_pin_sha256,
         **overrides,
     )
 
@@ -1044,6 +1104,8 @@ def _positive_plan_control(
 
 _ACTIVE_REVISION = ""
 _ACTIVE_SOURCE: Path | None = None
+_ACTIVE_CONFIG_FILES: list[str] = []
+_RUNTIME_RUNNING = True
 _PREPARE_CALLS = 0
 
 
@@ -1062,14 +1124,35 @@ def _synthetic_runtime(service_name: str) -> dict[str, Any]:
     if service_name != "hermes-bot" or _ACTIVE_SOURCE is None:
         raise execution_authority.ExecutionAuthorityError("CURRENT_RUNTIME_UNAVAILABLE")
     return {
-        "State": {"Running": True},
+        "Id": "a" * 64,
+        "Name": "/hermes-bot",
+        "State": {
+            "Running": _RUNTIME_RUNNING,
+            "Status": "running" if _RUNTIME_RUNNING else "exited",
+            "Paused": False,
+            "Restarting": False,
+            "Dead": False,
+            "OOMKilled": False,
+            "Error": "",
+        },
         "Image": PREVIOUS_IMAGE_ID,
         "Config": {
             "Labels": {
                 "com.docker.compose.project": "hermes-agent",
                 "com.docker.compose.service": "hermes-bot",
-            }
+                "com.docker.compose.project.working_dir": str(
+                    Path(_ACTIVE_CONFIG_FILES[0]).parent
+                ),
+                "com.docker.compose.project.config_files": ",".join(
+                    _ACTIVE_CONFIG_FILES
+                ),
+            },
+            "Env": [
+                "HEALBITE_SYNTHETIC_FEATURE=false",
+                "TELEGRAM_BOT_TOKEN=synthetic-token",
+            ],
         },
+        "HostConfig": {"NetworkMode": "synthetic"},
         "Mounts": [
             {
                 "Source": str(_ACTIVE_SOURCE),

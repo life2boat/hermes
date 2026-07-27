@@ -141,7 +141,7 @@ def test_runbook_requires_hash_bound_production_staged_copy_gate() -> None:
             "scripts/hermes_staged_schema_migrate.py",
             "scripts/hermes_production_staged_migrate.py",
             "single public production",
-            "separate explicit `plan` and `execute` subcommands",
+            "separate explicit `plan`, `attest-runtime`, and `execute` subcommands",
             "production execution is disabled by default",
             "plan and execute are separate",
             "plan and execute must run as root",

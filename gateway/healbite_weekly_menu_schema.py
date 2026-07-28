@@ -707,6 +707,20 @@ def is_weekly_menu_schema_v1(conn: sqlite3.Connection) -> bool:
     )
 
 
+def _canonical_table_statement(table: str) -> str:
+    prefix = f"CREATE TABLE IF NOT EXISTS {table} "
+    statements = tuple(
+        statement.strip()
+        for statement in WEEKLY_MENU_SCHEMA_SQL.split(";")
+        if statement.strip().startswith(prefix)
+    )
+    if len(statements) != 1:
+        raise sqlite3.OperationalError(
+            f"canonical weekly table DDL unavailable: {table}"
+        )
+    return statements[0]
+
+
 def migrate_weekly_menu_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
     if not conn.in_transaction:
         raise sqlite3.OperationalError("weekly schema migration requires transaction")
@@ -832,14 +846,45 @@ def migrate_weekly_menu_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
 
     conn.execute(f"DROP TABLE {WEEKLY_MENU_IDEMPOTENCY_TABLE}")
     conn.execute(f"DROP TABLE {WEEKLY_MENU_REVISIONS_TABLE}")
+    conn.execute(_canonical_table_statement(WEEKLY_MENU_REVISIONS_TABLE))
     conn.execute(
-        f"ALTER TABLE {_MIGRATION_REVISIONS_TABLE} "
-        f"RENAME TO {WEEKLY_MENU_REVISIONS_TABLE}"
+        f"""
+        INSERT INTO {WEEKLY_MENU_REVISIONS_TABLE}
+            (id, series_id, household_id, revision_number, status,
+             source_revision_id, created_by_member_id, created_at, updated_at,
+             published_at, archived_at, version)
+        SELECT id, series_id, household_id, revision_number, status,
+               source_revision_id, created_by_member_id, created_at, updated_at,
+               published_at, archived_at, version
+        FROM {_MIGRATION_REVISIONS_TABLE}
+        """
     )
+    conn.execute(_canonical_table_statement(WEEKLY_MENU_IDEMPOTENCY_TABLE))
     conn.execute(
-        f"ALTER TABLE {_MIGRATION_IDEMPOTENCY_TABLE} "
-        f"RENAME TO {WEEKLY_MENU_IDEMPOTENCY_TABLE}"
+        f"""
+        INSERT INTO {WEEKLY_MENU_IDEMPOTENCY_TABLE}
+            (id, household_id, actor_member_id, operation, idempotency_key,
+             payload_fingerprint, series_id, revision_id, created_at)
+        SELECT id, household_id, actor_member_id, operation, idempotency_key,
+               payload_fingerprint, series_id, revision_id, created_at
+        FROM {_MIGRATION_IDEMPOTENCY_TABLE}
+        """
     )
+    if int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {WEEKLY_MENU_REVISIONS_TABLE}"
+        ).fetchone()[0]
+    ) != revision_count:
+        raise sqlite3.IntegrityError("weekly revision migration row-count mismatch")
+    if int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE}"
+        ).fetchone()[0]
+    ) != idempotency_count:
+        raise sqlite3.IntegrityError("weekly idempotency migration row-count mismatch")
+
+    conn.execute(f"DROP TABLE {_MIGRATION_IDEMPOTENCY_TABLE}")
+    conn.execute(f"DROP TABLE {_MIGRATION_REVISIONS_TABLE}")
     conn.execute(
         f"CREATE UNIQUE INDEX idx_weekly_menu_revisions_id_household "
         f"ON {WEEKLY_MENU_REVISIONS_TABLE} (id, household_id)"

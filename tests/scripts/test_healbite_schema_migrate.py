@@ -1085,6 +1085,25 @@ def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> N
                 f"SELECT status FROM {WEEKLY_MENU_REVISIONS_TABLE} ORDER BY status"
             ).fetchall()
         )
+        revisions_before = tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {WEEKLY_MENU_REVISIONS_TABLE} ORDER BY id"
+            ).fetchall()
+        )
+        idempotency_before = tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE} ORDER BY id"
+            ).fetchall()
+        )
+        entry_relations_before = tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT menu_id, household_id FROM {WEEKLY_MENU_ENTRIES_TABLE} "
+                "ORDER BY id"
+            ).fetchall()
+        )
 
     result = _run_cli(db_path)
 
@@ -1105,6 +1124,25 @@ def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> N
             ).fetchall()
         )
         assert statuses_after == statuses_before
+        assert revisions_before == tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {WEEKLY_MENU_REVISIONS_TABLE} ORDER BY id"
+            ).fetchall()
+        )
+        assert idempotency_before == tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT * FROM {WEEKLY_MENU_IDEMPOTENCY_TABLE} ORDER BY id"
+            ).fetchall()
+        )
+        assert entry_relations_before == tuple(
+            tuple(row)
+            for row in conn.execute(
+                f"SELECT menu_id, household_id FROM {WEEKLY_MENU_ENTRIES_TABLE} "
+                "ORDER BY id"
+            ).fetchall()
+        )
         draft_id = str(
             conn.execute(
                 f"SELECT id FROM {WEEKLY_MENU_REVISIONS_TABLE} WHERE status = 'draft'"
@@ -1116,6 +1154,61 @@ def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> N
             (draft_id,),
         )
         conn.rollback()
+
+
+def _assert_weekly_target_contract(db_path: Path) -> None:
+    expected = healbite_schema_migrate._expected_schema_objects(
+        healbite_schema_migrate._component_statements()["weekly"]
+    )
+    with sqlite3.connect(db_path) as conn:
+        for table in (
+            WEEKLY_MENU_REVISIONS_TABLE,
+            WEEKLY_MENU_IDEMPOTENCY_TABLE,
+        ):
+            row = conn.execute(
+                "SELECT type, sql FROM sqlite_master "
+                "WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            assert row is not None
+            actual = (
+                str(row[0]).lower(),
+                healbite_schema_migrate._normalize_schema_sql(str(row[1])),
+            )
+            assert actual == expected[table]
+
+    from scripts import hermes_staged_schema_migrate as staged
+
+    assert (
+        staged._target_schema_fingerprint(db_path)
+        == staged._target_schema_contract().fingerprint
+    )
+
+
+def test_empty_weekly_v1_status_schema_upgrade_matches_authoritative_ddl(
+    tmp_path: Path,
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    _init_household(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(_weekly_v1_schema_sql())
+
+    result = _run_cli(db_path)
+
+    assert result.returncode == 0
+    _assert_weekly_target_contract(db_path)
+
+
+def test_weekly_v1_status_schema_upgrade_matches_authoritative_ddl(
+    tmp_path: Path,
+) -> None:
+    db_path = _fresh_db(tmp_path)
+    _insert_weekly_v1_data(db_path)
+
+    result = _run_cli(db_path)
+
+    assert result.returncode == 0
+    _assert_weekly_target_contract(db_path)
 
 
 def test_weekly_v1_status_schema_upgrade_rolls_back_atomically(

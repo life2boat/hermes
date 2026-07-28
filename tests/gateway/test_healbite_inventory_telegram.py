@@ -220,6 +220,62 @@ def test_disabled_gate_is_local_and_does_not_create_database(tmp_path):
     assert HEALBITE_REPLY_KEYBOARD_ACTIONS["🥕 Продукты дома"] == INVENTORY_COMMAND
 
 
+def test_authorized_home_opens_inventory_ui_and_unauthorized_fails_closed(
+    tmp_path,
+):
+    db_path = tmp_path / "canary-home.db"
+    controller = HealBiteInventoryTelegramController(
+        text_config=_gate(ACTOR),
+        photo_config=_gate(enabled=False),
+        weekly_generation_config=_gate(enabled=False),
+        db_path=db_path,
+    )
+    controller._resolve_scope = Mock(side_effect=AssertionError("scope accessed"))
+    controller._store = Mock(side_effect=AssertionError("store accessed"))
+
+    allowed = controller.home(ACTOR)
+    denied = controller.home(OTHER_ACTOR)
+
+    assert allowed.state == "home"
+    assert allowed.screen.text != INVENTORY_PLACEHOLDER_REPLY
+    assert _find_callback(allowed, "Ввести список текстом")
+    assert denied.state == "disabled"
+    assert denied.screen.text == INVENTORY_PLACEHOLDER_REPLY
+    controller._resolve_scope.assert_not_called()
+    controller._store.assert_not_called()
+    assert not db_path.exists()
+
+
+def test_historical_inventory_is_inaccessible_after_gate_is_disabled(tmp_path):
+    db_path = tmp_path / "historical-disabled.db"
+    household = _seed_household(db_path)
+    controller = _controller(db_path, photo_enabled=False, weekly_enabled=False)
+
+    home = controller.home(ACTOR)
+    controller.handle_callback(
+        ACTOR,
+        _find_callback(home, "Ввести список текстом"),
+    )
+    review = controller.handle_text(ACTOR, "рис 1 кг")
+    assert review is not None and review.state == "review"
+    confirmed = controller.handle_callback(
+        ACTOR,
+        _find_callback(review, "Подтвердить"),
+    )
+    assert confirmed.state == "confirmed"
+
+    controller._text_config = _gate(ACTOR, enabled=False)
+    blocked = controller.handle_callback(ACTOR, "inventory:v1:l")
+
+    assert controller.home(ACTOR).state == "disabled"
+    assert blocked.state == "disabled"
+    latest = HealBiteInventoryStore(db_path=db_path).get_latest_confirmed_snapshot(
+        InventoryOwnerScope(household_id=household.household.id)
+    )
+    assert latest is not None
+    assert latest.snapshot.status is InventoryStatus.CONFIRMED
+
+
 def test_text_review_edit_delete_confirm_and_isolation_state_machine(tmp_path):
     db_path = tmp_path / "inventory.db"
     household = _seed_household(db_path)
@@ -648,6 +704,36 @@ async def test_command_button_and_text_pending_stay_out_of_generic_lane(tmp_path
     assert adapter._send_message_with_thread_fallback.await_count == 1
     adapter._enqueue_text_event.assert_not_called()
     adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorized_inventory_command_opens_local_ui_without_generic_lane(
+    tmp_path,
+):
+    db_path = tmp_path / "authorized-command.db"
+    controller = HealBiteInventoryTelegramController(
+        text_config=_gate(ACTOR),
+        photo_config=_gate(enabled=False),
+        weekly_generation_config=_gate(enabled=False),
+        db_path=db_path,
+    )
+    adapter = _adapter(controller)
+    command_update = SimpleNamespace(
+        update_id=4,
+        message=_message(text=INVENTORY_COMMAND),
+        effective_message=None,
+    )
+
+    await adapter._handle_command(command_update, SimpleNamespace())
+
+    adapter._send_message_with_thread_fallback.assert_awaited_once()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Продукты дома" in kwargs["text"]
+    assert kwargs["text"] != INVENTORY_PLACEHOLDER_REPLY
+    assert kwargs["reply_markup"] is not None
+    adapter._enqueue_text_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+    assert not db_path.exists()
 
 
 @pytest.mark.asyncio

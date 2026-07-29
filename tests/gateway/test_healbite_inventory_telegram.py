@@ -14,6 +14,11 @@ import pytest
 import gateway.healbite_inventory_telegram as inventory_telegram
 from gateway.config import PlatformConfig
 from gateway.healbite_feature_gates import FeatureGateConfig
+from gateway.healbite_household_schema import (
+    HOUSEHOLD_MEMBERS_TABLE,
+    HouseholdRole,
+    new_household_member_id,
+)
 from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_inventory import (
     HealBiteInventoryStore,
@@ -44,6 +49,8 @@ from gateway.platforms.telegram import (
 
 ACTOR = 8_000_000_000_000_002_101
 OTHER_ACTOR = 8_000_000_000_000_002_102
+MEMBER_ACTOR = 8_000_000_000_000_002_103
+INACTIVE_MEMBER_ACTOR = 8_000_000_000_000_002_104
 WEEK_START = "2026-07-06"
 
 
@@ -68,6 +75,36 @@ def _seed_household(db_path: Path, actor: int = ACTOR):
     return HealBiteHouseholdStore(db_path=db_path).get_or_create_personal_household(
         actor
     )
+
+
+def _seed_linked_adult_member(
+    db_path: Path,
+    household_id: str,
+    actor: int,
+    *,
+    status: str = "active",
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users "
+            "(user_id, username, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (actor, "synthetic"),
+        )
+        conn.execute(
+            f"""
+            INSERT INTO {HOUSEHOLD_MEMBERS_TABLE}
+                (id, household_id, linked_user_id, display_name, member_type,
+                 role, status, age_band, created_at, updated_at, version)
+            VALUES (?, ?, ?, NULL, 'linked_adult', ?, ?, NULL, 't', 't', 1)
+            """,
+            (
+                new_household_member_id(),
+                household_id,
+                actor,
+                HouseholdRole.ADULT_MEMBER.value,
+                status,
+            ),
+        )
 
 
 def _controller(
@@ -244,6 +281,64 @@ def test_authorized_home_opens_inventory_ui_and_unauthorized_fails_closed(
     controller._resolve_scope.assert_not_called()
     controller._store.assert_not_called()
     assert not db_path.exists()
+
+
+def test_active_allowlisted_member_manages_shared_household_inventory(tmp_path):
+    db_path = tmp_path / "member-inventory.db"
+    household = _seed_household(db_path)
+    _seed_linked_adult_member(db_path, household.household.id, MEMBER_ACTOR)
+    _seed_linked_adult_member(
+        db_path,
+        household.household.id,
+        INACTIVE_MEMBER_ACTOR,
+        status="disabled",
+    )
+    controller = HealBiteInventoryTelegramController(
+        text_config=_gate(ACTOR, MEMBER_ACTOR, OTHER_ACTOR, INACTIVE_MEMBER_ACTOR),
+        photo_config=_gate(enabled=False),
+        weekly_generation_config=_gate(enabled=False),
+        db_path=db_path,
+    )
+
+    owner_scope = controller._resolve_scope(ACTOR)[1]
+    member_scope = controller._resolve_scope(MEMBER_ACTOR)[1]
+    assert member_scope == owner_scope
+
+    member_home = controller.home(MEMBER_ACTOR)
+    assert member_home.state == "home"
+    waiting = controller.handle_callback(
+        MEMBER_ACTOR,
+        _find_callback(member_home, "Ввести список текстом"),
+    )
+    assert waiting.state == "awaiting_text"
+    review = controller.handle_text(MEMBER_ACTOR, "рис 1 кг")
+    assert review is not None and review.state == "review"
+    confirmed = controller.handle_callback(
+        MEMBER_ACTOR,
+        _find_callback(review, "Подтвердить"),
+    )
+    assert confirmed.state == "confirmed"
+
+    latest = HealBiteInventoryStore(db_path=db_path).get_latest_confirmed_snapshot(
+        member_scope
+    )
+    assert latest is not None
+    assert latest.snapshot.status is InventoryStatus.CONFIRMED
+
+    without_membership = controller.handle_callback(
+        OTHER_ACTOR,
+        _find_callback(controller.home(OTHER_ACTOR), "Ввести список текстом"),
+    )
+    assert without_membership.state == "unavailable"
+
+    inactive = controller.handle_callback(
+        INACTIVE_MEMBER_ACTOR,
+        _find_callback(
+            controller.home(INACTIVE_MEMBER_ACTOR),
+            "Ввести список текстом",
+        ),
+    )
+    assert inactive.state == "unavailable"
 
 
 def test_historical_inventory_is_inaccessible_after_gate_is_disabled(tmp_path):

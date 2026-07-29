@@ -112,12 +112,17 @@ class _Households:
         return self.members
 
 
-def _invitation(*, invitation_id: str = INVITATION_ID):
+def _invitation(
+    *,
+    invitation_id: str = INVITATION_ID,
+    invitee_user_id: int = ACTOR,
+    invited_by_user_id: int = OTHER_ACTOR,
+):
     return SimpleNamespace(
         id=invitation_id,
         household_id=HOUSEHOLD_ID,
-        invitee_user_id=ACTOR,
-        invited_by_user_id=OTHER_ACTOR,
+        invitee_user_id=invitee_user_id,
+        invited_by_user_id=invited_by_user_id,
         proposed_role=HouseholdRole.ADULT_MEMBER,
         status=HouseholdInvitationStatus.PENDING,
         expires_at="2026-07-20T12:00:00.000000Z",
@@ -135,6 +140,8 @@ class _Invitations:
         self.fail_mutation = fail_mutation
         self.accept_keys: list[str] = []
         self.refuse_keys: list[str] = []
+        self.create_calls: list[tuple[object, ...]] = []
+        self.revoke_keys: list[str] = []
 
     def list_pending_invitations_for_actor(self, actor):
         assert actor == ACTOR
@@ -153,6 +160,28 @@ class _Invitations:
         self.items = []
         return _invitation()
 
+    def create_household_invitation(
+        self,
+        actor,
+        household_id,
+        invitee,
+        role,
+        expires_at,
+        idempotency_key,
+    ):
+        if self.fail_mutation:
+            raise HouseholdInvitationNotFoundError("invitation unavailable")
+        self.create_calls.append(
+            (actor, household_id, invitee, role, expires_at, idempotency_key)
+        )
+        return _invitation(invitee_user_id=invitee, invited_by_user_id=actor)
+
+    def revoke_invitation(self, actor, invitation_id, idempotency_key):
+        if self.fail_mutation or actor != ACTOR or invitation_id != INVITATION_ID:
+            raise HouseholdInvitationNotFoundError("invitation unavailable")
+        self.revoke_keys.append(idempotency_key)
+        return _invitation()
+
 
 def _controller(
     *,
@@ -160,13 +189,16 @@ def _controller(
     role: HouseholdRole = HouseholdRole.OWNER,
     households: _Households | None = None,
     invitations: _Invitations | None = None,
+    allowlist: set[int] | None = None,
+    now_factory=None,
 ):
     household_service = households or _Households(role=role)
     invitation_service = invitations or _Invitations()
     return HealBiteFamilyTelegramController(
-        config=_config(enabled=enabled),
+        config=_config(enabled=enabled, allowlist=allowlist),
         household_service_factory=lambda: household_service,
         invitation_service_factory=lambda: invitation_service,
+        now_factory=now_factory,
     )
 
 
@@ -246,6 +278,129 @@ def test_family_home_localizes_roles_and_applies_member_policy(role, member_butt
     callbacks = [item for row in result.screen.rows for item in row]
     assert any(label == "\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438" for label, _data in callbacks) is member_button
     assert role.value not in result.screen.text
+
+
+
+def test_owner_home_offers_invite_action_but_member_home_does_not():
+    owner = _controller(allowlist={ACTOR, OTHER_ACTOR}).home(ACTOR)
+    member = _controller(
+        role=HouseholdRole.ADULT_MEMBER,
+        allowlist={ACTOR, OTHER_ACTOR},
+    ).home(ACTOR)
+
+    owner_labels = {label for row in owner.screen.rows for label, _data in row}
+    member_labels = {label for row in member.screen.rows for label, _data in row}
+    assert "\u041f\u0440\u0438\u0433\u043b\u0430\u0441\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430" in owner_labels
+    assert "\u041f\u0440\u0438\u0433\u043b\u0430\u0441\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430" not in member_labels
+    assert "<b>\u0414\u043e\u043c\u043e\u0445\u043e\u0437\u044f\u0439\u0441\u0442\u0432\u043e</b>" in owner.screen.text
+
+
+def test_owner_creates_one_targeted_expiring_invitation_without_exposing_ids():
+    invitations = _Invitations()
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+    controller = _controller(
+        invitations=invitations,
+        allowlist={ACTOR, OTHER_ACTOR},
+        now_factory=lambda: now,
+    )
+
+    result = controller.handle_callback(
+        ACTOR,
+        f"{FAMILY_CALLBACK_PREFIX}invite",
+        callback_query_id="create-query",
+    )
+
+    assert result.state == "invite_created"
+    assert len(invitations.create_calls) == 1
+    actor, household_id, invitee, role, expires_at, key = invitations.create_calls[0]
+    assert actor == ACTOR
+    assert household_id == HOUSEHOLD_ID
+    assert invitee == OTHER_ACTOR
+    assert role is HouseholdRole.ADULT_MEMBER
+    assert expires_at == now + timedelta(days=7)
+    assert key == callback_idempotency_key("create-query", action="invite")
+    assert HOUSEHOLD_ID not in result.screen.text
+    assert INVITATION_ID not in result.screen.text
+    assert str(ACTOR) not in result.screen.text
+    assert str(OTHER_ACTOR) not in result.screen.text
+    callbacks = [data for row in result.screen.rows for _label, data in row]
+    assert any(data.endswith(INVITATION_ID) for data in callbacks)
+    assert all(len(data.encode("utf-8")) <= FAMILY_MAX_CALLBACK_BYTES for data in callbacks)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [HouseholdRole.ADULT_ADMIN, HouseholdRole.ADULT_MEMBER, HouseholdRole.DEPENDENT],
+)
+def test_non_owner_cannot_create_invitation_even_with_forged_callback(role):
+    invitations = _Invitations()
+    controller = _controller(
+        role=role,
+        invitations=invitations,
+        allowlist={ACTOR, OTHER_ACTOR},
+    )
+
+    result = controller.handle_callback(
+        ACTOR,
+        f"{FAMILY_CALLBACK_PREFIX}invite",
+        callback_query_id="forged",
+    )
+
+    assert result.state == "denied"
+    assert result.error_class == "access_denied"
+    assert invitations.create_calls == []
+
+
+def test_invite_target_must_be_one_unambiguous_allowlisted_non_member():
+    invitations = _Invitations()
+    ambiguous = _controller(
+        invitations=invitations,
+        allowlist={ACTOR, OTHER_ACTOR, 303},
+    )
+    already_joined = _controller(
+        households=_Households(
+            members=[
+                _member(),
+                SimpleNamespace(
+                    linked_user_id=OTHER_ACTOR,
+                    status=HouseholdMemberStatus.ACTIVE,
+                ),
+            ]
+        ),
+        invitations=invitations,
+        allowlist={ACTOR, OTHER_ACTOR},
+    )
+
+    ambiguous_result = ambiguous.create_invitation(
+        ACTOR,
+        callback_query_id="ambiguous",
+    )
+    joined_result = already_joined.create_invitation(
+        ACTOR,
+        callback_query_id="joined",
+    )
+
+    assert ambiguous_result.state == joined_result.state == "denied"
+    assert invitations.create_calls == []
+
+
+def test_owner_can_revoke_created_invitation():
+    invitations = _Invitations()
+    controller = _controller(
+        invitations=invitations,
+        allowlist={ACTOR, OTHER_ACTOR},
+    )
+
+    result = controller.handle_callback(
+        ACTOR,
+        f"{FAMILY_CALLBACK_PREFIX}revoke:{INVITATION_ID}",
+        callback_query_id="revoke-query",
+    )
+
+    assert result.state == "home"
+    assert invitations.revoke_keys == [
+        callback_idempotency_key("revoke-query", action="revoke")
+    ]
 
 
 def test_member_list_escapes_names_hides_ids_and_paginates():
@@ -445,6 +600,8 @@ async def test_family_back_callback_returns_to_main_menu():
 def test_callback_parser_and_constructor_contract():
     assert parse_family_callback(f"{FAMILY_CALLBACK_PREFIX}home") == ("home", None)
     assert parse_family_callback(f"{FAMILY_CALLBACK_PREFIX}invites:2") == ("invites", "2")
+    assert parse_family_callback(f"{FAMILY_CALLBACK_PREFIX}invite") == ("invite", None)
+    assert parse_family_callback(f"{FAMILY_CALLBACK_PREFIX}revoke:{INVITATION_ID}") == ("revoke", INVITATION_ID)
     assert parse_family_callback("family:v2:home") is None
     assert len(callback_idempotency_key("query", action="accept")) <= 128
 
@@ -460,41 +617,57 @@ def _create_users(db_path: Path, *user_ids: int) -> None:
         )
 
 
-def test_real_actor_scoped_services_accept_once_and_refresh_home(tmp_path):
+def test_real_actor_scoped_owner_invite_requires_explicit_accept_and_is_idempotent(
+    tmp_path,
+):
     db_path = tmp_path / "healbite.db"
     _create_users(db_path, ACTOR, OTHER_ACTOR)
     household_store = HealBiteHouseholdStore(db_path)
-    owner_household = household_store.get_or_create_personal_household(OTHER_ACTOR)
+    owner_household = household_store.get_or_create_personal_household(ACTOR)
     invitation_service = HealBiteHouseholdInvitationService(
         HealBiteHouseholdInvitationStore(db_path)
     )
-    invitation = invitation_service.create_household_invitation(
-        OTHER_ACTOR,
-        owner_household.household.id,
-        ACTOR,
-        HouseholdRole.ADULT_MEMBER,
-        datetime.now(timezone.utc) + timedelta(days=1),
-        "create-family-ui-integration",
-    )
     controller = HealBiteFamilyTelegramController(
-        config=_config(),
+        config=_config(allowlist={ACTOR, OTHER_ACTOR}),
         db_path=db_path,
     )
-    data = f"{FAMILY_CALLBACK_PREFIX}accept:{invitation.id}"
 
-    pending = controller.invitations(ACTOR)
-    accepted = controller.handle_callback(
+    created = controller.handle_callback(
         ACTOR,
+        f"{FAMILY_CALLBACK_PREFIX}invite",
+        callback_query_id="create-family-ui-integration",
+    )
+    invitations = invitation_service.list_pending_invitations_for_actor(OTHER_ACTOR)
+    assert len(invitations) == 1
+    invitation = invitations[0]
+    pending = controller.invitations(OTHER_ACTOR)
+
+    assert created.state == "invite_created"
+    assert pending.state == "invitations"
+    assert invitation.id not in pending.screen.text
+    assert household_store._read_household_for_linked_user_internal(OTHER_ACTOR) is None
+
+    data = f"{FAMILY_CALLBACK_PREFIX}accept:{invitation.id}"
+    accepted = controller.handle_callback(
+        OTHER_ACTOR,
         data,
         callback_query_id="same-real-query",
     )
     duplicate = controller.handle_callback(
-        ACTOR,
+        OTHER_ACTOR,
         data,
         callback_query_id="same-real-query",
     )
 
-    assert pending.state == "invitations"
-    assert invitation.id not in pending.screen.text
     assert accepted.state == duplicate.state == "home"
-    assert household_store.resolve_existing_actor_context(ACTOR).household_id == owner_household.household.id
+    assert (
+        household_store.resolve_existing_actor_context(OTHER_ACTOR).household_id
+        == owner_household.household.id
+    )
+    with sqlite3.connect(db_path) as conn:
+        active_memberships = conn.execute(
+            "SELECT COUNT(*) FROM household_members "
+            "WHERE linked_user_id = ? AND status = 'active'",
+            (OTHER_ACTOR,),
+        ).fetchone()[0]
+    assert active_memberships == 1

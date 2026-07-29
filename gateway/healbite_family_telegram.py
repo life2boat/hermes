@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Callable
@@ -36,6 +36,7 @@ FAMILY_ACTION_UNAVAILABLE_REPLY = "\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0
 FAMILY_MAX_CALLBACK_BYTES = 64
 FAMILY_MEMBER_PAGE_SIZE = 20
 FAMILY_INVITATION_PAGE_SIZE = 5
+FAMILY_INVITATION_LIFETIME = timedelta(days=7)
 
 _READ_MEMBER_ROLES = frozenset(
     {HouseholdRole.OWNER, HouseholdRole.ADULT_ADMIN, HouseholdRole.ADULT_MEMBER}
@@ -114,15 +115,15 @@ def parse_family_callback(data: object) -> tuple[str, str | None] | None:
         return None
     payload = data[len(FAMILY_CALLBACK_PREFIX) :]
     action, separator, argument = payload.partition(":")
-    if action in {"home", "back", "members", "invites"}:
-        if action in {"home", "back"} and separator:
+    if action in {"home", "back", "members", "invites", "invite"}:
+        if action in {"home", "back", "invite"} and separator:
             return None
-        if action != "home" and separator:
+        if action in {"members", "invites"} and separator:
             if not argument.isdigit() or int(argument) > 10000:
                 return None
             return action, argument
         return action, None
-    if action in {"accept", "refuse"} and separator and argument:
+    if action in {"accept", "refuse", "revoke"} and separator and argument:
         return action, argument
     return None
 
@@ -141,11 +142,13 @@ class HealBiteFamilyTelegramController:
         db_path: str | Path | None = None,
         household_service_factory: HouseholdServiceFactory | None = None,
         invitation_service_factory: InvitationServiceFactory | None = None,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self._config = config if config is not None else load_household_feature_config()
         self._db_path = resolve_healbite_db_path(db_path)
         self._household_service_factory = household_service_factory or self._household_service
         self._invitation_service_factory = invitation_service_factory or self._invitation_service
+        self._now_factory = now_factory or (lambda: datetime.now(timezone.utc))
 
     def _household_service(self) -> HealBiteHouseholdService:
         return HealBiteHouseholdService(
@@ -224,6 +227,15 @@ class HealBiteFamilyTelegramController:
         rows: list[tuple[tuple[str, str], ...]] = []
         if context.role in _READ_MEMBER_ROLES:
             rows.append((("\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438", _callback("members")),))
+        if context.role is HouseholdRole.OWNER:
+            rows.append(
+                (
+                    (
+                        "\u041f\u0440\u0438\u0433\u043b\u0430\u0441\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",
+                        _callback("invite"),
+                    ),
+                )
+            )
         rows.extend(
             [
                 (("\u0412\u0445\u043e\u0434\u044f\u0449\u0438\u0435 \u043f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u044f", _callback("invites")),),
@@ -234,10 +246,89 @@ class HealBiteFamilyTelegramController:
         return FamilyTelegramResult(
             state="home",
             screen=FamilyTelegramScreen(
-                f"{prefix}<b>{household_label}</b>\n"
+                f"{prefix}<b>\u0414\u043e\u043c\u043e\u0445\u043e\u0437\u044f\u0439\u0441\u0442\u0432\u043e</b>\n"
+                f"{household_label}\n"
                 f"\u0412\u0430\u0448\u0430 \u0440\u043e\u043b\u044c: {role_label}\n"
                 "\u0421\u0442\u0430\u0442\u0443\u0441: \u0430\u043a\u0442\u0438\u0432\u043d\u0430",
                 rows=tuple(rows),
+            ),
+        )
+
+
+    def create_invitation(
+        self,
+        actor_user_id: object,
+        *,
+        callback_query_id: object,
+    ) -> FamilyTelegramResult:
+        actor = self._eligible_actor(actor_user_id)
+        if actor is None:
+            return self._placeholder()
+        try:
+            household_service = self._household_service_factory()
+            context = household_service.resolve_existing_actor_household_context(actor)
+            if context.role is not HouseholdRole.OWNER:
+                raise HouseholdAccessError("household access denied")
+            members = household_service.list_members_for_actor(actor, context.household_id)
+            active_linked_users = {
+                int(member.linked_user_id)
+                for member in members
+                if member.status.value == "active" and member.linked_user_id is not None
+            }
+            candidates = sorted(self._config.allowlist - active_linked_users - {actor})
+            if len(candidates) != 1:
+                return FamilyTelegramResult(
+                    state="denied",
+                    screen=FamilyTelegramScreen(
+                        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0434\u043d\u043e\u0437\u043d\u0430\u0447\u043d\u043e \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u044f.",
+                        rows=((("\u041a \u0440\u0430\u0437\u0434\u0435\u043b\u0443 \u0441\u0435\u043c\u044c\u0438", _callback("home")),),),
+                        parse_mode=None,
+                    ),
+                    error_class="invitee_unavailable",
+                )
+            now = self._now_factory()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise HouseholdIntegrityError("invalid runtime clock")
+            invitation = self._invitation_service_factory().create_household_invitation(
+                actor,
+                context.household_id,
+                candidates[0],
+                HouseholdRole.ADULT_MEMBER,
+                now.astimezone(timezone.utc) + FAMILY_INVITATION_LIFETIME,
+                callback_idempotency_key(callback_query_id, action="invite"),
+            )
+        except HouseholdAccessError:
+            return FamilyTelegramResult(
+                state="denied",
+                screen=FamilyTelegramScreen(
+                    "\u0421\u043e\u0437\u0434\u0430\u0432\u0430\u0442\u044c \u043f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u044f \u043c\u043e\u0436\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0432\u043b\u0430\u0434\u0435\u043b\u0435\u0446 \u0434\u043e\u043c\u043e\u0445\u043e\u0437\u044f\u0439\u0441\u0442\u0432\u0430.",
+                    rows=((("\u041a \u0440\u0430\u0437\u0434\u0435\u043b\u0443 \u0441\u0435\u043c\u044c\u0438", _callback("home")),),),
+                    parse_mode=None,
+                ),
+                error_class="access_denied",
+            )
+        except (HouseholdNotFoundError, HouseholdValidationError):
+            return self._unavailable(error_class="actor_unavailable")
+        except (
+            HouseholdIntegrityError,
+            HouseholdInvitationError,
+            HouseholdInvitationValidationError,
+            sqlite3.Error,
+        ):
+            return self._unavailable(error_class="invitation_unavailable")
+        except Exception:
+            return self._unavailable(error_class="internal_error")
+
+        return FamilyTelegramResult(
+            state="invite_created",
+            screen=FamilyTelegramScreen(
+                "<b>\u041f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u043e</b>\n\n"
+                "\u041f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u044c \u0443\u0432\u0438\u0434\u0438\u0442 \u0435\u0433\u043e \u0432 \u0440\u0430\u0437\u0434\u0435\u043b\u0435 \u0441\u0435\u043c\u044c\u0438. "
+                "\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a \u0431\u0443\u0434\u0435\u0442 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e\u0441\u043b\u0435 \u044f\u0432\u043d\u043e\u0433\u043e \u043f\u0440\u0438\u043d\u044f\u0442\u0438\u044f.",
+                rows=(
+                    (("\u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u043f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435", _callback("revoke", invitation.id)),),
+                    (("\u041a \u0440\u0430\u0437\u0434\u0435\u043b\u0443 \u0441\u0435\u043c\u044c\u0438", _callback("home")),),
+                ),
             ),
         )
 
@@ -368,6 +459,8 @@ class HealBiteFamilyTelegramController:
             return self.members(actor, page=int(argument or 0))
         if action == "invites":
             return self.invitations(actor, page=int(argument or 0))
+        if action == "invite":
+            return self.create_invitation(actor, callback_query_id=callback_query_id)
         assert argument is not None
         key = callback_idempotency_key(callback_query_id, action=action)
         try:
@@ -375,6 +468,9 @@ class HealBiteFamilyTelegramController:
             if action == "accept":
                 service.accept_invitation(actor, argument, key)
                 return self.home(actor, notice="\u041f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435 \u043f\u0440\u0438\u043d\u044f\u0442\u043e.")
+            if action == "revoke":
+                service.revoke_invitation(actor, argument, key)
+                return self.home(actor, notice="\u041f\u0440\u0438\u0433\u043b\u0430\u0448\u0435\u043d\u0438\u0435 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u043e.")
             service.refuse_invitation(actor, argument, key)
             result = self.invitations(actor)
             return FamilyTelegramResult(

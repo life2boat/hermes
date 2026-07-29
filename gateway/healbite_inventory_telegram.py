@@ -384,7 +384,10 @@ class HealBiteInventoryTelegramController:
         context = HealBiteHouseholdService(
             HealBiteHouseholdStore(db_path=self._db_path, ensure_schema_on_init=False)
         ).resolve_existing_actor_household_context(actor)
-        if context.role is not HouseholdRole.OWNER:
+        if context.role not in (
+            HouseholdRole.OWNER,
+            HouseholdRole.ADULT_MEMBER,
+        ):
             raise HouseholdAccessError("household access denied")
         return actor, InventoryOwnerScope(household_id=context.household_id), context
 

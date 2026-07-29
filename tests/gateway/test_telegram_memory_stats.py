@@ -8,6 +8,16 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolate_external_memory_stats_admin_policy(monkeypatch):
+    """Keep unit tests independent from host runtime policy files."""
+    monkeypatch.setattr("gateway.config.load_gateway_config", lambda: GatewayConfig())
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.TelegramAdapter._memory_stats_extra_from_config_file",
+        lambda _adapter: {},
+    )
+
+
 @pytest.mark.asyncio
 async def test_memory_stats_command_is_admin_only(monkeypatch):
     from gateway.platforms.telegram import TelegramAdapter

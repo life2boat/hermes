@@ -139,6 +139,14 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.runtime_directory == Path("/run/hermes")
     assert contract.secret_override == Path("/run/hermes/hermes-secrets-override.yml")
     assert contract.required_secret_names == ("TELEGRAM_BOT_TOKEN",)
+    assert set(contract.protected_secret_names) == {
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "NOUS_API_KEY",
+        "OPENAI_API_KEY",
+        "QWEN_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+    }
     assert contract.approved_secret_source == Path("/etc/hermes/hermes-production.env")
     assert contract.approved_source_owner_uids == frozenset({0})
     assert contract.image_revision_label == REVISION_LABEL
@@ -814,7 +822,7 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
     contract, source = protected_contract
     events: list[str] = []
     original_read = deploy.read_required_secrets
-    original_write = deploy._write_secret_override
+    original_begin = deploy._begin_secret_override_transaction
 
     def repository_gate(*_args):
         events.append("repository")
@@ -823,9 +831,9 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
         events.append("secret")
         return original_read(*args)
 
-    def tracked_write(target_contract, secrets):
+    def tracked_begin(target_contract, secrets):
         events.append("canonical_override" if target_contract is contract else "temporary_override")
-        return original_write(target_contract, secrets)
+        return original_begin(target_contract, secrets)
 
     def runner(argv, **kwargs):
         command = tuple(str(item) for item in argv)
@@ -848,7 +856,7 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
 
     monkeypatch.setattr(deploy, "validate_repository", repository_gate)
     monkeypatch.setattr(deploy, "read_required_secrets", secret_gate)
-    monkeypatch.setattr(deploy, "_write_secret_override", tracked_write)
+    monkeypatch.setattr(deploy, "_begin_secret_override_transaction", tracked_begin)
     monkeypatch.setattr(deploy, "_run", runner)
     deploy.execute_operation(
         contract,
@@ -872,13 +880,15 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
 
 def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contract, monkeypatch) -> None:
     contract, source = protected_contract
-    original_cleanup = deploy.cleanup_secret_override
+    original_finish = deploy._finish_secret_override_transaction
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
 
-    def cleanup(target_contract, requested_path=None):
+    def finish(target_contract, transaction, *, preserve_published):
         if target_contract is contract:
             raise deploy.DeploymentContractError("cleanup-failed")
-        return original_cleanup(target_contract, requested_path)
+        return original_finish(
+            target_contract, transaction, preserve_published=preserve_published
+        )
 
     def runner(argv, **_kwargs):
         command = tuple(str(item) for item in argv)
@@ -890,7 +900,7 @@ def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contrac
             return _completed(argv, returncode=1)
         return _completed(argv)
 
-    monkeypatch.setattr(deploy, "cleanup_secret_override", cleanup)
+    monkeypatch.setattr(deploy, "_finish_secret_override_transaction", finish)
     monkeypatch.setattr(deploy, "_run", runner)
     with pytest.raises(deploy.DeploymentContractError, match="compose-up"):
         deploy.execute_operation(

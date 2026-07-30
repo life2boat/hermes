@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,16 @@ class DeploymentContractError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ProtectedSecretSpec:
+    name: str
+    required: bool
+    source_class: str
+    destination_name: str
+    allow_empty: bool
+    removal_requires_authorization: bool
+
+
+@dataclass(frozen=True)
 class DeploymentContract:
     version: int
     root: Path
@@ -51,12 +62,35 @@ class DeploymentContract:
     secret_override: Path
     approved_secret_source: Path
     approved_source_owner_uids: frozenset[int]
-    required_secret_names: tuple[str, ...]
+    protected_secrets: tuple[ProtectedSecretSpec, ...]
     project_name: str
     target_service: str
     image_revision_label: str
     allowed_revision_ref: str
     feature_gates: dict[str, str]
+
+
+    @property
+    def protected_secret_names(self) -> tuple[str, ...]:
+        return tuple(spec.name for spec in self.protected_secrets)
+
+    @property
+    def required_secret_names(self) -> tuple[str, ...]:
+        return tuple(spec.name for spec in self.protected_secrets if spec.required)
+
+
+@dataclass(frozen=True)
+class ProtectedSecretRemovalAuthorization:
+    exact_names: frozenset[str]
+    rollback_ready: bool
+
+
+@dataclass(frozen=True)
+class SecretOverrideTransaction:
+    staged_path: Path
+    rollback_path: Path | None
+    live_was_present: bool
+    previous_fingerprints: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -170,11 +204,64 @@ def load_contract(
         _fail("secret-source-owners")
     if owner_uids != [0]:
         _fail("secret-source-owners")
-    required = secrets.get("required_variables")
-    if not isinstance(required, list) or required != ["TELEGRAM_BOT_TOKEN"]:
-        _fail("required-secret-names")
-    if not all(isinstance(name, str) and ENV_NAME_RE.fullmatch(name) for name in required):
-        _fail("required-secret-names")
+    protected_raw = secrets.get("protected_variables")
+    if not isinstance(protected_raw, list) or len(protected_raw) != 6:
+        _fail("protected-secret-manifest")
+    protected: list[ProtectedSecretSpec] = []
+    expected_secret_names = {
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+        "NOUS_API_KEY",
+        "OPENAI_API_KEY",
+        "QWEN_API_KEY",
+        "TELEGRAM_BOT_TOKEN",
+    }
+    for item in protected_raw:
+        entry = _mapping(item, code="protected-secret-manifest")
+        if set(entry) != {
+            "name",
+            "required",
+            "source_class",
+            "destination_variable",
+            "allow_empty",
+            "removal_requires_authorization",
+        }:
+            _fail("protected-secret-manifest")
+        name = _string(entry.get("name"), code="protected-secret-name")
+        destination = _string(
+            entry.get("destination_variable"),
+            code="protected-secret-destination",
+        )
+        if (
+            not ENV_NAME_RE.fullmatch(name)
+            or destination != name
+            or entry.get("source_class")
+            != "approved-production-secret-source"
+            or not isinstance(entry.get("required"), bool)
+            or entry.get("allow_empty") is not False
+            or entry.get("removal_requires_authorization") is not True
+        ):
+            _fail("protected-secret-policy")
+        protected.append(
+            ProtectedSecretSpec(
+                name=name,
+                required=entry["required"],
+                source_class=entry["source_class"],
+                destination_name=destination,
+                allow_empty=entry["allow_empty"],
+                removal_requires_authorization=entry[
+                    "removal_requires_authorization"
+                ],
+            )
+        )
+    protected_names = [spec.name for spec in protected]
+    if (
+        set(protected_names) != expected_secret_names
+        or len(set(protected_names)) != len(protected_names)
+        or [spec.name for spec in protected if spec.required]
+        != ["TELEGRAM_BOT_TOKEN"]
+    ):
+        _fail("protected-secret-policy")
 
     deployment = _mapping(raw["deployment"], code="manifest-deployment")
     if (
@@ -220,7 +307,7 @@ def load_contract(
         secret_override=secret_override,
         approved_secret_source=approved_source,
         approved_source_owner_uids=frozenset(owner_uids),
-        required_secret_names=tuple(required),
+        protected_secrets=tuple(protected),
         project_name="hermes-agent",
         target_service="hermes-bot",
         image_revision_label="org.opencontainers.image.revision",
@@ -373,18 +460,23 @@ def _validate_regular_file(path: Path, *, mode: int, allowed_uids: frozenset[int
     return metadata
 
 
-def _read_protected_file(path: Path, *, expected: os.stat_result) -> str:
+def _read_protected_bytes(
+    path: Path,
+    *,
+    expected: os.stat_result,
+    code: str,
+) -> bytes:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
         fd = os.open(path, flags)
     except OSError:
-        _fail("secret-source-open")
+        _fail(f"{code}-open")
     try:
         opened = os.fstat(fd)
         if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino or not stat.S_ISREG(opened.st_mode):
-            _fail("secret-source-race")
+            _fail(f"{code}-race")
         data = bytearray()
         while len(data) <= MAX_SECRET_SOURCE_BYTES:
             chunk = os.read(fd, min(65536, MAX_SECRET_SOURCE_BYTES + 1 - len(data)))
@@ -392,36 +484,40 @@ def _read_protected_file(path: Path, *, expected: os.stat_result) -> str:
                 break
             data.extend(chunk)
         if len(data) > MAX_SECRET_SOURCE_BYTES:
-            _fail("secret-source-too-large")
-        try:
-            return bytes(data).decode("utf-8")
-        except UnicodeDecodeError:
-            _fail("secret-source-encoding")
+            _fail(f"{code}-too-large")
+        return bytes(data)
     finally:
         os.close(fd)
+
+
+def _read_protected_file(path: Path, *, expected: os.stat_result) -> str:
+    data = _read_protected_bytes(path, expected=expected, code="secret-source")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        _fail("secret-source-encoding")
 
 
 def _parse_dotenv(text: str) -> dict[str, str]:
     if "\x00" in text or "\r" in text:
         _fail("secret-source-control-character")
     values: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
+    for line in text.split("\n"):
         if not line or line.startswith("#"):
             continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
         if "=" not in line:
             _fail("secret-source-syntax")
         name, value = line.split("=", 1)
-        name = name.strip()
-        value = value.strip()
         if not ENV_NAME_RE.fullmatch(name) or name in values:
             _fail("secret-source-variable")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
         values[name] = value
     return values
+
+
+def _secret_specs_by_name(
+    contract: DeploymentContract,
+) -> dict[str, ProtectedSecretSpec]:
+    return {spec.name: spec for spec in contract.protected_secrets}
 
 
 def read_required_secrets(contract: DeploymentContract, source: Path) -> dict[str, str]:
@@ -435,13 +531,20 @@ def read_required_secrets(contract: DeploymentContract, source: Path) -> dict[st
         code="secret-source",
     )
     values = _parse_dotenv(_read_protected_file(source, expected=metadata))
+    specs = _secret_specs_by_name(contract)
     selected: dict[str, str] = {}
-    for name in contract.required_secret_names:
-        value = values.get(name)
-        if value is None or not value:
+    for spec in contract.protected_secrets:
+        if spec.name not in values:
+            if spec.required:
+                _fail("required-secret-missing")
+            continue
+        value = values[spec.name]
+        if not value and spec.required:
             _fail("required-secret-missing")
-        selected[name] = value
-    if set(values) != set(contract.required_secret_names):
+        if not value and not spec.allow_empty:
+            _fail("secret-empty-value")
+        selected[spec.name] = value
+    if not set(values).issubset(specs):
         _fail("secret-source-variable-set")
     return selected
 
@@ -472,81 +575,411 @@ def _validate_runtime_directory(contract: DeploymentContract, *, create: bool) -
         _fail("runtime-directory-owner")
 
 
+def _validate_secret_mapping(
+    contract: DeploymentContract,
+    secrets: dict[str, str],
+    *,
+    code: str,
+    require_required: bool = True,
+) -> dict[str, str]:
+    specs = _secret_specs_by_name(contract)
+    if not set(secrets).issubset(specs):
+        _fail(f"{code}-variable-set")
+    selected: dict[str, str] = {}
+    for spec in contract.protected_secrets:
+        if spec.name not in secrets:
+            if spec.required and require_required:
+                _fail(f"{code}-required-secret-missing")
+            continue
+        value = secrets[spec.name]
+        if not isinstance(value, str):
+            _fail(f"{code}-value-type")
+        if not value and not spec.allow_empty:
+            _fail(f"{code}-empty-secret")
+        selected[spec.name] = value
+    return selected
+
+
+def _read_secret_override(
+    contract: DeploymentContract,
+    path: Path,
+    *,
+    code: str,
+) -> dict[str, str]:
+    metadata = _validate_regular_file(
+        path,
+        mode=0o600,
+        allowed_uids=frozenset({_effective_uid()}),
+        code=code,
+    )
+    document = _decode_json_document(
+        _read_protected_bytes(path, expected=metadata, code=code),
+        code=code,
+    )
+    if set(document) != {"services"}:
+        _fail(f"{code}-document")
+    services = _mapping(document["services"], code=f"{code}-document")
+    if set(services) != {contract.target_service}:
+        _fail(f"{code}-document")
+    service = _mapping(
+        services[contract.target_service],
+        code=f"{code}-document",
+    )
+    if set(service) != {"environment"}:
+        _fail(f"{code}-document")
+    environment = _mapping(
+        service["environment"],
+        code=f"{code}-document",
+    )
+    if not all(isinstance(value, str) for value in environment.values()):
+        _fail(f"{code}-value-type")
+    return _validate_secret_mapping(contract, environment, code=code)
+
+
 def validate_secret_override(contract: DeploymentContract) -> None:
     if contract.secret_override.parent != contract.runtime_directory:
         _fail("override-path")
     _validate_runtime_directory(contract, create=False)
-    _validate_regular_file(
+    _read_secret_override(
+        contract,
+        contract.secret_override,
+        code="secret-override",
+    )
+
+
+def _override_document(
+    contract: DeploymentContract,
+    secrets: dict[str, str],
+) -> bytes:
+    selected = _validate_secret_mapping(
+        contract,
+        secrets,
+        code="override-input",
+    )
+    environment = {
+        spec.destination_name: selected[spec.name]
+        for spec in contract.protected_secrets
+        if spec.name in selected
+    }
+    document = {
+        "services": {
+            contract.target_service: {
+                "environment": environment,
+            }
+        }
+    }
+    return (
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _secret_fingerprints(
+    secrets: dict[str, str],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (name, hashlib.sha256(value.encode("utf-8")).hexdigest())
+        for name, value in sorted(secrets.items())
+    )
+
+
+def _validate_secret_transition(
+    contract: DeploymentContract,
+    *,
+    live: dict[str, str],
+    staged: dict[str, str],
+    removal_authorization: ProtectedSecretRemovalAuthorization | None = None,
+) -> None:
+    live = _validate_secret_mapping(
+        contract,
+        live,
+        code="live-override",
+        require_required=False,
+    )
+    staged = _validate_secret_mapping(
+        contract,
+        staged,
+        code="staged-override",
+    )
+    removed = frozenset(set(live) - set(staged))
+    if removed:
+        specs = _secret_specs_by_name(contract)
+        if (
+            removal_authorization is None
+            or removal_authorization.exact_names != removed
+            or not removal_authorization.rollback_ready
+            or any(specs[name].required for name in removed)
+            or any(
+                not specs[name].removal_requires_authorization
+                for name in removed
+            )
+        ):
+            _fail("protected-credential-removal")
+    live_fingerprints = dict(_secret_fingerprints(live))
+    staged_fingerprints = dict(_secret_fingerprints(staged))
+    if any(
+        live_fingerprints[name] != staged_fingerprints[name]
+        for name in set(live) & set(staged)
+    ):
+        _fail("credential-fingerprint-drift")
+
+
+def _fsync_runtime_directory(contract: DeploymentContract) -> None:
+    directory_fd = os.open(contract.runtime_directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _unlink_private_path(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        _fail("override-partial-cleanup")
+
+
+def _write_private_payload(
+    contract: DeploymentContract,
+    *,
+    prefix: str,
+    payload: bytes,
+) -> Path:
+    temp_path: Path | None = None
+    fd: int | None = None
+    completed = False
+    old_umask = os.umask(0o077)
+    try:
+        fd, raw_path = tempfile.mkstemp(
+            prefix=prefix,
+            dir=contract.runtime_directory,
+        )
+        temp_path = Path(raw_path)
+        os.fchmod(fd, 0o600)
+        written = 0
+        while written < len(payload):
+            count = os.write(fd, payload[written:])
+            if count <= 0:
+                _fail("override-write")
+            written += count
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        _validate_regular_file(
+            temp_path,
+            mode=0o600,
+            allowed_uids=frozenset({_effective_uid()}),
+            code="temporary-override",
+        )
+        completed = True
+        return temp_path
+    except DeploymentContractError:
+        raise
+    except OSError:
+        _fail("override-atomic-write")
+    finally:
+        os.umask(old_umask)
+        if fd is not None:
+            os.close(fd)
+        if temp_path is not None and not completed:
+            _unlink_private_path(temp_path)
+
+
+def _stage_secret_override(
+    contract: DeploymentContract,
+    secrets: dict[str, str],
+) -> Path:
+    _validate_runtime_directory(contract, create=True)
+    staged_path = _write_private_payload(
+        contract,
+        prefix=".hermes-secrets-staged.",
+        payload=_override_document(contract, secrets),
+    )
+    try:
+        _read_secret_override(
+            contract,
+            staged_path,
+            code="staged-override",
+        )
+    except BaseException:
+        _unlink_private_path(staged_path)
+        raise
+    return staged_path
+
+
+def _live_override_secrets(
+    contract: DeploymentContract,
+) -> dict[str, str] | None:
+    try:
+        contract.secret_override.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _fail("secret-override-metadata")
+    validate_secret_override(contract)
+    return _read_secret_override(
+        contract,
+        contract.secret_override,
+        code="secret-override",
+    )
+
+
+def _stage_live_override_rollback(
+    contract: DeploymentContract,
+) -> Path:
+    metadata = _validate_regular_file(
         contract.secret_override,
         mode=0o600,
         allowed_uids=frozenset({_effective_uid()}),
         code="secret-override",
     )
+    payload = _read_protected_bytes(
+        contract.secret_override,
+        expected=metadata,
+        code="secret-override",
+    )
+    rollback_path = _write_private_payload(
+        contract,
+        prefix=".hermes-secrets-rollback.",
+        payload=payload,
+    )
+    _read_secret_override(
+        contract,
+        rollback_path,
+        code="rollback-override",
+    )
+    return rollback_path
 
 
-def _override_document(contract: DeploymentContract, secrets: dict[str, str]) -> bytes:
-    document = {
-        "services": {
-            contract.target_service: {
-                "environment": {name: secrets[name] for name in contract.required_secret_names}
-            }
-        }
-    }
-    return (json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-
-
-def _write_secret_override(contract: DeploymentContract, secrets: dict[str, str]) -> None:
-    _validate_runtime_directory(contract, create=True)
-    if contract.secret_override.exists() or contract.secret_override.is_symlink():
-        validate_secret_override(contract)
-
-    temp_path: Path | None = None
-    fd: int | None = None
-    old_umask = os.umask(0o077)
+def _restore_secret_override_transaction(
+    contract: DeploymentContract,
+    transaction: SecretOverrideTransaction,
+) -> None:
     try:
-        try:
-            fd, raw_path = tempfile.mkstemp(prefix=".hermes-secrets-override.", dir=contract.runtime_directory)
-            temp_path = Path(raw_path)
-            os.fchmod(fd, 0o600)
-            payload = _override_document(contract, secrets)
-            written = 0
-            while written < len(payload):
-                count = os.write(fd, payload[written:])
-                if count <= 0:
-                    _fail("override-write")
-                written += count
-            os.fsync(fd)
-            os.close(fd)
-            fd = None
-            _validate_regular_file(
-                temp_path,
-                mode=0o600,
-                allowed_uids=frozenset({_effective_uid()}),
-                code="temporary-override",
+        if transaction.live_was_present:
+            if transaction.rollback_path is None:
+                _fail("secret-rollback-artifact-missing")
+            _read_secret_override(
+                contract,
+                transaction.rollback_path,
+                code="rollback-override",
             )
-            os.replace(temp_path, contract.secret_override)
-            temp_path = None
-            directory_fd = os.open(contract.runtime_directory, os.O_RDONLY)
+            os.replace(
+                transaction.rollback_path,
+                contract.secret_override,
+            )
+            _fsync_runtime_directory(contract)
+            restored = _read_secret_override(
+                contract,
+                contract.secret_override,
+                code="secret-override",
+            )
+            if _secret_fingerprints(restored) != transaction.previous_fingerprints:
+                _fail("secret-rollback-fingerprint-mismatch")
+        else:
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            validate_secret_override(contract)
-        except DeploymentContractError:
-            raise
-        except OSError:
-            _fail("override-atomic-write")
-    finally:
-        os.umask(old_umask)
-        if fd is not None:
-            os.close(fd)
-        if temp_path is not None:
-            try:
-                temp_path.unlink()
+                contract.secret_override.lstat()
             except FileNotFoundError:
                 pass
-            except OSError:
-                _fail("override-partial-cleanup")
+            else:
+                _validate_regular_file(
+                    contract.secret_override,
+                    mode=0o600,
+                    allowed_uids=frozenset({_effective_uid()}),
+                    code="secret-override",
+                )
+                contract.secret_override.unlink()
+                _fsync_runtime_directory(contract)
+        _unlink_private_path(transaction.staged_path)
+        _unlink_private_path(transaction.rollback_path)
+    except DeploymentContractError:
+        raise
+    except OSError:
+        _fail("secret-rollback-restore")
+
+
+def _begin_secret_override_transaction(
+    contract: DeploymentContract,
+    secrets: dict[str, str],
+) -> SecretOverrideTransaction:
+    staged_path = _stage_secret_override(contract, secrets)
+    rollback_path: Path | None = None
+    live = _live_override_secrets(contract)
+    staged = _read_secret_override(
+        contract,
+        staged_path,
+        code="staged-override",
+    )
+    _validate_secret_transition(
+        contract,
+        live={} if live is None else live,
+        staged=staged,
+    )
+    previous_fingerprints: tuple[tuple[str, str], ...] = ()
+    if live is not None:
+        previous_fingerprints = _secret_fingerprints(live)
+        rollback_path = _stage_live_override_rollback(contract)
+    transaction = SecretOverrideTransaction(
+        staged_path=staged_path,
+        rollback_path=rollback_path,
+        live_was_present=live is not None,
+        previous_fingerprints=previous_fingerprints,
+    )
+    replaced = False
+    try:
+        os.replace(staged_path, contract.secret_override)
+        replaced = True
+        _fsync_runtime_directory(contract)
+        validate_secret_override(contract)
+        return transaction
+    except BaseException as exc:
+        if replaced:
+            try:
+                _restore_secret_override_transaction(contract, transaction)
+            except DeploymentContractError:
+                if isinstance(exc, DeploymentContractError):
+                    raise
+                _fail("secret-rollback-restore")
+        else:
+            _unlink_private_path(staged_path)
+            _unlink_private_path(rollback_path)
+        if isinstance(exc, DeploymentContractError):
+            raise
+        _fail("override-atomic-write")
+
+
+def _finish_secret_override_transaction(
+    contract: DeploymentContract,
+    transaction: SecretOverrideTransaction,
+    *,
+    preserve_published: bool,
+) -> None:
+    if preserve_published:
+        _unlink_private_path(transaction.staged_path)
+        _unlink_private_path(transaction.rollback_path)
+        return
+    _restore_secret_override_transaction(contract, transaction)
+
+
+def _write_secret_override(
+    contract: DeploymentContract,
+    secrets: dict[str, str],
+) -> None:
+    transaction = _begin_secret_override_transaction(contract, secrets)
+    _finish_secret_override_transaction(
+        contract,
+        transaction,
+        preserve_published=True,
+    )
 
 
 def prepare_secret_override(contract: DeploymentContract, source: Path) -> None:
@@ -739,6 +1172,13 @@ def _validate_pre_mutation(
         if current.image_id == target.image_id:
             _fail("rollback-image-not-distinct")
     secrets = read_required_secrets(contract, source)
+    live = _live_override_secrets(contract)
+    if live is not None:
+        _validate_secret_transition(
+            contract,
+            live=live,
+            staged=secrets,
+        )
     with tempfile.TemporaryDirectory(prefix="hermes-production-plan-") as raw_directory:
         temporary = _temporary_render_contract(contract, Path(raw_directory))
         _write_secret_override(temporary, secrets)
@@ -801,7 +1241,9 @@ def execute_operation(
         rollback=rollback,
     )
     expected_image_id = target.image_id
-    _write_secret_override(contract, secrets)
+    secret_transaction = _begin_secret_override_transaction(
+        contract, secrets
+    )
     primary_error: BaseException | None = None
     try:
         environment = _compose_environment(expected_image_id, revision)
@@ -826,7 +1268,11 @@ def execute_operation(
         raise
     finally:
         try:
-            cleanup_secret_override(contract)
+            _finish_secret_override_transaction(
+                contract,
+                secret_transaction,
+                preserve_published=False,
+            )
         except DeploymentContractError:
             if primary_error is None:
                 raise
@@ -899,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
             print("SOURCE_OWNER=root")
             print(f"SOURCE_MODE={stat.S_IMODE(metadata.st_mode):04o}")
             print("REQUIRED_VARIABLES=" + ",".join(contract.required_secret_names))
+            print("PROTECTED_VARIABLES=" + ",".join(contract.protected_secret_names))
+            print("OPTIONAL_VARIABLES=" + ",".join(name for name in contract.protected_secret_names if name not in contract.required_secret_names))
             print("SOURCE_REQUIRED_VARIABLES_PRESENT=true")
             print("SOURCE_DUPLICATE_ASSIGNMENTS=false")
             print("SOURCE_MALFORMED_ASSIGNMENTS=false")
@@ -908,6 +1356,8 @@ def main(argv: list[str] | None = None) -> int:
             prepare_secret_override(contract, _secret_source_argument(contract, args.secret_source))
             print("SECRET_OVERRIDE_PREPARED=true")
             print("REQUIRED_VARIABLES=" + ",".join(contract.required_secret_names))
+            print("PROTECTED_VARIABLES=" + ",".join(contract.protected_secret_names))
+            print("OPTIONAL_VARIABLES=" + ",".join(name for name in contract.protected_secret_names if name not in contract.required_secret_names))
         elif args.command == "cleanup":
             cleanup_secret_override(contract)
             print("SECRET_OVERRIDE_PRESENT=false")

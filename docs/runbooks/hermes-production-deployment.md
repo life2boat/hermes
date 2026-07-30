@@ -20,7 +20,7 @@ separate approval gates.
 | Secret override | regular deployment-operator-owned file, mode `0600` |
 | Approved secret source class | explicit protected dotenv file outside the repository |
 | Approved production source | `/etc/hermes/hermes-production.env`, root-owned, mode `0600` |
-| Required override variable | `TELEGRAM_BOT_TOKEN` |
+| Protected override variables | six manifest-declared variables; only `TELEGRAM_BOT_TOKEN` is required on a clean install |
 
 The canonical Compose order is deterministic:
 
@@ -228,7 +228,29 @@ temporary files after failures. Status output contains variable names only.
 Never use `set -x`, print the source, render full Compose configuration, pass
 secret values on the command line, or store rendered configuration as evidence.
 
+The `secrets.protected_variables` manifest is the sole protected-key
+allowlist. It records only variable names, required/optional classification,
+approved source class, destination name, empty-value policy, and the
+authorization requirement for removal. It contains no credential values.
+Optional provider variables may be absent when no protected live value would
+be removed. A live protected value is never silently dropped: the ordinary
+deployment and rollback paths compare live and staged protected-key sets and
+SHA-256 fingerprints, and fail closed on deletion or drift. Unknown live or
+source variables are rejected rather than preserved through an ambient
+environment fallback.
+
+The producer first creates a private staged override with mode `0600`, validates
+the complete declared mapping, and only then atomically publishes it. Before a
+production Compose operation, a separate rollback artifact is prepared from
+the prior live override. If the operation ends, the prior live override is
+restored byte-for-byte; if publication is interrupted, the previous file is
+left intact. Protected-key removal has no ordinary CLI authorization path and
+therefore remains denied unless an internal exact-name decommission
+authorization and rollback readiness are both supplied. Secret values are
+never logged, printed, or stored in evidence; only safe classifications are
+reported.
 ## Check-only render and plan
+
 
 `check-render` requires an already prepared override and uses `docker compose
 config --quiet` plus a service-name-only query. It suppresses Compose output:

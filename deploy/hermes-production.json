@@ -21,8 +21,55 @@
       0
     ],
     "source_mode": "0600",
-    "required_variables": [
-      "TELEGRAM_BOT_TOKEN"
+    "protected_variables": [
+      {
+        "name": "TELEGRAM_BOT_TOKEN",
+        "required": true,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "TELEGRAM_BOT_TOKEN",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      },
+      {
+        "name": "DEEPSEEK_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "DEEPSEEK_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      },
+      {
+        "name": "GEMINI_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "GEMINI_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      },
+      {
+        "name": "NOUS_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "NOUS_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      },
+      {
+        "name": "OPENAI_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "OPENAI_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      },
+      {
+        "name": "QWEN_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "QWEN_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
+      }
     ],
     "ambient_environment_allowed": false
   },

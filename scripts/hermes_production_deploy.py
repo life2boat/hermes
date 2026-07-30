@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Sequence
 
 
+try:
+    from scripts import hermes_deploy_preflight as preflight
+except ModuleNotFoundError:  # Direct execution adds scripts/ rather than its parent.
+    import hermes_deploy_preflight as preflight
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPOSITORY_ROOT / "deploy" / "hermes-production.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -57,6 +62,14 @@ class DeploymentContract:
     root: Path
     manifest_path: Path
     base_compose: Path
+    canonical_repository: str
+    canonical_repository_slug: str
+    canonical_remote: str
+    canonical_remote_urls: tuple[str, ...]
+    canonical_main_branch: str
+    required_ci_workflows: tuple[str, ...]
+    database_source: Path
+    database_target: Path
     production_override: Path
     runtime_directory: Path
     secret_override: Path
@@ -64,11 +77,22 @@ class DeploymentContract:
     approved_source_owner_uids: frozenset[int]
     protected_secrets: tuple[ProtectedSecretSpec, ...]
     project_name: str
+    database_mount_type: str
+    database_read_only: bool
+    legacy_database_sources: tuple[Path, ...]
+    lease_path: Path
+    lease_owner_uids: frozenset[int]
+    lease_timeout_seconds: int
+    capacity_filesystem: Path
+    minimum_free_basis_points: int
+    estimated_peak_incremental_build_bytes: int
+    build_peak_multiplier: int
+    staging_safety_margin_bytes: int
+    capacity_formula_source: str
     target_service: str
     image_revision_label: str
     allowed_revision_ref: str
     feature_gates: dict[str, str]
-
 
     @property
     def protected_secret_names(self) -> tuple[str, ...]:
@@ -97,6 +121,13 @@ class SecretOverrideTransaction:
 class InspectedImage:
     image_id: str
     revision: str
+
+
+def _preflight(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except preflight.DeployPreflightError as exc:
+        _fail(exc.code)
 
 
 def _fail(code: str) -> None:
@@ -162,10 +193,34 @@ def load_contract(
         if manifest_bytes is None
         else _decode_json_document(manifest_bytes, code="manifest")
     )
-    if set(raw) != {"version", "compose", "runtime", "secrets", "deployment", "rollback", "feature_gates"}:
+    if set(raw) != {
+        "version", "provenance", "compose", "runtime", "database_mount",
+        "capacity", "secrets", "deployment", "rollback", "feature_gates",
+    }:
         _fail("manifest-fields")
-    if raw["version"] != 1:
+    if raw["version"] != 2:
         _fail("manifest-version")
+
+    provenance = _mapping(raw["provenance"], code="manifest-provenance")
+    canonical_repository = "https://github.com/life2boat/hermes.git"
+    canonical_remote = "github"
+    canonical_main_ref = "refs/remotes/github/main"
+    canonical_main_branch = "refs/heads/main"
+    expected_remote_urls = (
+        "git@github-healbite:life2boat/hermes.git",
+        "git@github.com:life2boat/hermes.git",
+        canonical_repository,
+    )
+    expected_ci = ("Tests", "Lint", "Typecheck", "Nix")
+    if (
+        provenance.get("canonical_repository") != canonical_repository
+        or provenance.get("canonical_remote") != canonical_remote
+        or tuple(provenance.get("canonical_remote_urls", ())) != expected_remote_urls
+        or provenance.get("canonical_main_ref") != canonical_main_ref
+        or provenance.get("canonical_main_branch") != canonical_main_branch
+        or tuple(provenance.get("required_ci_workflows", ())) != expected_ci
+    ):
+        _fail("provenance-policy")
 
     compose = _mapping(raw["compose"], code="manifest-compose")
     if compose.get("project_name") != "hermes-agent" or compose.get("target_service") != "hermes-bot":
@@ -181,12 +236,63 @@ def load_contract(
     runtime = _mapping(raw["runtime"], code="manifest-runtime")
     runtime_directory = Path(_string(runtime.get("directory"), code="runtime-directory"))
     secret_override = Path(_string(runtime.get("secret_override"), code="secret-override"))
-    if runtime_directory != Path("/run/hermes") or secret_override != runtime_directory / "hermes-secrets-override.yml":
+    lease_path = Path(_string(runtime.get("deployment_lease"), code="deployment-lease"))
+    if (
+        runtime_directory != Path("/run/hermes")
+        or secret_override != runtime_directory / "hermes-secrets-override.yml"
+        or lease_path != runtime_directory / "hermes-deployment-operation.json"
+    ):
         _fail("runtime-path")
     _mode(runtime.get("directory_mode"), expected="0700", code="runtime-directory-mode")
     _mode(runtime.get("secret_override_mode"), expected="0600", code="secret-override-mode")
+    _mode(runtime.get("deployment_lease_mode"), expected="0600", code="deployment-lease-mode")
+    lease_timeout_seconds = runtime.get("deployment_lease_timeout_seconds")
+    if lease_timeout_seconds != 900:
+        _fail("deployment-lease-timeout")
     if runtime.get("owner") != "deployment-operator":
         _fail("runtime-owner")
+
+    database = _mapping(raw["database_mount"], code="manifest-database-mount")
+    database_source = Path(_string(database.get("source"), code="database-source"))
+    database_target = Path(_string(database.get("target"), code="database-target"))
+    legacy_database_sources = tuple(
+        Path(item)
+        for item in database.get("legacy_sources", ())
+        if isinstance(item, str)
+    )
+    if (
+        database_source != Path("/var/lib/hermes/production-db/healbite.db")
+        or database_target != Path("/home/hermes/healbite.db")
+        or database.get("type") != "bind"
+        or database.get("read_write") is not True
+        or legacy_database_sources != (Path("/home/hermes/healbite.db"),)
+    ):
+        _fail("database-mount-policy")
+
+    capacity = _mapping(raw["capacity"], code="manifest-capacity")
+    capacity_filesystem = Path(_string(capacity.get("filesystem"), code="capacity-filesystem"))
+    minimum_free_basis_points = capacity.get("minimum_free_basis_points")
+    estimated_peak_incremental_build_bytes = capacity.get(
+        "estimated_peak_incremental_build_bytes"
+    )
+    build_peak_multiplier = capacity.get("build_peak_multiplier")
+    staging_safety_margin_bytes = capacity.get("staging_safety_margin_bytes")
+    capacity_source = capacity.get("formula_source")
+    capacity_policy_class = capacity.get("policy_class")
+    capacity_policy_reference = capacity.get("policy_reference")
+    if (
+        capacity_filesystem != Path("/")
+        or minimum_free_basis_points != 1000
+        or estimated_peak_incremental_build_bytes != 2069000000
+        or build_peak_multiplier != 2
+        or staging_safety_margin_bytes != 5368709120
+        or capacity_source
+        != "repository-manifest:max(filesystem-percentage,operation-peak-plus-margin)"
+        or capacity_policy_class != "new-explicit-p0"
+        or capacity_policy_reference
+        != "docs/runbooks/hermes-production-deployment.md#capacity-policy"
+    ):
+        _fail("capacity-policy")
 
     secrets = _mapping(raw["secrets"], code="manifest-secrets")
     if secrets.get("source_type") != "explicit-protected-dotenv":
@@ -268,7 +374,7 @@ def load_contract(
         deployment.get("image_reference_policy") != "digest-only"
         or deployment.get("revision_required") is not True
         or deployment.get("revision_label") != "org.opencontainers.image.revision"
-        or deployment.get("allowed_revision_ref") != "refs/remotes/healbite-project/main"
+        or deployment.get("allowed_revision_ref") != canonical_main_ref
         or deployment.get("recreate_services") != ["hermes-bot"]
         or deployment.get("cleanup_after_operation") is not True
     ):
@@ -298,10 +404,18 @@ def load_contract(
     }
 
     return DeploymentContract(
-        version=1,
+        version=2,
         root=root,
         manifest_path=manifest_path,
         base_compose=root / base_relative,
+        canonical_repository=canonical_repository,
+        canonical_repository_slug="life2boat/hermes",
+        canonical_remote=canonical_remote,
+        canonical_remote_urls=expected_remote_urls,
+        canonical_main_branch=canonical_main_branch,
+        required_ci_workflows=expected_ci,
+        database_source=database_source,
+        database_target=database_target,
         production_override=root / production_relative,
         runtime_directory=runtime_directory,
         secret_override=secret_override,
@@ -309,9 +423,21 @@ def load_contract(
         approved_source_owner_uids=frozenset(owner_uids),
         protected_secrets=tuple(protected),
         project_name="hermes-agent",
+        database_mount_type="bind",
+        database_read_only=False,
+        legacy_database_sources=legacy_database_sources,
+        lease_path=lease_path,
+        lease_owner_uids=frozenset({0}),
+        lease_timeout_seconds=lease_timeout_seconds,
+        capacity_filesystem=capacity_filesystem,
+        minimum_free_basis_points=minimum_free_basis_points,
+        estimated_peak_incremental_build_bytes=estimated_peak_incremental_build_bytes,
+        build_peak_multiplier=build_peak_multiplier,
+        staging_safety_margin_bytes=staging_safety_margin_bytes,
+        capacity_formula_source=capacity_source,
         target_service="hermes-bot",
         image_revision_label="org.opencontainers.image.revision",
-        allowed_revision_ref="refs/remotes/healbite-project/main",
+        allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
     )
 
@@ -349,24 +475,28 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
         _fail("expected-sha")
     if Path(_git_output(contract, "rev-parse", "--show-toplevel")).resolve() != contract.root.resolve():
         _fail("repository-root-mismatch")
+    if contract.allowed_revision_ref != "refs/remotes/github/main":
+        _fail("canonical-main-ref-mismatch")
     if _git_output(contract, "rev-parse", "HEAD") != expected_sha:
         _fail("head-mismatch")
     if _git_output(contract, "status", "--porcelain=v1"):
         _fail("dirty-worktree")
-    ancestry = _run(
-        (
-            "git",
-            "-C",
-            str(contract.root),
-            "merge-base",
-            "--is-ancestor",
-            expected_sha,
-            contract.allowed_revision_ref,
-        ),
-        timeout=20,
+    canonical_main = _git_output(contract, "rev-parse", "--verify", f"{contract.allowed_revision_ref}^{{commit}}")
+    if canonical_main != expected_sha:
+        _fail("canonical-main-sha-mismatch")
+    _preflight(
+        preflight.validate_canonical_provenance,
+        root=contract.root,
+        expected_sha=expected_sha,
+        canonical_repository_slug=contract.canonical_repository_slug,
+        canonical_remote=contract.canonical_remote,
+        allowed_remote_urls=contract.canonical_remote_urls,
+        canonical_main_ref=contract.allowed_revision_ref,
+        canonical_main_branch=contract.canonical_main_branch,
+        required_ci_workflows=contract.required_ci_workflows,
+        git_output=lambda *args: _git_output(contract, *args),
+        run=_run,
     )
-    if ancestry.returncode != 0:
-        _fail("revision-not-allowed")
     for path in (contract.manifest_path, contract.base_compose, contract.production_override):
         try:
             metadata = path.lstat()
@@ -1048,7 +1178,33 @@ def _compose_environment(image: str, revision: str) -> dict[str, str]:
     return environment
 
 
-def validate_compose_render(contract: DeploymentContract, image: str, revision: str) -> None:
+def _validate_database_source_path(path: Path) -> None:
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        _fail("unsafe-db-source-path")
+    _assert_no_symlink_components(path)
+    try:
+        metadata = path.lstat()
+    except OSError:
+        _fail("unsafe-db-source-path")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        _fail("unsafe-db-source-path")
+
+
+def _database_mount_kwargs(contract: DeploymentContract) -> dict[str, object]:
+    return {
+        "expected_source": str(contract.database_source),
+        "expected_target": str(contract.database_target),
+        "expected_type": contract.database_mount_type,
+        "expected_read_only": contract.database_read_only,
+        "legacy_sources": tuple(str(path) for path in contract.legacy_database_sources),
+    }
+
+
+def validate_compose_render(
+    contract: DeploymentContract,
+    image: str,
+    revision: str,
+) -> tuple[preflight.MountRecord, ...]:
     validate_immutable_image(image)
     validate_revision(revision)
     validate_secret_override(contract)
@@ -1063,6 +1219,46 @@ def validate_compose_render(contract: DeploymentContract, image: str, revision: 
     service_names = {line.strip() for line in services.stdout.splitlines() if line.strip()}
     if contract.target_service not in service_names:
         _fail("target-service-missing")
+    rendered = _run(
+        (*base, "config", "--format", "json"),
+        cwd=contract.root,
+        env=environment,
+        timeout=45,
+    )
+    if rendered.returncode != 0:
+        _fail("compose-render-document")
+    try:
+        document = json.loads(rendered.stdout)
+    except json.JSONDecodeError:
+        _fail("compose-render-document")
+    if not isinstance(document, dict):
+        _fail("compose-render-document")
+    mounts = _preflight(
+        preflight.compose_mounts_from_document,
+        document,
+        service_name=contract.target_service,
+    )
+    _preflight(
+        preflight.validate_database_mounts,
+        mounts,
+        **_database_mount_kwargs(contract),
+        source_path_validator=None,
+    )
+    return mounts
+
+
+def inspect_live_database_mounts(contract: DeploymentContract) -> tuple[preflight.MountRecord, ...]:
+    result = _run(
+        ("docker", "inspect", "--format", "{{json .Mounts}}", contract.target_service),
+        timeout=30,
+    )
+    if result.returncode != 0:
+        _fail("live-mount-inspect")
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        _fail("live-mount-document")
+    return _preflight(preflight.live_mounts_from_document, document)
 
 
 def inspect_local_image(
@@ -1146,15 +1342,14 @@ def _temporary_render_contract(contract: DeploymentContract, directory: Path) ->
     )
 
 
-def _validate_pre_mutation(
+def _validate_operation_identity(
     contract: DeploymentContract,
     *,
-    source: Path,
     image: str,
     revision: str,
-    current_image: str | None = None,
-    rollback: bool = False,
-) -> tuple[InspectedImage, dict[str, str], str]:
+    current_image: str | None,
+    rollback: bool,
+) -> tuple[InspectedImage, str]:
     if rollback:
         source_head = current_source_head_revision(contract)
         validate_repository(contract, source_head)
@@ -1171,6 +1366,91 @@ def _validate_pre_mutation(
         current = inspect_local_image(contract, current_image)
         if current.image_id == target.image_id:
             _fail("rollback-image-not-distinct")
+    return target, source_head
+
+
+def _validate_capacity(
+    contract: DeploymentContract,
+    *,
+    phase: str,
+    revision: str,
+    image_id: str | None,
+    available_bytes: int | None = None,
+) -> preflight.CapacityAssessment:
+    return _preflight(
+        preflight.validate_capacity,
+        phase=phase,
+        filesystem=contract.capacity_filesystem,
+        minimum_free_basis_points=contract.minimum_free_basis_points,
+        estimated_peak_incremental_build_bytes=contract.estimated_peak_incremental_build_bytes,
+        build_peak_multiplier=contract.build_peak_multiplier,
+        staging_safety_margin_bytes=contract.staging_safety_margin_bytes,
+        formula_source=contract.capacity_formula_source,
+        target_sha=revision,
+        target_image_id=image_id,
+        available_bytes=available_bytes,
+    )
+
+
+def _assert_lease_available(
+    contract: DeploymentContract,
+    *,
+    revision: str,
+    image_id: str,
+) -> None:
+    _preflight(
+        preflight.assert_lease_available,
+        path=contract.lease_path,
+        allowed_owner_uids=contract.lease_owner_uids,
+        canonical_repository=contract.canonical_repository,
+        target_sha=revision,
+        target_image_id=image_id,
+    )
+
+
+def _validate_live_future_mounts(
+    contract: DeploymentContract,
+    future_mounts: tuple[preflight.MountRecord, ...],
+) -> preflight.DatabaseMountAssessment:
+    live_mounts = inspect_live_database_mounts(contract)
+    return _preflight(
+        preflight.validate_live_future_database_mounts,
+        future_mounts,
+        live_mounts,
+        **_database_mount_kwargs(contract),
+        source_path_validator=_validate_database_source_path,
+    )
+
+
+def _ordinary_deploy_pre_mutation_barrier(
+    contract: DeploymentContract,
+    *,
+    source: Path,
+    image: str,
+    revision: str,
+    current_image: str | None = None,
+    rollback: bool = False,
+    lease: preflight.DeploymentLease | None = None,
+) -> tuple[InspectedImage, dict[str, str], str]:
+    target, source_head = _validate_operation_identity(
+        contract,
+        image=image,
+        revision=revision,
+        current_image=current_image,
+        rollback=rollback,
+    )
+    if lease is None:
+        _assert_lease_available(contract, revision=revision, image_id=target.image_id)
+    else:
+        _preflight(
+            preflight.validate_held_lease,
+            lease,
+            allowed_owner_uids=contract.lease_owner_uids,
+            operation_class="rollback" if rollback else "deploy",
+            canonical_repository=contract.canonical_repository,
+            target_sha=revision,
+            target_image_id=target.image_id,
+        )
     secrets = read_required_secrets(contract, source)
     live = _live_override_secrets(contract)
     if live is not None:
@@ -1184,7 +1464,7 @@ def _validate_pre_mutation(
         _write_secret_override(temporary, secrets)
         primary_error: BaseException | None = None
         try:
-            validate_compose_render(temporary, target.image_id, revision)
+            future_mounts = validate_compose_render(temporary, target.image_id, revision)
         except BaseException as exc:
             primary_error = exc
             raise
@@ -1194,6 +1474,8 @@ def _validate_pre_mutation(
             except DeploymentContractError:
                 if primary_error is None:
                     raise
+    _validate_live_future_mounts(contract, future_mounts)
+    _validate_capacity(contract, phase="deploy", revision=revision, image_id=target.image_id)
     return target, secrets, source_head
 
 
@@ -1206,7 +1488,7 @@ def plan_operation(
     rollback_from: str | None = None,
 ) -> None:
     rollback = rollback_from is not None
-    target, _secrets, source_head = _validate_pre_mutation(
+    target, _secrets, source_head = _ordinary_deploy_pre_mutation_barrier(
         contract,
         source=source,
         image=image,
@@ -1232,46 +1514,78 @@ def execute_operation(
         _fail("explicit-confirmation-required")
     if rollback and current_image is None:
         _fail("current-image-required")
-    target, secrets, _source_head = _validate_pre_mutation(
+    target, _source_head = _validate_operation_identity(
         contract,
-        source=source,
         image=image,
         revision=revision,
-        current_image=current_image if rollback else None,
+        current_image=current_image,
         rollback=rollback,
     )
-    expected_image_id = target.image_id
-    secret_transaction = _begin_secret_override_transaction(
-        contract, secrets
+    _validate_runtime_directory(contract, create=True)
+    lease = _preflight(
+        preflight.acquire_deployment_lease,
+        path=contract.lease_path,
+        allowed_owner_uids=contract.lease_owner_uids,
+        operation_class="rollback" if rollback else "deploy",
+        canonical_repository=contract.canonical_repository,
+        target_sha=revision,
+        target_image_id=target.image_id,
+        timeout_seconds=contract.lease_timeout_seconds,
     )
     primary_error: BaseException | None = None
     try:
-        environment = _compose_environment(expected_image_id, revision)
-        command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
-        result = _run(command, cwd=contract.root, env=environment, timeout=300)
-        if result.returncode != 0:
-            _fail("compose-up")
-        health = _run(
-            (
-                "docker",
-                "inspect",
-                "--format",
-                "{{.State.Status}} {{.RestartCount}} {{.Image}}",
-                contract.target_service,
-            ),
-            timeout=30,
+        target, secrets, _source_head = _ordinary_deploy_pre_mutation_barrier(
+            contract,
+            source=source,
+            image=image,
+            revision=revision,
+            current_image=current_image if rollback else None,
+            rollback=rollback,
+            lease=lease,
         )
-        if health.returncode != 0 or health.stdout.strip() != f"running 0 {expected_image_id}":
-            _fail("post-operation-health")
+        expected_image_id = target.image_id
+        secret_transaction = _begin_secret_override_transaction(contract, secrets)
+        mutation_error: BaseException | None = None
+        try:
+            environment = _compose_environment(expected_image_id, revision)
+            command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
+            result = _run(command, cwd=contract.root, env=environment, timeout=300)
+            if result.returncode != 0:
+                _fail("compose-up")
+            health = _run(
+                (
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Status}} {{.RestartCount}} {{.Image}}",
+                    contract.target_service,
+                ),
+                timeout=30,
+            )
+            if health.returncode != 0 or health.stdout.strip() != f"running 0 {expected_image_id}":
+                _fail("post-operation-health")
+        except BaseException as exc:
+            mutation_error = exc
+            raise
+        finally:
+            try:
+                _finish_secret_override_transaction(
+                    contract,
+                    secret_transaction,
+                    preserve_published=False,
+                )
+            except DeploymentContractError:
+                if mutation_error is None:
+                    raise
     except BaseException as exc:
         primary_error = exc
         raise
     finally:
         try:
-            _finish_secret_override_transaction(
-                contract,
-                secret_transaction,
-                preserve_published=False,
+            _preflight(
+                preflight.release_deployment_lease,
+                lease,
+                allowed_owner_uids=contract.lease_owner_uids,
             )
         except DeploymentContractError:
             if primary_error is None:
@@ -1300,6 +1614,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     render = subparsers.add_parser("check-render")
     _add_image_arguments(render)
+
+    capacity = subparsers.add_parser("check-capacity")
+    capacity.add_argument("--phase", choices=("build", "deploy"), required=True)
+    capacity.add_argument("--revision", required=True)
+    capacity.add_argument("--image")
+
+    recover = subparsers.add_parser("recover-lease")
+    recover.add_argument("--expected-fingerprint", required=True)
+    recover.add_argument("--confirm", required=True)
 
     plan = subparsers.add_parser("plan")
     _add_image_arguments(plan)
@@ -1367,6 +1690,40 @@ def main(argv: list[str] | None = None) -> int:
             validate_compose_render(contract, inspected.image_id, args.revision)
             print("CHECK_COMPOSE_RENDER=PASS")
             print("DEPLOYMENT_ACTIONS_PERFORMED=false")
+        elif args.command == "check-capacity":
+            validate_repository(contract, args.revision)
+            image_id = None
+            if args.phase == "deploy":
+                if args.image is None:
+                    _fail("capacity-image-required")
+                image_id = inspect_local_image(
+                    contract,
+                    args.image,
+                    expected_revision=args.revision,
+                ).image_id
+            elif args.image is not None:
+                _fail("capacity-build-image-not-allowed")
+            assessment = _validate_capacity(
+                contract,
+                phase=args.phase,
+                revision=args.revision,
+                image_id=image_id,
+            )
+            print("CAPACITY_GATE=PASS")
+            print(f"CAPACITY_PHASE={assessment.phase}")
+            print(f"CAPACITY_REQUIRED_BYTES={assessment.required_bytes}")
+            print(f"CAPACITY_AVAILABLE_BYTES={assessment.available_bytes}")
+            print(f"CAPACITY_FORMULA_SOURCE={assessment.formula_source}")
+            print("DEPLOYMENT_ACTIONS_PERFORMED=false")
+        elif args.command == "recover-lease":
+            _preflight(
+                preflight.recover_expired_lease,
+                path=contract.lease_path,
+                allowed_owner_uids=contract.lease_owner_uids,
+                expected_fingerprint=args.expected_fingerprint,
+                confirmation=args.confirm,
+            )
+            print("DEPLOYMENT_LEASE_RECOVERED=true")
         elif args.command == "plan":
             plan_operation(
                 contract,

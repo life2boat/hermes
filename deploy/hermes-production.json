@@ -1,5 +1,22 @@
 {
-  "version": 1,
+  "version": 2,
+  "provenance": {
+    "canonical_repository": "https://github.com/life2boat/hermes.git",
+    "canonical_remote": "github",
+    "canonical_remote_urls": [
+      "git@github-healbite:life2boat/hermes.git",
+      "git@github.com:life2boat/hermes.git",
+      "https://github.com/life2boat/hermes.git"
+    ],
+    "canonical_main_ref": "refs/remotes/github/main",
+    "canonical_main_branch": "refs/heads/main",
+    "required_ci_workflows": [
+      "Tests",
+      "Lint",
+      "Typecheck",
+      "Nix"
+    ]
+  },
   "compose": {
     "project_name": "hermes-agent",
     "target_service": "hermes-bot",
@@ -12,7 +29,29 @@
     "directory_mode": "0700",
     "secret_override": "/run/hermes/hermes-secrets-override.yml",
     "secret_override_mode": "0600",
+    "deployment_lease": "/run/hermes/hermes-deployment-operation.json",
+    "deployment_lease_mode": "0600",
+    "deployment_lease_timeout_seconds": 900,
     "owner": "deployment-operator"
+  },
+  "database_mount": {
+    "source": "/var/lib/hermes/production-db/healbite.db",
+    "target": "/home/hermes/healbite.db",
+    "type": "bind",
+    "read_write": true,
+    "legacy_sources": [
+      "/home/hermes/healbite.db"
+    ]
+  },
+  "capacity": {
+    "filesystem": "/",
+    "minimum_free_basis_points": 1000,
+    "estimated_peak_incremental_build_bytes": 2069000000,
+    "build_peak_multiplier": 2,
+    "staging_safety_margin_bytes": 5368709120,
+    "formula_source": "repository-manifest:max(filesystem-percentage,operation-peak-plus-margin)",
+    "policy_class": "new-explicit-p0",
+    "policy_reference": "docs/runbooks/hermes-production-deployment.md#capacity-policy"
   },
   "secrets": {
     "source_type": "explicit-protected-dotenv",
@@ -77,7 +116,7 @@
     "image_reference_policy": "digest-only",
     "revision_required": true,
     "revision_label": "org.opencontainers.image.revision",
-    "allowed_revision_ref": "refs/remotes/healbite-project/main",
+    "allowed_revision_ref": "refs/remotes/github/main",
     "recreate_services": [
       "hermes-bot"
     ],

@@ -18,7 +18,8 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 
 import pytest
 
@@ -26,6 +27,53 @@ IMAGE_TAG = os.environ.get("HERMES_TEST_IMAGE", "hermes-agent-harness:latest")
 _DOCKER_BUILD_TIMEOUT_SECONDS = max(300, int(os.environ.get("HERMES_DOCKER_BUILD_TIMEOUT", "1200")))
 _DOCKER_SUITE_TIMEOUT_SECONDS = max(_DOCKER_BUILD_TIMEOUT_SECONDS + 120, 180)
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_LOCAL_BUILD_AUTHORIZATION_ENV = "HERMES_TEST_LOCAL_BUILD_ALLOWED"
+_PREBUILT_IMAGE_ENV = "HERMES_TEST_IMAGE"
+
+
+@dataclass(frozen=True)
+class _ImageFixturePolicy:
+    """Pure decision for the Docker image fixture."""
+
+    image_reference: str | None
+    local_build_allowed: bool
+    skip_reason: str | None = None
+    error_reason: str | None = None
+
+
+def _resolve_image_fixture_policy(
+    environment: Mapping[str, str],
+) -> _ImageFixturePolicy:
+    """Select a supplied image or require an exact local-build opt-in."""
+    supplied_image = environment.get(_PREBUILT_IMAGE_ENV)
+    if supplied_image:
+        return _ImageFixturePolicy(
+            image_reference=supplied_image,
+            local_build_allowed=False,
+        )
+
+    authorization = environment.get(_LOCAL_BUILD_AUTHORIZATION_ENV)
+    if authorization in (None, ""):
+        return _ImageFixturePolicy(
+            image_reference=None,
+            local_build_allowed=False,
+            skip_reason=(
+                "Docker image integration tests require HERMES_TEST_IMAGE or "
+                "HERMES_TEST_LOCAL_BUILD_ALLOWED=1; local Docker builds are disabled"
+            ),
+        )
+    if authorization != "1":
+        return _ImageFixturePolicy(
+            image_reference=None,
+            local_build_allowed=False,
+            error_reason=(
+                "HERMES_TEST_LOCAL_BUILD_ALLOWED must be unset, empty, or exactly '1'"
+            ),
+        )
+    return _ImageFixturePolicy(
+        image_reference=IMAGE_TAG,
+        local_build_allowed=True,
+    )
 
 
 def _docker_build_env() -> dict[str, str]:
@@ -103,8 +151,16 @@ def built_image() -> str:
     Override with ``HERMES_TEST_IMAGE`` env var to point at a pre-built
     image (faster local iteration).
     """
-    if os.environ.get("HERMES_TEST_IMAGE"):
-        return IMAGE_TAG
+    policy = _resolve_image_fixture_policy(os.environ)
+    if policy.image_reference is not None and not policy.local_build_allowed:
+        return policy.image_reference
+    if policy.error_reason is not None:
+        pytest.fail(policy.error_reason)
+    if policy.skip_reason is not None:
+        pytest.skip(policy.skip_reason)
+    assert policy.local_build_allowed
+    assert policy.image_reference == IMAGE_TAG
+
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", ".."),
     )
@@ -145,7 +201,7 @@ def built_image() -> str:
     assert result.returncode == 0, (
         f"docker build failed:\n{result.stderr[-2000:]}"
     )
-    return IMAGE_TAG
+    return policy.image_reference
 
 
 @pytest.fixture

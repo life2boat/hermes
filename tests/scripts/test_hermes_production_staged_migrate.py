@@ -960,7 +960,7 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["PLAN_CREATOR_PROCESS_GID"] == 0
     assert payload["DEPLOYMENT_CONTRACT_CANONICAL_PATH"] == str(context.manifest)
     assert payload["DEPLOYMENT_CONTRACT_SHA256"] == production._sha256(context.manifest)
-    assert payload["DEPLOYMENT_CONTRACT_VERSION"] == 1
+    assert payload["DEPLOYMENT_CONTRACT_VERSION"] == 2
     assert payload["OPERATIONS_ROOT_APPROVAL_PATH"] == str(
         context.operations_root_approval
     )

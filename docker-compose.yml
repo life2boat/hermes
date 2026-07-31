@@ -20,7 +20,7 @@ services:
       LC_ALL: ${LC_ALL:-C.UTF-8}
     volumes:
       - /home/hermes/.hermes:/home/hermes/.hermes
-      - /home/hermes/healbite.db:/home/hermes/healbite.db
+      - /var/lib/hermes/production-db/healbite.db:/home/hermes/healbite.db
       - /home/hermes/backups:/home/hermes/backups
       - /home/hermes/.cache/huggingface:/home/hermes/.cache/huggingface
     command: ["hermes", "gateway"]

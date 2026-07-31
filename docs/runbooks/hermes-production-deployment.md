@@ -183,6 +183,37 @@ no download attempt.
 Artifact acquisition, image build, image validation, deployment, and feature
 activation remain separate approval gates.
 
+## Capacity policy
+
+The capacity gate is a new explicit P0 deployment policy, not an inherited
+release threshold. It applies before an authorized exact-main build and before
+the first ordinary-deploy mutation. Its metadata lives in the versioned
+production manifest and is bound to this section.
+
+The policy is:
+
+```text
+build  = max(10% of the selected filesystem,
+             2 * estimated_peak_incremental_build_bytes + 5 GiB)
+deploy = max(10% of the selected filesystem, 5 GiB)
+```
+
+The `2,069,000,000` byte incremental-build estimate is calibrated from the
+read-only comparable-build measurement in the capacity assessment with SHA-256
+`e873aae7e4c8e9a56997ec031efc294615d713394e8921d744797b7716d6db83`.
+The multiplier reserves space for an in-progress BuildKit layer set and the
+resulting local image at the same time. The 5 GiB reserve is an explicit
+operational safety floor for Compose staging and Docker accounting variance.
+The 10% term prevents the operation from consuming a disproportionately full
+root filesystem. These are conservative policy inputs reviewed for P0; they
+are not evidence that a later release will have the same size.
+
+The CLI calculates the exact required bytes from the current filesystem and
+fails closed when available bytes are one byte below the computed threshold.
+At the exact threshold it proceeds. The gate neither prunes Docker resources
+nor changes runtime state. A separate capacity review is required whenever the
+build shape or target filesystem changes materially.
+
 ## Repository validation
 
 Run from any directory; the wrapper resolves its own repository root:
@@ -192,8 +223,8 @@ scripts/hermes_production_deploy.sh check-repository \
   --expected-sha <exact-40-character-source-sha>
 ```
 
-This mode checks the canonical repository root, exact HEAD, reachability from
-`refs/remotes/healbite-project/main`, clean worktree state, canonical files,
+This mode checks the canonical repository root, exact HEAD, exact canonical remote identity and
+`refs/remotes/github/main`, clean worktree state, canonical files,
 project/service identity, disabled Shopping flags, and absence of active legacy
 paths. It does not invoke Docker or read secret values.
 

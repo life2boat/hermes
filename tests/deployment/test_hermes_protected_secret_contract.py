@@ -46,6 +46,8 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
         deploy.load_contract(),
         runtime_directory=runtime,
         secret_override=runtime / "hermes-secrets-override.yml",
+        lease_path=runtime / "hermes-deployment-operation.json",
+        lease_owner_uids=frozenset({deploy._effective_uid()}),
         approved_secret_source=source,
         approved_source_owner_uids=frozenset({deploy._effective_uid()}),
     )

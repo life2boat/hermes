@@ -34,12 +34,25 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
     source.chmod(0o600)
     runtime = tmp_path / "run" / "hermes"
     runtime.parent.mkdir(mode=0o700)
+    database_source = tmp_path / "production-db" / "healbite.db"
+    database_source.parent.mkdir(mode=0o700)
+    database_source.write_bytes(b"synthetic-db")
+    database_source.chmod(0o600)
     contract = replace(
         deploy.load_contract(),
         runtime_directory=runtime,
         secret_override=runtime / "hermes-secrets-override.yml",
+        lease_path=runtime / "hermes-deployment-operation.json",
+        lease_owner_uids=frozenset({deploy._effective_uid()}),
         approved_secret_source=source,
         approved_source_owner_uids=frozenset({deploy._effective_uid()}),
+        database_source=database_source,
+        capacity_filesystem=tmp_path,
+        minimum_free_basis_points=1,
+        estimated_peak_incremental_build_bytes=1,
+        build_peak_multiplier=1,
+        staging_safety_margin_bytes=1,
+        capacity_formula_source="synthetic-test-policy",
     )
     return contract, source
 
@@ -60,10 +73,34 @@ def _image_record(image_id: str, revision: object = REVISION) -> dict[str, objec
 def _safe_docker_runner(
     calls: list[tuple[str, ...]],
     *,
+    contract: deploy.DeploymentContract | None = None,
     services: str = "hermes-bot\nqdrant\n",
     revisions: dict[str, object] | None = None,
 ):
     revisions = revisions or {}
+    contract = contract or deploy.load_contract()
+    compose_document = {
+        "services": {
+            contract.target_service: {
+                "volumes": [
+                    {
+                        "type": contract.database_mount_type,
+                        "source": str(contract.database_source),
+                        "target": str(contract.database_target),
+                        "read_only": contract.database_read_only,
+                    }
+                ]
+            }
+        }
+    }
+    live_mounts = [
+        {
+            "Type": contract.database_mount_type,
+            "Source": str(contract.database_source),
+            "Destination": str(contract.database_target),
+            "RW": not contract.database_read_only,
+        }
+    ]
 
     def runner(argv, **_kwargs):
         command = tuple(str(item) for item in argv)
@@ -73,14 +110,52 @@ def _safe_docker_runner(
             image_id = IMAGE_A if image == IMAGE_A else IMAGE_B
             revision = revisions.get(image, REVISION)
             return _completed(argv, stdout=json.dumps([_image_record(image_id, revision)]))
+        if command[:2] == ("docker", "inspect") and "{{json .Mounts}}" in command:
+            return _completed(argv, stdout=json.dumps(live_mounts))
         if command[:2] == ("docker", "inspect"):
             return _completed(argv, stdout=f"running 0 {IMAGE_A}\n")
         if command[-2:] == ("config", "--services"):
             return _completed(argv, stdout=services, stderr=FAKE_SECRET)
+        if command[-3:] == ("config", "--format", "json"):
+            return _completed(argv, stdout=json.dumps(compose_document))
         return _completed(argv, stderr=FAKE_SECRET)
 
     return runner
 
+
+def _with_preflight_documents(contract: deploy.DeploymentContract, runner):
+    compose_document = {
+        "services": {
+            contract.target_service: {
+                "volumes": [
+                    {
+                        "type": contract.database_mount_type,
+                        "source": str(contract.database_source),
+                        "target": str(contract.database_target),
+                        "read_only": contract.database_read_only,
+                    }
+                ]
+            }
+        }
+    }
+    live_mounts = [
+        {
+            "Type": contract.database_mount_type,
+            "Source": str(contract.database_source),
+            "Destination": str(contract.database_target),
+            "RW": not contract.database_read_only,
+        }
+    ]
+
+    def wrapped(argv, **kwargs):
+        command = tuple(str(item) for item in argv)
+        if command[-3:] == ("config", "--format", "json"):
+            return _completed(argv, stdout=json.dumps(compose_document))
+        if command[:2] == ("docker", "inspect") and "{{json .Mounts}}" in command:
+            return _completed(argv, stdout=json.dumps(live_mounts))
+        return runner(argv, **kwargs)
+
+    return wrapped
 
 def _git(*args: str, cwd: Path) -> str:
     result = subprocess.run(["git", *args], cwd=cwd, check=True, text=True, capture_output=True)
@@ -92,11 +167,38 @@ def _allow_mocked_rollback_revision(monkeypatch) -> None:
     monkeypatch.setattr(deploy, "validate_rollback_revision", lambda *_args, **_kwargs: None)
 
 
-def _runner_with_real_git(calls: list[tuple[str, ...]], **kwargs):
-    docker_runner = _safe_docker_runner(calls, **kwargs)
+def _runner_with_real_git(
+    calls: list[tuple[str, ...]],
+    *,
+    contract: deploy.DeploymentContract,
+    **kwargs,
+):
+    docker_runner = _safe_docker_runner(calls, contract=contract, **kwargs)
 
     def runner(argv, **run_kwargs):
         command = tuple(str(item) for item in argv)
+        if command[:2] == ("ssh", "-G"):
+            return _completed(argv, stdout="hostname github.com\nuser git\n")
+        if command[:1] == ("gh",):
+            expected_sha = command[command.index("--commit") + 1]
+            runs = [
+                {
+                    "name": workflow,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "headSha": expected_sha,
+                }
+                for workflow in contract.required_ci_workflows
+            ]
+            return _completed(argv, stdout=json.dumps(runs))
+        if command[:1] == ("git",) and "ls-remote" in command:
+            expected_sha = _git(
+                "rev-parse", contract.allowed_revision_ref, cwd=contract.root
+            )
+            return _completed(
+                argv,
+                stdout=f"{expected_sha}\t{contract.canonical_main_branch}\n",
+            )
         if command[:1] == ("git",):
             return subprocess.run(
                 list(command),
@@ -108,8 +210,6 @@ def _runner_with_real_git(calls: list[tuple[str, ...]], **kwargs):
         return docker_runner(argv, **run_kwargs)
 
     return runner
-
-
 @pytest.fixture
 def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
     root = tmp_path / "repo"
@@ -126,13 +226,14 @@ def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
     _git("add", ".", cwd=root)
     _git("commit", "-qm", "fixture", cwd=root)
     head = _git("rev-parse", "HEAD", cwd=root)
-    _git("update-ref", "refs/remotes/healbite-project/main", head, cwd=root)
+    _git("remote", "add", "github", "git@github-healbite:life2boat/hermes.git", cwd=root)
+    _git("update-ref", "refs/remotes/github/main", head, cwd=root)
     return deploy.load_contract(root), head
 
 
 def test_manifest_is_canonical_and_secret_free() -> None:
     contract = deploy.load_contract()
-    assert contract.version == 1
+    assert contract.version == 2
     text = contract.manifest_path.read_text(encoding="utf-8")
     assert contract.project_name == "hermes-agent"
     assert contract.target_service == "hermes-bot"
@@ -150,7 +251,10 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.approved_secret_source == Path("/etc/hermes/hermes-production.env")
     assert contract.approved_source_owner_uids == frozenset({0})
     assert contract.image_revision_label == REVISION_LABEL
-    assert contract.allowed_revision_ref == "refs/remotes/healbite-project/main"
+    assert contract.canonical_remote == "github"
+    assert contract.allowed_revision_ref == "refs/remotes/github/main"
+    assert contract.database_source == Path("/var/lib/hermes/production-db/healbite.db")
+    assert contract.lease_path == Path("/run/hermes/hermes-deployment-operation.json")
     assert FAKE_SECRET not in text
 
 
@@ -177,7 +281,7 @@ def test_pinned_manifest_bytes_use_canonical_loader_without_reopen(
     assert contract.manifest_path == (
         root / "deploy" / "hermes-production.json"
     )
-    assert contract.version == 1
+    assert contract.version == 2
 
 
 @pytest.mark.parametrize(
@@ -222,30 +326,70 @@ def test_non_posix_runtime_fails_closed(monkeypatch) -> None:
         deploy._effective_uid()
 
 
-def test_repository_check_passes_on_clean_exact_head(repository_fixture) -> None:
+def test_execute_denies_unavailable_geteuid_before_production_mutation(
+    protected_contract,
+    monkeypatch,
+) -> None:
+    contract, source = protected_contract
+    mutation_calls: list[str] = []
+
+    def mutation_reached(*_args, **_kwargs):
+        mutation_calls.append("reached")
+        pytest.fail("production mutation boundary must not be reached")
+
+    monkeypatch.setattr(deploy.os, "geteuid", None)
+    monkeypatch.setattr(deploy, "_validate_operation_identity", mutation_reached)
+    monkeypatch.setattr(deploy, "_validate_runtime_directory", mutation_reached)
+    monkeypatch.setattr(deploy, "_begin_secret_override_transaction", mutation_reached)
+    monkeypatch.setattr(deploy, "_run", mutation_reached)
+
+    with pytest.raises(
+        deploy.DeploymentContractError,
+        match="deployment-lease-owner-unavailable",
+    ) as error:
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=REVISION,
+            confirmation=deploy.DEPLOY_CONFIRMATION,
+            rollback=False,
+        )
+
+    assert mutation_calls == []
+    assert not contract.lease_path.exists()
+    assert "secret" not in str(error.value).lower()
+    assert "identity" not in str(error.value).lower()
+
+
+def test_repository_check_passes_on_clean_exact_head(repository_fixture, monkeypatch) -> None:
     contract, head = repository_fixture
+    monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
     deploy.validate_repository(contract, head)
 
 
-def test_repository_check_rejects_dirty_worktree(repository_fixture) -> None:
+def test_repository_check_rejects_dirty_worktree(repository_fixture, monkeypatch) -> None:
     contract, head = repository_fixture
+    monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
     (contract.root / "dirty.txt").write_text("dirty", encoding="utf-8")
     with pytest.raises(deploy.DeploymentContractError, match="dirty-worktree"):
         deploy.validate_repository(contract, head)
 
 
-def test_repository_check_rejects_revision_not_reachable_from_allowed_ref(repository_fixture) -> None:
+def test_repository_check_rejects_revision_not_reachable_from_allowed_ref(repository_fixture, monkeypatch) -> None:
     contract, _head = repository_fixture
+    monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
     (contract.root / "new.txt").write_text("new", encoding="utf-8")
     _git("add", ".", cwd=contract.root)
     _git("commit", "-qm", "unpublished", cwd=contract.root)
     unpublished = _git("rev-parse", "HEAD", cwd=contract.root)
-    with pytest.raises(deploy.DeploymentContractError, match="revision-not-allowed"):
+    with pytest.raises(deploy.DeploymentContractError, match="canonical-main-sha-mismatch"):
         deploy.validate_repository(contract, unpublished)
 
 
-def test_repository_check_rejects_legacy_worktree_reference(repository_fixture) -> None:
+def test_repository_check_rejects_legacy_worktree_reference(repository_fixture, monkeypatch) -> None:
     contract, _head = repository_fixture
+    monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
     text = contract.production_override.read_text(encoding="utf-8")
     contract.production_override.write_text(text + "\n# healbite-s71v2-r6-deploy\n", encoding="utf-8")
     _git("add", ".", cwd=contract.root)
@@ -256,8 +400,9 @@ def test_repository_check_rejects_legacy_worktree_reference(repository_fixture) 
         deploy.validate_repository(contract, head)
 
 
-def test_repository_check_rejects_tmp_override_reference(repository_fixture) -> None:
+def test_repository_check_rejects_tmp_override_reference(repository_fixture, monkeypatch) -> None:
     contract, _head = repository_fixture
+    monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
     text = contract.production_override.read_text(encoding="utf-8")
     contract.production_override.write_text(text + "\n# /tmp/hermes-secrets-override.yml\n", encoding="utf-8")
     _git("add", ".", cwd=contract.root)
@@ -503,7 +648,7 @@ def test_compose_render_is_secret_safe(protected_contract, monkeypatch, capsys) 
     contract, source = protected_contract
     _prepare(contract, source)
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls, contract=contract))
     deploy.validate_compose_render(contract, IMAGE_A, REVISION)
     captured = capsys.readouterr()
     assert FAKE_SECRET not in captured.out
@@ -518,12 +663,16 @@ def test_real_compose_render_uses_only_temporary_fake_secrets(protected_contract
     (compose_root / "deploy").mkdir(parents=True)
     base = compose_root / "docker-compose.yml"
     base.write_text(
-        """
+        f"""
 services:
   hermes-bot:
-    image: ${HERMES_IMAGE:?}
+    image: ${{HERMES_IMAGE:?}}
     environment:
-      HERMES_GIT_SHA: ${HERMES_GIT_SHA:?}
+      HERMES_GIT_SHA: ${{HERMES_GIT_SHA:?}}
+    volumes:
+      - type: bind
+        source: {contract.database_source}
+        target: /home/hermes/healbite.db
   qdrant:
     image: qdrant/qdrant:v1.15.4
 """.lstrip(),
@@ -546,7 +695,7 @@ services:
 def test_compose_render_requires_target_service(protected_contract, monkeypatch) -> None:
     contract, source = protected_contract
     _prepare(contract, source)
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([], services="qdrant\n"))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([], contract=contract, services="qdrant\n"))
     with pytest.raises(deploy.DeploymentContractError, match="target-service-missing"):
         deploy.validate_compose_render(contract, IMAGE_A, REVISION)
 
@@ -569,7 +718,7 @@ def test_plan_performs_no_deployment_and_cleans_override(protected_contract, mon
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls, contract=contract))
     deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
     captured = capsys.readouterr()
     assert "DEPLOYMENT_ACTIONS_PERFORMED=false" in captured.out
@@ -586,7 +735,7 @@ def test_rollback_plan_uses_distinct_local_immutable_image(protected_contract, m
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     _allow_mocked_rollback_revision(monkeypatch)
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls, contract=contract))
     deploy.plan_operation(
         contract,
         source=source,
@@ -650,14 +799,14 @@ def test_plan_leaves_legacy_tmp_path_untouched(protected_contract, monkeypatch, 
     legacy = tmp_path / "hermes-secrets-override.yml"
     legacy.write_text("preserve", encoding="utf-8")
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([]))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([], contract=contract))
     deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
     assert legacy.read_text(encoding="utf-8") == "preserve"
 
 
 def test_matching_image_revision_label_passes(protected_contract, monkeypatch) -> None:
     contract, _source = protected_contract
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([]))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner([], contract=contract))
     inspected = deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
     assert inspected == deploy.InspectedImage(image_id=IMAGE_A, revision=REVISION)
 
@@ -677,7 +826,7 @@ def test_invalid_image_revision_labels_fail_closed(protected_contract, monkeypat
     monkeypatch.setattr(
         deploy,
         "_run",
-        _safe_docker_runner([], revisions={IMAGE_A: label}),
+        _safe_docker_runner([], contract=contract, revisions={IMAGE_A: label}),
     )
     with pytest.raises(deploy.DeploymentContractError, match=error):
         deploy.inspect_local_image(contract, IMAGE_A, expected_revision=REVISION)
@@ -707,7 +856,7 @@ def test_plan_image_mismatch_fails_without_canonical_runtime_write(protected_con
     monkeypatch.setattr(
         deploy,
         "_run",
-        _safe_docker_runner([], revisions={IMAGE_A: OTHER_REVISION}),
+        _safe_docker_runner([], contract=contract, revisions={IMAGE_A: OTHER_REVISION}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="image-revision-mismatch"):
         deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=REVISION)
@@ -779,7 +928,7 @@ def test_execute_image_mismatch_precedes_secret_read_and_runtime(
     monkeypatch.setattr(
         deploy,
         "_run",
-        _safe_docker_runner([], revisions={IMAGE_A: OTHER_REVISION}),
+        _safe_docker_runner([], contract=contract, revisions={IMAGE_A: OTHER_REVISION}),
     )
 
     def count_secret_reads(*_args):
@@ -805,7 +954,7 @@ def test_execute_image_mismatch_precedes_secret_read_and_runtime(
 def test_execute_requires_explicit_confirmation_before_docker(protected_contract, monkeypatch) -> None:
     contract, source = protected_contract
     calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls, contract=contract))
     with pytest.raises(deploy.DeploymentContractError, match="explicit-confirmation-required"):
         deploy.execute_operation(
             contract,
@@ -857,7 +1006,7 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
     monkeypatch.setattr(deploy, "validate_repository", repository_gate)
     monkeypatch.setattr(deploy, "read_required_secrets", secret_gate)
     monkeypatch.setattr(deploy, "_begin_secret_override_transaction", tracked_begin)
-    monkeypatch.setattr(deploy, "_run", runner)
+    monkeypatch.setattr(deploy, "_run", _with_preflight_documents(contract, runner))
     deploy.execute_operation(
         contract,
         source=source,
@@ -866,15 +1015,13 @@ def test_execute_orders_all_gates_and_deploys_inspected_image_id(protected_contr
         confirmation=deploy.DEPLOY_CONFIRMATION,
         rollback=False,
     )
-    assert events == [
-        "repository",
-        "image",
-        "secret",
-        "temporary_override",
-        "compose_render",
-        "canonical_override",
-        "docker_mutation",
-    ]
+    assert events.count("repository") == 2
+    assert events.count("image") == 2
+    assert events.index("repository") < events.index("secret")
+    assert events.index("secret") < events.index("temporary_override")
+    assert events.index("temporary_override") < events.index("compose_render")
+    assert events.index("compose_render") < events.index("canonical_override")
+    assert events.index("canonical_override") < events.index("docker_mutation")
     assert not contract.secret_override.exists()
 
 
@@ -901,7 +1048,7 @@ def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contrac
         return _completed(argv)
 
     monkeypatch.setattr(deploy, "_finish_secret_override_transaction", finish)
-    monkeypatch.setattr(deploy, "_run", runner)
+    monkeypatch.setattr(deploy, "_run", _with_preflight_documents(contract, runner))
     with pytest.raises(deploy.DeploymentContractError, match="compose-up"):
         deploy.execute_operation(
             contract,
@@ -933,7 +1080,7 @@ def test_execute_rollback_deploys_inspected_previous_image_id(protected_contract
             return _completed(argv, stdout=f"running 0 {IMAGE_A}\n")
         return _completed(argv)
 
-    monkeypatch.setattr(deploy, "_run", runner)
+    monkeypatch.setattr(deploy, "_run", _with_preflight_documents(contract, runner))
     deploy.execute_operation(
         contract,
         source=source,
@@ -952,7 +1099,7 @@ def test_execute_rollback_requires_distinct_current_image(protected_contract, mo
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
     _allow_mocked_rollback_revision(monkeypatch)
-    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls))
+    monkeypatch.setattr(deploy, "_run", _safe_docker_runner(calls, contract=contract))
     with pytest.raises(deploy.DeploymentContractError, match="rollback-image-not-distinct"):
         deploy.execute_operation(
             contract,
@@ -987,6 +1134,13 @@ def _production_like_contract(repository_fixture, protected_contract) -> tuple[d
         secret_override=protected.secret_override,
         approved_secret_source=source,
         approved_source_owner_uids=protected.approved_source_owner_uids,
+        database_source=protected.database_source,
+        capacity_filesystem=protected.capacity_filesystem,
+        minimum_free_basis_points=protected.minimum_free_basis_points,
+        estimated_peak_incremental_build_bytes=protected.estimated_peak_incremental_build_bytes,
+        build_peak_multiplier=protected.build_peak_multiplier,
+        staging_safety_margin_bytes=protected.staging_safety_margin_bytes,
+        capacity_formula_source=protected.capacity_formula_source,
     )
     return contract, source, previous, source_head
 
@@ -1002,7 +1156,7 @@ def test_rollback_plan_accepts_previous_ancestor_revision_distinct_from_source_h
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git(calls, revisions={IMAGE_A: rollback_revision, IMAGE_B: source_head}),
+        _runner_with_real_git(calls, contract=contract, revisions={IMAGE_A: rollback_revision, IMAGE_B: source_head}),
     )
     deploy.plan_operation(
         contract,
@@ -1033,7 +1187,7 @@ def test_rollback_plan_denies_label_substitution_with_source_head(
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git([], revisions={IMAGE_A: source_head, IMAGE_B: source_head}),
+        _runner_with_real_git([], contract=contract, revisions={IMAGE_A: source_head, IMAGE_B: source_head}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="image-revision-mismatch"):
         deploy.plan_operation(
@@ -1057,7 +1211,7 @@ def test_rollback_plan_denies_non_full_lowercase_sha(
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git([], revisions={IMAGE_A: revision, IMAGE_B: source_head}),
+        _runner_with_real_git([], contract=contract, revisions={IMAGE_A: revision, IMAGE_B: source_head}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="revision"):
         deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=revision, rollback_from=IMAGE_B)
@@ -1070,7 +1224,7 @@ def test_rollback_plan_denies_unknown_commit(repository_fixture, protected_contr
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git([], revisions={IMAGE_A: unknown, IMAGE_B: source_head}),
+        _runner_with_real_git([], contract=contract, revisions={IMAGE_A: unknown, IMAGE_B: source_head}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="rollback-revision-not-commit"):
         deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=unknown, rollback_from=IMAGE_B)
@@ -1088,7 +1242,7 @@ def test_rollback_plan_denies_non_ancestor_commit(repository_fixture, protected_
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git([], revisions={IMAGE_A: side, IMAGE_B: source_head}),
+        _runner_with_real_git([], contract=contract, revisions={IMAGE_A: side, IMAGE_B: source_head}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="rollback-revision-not-ancestor"):
         deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=side, rollback_from=IMAGE_B)
@@ -1101,7 +1255,7 @@ def test_rollback_plan_denies_source_head_mismatch(repository_fixture, protected
     monkeypatch.setattr(
         deploy,
         "_run",
-        _runner_with_real_git([], revisions={IMAGE_A: rollback_revision, IMAGE_B: OTHER_REVISION}),
+        _runner_with_real_git([], contract=contract, revisions={IMAGE_A: rollback_revision, IMAGE_B: OTHER_REVISION}),
     )
     with pytest.raises(deploy.DeploymentContractError, match="head-mismatch"):
         deploy.plan_operation(contract, source=source, image=IMAGE_A, revision=rollback_revision, rollback_from=IMAGE_B)

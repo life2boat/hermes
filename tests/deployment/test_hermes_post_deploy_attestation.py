@@ -30,8 +30,22 @@ TOKEN = "synthetic-secret-value"
 FEATURES = {
     "HEALBITE_HOUSEHOLDS_ENABLED": "false",
     "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+    "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",
+    "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+    "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": "false",
+    "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
+    "HEALBITE_INVENTORY_TEXT_ENABLED": "true",
+    "HEALBITE_INVENTORY_TEXT_ALLOWLIST": "1001,2002",
+    "HEALBITE_INVENTORY_TEXT_UI_ENABLED": "true",
+    "HEALBITE_INVENTORY_TEXT_UI_ALLOWLIST": "1001,2002",
+    "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED": "false",
+    "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST": "",
     "HEALBITE_SHOPPING_LIST_ENABLED": "false",
     "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
+    "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+    "HEALBITE_WEEKLY_MENU_ALLOWLIST": "1001",
+    "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
+    "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "1001",
 }
 
 
@@ -202,7 +216,6 @@ def _capture(
         database_path=database_path,
         database_target=Path("/home/hermes/healbite.db"),
         revision_label="org.opencontainers.image.revision",
-        expected_feature_gates=FEATURES,
         protected_secret_names=("TELEGRAM_BOT_TOKEN",),
         run=runner,
     )
@@ -223,7 +236,6 @@ def _post(
         revision_label="org.opencontainers.image.revision",
         target_image_id=IMAGE_NEW,
         target_revision=REVISION_NEW,
-        expected_feature_gates=FEATURES,
         protected_secret_names=("TELEGRAM_BOT_TOKEN",),
         run=runner,
         sleep=lambda _seconds: None,
@@ -266,6 +278,8 @@ def test_complete_runtime_attestation_success_is_bounded_and_secret_safe(
     assert result.provider_request_count == 0
     assert result.database_delta_result == "UNCHANGED"
     assert TOKEN not in repr(baseline)
+    assert "1001" not in repr(baseline)
+    assert "2002" not in repr(baseline)
     log_calls = [call for call in runner.calls if call[:2] == ("docker", "logs")]
     assert len(log_calls) == 1
     assert "--since" in log_calls[0]
@@ -296,6 +310,14 @@ def test_complete_runtime_attestation_success_is_bounded_and_secret_safe(
             {"env_changes": {"HEALBITE_UNKNOWN_ENABLED": "true"}},
             "UNKNOWN_FEATURE_VARIABLE",
         ),
+        (
+            {"env_changes": {"HEALBITE_UNKNOWN_ALLOWLIST": "1001"}},
+            "UNKNOWN_FEATURE_VARIABLE",
+        ),
+        (
+            {"env_changes": {"HEALBITE_WEEKLY_MENU_ENABLED": None}},
+            "FEATURE_STATE_MISSING",
+        ),
     ),
 )
 def test_runtime_delta_boundaries_fail_closed(
@@ -320,6 +342,160 @@ def test_runtime_delta_boundaries_fail_closed(
     runner.hermes_records = [bad, bad, bad]
     with pytest.raises(runtime.RuntimeAttestationError, match=code):
         _post(policy, database_path, runner, baseline)
+
+
+def test_feature_state_normalization_ignores_boolean_spelling_and_allowlist_order(
+    policy: runtime.RuntimeAttestationPolicy,
+    database_path: Path,
+) -> None:
+    old = _hermes_record(
+        database_path,
+        container_id="old-container",
+        image_id=IMAGE_OLD,
+        revision=REVISION_OLD,
+        env_changes={
+            "HEALBITE_INVENTORY_TEXT_ENABLED": "yes",
+            "HEALBITE_INVENTORY_TEXT_ALLOWLIST": "1001,2002",
+        },
+    )
+    new = _hermes_record(
+        database_path,
+        container_id="new-container",
+        image_id=IMAGE_NEW,
+        revision=REVISION_NEW,
+        started_at="2026-07-31T10:01:00Z",
+        env_changes={
+            "HEALBITE_INVENTORY_TEXT_ENABLED": "1",
+            "HEALBITE_INVENTORY_TEXT_ALLOWLIST": "2002; 1001;1001",
+        },
+    )
+    runner = SyntheticRunner(
+        policy,
+        hermes_records=[old, new, new, new],
+        qdrant_records=[_qdrant_record(), _qdrant_record()],
+    )
+    baseline = _capture(policy, database_path, runner)
+    result = _post(policy, database_path, runner, baseline)
+    assert result.feature_gate_delta == "UNCHANGED"
+    assert result.allowlist_delta == "UNCHANGED"
+
+
+def test_invalid_canonical_boolean_fails_closed(
+    policy: runtime.RuntimeAttestationPolicy,
+    database_path: Path,
+) -> None:
+    bad = _hermes_record(
+        database_path,
+        container_id="old-container",
+        image_id=IMAGE_OLD,
+        revision=REVISION_OLD,
+        env_changes={"HEALBITE_INVENTORY_PHOTO_ENABLED": "sometimes"},
+    )
+    runner = SyntheticRunner(policy, hermes_records=[bad])
+    with pytest.raises(runtime.RuntimeAttestationError, match="FEATURE_STATE_INVALID"):
+        _capture(policy, database_path, runner)
+
+
+def test_unrelated_environment_does_not_change_feature_contract(
+    policy: runtime.RuntimeAttestationPolicy,
+    database_path: Path,
+) -> None:
+    runner = _success_runner(policy, database_path)
+    baseline = _capture(policy, database_path, runner)
+    good = _hermes_record(
+        database_path,
+        container_id="new-container",
+        image_id=IMAGE_NEW,
+        revision=REVISION_NEW,
+        started_at="2026-07-31T10:01:00Z",
+        env_changes={"UNRELATED_APPLICATION_SETTING": "changed"},
+    )
+    runner.hermes_records = [good, good, good]
+    assert _post(policy, database_path, runner, baseline).feature_gate_delta == "UNCHANGED"
+
+
+def test_current_production_feature_inventory_shape_is_accepted_without_identities(
+    policy: runtime.RuntimeAttestationPolicy,
+    database_path: Path,
+) -> None:
+    current_state = {
+        "HEALBITE_HOUSEHOLDS_ENABLED": "true",
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "3001,3002",
+        "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_TEXT_ENABLED": "true",
+        "HEALBITE_INVENTORY_TEXT_ALLOWLIST": "3001,3002",
+        "HEALBITE_INVENTORY_TEXT_UI_ENABLED": "true",
+        "HEALBITE_INVENTORY_TEXT_UI_ALLOWLIST": "3001,3002",
+        "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED": "false",
+        "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST": "",
+        "HEALBITE_SHOPPING_LIST_ENABLED": "true",
+        "HEALBITE_SHOPPING_LIST_ALLOWLIST": "3001",
+        "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+        "HEALBITE_WEEKLY_MENU_ALLOWLIST": "3001",
+        "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
+        "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "3001",
+    }
+    record = _hermes_record(
+        database_path,
+        container_id="current-container",
+        image_id=IMAGE_OLD,
+        revision=REVISION_OLD,
+        env_changes=current_state,
+    )
+    runner = SyntheticRunner(policy, hermes_records=[record])
+    snapshot = _capture(policy, database_path, runner).hermes
+    assert tuple(name for name, _value in snapshot.feature_gates) == policy.feature_gate_names
+    assert tuple(name for name, _fingerprint, _count in snapshot.allowlists) == policy.allowlist_names
+    assert "3001" not in repr(snapshot)
+    assert "3002" not in repr(snapshot)
+
+
+def test_empty_allowlist_state_is_deterministic() -> None:
+    assert runtime._allowlist_state("") == runtime._allowlist_state(" , ; , ")
+
+
+def test_rollback_attestation_uses_the_same_complete_inventory(
+    policy: runtime.RuntimeAttestationPolicy,
+    database_path: Path,
+) -> None:
+    old = _hermes_record(
+        database_path,
+        container_id="old-container",
+        image_id=IMAGE_OLD,
+        revision=REVISION_OLD,
+    )
+    restored = _hermes_record(
+        database_path,
+        container_id="restored-container",
+        image_id=IMAGE_OLD,
+        revision=REVISION_OLD,
+        started_at="2026-07-31T10:01:00Z",
+    )
+    runner = SyntheticRunner(
+        policy,
+        hermes_records=[old, restored, restored, restored],
+        qdrant_records=[_qdrant_record(), _qdrant_record()],
+    )
+    baseline = _capture(policy, database_path, runner)
+    result = runtime.post_deploy_attestation(
+        policy,
+        runtime.rollback_log_baseline(baseline),
+        hermes_service="hermes-bot",
+        qdrant_service="qdrant",
+        database_path=database_path,
+        revision_label="org.opencontainers.image.revision",
+        target_image_id=IMAGE_OLD,
+        target_revision=REVISION_OLD,
+        protected_secret_names=("TELEGRAM_BOT_TOKEN",),
+        run=runner,
+        sleep=lambda _seconds: None,
+    )
+    assert result.feature_gate_delta == "UNCHANGED"
+    assert len(baseline.hermes.feature_gates) == 9
+    assert len(baseline.hermes.allowlists) == 9
 
 
 def test_late_crash_is_detected_across_multiple_samples(
@@ -539,6 +715,12 @@ def test_policy_rejects_unknown_missing_and_duplicate_fields() -> None:
     with pytest.raises(deploy.DeploymentContractError, match="attestation-policy-fields"):
         deploy.load_contract(manifest_bytes=json.dumps(raw).encode())
 
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    names = raw["attestation"]["feature_gate_names"]
+    names.append(names[0])
+    with pytest.raises(deploy.DeploymentContractError, match="attestation-policy-value"):
+        deploy.load_contract(manifest_bytes=json.dumps(raw).encode())
+
     text = manifest_path.read_text(encoding="utf-8")
     duplicate = text.replace('"version": 2,', '"version": 2, "version": 2,', 1)
     with pytest.raises(deploy.DeploymentContractError, match="manifest-duplicate-field"):
@@ -693,6 +875,7 @@ def test_orchestrator_captures_baseline_before_first_mutation_and_releases_lease
         "DATABASE_INTEGRITY_FAILED",
         "DATABASE_FOREIGN_KEY_VIOLATION",
         "DATABASE_DATA_DELTA",
+        "FEATURE_STATE_INVALID",
         "FEATURE_GATE_DELTA",
         "ALLOWLIST_DELTA",
         "SECRET_FINGERPRINT_DELTA",

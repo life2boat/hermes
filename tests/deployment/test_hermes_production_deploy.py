@@ -1369,6 +1369,23 @@ def test_feature_flags_remain_disabled() -> None:
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }
 
+    expected_inventory = {
+        "feature_gate_names": list(deploy.attestation.CANONICAL_FEATURE_GATE_NAMES),
+        "allowlist_names": list(deploy.attestation.CANONICAL_ALLOWLIST_NAMES),
+    }
+    assert contract.attestation_policy.feature_gate_names == tuple(
+        expected_inventory["feature_gate_names"]
+    )
+    assert contract.attestation_policy.allowlist_names == tuple(
+        expected_inventory["allowlist_names"]
+    )
+    assert (
+        override["x-hermes-feature-state-inventory"]
+        == expected_inventory
+    )
+    assert len(expected_inventory["feature_gate_names"]) == 9
+    assert len(expected_inventory["allowlist_names"]) == 9
+
 
 def test_canonical_tooling_has_no_active_legacy_paths() -> None:
     paths = (

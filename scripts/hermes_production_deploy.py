@@ -566,6 +566,15 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
         _fail("production-override-service")
     if environment != contract.feature_gates:
         _fail("production-feature-gates")
+    expected_inventory = {
+        "feature_gate_names": list(attestation.CANONICAL_FEATURE_GATE_NAMES),
+        "allowlist_names": list(attestation.CANONICAL_ALLOWLIST_NAMES),
+    }
+    if (
+        production.get("x-hermes-feature-state-inventory")
+        != expected_inventory
+    ):
+        _fail("production-feature-state-inventory")
 
 
 def current_source_head_revision(contract: DeploymentContract) -> str:
@@ -1565,7 +1574,6 @@ def _capture_pre_mutation_baseline(
             database_path=contract.database_source,
             database_target=contract.database_target,
             revision_label=contract.image_revision_label,
-            expected_feature_gates=contract.feature_gates,
             protected_secret_names=contract.protected_secret_names,
             run=_run,
         )
@@ -1640,7 +1648,6 @@ def _post_deploy_attestation(
         revision_label=contract.image_revision_label,
         target_image_id=target_image_id,
         target_revision=target_revision,
-        expected_feature_gates=contract.feature_gates,
         protected_secret_names=contract.protected_secret_names,
         run=_run,
     )

@@ -18,13 +18,32 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 FEATURE_NAME_RE = re.compile(r"^HEALBITE_[A-Z0-9_]+_(?:ENABLED|ALLOWLIST)$")
+CANONICAL_FEATURE_GATE_PREFIXES = (
+    "HEALBITE_HOUSEHOLDS",
+    "HEALBITE_INVENTORY_PHOTO",
+    "HEALBITE_INVENTORY_PHOTO_UI",
+    "HEALBITE_INVENTORY_TEXT",
+    "HEALBITE_INVENTORY_TEXT_UI",
+    "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI",
+    "HEALBITE_SHOPPING_LIST",
+    "HEALBITE_WEEKLY_MENU",
+    "HEALBITE_WEEKLY_MENU_INVENTORY",
+)
+CANONICAL_FEATURE_GATE_NAMES = tuple(
+    f"{prefix}_ENABLED" for prefix in CANONICAL_FEATURE_GATE_PREFIXES
+)
+CANONICAL_ALLOWLIST_NAMES = tuple(
+    f"{prefix}_ALLOWLIST" for prefix in CANONICAL_FEATURE_GATE_PREFIXES
+)
+TRUE_FEATURE_GATE_TOKENS = frozenset({"1", "true", "yes", "on"})
+FALSE_FEATURE_GATE_TOKENS = frozenset({"0", "false", "no", "off"})
 Run = Callable[..., subprocess.CompletedProcess[str]]
 Sleep = Callable[[float], None]
 
@@ -217,6 +236,8 @@ def parse_policy(raw: object) -> RuntimeAttestationPolicy:
         not all(name.endswith("_ENABLED") for name in feature_names)
         or not all(name.endswith("_ALLOWLIST") for name in allowlist_names)
         or set(feature_names) & set(allowlist_names)
+        or feature_names != CANONICAL_FEATURE_GATE_NAMES
+        or allowlist_names != CANONICAL_ALLOWLIST_NAMES
     ):
         _fail("ATTESTATION_POLICY_VALUE")
     qdrant_fields = strings("qdrant_non_interference_fields")
@@ -310,8 +331,19 @@ def _parse_env(values: object) -> dict[str, str]:
     return result
 
 
+def _feature_gate_state(value: str) -> str:
+    token = value.strip().lower()
+    if token in TRUE_FEATURE_GATE_TOKENS:
+        return "true"
+    if token in FALSE_FEATURE_GATE_TOKENS:
+        return "false"
+    _fail("FEATURE_STATE_INVALID")
+
+
 def _allowlist_state(value: str) -> tuple[str, int]:
-    members = tuple(sorted({item.strip() for item in value.split(",") if item.strip()}))
+    members = tuple(
+        sorted({item.strip() for item in value.replace(";", ",").split(",") if item.strip()})
+    )
     return _canonical_hash(members), len(members)
 
 
@@ -356,7 +388,9 @@ def _container_snapshot(
         _fail("UNKNOWN_FEATURE_VARIABLE")
     if any(name not in environment for name in selected_names):
         _fail("FEATURE_STATE_MISSING")
-    feature_gates = tuple((name, environment[name]) for name in feature_gate_names)
+    feature_gates = tuple(
+        (name, _feature_gate_state(environment[name])) for name in feature_gate_names
+    )
     allowlists = tuple(
         (name, *_allowlist_state(environment[name])) for name in allowlist_names
     )
@@ -576,7 +610,7 @@ def _require_expected_runtime(
     expected_image_id: str,
     expected_revision: str,
     expected_mounts: tuple[MountSnapshot, ...],
-    expected_feature_gates: Mapping[str, str],
+    expected_feature_gates: tuple[tuple[str, str], ...],
     expected_allowlists: tuple[tuple[str, str, int], ...],
     expected_secret_fingerprints: tuple[tuple[str, str], ...],
 ) -> None:
@@ -590,11 +624,7 @@ def _require_expected_runtime(
         _fail("HERMES_RESTART_COUNT_CHANGED")
     if snapshot.mounts != expected_mounts:
         _fail("HERMES_MOUNT_SET_CHANGED")
-    expected_selected = tuple(
-        (name, expected_feature_gates.get(name, "__MISSING__"))
-        for name, _value in snapshot.feature_gates
-    )
-    if snapshot.feature_gates != expected_selected:
+    if snapshot.feature_gates != expected_feature_gates:
         _fail("FEATURE_GATE_DELTA")
     if snapshot.allowlists != expected_allowlists:
         _fail("ALLOWLIST_DELTA")
@@ -610,7 +640,6 @@ def capture_pre_mutation_baseline(
     database_path: Path,
     database_target: Path,
     revision_label: str,
-    expected_feature_gates: Mapping[str, str],
     protected_secret_names: tuple[str, ...],
     run: Run = _default_run,
 ) -> RuntimeBaseline:
@@ -633,12 +662,6 @@ def capture_pre_mutation_baseline(
     )
     if expected_db_mount not in hermes.mounts:
         _fail("PRE_MUTATION_DATABASE_MOUNT_MISMATCH")
-    expected_selected = tuple(
-        (name, expected_feature_gates.get(name, "__MISSING__"))
-        for name, _value in hermes.feature_gates
-    )
-    if hermes.feature_gates != expected_selected:
-        _fail("AMBIENT_FEATURE_STATE_REJECTED")
     qdrant = _qdrant_snapshot(qdrant_service, run=run)
     if qdrant.state != "running":
         _fail("PRE_MUTATION_QDRANT_UNHEALTHY")
@@ -774,7 +797,6 @@ def post_deploy_attestation(
     revision_label: str,
     target_image_id: str,
     target_revision: str,
-    expected_feature_gates: Mapping[str, str],
     protected_secret_names: tuple[str, ...],
     run: Run = _default_run,
     sleep: Sleep = time.sleep,
@@ -796,7 +818,7 @@ def post_deploy_attestation(
             expected_image_id=target_image_id,
             expected_revision=target_revision,
             expected_mounts=baseline.hermes.mounts,
-            expected_feature_gates=expected_feature_gates,
+            expected_feature_gates=baseline.hermes.feature_gates,
             expected_allowlists=baseline.hermes.allowlists,
             expected_secret_fingerprints=baseline.hermes.secret_fingerprints,
         )

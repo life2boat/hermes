@@ -63,7 +63,7 @@ def _provenance(
                     "conclusion": "success" if ci_ok else "failure",
                     "headSha": SHA,
                 }
-                for name in ("Tests", "Lint", "Typecheck", "Nix")
+                for name in ("Tests", "Lint (ruff + ty)", "Typecheck", "Nix")
             ]
             return _result(argv, stdout=json.dumps(runs))
         raise AssertionError(argv)
@@ -82,7 +82,7 @@ def test_canonical_provenance_accepts_authorized_transports(remote_url: str, tmp
         allowed_remote_urls=URLS,
         canonical_main_ref="refs/remotes/github/main",
         canonical_main_branch="refs/heads/main",
-        required_ci_workflows=("Tests", "Lint", "Typecheck", "Nix"),
+        required_ci_workflows=("Tests", "Lint (ruff + ty)", "Typecheck", "Nix"),
         git_output=git_output,
         run=run,
     )
@@ -139,7 +139,7 @@ def test_canonical_provenance_rejects_substitution_and_stale_state(
             allowed_remote_urls=URLS,
             canonical_main_ref=kwargs.get("canonical_main_ref", "refs/remotes/github/main"),
             canonical_main_branch="refs/heads/main",
-            required_ci_workflows=("Tests", "Lint", "Typecheck", "Nix"),
+            required_ci_workflows=("Tests", "Lint (ruff + ty)", "Typecheck", "Nix"),
             git_output=git_output,
             run=run,
         )

@@ -211,7 +211,7 @@ def load_contract(
         "git@github.com:life2boat/hermes.git",
         canonical_repository,
     )
-    expected_ci = ("Tests", "Lint", "Typecheck", "Nix")
+    expected_ci = ("Tests", "Lint (ruff + ty)", "Typecheck", "Nix")
     if (
         provenance.get("canonical_repository") != canonical_repository
         or provenance.get("canonical_remote") != canonical_remote

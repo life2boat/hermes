@@ -536,6 +536,22 @@ def assert_lease_available(
     _fail("deployment-lease-recovery-required")
 
 
+def validate_deployment_lease_owner(
+    *,
+    allowed_owner_uids: frozenset[int],
+) -> int:
+    get_euid = getattr(os, "geteuid", None)
+    if not callable(get_euid):
+        _fail("deployment-lease-owner-unavailable")
+    try:
+        effective_uid = get_euid()
+    except (AttributeError, OSError):
+        _fail("deployment-lease-owner-unavailable")
+    if effective_uid not in allowed_owner_uids:
+        _fail("deployment-lease-owner")
+    return effective_uid
+
+
 def acquire_deployment_lease(
     *,
     path: Path,
@@ -547,8 +563,9 @@ def acquire_deployment_lease(
     timeout_seconds: int,
     now: datetime | None = None,
 ) -> DeploymentLease:
-    if os.geteuid() not in allowed_owner_uids:
-        _fail("deployment-lease-owner")
+    validate_deployment_lease_owner(
+        allowed_owner_uids=allowed_owner_uids,
+    )
     assert_lease_available(
         path=path,
         allowed_owner_uids=allowed_owner_uids,

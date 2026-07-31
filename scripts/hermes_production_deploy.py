@@ -1514,6 +1514,10 @@ def execute_operation(
         _fail("explicit-confirmation-required")
     if rollback and current_image is None:
         _fail("current-image-required")
+    _preflight(
+        preflight.validate_deployment_lease_owner,
+        allowed_owner_uids=contract.lease_owner_uids,
+    )
     target, _source_head = _validate_operation_identity(
         contract,
         image=image,

@@ -232,7 +232,8 @@ def test_capacity_rejects_one_byte_below_and_accepts_boundary(phase: str, tmp_pa
 
 def test_lease_acquisition_binding_and_explicit_expired_recovery(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "operation.json"
-    owner = frozenset({os.geteuid()})
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
+    owner = frozenset({0})
     now = datetime.now(timezone.utc)
     lease = preflight.acquire_deployment_lease(
         path=path,
@@ -290,4 +291,76 @@ def test_lease_acquisition_binding_and_explicit_expired_recovery(tmp_path: Path,
         confirmation=preflight.LEASE_RECOVERY_CONFIRMATION,
         now=now + timedelta(seconds=61),
     )
+    assert not path.exists()
+
+
+def test_lease_denies_unix_non_root_before_file_creation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "operation.json"
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: 1000)
+    with pytest.raises(
+        preflight.DeployPreflightError,
+        match="deployment-lease-owner",
+    ):
+        preflight.acquire_deployment_lease(
+            path=path,
+            allowed_owner_uids=frozenset({0}),
+            operation_class="deploy",
+            canonical_repository="https://github.com/life2boat/hermes.git",
+            target_sha=SHA,
+            target_image_id=IMAGE,
+            timeout_seconds=60,
+        )
+    assert not path.exists()
+
+
+def test_lease_denies_unavailable_geteuid_before_file_creation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "operation.json"
+    monkeypatch.delattr(preflight.os, "geteuid", raising=False)
+    with pytest.raises(
+        preflight.DeployPreflightError,
+        match="deployment-lease-owner-unavailable",
+    ) as error:
+        preflight.acquire_deployment_lease(
+            path=path,
+            allowed_owner_uids=frozenset({0}),
+            operation_class="deploy",
+            canonical_repository="https://github.com/life2boat/hermes.git",
+            target_sha=SHA,
+            target_image_id=IMAGE,
+            timeout_seconds=60,
+        )
+    assert not path.exists()
+    assert "secret" not in str(error.value).lower()
+    assert "identity" not in str(error.value).lower()
+
+
+def test_lease_denies_geteuid_error_before_file_creation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "operation.json"
+
+    def unavailable() -> int:
+        raise OSError("synthetic platform error")
+
+    monkeypatch.setattr(preflight.os, "geteuid", unavailable)
+    with pytest.raises(
+        preflight.DeployPreflightError,
+        match="deployment-lease-owner-unavailable",
+    ):
+        preflight.acquire_deployment_lease(
+            path=path,
+            allowed_owner_uids=frozenset({0}),
+            operation_class="deploy",
+            canonical_repository="https://github.com/life2boat/hermes.git",
+            target_sha=SHA,
+            target_image_id=IMAGE,
+            timeout_seconds=60,
+        )
     assert not path.exists()

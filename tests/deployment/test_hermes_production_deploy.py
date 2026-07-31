@@ -326,6 +326,42 @@ def test_non_posix_runtime_fails_closed(monkeypatch) -> None:
         deploy._effective_uid()
 
 
+def test_execute_denies_unavailable_geteuid_before_production_mutation(
+    protected_contract,
+    monkeypatch,
+) -> None:
+    contract, source = protected_contract
+    mutation_calls: list[str] = []
+
+    def mutation_reached(*_args, **_kwargs):
+        mutation_calls.append("reached")
+        pytest.fail("production mutation boundary must not be reached")
+
+    monkeypatch.setattr(deploy.os, "geteuid", None)
+    monkeypatch.setattr(deploy, "_validate_operation_identity", mutation_reached)
+    monkeypatch.setattr(deploy, "_validate_runtime_directory", mutation_reached)
+    monkeypatch.setattr(deploy, "_begin_secret_override_transaction", mutation_reached)
+    monkeypatch.setattr(deploy, "_run", mutation_reached)
+
+    with pytest.raises(
+        deploy.DeploymentContractError,
+        match="deployment-lease-owner-unavailable",
+    ) as error:
+        deploy.execute_operation(
+            contract,
+            source=source,
+            image=IMAGE_A,
+            revision=REVISION,
+            confirmation=deploy.DEPLOY_CONFIRMATION,
+            rollback=False,
+        )
+
+    assert mutation_calls == []
+    assert not contract.lease_path.exists()
+    assert "secret" not in str(error.value).lower()
+    assert "identity" not in str(error.value).lower()
+
+
 def test_repository_check_passes_on_clean_exact_head(repository_fixture, monkeypatch) -> None:
     contract, head = repository_fixture
     monkeypatch.setattr(deploy, "_run", _runner_with_real_git([], contract=contract))
@@ -1098,6 +1134,7 @@ def _production_like_contract(repository_fixture, protected_contract) -> tuple[d
         secret_override=protected.secret_override,
         approved_secret_source=source,
         approved_source_owner_uids=protected.approved_source_owner_uids,
+        database_source=protected.database_source,
         capacity_filesystem=protected.capacity_filesystem,
         minimum_free_basis_points=protected.minimum_free_basis_points,
         estimated_peak_incremental_build_bytes=protected.estimated_peak_incremental_build_bytes,

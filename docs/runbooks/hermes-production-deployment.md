@@ -329,9 +329,48 @@ secret-source, and Compose gate. These checks use an ephemeral override; only
 after all pass may execution create `/run/hermes`. Deployment uses the exact
 inspected immutable image ID rather than returning to the supplied reference.
 The wrapper recreates only `hermes-bot` with `--no-deps --force-recreate`,
-verifies running state, restart count zero and image identity, then removes the
-runtime override. Qdrant is not in the recreate plan. Do not invoke this mode
-without a dedicated controlled-deploy task.
+then runs the versioned P1 runtime-attestation policy in
+`deploy/hermes-production.json`. Qdrant is not in the recreate plan. Do not
+invoke this mode without a dedicated controlled-deploy task.
+
+### P1 attestation and automatic rollback
+
+The serialized ordinary-deploy call graph is:
+
+1. repository/CI, immutable image, lease, secret transition, Compose render,
+   exact DB mount, and capacity gates;
+2. sanitized Hermes, Qdrant, SQLite, Telegram, Gateway, feature/allowlist, and
+   protected-secret baseline;
+3. previous-image local identity, previous Compose render, secret fingerprint,
+   DB mount, and rollback-capacity readiness;
+4. secret override publication, which is the first production mutation;
+5. `docker compose up -d --no-deps --force-recreate hermes-bot`;
+6. three stability samples over ten seconds, bounded new startup logs, Telegram
+   connectivity, Gateway no-send smoke, SQLite no-delta checks, and Qdrant
+   non-interference;
+7. exact secret-override restoration, bounded mode-`0600` evidence, and lease
+   release.
+
+Ordinary image-only startup is contractually DB-write-free. The SQLite
+`user_version`, schema/table/index/trigger fingerprints, main DB fingerprint,
+WAL fingerprint/presence, and SHM presence must remain unchanged; integrity
+must be `ok` and foreign-key violations must remain zero. No schema, arbitrary
+row, authorization, household, Inventory, Weekly, or Shopping delta is
+authorized by this operation.
+
+Any failure after secret publication makes the deployment unverified. The
+orchestrator restores the prior protected override, makes exactly one Compose
+recreate attempt using the previous immutable image ID and OCI revision, and
+reruns the same health contract against the restored runtime. It never restores
+SQLite and never mutates or recreates Qdrant. A healthy rollback reports
+`ROLLED_BACK`, never `PASS`; a failed rollback reports `FAIL` while preserving
+the original post-check classification separately.
+
+Evidence contains only safe classifications, hashes/counts, immutable
+image/revision identifiers, timestamps, and rollback status. It never contains
+raw logs, environment dumps, Telegram identity, allowlist members, DB rows,
+Qdrant payloads, or secret values. Evidence write failure is itself a
+post-mutation failure and triggers rollback.
 
 ## Cleanup lifecycle
 

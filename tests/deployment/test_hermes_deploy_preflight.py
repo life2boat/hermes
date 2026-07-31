@@ -232,8 +232,9 @@ def test_capacity_rejects_one_byte_below_and_accepts_boundary(phase: str, tmp_pa
 
 def test_lease_acquisition_binding_and_explicit_expired_recovery(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / "operation.json"
-    monkeypatch.setattr(preflight.os, "geteuid", lambda: 0)
-    owner = frozenset({0})
+    owner_uid = tmp_path.stat().st_uid
+    monkeypatch.setattr(preflight.os, "geteuid", lambda: owner_uid)
+    owner = frozenset({owner_uid})
     now = datetime.now(timezone.utc)
     lease = preflight.acquire_deployment_lease(
         path=path,

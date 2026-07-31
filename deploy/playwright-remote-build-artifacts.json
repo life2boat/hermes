@@ -1,0 +1,25 @@
+{
+  "approved_base_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
+  "artifacts": [
+    {
+      "archive_sha256": "410c9407d5de3fea80d9398666be06f2aa09154a3fa7b327dc254e336bb4c4b7",
+      "archive_size": 119778157,
+      "artifact_name": "chromium-headless-shell",
+      "source_kind": "operator-approved-offline-artifact",
+      "source_reference_sha256": "11fd3de616836abc46ab19830dcfbf79afa5f1a199488439b2ddffa08b209e27",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/linux64/chrome-headless-shell-linux64.zip"
+    },
+    {
+      "archive_sha256": "ebc74fc5b94830176a3c2914ae96bd8bc7f6a91f4f33890230f84a172ee61ccc",
+      "archive_size": 2376500,
+      "artifact_name": "ffmpeg",
+      "source_kind": "operator-approved-offline-artifact",
+      "source_reference_sha256": "a3ea90036404db6cdc91315654622dc037cebec2b612d7d2b21d23e874b2cd5d",
+      "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip"
+    }
+  ],
+  "closure_manifest_sha256": "a685b3d071968d5140ce42f8346246b0857167c90eefdde71b6ff011eb97340f",
+  "platform": "linux/amd64",
+  "policy_version": 1,
+  "wheel_url": "https://files.pythonhosted.org/packages/ab/f8/a35bf179e4ba2522c1893635094a64e407572547bd61528820fc0abc87fe/playwright-1.61.0-py3-none-manylinux1_x86_64.whl"
+}

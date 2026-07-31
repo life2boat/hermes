@@ -34,6 +34,7 @@ from scripts.playwright_artifact_contract import (
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IMAGE_TAG_RE = re.compile(
     r"^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$"
 )
@@ -770,11 +771,86 @@ def docker_build_command(inputs: BuildInputs) -> list[str]:
     ]
 
 
+def docker_buildx_push_command(
+    inputs: BuildInputs,
+    metadata_file: Path,
+) -> list[str]:
+    return [
+        "docker",
+        "buildx",
+        "build",
+        "--platform",
+        inputs.platform,
+        "--build-context",
+        f"playwright_artifacts={inputs.artifact_context}",
+        "--build-arg",
+        f"HERMES_GIT_SHA={inputs.source_sha}",
+        "--build-arg",
+        (f"PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256={inputs.closure_manifest_sha256}"),
+        "--label",
+        f"org.opencontainers.image.revision={inputs.source_sha}",
+        "--label",
+        "org.opencontainers.image.source=https://github.com/life2boat/hermes",
+        "--tag",
+        inputs.image_tag,
+        "--metadata-file",
+        str(metadata_file),
+        "--provenance=false",
+        "--sbom=false",
+        "--push",
+        str(inputs.build_context),
+    ]
+
+
+def _registry_digest(metadata_file: Path) -> str:
+    try:
+        data = metadata_file.read_bytes()
+        if not 0 < len(data) <= 1024 * 1024:
+            _fail("BUILDX_METADATA_INVALID")
+        document = json.loads(data.decode("utf-8"))
+    except BuildContractError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _fail("BUILDX_METADATA_INVALID")
+    if not isinstance(document, dict):
+        _fail("BUILDX_METADATA_INVALID")
+    digest = document.get("containerimage.digest")
+    if not isinstance(digest, str) or _DIGEST_RE.fullmatch(digest) is None:
+        _fail("BUILDX_DIGEST_MISSING")
+    return digest
+
+
+def _write_remote_build_receipt(
+    *,
+    path: Path,
+    inputs: BuildInputs,
+    registry_digest: str,
+) -> None:
+    document = {
+        "closure_manifest_sha256": inputs.closure_manifest_sha256,
+        "context_manifest_sha256": inputs.context_manifest_sha256,
+        "image_tag": inputs.image_tag,
+        "platform": inputs.platform,
+        "registry_digest": registry_digest,
+        "source_sha": inputs.source_sha,
+        "source_tree_sha": inputs.source_tree_sha,
+    }
+    data = _canonical_context_manifest(document)
+    try:
+        with path.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        path.chmod(0o600)
+    except OSError:
+        _fail("BUILD_RECEIPT_WRITE_FAILED")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Validate or execute the canonical verified Playwright build."
     )
-    parser.add_argument("mode", choices=("check", "build"))
+    parser.add_argument("mode", choices=("check", "build", "build-push"))
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--approved-base-sha", required=True)
     parser.add_argument("--artifact-context", required=True, type=Path)
@@ -783,6 +859,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--platform", required=True, choices=("linux/amd64", "linux/arm64")
     )
+    parser.add_argument("--metadata-file", type=Path)
+    parser.add_argument("--receipt", type=Path)
     return parser
 
 
@@ -790,6 +868,19 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repository_root = Path(__file__).resolve().parents[1]
     try:
+        if args.mode == "build-push":
+            if args.metadata_file is None or args.receipt is None:
+                _fail("REMOTE_BUILD_OUTPUT_REQUIRED")
+            if (
+                not args.metadata_file.is_absolute()
+                or not args.receipt.is_absolute()
+                or args.metadata_file.exists()
+                or args.receipt.exists()
+                or args.metadata_file.parent != args.receipt.parent
+            ):
+                _fail("REMOTE_BUILD_OUTPUT_INVALID")
+        elif args.metadata_file is not None or args.receipt is not None:
+            _fail("REMOTE_BUILD_OUTPUT_NOT_ALLOWED")
         with prepared_build_inputs(
             repository_root=repository_root,
             expected_source_sha=args.expected_source_sha,
@@ -807,6 +898,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if completed.returncode != 0:
                     _fail("DOCKER_BUILD_FAILED")
+            elif args.mode == "build-push":
+                completed = subprocess.run(
+                    docker_buildx_push_command(inputs, args.metadata_file),
+                    check=False,
+                    env={**os.environ, "DOCKER_BUILDKIT": "1"},
+                )
+                if completed.returncode != 0:
+                    _fail("DOCKER_BUILDX_PUSH_FAILED")
+                digest = _registry_digest(args.metadata_file)
+                _write_remote_build_receipt(
+                    path=args.receipt,
+                    inputs=inputs,
+                    registry_digest=digest,
+                )
             print("PLAYWRIGHT_IMAGE_BUILD_CONTRACT=PASS")
             print(f"MODE={args.mode}")
             print(f"SOURCE_SHA={inputs.source_sha}")
@@ -819,7 +924,13 @@ def main(argv: list[str] | None = None) -> int:
             print("BUILD_CONTEXT_SOURCE=EXACT_GIT_TREE_EXPORT")
             print("ARTIFACT_CLOSURE_CONTEXT_VERIFIED=true")
             print("CLOSURE_MANIFEST_SHA256_VERIFIED=true")
-            print(f"IMAGE_BUILD_PERFORMED={str(args.mode == 'build').lower()}")
+            print(
+                "IMAGE_BUILD_PERFORMED="
+                f"{str(args.mode in {'build', 'build-push'}).lower()}"
+            )
+            print(f"REGISTRY_PUSH_PERFORMED={str(args.mode == 'build-push').lower()}")
+            if args.mode == "build-push":
+                print(f"REGISTRY_IMAGE_DIGEST={digest}")
     except (BuildContractError, ArtifactContractError) as exc:
         print("PLAYWRIGHT_IMAGE_BUILD_CONTRACT=FAIL", file=sys.stderr)
         print(f"ERROR_CLASS={exc.code}", file=sys.stderr)

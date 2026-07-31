@@ -1,0 +1,127 @@
+name: Healbite exact-main GHCR image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: healbite-exact-main-ghcr-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APPROVED_BASE_SHA: 8b44bb146b31902dc99c53d976e7b20964eb4caa
+  CLOSURE_MANIFEST_SHA256: a685b3d071968d5140ce42f8346246b0857167c90eefdde71b6ff011eb97340f
+  REGISTRY_IMAGE: ghcr.io/life2boat/hermes
+  SOURCE_URL: https://github.com/life2boat/hermes
+
+jobs:
+  build:
+    if: github.repository == 'life2boat/hermes' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact dispatch SHA
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify exact canonical main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git remote get-url origin)" = "https://github.com/life2boat/hermes"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1)"
+          git diff --check
+
+      - name: Scan exact source candidates
+        shell: bash
+        run: bash scripts/secret_check.sh
+
+      - name: Materialize reviewed Playwright closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare_remote_playwright_artifacts.py \
+            --policy deploy/playwright-remote-build-artifacts.json \
+            --lockfile uv.lock \
+            --output "$RUNNER_TEMP/playwright-artifacts"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push exact-main image once
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_verified_playwright_image.py build-push \
+            --expected-source-sha "$GITHUB_SHA" \
+            --approved-base-sha "$APPROVED_BASE_SHA" \
+            --artifact-context "$RUNNER_TEMP/playwright-artifacts" \
+            --expected-closure-manifest-sha256 "$CLOSURE_MANIFEST_SHA256" \
+            --image-tag "$REGISTRY_IMAGE:sha-$GITHUB_SHA" \
+            --platform linux/amd64 \
+            --metadata-file "$RUNNER_TEMP/build-metadata.json" \
+            --receipt "$RUNNER_TEMP/build-receipt.json"
+
+      - name: Inspect and attest registry digest
+        id: attest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["registry_digest"])' "$RUNNER_TEMP/build-receipt.json")"
+          reference="$REGISTRY_IMAGE@$digest"
+          docker buildx imagetools inspect "$reference" --raw > "$RUNNER_TEMP/manifest.json"
+          docker buildx imagetools inspect "$reference" --format '{{json .Image}}' > "$RUNNER_TEMP/config.json"
+          python3 scripts/attest_remote_registry_image.py \
+            --manifest "$RUNNER_TEMP/manifest.json" \
+            --config "$RUNNER_TEMP/config.json" \
+            --receipt "$RUNNER_TEMP/build-receipt.json" \
+            --expected-digest "$digest" \
+            --expected-source-sha "$GITHUB_SHA" \
+            --expected-source-url "$SOURCE_URL" \
+            --expected-platform linux/amd64 \
+            --output "$RUNNER_TEMP/registry-attestation.json"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$REGISTRY_IMAGE@$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=$REGISTRY_IMAGE:sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload safe registry attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: exact-main-registry-attestation-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/build-receipt.json
+            ${{ runner.temp }}/registry-attestation.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish safe summary
+        shell: bash
+        run: |
+          {
+            echo "REMOTE_BUILD_HOST=github-hosted-ubuntu"
+            echo "REMOTE_BUILD_COUNT=1"
+            echo "REMOTE_BUILD_RETRY_COUNT=0"
+            echo "FINAL_BUILD_SOURCE_SHA=$GITHUB_SHA"
+            echo "REGISTRY_IMAGE_REFERENCE=${{ steps.attest.outputs.image }}"
+            echo "REGISTRY_IMAGE_DIGEST=${{ steps.attest.outputs.digest }}"
+            echo "IMMUTABLE_SHA_TAG=${{ steps.attest.outputs.tag }}"
+            echo "PRODUCTION_SECRETS_USED_AS_BUILD_ARGS=false"
+            echo "IMAGE_METADATA_HISTORY_SECRET_FINDINGS=0"
+          } >> "$GITHUB_STEP_SUMMARY"

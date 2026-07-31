@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.11
-updated_at: 2026-07-10
+version: 1.2.12
+updated_at: 2026-07-31
 status: active
 source_of_truth: true
-state_verified_against_main_sha: f45a3c16b49282775d06003948e449d756aa54f2
+state_verified_against_main_sha: 8b44bb146b31902dc99c53d976e7b20964eb4caa
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `f45a3c16b49282775d06003948e449d756aa54f2`.
+  `8b44bb146b31902dc99c53d976e7b20964eb4caa`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -25,6 +25,12 @@ Git.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.
 - Canonical checkout state during this update: dirty; it must not be cleaned,
   reset, stashed or modified by unrelated tasks.
+- Repository main defines a manual, main-only, GitHub-hosted exact-tree image
+  build path that publishes an immutable SHA tag and digest to
+  `ghcr.io/life2boat/hermes`.
+- The remote-build workflow has read-only repository access plus package
+  publication access. It is not a deployment workflow and does not authorize a
+  production image pull, container recreate, configuration change, or DB write.
 - Last confirmed `hermes-bot` runtime: running, restart count 0.
 - Last confirmed Qdrant runtime: running, restart count 0.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
@@ -131,6 +137,10 @@ Git.
 - Production deployment state for the weekly backend is not confirmed by this
   document.
 - Shopping runtime remains disabled unless a later state update proves otherwise.
+- Exact-main GHCR publication is manual, SHA-bound, and digest-authoritative.
+  Registry publication and production deployment remain separate gates.
+- Production-host deploy-capacity qualification is read-only and must complete
+  before a separately authorized pull or deployment task.
 
 ## 3. Active Blockers
 

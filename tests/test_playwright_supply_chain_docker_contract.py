@@ -194,11 +194,14 @@ def test_no_archive_manifest_or_wheel_instance_is_committed() -> None:
 
 def test_canonical_build_helper_exports_exact_git_tree_and_binds_closure() -> None:
     source = _text(BUILD_HELPER)
-    assert 'choices=("check", "build")' in source
+    assert 'choices=("check", "build", "build-push")' in source
     assert 'if args.mode == "build":' in source
     assert "git-tree-context" in source
     assert "inspect_exported_context" in source
     assert "inputs.build_context" in source
+    assert "docker_buildx_push_command" in source
+    assert '"--push"' in source
+    assert "org.opencontainers.image.source=https://github.com/life2boat/hermes" in source
     command_block = source.split("def docker_build_command", 1)[1].split(
         "def _parser", 1
     )[0]

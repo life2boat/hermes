@@ -12,7 +12,7 @@
     "canonical_main_branch": "refs/heads/main",
     "required_ci_workflows": [
       "Tests",
-      "Lint",
+      "Lint (ruff + ty)",
       "Typecheck",
       "Nix"
     ]

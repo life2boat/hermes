@@ -231,6 +231,83 @@ def repository_fixture(tmp_path: Path) -> tuple[deploy.DeploymentContract, str]:
     return deploy.load_contract(root), head
 
 
+def _workflow_display_names(workflow_directory: Path) -> dict[str, tuple[Path, ...]]:
+    names: dict[str, list[Path]] = {}
+    files = sorted(
+        (*workflow_directory.glob("*.yml"), *workflow_directory.glob("*.yaml")),
+        key=lambda path: path.name,
+    )
+    for workflow_path in files:
+        display_name = None
+        for line in workflow_path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("name:"):
+                continue
+            candidate = line.removeprefix("name:").strip()
+            if not candidate:
+                raise AssertionError("empty-workflow-display-name")
+            display_name = candidate
+            break
+        if display_name is None:
+            raise AssertionError("missing-top-level-workflow-display-name")
+        names.setdefault(display_name, []).append(workflow_path)
+    duplicates = [name for name, paths in names.items() if len(paths) != 1]
+    if duplicates:
+        raise AssertionError("duplicate-workflow-display-name")
+    return {name: tuple(paths) for name, paths in names.items()}
+
+
+def _assert_required_workflows_resolve(
+    required_workflows: tuple[str, ...], workflow_directory: Path
+) -> dict[str, tuple[Path, ...]]:
+    names = _workflow_display_names(workflow_directory)
+    missing = [name for name in required_workflows if name not in names]
+    if missing:
+        raise AssertionError("missing-required-workflow")
+    return names
+
+
+def test_manifest_required_ci_workflows_match_authoritative_workflow_names(
+    tmp_path: Path,
+) -> None:
+    manifest = json.loads(
+        (REPO_ROOT / "deploy" / "hermes-production.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    required = tuple(manifest["provenance"]["required_ci_workflows"])
+    names = _assert_required_workflows_resolve(
+        required,
+        REPO_ROOT / ".github" / "workflows",
+    )
+    assert all(len(paths) == 1 for paths in names.values())
+    assert "Lint (ruff + ty)" in names
+    with pytest.raises(AssertionError, match="missing-required-workflow"):
+        _assert_required_workflows_resolve(
+            tuple("Lint" if name == "Lint (ruff + ty)" else name for name in required),
+            REPO_ROOT / ".github" / "workflows",
+        )
+
+    synthetic = tmp_path / "workflows"
+    synthetic.mkdir()
+    (synthetic / "tests.yml").write_text(
+        "name: Tests\njobs:\n  lint:\n    name: Lint (ruff + ty)\n",
+        encoding="utf-8",
+    )
+    (synthetic / "lint.yaml").write_text(
+        "name: Lint (ruff + ty)\n",
+        encoding="utf-8",
+    )
+    synthetic_names = _workflow_display_names(synthetic)
+    assert set(synthetic_names) == {"Tests", "Lint (ruff + ty)"}
+
+    (synthetic / "duplicate.yml").write_text(
+        "name: Tests\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="duplicate-workflow-display-name"):
+        _workflow_display_names(synthetic)
+
+
 def test_manifest_is_canonical_and_secret_free() -> None:
     contract = deploy.load_contract()
     assert contract.version == 2
@@ -253,6 +330,7 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.image_revision_label == REVISION_LABEL
     assert contract.canonical_remote == "github"
     assert contract.allowed_revision_ref == "refs/remotes/github/main"
+    assert contract.required_ci_workflows == ("Tests", "Lint (ruff + ty)", "Typecheck", "Nix")
     assert contract.database_source == Path("/var/lib/hermes/production-db/healbite.db")
     assert contract.lease_path == Path("/run/hermes/hermes-deployment-operation.json")
     assert FAKE_SECRET not in text

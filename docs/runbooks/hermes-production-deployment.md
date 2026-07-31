@@ -31,6 +31,19 @@ The canonical Compose order is deterministic:
 The production override explicitly keeps `HEALBITE_SHOPPING_LIST_ENABLED=false`
 and its allowlist empty. Other feature settings are not changed by this contract.
 
+The inert `x-hermes-feature-state-inventory` Compose extension records the complete
+P1 inventory without changing service environment values. Its nine canonical
+prefixes are Households, Inventory Photo, Inventory Photo UI, Inventory Text,
+Inventory Text UI, Inventory Weekly Generation UI, Shopping List, Weekly Menu,
+and Weekly Menu Inventory. The manifest attestation lists and the Compose extension
+must match the repository inventory exactly. P1 rejects any other matching
+`HEALBITE_*_ENABLED` or `HEALBITE_*_ALLOWLIST` variable, rejects missing canonical
+variables and invalid boolean values, fingerprints allowlists without retaining
+their members, and compares normalized pre/post state. Only the two existing
+Households and Shopping List defaults remain pinned by this deployment contract;
+all other canonical values are captured from the running container and must remain
+unchanged through deploy or rollback.
+
 Image inputs must be immutable Docker image IDs (`sha256:<64 hex>`) or repository
 digests (`name@sha256:<64 hex>`). Mutable tags, including `latest`, are rejected.
 The exact 40-character source revision is also mandatory. Every deployable or

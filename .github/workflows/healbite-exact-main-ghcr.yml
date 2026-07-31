@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/prepare_remote_playwright_artifacts.py \
+          python3 -m scripts.prepare_remote_playwright_artifacts \
             --policy deploy/playwright-remote-build-artifacts.json \
             --lockfile uv.lock \
             --output "$RUNNER_TEMP/playwright-artifacts"
@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/build_verified_playwright_image.py build-push \
+          python3 -m scripts.build_verified_playwright_image build-push \
             --expected-source-sha "$GITHUB_SHA" \
             --approved-base-sha "$APPROVED_BASE_SHA" \
             --artifact-context "$RUNNER_TEMP/playwright-artifacts" \
@@ -88,7 +88,7 @@ jobs:
           reference="$REGISTRY_IMAGE@$digest"
           docker buildx imagetools inspect "$reference" --raw > "$RUNNER_TEMP/manifest.json"
           docker buildx imagetools inspect "$reference" --format '{{json .Image}}' > "$RUNNER_TEMP/config.json"
-          python3 scripts/attest_remote_registry_image.py \
+          python3 -m scripts.attest_remote_registry_image \
             --manifest "$RUNNER_TEMP/manifest.json" \
             --config "$RUNNER_TEMP/config.json" \
             --receipt "$RUNNER_TEMP/build-receipt.json" \

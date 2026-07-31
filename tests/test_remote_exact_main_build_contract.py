@@ -25,11 +25,19 @@ def test_workflow_is_manual_main_only_with_minimal_permissions() -> None:
     assert "ref: ${{ github.sha }}" in text
     assert "fetch-depth: 0" in text
     assert "refs/remotes/origin/main" in text
-    assert text.count("build_verified_playwright_image.py build-push") == 1
+    assert text.count("-m scripts.build_verified_playwright_image build-push") == 1
     assert "ghcr.io/life2boat/hermes:sha-" not in text
     assert "$REGISTRY_IMAGE:sha-$GITHUB_SHA" in text
     assert ":latest" not in text
     assert "DOCKERHUB" not in text
+
+
+def test_workflow_uses_repository_module_entrypoints() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "python3 -m scripts.prepare_remote_playwright_artifacts" in text
+    assert "python3 -m scripts.build_verified_playwright_image" in text
+    assert "python3 -m scripts.attest_remote_registry_image" in text
+    assert "python3 scripts/" not in text
 
 
 def test_workflow_actions_are_commit_pinned() -> None:

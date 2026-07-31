@@ -1574,7 +1574,6 @@ def _capture_pre_mutation_baseline(
             database_path=contract.database_source,
             database_target=contract.database_target,
             revision_label=contract.image_revision_label,
-            expected_feature_gates=contract.feature_gates,
             protected_secret_names=contract.protected_secret_names,
             run=_run,
         )

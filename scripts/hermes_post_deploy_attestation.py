@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -640,7 +640,6 @@ def capture_pre_mutation_baseline(
     database_path: Path,
     database_target: Path,
     revision_label: str,
-    expected_feature_gates: Mapping[str, str],
     protected_secret_names: tuple[str, ...],
     run: Run = _default_run,
 ) -> RuntimeBaseline:
@@ -663,20 +662,6 @@ def capture_pre_mutation_baseline(
     )
     if expected_db_mount not in hermes.mounts:
         _fail("PRE_MUTATION_DATABASE_MOUNT_MISMATCH")
-    expected_names = {
-        name for name in expected_feature_gates if name.endswith("_ENABLED")
-    }
-    observed_names = {name for name, _value in hermes.feature_gates}
-    if not expected_names <= observed_names:
-        _fail("AMBIENT_FEATURE_STATE_REJECTED")
-    expected_selected = tuple(
-        (name, _feature_gate_state(expected_feature_gates[name]))
-        for name, _value in hermes.feature_gates
-        if name in expected_names
-    )
-    observed_selected = tuple(item for item in hermes.feature_gates if item[0] in expected_names)
-    if observed_selected != expected_selected:
-        _fail("AMBIENT_FEATURE_STATE_REJECTED")
     qdrant = _qdrant_snapshot(qdrant_service, run=run)
     if qdrant.state != "running":
         _fail("PRE_MUTATION_QDRANT_UNHEALTHY")

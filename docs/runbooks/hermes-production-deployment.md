@@ -39,10 +39,10 @@ and Weekly Menu Inventory. The manifest attestation lists and the Compose extens
 must match the repository inventory exactly. P1 rejects any other matching
 `HEALBITE_*_ENABLED` or `HEALBITE_*_ALLOWLIST` variable, rejects missing canonical
 variables and invalid boolean values, fingerprints allowlists without retaining
-their members, and compares normalized pre/post state. Only the two existing
-Households and Shopping List defaults remain pinned by this deployment contract;
-all other canonical values are captured from the running container and must remain
-unchanged through deploy or rollback.
+their members, and compares normalized pre/post state. The two existing Households
+and Shopping List Compose defaults remain unchanged, but defaults are not treated
+as live canary-state expectations. All nine canonical pairs are captured from the
+running container and must remain unchanged through deploy or rollback.
 
 Image inputs must be immutable Docker image IDs (`sha256:<64 hex>`) or repository
 digests (`name@sha256:<64 hex>`). Mutable tags, including `latest`, are rejected.

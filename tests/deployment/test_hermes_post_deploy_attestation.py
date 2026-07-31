@@ -47,12 +47,6 @@ FEATURES = {
     "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "1001",
 }
-PINNED_DEFAULTS = {
-    name: value
-    for name, value in FEATURES.items()
-    if name.startswith("HEALBITE_HOUSEHOLDS_")
-    or name.startswith("HEALBITE_SHOPPING_LIST_")
-}
 
 
 def _completed(
@@ -222,7 +216,6 @@ def _capture(
         database_path=database_path,
         database_target=Path("/home/hermes/healbite.db"),
         revision_label="org.opencontainers.image.revision",
-        expected_feature_gates=PINNED_DEFAULTS,
         protected_secret_names=("TELEGRAM_BOT_TOKEN",),
         run=runner,
     )
@@ -453,14 +446,7 @@ def test_current_production_feature_inventory_shape_is_accepted_without_identiti
         env_changes=current_state,
     )
     runner = SyntheticRunner(policy, hermes_records=[record])
-    snapshot = runtime._container_snapshot(
-        "hermes-bot",
-        revision_label="org.opencontainers.image.revision",
-        feature_gate_names=policy.feature_gate_names,
-        allowlist_names=policy.allowlist_names,
-        protected_secret_names=("TELEGRAM_BOT_TOKEN",),
-        run=runner,
-    )
+    snapshot = _capture(policy, database_path, runner).hermes
     assert tuple(name for name, _value in snapshot.feature_gates) == policy.feature_gate_names
     assert tuple(name for name, _fingerprint, _count in snapshot.allowlists) == policy.allowlist_names
     assert "3001" not in repr(snapshot)

@@ -56,6 +56,19 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
     )
     return contract, source
 
+@pytest.fixture(autouse=True)
+def isolated_p1_attestation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy deployment tests focused on their pre-P1 boundaries."""
+    baseline = object()
+    post_result = object()
+    monkeypatch.setattr(deploy, "_capture_pre_mutation_baseline", lambda *_args: baseline)
+    monkeypatch.setattr(
+        deploy, "_validate_automatic_rollback_readiness", lambda *_args: None
+    )
+    monkeypatch.setattr(deploy, "_post_deploy_attestation", lambda *_args, **_kwargs: post_result)
+    monkeypatch.setattr(deploy, "_write_operation_evidence", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(deploy, "_automatic_rollback", lambda *_args: post_result)
+
 
 def _prepare(contract: deploy.DeploymentContract, source: Path) -> None:
     deploy.prepare_secret_override(contract, source)
@@ -82,6 +95,7 @@ def _safe_docker_runner(
     compose_document = {
         "services": {
             contract.target_service: {
+                "environment": dict(contract.feature_gates),
                 "volumes": [
                     {
                         "type": contract.database_mount_type,
@@ -127,6 +141,7 @@ def _with_preflight_documents(contract: deploy.DeploymentContract, runner):
     compose_document = {
         "services": {
             contract.target_service: {
+                "environment": dict(contract.feature_gates),
                 "volumes": [
                     {
                         "type": contract.database_mount_type,
@@ -1127,7 +1142,10 @@ def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contrac
 
     monkeypatch.setattr(deploy, "_finish_secret_override_transaction", finish)
     monkeypatch.setattr(deploy, "_run", _with_preflight_documents(contract, runner))
-    with pytest.raises(deploy.DeploymentContractError, match="compose-up"):
+    with pytest.raises(
+        deploy.PostMutationDeploymentError,
+        match="post-deploy-rollback-failed",
+    ) as error:
         deploy.execute_operation(
             contract,
             source=source,
@@ -1136,6 +1154,8 @@ def test_cleanup_failure_does_not_mask_primary_execute_failure(protected_contrac
             confirmation=deploy.DEPLOY_CONFIRMATION,
             rollback=False,
         )
+    assert error.value.original_error_code == "COMPOSE_UP"
+    assert error.value.rollback_error_code == "CLEANUP_FAILED"
 
 
 def test_execute_rollback_deploys_inspected_previous_image_id(protected_contract, monkeypatch) -> None:

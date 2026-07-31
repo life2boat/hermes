@@ -120,7 +120,7 @@
     "recreate_services": [
       "hermes-bot"
     ],
-    "health_check": "container-running-restart-count-zero-image-match",
+    "health_check": "p1-runtime-attestation-and-automatic-rollback",
     "cleanup_after_operation": true
   },
   "rollback": {
@@ -128,6 +128,76 @@
     "same_compose_chain": true,
     "schema_downgrade": false,
     "database_restore": false
+  },
+  "attestation": {
+    "version": 1,
+    "startup_observation_seconds": 30,
+    "stability_sample_count": 3,
+    "stability_interval_seconds": 5,
+    "startup_log_tail_lines": 500,
+    "startup_log_max_bytes": 131072,
+    "forbidden_startup_log_classifications": [
+      "PYTHON_TRACEBACK",
+      "UNHANDLED_EXCEPTION",
+      "FATAL_STARTUP_FAILURE",
+      "DATABASE_FAILURE",
+      "AUTHENTICATION_FAILURE",
+      "SECRET_INVALID",
+      "PROVIDER_FALLBACK",
+      "GATEWAY_INITIALIZATION_FAILURE",
+      "TELEGRAM_INITIALIZATION_FAILURE",
+      "CRASH_LOOP"
+    ],
+    "telegram_health_command": [
+      "docker",
+      "exec",
+      "hermes-bot",
+      "python3",
+      "-c",
+      "import json,os,urllib.request;t=os.environ.get('TELEGRAM_BOT_TOKEN','');assert t;r=urllib.request.urlopen('https://api.telegram.org/bot'+t+'/getMe',timeout=10);d=json.loads(r.read(65536));assert d.get('ok') is True;print('TELEGRAM_HEALTH=PASS')"
+    ],
+    "gateway_no_send_command": [
+      "docker",
+      "exec",
+      "hermes-bot",
+      "python3",
+      "-c",
+      "import importlib;importlib.import_module('gateway.run');print('GATEWAY_NO_SEND_SMOKE=PASS');print('PROVIDER_REQUESTS=0')"
+    ],
+    "database_structural_contract": [
+      "user_version",
+      "schema",
+      "table",
+      "index",
+      "trigger",
+      "integrity",
+      "foreign_keys"
+    ],
+    "database_delta_policy": "no-delta",
+    "database_schema_change_allowed": false,
+    "database_unknown_delta_allowed": false,
+    "feature_gate_names": [
+      "HEALBITE_HOUSEHOLDS_ENABLED",
+      "HEALBITE_SHOPPING_LIST_ENABLED"
+    ],
+    "allowlist_names": [
+      "HEALBITE_HOUSEHOLDS_ALLOWLIST",
+      "HEALBITE_SHOPPING_LIST_ALLOWLIST"
+    ],
+    "qdrant_non_interference_fields": [
+      "container_id",
+      "image_id",
+      "created_at",
+      "started_at",
+      "state",
+      "restart_count",
+      "mounts"
+    ],
+    "rollback_health_required": true,
+    "rollback_attempt_count_max": 1,
+    "image_only_rollback_db_restore": false,
+    "evidence_max_bytes": 16384,
+    "evidence_mode": "0600"
   },
   "feature_gates": {
     "HEALBITE_HOUSEHOLDS_ENABLED": false,

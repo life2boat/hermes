@@ -20,8 +20,10 @@ from typing import Sequence
 
 try:
     from scripts import hermes_deploy_preflight as preflight
+    from scripts import hermes_post_deploy_attestation as attestation
 except ModuleNotFoundError:  # Direct execution adds scripts/ rather than its parent.
     import hermes_deploy_preflight as preflight
+    import hermes_post_deploy_attestation as attestation
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPOSITORY_ROOT / "deploy" / "hermes-production.json"
@@ -29,6 +31,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMAGE_DIGEST_RE = re.compile(r"^[a-zA-Z0-9._/-]+@sha256:[0-9a-f]{64}$")
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+FEATURE_STATE_NAME_RE = re.compile(r"^HEALBITE_[A-Z0-9_]+_(?:ENABLED|ALLOWLIST)$")
 MAX_SECRET_SOURCE_BYTES = 1024 * 1024
 DEPLOY_CONFIRMATION = "DEPLOY_HERMES_BOT"
 ROLLBACK_CONFIRMATION = "ROLLBACK_HERMES_BOT"
@@ -44,6 +47,26 @@ class DeploymentContractError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class PostMutationDeploymentError(DeploymentContractError):
+    """A post-mutation failure and its single rollback outcome."""
+
+    def __init__(
+        self,
+        *,
+        status: str,
+        original_error_code: str,
+        rollback_error_code: str | None,
+    ) -> None:
+        super().__init__(
+            "post-deploy-rolled-back"
+            if status == "ROLLED_BACK"
+            else "post-deploy-rollback-failed"
+        )
+        self.status = status
+        self.original_error_code = original_error_code
+        self.rollback_error_code = rollback_error_code
 
 
 @dataclass(frozen=True)
@@ -93,6 +116,7 @@ class DeploymentContract:
     image_revision_label: str
     allowed_revision_ref: str
     feature_gates: dict[str, str]
+    attestation_policy: attestation.RuntimeAttestationPolicy
 
     @property
     def protected_secret_names(self) -> tuple[str, ...]:
@@ -142,8 +166,21 @@ def _effective_uid() -> int:
 
 
 def _decode_json_document(data: bytes, *, code: str) -> dict[str, object]:
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                _fail(f"{code}-duplicate-field")
+            result[key] = value
+        return result
+
     try:
-        raw = json.loads(data.decode("utf-8"))
+        raw = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+        )
     except (UnicodeError, json.JSONDecodeError):
         _fail(f"{code}-invalid")
     if not isinstance(raw, dict):
@@ -196,6 +233,7 @@ def load_contract(
     if set(raw) != {
         "version", "provenance", "compose", "runtime", "database_mount",
         "capacity", "secrets", "deployment", "rollback", "feature_gates",
+        "attestation",
     }:
         _fail("manifest-fields")
     if raw["version"] != 2:
@@ -376,6 +414,8 @@ def load_contract(
         or deployment.get("revision_label") != "org.opencontainers.image.revision"
         or deployment.get("allowed_revision_ref") != canonical_main_ref
         or deployment.get("recreate_services") != ["hermes-bot"]
+        or deployment.get("health_check")
+        != "p1-runtime-attestation-and-automatic-rollback"
         or deployment.get("cleanup_after_operation") is not True
     ):
         _fail("deployment-policy")
@@ -402,6 +442,10 @@ def load_contract(
         "HEALBITE_SHOPPING_LIST_ENABLED": "false",
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }
+    try:
+        attestation_policy = attestation.parse_policy(raw["attestation"])
+    except attestation.RuntimeAttestationError as exc:
+        _fail(exc.code.lower().replace("_", "-"))
 
     return DeploymentContract(
         version=2,
@@ -439,6 +483,7 @@ def load_contract(
         image_revision_label="org.opencontainers.image.revision",
         allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
+        attestation_policy=attestation_policy,
     )
 
 
@@ -1233,6 +1278,26 @@ def validate_compose_render(
         _fail("compose-render-document")
     if not isinstance(document, dict):
         _fail("compose-render-document")
+    service_documents = document.get("services")
+    service_document = (
+        service_documents.get(contract.target_service)
+        if isinstance(service_documents, dict)
+        else None
+    )
+    rendered_environment = (
+        service_document.get("environment")
+        if isinstance(service_document, dict)
+        else None
+    )
+    if not isinstance(rendered_environment, dict):
+        _fail("compose-feature-state")
+    rendered_feature_state = {
+        name: value
+        for name, value in rendered_environment.items()
+        if isinstance(name, str) and FEATURE_STATE_NAME_RE.fullmatch(name)
+    }
+    if rendered_feature_state != contract.feature_gates:
+        _fail("compose-feature-state")
     mounts = _preflight(
         preflight.compose_mounts_from_document,
         document,
@@ -1479,6 +1544,193 @@ def _ordinary_deploy_pre_mutation_barrier(
     return target, secrets, source_head
 
 
+def _attestation_error_code(exc: BaseException) -> str:
+    if isinstance(exc, attestation.RuntimeAttestationError):
+        return exc.code
+    if isinstance(exc, DeploymentContractError):
+        normalized = re.sub(r"[^A-Z0-9]+", "_", exc.code.upper()).strip("_")
+        if normalized:
+            return normalized[:64]
+    return "UNCLASSIFIED_POST_MUTATION_FAILURE"
+
+
+def _capture_pre_mutation_baseline(
+    contract: DeploymentContract,
+) -> attestation.RuntimeBaseline:
+    try:
+        return attestation.capture_pre_mutation_baseline(
+            contract.attestation_policy,
+            hermes_service=contract.target_service,
+            qdrant_service="qdrant",
+            database_path=contract.database_source,
+            database_target=contract.database_target,
+            revision_label=contract.image_revision_label,
+            expected_feature_gates=contract.feature_gates,
+            protected_secret_names=contract.protected_secret_names,
+            run=_run,
+        )
+    except attestation.RuntimeAttestationError as exc:
+        _fail(exc.code.lower().replace("_", "-"))
+
+
+def _validate_automatic_rollback_readiness(
+    contract: DeploymentContract,
+    baseline: attestation.RuntimeBaseline,
+    rollback_secrets: dict[str, str],
+) -> None:
+    previous = inspect_local_image(
+        contract,
+        baseline.hermes.image_id,
+        expected_revision=baseline.hermes.revision,
+    )
+    if previous.image_id != baseline.hermes.image_id:
+        _fail("rollback-baseline-image-mismatch")
+    if dict(_secret_fingerprints(rollback_secrets)) != dict(
+        baseline.hermes.secret_fingerprints
+    ):
+        _fail("rollback-secret-fingerprint-mismatch")
+    live = _live_override_secrets(contract)
+    if live is not None and dict(_secret_fingerprints(live)) != dict(
+        _secret_fingerprints(rollback_secrets)
+    ):
+        _fail("rollback-secret-fingerprint-mismatch")
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-production-rollback-readiness-"
+    ) as raw_directory:
+        temporary = _temporary_render_contract(contract, Path(raw_directory))
+        _write_secret_override(temporary, rollback_secrets)
+        primary_error: BaseException | None = None
+        try:
+            previous_mounts = validate_compose_render(
+                temporary,
+                baseline.hermes.image_id,
+                baseline.hermes.revision,
+            )
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                cleanup_secret_override(temporary)
+            except DeploymentContractError:
+                if primary_error is None:
+                    raise
+    _validate_live_future_mounts(contract, previous_mounts)
+    _validate_capacity(
+        contract,
+        phase="deploy",
+        revision=baseline.hermes.revision,
+        image_id=baseline.hermes.image_id,
+    )
+
+
+def _post_deploy_attestation(
+    contract: DeploymentContract,
+    baseline: attestation.RuntimeBaseline,
+    *,
+    target_image_id: str,
+    target_revision: str,
+) -> attestation.PostDeployAttestation:
+    return attestation.post_deploy_attestation(
+        contract.attestation_policy,
+        baseline,
+        hermes_service=contract.target_service,
+        qdrant_service="qdrant",
+        database_path=contract.database_source,
+        revision_label=contract.image_revision_label,
+        target_image_id=target_image_id,
+        target_revision=target_revision,
+        expected_feature_gates=contract.feature_gates,
+        protected_secret_names=contract.protected_secret_names,
+        run=_run,
+    )
+
+
+def _write_operation_evidence(
+    contract: DeploymentContract,
+    *,
+    target_revision: str,
+    target_image_id: str,
+    baseline: attestation.RuntimeBaseline,
+    operation_status: str,
+    post_result: attestation.PostDeployAttestation | None,
+    original_error: str | None,
+    rollback_attempted: bool,
+    rollback_result: str,
+    rollback_error: str | None,
+) -> Path:
+    return attestation.write_evidence(
+        contract.attestation_policy,
+        runtime_directory=contract.runtime_directory,
+        target_revision=target_revision,
+        target_image_id=target_image_id,
+        previous_image_id=baseline.hermes.image_id,
+        operation_status=operation_status,
+        post_result=post_result,
+        original_error=original_error,
+        rollback_attempted=rollback_attempted,
+        rollback_result=rollback_result,
+        rollback_error=rollback_error,
+    )
+
+
+def _compose_recreate_hermes(
+    contract: DeploymentContract,
+    *,
+    image_id: str,
+    revision: str,
+) -> None:
+    environment = _compose_environment(image_id, revision)
+    command = (
+        *compose_command(contract),
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        contract.target_service,
+    )
+    result = _run(command, cwd=contract.root, env=environment, timeout=300)
+    if result.returncode != 0:
+        _fail("compose-up")
+
+
+def _automatic_rollback(
+    contract: DeploymentContract,
+    baseline: attestation.RuntimeBaseline,
+    rollback_secrets: dict[str, str],
+) -> attestation.PostDeployAttestation:
+    rollback_baseline = attestation.rollback_log_baseline(baseline)
+    rollback_transaction = _begin_secret_override_transaction(
+        contract,
+        rollback_secrets,
+    )
+    primary_error: BaseException | None = None
+    try:
+        _compose_recreate_hermes(
+            contract,
+            image_id=baseline.hermes.image_id,
+            revision=baseline.hermes.revision,
+        )
+        return _post_deploy_attestation(
+            contract,
+            rollback_baseline,
+            target_image_id=baseline.hermes.image_id,
+            target_revision=baseline.hermes.revision,
+        )
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            _finish_secret_override_transaction(
+                contract,
+                rollback_transaction,
+                preserve_published=False,
+            )
+        except DeploymentContractError:
+            if primary_error is None:
+                raise
+
 def plan_operation(
     contract: DeploymentContract,
     *,
@@ -1537,6 +1789,10 @@ def execute_operation(
         timeout_seconds=contract.lease_timeout_seconds,
     )
     primary_error: BaseException | None = None
+    baseline: attestation.RuntimeBaseline | None = None
+    secret_transaction: SecretOverrideTransaction | None = None
+    mutation_started = False
+    restore_attempted = False
     try:
         target, secrets, _source_head = _ordinary_deploy_pre_mutation_barrier(
             contract,
@@ -1547,43 +1803,121 @@ def execute_operation(
             rollback=rollback,
             lease=lease,
         )
-        expected_image_id = target.image_id
-        secret_transaction = _begin_secret_override_transaction(contract, secrets)
-        mutation_error: BaseException | None = None
-        try:
-            environment = _compose_environment(expected_image_id, revision)
-            command = (*compose_command(contract), "up", "-d", "--no-deps", "--force-recreate", contract.target_service)
-            result = _run(command, cwd=contract.root, env=environment, timeout=300)
-            if result.returncode != 0:
-                _fail("compose-up")
-            health = _run(
-                (
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.State.Status}} {{.RestartCount}} {{.Image}}",
-                    contract.target_service,
-                ),
-                timeout=30,
+        baseline = _capture_pre_mutation_baseline(contract)
+        if not rollback:
+            _validate_automatic_rollback_readiness(
+                contract, baseline, secrets
             )
-            if health.returncode != 0 or health.stdout.strip() != f"running 0 {expected_image_id}":
-                _fail("post-operation-health")
-        except BaseException as exc:
-            mutation_error = exc
+        mutation_started = True
+        secret_transaction = _begin_secret_override_transaction(contract, secrets)
+        _compose_recreate_hermes(
+            contract,
+            image_id=target.image_id,
+            revision=revision,
+        )
+        post_result = _post_deploy_attestation(
+            contract,
+            baseline,
+            target_image_id=target.image_id,
+            target_revision=revision,
+        )
+        restore_attempted = True
+        _finish_secret_override_transaction(
+            contract,
+            secret_transaction,
+            preserve_published=False,
+        )
+        _write_operation_evidence(
+            contract,
+            target_revision=revision,
+            target_image_id=target.image_id,
+            baseline=baseline,
+            operation_status="PASS",
+            post_result=post_result,
+            original_error=None,
+            rollback_attempted=False,
+            rollback_result="NOT_ATTEMPTED",
+            rollback_error=None,
+        )
+    except BaseException as exc:
+        if not mutation_started:
+            primary_error = exc
             raise
-        finally:
+        if baseline is None:
+            primary_error = exc
+            raise
+        original_error_code = _attestation_error_code(exc)
+        restoration_error_code: str | None = None
+        if secret_transaction is not None and not restore_attempted:
+            restore_attempted = True
             try:
                 _finish_secret_override_transaction(
                     contract,
                     secret_transaction,
                     preserve_published=False,
                 )
-            except DeploymentContractError:
-                if mutation_error is None:
-                    raise
-    except BaseException as exc:
-        primary_error = exc
-        raise
+            except BaseException as restoration_exc:
+                restoration_error_code = _attestation_error_code(restoration_exc)
+        if rollback:
+            primary_error = exc
+            raise
+
+        rollback_post_result: attestation.PostDeployAttestation | None = None
+        rollback_error_code: str | None = restoration_error_code
+        try:
+            rollback_post_result = _automatic_rollback(
+                contract, baseline, secrets
+            )
+        except BaseException as rollback_exc:
+            if rollback_error_code is None:
+                rollback_error_code = _attestation_error_code(rollback_exc)
+
+        if rollback_error_code is None:
+            try:
+                _write_operation_evidence(
+                    contract,
+                    target_revision=revision,
+                    target_image_id=target.image_id,
+                    baseline=baseline,
+                    operation_status="ROLLED_BACK",
+                    post_result=rollback_post_result,
+                    original_error=original_error_code,
+                    rollback_attempted=True,
+                    rollback_result="PASS",
+                    rollback_error=None,
+                )
+            except BaseException as evidence_exc:
+                rollback_error_code = _attestation_error_code(evidence_exc)
+
+        if rollback_error_code is not None:
+            try:
+                _write_operation_evidence(
+                    contract,
+                    target_revision=revision,
+                    target_image_id=target.image_id,
+                    baseline=baseline,
+                    operation_status="FAIL",
+                    post_result=rollback_post_result,
+                    original_error=original_error_code,
+                    rollback_attempted=True,
+                    rollback_result="FAIL",
+                    rollback_error=rollback_error_code,
+                )
+            except BaseException:
+                pass
+            final_error = PostMutationDeploymentError(
+                status="FAIL",
+                original_error_code=original_error_code,
+                rollback_error_code=rollback_error_code,
+            )
+        else:
+            final_error = PostMutationDeploymentError(
+                status="ROLLED_BACK",
+                original_error_code=original_error_code,
+                rollback_error_code=None,
+            )
+        primary_error = final_error
+        raise final_error from exc
     finally:
         try:
             _preflight(

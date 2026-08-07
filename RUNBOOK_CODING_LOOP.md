@@ -62,32 +62,13 @@ CHANGED_FILES="gateway/run.py gateway/config.py agent/auxiliary_client.py" bash 
 
 Keep the value space-separated. Only include Python files that should be sent to `python3 -m py_compile`.
 
-## HealBite Diagnostic CLI
+## HealBite Domain Procedures
 
-Before fixing a HealBite runtime issue, capture a fresh snapshot with:
+Keep this runbook focused on the bounded coding loop. Load the relevant procedural skill for operational work:
 
-```bash
-cd /home/hermes/.hermes/hermes-agent
-./scripts/healbite status
-```
-
-Useful follow-up commands:
-
-```bash
-./scripts/healbite logs --last 80
-./scripts/healbite test-diary
-./scripts/healbite check-admins
-./scripts/healbite inspect-profile --user-id 248875361
-./scripts/healbite simulate-message "/diary 7d" --user-id 248875361
-./scripts/healbite fix-plan --issue provider-auth
-```
-
-Guardrails for this CLI:
-
-- it must not print secret values;
-- it must not mutate provider/model/admin-list/Qdrant toggles;
-- it is read-only by default;
-- any write probe must be a synthetic insert/delete probe only.
+- production deployment and rollback: [`skills/deploy/SKILL.md`](skills/deploy/SKILL.md);
+- SQLite/Qdrant memory maintenance: [`skills/memory/SKILL.md`](skills/memory/SKILL.md);
+- Telegram runtime troubleshooting: [`skills/telegram/SKILL.md`](skills/telegram/SKILL.md).
 
 ## Commands That Require User Confirmation
 
@@ -100,11 +81,4 @@ Do not run these without explicit user approval:
 
 ## Deploy Checkpoint
 
-Before a deploy checkpoint:
-
-1. Confirm what changed and whether runtime code was touched.
-2. Create or confirm a backup if production code/data is involved.
-3. Run `bash scripts/agent_check.sh`.
-4. If relevant, run any extra targeted pytest near the changed files.
-5. Only rebuild/restart containers when the user explicitly asked for deploy or runtime rollout.
-6. After deploy, verify `hermes-bot` is running, `restart_count=0`, logs contain no traceback, and user-facing paths do not leak provider/auth details.
+Use [`skills/deploy/SKILL.md`](skills/deploy/SKILL.md) for the complete deployment checkpoint, backup, migration, verification, failure, and rollback procedure.

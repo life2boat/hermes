@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Runtime Debug"
+  short_description: "Diagnose Hermes Telegram runtime failures safely"
+  default_prompt: "Use $telegram to diagnose a Hermes Telegram runtime failure."

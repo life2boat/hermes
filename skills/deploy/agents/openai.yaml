@@ -1,0 +1,4 @@
+interface:
+  display_name: "HealBite Production Deploy"
+  short_description: "Run fail-closed HealBite production deployments"
+  default_prompt: "Use $deploy to run a SHA-pinned HealBite production deployment."

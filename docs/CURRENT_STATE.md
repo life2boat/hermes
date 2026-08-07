@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.13
+version: 1.2.14
 updated_at: 2026-08-07
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 492b50e979770ed5004bd6e025b9b0642636030a
+state_verified_against_main_sha: c68c64f3513de6e5ca306ab0e85f6cf18a2969a9
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `492b50e979770ed5004bd6e025b9b0642636030a`.
+  `c68c64f3513de6e5ca306ab0e85f6cf18a2969a9`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -122,6 +122,11 @@ Git.
   shopping-list block, and explicit save/regenerate/cancel callbacks.
 - The fridge-menu schema has not been applied to production and the Telegram UI
   has not been deployed or manually smoke-tested.
+- Repository-local procedural entry points are being introduced under
+  `skills/deploy/`, `skills/memory/`, and `skills/telegram/`; passive policy
+  files point to those procedures instead of duplicating operational steps.
+- This documentation refactor does not build, deploy, restart, change
+  production configuration, write SQLite, or mutate Qdrant.
 
 ## 2. Stable Capabilities
 
@@ -155,6 +160,9 @@ Git.
   Registry publication and production deployment remain separate gates.
 - Production-host deploy-capacity qualification is read-only and must complete
   before a separately authorized pull or deployment task.
+- Production deployment, Memory OS reconciliation, and Telegram runtime
+  troubleshooting now have repository-local procedural skill contracts with
+  explicit safety, failure, and verification gates.
 
 ## 3. Active Blockers
 

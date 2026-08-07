@@ -21,16 +21,13 @@ Before making changes, read:
 - MEMORY.md
 - USER.md
 - SOUL.md
-- RUNBOOK_MEMORY_OS.md, if relevant
 
-Respect the current architecture:
-- SQLite is the only Source of Truth.
-- Qdrant is a disposable semantic index.
-- Telegram polling belongs to Hermes Gateway.
-- Do not start a second Telegram polling process.
-- Do not hardcode Telegram user IDs.
-- Do not expose provider/auth errors to users.
-- Do not change secrets, LLM provider/model, admin-list, Qdrant toggle, or production env without explicit approval.
+Load the domain procedure when the loop reaches operational work:
+- deployment, backup, migration, or rollback: [`../../deploy/SKILL.md`](../../deploy/SKILL.md);
+- SQLite/Qdrant maintenance: [`../../memory/SKILL.md`](../../memory/SKILL.md);
+- Telegram runtime debugging: [`../../telegram/SKILL.md`](../../telegram/SKILL.md).
+
+Keep repository-wide safety and architecture rules in `AGENTS.md`; do not duplicate them here.
 
 ## Loop Contract
 You are not doing single-shot prompting. You are running a bounded engineering loop.
@@ -63,20 +60,10 @@ Otherwise prefer:
 - ruff check and ruff format for changed Python files;
 - targeted pytest near changed files;
 - docker compose build/restart only when needed;
-- docker logs after deploy.
+- post-deploy verification from the deployment skill when deployment is authorized.
 
 ## Deploy Rules
-Do not deploy automatically unless the user explicitly asks for deploy.
-Before deploy:
-1. Create or confirm backup.
-2. Run targeted tests.
-3. Rebuild container only if code changed.
-4. Check:
-   - hermes-bot running
-   - restart_count=0
-   - logs have no traceback
-   - no database is locked
-   - no Provider authentication failed in user-facing path
+Use [`../../deploy/SKILL.md`](../../deploy/SKILL.md). A coding-loop success never authorizes production mutation by itself.
 
 ## Memory Update
 At the end:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Memory Maintenance"
+  short_description: "Maintain and reconcile SQLite and Qdrant memory"
+  default_prompt: "Use $memory to maintain SQLite memory and reconcile its Qdrant index."

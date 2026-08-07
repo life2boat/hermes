@@ -11,8 +11,19 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 - Store private artifacts under `/home/hermes/private_backups/hermes-agent/` with `chmod 700`.
 - Do not print secret values.
 - `scripts/agent_check.sh` runs `scripts/secret_check.sh` as its first step and should be used before commits for local coding tasks.
-- Before a HealBite fix or runtime audit, run `./scripts/healbite status` so you have the current container, config, diary DB, and admin-policy snapshot.
 - See `RUNBOOK_CODING_LOOP.md` -> `Hook Bootstrap`; for a new checkout run `venv/bin/lefthook install`, verify with `venv/bin/lefthook run pre-commit --verbose`, and fall back to `bash scripts/agent_check.sh` if hooks are not installed yet.
+- Load the domain procedure below before HealBite deployment, memory maintenance, or Telegram runtime work.
+
+## HealBite Procedural Skills
+
+- Production deployment, backup, migration, verification, and rollback:
+  [`skills/deploy/SKILL.md`](skills/deploy/SKILL.md).
+- SQLite Memory OS maintenance and Qdrant reconciliation:
+  [`skills/memory/SKILL.md`](skills/memory/SKILL.md).
+- Telegram runtime troubleshooting:
+  [`skills/telegram/SKILL.md`](skills/telegram/SKILL.md).
+
+These skills are the maintained procedural entry points. Keep this file focused on repository-wide policy and architecture.
 
 ## Project State Source of Truth
 

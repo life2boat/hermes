@@ -5,6 +5,10 @@ application deployment entrypoint for Hermes production. Database migration,
 production snapshot inventory, snapshot backfill, and feature enablement are
 separate approval gates.
 
+For the operator-facing sequence that coordinates these low-level contracts,
+use [`skills/deploy/SKILL.md`](../../skills/deploy/SKILL.md). This runbook remains
+the authoritative detailed contract consumed by deployment tooling and tests.
+
 ## Canonical contract
 
 | Setting | Value |

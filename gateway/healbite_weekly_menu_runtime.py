@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable, Sequence, TypeVar
 
 from gateway.healbite_feature_gates import (
     FeatureAvailabilityStatus,
@@ -22,7 +24,10 @@ from gateway.healbite_households import (
 )
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
 from gateway.healbite_runtime_resources import RuntimeResource, borrowed_runtime_resource
-from gateway.healbite_weekly_menu_schema import WeeklyMenuSchemaState
+from gateway.healbite_weekly_menu_schema import (
+    WeeklyMenuSchemaState,
+    require_monday_week_start,
+)
 from gateway.healbite_weekly_menus import (
     HealBiteWeeklyMenuStore,
     HouseholdAuthorizationContext,
@@ -83,6 +88,144 @@ class WeeklyMenuRuntimeCleanupError(WeeklyMenuRuntimeStateError):
 HouseholdStoreResourceFactory = Callable[[], RuntimeResource[HealBiteHouseholdStore]]
 WeeklyMenuStoreResourceFactory = Callable[[], RuntimeResource[HealBiteWeeklyMenuStore]]
 T = TypeVar("T")
+
+
+_FRIDGE_MENU_WEEKDAYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+_FRIDGE_MENU_MEAL_TYPES = ("breakfast", "lunch", "dinner")
+_FRIDGE_MENU_SYSTEM_PROMPT = (
+    "You generate a seven-day meal plan from the user's confirmed refrigerator inventory. "
+    "Return exactly one valid JSON object and nothing else: no markdown, code fences, comments, or prose. "
+    "The object must contain exactly two top-level keys: days and missing_ingredients_to_buy. "
+    "days must contain exactly seven objects in canonical order monday through sunday. Each day object "
+    "must contain exactly day and meals. meals must contain exactly breakfast, lunch, and dinner once each. "
+    "Each meal must contain exactly meal_type, title, and ingredients. Each ingredient must contain exactly "
+    "name, quantity, unit, and is_in_inventory, where is_in_inventory is a JSON boolean. "
+    "missing_ingredients_to_buy must be an array of unique objects containing exactly name, quantity, and unit. "
+    "It must contain every ingredient whose is_in_inventory value is false and no ingredient whose value is true. "
+    "Use inventory ingredients whenever practical, never claim an absent ingredient is in inventory, and obey "
+    "dietary restrictions. Use the requested locale for human-readable values."
+)
+_VISION_INGREDIENT_SEPARATOR_RE = re.compile(r"[\n,;]+")
+_VISION_INGREDIENT_PREFIX_RE = re.compile(r"^\s*(?:(?:[-*\u2022]+)|(?:\d+[.)]))\s*")
+_MAX_PROMPT_INGREDIENTS = 200
+_MAX_PROMPT_ITEM_LENGTH = 200
+_MAX_VISION_TEXT_LENGTH = 20_000
+
+
+@dataclass(frozen=True, slots=True)
+class WeeklyMenuPromptBundle:
+    system_prompt: str
+    user_prompt: str
+
+
+class WeeklyMenuPromptValidationError(ValueError):
+    pass
+
+
+def _normalize_prompt_values(
+    values: Sequence[str],
+    *,
+    label: str,
+    maximum: int,
+) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise WeeklyMenuPromptValidationError(f"{label} must be a sequence")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = " ".join(str(raw or "").split())
+        if not value or len(value) > _MAX_PROMPT_ITEM_LENGTH:
+            raise WeeklyMenuPromptValidationError(f"invalid {label} item")
+        key = value.casefold()
+        if key in seen:
+            continue
+        normalized.append(value)
+        seen.add(key)
+        if len(normalized) > maximum:
+            raise WeeklyMenuPromptValidationError(f"too many {label} items")
+    return tuple(normalized)
+
+
+def build_fridge_weekly_menu_prompts(
+    inventory_ingredients: Sequence[str],
+    *,
+    week_start: str,
+    dietary_restrictions: Sequence[str] = (),
+    locale: str = "ru-RU",
+) -> WeeklyMenuPromptBundle:
+    """Build a strict, cache-stable LLM prompt pair for fridge-first menus."""
+
+    try:
+        canonical_week_start = require_monday_week_start(
+            str(week_start).strip()
+        )
+    except (TypeError, ValueError) as exc:
+        raise WeeklyMenuPromptValidationError("invalid week_start") from exc
+    normalized_locale = str(locale or "").strip()
+    if not normalized_locale or len(normalized_locale) > 32:
+        raise WeeklyMenuPromptValidationError("invalid locale")
+    inventory = _normalize_prompt_values(
+        inventory_ingredients,
+        label="inventory",
+        maximum=_MAX_PROMPT_INGREDIENTS,
+    )
+    restrictions = _normalize_prompt_values(
+        dietary_restrictions,
+        label="dietary restriction",
+        maximum=32,
+    )
+    request = {
+        "dietary_restrictions": list(restrictions),
+        "inventory_ingredients": list(inventory),
+        "locale": normalized_locale,
+        "meal_types": list(_FRIDGE_MENU_MEAL_TYPES),
+        "week_start": canonical_week_start,
+        "weekdays": list(_FRIDGE_MENU_WEEKDAYS),
+    }
+    return WeeklyMenuPromptBundle(
+        system_prompt=_FRIDGE_MENU_SYSTEM_PROMPT,
+        user_prompt=json.dumps(
+            request,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def parse_fridge_vision_ingredients(vision_text: str) -> list[str]:
+    """Parse a Vision model's draft text into normalized ingredient names."""
+
+    if not isinstance(vision_text, str):
+        raise WeeklyMenuPromptValidationError("vision text must be a string")
+    if len(vision_text) > _MAX_VISION_TEXT_LENGTH:
+        raise WeeklyMenuPromptValidationError("vision text is too long")
+    ingredients: list[str] = []
+    seen: set[str] = set()
+    for chunk in _VISION_INGREDIENT_SEPARATOR_RE.split(vision_text):
+        value = _VISION_INGREDIENT_PREFIX_RE.sub("", chunk).strip()
+        value = " ".join(value.split())
+        if not value:
+            continue
+        if len(value) > _MAX_PROMPT_ITEM_LENGTH:
+            raise WeeklyMenuPromptValidationError("invalid vision ingredient")
+        key = value.casefold()
+        if key in seen:
+            continue
+        ingredients.append(value)
+        seen.add(key)
+        if len(ingredients) > _MAX_PROMPT_INGREDIENTS:
+            raise WeeklyMenuPromptValidationError("too many vision ingredients")
+    return ingredients
+
 
 
 

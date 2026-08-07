@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,9 @@ from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_runtime_resources import borrowed_runtime_resource
 from gateway.healbite_weekly_menu_runtime import (
     HealBiteWeeklyMenuRuntimeService,
+    WeeklyMenuPromptValidationError,
+    build_fridge_weekly_menu_prompts,
+    parse_fridge_vision_ingredients,
     WeeklyMenuRuntimeCleanupError,
     WeeklyMenuRuntimeNotFoundError,
     WeeklyMenuRuntimeStateError,
@@ -761,3 +765,83 @@ def test_weekly_runtime_owned_resource_rolls_back_and_releases_sqlite_lock(tmp_p
         second.rollback()
     finally:
         second.close()
+
+def test_fridge_prompt_builder_is_cache_stable_and_emits_strict_request() -> None:
+    first = build_fridge_weekly_menu_prompts(
+        [" \u042f\u0439\u0446\u0430 ", "\u043c\u043e\u043b\u043e\u043a\u043e", "\u044f\u0439\u0446\u0430"],
+        week_start="2026-08-10",
+        dietary_restrictions=["\u0431\u0435\u0437 \u0430\u0440\u0430\u0445\u0438\u0441\u0430"],
+    )
+    second = build_fridge_weekly_menu_prompts(
+        ["\u0441\u044b\u0440"],
+        week_start="2026-08-10",
+    )
+
+    assert first.system_prompt == second.system_prompt
+    assert "missing_ingredients_to_buy" in first.system_prompt
+    assert "is_in_inventory" in first.system_prompt
+    assert "exactly seven" in first.system_prompt
+    payload = json.loads(first.user_prompt)
+    assert set(payload) == {
+        "dietary_restrictions",
+        "inventory_ingredients",
+        "locale",
+        "meal_types",
+        "week_start",
+        "weekdays",
+    }
+    assert payload["inventory_ingredients"] == [
+        "\u042f\u0439\u0446\u0430",
+        "\u043c\u043e\u043b\u043e\u043a\u043e",
+    ]
+    assert payload["dietary_restrictions"] == [
+        "\u0431\u0435\u0437 \u0430\u0440\u0430\u0445\u0438\u0441\u0430"
+    ]
+    assert payload["weekdays"] == [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+    assert payload["meal_types"] == ["breakfast", "lunch", "dinner"]
+
+
+@pytest.mark.parametrize("week_start", ("", "2026-08-11", "not-a-date"))
+def test_fridge_prompt_builder_rejects_invalid_week_start(week_start: str) -> None:
+    with pytest.raises(WeeklyMenuPromptValidationError, match="week_start"):
+        build_fridge_weekly_menu_prompts([], week_start=week_start)
+
+
+def test_fridge_prompt_builder_rejects_string_as_inventory_sequence() -> None:
+    with pytest.raises(WeeklyMenuPromptValidationError, match="sequence"):
+        build_fridge_weekly_menu_prompts(
+            "\u044f\u0439\u0446\u0430",
+            week_start="2026-08-10",
+        )
+
+
+def test_vision_stub_parses_deduplicated_ingredient_list() -> None:
+    parsed = parse_fridge_vision_ingredients(
+        "- \u041c\u043e\u043b\u043e\u043a\u043e\n"
+        "2. \u042f\u0439\u0446\u0430; "
+        "\u0441\u044b\u0440, \u043c\u043e\u043b\u043e\u043a\u043e\n"
+        "\u2022 \u041f\u043e\u043c\u0438\u0434\u043e\u0440\u044b"
+    )
+
+    assert parsed == [
+        "\u041c\u043e\u043b\u043e\u043a\u043e",
+        "\u042f\u0439\u0446\u0430",
+        "\u0441\u044b\u0440",
+        "\u041f\u043e\u043c\u0438\u0434\u043e\u0440\u044b",
+    ]
+    assert parse_fridge_vision_ingredients("  ") == []
+
+
+def test_vision_stub_rejects_non_text_and_oversized_input() -> None:
+    with pytest.raises(WeeklyMenuPromptValidationError, match="string"):
+        parse_fridge_vision_ingredients(None)  # type: ignore[arg-type]
+    with pytest.raises(WeeklyMenuPromptValidationError, match="too long"):
+        parse_fridge_vision_ingredients("x" * 20_001)

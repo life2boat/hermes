@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from gateway.healbite_fridge_menu_schema import (
+    FRIDGE_MENU_SCHEMA_MIGRATION_ID,
+    FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
+    FRIDGE_MENU_SCHEMA_SQL,
+)
 from gateway.healbite_inventory import (
     INVENTORY_SCHEMA_MIGRATION_ID,
     INVENTORY_SCHEMA_MIGRATION_SHA256,
@@ -71,6 +76,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "weekly",
         "shopping",
         "inventory",
+        "fridge_menu",
     )
     manifest = schema_migrate.migration_registry_manifest()
     assert tuple(item["component"] for item in manifest) == (
@@ -78,8 +84,9 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "weekly",
         "shopping",
         "inventory",
+        "fridge_menu",
     )
-    assert manifest[-1] == {
+    assert manifest[-2] == {
         "component": "inventory",
         "migration_id": INVENTORY_SCHEMA_MIGRATION_ID,
         "migration_sha256": INVENTORY_SCHEMA_MIGRATION_SHA256,
@@ -87,6 +94,14 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
     assert hashlib.sha256(
         (INVENTORY_SCHEMA_SQL.strip() + "\n").encode("utf-8")
     ).hexdigest() == INVENTORY_SCHEMA_MIGRATION_SHA256
+    assert manifest[-1] == {
+        "component": "fridge_menu",
+        "migration_id": FRIDGE_MENU_SCHEMA_MIGRATION_ID,
+        "migration_sha256": FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
+    }
+    assert hashlib.sha256(
+        (FRIDGE_MENU_SCHEMA_SQL.strip() + "\n").encode("utf-8")
+    ).hexdigest() == FRIDGE_MENU_SCHEMA_MIGRATION_SHA256
 
 
 def test_registry_rejects_duplicate_component() -> None:
@@ -172,13 +187,15 @@ def test_inventory_migration_is_atomic_and_idempotent(tmp_path: Path) -> None:
 def test_target_plan_payload_uses_canonical_registry() -> None:
     payload = staged._target_schema_payload()
     assert payload["components"] == [
+        "fridge_menu",
         "household",
         "inventory",
         "shopping",
         "weekly",
     ]
     assert payload["migrations"] == schema_migrate.migration_registry_manifest()
-    assert payload["migrations"][-1]["component"] == "inventory"
+    assert payload["migrations"][-2]["component"] == "inventory"
+    assert payload["migrations"][-1]["component"] == "fridge_menu"
     assert production.PLAN_VERSION == 6
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
 
@@ -190,10 +207,17 @@ def test_target_plan_omits_absent_registry_component(
     monkeypatch.setattr(
         schema_migrate,
         "_component_registry",
-        lambda: original[:-1],
+        lambda: tuple(
+            component for component in original if component.name != "inventory"
+        ),
     )
     payload = staged._target_schema_payload()
-    assert payload["components"] == ["household", "shopping", "weekly"]
+    assert payload["components"] == [
+        "fridge_menu",
+        "household",
+        "shopping",
+        "weekly",
+    ]
     assert all(
         item["component"] != "inventory"
         for item in payload["migrations"]

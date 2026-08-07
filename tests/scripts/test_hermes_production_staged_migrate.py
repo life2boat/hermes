@@ -984,7 +984,7 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["MIGRATION_REGISTRY"] == (
         schema_migrate.migration_registry_manifest()
     )
-    assert payload["MIGRATION_REGISTRY"][-1]["component"] == "inventory"
+    assert payload["MIGRATION_REGISTRY"][-1]["component"] == "fridge_menu"
     assert payload["SOURCE_USER_VERSION"] == 0
     assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(
         context.source.parent

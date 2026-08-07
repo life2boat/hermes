@@ -13,6 +13,12 @@ from uuid import uuid4
 
 import pytest
 
+from gateway.healbite_fridge_menu_schema import (
+    PLANNED_INGREDIENTS_TABLE,
+    PLANNED_MEALS_TABLE,
+    USER_INVENTORY_TABLE,
+    WEEKLY_MENU_PLANS_TABLE,
+)
 from gateway.healbite_household_bootstrap import detect_schema_state
 from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_shopping import HealBiteShoppingStore
@@ -888,7 +894,7 @@ def test_borrowed_connection_is_not_closed(tmp_path: Path) -> None:
         selected=healbite_schema_migrate.ALL_COMPONENTS,
     )
     assert changed is True
-    assert len(phases) == 4
+    assert len(phases) == 5
     assert tracker.close_count == 0
     assert tracker.execute("SELECT 1").fetchone() == (1,)
     tracker.close()
@@ -1063,12 +1069,49 @@ def test_fresh_db_full_migration_order_and_sanitized_output(tmp_path: Path) -> N
     result = _run_cli(db_path)
     payload = _json_result(result)
     assert result.returncode == 0
-    assert [phase["name"] for phase in payload["phases"]] == ["household", "weekly", "shopping", "inventory"]
+    assert [phase["name"] for phase in payload["phases"]] == [
+        "household",
+        "weekly",
+        "shopping",
+        "inventory",
+        "fridge_menu",
+    ]
     assert payload["data_backfilled"] is False
     assert str(db_path) not in result.stdout
     assert "id" not in payload
     assert _table_count(db_path, SHOPPING_LISTS_TABLE) == 0
     assert _table_count(db_path, SHOPPING_ITEMS_TABLE) == 0
+    assert _table_exists(db_path, USER_INVENTORY_TABLE)
+    assert _table_exists(db_path, WEEKLY_MENU_PLANS_TABLE)
+    assert _table_exists(db_path, PLANNED_MEALS_TABLE)
+    assert _table_exists(db_path, PLANNED_INGREDIENTS_TABLE)
+
+
+def test_fridge_menu_component_can_be_selected_additively(tmp_path: Path) -> None:
+    db_path = _fresh_db(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE existing_rows (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_rows (value) VALUES ('keep')")
+        connection.commit()
+
+    first = _run_cli(db_path, "--components", "fridge_menu")
+    second = _run_cli(db_path, "--components", "fridge_menu")
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert _json_result(first)["schema_changed"] is True
+    assert _json_result(second)["schema_changed"] is False
+    assert [phase["name"] for phase in _json_result(first)["phases"]] == [
+        "fridge_menu"
+    ]
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT value FROM existing_rows"
+        ).fetchone()[0] == "keep"
+    assert _table_exists(db_path, USER_INVENTORY_TABLE)
+    assert _table_exists(db_path, WEEKLY_MENU_PLANS_TABLE)
+    assert _table_exists(db_path, PLANNED_MEALS_TABLE)
+    assert _table_exists(db_path, PLANNED_INGREDIENTS_TABLE)
 
 
 def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> None:

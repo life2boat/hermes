@@ -26,6 +26,12 @@ from gateway.healbite_inventory import (
     INVENTORY_SCHEMA_SQL,
     HealBiteInventoryStore,
 )
+from gateway.healbite_fridge_menu_schema import (
+    FRIDGE_MENU_SCHEMA_MIGRATION_ID,
+    FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
+    FRIDGE_MENU_SCHEMA_SQL,
+    fridge_menu_schema_statements,
+)
 from gateway.healbite_households import HealBiteHouseholdStore
 from gateway.healbite_shopping import HealBiteShoppingStore
 from gateway.healbite_weekly_menu_schema import (
@@ -743,6 +749,13 @@ def _component_registry() -> tuple[MigrationComponent, ...]:
                 source_sql=INVENTORY_SCHEMA_SQL,
                 expected_sha256=INVENTORY_SCHEMA_MIGRATION_SHA256,
             ),
+            _component(
+                "fridge_menu",
+                fridge_menu_schema_statements(),
+                migration_id=FRIDGE_MENU_SCHEMA_MIGRATION_ID,
+                source_sql=FRIDGE_MENU_SCHEMA_SQL,
+                expected_sha256=FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
+            ),
         )
     )
 
@@ -1325,7 +1338,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Migrate an existing disposable DB in an owned private 0700 directory",
     )
-    parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping")
+    parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping,inventory,fridge_menu")
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
     return parser
 

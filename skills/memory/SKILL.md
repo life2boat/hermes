@@ -49,6 +49,48 @@ Do not run the non-dry rebuild against production until Qdrant mutation is expli
 
 The current rebuild implementation is **upsert-only**. A successful rebuild repopulates current SQLite facts but does not prove that stale Qdrant-only points were removed.
 
+## Safety Decision Memory
+
+### User and household isolation
+
+**Invariant:** Scope every Memory OS fact read and write by normalized `user_id`. If a maintenance task also touches household-owned product data, resolve access through the authoritative household authorization context rather than trusting a raw household, member, user, or Telegram identifier.
+
+**Why:** User and household boundaries protect both confidentiality and write ownership. A transport identifier or caller-supplied domain ID is not proof that the caller may read or mutate that scope.
+
+**Evidence:** Require user-scoped SQLite predicates, Qdrant `user_id` filters/payloads, SQLite re-hydration of semantic hits, and focused cross-user/cross-household denial tests. Evidence remains aggregate-only and contains no identifiers.
+
+### Durable state and derived search
+
+**Invariant:** Keep SQLite as the durable source of truth wherever the current Memory OS contract applies; treat Qdrant and SQLite FTS as derived search indexes.
+
+**Why:** Vector points can be missing, stale, duplicated, or unavailable without changing the authoritative fact. Allowing a derived index to overwrite SQLite would turn search-index drift into durable data loss.
+
+**Evidence:** Verify Qdrant hits are hydrated from user-scoped SQLite rows, SQLite-only fallback returns authoritative facts, and SQLite schema/content fingerprints remain unchanged during a Qdrant-only operation.
+
+### Dual-write and reconciliation
+
+**Invariant:** Commit the SQLite fact first and only then schedule the derived Qdrant upsert. Treat the two writes as non-atomic and retain reconciliation as an explicit maintenance responsibility.
+
+**Why:** The current dual-write path crosses two stores and may complete in SQLite before an asynchronous Qdrant upsert succeeds. Deletes also do not remove stale Qdrant points, so a successful write or equal count alone cannot prove convergence.
+
+**Evidence:** Compare SQLite candidate identities with hydrated Qdrant identities, record candidate/upsert counts and adapter failures, and keep the stale-point classification visible after every dry run or rebuild.
+
+### Qdrant mutation boundary
+
+**Invariant:** Default to read-only metadata and `--dry-run`; permit only scoped upserts under explicit authorization. Replacement, cutover, deletion, or collection cleanup requires its own reviewed workflow and rollback point.
+
+**Why:** The live collection is shared derived state, and the current rebuild is upsert-only. In-place deletion based on counts can remove valid points or cross an ownership boundary without proving which identities are stale.
+
+**Evidence:** Pin the resolved URL, collection, vector size, DB path, and optional user scope; retain dry-run candidates, post-upsert readiness/counts, hydration tests, and proof that no delete or collection switch occurred unless separately authorized.
+
+### Integrity around state changes
+
+**Invariant:** Resolve the exact live SQLite path, validate integrity and foreign keys before and after every state-changing operation, and prepare a verified backup before SQLite mutation.
+
+**Why:** A guessed path can silently create a new empty database, while corruption or FK violations can be propagated into backups, migrations, FTS rebuilds, or Qdrant reconciliation.
+
+**Evidence:** Record path/device/inode, pre/post `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, schema/user-version fingerprints, backup SHA-256, and a successful isolated restore test.
+
 ## Procedure
 
 1. **Define the failure.** Separate missing recall, wrong-user recall, count drift, Qdrant unavailability, SQLite corruption, FTS degradation, and configuration drift. Record only safe error classes.

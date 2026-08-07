@@ -47,6 +47,40 @@ Use focused tests through `scripts/run_tests.sh`; do not invoke the test runner 
 
 One live gateway/profile must own one Telegram bot token. Never start a second polling process to test a token already in use.
 
+## Safety Decision Memory
+
+### Runtime and user ownership isolation
+
+**Invariant:** Bind the bot token to the intended gateway/profile, then authorize each update against the correct private-user, group-user, group-chat, and feature scope before routing or reading FSM state.
+
+**Why:** Bot identity proves which Telegram bot is connected; it does not prove that a sender may access another user, chat, topic, household, or state machine. Mixing those scopes can disclose data or execute actions for the wrong owner.
+
+**Evidence:** Record only token/profile and authorization classifications, never identifiers. Require the scoped token lock, fail-closed allowlist results, and synthetic cross-user/cross-chat routing and FSM tests.
+
+### Token secrecy
+
+**Invariant:** Treat the Telegram bot token as a bearer credential: never print it, place it in evidence, pass it on a command line, or expose it through raw logs/config dumps.
+
+**Why:** Anyone holding the token can impersonate the bot and access its Telegram API surface. Redaction after logging is weaker than preventing the value from entering output at all.
+
+**Evidence:** Report presence or a safe fingerprint only, use filtered diagnostics, run the repository secret scan, and verify captured logs/evidence contain neither the token nor credential-bearing URLs.
+
+### Long-polling single consumer
+
+**Invariant:** Permit exactly one active `getUpdates` long-polling consumer for a bot token. Two runtimes using the same bot token must not be active, even when they use different profiles, containers, or hosts.
+
+**Why:** Telegram terminates competing `getUpdates` sessions with a conflict, so duplicate runtimes produce ambiguous ownership, retry loops, and gaps in update consumption. Starting another poller is therefore not a valid diagnostic probe.
+
+**Evidence:** Require the scoped token lock, sanitized process/container/profile inventory, one running updater, and absence of unresolved polling conflicts. The same-host lock and conflict-retry/fatal tests must pass.
+
+### Read-only and no-send health checks
+
+**Invariant:** Default health checks to no-send operations. Treat updater state and `getMe` as evidence of credential/network/API readiness, not as proof that a user-visible message can be delivered.
+
+**Why:** A diagnostic message mutates the user-facing conversation and can trigger routing or notification side effects. Conversely, a read-only probe cannot validate formatting, chat permissions, or end-to-end delivery.
+
+**Evidence:** Record successful updater/transport state and `getMe`, assert zero send/edit API calls and zero outbound messages, and reproduce handler behavior with synthetic events. Run a live delivery smoke only under separate explicit authorization.
+
 ## Procedure
 
 1. **Define the smallest failing path.** Record platform mode, DM/group/topic context, update type, handler/callback name, expected state transition, and safe error class. Do not copy message content or identifiers.

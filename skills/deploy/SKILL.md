@@ -53,6 +53,56 @@ Run `execute-deploy` or `execute-rollback` only inside a separately authorized r
 
 The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_VISION_PREDEPLOY.md) defines provenance and environment-precedence checks. The [weekly/shopping rollout runbook](../../docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md#backup-contract-before-first-production-ddl) is the detailed source for SQLite backup, staged migration, and emergency restore constraints.
 
+## Safety Decision Memory
+
+### Canonical source provenance
+
+**Invariant:** Operate only from the canonical repository with the trusted remote, and require clean `HEAD` to equal the exact resolved 40-character `main` SHA.
+
+**Why:** Branch names and worktree contents are mutable. A wrong remote, stale ref, or dirty checkout disconnects the deployed bytes from the source reviewed and tested by CI.
+
+**Evidence:** Record the sanitized canonical remote identity, resolved `main` SHA, `HEAD` equality, clean status, and a passing `check-repository` result.
+
+### Trusted build and immutable release identity
+
+**Invariant:** Build from a verified export of the exact Git tree, never a raw worktree, and deploy only an immutable image ID or digest whose single OCI revision equals the source SHA.
+
+**Why:** Ignored or untracked files can contaminate a raw build context, while mutable tags can move after review. The tree manifest and OCI revision bind source review, build input, and runtime artifact to one identity.
+
+**Evidence:** Retain the exported-context manifest with path, mode, blob, tree, and scanner results; inspect the image digest/ID and require `org.opencontainers.image.revision` to equal the exact SHA.
+
+### Quiescent capture and fresh rollback state
+
+**Invariant:** Require active writers to be zero before state capture or migration publication, then create a fresh backup from the exact live SQLite database through the SQLite backup API.
+
+**Why:** Concurrent writers can change the database and WAL between observations, making the baseline or rollback point internally inconsistent. An older backup does not represent the state immediately before the authorized mutation.
+
+**Evidence:** Record the writer lease/process classification, `active_writers=0`, live DB path/device/inode, backup timestamp and SHA-256, plus a successful isolated restore of that backup.
+
+### Database integrity and schema compatibility
+
+**Invariant:** Require SQLite integrity to be `ok`, foreign-key violations to be zero, and the resulting schema to remain compatible with both the candidate image and any approved automatic rollback image.
+
+**Why:** A healthy container cannot compensate for a corrupt database or an incompatible schema. An image-only rollback after a schema-breaking migration may make the previous binary misread or further damage durable state.
+
+**Evidence:** Capture pre/post `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, schema/user-version fingerprints, idempotent migration rehearsal, and compatibility tests for the candidate and rollback images against the rehearsed post-migration schema.
+
+### Exact-image deployment and rollback boundary
+
+**Invariant:** Recreate `hermes-bot` with the exact inspected immutable image without tag re-resolution. Permit automatic image rollback only when the previous image is proven compatible with the post-migration schema.
+
+**Why:** Re-resolving a tag can substitute an unreviewed artifact. If a schema-breaking migration has already published, the previous image is not a valid automatic recovery target.
+
+**Evidence:** Compare the running container image ID and OCI revision with the approved values. Preserve a passing rollback rehearsal and schema-compatibility result; otherwise keep writers stopped and require a separately authorized, rehearsed database-and-image recovery plan.
+
+### Governance warnings and technical gates
+
+**Invariant:** Report governance-only warnings without converting a complete technical PASS into a technical failure. Never waive a failed, unknown, or missing technical gate because of urgency, operator preference, or a governance disposition.
+
+**Why:** Advisory ownership or process warnings have different semantics from deterministic safety checks. Technical fail-closed gates protect durable state when the system cannot prove the source, artifact, backup, compatibility, or rollback assumptions needed for a safe mutation.
+
+**Evidence:** Classify advisory findings separately and retain each required technical gate result. Proceed only when every required technical result is explicitly `PASS`; any `FAIL`, `UNKNOWN`, or absent result blocks mutation.
+
 ## Procedure
 
 1. **Freeze scope and success criteria.** Record the requested source SHA, image, services, database migration, feature flags, and explicit stop point. Treat build, registry publication, migration, deploy, feature activation, secret changes, and smoke tests as separate gates.

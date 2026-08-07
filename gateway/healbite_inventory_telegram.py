@@ -673,6 +673,10 @@ class HealBiteInventoryTelegramController:
             None if actor is None else getattr(self._pending.get(actor), "mode", None)
         )
 
+    def cancel_pending(self, actor_user_id: object) -> bool:
+        actor = _positive_actor(actor_user_id)
+        return False if actor is None else self._pending.pop(actor, None) is not None
+
     def _load(
         self,
         actor_user_id: object,

@@ -107,11 +107,14 @@ _FRIDGE_MENU_SYSTEM_PROMPT = (
     "days must contain exactly seven objects in canonical order monday through sunday. Each day object "
     "must contain exactly day and meals. meals must contain exactly breakfast, lunch, and dinner once each. "
     "Each meal must contain exactly meal_type, title, and ingredients. Each ingredient must contain exactly "
-    "name, quantity, unit, and is_in_inventory, where is_in_inventory is a JSON boolean. "
+    "name, quantity, unit, and is_in_inventory. quantity must be a positive JSON number or numeric string; "
+    "unit must be one of g, kg, ml, l, piece, package, unitless, unknown; is_in_inventory must be a JSON boolean. "
     "missing_ingredients_to_buy must be an array of unique objects containing exactly name, quantity, and unit. "
-    "It must contain every ingredient whose is_in_inventory value is false and no ingredient whose value is true. "
-    "Use inventory ingredients whenever practical, never claim an absent ingredient is in inventory, and obey "
-    "dietary restrictions. Use the requested locale for human-readable values."
+    "It must contain every unique ingredient whose is_in_inventory value is false, aggregate repeated quantities "
+    "when units are compatible, and contain no ingredient whose value is true. "
+    "Use inventory ingredients whenever practical. When is_in_inventory is true, copy the ingredient name "
+    "exactly from inventory_ingredients; never claim an absent ingredient is in inventory. Obey dietary "
+    "restrictions. Use the requested locale for human-readable values."
 )
 _VISION_INGREDIENT_SEPARATOR_RE = re.compile(r"[\n,;]+")
 _VISION_INGREDIENT_PREFIX_RE = re.compile(r"^\s*(?:(?:[-*\u2022]+)|(?:\d+[.)]))\s*")

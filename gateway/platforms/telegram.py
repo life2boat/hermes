@@ -121,6 +121,12 @@ from gateway.healbite_inventory_telegram import (
     build_inventory_telegram_controller,
     log_inventory_text_observability,
 )
+from gateway.healbite_fridge_menu_telegram import (
+    FRIDGE_MENU_CALLBACK_ROOT,
+    FRIDGE_MENU_COMMAND,
+    FridgeMenuTelegramResult,
+    build_fridge_menu_telegram_controller,
+)
 from gateway.healbite_family_telegram import (
     FAMILY_CALLBACK_ROOT,
     FAMILY_CALLBACK_PREFIX,
@@ -197,6 +203,7 @@ MAX_COMMANDS_PER_SCOPE = 30
 HEALBITE_REPLY_KEYBOARD_ROWS = [
     ["👤 Мой профиль", "🍎 Дневник еды"],
     ["📋 Меню на неделю", "🛒 Список покупок"],
+    ["🥘 Из холодильника в меню"],
     ["🥕 Продукты дома"],
     ["⚖️ Трекер веса", "💧 Трекер воды"],
     ["👨‍👩‍👧 Семья", "📈 Отчет за неделю"],
@@ -207,6 +214,7 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "🍎 Дневник еды": "/diary",
     "📋 Меню на неделю": WEEKLY_MENU_COMMAND,
     "🛒 Список покупок": SHOPPING_COMMAND,
+    "🥘 Из холодильника в меню": FRIDGE_MENU_COMMAND,
     "🥕 Продукты дома": INVENTORY_COMMAND,
     "⚖️ Трекер веса": "/weight",
     "💧 Трекер воды": "/water",
@@ -571,6 +579,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._family_telegram = build_family_telegram_controller()
         self._inventory_telegram = build_inventory_telegram_controller()
+        self._fridge_menu_telegram = build_fridge_menu_telegram_controller()
         self._shopping_telegram = build_shopping_telegram_controller()
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
@@ -3511,6 +3520,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite Family callbacks (always consumed locally) ---
         if data.startswith(FAMILY_CALLBACK_ROOT):
             await self._handle_healbite_family_callback(query, data)
+            return
+
+        # --- HealBite Fridge Menu callbacks (always consumed locally) ---
+        if data.startswith(FRIDGE_MENU_CALLBACK_ROOT):
+            await self._handle_healbite_fridge_menu_callback(query, data)
             return
 
         # --- HealBite Inventory callbacks (always consumed locally) ---
@@ -7041,6 +7055,218 @@ class TelegramAdapter(BasePlatformAdapter):
             if message is not None:
                 await self._send_healbite_family_result(message, result)
 
+    def _healbite_fridge_menu_keyboard(
+        self,
+        result: FridgeMenuTelegramResult,
+    ) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not result.screen.rows:
+            return None
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=callback_data)
+                    for label, callback_data in row
+                ]
+                for row in result.screen.rows
+            ]
+        )
+
+    async def _send_healbite_fridge_menu_result(
+        self,
+        msg: Message,
+        result: FridgeMenuTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        chunks = result.screen.chunks
+        for index, text in enumerate(chunks):
+            kwargs: Dict[str, Any] = {
+                "chat_id": str(getattr(chat, "id", "")),
+                "text": text,
+                "message_thread_id": getattr(msg, "message_thread_id", None),
+            }
+            if index == len(chunks) - 1:
+                kwargs["reply_markup"] = self._healbite_fridge_menu_keyboard(result)
+            if result.screen.parse_mode == "HTML" and ParseMode is not None:
+                kwargs["parse_mode"] = ParseMode.HTML
+            await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _maybe_handle_healbite_fridge_menu_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (
+            text_override
+            if text_override is not None
+            else getattr(msg, "text", None) or ""
+        ).strip()
+        command_token = (
+            text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        )
+        if command_token != FRIDGE_MENU_COMMAND:
+            return False
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        self._inventory_telegram.cancel_pending(actor_user_id)
+        result = self._fridge_menu_telegram.home(actor_user_id)
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="fridge_menu",
+                action="open",
+                result=result.state,
+            )
+        await self._send_healbite_fridge_menu_result(msg, result)
+        return True
+
+    async def _maybe_handle_healbite_fridge_menu_pending_text(
+        self,
+        msg: Message,
+    ) -> bool:
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if self._fridge_menu_telegram.pending_input_kind(actor_user_id) is None:
+            return False
+        text = getattr(msg, "text", None) or ""
+        if not text.lstrip().startswith("/"):
+            chat = getattr(msg, "chat", None)
+            await self._send_message_with_thread_fallback(
+                chat_id=str(getattr(chat, "id", "")),
+                text="Составляю меню…",
+                message_thread_id=getattr(msg, "message_thread_id", None),
+            )
+        result = await asyncio.to_thread(
+            self._fridge_menu_telegram.handle_text,
+            actor_user_id,
+            text,
+        )
+        if result is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="fridge_menu_input",
+            action="text",
+            result=result.state,
+        )
+        await self._send_healbite_fridge_menu_result(msg, result)
+        return True
+
+    async def _maybe_handle_healbite_fridge_menu_photo(
+        self,
+        msg: Message,
+    ) -> bool:
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if self._fridge_menu_telegram.pending_input_kind(actor_user_id) is None:
+            return False
+        photo = self._largest_photo_size(msg)
+        if photo is None:
+            return False
+        image_bytes = b""
+        try:
+            allowed, _note = self._telegram_media_size_allowed(
+                photo,
+                "fridge menu photo",
+            )
+            if allowed:
+                file_obj = await photo.get_file()
+                image_bytes = bytes(await file_obj.download_as_bytearray())
+        except Exception:
+            image_bytes = b""
+        chat = getattr(msg, "chat", None)
+        await self._send_message_with_thread_fallback(
+            chat_id=str(getattr(chat, "id", "")),
+            text="Распознаю продукты и составляю меню…",
+            message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        result = await self._fridge_menu_telegram.handle_photo_bytes(
+            actor_user_id,
+            image_bytes,
+        )
+        if result is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="fridge_menu_input",
+            action="photo",
+            result=result.state,
+        )
+        await self._send_healbite_fridge_menu_result(msg, result)
+        return True
+
+    async def _handle_healbite_fridge_menu_callback(
+        self,
+        query: Any,
+        data: str,
+    ) -> None:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        message = self._healbite_inventory_source_message(query)
+        if message is None:
+            try:
+                await query.answer(text="Эта кнопка больше недоступна.")
+            except Exception:
+                pass
+            return
+        generation_requested = data.startswith("fridge:v1:r:")
+        if generation_requested:
+            try:
+                await query.answer(text="Составляю новый вариант…")
+            except Exception:
+                pass
+        result = await asyncio.to_thread(
+            self._fridge_menu_telegram.handle_callback,
+            actor_user_id,
+            data,
+        )
+        self._log_healbite_route_selected(
+            msg=message,
+            route="fridge_menu_callback",
+            action=result.state,
+            lane="healbite_public",
+            result=(
+                "blocked"
+                if result.state in {
+                    "disabled",
+                    "stale",
+                    "generation_failed",
+                    "generation_limited",
+                    "save_failed",
+                }
+                else "allowed"
+            ),
+        )
+        if result.state == "preview" and generation_requested:
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_fridge_menu_result(message, result)
+            return
+        if not generation_requested:
+            try:
+                await query.answer(
+                    text=(
+                        "Меню сохранено."
+                        if result.state == "saved"
+                        else "Отменено."
+                        if result.state == "cancelled"
+                        else "Действие недоступно."
+                        if result.error_class
+                        else "Обновлено."
+                    )
+                )
+            except Exception:
+                pass
+        kwargs: Dict[str, Any] = {
+            "text": result.screen.chunks[-1],
+            "reply_markup": self._healbite_fridge_menu_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            await self._send_healbite_fridge_menu_result(message, result)
+
     def _healbite_inventory_keyboard(
         self,
         result: InventoryTelegramResult,
@@ -7122,6 +7348,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if command_token != INVENTORY_COMMAND:
             return False
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        self._fridge_menu_telegram.cancel_pending(actor_user_id)
         result = self._inventory_telegram.home(actor_user_id)
         log_inventory_text_observability(
             action="command_accepted",
@@ -7527,6 +7754,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 route="keyboard_action",
                 action=self._healbite_safe_action_label(original_text),
             )
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        fridge_menu_controller = getattr(self, "_fridge_menu_telegram", None)
+        if (
+            normalized_action not in {FRIDGE_MENU_COMMAND, "/cancel"}
+            and fridge_menu_controller is not None
+        ):
+            fridge_menu_controller.cancel_pending(actor_user_id)
         if normalized_action == "/menu":
             await self._send_healbite_menu_message(msg, command=normalized_action)
             return True
@@ -7536,6 +7770,18 @@ class TelegramAdapter(BasePlatformAdapter):
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,
             )
+        if normalized_action == FRIDGE_MENU_COMMAND:
+            return await self._maybe_handle_healbite_fridge_menu_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if (
+            normalized_action == "/cancel"
+            and fridge_menu_controller is not None
+            and fridge_menu_controller.pending_input_kind(actor_user_id) is not None
+        ):
+            return await self._maybe_handle_healbite_fridge_menu_pending_text(msg)
         if (
             normalized_action == "/cancel"
             and self._inventory_telegram.pending_input_kind(
@@ -7653,6 +7899,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
+            return
+        if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
             return
         if await self._maybe_handle_healbite_inventory_pending_text(msg):
             return
@@ -8358,6 +8606,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return
 
         msg = update.message
+
+        if msg.photo and await self._maybe_handle_healbite_fridge_menu_photo(msg):
+            return
 
         if msg.photo and await self._maybe_handle_healbite_inventory_photo(msg):
             return

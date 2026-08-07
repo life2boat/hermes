@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.12
-updated_at: 2026-07-31
+version: 1.2.13
+updated_at: 2026-08-07
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 8b44bb146b31902dc99c53d976e7b20964eb4caa
+state_verified_against_main_sha: 492b50e979770ed5004bd6e025b9b0642636030a
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `8b44bb146b31902dc99c53d976e7b20964eb4caa`.
+  `492b50e979770ed5004bd6e025b9b0642636030a`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -31,7 +31,8 @@ Git.
 - The remote-build workflow has read-only repository access plus package
   publication access. It is not a deployment workflow and does not authorize a
   production image pull, container recreate, configuration change, or DB write.
-- Last confirmed `hermes-bot` runtime: running, restart count 0.
+- Read-only status check on 2026-08-07 found the `hermes-bot` container
+  stopped. This implementation task did not start, rebuild, restart or recreate it.
 - Last confirmed Qdrant runtime: running, restart count 0.
 - Qdrant has not been intentionally changed by recent HealBite rollout steps.
 - Production git SHA: `unknown`.
@@ -113,6 +114,14 @@ Git.
 - Weekly/shopping production feature flags: last confirmed target state is
   feature-disabled for shopping and allowlisted for weekly, but effective
   runtime config must be re-confirmed before any new rollout decision.
+- PR #115 merged the additive fridge-menu schema (`user_inventory`,
+  `weekly_menu_plans`, `planned_meals`, `planned_ingredients`) and the strict,
+  cache-stable weekly JSON prompt builder into repository main.
+- The follow-up repository implementation adds a Telegram FSM for text or photo
+  inventory input, strict 7-day/3-meal validation, an HTML menu plus a separate
+  shopping-list block, and explicit save/regenerate/cancel callbacks.
+- The fridge-menu schema has not been applied to production and the Telegram UI
+  has not been deployed or manually smoke-tested.
 
 ## 2. Stable Capabilities
 
@@ -134,8 +143,13 @@ Git.
 - Weekly menu backend mutation and validated draft generation were merged in PR43.
 - Weekly menu backend merge commit:
   `31f2594d2de352db3c0c6c78513770bdf5c606ab`.
-- Production deployment state for the weekly backend is not confirmed by this
-  document.
+- Fridge-to-menu data-layer and prompt contracts were merged in PR #115 with
+  merge commit `492b50e979770ed5004bd6e025b9b0642636030a`.
+- The repository Telegram flow accepts text or one refrigerator photo, parses
+  Vision text locally, validates a complete 7x3 menu, renders HTML with a
+  separate shopping list, and persists only after explicit save.
+- Production deployment state for the weekly and fridge-menu backends is not
+  confirmed by this document.
 - Shopping runtime remains disabled unless a later state update proves otherwise.
 - Exact-main GHCR publication is manual, SHA-bound, and digest-authoritative.
   Registry publication and production deployment remain separate gates.

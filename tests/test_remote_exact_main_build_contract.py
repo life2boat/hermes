@@ -37,7 +37,23 @@ def test_workflow_uses_repository_module_entrypoints() -> None:
     assert "python3 -m scripts.prepare_remote_playwright_artifacts" in text
     assert "python3 -m scripts.build_verified_playwright_image" in text
     assert "python3 -m scripts.attest_remote_registry_image" in text
+    assert "python3 -m scripts.hermes_image_secret_scan" in text
     assert "python3 scripts/" not in text
+
+
+def test_workflow_binds_full_image_scan_to_exact_digest_before_summary() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    pull = text.index('docker pull "$reference"')
+    scan = text.index("python3 -m scripts.hermes_image_secret_scan")
+    upload = text.index("${{ runner.temp }}/image-secret-attestation.json")
+    summary = text.index('echo "IMAGE_SECRET_FINDINGS=0"')
+
+    assert pull < scan < upload < summary
+    assert '--image "$reference"' in text
+    assert '--expected-source-sha "$GITHUB_SHA"' in text
+    assert '.IMAGE_METADATA_SECRET_FINDINGS == 0' in text
+    assert '.IMAGE_LAYER_SECRET_FINDINGS == 0' in text
+    assert '.IMAGE_FINAL_FILESYSTEM_SECRET_FINDINGS == 0' in text
 
 
 def test_workflow_actions_are_commit_pinned() -> None:

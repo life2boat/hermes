@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass
 
 
@@ -251,12 +252,23 @@ def _is_high_entropy_credential(value: str) -> bool:
     return len(set(value)) >= 10 and _entropy(value) >= 3.5
 
 
-def _assignment_finding(key: str, value: str) -> SecretFinding | None:
-    if not _is_credential_key(key):
+def _assignment_finding(
+    key: str,
+    value: str,
+    *,
+    protected_names: frozenset[str] = frozenset(),
+) -> SecretFinding | None:
+    protected = key in protected_names
+    if not protected and not _is_credential_key(key):
         return None
     candidate = value.strip()
     if _is_approved_placeholder(candidate):
         return None
+    if protected:
+        return SecretFinding(
+            rule_id="protected-secret-assignment",
+            match_class="PROTECTED_SECRET_MATERIAL",
+        )
     if _TELEGRAM_TOKEN_RE.fullmatch(candidate):
         return SecretFinding(
             rule_id="telegram-token-assignment",
@@ -275,7 +287,12 @@ def _assignment_finding(key: str, value: str) -> SecretFinding | None:
     return None
 
 
-def scan_secret_text(text: str) -> tuple[SecretFinding, ...]:
+def scan_secret_text(
+    text: str,
+    *,
+    protected_names: Collection[str] = (),
+) -> tuple[SecretFinding, ...]:
+    protected = frozenset(protected_names)
     findings: list[SecretFinding] = []
     seen: set[tuple[str, str]] = set()
 
@@ -314,18 +331,46 @@ def scan_secret_text(text: str) -> tuple[SecretFinding, ...]:
             or match.group("yaml_key")
             or ""
         )
-        finding = _assignment_finding(key, value)
+        finding = _assignment_finding(
+            key,
+            value,
+            protected_names=protected,
+        )
         if finding is not None:
             add(finding)
 
     return tuple(findings)
 
 
-def scan_secret_bytes(data: bytes) -> tuple[SecretFinding, ...]:
+def scan_secret_bytes(
+    data: bytes,
+    *,
+    protected_names: Collection[str] = (),
+) -> tuple[SecretFinding, ...]:
     if b"\x00" in data:
         raise SecretScanError("SECRET_SCAN_BINARY_DENIED")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SecretScanError("SECRET_SCAN_DECODING_FAILED") from exc
-    return scan_secret_text(text)
+    return scan_secret_text(text, protected_names=protected_names)
+
+
+def scan_secret_blob(
+    data: bytes,
+    *,
+    protected_names: Collection[str] = (),
+) -> tuple[SecretFinding, ...]:
+    """Scan arbitrary image bytes without weakening source-file policy.
+
+    Image layers legitimately contain binaries, so their printable ASCII
+    regions are scanned while non-printable bytes become separators. The
+    stricter source-file API intentionally keeps rejecting binary or non-UTF-8
+    Git objects.
+    """
+
+    text = "".join(
+        chr(value) if value in (9, 10, 13) or 32 <= value <= 126 else "\n"
+        for value in data
+    )
+    return scan_secret_text(text, protected_names=protected_names)

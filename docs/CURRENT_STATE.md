@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.16
+version: 1.2.17
 updated_at: 2026-08-08
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 8f9e1a60f5535cf3b1b843f4c1203e9d1a51f20d
+state_verified_against_main_sha: aabc5c3a52bf48be2d710823cd4da45e8b0281ea
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `8f9e1a60f5535cf3b1b843f4c1203e9d1a51f20d`.
+  `aabc5c3a52bf48be2d710823cd4da45e8b0281ea`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -138,8 +138,9 @@ Git.
   producer output alone never authorizes a production mutation.
 - A separate one-time legacy provenance bootstrap contract can transition an
   exact legacy image with an unknown OCI revision to a provenance-valid exact-main
-  image while preserving a private exact-image rollback archive. Ordinary deploy
-  still rejects every missing or invalid baseline revision.
+  image only after the private exact-image rollback archive passes structural
+  verification and Docker load rehearsal bound to the exact plan. Ordinary
+  deploy still rejects every missing or invalid baseline revision.
 - No production authority package, runtime attestation, backup, migration, image
   build, deploy, secret change, container change, SQLite write, or Qdrant mutation
   was performed while adding this repository tooling.
@@ -178,7 +179,9 @@ Git.
   confirmed by this document.
 - Shopping runtime remains disabled unless a later state update proves otherwise.
 - Exact-main GHCR publication is manual, SHA-bound, and digest-authoritative.
-  Registry publication and production deployment remain separate gates.
+  The hosted workflow scans image metadata, every recoverable layer, and the
+  final filesystem before publishing `IMAGE_SECRET_FINDINGS=0`. Registry
+  publication and production deployment remain separate gates.
 - Production-host deploy-capacity qualification is read-only and must complete
   before a separately authorized pull or deployment task.
 - Production deployment, Memory OS reconciliation, and Telegram runtime

@@ -71,6 +71,15 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 
 **Evidence:** Retain the exported-context manifest with path, mode, blob, tree, and scanner results; inspect the image digest/ID and require `org.opencontainers.image.revision` to equal the exact SHA.
 
+### Complete built-image secret coverage
+
+**Invariant:** A release image must pass the canonical scanner for configuration, environment metadata, labels, history, every recoverable layer, and the final filesystem. The receipt must bind the immutable local image ID, exact OCI revision, ordered layer identities, and scan-policy hash.
+
+**Why:** Source scanning cannot prove that build tooling or dependencies did not place a credential in the artifact. Scanning only the final filesystem misses secrets copied into an earlier layer and deleted later, because those bytes remain recoverable.
+
+**Evidence:** Require the sanitized `scripts/hermes_image_secret_scan.py` receipt to report zero metadata, layer, final-filesystem, and total findings for the digest-derived exact image. Any malformed, missing, ambiguous, unsafe, or uninspectable archive member is a technical failure, never zero findings.
+
+
 ### Quiescent capture and fresh rollback state
 
 **Invariant:** Require active writers to be zero before state capture or migration publication, then create a fresh backup from the exact live SQLite database through the SQLite backup API.
@@ -101,7 +110,7 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 
 **Why:** Guessing a legacy source SHA creates false provenance, while rejecting every transition leaves no safe route into the strict chain. A separate one-way bootstrap confines the exception to the rollback identity and makes the successful exact-main candidate the first provenance-valid baseline.
 
-**Evidence:** Require `plan-bootstrap` and `validate-bootstrap` to bind the exact legacy image ID, sanitized runtime/SQLite/Qdrant/config baseline, and a private mode-`0600` Docker image archive outside Git with size and SHA-256. `execute-bootstrap` may recreate only `hermes-bot`; candidate failure must restore that exact legacy image and report `ROLLED_BACK`, while a currently valid revision must report `BOOTSTRAP_DENIED_USE_ORDINARY_DEPLOY`.
+**Evidence:** Require `plan-bootstrap -> rehearse-rollback -> validate-bootstrap -> execute-bootstrap`. The root-private rehearsal independently verifies archive structure and embedded image identity, makes Docker load the exact bound archive, and binds mode-`0600` evidence to the plan SHA, archive SHA, operation ID, and legacy image ID. Validate and execute recheck that evidence before mutation; candidate failure may use only the same bound archive and must report `ROLLED_BACK`.
 
 ### Expected and effective migration scope
 
@@ -131,7 +140,7 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 1. **Freeze scope and success criteria.** Record the requested source SHA, image, services, database migration, feature flags, and explicit stop point. Treat build, registry publication, migration, deploy, feature activation, secret changes, and smoke tests as separate gates.
 2. **Verify repository provenance.** Fetch the HealBite project remote, resolve its main SHA, and require the worktree HEAD to equal the approved SHA. Require a clean status and a matching trusted remote. Never repair a dirty checkout with reset, clean, stash, rebase, or file copying.
 3. **Run code gates.** Run focused tests through `scripts/run_tests.sh`, then `bash scripts/agent_check.sh`, `git diff --check`, and the full `scripts/run_tests.sh` suite required by repository policy. Stop on any unexplained failure.
-4. **Verify the immutable image.** Require a local immutable image ID or repository digest. Require its single `org.opencontainers.image.revision` label to equal the exact source SHA. Reject tags as provenance.
+4. **Verify the immutable image.** Require a local immutable image ID or repository digest, its single `org.opencontainers.image.revision` label equal to the exact source SHA, and a passing full-image secret receipt for metadata, every layer, and the final filesystem. Reject tags as provenance.
 5. **Collect a sanitized production baseline.** Confirm service identity, container state and restart count, exact SQLite mount, integrity and foreign-key status, Qdrant health, feature-state fingerprints, and protected-secret key fingerprints. Record only safe classifications, hashes, and counts.
 6. **Prepare rollback before mutation.** Validate the previous immutable image and its revision, canonical Compose render, protected-secret transition, capacity, and the health contract the rollback must satisfy.
 7. **Back up SQLite before first DDL.** Use the SQLite backup API or an approved online equivalent, not a plain copy of an active database. Store a timestamped immutable backup outside the live DB directory and repository, record its SHA-256, verify `PRAGMA integrity_check`, restore it to a separate temporary path, and verify the restored copy.
@@ -167,11 +176,12 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 
 - [ ] Worktree HEAD equals the approved 40-character project SHA and status is clean.
 - [ ] Immutable image identity and OCI revision match the source SHA.
+- [ ] Canonical full-image scanning reports zero metadata, layer, final-filesystem, and total secret findings.
 - [ ] Focused checks, `scripts/agent_check.sh`, `git diff --check`, and required full tests passed.
 - [ ] Backup checksum, integrity check, and isolated restore test passed before DDL.
 - [ ] Migration rehearsal passed twice and preserved unrelated state.
 - [ ] Full migration registry is preserved; expected/effective mutation components match at plan time and at the final pre-DDL checkpoint.
-- [ ] Any legacy bootstrap records `SOURCE_REVISION=UNKNOWN`, binds a verified private rollback archive, and leaves DB, Qdrant, features, and secrets unchanged.
+- [ ] Any legacy bootstrap records `SOURCE_REVISION=UNKNOWN`, completes exact archive load rehearsal before validation, binds its root-private evidence, and leaves DB, Qdrant, features, and secrets unchanged.
 - [ ] Previous image, protected secret state, capacity, and rollback health contract were proven before mutation.
 - [ ] Post-deploy container, Telegram, SQLite, and Qdrant checks passed with no unauthorized delta.
 - [ ] Evidence is sanitized and the final status distinguishes `PASS`, `ROLLED_BACK`, `FAIL`, and `BLOCKED`.

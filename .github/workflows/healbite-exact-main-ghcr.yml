@@ -101,6 +101,36 @@ jobs:
           echo "image=$REGISTRY_IMAGE@$digest" >> "$GITHUB_OUTPUT"
           echo "tag=$REGISTRY_IMAGE:sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
+      - name: Materialize and scan exact immutable image
+        id: image_scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="${{ steps.attest.outputs.image }}"
+          docker pull "$reference"
+          python3 -m scripts.hermes_image_secret_scan \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --image "$reference" \
+            --expected-source-sha "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/image-secret-attestation.json"
+          expected_id="$(jq -er '.config_digest' "$RUNNER_TEMP/registry-attestation.json")"
+          jq -e \
+            --arg id "$expected_id" \
+            --arg revision "$GITHUB_SHA" \
+            '.STATUS == "PASS"
+             and .IMAGE_ID == $id
+             and .IMAGE_OCI_REVISION == $revision
+             and .IMAGE_SECRET_FINDINGS == 0
+             and .IMAGE_METADATA_SECRET_FINDINGS == 0
+             and .IMAGE_LAYER_SECRET_FINDINGS == 0
+             and .IMAGE_FINAL_FILESYSTEM_SECRET_FINDINGS == 0
+             and .LAYERS_SCANNED > 0
+             and (.SCAN_POLICY_SHA256 | test("^[0-9a-f]{64}$"))' \
+            "$RUNNER_TEMP/image-secret-attestation.json"
+          echo "layers=$(jq -er '.LAYERS_SCANNED' "$RUNNER_TEMP/image-secret-attestation.json")" >> "$GITHUB_OUTPUT"
+          echo "files=$(jq -er '.FILES_SCANNED' "$RUNNER_TEMP/image-secret-attestation.json")" >> "$GITHUB_OUTPUT"
+          echo "bytes=$(jq -er '.BYTES_SCANNED' "$RUNNER_TEMP/image-secret-attestation.json")" >> "$GITHUB_OUTPUT"
+
       - name: Upload safe registry attestation
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -108,6 +138,7 @@ jobs:
           path: |
             ${{ runner.temp }}/build-receipt.json
             ${{ runner.temp }}/registry-attestation.json
+            ${{ runner.temp }}/image-secret-attestation.json
           if-no-files-found: error
           retention-days: 30
 
@@ -124,4 +155,8 @@ jobs:
             echo "IMMUTABLE_SHA_TAG=${{ steps.attest.outputs.tag }}"
             echo "PRODUCTION_SECRETS_USED_AS_BUILD_ARGS=false"
             echo "IMAGE_METADATA_HISTORY_SECRET_FINDINGS=0"
+            echo "IMAGE_SECRET_FINDINGS=0"
+            echo "IMAGE_LAYERS_SCANNED=${{ steps.image_scan.outputs.layers }}"
+            echo "IMAGE_FILES_SCANNED=${{ steps.image_scan.outputs.files }}"
+            echo "IMAGE_BYTES_SCANNED=${{ steps.image_scan.outputs.bytes }}"
           } >> "$GITHUB_STEP_SUMMARY"

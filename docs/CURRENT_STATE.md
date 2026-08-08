@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.14
-updated_at: 2026-08-07
+version: 1.2.15
+updated_at: 2026-08-08
 status: active
 source_of_truth: true
-state_verified_against_main_sha: c68c64f3513de6e5ca306ab0e85f6cf18a2969a9
+state_verified_against_main_sha: 64520d451ef43e1ee83bff6c15ec8a845a5d6b16
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `c68c64f3513de6e5ca306ab0e85f6cf18a2969a9`.
+  `64520d451ef43e1ee83bff6c15ec8a845a5d6b16`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -120,6 +120,9 @@ Git.
 - The follow-up repository implementation adds a Telegram FSM for text or photo
   inventory input, strict 7-day/3-meal validation, an HTML menu plus a separate
   shopping-list block, and explicit save/regenerate/cancel callbacks.
+- Fridge-menu inline state-changing callbacks are session-bound: stale same-user,
+  cross-user, duplicate, and post-restart callbacks fail closed without SQLite
+  mutation. Textual `/cancel` retains its owner-local current-session behavior.
 - The fridge-menu schema has not been applied to production and the Telegram UI
   has not been deployed or manually smoke-tested.
 - Repository-local procedural entry points are being introduced under
@@ -153,6 +156,9 @@ Git.
 - The repository Telegram flow accepts text or one refrigerator photo, parses
   Vision text locally, validates a complete 7x3 menu, renders HTML with a
   separate shopping list, and persists only after explicit save.
+- Focused regressions cover generation, retry-limit, Vision, and storage failures;
+  failed storage rolls back fully, preserves user isolation, and passes SQLite
+  foreign-key validation before retry.
 - Production deployment state for the weekly and fridge-menu backends is not
   confirmed by this document.
 - Shopping runtime remains disabled unless a later state update proves otherwise.

@@ -13,12 +13,14 @@ from gateway.healbite_feature_gates import FeatureGateConfig
 from gateway.healbite_fridge_menu import (
     FridgeMenuContractError,
     FridgeMenuLLMGenerator,
+    FridgeMenuStore,
     parse_fridge_menu_response,
 )
 from gateway.healbite_fridge_menu_schema import apply_fridge_menu_schema
 from gateway.healbite_fridge_menu_telegram import (
     FRIDGE_MENU_COMMAND,
     FRIDGE_MENU_MAX_CHUNK_LENGTH,
+    FRIDGE_MENU_MAX_GENERATION_ATTEMPTS,
     HealBiteFridgeMenuTelegramController,
     format_fridge_menu_plan,
 )
@@ -351,6 +353,26 @@ def test_invalid_text_cancel_and_cross_user_callbacks_fail_closed(tmp_path):
     assert cancelled.state == "cancelled"
 
 
+def test_stale_same_user_inline_cancel_cannot_cancel_new_session(tmp_path):
+    db_path = tmp_path / "stale-cancel.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    controller = _controller(db_path, generator)
+
+    first_home = controller.home(ACTOR)
+    stale_cancel = first_home.screen.rows[0][0][1]
+    second_home = controller.home(ACTOR)
+    current_cancel = second_home.screen.rows[0][0][1]
+
+    rejected = controller.handle_callback(ACTOR, stale_cancel)
+
+    assert rejected.state == "stale"
+    assert current_cancel != stale_cancel
+    assert controller.pending_input_kind(ACTOR) == "text_or_photo"
+    preview = controller.handle_text(ACTOR, "eggs")
+    assert preview is not None and preview.state == "preview"
+
+
 @pytest.mark.asyncio
 async def test_photo_fsm_uses_vision_text_stub_before_generation(tmp_path):
     db_path = tmp_path / "photo.db"
@@ -443,3 +465,305 @@ async def test_adapter_consumes_fridge_photo_without_general_photo_cache(tmp_pat
         "Распознаю продукты" in call.kwargs["text"]
         for call in adapter._send_message_with_thread_fallback.await_args_list
     )
+
+
+def _callback_for_action(result, action: str) -> str:
+    prefix = f"fridge:v1:{action}:"
+    for row in result.screen.rows:
+        for _label, callback_data in row:
+            if callback_data.startswith(prefix):
+                return callback_data
+    raise AssertionError(f"callback not found for action: {action}")
+
+
+def _user_row_counts(db_path, user_id: int) -> tuple[int, int, int, int]:
+    with sqlite3.connect(db_path) as connection:
+        return (
+            connection.execute(
+                "SELECT COUNT(*) FROM user_inventory WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM weekly_menu_plans WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM planned_meals WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT COUNT(*) FROM planned_ingredients WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+        )
+
+
+def test_text_cancel_preserves_owner_local_current_session_semantics(tmp_path):
+    db_path = tmp_path / "text-cancel.db"
+    _seed_db(db_path)
+    controller = _controller(db_path, _Generator())
+
+    controller.home(ACTOR)
+    cancelled = controller.handle_text(ACTOR, "/cancel")
+
+    assert cancelled is not None and cancelled.state == "cancelled"
+    assert controller.pending_input_kind(ACTOR) is None
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+
+
+def test_stale_same_user_save_and_regenerate_cannot_mutate_new_session(tmp_path):
+    db_path = tmp_path / "stale-preview-actions.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    controller = _controller(db_path, generator)
+
+    controller.home(ACTOR)
+    first_preview = controller.handle_text(ACTOR, "first inventory")
+    assert first_preview is not None
+    stale_save = _callback_for_action(first_preview, "s")
+    stale_regenerate = _callback_for_action(first_preview, "r")
+
+    controller.home(ACTOR)
+    current_preview = controller.handle_text(ACTOR, "current inventory")
+    assert current_preview is not None
+    calls_before_stale_callbacks = len(generator.calls)
+
+    rejected_save = controller.handle_callback(ACTOR, stale_save)
+    rejected_regenerate = controller.handle_callback(ACTOR, stale_regenerate)
+
+    assert rejected_save.state == "stale"
+    assert rejected_regenerate.state == "stale"
+    assert len(generator.calls) == calls_before_stale_callbacks
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+
+    saved = controller.handle_callback(
+        ACTOR,
+        _callback_for_action(current_preview, "s"),
+    )
+    assert saved.state == "saved"
+    assert _user_row_counts(db_path, ACTOR) == (1, 1, 21, 42)
+
+
+def test_cross_user_callback_fails_closed_with_both_sessions_active(tmp_path):
+    db_path = tmp_path / "cross-user-active.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    controller = HealBiteFridgeMenuTelegramController(
+        config=_gate(ACTOR, OTHER_ACTOR),
+        db_path=db_path,
+        generator_factory=lambda: generator,
+        now_factory=lambda: datetime(2026, 8, 7, tzinfo=timezone.utc),
+    )
+
+    controller.home(ACTOR)
+    actor_preview = controller.handle_text(ACTOR, "actor inventory")
+    controller.home(OTHER_ACTOR)
+    other_preview = controller.handle_text(OTHER_ACTOR, "other inventory")
+    assert actor_preview is not None
+    assert other_preview is not None
+
+    rejected = controller.handle_callback(
+        OTHER_ACTOR,
+        _callback_for_action(actor_preview, "x"),
+    )
+
+    assert rejected.state == "stale"
+    assert (
+        controller.handle_callback(
+            ACTOR,
+            _callback_for_action(actor_preview, "r"),
+        ).state
+        == "preview"
+    )
+    assert (
+        controller.handle_callback(
+            OTHER_ACTOR,
+            _callback_for_action(other_preview, "r"),
+        ).state
+        == "preview"
+    )
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+    assert _user_row_counts(db_path, OTHER_ACTOR) == (0, 0, 0, 0)
+
+
+def test_duplicate_callbacks_do_not_repeat_state_mutations(tmp_path):
+    db_path = tmp_path / "duplicate-callbacks.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    controller = _controller(db_path, generator)
+
+    controller.home(ACTOR)
+    preview = controller.handle_text(ACTOR, "inventory")
+    assert preview is not None
+    regenerate_callback = _callback_for_action(preview, "r")
+
+    regenerated = controller.handle_callback(ACTOR, regenerate_callback)
+    duplicate_regenerate = controller.handle_callback(ACTOR, regenerate_callback)
+
+    assert regenerated.state == "preview"
+    assert duplicate_regenerate.state == "stale"
+    assert len(generator.calls) == 2
+
+    save_callback = _callback_for_action(regenerated, "s")
+    saved = controller.handle_callback(ACTOR, save_callback)
+    counts_after_save = _user_row_counts(db_path, ACTOR)
+    duplicate_save = controller.handle_callback(ACTOR, save_callback)
+
+    assert saved.state == "saved"
+    assert duplicate_save.state == "stale"
+    assert _user_row_counts(db_path, ACTOR) == counts_after_save
+
+    home = controller.home(ACTOR)
+    cancel_callback = _callback_for_action(home, "x")
+    cancelled = controller.handle_callback(ACTOR, cancel_callback)
+    duplicate_cancel = controller.handle_callback(ACTOR, cancel_callback)
+
+    assert cancelled.state == "cancelled"
+    assert duplicate_cancel.state == "stale"
+    assert controller.pending_input_kind(ACTOR) is None
+
+
+def test_generation_failure_keeps_retryable_state_without_db_residue(tmp_path):
+    db_path = tmp_path / "generation-failed.db"
+    _seed_db(db_path)
+    generator = Mock()
+    generator.generate.side_effect = [
+        FridgeMenuContractError("synthetic generation failure"),
+        _plan(),
+    ]
+    controller = _controller(db_path, generator)
+
+    home = controller.home(ACTOR)
+    failed = controller.handle_text(ACTOR, "inventory")
+
+    assert failed is not None and failed.state == "generation_failed"
+    assert _callback_for_action(failed, "x") == _callback_for_action(home, "x")
+    assert controller.pending_input_kind(ACTOR) == "text_or_photo"
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+
+    retried = controller.handle_text(ACTOR, "inventory")
+    assert retried is not None and retried.state == "preview"
+    assert generator.generate.call_count == 2
+
+
+def test_generation_limit_is_deterministic_and_preserves_current_preview(tmp_path):
+    db_path = tmp_path / "generation-limited.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    controller = _controller(db_path, generator)
+
+    controller.home(ACTOR)
+    preview = controller.handle_text(ACTOR, "inventory")
+    assert preview is not None
+
+    for _ in range(FRIDGE_MENU_MAX_GENERATION_ATTEMPTS - 1):
+        preview = controller.handle_callback(
+            ACTOR,
+            _callback_for_action(preview, "r"),
+        )
+        assert preview.state == "preview"
+
+    limited = controller.handle_callback(
+        ACTOR,
+        _callback_for_action(preview, "r"),
+    )
+
+    assert limited.state == "generation_limited"
+    assert len(generator.calls) == FRIDGE_MENU_MAX_GENERATION_ATTEMPTS
+    saved = controller.handle_callback(
+        ACTOR,
+        _callback_for_action(preview, "s"),
+    )
+    assert saved.state == "saved"
+
+
+@pytest.mark.asyncio
+async def test_vision_failure_keeps_retryable_state_without_db_residue(tmp_path):
+    db_path = tmp_path / "vision-failed.db"
+    _seed_db(db_path)
+    generator = _Generator()
+    vision = AsyncMock(side_effect=RuntimeError("synthetic vision failure"))
+    controller = _controller(db_path, generator, vision_text_fn=vision)
+
+    home = controller.home(ACTOR)
+    failed = await controller.handle_photo_bytes(ACTOR, b"synthetic-image")
+
+    assert failed is not None and failed.state == "vision_failed"
+    assert _callback_for_action(failed, "x") == _callback_for_action(home, "x")
+    assert controller.pending_input_kind(ACTOR) == "text_or_photo"
+    assert generator.calls == []
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+
+    retried = controller.handle_text(ACTOR, "inventory")
+    assert retried is not None and retried.state == "preview"
+
+
+def test_save_failure_rolls_back_and_allows_retry_without_cross_user_mutation(
+    tmp_path,
+):
+    db_path = tmp_path / "save-failed.db"
+    _seed_db(db_path)
+    FridgeMenuStore(db_path=db_path).save(
+        user_id=OTHER_ACTOR,
+        inventory_ingredients=("other inventory",),
+        source_type="text",
+        week_start=WEEK_START,
+        plan=_plan(),
+    )
+    other_counts_before = _user_row_counts(db_path, OTHER_ACTOR)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            f"""
+            CREATE TRIGGER fail_actor_planned_ingredient
+            BEFORE INSERT ON planned_ingredients
+            WHEN NEW.user_id = {ACTOR}
+            BEGIN
+                SELECT RAISE(ABORT, 'synthetic storage failure');
+            END
+            """
+        )
+
+    controller = _controller(db_path, _Generator())
+    controller.home(ACTOR)
+    preview = controller.handle_text(ACTOR, "actor inventory")
+    assert preview is not None
+    save_callback = _callback_for_action(preview, "s")
+
+    failed = controller.handle_callback(ACTOR, save_callback)
+
+    assert failed.state == "save_failed"
+    assert _callback_for_action(failed, "s") == save_callback
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)
+    assert _user_row_counts(db_path, OTHER_ACTOR) == other_counts_before
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        connection.execute("DROP TRIGGER fail_actor_planned_ingredient")
+
+    retried = controller.handle_callback(ACTOR, save_callback)
+
+    assert retried.state == "saved"
+    assert _user_row_counts(db_path, ACTOR) == (1, 1, 21, 42)
+    assert _user_row_counts(db_path, OTHER_ACTOR) == other_counts_before
+
+
+def test_restart_rejects_stale_callbacks_without_state_or_db_mutation(tmp_path):
+    db_path = tmp_path / "restart-stale.db"
+    _seed_db(db_path)
+    original = _controller(db_path, _Generator())
+    original.home(ACTOR)
+    preview = original.handle_text(ACTOR, "inventory")
+    assert preview is not None
+    callbacks = tuple(
+        _callback_for_action(preview, action)
+        for action in ("s", "r", "x")
+    )
+
+    restarted_generator = _Generator()
+    restarted = _controller(db_path, restarted_generator)
+
+    for callback_data in callbacks:
+        assert restarted.handle_callback(ACTOR, callback_data).state == "stale"
+
+    assert restarted_generator.calls == []
+    assert restarted.pending_input_kind(ACTOR) is None
+    assert _user_row_counts(db_path, ACTOR) == (0, 0, 0, 0)

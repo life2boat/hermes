@@ -112,11 +112,11 @@ class FridgeMenuTelegramResult:
 @dataclass(frozen=True, slots=True)
 class _FridgeMenuSession:
     stage: str
+    token: str
     inventory: tuple[str, ...] = ()
     source_type: str = "text"
     week_start: str | None = None
     plan: FridgeMenuPlan | None = None
-    token: str | None = None
     generation_attempts: int = 0
 
 
@@ -293,12 +293,15 @@ class HealBiteFridgeMenuTelegramController:
                 error_class="disabled",
                 parse_mode=None,
             )
+        token = secrets.token_hex(8)
         with self._lock:
-            self._sessions[actor] = _FridgeMenuSession(stage="awaiting_input")
+            self._sessions[actor] = _FridgeMenuSession(
+                stage="awaiting_input", token=token
+            )
         return self._result(
             "awaiting_input",
             FRIDGE_MENU_INPUT_PROMPT,
-            rows=((('Отмена', self._callback('x')),),),
+            rows=((('Отмена', self._callback('x', token)),),),
         )
 
     def pending_input_kind(self, actor_user_id: object) -> str | None:
@@ -403,7 +406,7 @@ class HealBiteFridgeMenuTelegramController:
             return self._result(
                 "generation_failed",
                 FRIDGE_MENU_UNAVAILABLE_REPLY,
-                rows=((('Отмена', self._callback('x')),),),
+                rows=((('Отмена', self._callback('x', generating.token)),),),
                 error_class="generation_failed",
                 parse_mode=None,
             )
@@ -455,7 +458,7 @@ class HealBiteFridgeMenuTelegramController:
             return self._result(
                 "invalid_input",
                 FRIDGE_MENU_INPUT_PROMPT,
-                rows=((('Отмена', self._callback('x')),),),
+                rows=((('Отмена', self._callback('x', session.token)),),),
                 error_class="invalid_input",
             )
         return self._generate(
@@ -481,7 +484,7 @@ class HealBiteFridgeMenuTelegramController:
             return self._result(
                 "vision_failed",
                 "Не удалось прочитать фото. Отправьте другое фото или список текстом.",
-                rows=((('Отмена', self._callback('x')),),),
+                rows=((('Отмена', self._callback('x', session.token)),),),
                 error_class="vision_failed",
                 parse_mode=None,
             )
@@ -494,7 +497,7 @@ class HealBiteFridgeMenuTelegramController:
             return self._result(
                 "vision_failed",
                 "Не удалось распознать продукты. Отправьте другое фото или список текстом.",
-                rows=((('Отмена', self._callback('x')),),),
+                rows=((('Отмена', self._callback('x', session.token)),),),
                 error_class="vision_failed",
                 parse_mode=None,
             )
@@ -524,7 +527,16 @@ class HealBiteFridgeMenuTelegramController:
         action = parts[2]
         token = parts[3] if len(parts) == 4 else None
         if action == "x":
-            self.cancel_pending(actor)
+            with self._lock:
+                session = self._sessions.get(actor)
+                if session is None or not token or token != session.token:
+                    return self._result(
+                        "stale",
+                        FRIDGE_MENU_UNAVAILABLE_REPLY,
+                        error_class="stale",
+                        parse_mode=None,
+                    )
+                self._sessions.pop(actor, None)
             return self._result(
                 "cancelled",
                 "Создание меню отменено.",

@@ -129,10 +129,17 @@ Git.
   `skills/deploy/`, `skills/memory/`, and `skills/telegram/`; passive policy
   files point to those procedures instead of duplicating operational steps.
 - The staged-migration gate now exposes one canonical authority-package producer:
-  operation-specific v2 initial approval/policy documents, exact plan v7,
-  plan-dependent companions, final-authority v1, and read-only package validation.
+  operation-specific v3 initial approval/policy documents, exact plan v8,
+  plan-dependent companions, final-authority v2, and read-only package validation.
+  The full canonical registry is preserved while the operator-bound expected
+  mutation subset must equal the read-only derived effective subset at plan time
+  and immediately before DDL.
   Operator authorization and external P5B/P6A evidence remain explicit inputs;
   producer output alone never authorizes a production mutation.
+- A separate one-time legacy provenance bootstrap contract can transition an
+  exact legacy image with an unknown OCI revision to a provenance-valid exact-main
+  image while preserving a private exact-image rollback archive. Ordinary deploy
+  still rejects every missing or invalid baseline revision.
 - No production authority package, runtime attestation, backup, migration, image
   build, deploy, secret change, container change, SQLite write, or Qdrant mutation
   was performed while adding this repository tooling.

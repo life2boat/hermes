@@ -201,8 +201,10 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
     assert payload["migrations"] == schema_migrate.migration_registry_manifest()
     assert payload["migrations"][-2]["component"] == "inventory"
     assert payload["migrations"][-1]["component"] == "fridge_menu"
-    assert production.PLAN_VERSION == 7
+    assert production.PLAN_VERSION == 8
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
+    assert "EXPECTED_MUTATION_COMPONENTS" in production.PLAN_FIELDS
+    assert "EFFECTIVE_MUTATION_COMPONENTS" in production.PLAN_FIELDS
 
 
 def test_target_plan_omits_absent_registry_component(

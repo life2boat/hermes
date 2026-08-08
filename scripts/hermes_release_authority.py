@@ -44,6 +44,13 @@ def _require_exact_components(values: Sequence[str]) -> list[str]:
     return expected
 
 
+def _require_expected_mutation_components(values: Sequence[str]) -> list[str]:
+    return migration._validate_expected_mutation_components(
+        values,
+        _operation_components(),
+    )
+
+
 def _outside_repository(path: Path, repository_root: Path) -> None:
     try:
         path.relative_to(repository_root)
@@ -226,6 +233,9 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
     if migration.OPERATION_ID_RE.fullmatch(operation_id) is None:
         raise migration.ProductionGateError("OPERATION_ID_INVALID")
     components = _require_exact_components(args.migration_component)
+    expected_mutation_components = _require_expected_mutation_components(
+        args.expected_mutation_component
+    )
     db_path = migration._absolute_path(args.db_path, "DB_PATH")
     if migration.SHA_RE.fullmatch(args.expected_source_sha256) is None:
         raise migration.ProductionGateError("EXPECTED_SOURCE_SHA256_INVALID")
@@ -280,6 +290,7 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
             **canonical,
             "TARGET_MAIN_SHA": head,
             "MIGRATION_COMPONENTS": components,
+            "EXPECTED_MUTATION_COMPONENTS": expected_mutation_components,
             "APPROVED_REPOSITORY_ROOT": str(repository_root),
             "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
             "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -316,6 +327,7 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
             "CREATED_AT": _timestamp(created_at),
             "TARGET_MAIN_SHA": head,
             "MIGRATION_COMPONENTS": components,
+            "EXPECTED_MUTATION_COMPONENTS": expected_mutation_components,
             "MIGRATION_IMAGE_ID": args.migration_image_id,
             "PRODUCTION_DB_SOURCE_SHA256": identity["SOURCE_SHA256"],
             "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
@@ -351,6 +363,7 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
             repository_root=repository_root,
             operation_id=operation_id,
             migration_components=components,
+            expected_mutation_components=expected_mutation_components,
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
             deployment_contract=deployment_contract,
@@ -365,6 +378,7 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
             policy,
             operation_id=operation_id,
             migration_components=components,
+            expected_mutation_components=expected_mutation_components,
             source_sha256=str(identity["SOURCE_SHA256"]),
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
@@ -405,6 +419,26 @@ def _validate_plan_shape(
         or plan.get("OPERATION_CLASS") != migration.AUTHORITY_OPERATION_CLASS
         or plan.get("MIGRATION_COMPONENTS") != components
         or plan.get("MIGRATION_REGISTRY") != migration._target_migration_registry()
+    ):
+        raise migration.ProductionGateError("AUTHORITY_PLAN_CONTRACT_INVALID")
+    expected_mutations = plan.get("EXPECTED_MUTATION_COMPONENTS")
+    states = plan.get("COMPONENT_SCHEMA_STATES")
+    effective_mutations = plan.get("EFFECTIVE_MUTATION_COMPONENTS")
+    if not isinstance(expected_mutations, list) or not isinstance(states, dict):
+        raise migration.ProductionGateError("AUTHORITY_PLAN_CONTRACT_INVALID")
+    expected_mutations = migration._validate_expected_mutation_components(
+        expected_mutations,
+        components,
+    )
+    allowed_states = {
+        item.value for item in migration.schema_migration.SchemaClassification
+    }
+    if (
+        set(states) != set(components)
+        or any(state not in allowed_states for state in states.values())
+        or effective_mutations
+        != migration._derive_effective_mutation_components(states, components)
+        or effective_mutations != expected_mutations
     ):
         raise migration.ProductionGateError("AUTHORITY_PLAN_CONTRACT_INVALID")
     migration._parse_timestamp(
@@ -642,6 +676,12 @@ def finalize_authority_package(args: argparse.Namespace) -> int:
             "SOURCE_TREE_SHA": tree,
             "TARGET_IMAGE_ID": plan["MIGRATION_IMAGE_ID"],
             "CURRENT_RUNTIME_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
+            "EXPECTED_MUTATION_COMPONENTS": plan[
+                "EXPECTED_MUTATION_COMPONENTS"
+            ],
+            "EFFECTIVE_MUTATION_COMPONENTS": plan[
+                "EFFECTIVE_MUTATION_COMPONENTS"
+            ],
             "CANONICAL_PRODUCTION_DB_PATH": plan["DB_CANONICAL_PATH"],
             "SOURCE_DB_SHA256": plan["SOURCE_SHA256"],
             "SOURCE_DB_SIZE": plan["SOURCE_SIZE"],

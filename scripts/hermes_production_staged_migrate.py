@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts import healbite_schema_migrate as schema_migration  # noqa: E402
 from scripts import hermes_production_deploy as deployment  # noqa: E402
 from scripts.hermes_execution_authority import (  # noqa: E402
     ExecutionAuthorityBundle,
@@ -60,15 +61,15 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 7
+PLAN_VERSION = 8
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_ID_RE = re.compile(r"[0-9a-f]{32}")
 AUTHORITY_OPERATION_CLASS = "PRODUCTION_STAGED_SCHEMA_MIGRATION"
-OPERATIONS_ROOT_APPROVAL_VERSION = 2
-CLEAN_START_POLICY_VERSION = 2
+OPERATIONS_ROOT_APPROVAL_VERSION = 3
+CLEAN_START_POLICY_VERSION = 3
 SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 CANONICAL_CONTRACT_RELATIVE_PATH = Path("deploy/hermes-production.json")
 EXPECTED_FEATURE_FLAGS = {
@@ -88,6 +89,7 @@ OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset({
     "CANONICAL_MAIN_REF",
     "TARGET_MAIN_SHA",
     "MIGRATION_COMPONENTS",
+    "EXPECTED_MUTATION_COMPONENTS",
     "APPROVED_REPOSITORY_ROOT",
     "REPOSITORY_ROOT_DEVICE",
     "REPOSITORY_ROOT_INODE",
@@ -117,6 +119,7 @@ CLEAN_START_POLICY_FIELDS = frozenset({
     "CREATED_AT",
     "TARGET_MAIN_SHA",
     "MIGRATION_COMPONENTS",
+    "EXPECTED_MUTATION_COMPONENTS",
     "MIGRATION_IMAGE_ID",
     "PRODUCTION_DB_SOURCE_SHA256",
     "FAMILY_SHOPPING_BACKFILL_REQUIRED",
@@ -170,6 +173,9 @@ PLAN_FIELDS = frozenset({
     "TARGET_SCHEMA_FINGERPRINT",
     "MIGRATION_REGISTRY",
     "MIGRATION_COMPONENTS",
+    "COMPONENT_SCHEMA_STATES",
+    "EXPECTED_MUTATION_COMPONENTS",
+    "EFFECTIVE_MUTATION_COMPONENTS",
     "REPOSITORY_ROOT",
     "CANONICAL_REPOSITORY",
     "CANONICAL_REMOTE",
@@ -961,6 +967,115 @@ def _read_only_source(path: Path) -> tuple[dict[str, int | str], str, str, int]:
         os.close(fd)
 
 
+def _validate_expected_mutation_components(
+    values: Sequence[str],
+    migration_components: Sequence[str],
+) -> list[str]:
+    expected = list(values)
+    canonical = list(migration_components)
+    if (
+        any(not isinstance(value, str) for value in expected)
+        or len(set(expected)) != len(expected)
+        or any(value not in canonical for value in expected)
+        or expected != [value for value in canonical if value in expected]
+    ):
+        raise ProductionGateError("EXPECTED_MUTATION_COMPONENTS_INVALID")
+    return expected
+
+
+def _component_schema_states_from_connection(
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    try:
+        classified = schema_migration._preflight_all_schemas(connection)
+    except schema_migration.MigrationError as exc:
+        raise ProductionGateError("COMPONENT_SCHEMA_CLASSIFICATION_FAILED") from exc
+    components = [
+        str(item["component"])
+        for item in _target_migration_registry()
+    ]
+    if set(classified) != set(components):
+        raise ProductionGateError("COMPONENT_SCHEMA_REGISTRY_MISMATCH")
+    return {
+        component: classified[component].value
+        for component in components
+    }
+
+
+def _read_component_schema_states(path: Path) -> dict[str, str]:
+    """Classify every canonical component without mutating the source database."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"file:{path}?mode=ro",
+            uri=True,
+            timeout=0,
+            isolation_level=None,
+        )
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=0")
+        connection.execute("BEGIN")
+        return _component_schema_states_from_connection(connection)
+    except sqlite3.Error as exc:
+        sqlite_code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(sqlite_code, int) and (sqlite_code & 0xFF) in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }:
+            raise ProductionGateError("QUIESCENCE_FAILED") from exc
+        raise ProductionGateError("COMPONENT_SCHEMA_CLASSIFICATION_FAILED") from exc
+    finally:
+        if connection is not None:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+
+
+def _derive_effective_mutation_components(
+    component_schema_states: dict[str, str],
+    migration_components: Sequence[str],
+) -> list[str]:
+    non_mutating = schema_migration.SchemaClassification.CURRENT.value
+    return [
+        component
+        for component in migration_components
+        if component_schema_states.get(component) != non_mutating
+    ]
+
+
+def _assert_effective_mutation_contract(
+    path: Path,
+    expected_mutation_components: Sequence[str],
+    *,
+    expected_source_sha256: str | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    migration_components = [
+        str(item["component"])
+        for item in _target_migration_registry()
+    ]
+    expected = _validate_expected_mutation_components(
+        expected_mutation_components,
+        migration_components,
+    )
+    states = _read_component_schema_states(path)
+    effective = _derive_effective_mutation_components(states, migration_components)
+    if effective != expected:
+        raise ProductionGateError("EFFECTIVE_MUTATION_COMPONENTS_MISMATCH")
+    if expected_source_sha256 is not None:
+        identity, _schema, integrity, foreign_keys = _read_only_source(path)
+        if (
+            identity["SOURCE_SHA256"] != expected_source_sha256
+            or integrity != "ok"
+            or foreign_keys != 0
+        ):
+            raise ProductionGateError(
+                "SOURCE_DRIFT_DURING_COMPONENT_CLASSIFICATION"
+            )
+    return states, effective
+
+
 def _inspect_image(image_id: str, expected_revision: str | None) -> str:
     if IMAGE_ID_RE.fullmatch(image_id) is None:
         raise ProductionGateError("IMAGE_ID_INVALID")
@@ -1244,6 +1359,7 @@ def _validate_operations_root_approval(
     repository_root: Path,
     operation_id: str,
     migration_components: list[str],
+    expected_mutation_components: list[str],
     migration_image_id: str,
     migration_revision: str,
     deployment_contract: PinnedDeploymentContract,
@@ -1283,6 +1399,7 @@ def _validate_operations_root_approval(
         "OPERATION_CLASS": AUTHORITY_OPERATION_CLASS,
         **canonical_binding,
         "MIGRATION_COMPONENTS": migration_components,
+        "EXPECTED_MUTATION_COMPONENTS": expected_mutation_components,
         "APPROVED_REPOSITORY_ROOT": str(repository_root),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -1328,6 +1445,7 @@ def _validate_clean_start_policy(
     *,
     operation_id: str,
     migration_components: list[str],
+    expected_mutation_components: list[str],
     source_sha256: str,
     migration_image_id: str,
     migration_revision: str,
@@ -1347,6 +1465,7 @@ def _validate_clean_start_policy(
         "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
         "TARGET_MAIN_SHA": migration_revision,
         "MIGRATION_COMPONENTS": migration_components,
+        "EXPECTED_MUTATION_COMPONENTS": expected_mutation_components,
         "MIGRATION_IMAGE_ID": migration_image_id,
         "PRODUCTION_DB_SOURCE_SHA256": source_sha256,
     }
@@ -1506,11 +1625,21 @@ def create_plan(args: argparse.Namespace) -> int:
             code_prefix="OPERATIONS_ROOT_APPROVAL",
             expected_fields=OPERATIONS_ROOT_APPROVAL_FIELDS,
         )
+        raw_expected = operations_root_approval.payload.get(
+            "EXPECTED_MUTATION_COMPONENTS"
+        )
+        if not isinstance(raw_expected, list):
+            raise ProductionGateError("EXPECTED_MUTATION_COMPONENTS_INVALID")
+        expected_mutation_components = _validate_expected_mutation_components(
+            raw_expected,
+            migration_components,
+        )
         _validate_operations_root_approval(
             operations_root_approval,
             repository_root=repository_root,
             operation_id=args.operation_id,
             migration_components=migration_components,
+            expected_mutation_components=expected_mutation_components,
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
             deployment_contract=deployment_contract,
@@ -1524,6 +1653,13 @@ def create_plan(args: argparse.Namespace) -> int:
         identity, schema_fingerprint, integrity, foreign_keys = _read_only_source(
             db_path
         )
+        component_schema_states, effective_mutation_components = (
+            _assert_effective_mutation_contract(
+                db_path,
+                expected_mutation_components,
+                expected_source_sha256=str(identity["SOURCE_SHA256"]),
+            )
+        )
         expected_identity = {
             "SOURCE_DEVICE": args.expected_source_device,
             "SOURCE_INODE": args.expected_source_inode,
@@ -1536,6 +1672,7 @@ def create_plan(args: argparse.Namespace) -> int:
             clean_start_policy,
             operation_id=args.operation_id,
             migration_components=migration_components,
+            expected_mutation_components=expected_mutation_components,
             source_sha256=str(identity["SOURCE_SHA256"]),
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
@@ -1586,6 +1723,9 @@ def create_plan(args: argparse.Namespace) -> int:
             "TARGET_SCHEMA_FINGERPRINT": target_schema.fingerprint,
             "MIGRATION_REGISTRY": migration_registry,
             "MIGRATION_COMPONENTS": migration_components,
+            "COMPONENT_SCHEMA_STATES": component_schema_states,
+            "EXPECTED_MUTATION_COMPONENTS": expected_mutation_components,
+            "EFFECTIVE_MUTATION_COMPONENTS": effective_mutation_components,
             "REPOSITORY_ROOT": str(repository_root),
             "CANONICAL_REPOSITORY": operations_root_approval.payload[
                 "CANONICAL_REPOSITORY"
@@ -1845,6 +1985,13 @@ def _revalidate_plan(
     operation_id = _expect_plan_string(plan, "OPERATION_ID", OPERATION_ID_RE)
     migration_registry = _target_migration_registry()
     migration_components = [item["component"] for item in migration_registry]
+    raw_expected_mutation_components = plan.get("EXPECTED_MUTATION_COMPONENTS")
+    if not isinstance(raw_expected_mutation_components, list):
+        raise ProductionGateError("EXPECTED_MUTATION_COMPONENTS_INVALID")
+    expected_mutation_components = _validate_expected_mutation_components(
+        raw_expected_mutation_components,
+        migration_components,
+    )
     if (
         plan.get("OPERATION_CLASS") != AUTHORITY_OPERATION_CLASS
         or plan.get("MIGRATION_COMPONENTS") != migration_components
@@ -1958,6 +2105,7 @@ def _revalidate_plan(
             repository_root=repository_root,
             operation_id=operation_id,
             migration_components=migration_components,
+            expected_mutation_components=expected_mutation_components,
             migration_image_id=migration_image,
             migration_revision=revision,
             deployment_contract=deployment_contract,
@@ -1987,6 +2135,7 @@ def _revalidate_plan(
             clean_start_policy,
             operation_id=operation_id,
             migration_components=migration_components,
+            expected_mutation_components=expected_mutation_components,
             source_sha256=source_sha,
             migration_image_id=migration_image,
             migration_revision=revision,
@@ -2040,6 +2189,19 @@ def _revalidate_plan(
             raise ProductionGateError("SOURCE_SCHEMA_DRIFT")
         if integrity != "ok" or foreign_keys != 0:
             raise ProductionGateError("SOURCE_DATABASE_INVALID")
+        component_schema_states, effective_mutation_components = (
+            _assert_effective_mutation_contract(
+                db_path,
+                expected_mutation_components,
+                expected_source_sha256=source_sha,
+            )
+        )
+        if (
+            plan.get("COMPONENT_SCHEMA_STATES") != component_schema_states
+            or plan.get("EFFECTIVE_MUTATION_COMPONENTS")
+            != effective_mutation_components
+        ):
+            raise ProductionGateError("EFFECTIVE_MUTATION_COMPONENTS_DRIFT")
         source_parent_identity = _directory_record(db_path.parent, private=False)
         if plan.get("SOURCE_PARENT_IDENTITY") != source_parent_identity:
             raise ProductionGateError("SOURCE_PARENT_IDENTITY_DRIFT")
@@ -2780,6 +2942,16 @@ def _execute_plan_outcome(
             raise ProductionGateError(exc.code) from exc
         if not runtime_matches:
             raise ProductionGateError("CURRENT_RUNTIME_IMAGE_DRIFT")
+        pre_ddl_states, pre_ddl_effective = _assert_effective_mutation_contract(
+            Path(str(plan["DB_CANONICAL_PATH"])),
+            plan["EXPECTED_MUTATION_COMPONENTS"],
+            expected_source_sha256=str(plan["SOURCE_SHA256"]),
+        )
+        if (
+            pre_ddl_states != plan["COMPONENT_SCHEMA_STATES"]
+            or pre_ddl_effective != plan["EFFECTIVE_MUTATION_COMPONENTS"]
+        ):
+            raise ProductionGateError("EFFECTIVE_MUTATION_COMPONENTS_DRIFT_PRE_DDL")
         authorization = _issue_production_authorization(
             operation_id=operation_id,
             plan_sha256=pinned.sha256,
@@ -2825,6 +2997,23 @@ def _execute_plan_outcome(
                 primary_error_type=code,
             )
             return outcome
+        if prepared.source_lease is None:
+            raise ProductionGateError("SOURCE_SQLITE_LEASE_MISSING")
+        locked_pre_ddl_states = _component_schema_states_from_connection(
+            prepared.source_lease.connection
+        )
+        locked_pre_ddl_effective = _derive_effective_mutation_components(
+            locked_pre_ddl_states,
+            plan["MIGRATION_COMPONENTS"],
+        )
+        if (
+            locked_pre_ddl_states != plan["COMPONENT_SCHEMA_STATES"]
+            or locked_pre_ddl_effective != plan["EFFECTIVE_MUTATION_COMPONENTS"]
+            or locked_pre_ddl_effective != plan["EXPECTED_MUTATION_COMPONENTS"]
+        ):
+            raise ProductionGateError(
+                "EFFECTIVE_MUTATION_COMPONENTS_DRIFT_UNDER_LEASE"
+            )
         _final_mutation_checkpoint(
             pinned,
             validated,
@@ -2844,6 +3033,12 @@ def _execute_plan_outcome(
                 "MIGRATION_IMAGE_ID": plan["MIGRATION_IMAGE_ID"],
                 "MIGRATION_IMAGE_REVISION": plan["MIGRATION_IMAGE_REVISION"],
                 "PREVIOUS_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
+                "EXPECTED_MUTATION_COMPONENTS": plan[
+                    "EXPECTED_MUTATION_COMPONENTS"
+                ],
+                "EFFECTIVE_MUTATION_COMPONENTS": plan[
+                    "EFFECTIVE_MUTATION_COMPONENTS"
+                ],
                 "OPERATIONS_ROOT_APPROVAL_SHA256": plan[
                     "OPERATIONS_ROOT_APPROVAL_SHA256"
                 ],
@@ -3221,6 +3416,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--migration-image-revision", required=True)
     prepare_parser.add_argument(
         "--migration-component",
+        action="append",
+        required=True,
+    )
+    prepare_parser.add_argument(
+        "--expected-mutation-component",
         action="append",
         required=True,
     )

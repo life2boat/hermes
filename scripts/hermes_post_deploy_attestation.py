@@ -639,7 +639,7 @@ def capture_pre_mutation_baseline(
     qdrant_service: str,
     database_path: Path,
     database_target: Path,
-    revision_label: str,
+    revision_label: str | None,
     protected_secret_names: tuple[str, ...],
     run: Run = _default_run,
 ) -> RuntimeBaseline:
@@ -794,7 +794,7 @@ def post_deploy_attestation(
     hermes_service: str,
     qdrant_service: str,
     database_path: Path,
-    revision_label: str,
+    revision_label: str | None,
     target_image_id: str,
     target_revision: str,
     protected_secret_names: tuple[str, ...],

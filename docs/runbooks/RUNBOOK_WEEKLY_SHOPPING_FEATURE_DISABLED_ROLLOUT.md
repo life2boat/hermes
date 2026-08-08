@@ -540,7 +540,7 @@ of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tab
 and false execution/deletion state
 both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
 descriptors before production source inspection; their path, filesystem identity,
-mode and SHA-256 are recorded in plan schema version 7
+mode and SHA-256 are recorded in plan schema version 8
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
@@ -551,6 +551,17 @@ code, recorded in the plan, and independently recalculated during execute;
 the same plan records the ordered canonical migration registry with component
 identity and SHA-256, including the Inventory migration, and execute rejects
 any registry drift
+the authority producer requires the complete ordered canonical registry as
+MIGRATION_COMPONENTS and a separate ordered, unique, known
+EXPECTED_MUTATION_COMPONENTS subset; the latter is operator authorization for
+which components may actually change, not a replacement migration registry
+plan classifies every component as ABSENT, KNOWN_COMPATIBLE_PARTIAL, or CURRENT,
+derives EFFECTIVE_MUTATION_COMPONENTS from every non-CURRENT component, and
+fails before writing a plan unless the derived ordered subset exactly equals the
+operator-bound expected subset
+execute repeats component classification after runtime quiescence and immediately
+before production authorization and first DDL; any component-state or effective
+scope drift fails closed without backup, staging migration, or DDL expansion
 production execute requires exact --plan, --expected-plan-sha256,
 --confirm-operation-id, --confirm-source-sha256, and --confirm-image-revision
 plus independent --confirm-operations-root-approval-sha256 and
@@ -568,11 +579,12 @@ production execute additionally requires --runtime-pin and
 --expected-runtime-pin-sha256; it reopens the exact adjacent pin after the
 authorized Hermes stop and accepts only Running=false with Status=exited and no
 immutable identity drift or missing pre-stop pin before quiescence, backup, staging or mutation
-execution authority schema version 1 binds the exact plan, native approval,
+execution authority schema version 2 binds the exact plan, native approval,
 clean-start policy, approval envelope, invocation descriptor, persistent DB
 override, P5B and P6A-F1 evidence, source HEAD/tree, both image IDs, canonical DB
 path/hash/size/user_version/schema fingerprint/parent identity, operations-root
-identity, and expiry; unknown fields and environment fallbacks are denied
+identity, expected/effective mutation components, and expiry; unknown fields and
+environment fallbacks are denied
 invocation descriptor schema version 2 binds the Compose project, project
 directory, exact three-file order, SHA-256 of both non-secret Compose files,
 secret-safe secrets-override identity, service, DB bind source/target, both image
@@ -636,7 +648,7 @@ operation ID, source SHA-256, and migration image revision before service stop.
    plan while Hermes remains running.
 3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256;
    provide the separately reviewed companion evidence, then use the producer to
-   create and validate one complete final-authority v1 artifact bound to that plan.
+   create and validate one complete final-authority v2 artifact bound to that plan.
 4. Run the explicit `attest-runtime` command while Hermes is still running and
    review the adjacent runtime pin with the plan and final authority.
 5. Use a separately approved quiet window in which hermes-bot makes no database
@@ -695,6 +707,7 @@ sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" prepare-authority \
   --migration-component shopping \
   --migration-component inventory \
   --migration-component fridge_menu \
+  --expected-mutation-component fridge_menu \
   --expires-in-seconds 3600 \
   --confirm-plan-only-authority PREPARE_PLAN_ONLY_AUTHORITY \
   --confirm-clean-start-policy CONFIRM_NO_CLIENTS_CLEAN_START

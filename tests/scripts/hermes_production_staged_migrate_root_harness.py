@@ -226,6 +226,12 @@ def _create_final_authority(
             "SOURCE_TREE_SHA": tree,
             "TARGET_IMAGE_ID": target_image_id,
             "CURRENT_RUNTIME_IMAGE_ID": previous_image_id,
+            "EXPECTED_MUTATION_COMPONENTS": plan[
+                "EXPECTED_MUTATION_COMPONENTS"
+            ],
+            "EFFECTIVE_MUTATION_COMPONENTS": plan[
+                "EFFECTIVE_MUTATION_COMPONENTS"
+            ],
             "CANONICAL_PRODUCTION_DB_PATH": str(source),
             "SOURCE_DB_SHA256": str(plan["SOURCE_SHA256"]),
             "SOURCE_DB_SIZE": int(plan["SOURCE_SIZE"]),
@@ -483,6 +489,7 @@ def main() -> int:
             **canonical,
             "TARGET_MAIN_SHA": head,
             "MIGRATION_COMPONENTS": components,
+            "EXPECTED_MUTATION_COMPONENTS": components,
             "APPROVED_REPOSITORY_ROOT": str(repository_root),
             "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
             "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -519,6 +526,7 @@ def main() -> int:
             "CREATED_AT": production._timestamp(created_at),
             "TARGET_MAIN_SHA": args.target_revision,
             "MIGRATION_COMPONENTS": components,
+            "EXPECTED_MUTATION_COMPONENTS": components,
             "MIGRATION_IMAGE_ID": args.target_image_id,
             "PRODUCTION_DB_SOURCE_SHA256": source_identity["SOURCE_SHA256"],
             "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,

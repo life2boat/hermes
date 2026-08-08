@@ -1505,6 +1505,7 @@ def _ordinary_deploy_pre_mutation_barrier(
     current_image: str | None = None,
     rollback: bool = False,
     lease: preflight.DeploymentLease | None = None,
+    lease_operation_class: str | None = None,
 ) -> tuple[InspectedImage, dict[str, str], str]:
     target, source_head = _validate_operation_identity(
         contract,
@@ -1520,7 +1521,11 @@ def _ordinary_deploy_pre_mutation_barrier(
             preflight.validate_held_lease,
             lease,
             allowed_owner_uids=contract.lease_owner_uids,
-            operation_class="rollback" if rollback else "deploy",
+            operation_class=(
+                lease_operation_class
+                if lease_operation_class is not None
+                else "rollback" if rollback else "deploy"
+            ),
             canonical_repository=contract.canonical_repository,
             target_sha=revision,
             target_image_id=target.image_id,

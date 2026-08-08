@@ -18,7 +18,7 @@ MAX_ARTIFACT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
-EXECUTION_AUTHORITY_VERSION = 1
+EXECUTION_AUTHORITY_VERSION = 2
 INVOCATION_DESCRIPTOR_VERSION = 2
 TRUSTED_FILESYSTEM_ANCHOR = Path("/")
 
@@ -46,6 +46,8 @@ EXECUTION_AUTHORITY_FIELDS = frozenset({
     "SOURCE_TREE_SHA",
     "TARGET_IMAGE_ID",
     "CURRENT_RUNTIME_IMAGE_ID",
+    "EXPECTED_MUTATION_COMPONENTS",
+    "EFFECTIVE_MUTATION_COMPONENTS",
     "CANONICAL_PRODUCTION_DB_PATH",
     "SOURCE_DB_SHA256",
     "SOURCE_DB_SIZE",
@@ -1126,6 +1128,12 @@ def load_execution_authority(
                 "SOURCE_SHA": plan["MIGRATION_IMAGE_REVISION"],
                 "TARGET_IMAGE_ID": plan["MIGRATION_IMAGE_ID"],
                 "CURRENT_RUNTIME_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
+                "EXPECTED_MUTATION_COMPONENTS": plan[
+                    "EXPECTED_MUTATION_COMPONENTS"
+                ],
+                "EFFECTIVE_MUTATION_COMPONENTS": plan[
+                    "EFFECTIVE_MUTATION_COMPONENTS"
+                ],
                 "CANONICAL_PRODUCTION_DB_PATH": plan["DB_CANONICAL_PATH"],
                 "SOURCE_DB_SHA256": plan["SOURCE_SHA256"],
                 "SOURCE_DB_SIZE": plan["SOURCE_SIZE"],

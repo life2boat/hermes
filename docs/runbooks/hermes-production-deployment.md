@@ -1,7 +1,10 @@
 # Hermes production deployment source of truth
 
-This runbook and `scripts/hermes_production_deploy.sh` are the only authoritative
-application deployment entrypoint for Hermes production. Database migration,
+This runbook and `scripts/hermes_production_deploy.sh` are the authoritative
+ordinary application deployment contract for Hermes production. The only
+missing-revision exception is the separately authorized, one-time
+`scripts/hermes_legacy_provenance_bootstrap.py` transition documented below;
+it never weakens the ordinary wrapper. Database migration,
 production snapshot inventory, snapshot backfill, and feature enablement are
 separate approval gates. Production staged-migration authority packages must be
 created and validated through the lifecycle in
@@ -57,6 +60,61 @@ The exact 40-character source revision is also mandatory. Every deployable or
 rollback image must contain that same full SHA in the single authoritative OCI
 label `org.opencontainers.image.revision`. A missing, malformed, abbreviated, or
 mismatched label is a hard failure; tag text is never treated as provenance.
+
+## One-time legacy runtime provenance bootstrap
+
+Use this contract only when the running `hermes-bot` image has a known immutable
+image ID but its authoritative OCI revision is missing or malformed. Do not
+infer a source commit: the plan records `LEGACY_BASELINE` and
+`SOURCE_REVISION=UNKNOWN`. If the current image already has a valid revision,
+bootstrap fails with `BOOTSTRAP_DENIED_USE_ORDINARY_DEPLOY` and the ordinary
+wrapper is required.
+
+Planning and validation require the legacy runtime to be running with
+`restart_count=0`, the exact canonical SQLite bind with integrity `ok` and zero
+foreign-key violations, healthy Qdrant, passing Telegram and Gateway no-send
+checks, unchanged feature/allowlist state, and protected-secret fingerprints.
+They also run the ordinary exact-main candidate gates: canonical clean source,
+fresh CI, exact immutable candidate image and OCI revision, Compose render, DB
+mount, secret transition, and capacity. Before any bootstrap mutation,
+`plan-bootstrap` creates a private mode-`0600` Docker image archive outside Git
+and binds its path, size, SHA-256, and exact legacy image ID into a root-owned
+mode-`0600` plan under a new mode-`0700` operation directory.
+
+Read-only with respect to the running production services:
+
+```bash
+python3 scripts/hermes_legacy_provenance_bootstrap.py plan-bootstrap \
+  --repository-root <exact-clean-main-root> \
+  --operation-id <reviewed-32-lowercase-hex-id> \
+  --artifact-parent <existing-root-owned-0700-directory-outside-git> \
+  --secret-source /etc/hermes/hermes-production.env \
+  --candidate-image sha256:<64-hex-exact-main-image-id> \
+  --candidate-revision <exact-40-character-main-sha>
+
+python3 scripts/hermes_legacy_provenance_bootstrap.py validate-bootstrap \
+  --plan <reviewed-bootstrap-plan-path> \
+  --expected-plan-sha256 <reviewed-bootstrap-plan-sha256>
+```
+
+Only a separate production authorization may run:
+
+```bash
+python3 scripts/hermes_legacy_provenance_bootstrap.py execute-bootstrap \
+  --plan <reviewed-bootstrap-plan-path> \
+  --expected-plan-sha256 <reviewed-bootstrap-plan-sha256> \
+  --confirm BOOTSTRAP_LEGACY_HERMES_RUNTIME
+```
+
+Execution acquires the canonical deployment lease and may recreate only
+`hermes-bot` with the exact candidate image. Schema migration, feature
+activation, protected-secret changes, and Qdrant mutation are denied. The
+ordinary post-deploy attestation must prove the candidate revision, zero
+restarts, and no SQLite, Qdrant, feature, allowlist, or secret delta. Candidate
+failure makes exactly one recovery attempt with the exact legacy image ID,
+loading the bound private archive if necessary; a healthy recovery reports
+`ROLLED_BACK`, never `PASS`. A successful bootstrap creates a provenance-valid
+baseline, so every later transition must use the ordinary strict wrapper.
 
 ## Verified Playwright image build prerequisite
 

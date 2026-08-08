@@ -383,6 +383,7 @@ def _write_valid_evidence(
         **canonical,
         "TARGET_MAIN_SHA": revision,
         "MIGRATION_COMPONENTS": components,
+        "EXPECTED_MUTATION_COMPONENTS": components,
         "APPROVED_REPOSITORY_ROOT": str(repository),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -419,6 +420,7 @@ def _write_valid_evidence(
         "CREATED_AT": production._timestamp(created_at),
         "TARGET_MAIN_SHA": revision,
         "MIGRATION_COMPONENTS": components,
+        "EXPECTED_MUTATION_COMPONENTS": components,
         "MIGRATION_IMAGE_ID": TARGET_IMAGE_ID,
         "PRODUCTION_DB_SOURCE_SHA256": _sha256(context.source),
         "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
@@ -705,6 +707,12 @@ def _create_final_authority(
             "SOURCE_TREE_SHA": tree,
             "TARGET_IMAGE_ID": TARGET_IMAGE_ID,
             "CURRENT_RUNTIME_IMAGE_ID": PREVIOUS_IMAGE_ID,
+            "EXPECTED_MUTATION_COMPONENTS": plan.payload[
+                "EXPECTED_MUTATION_COMPONENTS"
+            ],
+            "EFFECTIVE_MUTATION_COMPONENTS": plan.payload[
+                "EFFECTIVE_MUTATION_COMPONENTS"
+            ],
             "CANONICAL_PRODUCTION_DB_PATH": str(context.source),
             "SOURCE_DB_SHA256": str(plan.payload["SOURCE_SHA256"]),
             "SOURCE_DB_SIZE": int(plan.payload["SOURCE_SIZE"]),

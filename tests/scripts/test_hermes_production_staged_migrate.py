@@ -265,6 +265,9 @@ def _write_unit_evidence(context: UnitContext) -> None:
         "MIGRATION_COMPONENTS": [
             item["component"] for item in production._target_migration_registry()
         ],
+        "EXPECTED_MUTATION_COMPONENTS": [
+            item["component"] for item in production._target_migration_registry()
+        ],
         "APPROVED_REPOSITORY_ROOT": str(context.repository),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -301,6 +304,9 @@ def _write_unit_evidence(context: UnitContext) -> None:
         "CREATED_AT": production._timestamp(created_at),
         "TARGET_MAIN_SHA": REVISION,
         "MIGRATION_COMPONENTS": [
+            item["component"] for item in production._target_migration_registry()
+        ],
+        "EXPECTED_MUTATION_COMPONENTS": [
             item["component"] for item in production._target_migration_registry()
         ],
         "MIGRATION_IMAGE_ID": IMAGE_ID,
@@ -948,7 +954,9 @@ def test_runbook_documents_exact_evidence_binding_contract() -> None:
         "--expected-runtime-pin-sha256",
         "attest-runtime",
         "NO_CLIENTS_CLEAN_START",
-        "plan schema version 7",
+        "plan schema version 8",
+        "EXPECTED_MUTATION_COMPONENTS",
+        "EFFECTIVE_MUTATION_COMPONENTS",
         "no generic force or skip-validation flag exists",
     ):
         assert required in runbook
@@ -2933,6 +2941,7 @@ def _producer_initial_args(
         migration_image_id=IMAGE_ID,
         migration_image_revision=REVISION,
         migration_component=producer._operation_components(),
+        expected_mutation_component=producer._operation_components(),
         expires_in_seconds=3600,
         confirm_plan_only_authority=producer.PLAN_ONLY_CONFIRMATION,
         confirm_clean_start_policy=producer.CLEAN_START_CONFIRMATION,

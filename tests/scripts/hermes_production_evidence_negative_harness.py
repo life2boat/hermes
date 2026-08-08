@@ -29,6 +29,7 @@ TARGET_IMAGE_ID = "sha256:" + "2" * 64
 PREVIOUS_IMAGE_ID = "sha256:" + "3" * 64
 OTHER_IMAGE_ID = "sha256:" + "9" * 64
 OTHER_REVISION = "8" * 40
+OPERATION_ID = "4" * 32
 
 PLAN_CASES = (
     ("missing_root_approval_path", 2, "ARGUMENT_ERROR"),
@@ -312,6 +313,15 @@ def _copy_repository(source_root: Path, target: Path) -> tuple[str, str]:
     _run_git(target, "commit", "--quiet", "-m", "synthetic evidence root")
     head = _run_git(target, "rev-parse", "HEAD")
     _run_git(target, "checkout", "--detach", "--quiet", head)
+    contract = production.deployment.load_contract(target)
+    _run_git(
+        target,
+        "remote",
+        "add",
+        contract.canonical_remote,
+        contract.canonical_remote_urls[0],
+    )
+    _run_git(target, "update-ref", contract.allowed_revision_ref, head)
     tree = _run_git(target, "rev-parse", "HEAD^{tree}")
     if len(head) != 40 or len(tree) != 40:
         raise AssertionError("synthetic repository identity invalid")
@@ -357,11 +367,22 @@ def _write_valid_evidence(
     contract_path = repository / production.CANONICAL_CONTRACT_RELATIVE_PATH
     contract_metadata = contract_path.stat()
     created_at = production._now()
+    components = [
+        str(item["component"]) for item in production._target_migration_registry()
+    ]
+    canonical = production._canonical_repository_binding(
+        repository,
+        head=revision,
+    )
     approval = {
-        "APPROVAL_VERSION": 1,
+        "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
+        "OPERATION_ID": OPERATION_ID,
+        "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,
         "CREATED_AT": production._timestamp(created_at),
         "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+        **canonical,
         "TARGET_MAIN_SHA": revision,
+        "MIGRATION_COMPONENTS": components,
         "APPROVED_REPOSITORY_ROOT": str(repository),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -392,10 +413,12 @@ def _write_valid_evidence(
         "DEPLOY_AUTHORIZED": False,
     }
     policy = {
-        "POLICY_VERSION": 1,
+        "POLICY_VERSION": production.CLEAN_START_POLICY_VERSION,
+        "OPERATION_ID": OPERATION_ID,
         "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
         "CREATED_AT": production._timestamp(created_at),
         "TARGET_MAIN_SHA": revision,
+        "MIGRATION_COMPONENTS": components,
         "MIGRATION_IMAGE_ID": TARGET_IMAGE_ID,
         "PRODUCTION_DB_SOURCE_SHA256": _sha256(context.source),
         "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
@@ -419,6 +442,8 @@ def _plan_argv(
     metadata = context.source.stat()
     return [
         "plan",
+        "--operation-id",
+        OPERATION_ID,
         "--repository-root",
         str(repository),
         "--db-path",
@@ -709,34 +734,30 @@ def _create_runtime_pin(
     final_authority_path: Path,
     final_authority_sha256: str,
 ) -> tuple[Path, str]:
-    return_code, result = _public_main(
-        [
-            "attest-runtime",
-            "--plan",
-            str(plan.path),
-            "--expected-plan-sha256",
-            plan.sha256,
-            "--confirm-operation-id",
-            str(plan.payload["OPERATION_ID"]),
-            "--confirm-source-sha256",
-            str(plan.payload["SOURCE_SHA256"]),
-            "--confirm-image-revision",
-            str(plan.payload["MIGRATION_IMAGE_REVISION"]),
-            "--confirm-operations-root-approval-sha256",
-            str(plan.payload["OPERATIONS_ROOT_APPROVAL_SHA256"]),
-            "--confirm-clean-start-policy-sha256",
-            str(plan.payload["CLEAN_START_POLICY_SHA256"]),
-            "--final-authority",
-            str(final_authority_path),
-            "--expected-final-authority-sha256",
-            final_authority_sha256,
-        ]
-    )
+    return_code, result = _public_main([
+        "attest-runtime",
+        "--plan",
+        str(plan.path),
+        "--expected-plan-sha256",
+        plan.sha256,
+        "--confirm-operation-id",
+        str(plan.payload["OPERATION_ID"]),
+        "--confirm-source-sha256",
+        str(plan.payload["SOURCE_SHA256"]),
+        "--confirm-image-revision",
+        str(plan.payload["MIGRATION_IMAGE_REVISION"]),
+        "--confirm-operations-root-approval-sha256",
+        str(plan.payload["OPERATIONS_ROOT_APPROVAL_SHA256"]),
+        "--confirm-clean-start-policy-sha256",
+        str(plan.payload["CLEAN_START_POLICY_SHA256"]),
+        "--final-authority",
+        str(final_authority_path),
+        "--expected-final-authority-sha256",
+        final_authority_sha256,
+    ])
     if return_code != 0 or result.get("status") != "PASS":
         raise AssertionError("synthetic runtime attestation failed")
-    return Path(str(result["runtime_pin_path"])), str(
-        result["runtime_pin_sha256"]
-    )
+    return Path(str(result["runtime_pin_path"])), str(result["runtime_pin_sha256"])
 
 
 def _rewrite_plan(plan: PlanContext) -> None:

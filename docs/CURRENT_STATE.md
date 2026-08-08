@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.15
+version: 1.2.16
 updated_at: 2026-08-08
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 64520d451ef43e1ee83bff6c15ec8a845a5d6b16
+state_verified_against_main_sha: 8f9e1a60f5535cf3b1b843f4c1203e9d1a51f20d
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `64520d451ef43e1ee83bff6c15ec8a845a5d6b16`.
+  `8f9e1a60f5535cf3b1b843f4c1203e9d1a51f20d`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -128,6 +128,14 @@ Git.
 - Repository-local procedural entry points are being introduced under
   `skills/deploy/`, `skills/memory/`, and `skills/telegram/`; passive policy
   files point to those procedures instead of duplicating operational steps.
+- The staged-migration gate now exposes one canonical authority-package producer:
+  operation-specific v2 initial approval/policy documents, exact plan v7,
+  plan-dependent companions, final-authority v1, and read-only package validation.
+  Operator authorization and external P5B/P6A evidence remain explicit inputs;
+  producer output alone never authorizes a production mutation.
+- No production authority package, runtime attestation, backup, migration, image
+  build, deploy, secret change, container change, SQLite write, or Qdrant mutation
+  was performed while adding this repository tooling.
 - This documentation refactor does not build, deploy, restart, change
   production configuration, write SQLite, or mutate Qdrant.
 
@@ -169,6 +177,9 @@ Git.
 - Production deployment, Memory OS reconciliation, and Telegram runtime
   troubleshooting now have repository-local procedural skill contracts with
   explicit safety, failure, and verification gates.
+- Production migration authority documents are generated from the consumer-owned
+  closed field sets, written as collision-resistant root-private canonical JSON,
+  and rejected on lifecycle reordering, replay, or bound-input drift.
 
 ## 3. Active Blockers
 

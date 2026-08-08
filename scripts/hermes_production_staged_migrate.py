@@ -34,6 +34,7 @@ from scripts import hermes_production_deploy as deployment  # noqa: E402
 from scripts.hermes_execution_authority import (  # noqa: E402
     ExecutionAuthorityBundle,
     ExecutionAuthorityError,
+    _git as _authority_git,
     exact_repository_provenance,
     load_execution_authority,
     validate_trusted_parent_chain,
@@ -59,12 +60,15 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 6
+PLAN_VERSION = 7
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_ID_RE = re.compile(r"[0-9a-f]{32}")
+AUTHORITY_OPERATION_CLASS = "PRODUCTION_STAGED_SCHEMA_MIGRATION"
+OPERATIONS_ROOT_APPROVAL_VERSION = 2
+CLEAN_START_POLICY_VERSION = 2
 SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 CANONICAL_CONTRACT_RELATIVE_PATH = Path("deploy/hermes-production.json")
 EXPECTED_FEATURE_FLAGS = {
@@ -73,136 +77,145 @@ EXPECTED_FEATURE_FLAGS = {
     "HEALBITE_SHOPPING_LIST_ENABLED": "false",
     "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
 }
-OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset(
-    {
-        "APPROVAL_VERSION",
-        "CREATED_AT",
-        "EXPIRES_AT",
-        "TARGET_MAIN_SHA",
-        "APPROVED_REPOSITORY_ROOT",
-        "REPOSITORY_ROOT_DEVICE",
-        "REPOSITORY_ROOT_INODE",
-        "REPOSITORY_ROOT_UID",
-        "REPOSITORY_ROOT_GID",
-        "REPOSITORY_ROOT_MODE",
-        "REPOSITORY_ROOT_TREE_SHA",
-        "DEPLOYMENT_CONTRACT_PATH",
-        "DEPLOYMENT_CONTRACT_DEVICE",
-        "DEPLOYMENT_CONTRACT_INODE",
-        "DEPLOYMENT_CONTRACT_SHA256",
-        "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256",
-        "STAGED_IMPLEMENTATION_SHA256",
-        "RUNBOOK_SHA256",
-        "MIGRATION_IMAGE_ID",
-        "MIGRATION_IMAGE_REVISION",
-        "DIRTY_LEGACY_ROOT_PRESERVED",
-        "PRODUCTION_DB_ACCESS_AUTHORIZED",
-        "PRODUCTION_PLAN_ONLY_AUTHORIZED",
-        "PRODUCTION_EXECUTE_AUTHORIZED",
-        "DEPLOY_AUTHORIZED",
-    }
-)
-CLEAN_START_POLICY_FIELDS = frozenset(
-    {
-        "POLICY_VERSION",
-        "DATA_POLICY",
-        "CREATED_AT",
-        "TARGET_MAIN_SHA",
-        "MIGRATION_IMAGE_ID",
-        "PRODUCTION_DB_SOURCE_SHA256",
-        "FAMILY_SHOPPING_BACKFILL_REQUIRED",
-        "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET",
-        "MEMORY_OS_DATA_MUST_BE_PRESERVED",
-        "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED",
-        "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED",
-        "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED",
-        "EXECUTION_AUTHORIZED",
-        "DELETION_PERFORMED",
-    }
-)
+OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset({
+    "APPROVAL_VERSION",
+    "OPERATION_ID",
+    "OPERATION_CLASS",
+    "CREATED_AT",
+    "EXPIRES_AT",
+    "CANONICAL_REPOSITORY",
+    "CANONICAL_REMOTE",
+    "CANONICAL_MAIN_REF",
+    "TARGET_MAIN_SHA",
+    "MIGRATION_COMPONENTS",
+    "APPROVED_REPOSITORY_ROOT",
+    "REPOSITORY_ROOT_DEVICE",
+    "REPOSITORY_ROOT_INODE",
+    "REPOSITORY_ROOT_UID",
+    "REPOSITORY_ROOT_GID",
+    "REPOSITORY_ROOT_MODE",
+    "REPOSITORY_ROOT_TREE_SHA",
+    "DEPLOYMENT_CONTRACT_PATH",
+    "DEPLOYMENT_CONTRACT_DEVICE",
+    "DEPLOYMENT_CONTRACT_INODE",
+    "DEPLOYMENT_CONTRACT_SHA256",
+    "PRODUCTION_MIGRATION_ENTRYPOINT_SHA256",
+    "STAGED_IMPLEMENTATION_SHA256",
+    "RUNBOOK_SHA256",
+    "MIGRATION_IMAGE_ID",
+    "MIGRATION_IMAGE_REVISION",
+    "DIRTY_LEGACY_ROOT_PRESERVED",
+    "PRODUCTION_DB_ACCESS_AUTHORIZED",
+    "PRODUCTION_PLAN_ONLY_AUTHORIZED",
+    "PRODUCTION_EXECUTE_AUTHORIZED",
+    "DEPLOY_AUTHORIZED",
+})
+CLEAN_START_POLICY_FIELDS = frozenset({
+    "POLICY_VERSION",
+    "OPERATION_ID",
+    "DATA_POLICY",
+    "CREATED_AT",
+    "TARGET_MAIN_SHA",
+    "MIGRATION_COMPONENTS",
+    "MIGRATION_IMAGE_ID",
+    "PRODUCTION_DB_SOURCE_SHA256",
+    "FAMILY_SHOPPING_BACKFILL_REQUIRED",
+    "LEGACY_FAMILY_SHOPPING_DATA_MAY_BE_RESET",
+    "MEMORY_OS_DATA_MUST_BE_PRESERVED",
+    "NUTRITION_DIARY_DATA_MUST_BE_PRESERVED",
+    "TELEGRAM_ADMIN_CONFIGURATION_MUST_BE_PRESERVED",
+    "OUT_OF_SCOPE_TABLES_MUST_BE_PRESERVED",
+    "EXECUTION_AUTHORIZED",
+    "DELETION_PERFORMED",
+})
 SUCCESS_STATES = ("QUIESCENCE_HELD", "COMPLETED")
-FAILURE_STATES = frozenset(
-    {"PRE_PUBLISH_FAILED", "PUBLISH_UNCERTAIN", "MANUAL_RECOVERY_REQUIRED"}
-)
-PLAN_FIELDS = frozenset(
-    {
-        "PLAN_VERSION",
-        "OPERATION_ID",
-        "CREATED_AT",
-        "EXPIRES_AT",
-        "HOSTNAME",
-        "PLAN_CREATOR_UID",
-        "PLAN_CREATOR_GID",
-        "PLAN_CREATOR_USERNAME",
-        "PLAN_CREATOR_PROCESS_UID",
-        "PLAN_CREATOR_PROCESS_GID",
-        "DB_CANONICAL_PATH",
-        "SOURCE_DEVICE",
-        "SOURCE_INODE",
-        "SOURCE_SIZE",
-        "SOURCE_MODE",
-        "SOURCE_UID",
-        "SOURCE_GID",
-        "SOURCE_SHA256",
-        "SOURCE_USER_VERSION",
-        "SOURCE_SCHEMA_FINGERPRINT",
-        "SOURCE_PARENT_IDENTITY",
-        "BACKUP_PARENT",
-        "STAGING_PARENT",
-        "EVIDENCE_PARENT",
-        "BACKUP_PARENT_IDENTITY",
-        "STAGING_PARENT_IDENTITY",
-        "EVIDENCE_PARENT_IDENTITY",
-        "MIGRATION_IMAGE_ID",
-        "MIGRATION_IMAGE_REVISION",
-        "PREVIOUS_IMAGE_ID",
-        "TARGET_SCHEMA_VERSION",
-        "TARGET_SCHEMA_FINGERPRINT",
-        "MIGRATION_REGISTRY",
-        "REPOSITORY_ROOT",
-        "DEPLOYMENT_CONTRACT_CANONICAL_PATH",
-        "DEPLOYMENT_CONTRACT_DEVICE",
-        "DEPLOYMENT_CONTRACT_INODE",
-        "DEPLOYMENT_CONTRACT_SIZE",
-        "DEPLOYMENT_CONTRACT_SHA256",
-        "DEPLOYMENT_CONTRACT_VERSION",
-        "EXPECTED_FEATURE_FLAGS",
-        "OPERATIONS_ROOT_APPROVAL_PATH",
-        "OPERATIONS_ROOT_APPROVAL_DEVICE",
-        "OPERATIONS_ROOT_APPROVAL_INODE",
-        "OPERATIONS_ROOT_APPROVAL_SIZE",
-        "OPERATIONS_ROOT_APPROVAL_UID",
-        "OPERATIONS_ROOT_APPROVAL_GID",
-        "OPERATIONS_ROOT_APPROVAL_MODE",
-        "OPERATIONS_ROOT_APPROVAL_SHA256",
-        "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT",
-        "OPERATIONS_ROOT_APPROVAL_TREE_SHA",
-        "CLEAN_START_POLICY_PATH",
-        "CLEAN_START_POLICY_DEVICE",
-        "CLEAN_START_POLICY_INODE",
-        "CLEAN_START_POLICY_SIZE",
-        "CLEAN_START_POLICY_UID",
-        "CLEAN_START_POLICY_GID",
-        "CLEAN_START_POLICY_MODE",
-        "CLEAN_START_POLICY_SHA256",
-        "CLEAN_START_POLICY_VERSION",
-        "CLEAN_START_DATA_POLICY",
-        "EXPECTED_FREE_BYTES",
-        "EXPECTED_FILESYSTEM_DEVICE",
-        "PLAN_STATE",
-        "PLAN_READ_ONLY",
-        "PLAN_DATABASE_MUTATION",
-        "PLAN_BACKUP_CREATED",
-        "PLAN_STAGING_CREATED",
-        "PLAN_CONTAINER_STOPPED",
-        "PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP",
-        "RUNTIME_ATTESTATION_REQUIRED",
-        "RUNTIME_ATTESTATION_VERSION",
-        "PLAN_CONTAINS_SECRETS",
-        "AUTOMATIC_RETRY_ALLOWED",
-        "AUTOMATIC_DB_RESTORE_IMPLEMENTED",
-    }
-)
+FAILURE_STATES = frozenset({
+    "PRE_PUBLISH_FAILED",
+    "PUBLISH_UNCERTAIN",
+    "MANUAL_RECOVERY_REQUIRED",
+})
+PLAN_FIELDS = frozenset({
+    "PLAN_VERSION",
+    "OPERATION_ID",
+    "OPERATION_CLASS",
+    "CREATED_AT",
+    "EXPIRES_AT",
+    "HOSTNAME",
+    "PLAN_CREATOR_UID",
+    "PLAN_CREATOR_GID",
+    "PLAN_CREATOR_USERNAME",
+    "PLAN_CREATOR_PROCESS_UID",
+    "PLAN_CREATOR_PROCESS_GID",
+    "DB_CANONICAL_PATH",
+    "SOURCE_DEVICE",
+    "SOURCE_INODE",
+    "SOURCE_SIZE",
+    "SOURCE_MODE",
+    "SOURCE_UID",
+    "SOURCE_GID",
+    "SOURCE_SHA256",
+    "SOURCE_USER_VERSION",
+    "SOURCE_SCHEMA_FINGERPRINT",
+    "SOURCE_PARENT_IDENTITY",
+    "BACKUP_PARENT",
+    "STAGING_PARENT",
+    "EVIDENCE_PARENT",
+    "BACKUP_PARENT_IDENTITY",
+    "STAGING_PARENT_IDENTITY",
+    "EVIDENCE_PARENT_IDENTITY",
+    "MIGRATION_IMAGE_ID",
+    "MIGRATION_IMAGE_REVISION",
+    "PREVIOUS_IMAGE_ID",
+    "TARGET_SCHEMA_VERSION",
+    "TARGET_SCHEMA_FINGERPRINT",
+    "MIGRATION_REGISTRY",
+    "MIGRATION_COMPONENTS",
+    "REPOSITORY_ROOT",
+    "CANONICAL_REPOSITORY",
+    "CANONICAL_REMOTE",
+    "CANONICAL_MAIN_REF",
+    "DEPLOYMENT_CONTRACT_CANONICAL_PATH",
+    "DEPLOYMENT_CONTRACT_DEVICE",
+    "DEPLOYMENT_CONTRACT_INODE",
+    "DEPLOYMENT_CONTRACT_SIZE",
+    "DEPLOYMENT_CONTRACT_SHA256",
+    "DEPLOYMENT_CONTRACT_VERSION",
+    "EXPECTED_FEATURE_FLAGS",
+    "OPERATIONS_ROOT_APPROVAL_PATH",
+    "OPERATIONS_ROOT_APPROVAL_DEVICE",
+    "OPERATIONS_ROOT_APPROVAL_INODE",
+    "OPERATIONS_ROOT_APPROVAL_SIZE",
+    "OPERATIONS_ROOT_APPROVAL_UID",
+    "OPERATIONS_ROOT_APPROVAL_GID",
+    "OPERATIONS_ROOT_APPROVAL_MODE",
+    "OPERATIONS_ROOT_APPROVAL_SHA256",
+    "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT",
+    "OPERATIONS_ROOT_APPROVAL_TREE_SHA",
+    "CLEAN_START_POLICY_PATH",
+    "CLEAN_START_POLICY_DEVICE",
+    "CLEAN_START_POLICY_INODE",
+    "CLEAN_START_POLICY_SIZE",
+    "CLEAN_START_POLICY_UID",
+    "CLEAN_START_POLICY_GID",
+    "CLEAN_START_POLICY_MODE",
+    "CLEAN_START_POLICY_SHA256",
+    "CLEAN_START_POLICY_VERSION",
+    "CLEAN_START_DATA_POLICY",
+    "EXPECTED_FREE_BYTES",
+    "EXPECTED_FILESYSTEM_DEVICE",
+    "PLAN_STATE",
+    "PLAN_READ_ONLY",
+    "PLAN_DATABASE_MUTATION",
+    "PLAN_BACKUP_CREATED",
+    "PLAN_STAGING_CREATED",
+    "PLAN_CONTAINER_STOPPED",
+    "PLAN_SUPPORTS_REQUIRED_MAINTENANCE_STOP",
+    "RUNTIME_ATTESTATION_REQUIRED",
+    "RUNTIME_ATTESTATION_VERSION",
+    "PLAN_CONTAINS_SECRETS",
+    "AUTOMATIC_RETRY_ALLOWED",
+    "AUTOMATIC_DB_RESTORE_IMPLEMENTED",
+})
 
 
 class ProductionGateError(RuntimeError):
@@ -451,20 +464,26 @@ class PinnedEvidenceDocument:
             self.mode,
         )
         return (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_size,
-            metadata.st_uid,
-            metadata.st_gid,
-            stat.S_IMODE(metadata.st_mode),
-        ) == identity and (
-            descriptor_metadata.st_dev,
-            descriptor_metadata.st_ino,
-            descriptor_metadata.st_size,
-            descriptor_metadata.st_uid,
-            descriptor_metadata.st_gid,
-            stat.S_IMODE(descriptor_metadata.st_mode),
-        ) == identity and descriptor_sha == self.sha256
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_uid,
+                metadata.st_gid,
+                stat.S_IMODE(metadata.st_mode),
+            )
+            == identity
+            and (
+                descriptor_metadata.st_dev,
+                descriptor_metadata.st_ino,
+                descriptor_metadata.st_size,
+                descriptor_metadata.st_uid,
+                descriptor_metadata.st_gid,
+                stat.S_IMODE(descriptor_metadata.st_mode),
+            )
+            == identity
+            and descriptor_sha == self.sha256
+        )
 
     def close(self) -> None:
         _run_cleanup(
@@ -493,10 +512,9 @@ class ExecutionEvidence:
         history = list(self.payload["STATE_HISTORY"])
         if state in SUCCESS_STATES:
             current = history[-1]
-            if (
-                current in SUCCESS_STATES
-                and SUCCESS_STATES.index(state) <= SUCCESS_STATES.index(current)
-            ):
+            if current in SUCCESS_STATES and SUCCESS_STATES.index(
+                state
+            ) <= SUCCESS_STATES.index(current):
                 raise ProductionGateError("NON_MONOTONIC_EXECUTION_STATE")
         elif state not in FAILURE_STATES:
             raise ProductionGateError("UNKNOWN_EXECUTION_STATE")
@@ -527,14 +545,11 @@ class ValidatedExecution:
     def close(self) -> None:
         cleanup_steps: list[tuple[str, Callable[[], None]]] = []
         if self.runtime_attestation is not None:
-            cleanup_steps.append(
-                (
-                    "RUNTIME_ATTESTATION_CLOSE_FAILED",
-                    self.runtime_attestation.close,
-                )
-            )
-        cleanup_steps.extend(
-            (
+            cleanup_steps.append((
+                "RUNTIME_ATTESTATION_CLOSE_FAILED",
+                self.runtime_attestation.close,
+            ))
+        cleanup_steps.extend((
             (
                 "EXECUTION_AUTHORITY_CLOSE_FAILED",
                 self.execution_authority.close,
@@ -554,8 +569,7 @@ class ValidatedExecution:
             ("EVIDENCE_PARENT_CLOSE_FAILED", self.evidence_parent.close),
             ("STAGING_PARENT_CLOSE_FAILED", self.staging_parent.close),
             ("BACKUP_PARENT_CLOSE_FAILED", self.backup_parent.close),
-            )
-        )
+        ))
         _run_cleanup(*cleanup_steps)
 
 
@@ -579,9 +593,7 @@ def _parse_timestamp(value: object, code: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _json_emit(
-    payload: dict[str, Any], *, stream: TextIO | None = None
-) -> None:
+def _json_emit(payload: dict[str, Any], *, stream: TextIO | None = None) -> None:
     stream = sys.stdout if stream is None else stream
     print(json.dumps(payload, ensure_ascii=True, sort_keys=True), file=stream)
 
@@ -655,22 +667,18 @@ def _read_fd_bytes(fd: int, *, maximum: int, code: str) -> bytes:
     if os.pread(fd, 1, offset):
         raise ProductionGateError(code)
     after = os.fstat(fd)
-    if (
-        offset != before.st_size
-        or (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mode,
-            before.st_nlink,
-        )
-        != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mode,
-            after.st_nlink,
-        )
+    if offset != before.st_size or (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mode,
+        before.st_nlink,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mode,
+        after.st_nlink,
     ):
         raise ProductionGateError(code)
     return data
@@ -716,11 +724,7 @@ def _write_json_durable_at(
 
 
 def _write_json_durable(path: Path, payload: dict[str, Any]) -> None:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     parent_fd = os.open(path.parent, flags)
     try:
         _write_json_durable_at(parent_fd, path.name, payload)
@@ -827,11 +831,7 @@ def _open_directory_record(record: object, code: str) -> PinnedDirectory:
     actual = _directory_record(path, private=True)
     if actual != record:
         raise ProductionGateError(code)
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     metadata = os.fstat(fd)
     if (metadata.st_dev, metadata.st_ino) != (
@@ -914,20 +914,20 @@ def _read_only_source(path: Path) -> tuple[dict[str, int | str], str, str, int]:
         integrity = str(
             connection.execute("PRAGMA integrity_check").fetchone()[0]
         ).lower()
-        foreign_keys = len(
-            connection.execute("PRAGMA foreign_key_check").fetchall()
-        )
+        foreign_keys = len(connection.execute("PRAGMA foreign_key_check").fetchall())
         source_sha = _sha256_fd(
             fd,
             code="SOURCE_READ_CONTRACT_VIOLATION",
         )
         current = os.fstat(fd)
         current_path = path.lstat()
-        if (
-            (current.st_dev, current.st_ino, current.st_size)
-            != (metadata.st_dev, metadata.st_ino, metadata.st_size)
-            or (current_path.st_dev, current_path.st_ino)
-            != (metadata.st_dev, metadata.st_ino)
+        if (current.st_dev, current.st_ino, current.st_size) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+        ) or (current_path.st_dev, current_path.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
         ):
             raise ProductionGateError("SOURCE_CHANGED_DURING_READ")
         if _sidecars(path):
@@ -998,9 +998,7 @@ def _open_canonical_deployment_contract(
     except ExecutionAuthorityError as exc:
         raise ProductionGateError(exc.code) from exc
     parent_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
     parent_fd = os.open(path.parent, parent_flags)
     try:
@@ -1052,9 +1050,7 @@ def _open_canonical_deployment_contract(
             )
         except deployment.DeploymentContractError as exc:
             code = re.sub(r"[^A-Z0-9]+", "_", exc.code.upper()).strip("_")
-            raise ProductionGateError(
-                f"DEPLOYMENT_CONTRACT_{code}"
-            ) from exc
+            raise ProductionGateError(f"DEPLOYMENT_CONTRACT_{code}") from exc
         if (
             contract.manifest_path != path
             or contract.feature_gates != EXPECTED_FEATURE_FLAGS
@@ -1093,9 +1089,7 @@ def _open_evidence_document(
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError(f"EXPECTED_{code_prefix}_SHA256_INVALID")
     parent_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
     parent_fd = os.open(path.parent, parent_flags)
     try:
@@ -1197,6 +1191,43 @@ def _repository_provenance(repository_root: Path) -> tuple[str, str]:
         raise ProductionGateError(exc.code) from exc
 
 
+def _canonical_repository_binding(
+    repository_root: Path,
+    *,
+    head: str,
+) -> dict[str, str]:
+    try:
+        contract = deployment.load_contract(repository_root)
+    except deployment.DeploymentContractError as exc:
+        raise ProductionGateError("CANONICAL_REPOSITORY_CONTRACT_INVALID") from exc
+    try:
+        remote_url = str(
+            _authority_git(
+                "remote",
+                "get-url",
+                contract.canonical_remote,
+                root=repository_root,
+            )
+        ).strip()
+        main_sha = str(
+            _authority_git(
+                "rev-parse",
+                "--verify",
+                contract.allowed_revision_ref,
+                root=repository_root,
+            )
+        ).strip()
+    except ExecutionAuthorityError as exc:
+        raise ProductionGateError("CANONICAL_REPOSITORY_PROVENANCE_INVALID") from exc
+    if remote_url not in contract.canonical_remote_urls or main_sha != head:
+        raise ProductionGateError("CANONICAL_REPOSITORY_PROVENANCE_INVALID")
+    return {
+        "CANONICAL_REPOSITORY": contract.canonical_repository,
+        "CANONICAL_REMOTE": contract.canonical_remote,
+        "CANONICAL_MAIN_REF": contract.allowed_revision_ref,
+    }
+
+
 def _typed_mapping_matches(
     payload: dict[str, Any],
     expected: dict[str, Any],
@@ -1211,13 +1242,20 @@ def _validate_operations_root_approval(
     document: PinnedEvidenceDocument,
     *,
     repository_root: Path,
+    operation_id: str,
+    migration_components: list[str],
     migration_image_id: str,
     migration_revision: str,
     deployment_contract: PinnedDeploymentContract,
 ) -> None:
     payload = document.payload
-    if type(payload.get("APPROVAL_VERSION")) is not int or payload.get("APPROVAL_VERSION") != 1:
+    if (
+        type(payload.get("APPROVAL_VERSION")) is not int
+        or payload.get("APPROVAL_VERSION") != OPERATIONS_ROOT_APPROVAL_VERSION
+    ):
         raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_VERSION_INVALID")
+    if OPERATION_ID_RE.fullmatch(operation_id) is None:
+        raise ProductionGateError("OPERATION_ID_INVALID")
     created_at = _parse_timestamp(
         payload.get("CREATED_AT"),
         "OPERATIONS_ROOT_APPROVAL_CREATED_AT_INVALID",
@@ -1235,8 +1273,16 @@ def _validate_operations_root_approval(
     ):
         raise ProductionGateError("OPERATIONS_ROOT_APPROVAL_EXPIRED")
     head, tree = _repository_provenance(repository_root)
+    canonical_binding = _canonical_repository_binding(
+        repository_root,
+        head=head,
+    )
     root_record = _directory_record(repository_root, private=False)
     root_fields = {
+        "OPERATION_ID": operation_id,
+        "OPERATION_CLASS": AUTHORITY_OPERATION_CLASS,
+        **canonical_binding,
+        "MIGRATION_COMPONENTS": migration_components,
         "APPROVED_REPOSITORY_ROOT": str(repository_root),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -1280,11 +1326,15 @@ def _validate_operations_root_approval(
 def _validate_clean_start_policy(
     document: PinnedEvidenceDocument,
     *,
+    operation_id: str,
+    migration_components: list[str],
     source_sha256: str,
     migration_image_id: str,
     migration_revision: str,
 ) -> None:
     payload = document.payload
+    if OPERATION_ID_RE.fullmatch(operation_id) is None:
+        raise ProductionGateError("OPERATION_ID_INVALID")
     created_at = _parse_timestamp(
         payload.get("CREATED_AT"),
         "CLEAN_START_POLICY_CREATED_AT_INVALID",
@@ -1292,9 +1342,11 @@ def _validate_clean_start_policy(
     if created_at > _now():
         raise ProductionGateError("CLEAN_START_POLICY_CREATED_AT_INVALID")
     expected = {
-        "POLICY_VERSION": 1,
+        "POLICY_VERSION": CLEAN_START_POLICY_VERSION,
+        "OPERATION_ID": operation_id,
         "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
         "TARGET_MAIN_SHA": migration_revision,
+        "MIGRATION_COMPONENTS": migration_components,
         "MIGRATION_IMAGE_ID": migration_image_id,
         "PRODUCTION_DB_SOURCE_SHA256": source_sha256,
     }
@@ -1383,6 +1435,8 @@ def _validate_plan_inputs(
         args.clean_start_policy,
         "CLEAN_START_POLICY_PATH",
     )
+    if OPERATION_ID_RE.fullmatch(args.operation_id) is None:
+        raise ProductionGateError("OPERATION_ID_INVALID")
     if socket.gethostname() != args.expected_hostname:
         raise ProductionGateError("HOSTNAME_MISMATCH")
     if REVISION_RE.fullmatch(args.migration_image_revision) is None:
@@ -1390,22 +1444,18 @@ def _validate_plan_inputs(
     if SHA_RE.fullmatch(args.expected_source_sha256) is None:
         raise ProductionGateError("EXPECTED_SOURCE_SHA256_INVALID")
     if SHA_RE.fullmatch(args.expected_operations_root_approval_sha256) is None:
-        raise ProductionGateError(
-            "EXPECTED_OPERATIONS_ROOT_APPROVAL_SHA256_INVALID"
-        )
+        raise ProductionGateError("EXPECTED_OPERATIONS_ROOT_APPROVAL_SHA256_INVALID")
     if SHA_RE.fullmatch(args.expected_clean_start_policy_sha256) is None:
         raise ProductionGateError("EXPECTED_CLEAN_START_POLICY_SHA256_INVALID")
     if args.expires_in_seconds < 60 or args.expires_in_seconds > 86400:
         raise ProductionGateError("PLAN_EXPIRY_INVALID")
-    _pairwise_disjoint(
-        (
-            db_path,
-            backup_parent,
-            staging_parent,
-            evidence_parent,
-            repository_root,
-        )
-    )
+    _pairwise_disjoint((
+        db_path,
+        backup_parent,
+        staging_parent,
+        evidence_parent,
+        repository_root,
+    ))
     _pairwise_disjoint((operations_root_approval, clean_start_policy))
     for document in (operations_root_approval, clean_start_policy):
         if (
@@ -1444,6 +1494,7 @@ def create_plan(args: argparse.Namespace) -> int:
     _inspect_image(args.previous_image_id, None)
     target_schema = _target_schema_contract()
     migration_registry = _target_migration_registry()
+    migration_components = [item["component"] for item in migration_registry]
     deployment_contract: PinnedDeploymentContract | None = None
     operations_root_approval: PinnedEvidenceDocument | None = None
     clean_start_policy: PinnedEvidenceDocument | None = None
@@ -1458,6 +1509,8 @@ def create_plan(args: argparse.Namespace) -> int:
         _validate_operations_root_approval(
             operations_root_approval,
             repository_root=repository_root,
+            operation_id=args.operation_id,
+            migration_components=migration_components,
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
             deployment_contract=deployment_contract,
@@ -1468,8 +1521,8 @@ def create_plan(args: argparse.Namespace) -> int:
             code_prefix="CLEAN_START_POLICY",
             expected_fields=CLEAN_START_POLICY_FIELDS,
         )
-        identity, schema_fingerprint, integrity, foreign_keys = (
-            _read_only_source(db_path)
+        identity, schema_fingerprint, integrity, foreign_keys = _read_only_source(
+            db_path
         )
         expected_identity = {
             "SOURCE_DEVICE": args.expected_source_device,
@@ -1477,13 +1530,12 @@ def create_plan(args: argparse.Namespace) -> int:
             "SOURCE_SIZE": args.expected_source_size,
             "SOURCE_SHA256": args.expected_source_sha256,
         }
-        if any(
-            identity[name] != value
-            for name, value in expected_identity.items()
-        ):
+        if any(identity[name] != value for name, value in expected_identity.items()):
             raise ProductionGateError("EXPECTED_SOURCE_IDENTITY_MISMATCH")
         _validate_clean_start_policy(
             clean_start_policy,
+            operation_id=args.operation_id,
+            migration_components=migration_components,
             source_sha256=str(identity["SOURCE_SHA256"]),
             migration_image_id=args.migration_image_id,
             migration_revision=args.migration_image_revision,
@@ -1493,7 +1545,7 @@ def create_plan(args: argparse.Namespace) -> int:
         if identity["SOURCE_DEVICE"] != staging_record["DEVICE"]:
             raise ProductionGateError("CROSS_FILESYSTEM_STAGING")
         _require_free_bytes(staging_parent, args.expected_free_bytes)
-        operation_id = uuid.uuid4().hex
+        operation_id = args.operation_id
         operation_directory = evidence_parent / operation_id
         operation_directory.mkdir(mode=0o700)
         os.chmod(operation_directory, 0o700)
@@ -1506,6 +1558,7 @@ def create_plan(args: argparse.Namespace) -> int:
         plan_payload: dict[str, Any] = {
             "PLAN_VERSION": PLAN_VERSION,
             "OPERATION_ID": operation_id,
+            "OPERATION_CLASS": AUTHORITY_OPERATION_CLASS,
             "CREATED_AT": _timestamp(created_at),
             "EXPIRES_AT": _timestamp(
                 created_at + timedelta(seconds=args.expires_in_seconds)
@@ -1519,9 +1572,7 @@ def create_plan(args: argparse.Namespace) -> int:
             "DB_CANONICAL_PATH": str(db_path),
             **identity,
             "SOURCE_SCHEMA_FINGERPRINT": schema_fingerprint,
-            "SOURCE_PARENT_IDENTITY": _directory_record(
-                db_path.parent, private=False
-            ),
+            "SOURCE_PARENT_IDENTITY": _directory_record(db_path.parent, private=False),
             "BACKUP_PARENT": str(backup_parent),
             "STAGING_PARENT": str(staging_parent),
             "EVIDENCE_PARENT": str(evidence_parent),
@@ -1534,10 +1585,16 @@ def create_plan(args: argparse.Namespace) -> int:
             "TARGET_SCHEMA_VERSION": target_schema.version,
             "TARGET_SCHEMA_FINGERPRINT": target_schema.fingerprint,
             "MIGRATION_REGISTRY": migration_registry,
+            "MIGRATION_COMPONENTS": migration_components,
             "REPOSITORY_ROOT": str(repository_root),
-            "DEPLOYMENT_CONTRACT_CANONICAL_PATH": str(
-                deployment_contract.path
-            ),
+            "CANONICAL_REPOSITORY": operations_root_approval.payload[
+                "CANONICAL_REPOSITORY"
+            ],
+            "CANONICAL_REMOTE": operations_root_approval.payload["CANONICAL_REMOTE"],
+            "CANONICAL_MAIN_REF": operations_root_approval.payload[
+                "CANONICAL_MAIN_REF"
+            ],
+            "DEPLOYMENT_CONTRACT_CANONICAL_PATH": str(deployment_contract.path),
             "DEPLOYMENT_CONTRACT_DEVICE": deployment_contract.device,
             "DEPLOYMENT_CONTRACT_INODE": deployment_contract.inode,
             "DEPLOYMENT_CONTRACT_SIZE": deployment_contract.size,
@@ -1558,12 +1615,8 @@ def create_plan(args: argparse.Namespace) -> int:
                 "CLEAN_START_POLICY",
                 clean_start_policy,
             ),
-            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload[
-                "POLICY_VERSION"
-            ],
-            "CLEAN_START_DATA_POLICY": clean_start_policy.payload[
-                "DATA_POLICY"
-            ],
+            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload["POLICY_VERSION"],
+            "CLEAN_START_DATA_POLICY": clean_start_policy.payload["DATA_POLICY"],
             "EXPECTED_FREE_BYTES": args.expected_free_bytes,
             "EXPECTED_FILESYSTEM_DEVICE": identity["SOURCE_DEVICE"],
             "PLAN_STATE": "PLANNED",
@@ -1582,42 +1635,37 @@ def create_plan(args: argparse.Namespace) -> int:
         plan_path = operation_directory / "plan.json"
         _write_json_durable(plan_path, plan_payload)
         plan_sha = _sha256(plan_path)
-        _json_emit(
-            {
-                "status": "PASS",
-                "mode": "PLAN",
-                "operation_id": operation_id,
-                "plan_path": str(plan_path),
-                "plan_sha256": plan_sha,
-                "plan_creator_uid": root_identity.effective_uid,
-                "plan_creator_gid": root_identity.effective_gid,
-                "plan_manifest_fsynced": True,
-                "plan_parent_fsynced": True,
-                "plan_read_only": True,
-                "production_execution_enabled": False,
-            }
-        )
+        _json_emit({
+            "status": "PASS",
+            "mode": "PLAN",
+            "operation_id": operation_id,
+            "plan_path": str(plan_path),
+            "plan_sha256": plan_sha,
+            "plan_creator_uid": root_identity.effective_uid,
+            "plan_creator_gid": root_identity.effective_gid,
+            "plan_manifest_fsynced": True,
+            "plan_parent_fsynced": True,
+            "plan_read_only": True,
+            "production_execution_enabled": False,
+        })
         return 0
     finally:
         cleanup_steps: list[tuple[str, Callable[[], None]]] = []
         if clean_start_policy is not None:
-            cleanup_steps.append(
-                ("CLEAN_START_POLICY_CLOSE_FAILED", clean_start_policy.close)
-            )
+            cleanup_steps.append((
+                "CLEAN_START_POLICY_CLOSE_FAILED",
+                clean_start_policy.close,
+            ))
         if operations_root_approval is not None:
-            cleanup_steps.append(
-                (
-                    "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
-                    operations_root_approval.close,
-                )
-            )
+            cleanup_steps.append((
+                "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
+                operations_root_approval.close,
+            ))
         if deployment_contract is not None:
-            cleanup_steps.append(
-                (
-                    "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
-                    deployment_contract.close,
-                )
-            )
+            cleanup_steps.append((
+                "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
+                deployment_contract.close,
+            ))
         _run_cleanup(*cleanup_steps)
 
 
@@ -1634,9 +1682,7 @@ def _open_plan(path_value: str, expected_sha: str) -> PinnedPlan:
     if SHA_RE.fullmatch(expected_sha) is None:
         raise ProductionGateError("EXPECTED_PLAN_SHA256_INVALID")
     parent_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
     parent_fd = os.open(path.parent, parent_flags)
     try:
@@ -1769,10 +1815,7 @@ def _revalidate_plan(
     plan = pinned.payload
     if set(plan) != PLAN_FIELDS:
         raise ProductionGateError("PLAN_FIELDS_INVALID")
-    if (
-        plan.get("PLAN_VERSION") != PLAN_VERSION
-        or plan.get("PLAN_STATE") != "PLANNED"
-    ):
+    if plan.get("PLAN_VERSION") != PLAN_VERSION or plan.get("PLAN_STATE") != "PLANNED":
         raise ProductionGateError("PLAN_VERSION_OR_STATE_INVALID")
     expected_booleans = {
         "PLAN_READ_ONLY": True,
@@ -1786,15 +1829,9 @@ def _revalidate_plan(
         "AUTOMATIC_RETRY_ALLOWED": False,
         "AUTOMATIC_DB_RESTORE_IMPLEMENTED": False,
     }
-    if any(
-        plan.get(name) is not value
-        for name, value in expected_booleans.items()
-    ):
+    if any(plan.get(name) is not value for name, value in expected_booleans.items()):
         raise ProductionGateError("PLAN_SAFETY_CONTRACT_INVALID")
-    if (
-        plan.get("RUNTIME_ATTESTATION_VERSION")
-        != RUNTIME_ATTESTATION_VERSION
-    ):
+    if plan.get("RUNTIME_ATTESTATION_VERSION") != RUNTIME_ATTESTATION_VERSION:
         raise ProductionGateError("PLAN_RUNTIME_ATTESTATION_CONTRACT_INVALID")
     if (
         plan.get("PLAN_CREATOR_UID") != 0
@@ -1806,6 +1843,13 @@ def _revalidate_plan(
     ):
         raise ProductionGateError("PLAN_CREATOR_IDENTITY_MISMATCH")
     operation_id = _expect_plan_string(plan, "OPERATION_ID", OPERATION_ID_RE)
+    migration_registry = _target_migration_registry()
+    migration_components = [item["component"] for item in migration_registry]
+    if (
+        plan.get("OPERATION_CLASS") != AUTHORITY_OPERATION_CLASS
+        or plan.get("MIGRATION_COMPONENTS") != migration_components
+    ):
+        raise ProductionGateError("PLAN_OPERATION_BINDING_MISMATCH")
     source_sha = _expect_plan_string(plan, "SOURCE_SHA256", SHA_RE)
     revision = _expect_plan_string(
         plan,
@@ -1817,12 +1861,8 @@ def _revalidate_plan(
         "MIGRATION_IMAGE_ID",
         IMAGE_ID_RE,
     )
-    approval_sha = _expect_plan_string(
-        plan, "OPERATIONS_ROOT_APPROVAL_SHA256", SHA_RE
-    )
-    policy_sha = _expect_plan_string(
-        plan, "CLEAN_START_POLICY_SHA256", SHA_RE
-    )
+    approval_sha = _expect_plan_string(plan, "OPERATIONS_ROOT_APPROVAL_SHA256", SHA_RE)
+    policy_sha = _expect_plan_string(plan, "CLEAN_START_POLICY_SHA256", SHA_RE)
     if operation_id != args.confirm_operation_id:
         raise ProductionGateError("PLAN_OPERATION_ID_MISMATCH")
     if source_sha != args.confirm_source_sha256:
@@ -1861,18 +1901,14 @@ def _revalidate_plan(
             plan.get("EVIDENCE_PARENT_IDENTITY"),
             "EVIDENCE_PARENT_DRIFT",
         )
-        expected_plan_path = (
-            evidence_parent.path / operation_id / "plan.json"
-        )
+        expected_plan_path = evidence_parent.path / operation_id / "plan.json"
         if pinned.path != expected_plan_path or not pinned.path_matches():
             raise ProductionGateError("PLAN_PATH_SUBSTITUTION")
         operation_record = _directory_record(
             pinned.path.parent,
             private=True,
         )
-        if operation_record["PATH"] != str(
-            evidence_parent.path / operation_id
-        ):
+        if operation_record["PATH"] != str(evidence_parent.path / operation_id):
             raise ProductionGateError("PLAN_OPERATION_DIRECTORY_INVALID")
         backup_parent = _open_directory_record(
             plan.get("BACKUP_PARENT_IDENTITY"),
@@ -1892,13 +1928,15 @@ def _revalidate_plan(
         repository_root = _canonical_repository_root(
             _expect_plan_string(plan, "REPOSITORY_ROOT")
         )
-        deployment_contract = _open_canonical_deployment_contract(
-            repository_root
+        canonical_binding = _canonical_repository_binding(
+            repository_root,
+            head=revision,
         )
+        if not _typed_mapping_matches(plan, canonical_binding):
+            raise ProductionGateError("PLAN_REPOSITORY_BINDING_DRIFT")
+        deployment_contract = _open_canonical_deployment_contract(repository_root)
         contract_fields = {
-            "DEPLOYMENT_CONTRACT_CANONICAL_PATH": str(
-                deployment_contract.path
-            ),
+            "DEPLOYMENT_CONTRACT_CANONICAL_PATH": str(deployment_contract.path),
             "DEPLOYMENT_CONTRACT_DEVICE": deployment_contract.device,
             "DEPLOYMENT_CONTRACT_INODE": deployment_contract.inode,
             "DEPLOYMENT_CONTRACT_SIZE": deployment_contract.size,
@@ -1918,6 +1956,8 @@ def _revalidate_plan(
         _validate_operations_root_approval(
             operations_root_approval,
             repository_root=repository_root,
+            operation_id=operation_id,
+            migration_components=migration_components,
             migration_image_id=migration_image,
             migration_revision=revision,
             deployment_contract=deployment_contract,
@@ -1945,18 +1985,16 @@ def _revalidate_plan(
         )
         _validate_clean_start_policy(
             clean_start_policy,
+            operation_id=operation_id,
+            migration_components=migration_components,
             source_sha256=source_sha,
             migration_image_id=migration_image,
             migration_revision=revision,
         )
         policy_fields: dict[str, Any] = {
             **_document_plan_fields("CLEAN_START_POLICY", clean_start_policy),
-            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload[
-                "POLICY_VERSION"
-            ],
-            "CLEAN_START_DATA_POLICY": clean_start_policy.payload[
-                "DATA_POLICY"
-            ],
+            "CLEAN_START_POLICY_VERSION": clean_start_policy.payload["POLICY_VERSION"],
+            "CLEAN_START_DATA_POLICY": clean_start_policy.payload["DATA_POLICY"],
         }
         if not _typed_mapping_matches(plan, policy_fields):
             raise ProductionGateError("CLEAN_START_POLICY_IDENTITY_DRIFT")
@@ -1978,18 +2016,14 @@ def _revalidate_plan(
             _expect_plan_string(plan, "DB_CANONICAL_PATH"),
             "DB_PATH",
         )
-        _pairwise_disjoint(
-            (
-                db_path,
-                backup_parent.path,
-                staging_parent.path,
-                evidence_parent.path,
-                repository_root,
-            )
-        )
-        identity, source_schema, integrity, foreign_keys = _read_only_source(
-            db_path
-        )
+        _pairwise_disjoint((
+            db_path,
+            backup_parent.path,
+            staging_parent.path,
+            evidence_parent.path,
+            repository_root,
+        ))
+        identity, source_schema, integrity, foreign_keys = _read_only_source(db_path)
         for name in (
             "SOURCE_DEVICE",
             "SOURCE_INODE",
@@ -2006,9 +2040,7 @@ def _revalidate_plan(
             raise ProductionGateError("SOURCE_SCHEMA_DRIFT")
         if integrity != "ok" or foreign_keys != 0:
             raise ProductionGateError("SOURCE_DATABASE_INVALID")
-        source_parent_identity = _directory_record(
-            db_path.parent, private=False
-        )
+        source_parent_identity = _directory_record(db_path.parent, private=False)
         if plan.get("SOURCE_PARENT_IDENTITY") != source_parent_identity:
             raise ProductionGateError("SOURCE_PARENT_IDENTITY_DRIFT")
         try:
@@ -2020,10 +2052,8 @@ def _revalidate_plan(
         except ExecutionAuthorityError as exc:
             raise ProductionGateError(exc.code) from exc
         if (
-            plan.get("EXPECTED_FILESYSTEM_DEVICE")
-            != identity["SOURCE_DEVICE"]
-            or os.fstat(staging_parent.fd).st_dev
-            != identity["SOURCE_DEVICE"]
+            plan.get("EXPECTED_FILESYSTEM_DEVICE") != identity["SOURCE_DEVICE"]
+            or os.fstat(staging_parent.fd).st_dev != identity["SOURCE_DEVICE"]
         ):
             raise ProductionGateError("FILESYSTEM_DRIFT")
         expected_free = _expect_plan_int(plan, "EXPECTED_FREE_BYTES")
@@ -2037,15 +2067,12 @@ def _revalidate_plan(
         )
         _inspect_image(migration_image, revision)
         _inspect_image(previous_image, None)
-        if plan.get("MIGRATION_REGISTRY") != _target_migration_registry():
-            raise ProductionGateError(
-                "TARGET_MIGRATION_REGISTRY_MISMATCH"
-            )
+        if plan.get("MIGRATION_REGISTRY") != migration_registry:
+            raise ProductionGateError("TARGET_MIGRATION_REGISTRY_MISMATCH")
         expected_target = _target_schema_contract()
         if (
             plan.get("TARGET_SCHEMA_VERSION") != expected_target.version
-            or plan.get("TARGET_SCHEMA_FINGERPRINT")
-            != expected_target.fingerprint
+            or plan.get("TARGET_SCHEMA_FINGERPRINT") != expected_target.fingerprint
         ):
             raise ProductionGateError("TARGET_SCHEMA_CONTRACT_MISMATCH")
         for path in (
@@ -2091,42 +2118,34 @@ def _revalidate_plan(
     except Exception as primary:
         cleanup_steps: list[tuple[str, Callable[[], None]]] = []
         if execution_authority is not None:
-            cleanup_steps.append(
-                (
-                    "EXECUTION_AUTHORITY_CLOSE_FAILED",
-                    execution_authority.close,
-                )
-            )
+            cleanup_steps.append((
+                "EXECUTION_AUTHORITY_CLOSE_FAILED",
+                execution_authority.close,
+            ))
         if clean_start_policy is not None:
-            cleanup_steps.append(
-                ("CLEAN_START_POLICY_CLOSE_FAILED", clean_start_policy.close)
-            )
+            cleanup_steps.append((
+                "CLEAN_START_POLICY_CLOSE_FAILED",
+                clean_start_policy.close,
+            ))
         if operations_root_approval is not None:
-            cleanup_steps.append(
-                (
-                    "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
-                    operations_root_approval.close,
-                )
-            )
+            cleanup_steps.append((
+                "OPERATIONS_ROOT_APPROVAL_CLOSE_FAILED",
+                operations_root_approval.close,
+            ))
         if deployment_contract is not None:
-            cleanup_steps.append(
-                (
-                    "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
-                    deployment_contract.close,
-                )
-            )
+            cleanup_steps.append((
+                "DEPLOYMENT_CONTRACT_CLOSE_FAILED",
+                deployment_contract.close,
+            ))
         if evidence_parent is not None:
-            cleanup_steps.append(
-                ("EVIDENCE_PARENT_CLOSE_FAILED", evidence_parent.close)
-            )
+            cleanup_steps.append((
+                "EVIDENCE_PARENT_CLOSE_FAILED",
+                evidence_parent.close,
+            ))
         if staging_parent is not None:
-            cleanup_steps.append(
-                ("STAGING_PARENT_CLOSE_FAILED", staging_parent.close)
-            )
+            cleanup_steps.append(("STAGING_PARENT_CLOSE_FAILED", staging_parent.close))
         if backup_parent is not None:
-            cleanup_steps.append(
-                ("BACKUP_PARENT_CLOSE_FAILED", backup_parent.close)
-            )
+            cleanup_steps.append(("BACKUP_PARENT_CLOSE_FAILED", backup_parent.close))
         try:
             _run_cleanup(*cleanup_steps)
         except _CleanupFailure as cleanup:
@@ -2176,10 +2195,7 @@ def _read_internal_manifest(
             metadata.st_ino,
         ):
             raise ProductionGateError("INTERNAL_MANIFEST_SUBSTITUTED")
-        if (
-            not isinstance(payload, dict)
-            or payload.get("OPERATION_ID") != operation_id
-        ):
+        if not isinstance(payload, dict) or payload.get("OPERATION_ID") != operation_id:
             raise ProductionGateError("INTERNAL_MANIFEST_INVALID")
         return payload
     except Exception as exc:
@@ -2223,9 +2239,7 @@ def _failure_updates(result: dict[str, Any]) -> dict[str, Any]:
         or "STAGED_EXECUTION_FAILED"
     )
     return {
-        "PUBLISH_STATE": str(
-            result.get("publish_state", "BEFORE_EXCHANGE")
-        ),
+        "PUBLISH_STATE": str(result.get("publish_state", "BEFORE_EXCHANGE")),
         "TARGET_MAY_HAVE_CHANGED": target_changed,
         "AUTOMATIC_RETRY_ALLOWED": False,
         "MANUAL_RECOVERY_REQUIRED": manual,
@@ -2281,26 +2295,24 @@ def _sanitized_cleanup_failures(value: object) -> list[dict[str, str]]:
     for item in value:
         if not isinstance(item, dict):
             continue
-        failures.append(
-            {
-                "resource_kind": _safe_cleanup_metadata(
-                    item.get("resource_kind"),
-                    "UNKNOWN_RESOURCE",
-                ),
-                "cleanup_phase": _safe_cleanup_metadata(
-                    item.get("cleanup_phase"),
-                    "UNKNOWN_CLEANUP_PHASE",
-                ),
-                "error_type": _safe_cleanup_metadata(
-                    item.get("error_type"),
-                    "CleanupError",
-                ),
-                "error_code": _safe_cleanup_metadata(
-                    item.get("error_code"),
-                    "OWNED_RESOURCE_CLEANUP_FAILED",
-                ),
-            }
-        )
+        failures.append({
+            "resource_kind": _safe_cleanup_metadata(
+                item.get("resource_kind"),
+                "UNKNOWN_RESOURCE",
+            ),
+            "cleanup_phase": _safe_cleanup_metadata(
+                item.get("cleanup_phase"),
+                "UNKNOWN_CLEANUP_PHASE",
+            ),
+            "error_type": _safe_cleanup_metadata(
+                item.get("error_type"),
+                "CleanupError",
+            ),
+            "error_code": _safe_cleanup_metadata(
+                item.get("error_code"),
+                "OWNED_RESOURCE_CLEANUP_FAILED",
+            ),
+        })
     return failures
 
 
@@ -2319,9 +2331,7 @@ def _failure_outcome(
     stream: TextIO | None = None,
 ) -> _ExecutionOutcome:
     updates = _failure_updates(result)
-    cleanup_failures = _sanitized_cleanup_failures(
-        result.get("cleanup_failures")
-    )
+    cleanup_failures = _sanitized_cleanup_failures(result.get("cleanup_failures"))
     raw_cleanup_codes = result.get("cleanup_failure_codes", [])
     if not isinstance(raw_cleanup_codes, (list, tuple)):
         raw_cleanup_codes = []
@@ -2331,12 +2341,8 @@ def _failure_outcome(
         if isinstance(code, str)
     ]
     if not cleanup_codes:
-        cleanup_codes = [
-            failure["error_code"] for failure in cleanup_failures
-        ]
-    cleanup_resource_kinds = [
-        failure["resource_kind"] for failure in cleanup_failures
-    ]
+        cleanup_codes = [failure["error_code"] for failure in cleanup_failures]
+    cleanup_resource_kinds = [failure["resource_kind"] for failure in cleanup_failures]
     cleanup_count = _cleanup_count(
         result.get("cleanup_exception_count"),
         len(cleanup_failures),
@@ -2372,9 +2378,7 @@ def _failure_outcome(
         "database_mutated": updates["DATABASE_MUTATED"],
         "backup_created": updates["BACKUP_CREATED"],
         "automatic_retry_allowed": False,
-        "manual_recovery_required": updates[
-            "MANUAL_RECOVERY_REQUIRED"
-        ],
+        "manual_recovery_required": updates["MANUAL_RECOVERY_REQUIRED"],
         "durable_evidence_updated": durable_evidence_updated,
         "durable_evidence_persisted": durable_evidence_updated,
         "primary_exit_classification": primary_classification,
@@ -2473,8 +2477,7 @@ def _apply_cleanup_failure(
     publish_state: str,
 ) -> None:
     sanitized_codes = [
-        _safe_cleanup_metadata(code, "OUTER_RESOURCE_CLEANUP_FAILED")
-        for code in codes
+        _safe_cleanup_metadata(code, "OUTER_RESOURCE_CLEANUP_FAILED") for code in codes
     ]
     combined = list(outcome.payload.get("cleanup_failure_codes", []))
     combined.extend(sanitized_codes)
@@ -2490,15 +2493,10 @@ def _apply_cleanup_failure(
         }
         for code in sanitized_codes
     )
-    prior_classification = str(
-        outcome.payload.get("exit_classification", "")
-    )
+    prior_classification = str(outcome.payload.get("exit_classification", ""))
     had_primary = bool(
         outcome.payload.get("primary_exception_present")
-        or (
-            outcome.exit_code != 0
-            and outcome.primary_error_type is not None
-        )
+        or (outcome.exit_code != 0 and outcome.primary_error_type is not None)
     )
     if had_primary and outcome.primary_error_type is not None:
         outcome.payload.setdefault(
@@ -2527,32 +2525,28 @@ def _apply_cleanup_failure(
     if requires_uncertainty:
         outcome.exit_code = 1
         outcome.stream = sys.stderr
-        outcome.payload.update(
-            {
-                "status": "FAILED",
-                "error_type": "PUBLISH_UNCERTAIN",
-                "exit_classification": "PUBLISH_UNCERTAIN",
-                "publish_state": publish_state,
-                "target_may_have_changed": True,
-                "database_mutated": None,
-                "automatic_retry_allowed": False,
-                "manual_recovery_required": True,
-            }
-        )
+        outcome.payload.update({
+            "status": "FAILED",
+            "error_type": "PUBLISH_UNCERTAIN",
+            "exit_classification": "PUBLISH_UNCERTAIN",
+            "publish_state": publish_state,
+            "target_may_have_changed": True,
+            "database_mutated": None,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": True,
+        })
     elif outcome.exit_code == 0:
         outcome.exit_code = 1
-        outcome.payload.update(
-            {
-                "status": "FAILED",
-                "error_type": "CLEANUP_FAILED",
-                "exit_classification": "CLEANUP_FAILED",
-                "publish_state": "BEFORE_EXCHANGE",
-                "target_may_have_changed": False,
-                "database_mutated": False,
-                "automatic_retry_allowed": False,
-                "manual_recovery_required": False,
-            }
-        )
+        outcome.payload.update({
+            "status": "FAILED",
+            "error_type": "CLEANUP_FAILED",
+            "exit_classification": "CLEANUP_FAILED",
+            "publish_state": "BEFORE_EXCHANGE",
+            "target_may_have_changed": False,
+            "database_mutated": False,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": False,
+        })
     elif had_primary:
         outcome.payload["exit_classification"] = prior_classification
         outcome.payload["error_type"] = prior_classification
@@ -2578,31 +2572,23 @@ def _apply_cleanup_failure(
                 failure["resource_kind"] for failure in cleanup_failures
             ]
             evidence.checkpoint(
-                FINAL_EXIT_CLASSIFICATION=outcome.payload[
-                    "exit_classification"
-                ],
+                FINAL_EXIT_CLASSIFICATION=outcome.payload["exit_classification"],
                 PRIMARY_ERROR_TYPE=outcome.payload.get(
                     "primary_error_type",
                     outcome.primary_error_type,
                 ),
-                PRIMARY_ERROR_CODE=outcome.payload.get(
-                    "primary_error_code"
-                ),
+                PRIMARY_ERROR_CODE=outcome.payload.get("primary_error_code"),
                 PRIMARY_EXIT_CLASSIFICATION=outcome.payload.get(
                     "primary_exit_classification"
                 ),
-                PRIMARY_PUBLISH_STATE=outcome.payload.get(
-                    "primary_publish_state"
-                ),
+                PRIMARY_PUBLISH_STATE=outcome.payload.get("primary_publish_state"),
                 PRIMARY_EXCEPTION_PRESENT=had_primary,
                 PRIMARY_EXCEPTION_PRESERVED=outcome.payload.get(
                     "primary_exception_preserved",
                     had_primary,
                 ),
                 CLEANUP_EXCEPTION_RECORDED=True,
-                CLEANUP_EXCEPTION_COUNT=outcome.payload[
-                    "cleanup_exception_count"
-                ],
+                CLEANUP_EXCEPTION_COUNT=outcome.payload["cleanup_exception_count"],
                 CLEANUP_FAILURES=cleanup_failures,
                 CLEANUP_RESOURCE_KINDS=cleanup_resource_kinds,
                 CLEANUP_FAILURE_CODES=combined,
@@ -2633,15 +2619,11 @@ def _finalize_execution_evidence(
                 "primary_error_type",
                 outcome.primary_error_type,
             ),
-            PRIMARY_ERROR_CODE=outcome.payload.get(
-                "primary_error_code"
-            ),
+            PRIMARY_ERROR_CODE=outcome.payload.get("primary_error_code"),
             PRIMARY_EXIT_CLASSIFICATION=outcome.payload.get(
                 "primary_exit_classification"
             ),
-            PRIMARY_PUBLISH_STATE=outcome.payload.get(
-                "primary_publish_state"
-            ),
+            PRIMARY_PUBLISH_STATE=outcome.payload.get("primary_publish_state"),
             PRIMARY_TARGET_MAY_HAVE_CHANGED=outcome.payload.get(
                 "primary_target_may_have_changed"
             ),
@@ -2671,9 +2653,7 @@ def _finalize_execution_evidence(
                 "cleanup_failures",
                 [],
             ),
-            CLEANUP_RESOURCE_KINDS=outcome.payload.get(
-                "cleanup_resource_kinds", []
-            ),
+            CLEANUP_RESOURCE_KINDS=outcome.payload.get("cleanup_resource_kinds", []),
             CLEANUP_FAILURE_CODES=outcome.payload.get(
                 "cleanup_failure_codes",
                 [],
@@ -2731,9 +2711,7 @@ def _final_mutation_checkpoint(
     try:
         validated.execution_authority.validate_not_expired()
         validated.execution_authority.revalidate_operations_root()
-        validated.execution_authority.validate_runtime(
-            expected_running=False
-        )
+        validated.execution_authority.validate_runtime(expected_running=False)
         if validated.runtime_attestation is None:
             raise ProductionGateError("RUNTIME_ATTESTATION_REQUIRED")
         validate_stopped_runtime_attestation(
@@ -2746,9 +2724,7 @@ def _final_mutation_checkpoint(
     except ExecutionAuthorityError as exc:
         raise ProductionGateError(exc.code) from exc
     if prepared.source_identity != validated.source_identity:
-        raise ProductionGateError(
-            "SOURCE_IDENTITY_DRIFT_AT_FINAL_CHECKPOINT"
-        )
+        raise ProductionGateError("SOURCE_IDENTITY_DRIFT_AT_FINAL_CHECKPOINT")
 
 
 def _execute_plan_outcome(
@@ -2782,9 +2758,7 @@ def _execute_plan_outcome(
                 runtime_attestation.path != expected_pin_path
                 or not runtime_attestation.path_matches()
             ):
-                raise ProductionGateError(
-                    "RUNTIME_ATTESTATION_PATH_SUBSTITUTION"
-                )
+                raise ProductionGateError("RUNTIME_ATTESTATION_PATH_SUBSTITUTION")
             validate_stopped_runtime_attestation(
                 artifact=runtime_attestation,
                 bundle=validated.execution_authority,
@@ -2864,17 +2838,11 @@ def _execute_plan_outcome(
                 "PLAN_SHA256": pinned.sha256,
                 "OPERATION_ID": operation_id,
                 "SOURCE_SHA256_BEFORE": plan["SOURCE_SHA256"],
-                "SOURCE_SCHEMA_BEFORE": plan[
-                    "SOURCE_SCHEMA_FINGERPRINT"
-                ],
+                "SOURCE_SCHEMA_BEFORE": plan["SOURCE_SCHEMA_FINGERPRINT"],
                 "TARGET_SCHEMA_VERSION": validated.target_schema_version,
-                "TARGET_SCHEMA_FINGERPRINT": (
-                    validated.target_schema_fingerprint
-                ),
+                "TARGET_SCHEMA_FINGERPRINT": (validated.target_schema_fingerprint),
                 "MIGRATION_IMAGE_ID": plan["MIGRATION_IMAGE_ID"],
-                "MIGRATION_IMAGE_REVISION": plan[
-                    "MIGRATION_IMAGE_REVISION"
-                ],
+                "MIGRATION_IMAGE_REVISION": plan["MIGRATION_IMAGE_REVISION"],
                 "PREVIOUS_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
                 "OPERATIONS_ROOT_APPROVAL_SHA256": plan[
                     "OPERATIONS_ROOT_APPROVAL_SHA256"
@@ -2909,13 +2877,9 @@ def _execute_plan_outcome(
             )
         prepared = None
         result = _parse_staged_output(captured.getvalue())
-        publish_state = str(
-            result.get("publish_state", "EXCHANGE_STARTED")
-        )
+        publish_state = str(result.get("publish_state", "EXCHANGE_STARTED"))
         if return_code != 0 or result.get("status") != "PASS":
-            primary_present = bool(
-                result.get("primary_exception_present", True)
-            )
+            primary_present = bool(result.get("primary_exception_present", True))
             primary_error = (
                 str(
                     result.get("primary_exit_classification")
@@ -2931,17 +2895,15 @@ def _execute_plan_outcome(
                 _record_failure(evidence, result)
             except Exception:
                 result = dict(result)
-                result.update(
-                    {
-                        "status": "FAILED",
-                        "error_type": "PUBLISH_UNCERTAIN",
-                        "exit_classification": "PUBLISH_UNCERTAIN",
-                        "publish_state": publish_state,
-                        "target_may_have_changed": True,
-                        "automatic_retry_allowed": False,
-                        "manual_recovery_required": True,
-                    }
-                )
+                result.update({
+                    "status": "FAILED",
+                    "error_type": "PUBLISH_UNCERTAIN",
+                    "exit_classification": "PUBLISH_UNCERTAIN",
+                    "publish_state": publish_state,
+                    "target_may_have_changed": True,
+                    "automatic_retry_allowed": False,
+                    "manual_recovery_required": True,
+                })
                 outcome = _failure_outcome(
                     operation_id,
                     result,
@@ -2972,29 +2934,18 @@ def _execute_plan_outcome(
             internal.get("STATE") != "VERIFIED"
             or internal.get("PUBLISH_STATE") != "FINAL_VERIFIED"
         ):
-            raise ProductionGateError(
-                "INTERNAL_MANIFEST_NOT_FINAL_VERIFIED"
-            )
+            raise ProductionGateError("INTERNAL_MANIFEST_NOT_FINAL_VERIFIED")
         db_path = Path(str(plan["DB_CANONICAL_PATH"]))
-        final_identity, _whole_schema, integrity, foreign_keys = (
-            _read_only_source(db_path)
+        final_identity, _whole_schema, integrity, foreign_keys = _read_only_source(
+            db_path
         )
         if integrity != "ok" or foreign_keys != 0:
-            raise ProductionGateError(
-                "FINAL_DATABASE_VALIDATION_FAILED"
-            )
+            raise ProductionGateError("FINAL_DATABASE_VALIDATION_FAILED")
         actual_target_fingerprint = _target_schema_fingerprint(db_path)
-        if (
-            actual_target_fingerprint
-            != validated.target_schema_fingerprint
-        ):
-            raise ProductionGateError(
-                "FINAL_TARGET_SCHEMA_MISMATCH"
-            )
+        if actual_target_fingerprint != validated.target_schema_fingerprint:
+            raise ProductionGateError("FINAL_TARGET_SCHEMA_MISMATCH")
         if not _pinned_authorities_match(pinned, validated):
-            raise ProductionGateError(
-                "PINNED_AUTHORITY_DRIFT_AFTER_EXCHANGE"
-            )
+            raise ProductionGateError("PINNED_AUTHORITY_DRIFT_AFTER_EXCHANGE")
         publish_state = "FINAL_VERIFIED"
         evidence.transition(
             "COMPLETED",
@@ -3011,8 +2962,7 @@ def _execute_plan_outcome(
             BACKUP_FILE_FSYNCED=True,
             BACKUP_PARENT_FSYNCED=True,
             BACKUP_SOURCE_IDENTITY_MATCH=(
-                internal.get("BACKUP_SHA256")
-                == plan["SOURCE_SHA256"]
+                internal.get("BACKUP_SHA256") == plan["SOURCE_SHA256"]
             ),
             FINAL_SCHEMA_MATCHES_PLANNED_TARGET=True,
         )
@@ -3025,9 +2975,7 @@ def _execute_plan_outcome(
                 "plan_sha256": pinned.sha256,
                 "publish_state": "FINAL_VERIFIED",
                 "manifest_state": "COMPLETED",
-                "target_schema_version": (
-                    validated.target_schema_version
-                ),
+                "target_schema_version": (validated.target_schema_version),
                 "target_schema_fingerprint_match": True,
                 "target_may_have_changed": True,
                 "automatic_retry_allowed": False,
@@ -3056,9 +3004,7 @@ def _execute_plan_outcome(
             primary = exc
             embedded_cleanup = ()
         primary_code = (
-            _safe_exception_code(primary)
-            if primary is not None
-            else "CLEANUP_FAILED"
+            _safe_exception_code(primary) if primary is not None else "CLEANUP_FAILED"
         )
         if _publish_state_requires_uncertainty(
             publish_state,
@@ -3082,9 +3028,7 @@ def _execute_plan_outcome(
                     "backup_available": False,
                 },
                 durable_evidence_updated=False,
-                primary_error_type=(
-                    primary_code if primary is not None else None
-                ),
+                primary_error_type=(primary_code if primary is not None else None),
             )
         if embedded_cleanup:
             _apply_cleanup_failure(
@@ -3145,20 +3089,14 @@ def _sanitized_stderr_fallback(
     cleanup_failures = _sanitized_cleanup_failures(
         outcome.payload.get("cleanup_failures")
     )
-    cleanup_failures.append(
-        {
-            "resource_kind": "FINAL_RESULT_STREAM",
-            "cleanup_phase": "FINAL_RESULT_EMIT",
-            "error_type": "OutputError",
-            "error_code": "FINAL_RESULT_EMIT_FAILED",
-        }
-    )
-    cleanup_codes = [
-        failure["error_code"] for failure in cleanup_failures
-    ]
-    cleanup_resource_kinds = [
-        failure["resource_kind"] for failure in cleanup_failures
-    ]
+    cleanup_failures.append({
+        "resource_kind": "FINAL_RESULT_STREAM",
+        "cleanup_phase": "FINAL_RESULT_EMIT",
+        "error_type": "OutputError",
+        "error_code": "FINAL_RESULT_EMIT_FAILED",
+    })
+    cleanup_codes = [failure["error_code"] for failure in cleanup_failures]
+    cleanup_resource_kinds = [failure["resource_kind"] for failure in cleanup_failures]
     payload = {
         "status": "FAILED",
         "error_type": "PUBLISH_UNCERTAIN",
@@ -3177,7 +3115,8 @@ def _sanitized_stderr_fallback(
         "cleanup_exception_count": _cleanup_count(
             outcome.payload.get("cleanup_exception_count"),
             len(cleanup_failures) - 1,
-        ) + 1,
+        )
+        + 1,
         "cleanup_failures": cleanup_failures,
         "cleanup_resource_kinds": cleanup_resource_kinds,
         "cleanup_failure_codes": cleanup_codes,
@@ -3238,28 +3177,21 @@ def attest_runtime(args: argparse.Namespace) -> int:
             runtime_pin_sha256,
         )
         try:
-            if (
-                artifact.path != runtime_pin_path
-                or not artifact.path_matches()
-            ):
-                raise ProductionGateError(
-                    "RUNTIME_ATTESTATION_PATH_SUBSTITUTION"
-                )
+            if artifact.path != runtime_pin_path or not artifact.path_matches():
+                raise ProductionGateError("RUNTIME_ATTESTATION_PATH_SUBSTITUTION")
         finally:
             artifact.close()
-        _json_emit(
-            {
-                "status": "PASS",
-                "mode": "ATTEST_RUNTIME",
-                "operation_id": pinned.payload["OPERATION_ID"],
-                "runtime_pin_path": str(runtime_pin_path),
-                "runtime_pin_sha256": runtime_pin_sha256,
-                "runtime_state_attested": "running",
-                "expected_runtime_transition": "running_to_stopped",
-                "contains_secrets": False,
-                "production_execution_enabled": False,
-            }
-        )
+        _json_emit({
+            "status": "PASS",
+            "mode": "ATTEST_RUNTIME",
+            "operation_id": pinned.payload["OPERATION_ID"],
+            "runtime_pin_path": str(runtime_pin_path),
+            "runtime_pin_sha256": runtime_pin_sha256,
+            "runtime_state_attested": "running",
+            "expected_runtime_transition": "running_to_stopped",
+            "contains_secrets": False,
+            "production_execution_enabled": False,
+        })
         return 0
     finally:
         if validated is not None:
@@ -3278,8 +3210,77 @@ def build_parser() -> argparse.ArgumentParser:
         description="Explicit root-only production staged migration gate"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    prepare_parser = subparsers.add_parser("prepare-authority")
+    prepare_parser.add_argument("--repository-root", required=True)
+    prepare_parser.add_argument("--operation-id", required=True)
+    prepare_parser.add_argument("--authority-parent", required=True)
+    prepare_parser.add_argument("--db-path", required=True)
+    prepare_parser.add_argument("--expected-source-sha256", required=True)
+    prepare_parser.add_argument("--migration-image-id", required=True)
+    prepare_parser.add_argument("--migration-image-revision", required=True)
+    prepare_parser.add_argument(
+        "--migration-component",
+        action="append",
+        required=True,
+    )
+    prepare_parser.add_argument(
+        "--expires-in-seconds",
+        required=True,
+        type=_positive_int,
+    )
+    prepare_parser.add_argument(
+        "--confirm-plan-only-authority",
+        required=True,
+    )
+    prepare_parser.add_argument(
+        "--confirm-clean-start-policy",
+        required=True,
+    )
+
+    finalize_parser = subparsers.add_parser("finalize-authority")
+    finalize_parser.add_argument("--plan", required=True)
+    finalize_parser.add_argument("--expected-plan-sha256", required=True)
+    finalize_parser.add_argument("--confirm-operation-id", required=True)
+    finalize_parser.add_argument("--authority-directory", required=True)
+    finalize_parser.add_argument("--p5b-evidence", required=True)
+    finalize_parser.add_argument(
+        "--expected-p5b-evidence-sha256",
+        required=True,
+    )
+    finalize_parser.add_argument("--p6a-f1-evidence", required=True)
+    finalize_parser.add_argument(
+        "--expected-p6a-f1-evidence-sha256",
+        required=True,
+    )
+    finalize_parser.add_argument("--secrets-override", required=True)
+    finalize_parser.add_argument(
+        "--expected-secrets-override-sha256",
+        required=True,
+    )
+    finalize_parser.add_argument(
+        "--expires-in-seconds",
+        required=True,
+        type=_positive_int,
+    )
+    finalize_parser.add_argument(
+        "--confirm-execution-authority",
+        required=True,
+    )
+
+    validate_parser = subparsers.add_parser("validate-authority-package")
+    validate_parser.add_argument("--plan", required=True)
+    validate_parser.add_argument("--expected-plan-sha256", required=True)
+    validate_parser.add_argument("--confirm-operation-id", required=True)
+    validate_parser.add_argument("--final-authority", required=True)
+    validate_parser.add_argument(
+        "--expected-final-authority-sha256",
+        required=True,
+    )
+
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--repository-root", required=True)
+    plan_parser.add_argument("--operation-id", required=True)
     plan_parser.add_argument("--db-path", required=True)
     plan_parser.add_argument("--backup-parent", required=True)
     plan_parser.add_argument("--staging-parent", required=True)
@@ -3387,6 +3388,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         _json_emit(_argument_error_payload(), stream=sys.stderr)
         return 2
     try:
+        if args.command in {
+            "prepare-authority",
+            "finalize-authority",
+            "validate-authority-package",
+        }:
+            from scripts import hermes_release_authority as producer
+
+            if args.command == "prepare-authority":
+                return producer.prepare_initial_authority(args)
+            if args.command == "finalize-authority":
+                return producer.finalize_authority_package(args)
+            return producer.validate_authority_package(args)
         if args.command == "plan":
             return create_plan(args)
         if args.command == "attest-runtime":
@@ -3414,18 +3427,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stream=sys.stderr,
             )
             return 1
-        _json_emit(
-            {
-                "status": "FAILED",
-                "error_type": code,
-                "exit_classification": code,
-                "publish_state": "BEFORE_EXCHANGE",
-                "target_may_have_changed": False,
-                "automatic_retry_allowed": False,
-                "manual_recovery_required": False,
-                "production_execution_enabled": False,
-            }
-        )
+        _json_emit({
+            "status": "FAILED",
+            "error_type": code,
+            "exit_classification": code,
+            "publish_state": "BEFORE_EXCHANGE",
+            "target_may_have_changed": False,
+            "automatic_retry_allowed": False,
+            "manual_recovery_required": False,
+            "production_execution_enabled": False,
+        })
         return 1
 
 

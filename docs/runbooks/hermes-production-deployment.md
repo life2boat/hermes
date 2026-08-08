@@ -3,7 +3,10 @@
 This runbook and `scripts/hermes_production_deploy.sh` are the only authoritative
 application deployment entrypoint for Hermes production. Database migration,
 production snapshot inventory, snapshot backfill, and feature enablement are
-separate approval gates.
+separate approval gates. Production staged-migration authority packages must be
+created and validated through the lifecycle in
+`RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md`; the application deploy
+wrapper neither creates migration authority nor authorizes database mutation.
 
 For the operator-facing sequence that coordinates these low-level contracts,
 use [`skills/deploy/SKILL.md`](../../skills/deploy/SKILL.md). This runbook remains

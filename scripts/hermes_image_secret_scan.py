@@ -28,6 +28,7 @@ from scripts import hermes_production_deploy as deploy  # noqa: E402
 from scripts.secret_scanner import SecretFinding, scan_secret_blob  # noqa: E402
 
 SCAN_POLICY_VERSION = 1
+RECEIPT_VERSION = 1
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 DIGEST_REFERENCE_RE = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 SHA256_RE = re.compile(r"sha256:([0-9a-f]{64})")
@@ -113,6 +114,25 @@ def _safe_path(value: str, *, rootfs: bool = False) -> str:
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise ImageScanError("IMAGE_ARCHIVE_PATH_UNSAFE")
     return path.as_posix()
+
+
+def _validate_symlink_target(member_path: str, target: str) -> None:
+    """Validate one inert rootfs symlink target without treating it as a member."""
+    if not target or "\\" in target or "\x00" in target or target.startswith("//"):
+        raise ImageScanError("IMAGE_ARCHIVE_PATH_UNSAFE")
+    remaining = target[1:] if target.startswith("/") else target
+    resolved = (
+        [] if target.startswith("/") else list(PurePosixPath(member_path).parent.parts)
+    )
+    for part in remaining.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise ImageScanError("IMAGE_ARCHIVE_PATH_UNSAFE")
+            resolved.pop()
+            continue
+        resolved.append(part)
 
 
 def _json_object(data: bytes, code: str) -> dict[str, Any]:
@@ -460,7 +480,11 @@ def _scan_layer(
                 if pure.name.startswith(".wh."):
                     _remove(tree, (pure.parent / pure.name[4:]).as_posix())
                     continue
-                if member.issym() or member.islnk():
+                if member.issym():
+                    _validate_symlink_target(member_path, member.linkname)
+                    tree[member_path] = (0, 0)
+                    continue
+                if member.islnk():
                     _safe_path(member.linkname, rootfs=True)
                     tree[member_path] = (0, 0)
                     continue
@@ -653,6 +677,89 @@ def _write_new_json(path: Path, payload: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
+def _immutable_digest(image: str) -> str | None:
+    if IMAGE_ID_RE.fullmatch(image) is not None:
+        return image
+    if DIGEST_REFERENCE_RE.fullmatch(image) is not None:
+        return image.rsplit("@", 1)[1]
+    return None
+
+
+def _scan_receipt(payload: dict[str, Any], image: str) -> dict[str, Any]:
+    findings = payload.get("FINDINGS")
+    safe_findings = findings if isinstance(findings, list) else []
+    count = payload.get("IMAGE_SECRET_FINDINGS")
+    finding_count = (
+        count if isinstance(count, int) and not isinstance(count, bool) else 0
+    )
+    payload.update({
+        "RECEIPT_VERSION": RECEIPT_VERSION,
+        "SCANNER_EXIT_CODE": 0 if finding_count == 0 else 1,
+        "SCANNER_ERROR_CLASS": "NONE" if finding_count == 0 else "FINDING",
+        "SCANNER_ERROR_CODE": (
+            None if finding_count == 0 else "SECRET_FINDINGS_PRESENT"
+        ),
+        "FINDING_COUNT": finding_count,
+        "FINDING_CLASS": sorted({
+            str(item["finding_class"])
+            for item in safe_findings
+            if isinstance(item, dict) and "finding_class" in item
+        }),
+        "FINDING_LOCATION": [
+            {
+                "scope": item.get("scope"),
+                "path_sha256": item.get("path_sha256"),
+                "layer_digest": item.get("layer_id"),
+            }
+            for item in safe_findings
+            if isinstance(item, dict)
+        ],
+        "IMAGE_DIGEST": _immutable_digest(image),
+    })
+    return payload
+
+
+def _scanner_error(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, ImageScanError):
+        code = exc.code
+        if code.startswith(("IMAGE_ARCHIVE_", "IMAGE_LAYER_", "IMAGE_CONFIG_", "OCI_")):
+            return "PARSE_ERROR", code
+        if code in {"IMAGE_INSPECT_FAILED", "IMAGE_EXPORT_FAILED"}:
+            return "IO_ERROR", code
+        return "ASSERTION_ERROR", code
+    if isinstance(exc, (OSError, subprocess.SubprocessError)):
+        return "IO_ERROR", "IMAGE_SCAN_IO_FAILED"
+    if isinstance(exc, deploy.DeploymentContractError):
+        return "CONTRACT_ERROR", "IMAGE_SCAN_CONTRACT_FAILED"
+    if isinstance(exc, AssertionError):
+        return "ASSERTION_ERROR", "IMAGE_SCAN_ASSERTION_FAILED"
+    return "INTERNAL_ERROR", "IMAGE_SCAN_FAILED"
+
+
+def _failure_receipt(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
+    policy_sha: str | None = None
+    try:
+        repository_root = Path(args.repository_root).resolve()
+        contract = deploy.load_contract(repository_root)
+        policy_sha = _policy_sha(repository_root, contract.protected_secret_names)
+    except Exception:  # noqa: BLE001 - a receipt must not expose nested failure text
+        pass
+    error_class, error_code = _scanner_error(exc)
+    return {
+        "RECEIPT_VERSION": RECEIPT_VERSION,
+        "STATUS": "FAIL",
+        "SCANNER_EXIT_CODE": 1,
+        "SCANNER_ERROR_CLASS": error_class,
+        "SCANNER_ERROR_CODE": error_code,
+        "ERROR": error_code,
+        "FINDING_COUNT": None,
+        "FINDING_CLASS": [],
+        "FINDING_LOCATION": [],
+        "SCAN_POLICY_SHA256": policy_sha,
+        "IMAGE_DIGEST": _immutable_digest(args.image),
+    }
+
+
 def scan_local_image(args: argparse.Namespace) -> int:
     if REVISION_RE.fullmatch(args.expected_source_sha) is None:
         raise ImageScanError("EXPECTED_SOURCE_SHA_INVALID")
@@ -684,7 +791,7 @@ def scan_local_image(args: argparse.Namespace) -> int:
             protected_names=contract.protected_secret_names,
             exact_secret_values=exact_values,
         )
-    payload = result.contract()
+    payload = _scan_receipt(result.contract(), args.image)
     _write_new_json(Path(args.output), payload)
     print(json.dumps(payload, sort_keys=True))
     return 0 if payload["IMAGE_SECRET_FINDINGS"] == 0 else 1
@@ -701,20 +808,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
-        return scan_local_image(build_parser().parse_args(argv))
-    except (
-        ImageScanError,
-        OSError,
-        subprocess.SubprocessError,
-        deploy.DeploymentContractError,
-    ) as exc:
-        print(
-            json.dumps(
-                {"STATUS": "FAIL", "ERROR": getattr(exc, "code", "IMAGE_SCAN_FAILED")},
-                sort_keys=True,
-            )
-        )
+        return scan_local_image(args)
+    except Exception as exc:  # noqa: BLE001 - emit only a closed sanitized receipt
+        payload = _failure_receipt(args, exc)
+        try:
+            _write_new_json(Path(args.output), payload)
+        except OSError:
+            pass
+        print(json.dumps(payload, sort_keys=True))
         return 1
 
 

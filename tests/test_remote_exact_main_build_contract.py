@@ -46,11 +46,19 @@ def test_workflow_binds_full_image_scan_to_exact_digest_before_summary() -> None
     pull = text.index('docker pull "$reference"')
     scan = text.index("python3 -m scripts.hermes_image_secret_scan")
     upload = text.index("${{ runner.temp }}/image-secret-attestation.json")
+    gate = text.index("Enforce exact image secret scan gate")
     summary = text.index('echo "IMAGE_SECRET_FINDINGS=0"')
 
-    assert pull < scan < upload < summary
+    assert pull < scan < upload < gate < summary
     assert '--image "$reference"' in text
     assert '--expected-source-sha "$GITHUB_SHA"' in text
+    assert "set +e" in text
+    assert 'scanner_rc="$?"' in text
+    assert "receipt_safe=true" in text
+    assert "always() && steps.image_scan.outputs.receipt_safe == 'true'" in text
+    assert 'test "${{ steps.image_scan.outputs.scanner_exit_code }}" -eq 0' in text
+    assert ".SCANNER_EXIT_CODE == 0" in text
+    assert ".FINDING_COUNT == 0" in text
     assert '.IMAGE_METADATA_SECRET_FINDINGS == 0' in text
     assert '.IMAGE_LAYER_SECRET_FINDINGS == 0' in text
     assert '.IMAGE_FINAL_FILESYSTEM_SECRET_FINDINGS == 0' in text

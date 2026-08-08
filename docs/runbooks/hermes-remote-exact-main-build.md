@@ -57,7 +57,7 @@ The workflow invokes the canonical helper once in `build-push` mode. The helper:
 No production secret or production dotenv path is an input. `latest` is never
 created or treated as release authority.
 
-## Registry-only attestation
+## Registry and full-image attestation
 
 After the push, the hosted runner resolves the digest with Buildx registry
 inspection. `scripts/attest_remote_registry_image.py` verifies:
@@ -70,9 +70,19 @@ inspection. `scripts/attest_remote_registry_image.py` verifies:
 - compressed layer total and config digest;
 - zero secret findings in image configuration and history.
 
-The workflow uploads only a short safe JSON attestation. Authentication tokens,
-raw image configuration, build context manifests, and artifact downloads are
-not uploaded.
+The hosted runner then pulls that same immutable digest and runs
+`scripts/hermes_image_secret_scan.py`. Source scanning alone cannot prove the
+built artifact contains no recoverable credential, and a final-filesystem-only
+scan misses bytes deleted by later whiteouts. The canonical scanner therefore
+binds the local image ID and exact OCI revision, verifies Docker/OCI config and
+layer identities, scans configuration, environment, labels, history, every
+stored layer, and the resulting filesystem, and fails closed on malformed,
+missing, ambiguous, unsafe, or unsupported content.
+
+The workflow publishes `IMAGE_SECRET_FINDINGS=0` only after all narrower
+metadata, layer, and final-filesystem counts are zero. It uploads only safe
+receipts with counts, identities, policy hash, and hashed paths; authentication
+tokens, matching bytes, raw configuration, and image contents are not uploaded.
 
 ## Production-host stop boundary
 

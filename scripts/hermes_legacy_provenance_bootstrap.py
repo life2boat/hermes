@@ -24,9 +24,14 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from scripts import hermes_deploy_preflight as preflight  # noqa: E402
 from scripts import hermes_post_deploy_attestation as attestation  # noqa: E402
 from scripts import hermes_production_deploy as deploy  # noqa: E402
+from scripts.hermes_image_secret_scan import (  # noqa: E402
+    ImageScanError,
+    verify_rollback_archive,
+)
 
 
-BOOTSTRAP_PLAN_VERSION = 1
+BOOTSTRAP_PLAN_VERSION = 2
+ROLLBACK_REHEARSAL_VERSION = 1
 OPERATION_CLASS = "LEGACY_RUNTIME_PROVENANCE_BOOTSTRAP"
 LEGACY_CLASSIFICATION = "LEGACY_BASELINE"
 UNKNOWN_REVISION = "UNKNOWN"
@@ -36,6 +41,20 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 MAX_PLAN_BYTES = 1024 * 1024
+MAX_REHEARSAL_BYTES = 1024 * 1024
+
+REHEARSAL_FIELDS = frozenset({
+    "ROLLBACK_REHEARSAL_VERSION",
+    "OPERATION_ID",
+    "PLAN_SHA256",
+    "ROLLBACK_ARTIFACT_SHA256",
+    "EXPECTED_LEGACY_IMAGE_ID",
+    "ARCHIVE_STRUCTURE_VALID",
+    "DOCKER_LOAD_ACCEPTED",
+    "LOADED_IMAGE_IDENTITY_VALID",
+    "REHEARSAL_STATUS",
+    "CREATED_AT",
+})
 
 PLAN_FIELDS = frozenset({
     "BOOTSTRAP_PLAN_VERSION",
@@ -54,6 +73,7 @@ PLAN_FIELDS = frozenset({
     "ROLLBACK_ARTIFACT_PATH",
     "ROLLBACK_ARTIFACT_SIZE",
     "ROLLBACK_ARTIFACT_SHA256",
+    "ROLLBACK_REHEARSAL_PATH",
     "ALLOWED_MUTATION",
     "SCHEMA_MIGRATION_ALLOWED",
     "FEATURE_ACTIVATION_ALLOWED",
@@ -115,9 +135,7 @@ def _read_private_file(
                 if not block:
                     break
                 total += len(block)
-                if total > before.st_size or (
-                    maximum is not None and total > maximum
-                ):
+                if total > before.st_size or (maximum is not None and total > maximum):
                     raise BootstrapError("PRIVATE_ARTIFACT_READ_INVALID")
                 digest.update(block)
                 if chunks is not None:
@@ -137,22 +155,28 @@ def _read_private_file(
                 stat.S_IMODE(before.st_mode),
                 before.st_nlink,
             )
-            if total != before.st_size or identity != (
-                path_metadata.st_dev,
-                path_metadata.st_ino,
-                path_metadata.st_size,
-                path_metadata.st_uid,
-                path_metadata.st_gid,
-                stat.S_IMODE(path_metadata.st_mode),
-                path_metadata.st_nlink,
-            ) or identity != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_uid,
-                after.st_gid,
-                stat.S_IMODE(after.st_mode),
-                after.st_nlink,
+            if (
+                total != before.st_size
+                or identity
+                != (
+                    path_metadata.st_dev,
+                    path_metadata.st_ino,
+                    path_metadata.st_size,
+                    path_metadata.st_uid,
+                    path_metadata.st_gid,
+                    stat.S_IMODE(path_metadata.st_mode),
+                    path_metadata.st_nlink,
+                )
+                or identity
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_uid,
+                    after.st_gid,
+                    stat.S_IMODE(after.st_mode),
+                    after.st_nlink,
+                )
             ):
                 raise BootstrapError("PRIVATE_ARTIFACT_SUBSTITUTION")
             data = b"".join(chunks) if chunks is not None else None
@@ -232,8 +256,77 @@ def _open_plan(path: Path, expected_sha256: str) -> dict[str, Any]:
         or path.parent.name != payload.get("OPERATION_ID")
         or payload.get("ROLLBACK_ARTIFACT_PATH")
         != str(path.parent / "legacy-image.tar")
+        or payload.get("ROLLBACK_REHEARSAL_PATH")
+        != str(path.parent / "rollback-rehearsal.json")
     ):
         raise BootstrapError("BOOTSTRAP_PLAN_CONTRACT_INVALID")
+    return payload
+
+
+def _open_rehearsal(
+    plan_path: Path,
+    plan_sha256: str,
+    plan: dict[str, Any],
+    require_unexpired: bool = True,
+) -> dict[str, Any]:
+    rehearsal_path = Path(str(plan.get("ROLLBACK_REHEARSAL_PATH", "")))
+    if (
+        not rehearsal_path.is_absolute()
+        or rehearsal_path != plan_path.parent / "rollback-rehearsal.json"
+    ):
+        raise BootstrapError("ROLLBACK_REHEARSAL_PATH_INVALID")
+    try:
+        data, _size, _digest = _read_private_file(
+            rehearsal_path,
+            maximum=MAX_REHEARSAL_BYTES,
+        )
+    except (BootstrapError, OSError) as exc:
+        raise BootstrapError("ROLLBACK_REHEARSAL_EVIDENCE_MISSING") from exc
+    try:
+        payload = json.loads((data or b"").decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise BootstrapError("ROLLBACK_REHEARSAL_JSON_INVALID") from exc
+    required = {
+        "ROLLBACK_REHEARSAL_VERSION": ROLLBACK_REHEARSAL_VERSION,
+        "OPERATION_ID": plan["OPERATION_ID"],
+        "PLAN_SHA256": plan_sha256,
+        "ROLLBACK_ARTIFACT_SHA256": plan["ROLLBACK_ARTIFACT_SHA256"],
+        "EXPECTED_LEGACY_IMAGE_ID": plan["LEGACY_IMAGE_ID"],
+        "ARCHIVE_STRUCTURE_VALID": True,
+        "DOCKER_LOAD_ACCEPTED": True,
+        "LOADED_IMAGE_IDENTITY_VALID": True,
+        "REHEARSAL_STATUS": "PASS",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != REHEARSAL_FIELDS
+        or _canonical_json(payload) != data
+        or any(
+            type(payload.get(name)) is not type(value) or payload.get(name) != value
+            for name, value in required.items()
+        )
+    ):
+        raise BootstrapError("ROLLBACK_REHEARSAL_BINDING_INVALID")
+    try:
+        created_at = datetime.fromisoformat(
+            str(payload["CREATED_AT"]).replace("Z", "+00:00")
+        )
+        plan_created_at = datetime.fromisoformat(
+            str(plan["CREATED_AT"]).replace("Z", "+00:00")
+        )
+        expires_at = datetime.fromisoformat(
+            str(plan["EXPIRES_AT"]).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise BootstrapError("ROLLBACK_REHEARSAL_EXPIRY_INVALID") from exc
+    now = datetime.now(timezone.utc)
+    if (
+        created_at < plan_created_at
+        or created_at >= expires_at
+        or created_at > now
+        or (require_unexpired and now >= expires_at)
+    ):
+        raise BootstrapError("ROLLBACK_REHEARSAL_EXPIRED")
     return payload
 
 
@@ -250,12 +343,18 @@ def _inspect_legacy_image(
         records = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise BootstrapError("LEGACY_IMAGE_INSPECT_INVALID") from exc
-    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+    if (
+        not isinstance(records, list)
+        or len(records) != 1
+        or not isinstance(records[0], dict)
+    ):
         raise BootstrapError("LEGACY_IMAGE_INSPECT_INVALID")
     record = records[0]
     config = record.get("Config")
     labels = config.get("Labels") if isinstance(config, dict) else None
-    revision = labels.get(contract.image_revision_label) if isinstance(labels, dict) else None
+    revision = (
+        labels.get(contract.image_revision_label) if isinstance(labels, dict) else None
+    )
     if record.get("Id") != image_id:
         raise BootstrapError("LEGACY_IMAGE_IDENTITY_MISMATCH")
     if isinstance(revision, str) and REVISION_RE.fullmatch(revision):
@@ -356,6 +455,9 @@ def _validate_plan_runtime(
     plan: dict[str, Any],
     *,
     lease: preflight.DeploymentLease | None = None,
+    plan_path: Path | None = None,
+    plan_sha256: str | None = None,
+    require_rehearsal: bool = True,
 ) -> tuple[deploy.DeploymentContract, attestation.RuntimeBaseline, Path]:
     operation_id = plan.get("OPERATION_ID")
     repository_value = plan.get("REPOSITORY_ROOT")
@@ -401,7 +503,9 @@ def _validate_plan_runtime(
         created_at = datetime.fromisoformat(
             str(plan["CREATED_AT"]).replace("Z", "+00:00")
         )
-        expires_at = datetime.fromisoformat(str(plan["EXPIRES_AT"]).replace("Z", "+00:00"))
+        expires_at = datetime.fromisoformat(
+            str(plan["EXPIRES_AT"]).replace("Z", "+00:00")
+        )
     except ValueError as exc:
         raise BootstrapError("BOOTSTRAP_PLAN_EXPIRY_INVALID") from exc
     now = datetime.now(timezone.utc)
@@ -415,7 +519,10 @@ def _validate_plan_runtime(
     repository_root = Path(str(plan["REPOSITORY_ROOT"]))
     source = Path(str(plan["SECRET_SOURCE_PATH"]))
     artifact_path = Path(str(plan["ROLLBACK_ARTIFACT_PATH"]))
-    if artifact_path.parent.name != operation_id or artifact_path.name != "legacy-image.tar":
+    if (
+        artifact_path.parent.name != operation_id
+        or artifact_path.name != "legacy-image.tar"
+    ):
         raise BootstrapError("ROLLBACK_ARTIFACT_PATH_INVALID")
     _outside_repository(artifact_path, repository_root)
     contract = deploy.load_contract(repository_root)
@@ -433,7 +540,24 @@ def _validate_plan_runtime(
         or _baseline_contract(baseline) != plan["LEGACY_RUNTIME_BASELINE"]
     ):
         raise BootstrapError("LEGACY_RUNTIME_BASELINE_DRIFT")
-    return contract, baseline, _validate_artifact(plan)
+    artifact = _validate_artifact(plan)
+    try:
+        verified = verify_rollback_archive(
+            artifact,
+            str(plan["LEGACY_IMAGE_ID"]),
+        )
+    except (ImageScanError, OSError) as exc:
+        raise BootstrapError("ROLLBACK_ARCHIVE_STRUCTURE_INVALID") from exc
+    if (
+        verified.get("archive_structure_valid") is not True
+        or verified.get("image_id") != plan["LEGACY_IMAGE_ID"]
+    ):
+        raise BootstrapError("ROLLBACK_ARCHIVE_IDENTITY_INVALID")
+    if require_rehearsal:
+        if plan_path is None or plan_sha256 is None:
+            raise BootstrapError("ROLLBACK_REHEARSAL_BINDING_INVALID")
+        _open_rehearsal(plan_path, plan_sha256, plan)
+    return contract, baseline, artifact
 
 
 def plan_bootstrap(args: argparse.Namespace) -> int:
@@ -483,6 +607,7 @@ def plan_bootstrap(args: argparse.Namespace) -> int:
         "ROLLBACK_ARTIFACT_PATH": str(artifact),
         "ROLLBACK_ARTIFACT_SIZE": artifact_size,
         "ROLLBACK_ARTIFACT_SHA256": artifact_sha,
+        "ROLLBACK_REHEARSAL_PATH": str(operation_directory / "rollback-rehearsal.json"),
         "ALLOWED_MUTATION": "HERMES_RUNTIME_IMAGE_IDENTITY_ONLY",
         "SCHEMA_MIGRATION_ALLOWED": False,
         "FEATURE_ACTIVATION_ALLOWED": False,
@@ -492,30 +617,110 @@ def plan_bootstrap(args: argparse.Namespace) -> int:
     }
     plan_path = operation_directory / "bootstrap-plan.json"
     plan_sha = _write_new_private_json(plan_path, payload)
-    print(json.dumps({
-        "status": "PASS",
-        "mode": "PLAN_BOOTSTRAP",
-        "plan_path": str(plan_path),
-        "plan_sha256": plan_sha,
-        "legacy_image_id": baseline.hermes.image_id,
-        "source_revision": UNKNOWN_REVISION,
-        "rollback_artifact_path": str(artifact),
-        "rollback_artifact_sha256": artifact_sha,
-        "production_mutated": False,
-    }, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "mode": "PLAN_BOOTSTRAP",
+                "plan_path": str(plan_path),
+                "plan_sha256": plan_sha,
+                "legacy_image_id": baseline.hermes.image_id,
+                "source_revision": UNKNOWN_REVISION,
+                "rollback_artifact_path": str(artifact),
+                "rollback_artifact_sha256": artifact_sha,
+                "rollback_rehearsal_path": payload["ROLLBACK_REHEARSAL_PATH"],
+                "production_mutated": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def rehearse_rollback(args: argparse.Namespace) -> int:
+    _root_required()
+    plan_path = Path(args.plan)
+    plan = _open_plan(plan_path, args.expected_plan_sha256)
+    contract, baseline, artifact = _validate_plan_runtime(
+        plan,
+        plan_path=plan_path,
+        plan_sha256=args.expected_plan_sha256,
+        require_rehearsal=False,
+    )
+    result = deploy._run(
+        ("docker", "image", "load", "--input", str(artifact)),
+        timeout=300,
+    )
+    if result.returncode != 0:
+        raise BootstrapError("ROLLBACK_REHEARSAL_DOCKER_LOAD_FAILED")
+    _inspect_legacy_image(contract, str(plan["LEGACY_IMAGE_ID"]))
+    after = _capture_eligible_baseline(contract)
+    if after.hermes.image_id != plan["LEGACY_IMAGE_ID"] or _baseline_contract(
+        after
+    ) != _baseline_contract(baseline):
+        raise BootstrapError("ROLLBACK_REHEARSAL_RUNTIME_DRIFT")
+    _validate_artifact(plan)
+    try:
+        verified = verify_rollback_archive(
+            artifact,
+            str(plan["LEGACY_IMAGE_ID"]),
+        )
+    except (ImageScanError, OSError) as exc:
+        raise BootstrapError("ROLLBACK_ARCHIVE_STRUCTURE_INVALID") from exc
+    if verified.get("image_id") != plan["LEGACY_IMAGE_ID"]:
+        raise BootstrapError("ROLLBACK_ARCHIVE_IDENTITY_INVALID")
+    evidence_path = Path(str(plan["ROLLBACK_REHEARSAL_PATH"]))
+    _write_new_private_json(
+        evidence_path,
+        {
+            "ROLLBACK_REHEARSAL_VERSION": ROLLBACK_REHEARSAL_VERSION,
+            "OPERATION_ID": plan["OPERATION_ID"],
+            "PLAN_SHA256": args.expected_plan_sha256,
+            "ROLLBACK_ARTIFACT_SHA256": plan["ROLLBACK_ARTIFACT_SHA256"],
+            "EXPECTED_LEGACY_IMAGE_ID": plan["LEGACY_IMAGE_ID"],
+            "ARCHIVE_STRUCTURE_VALID": True,
+            "DOCKER_LOAD_ACCEPTED": True,
+            "LOADED_IMAGE_IDENTITY_VALID": True,
+            "REHEARSAL_STATUS": "PASS",
+            "CREATED_AT": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    _open_rehearsal(plan_path, args.expected_plan_sha256, plan)
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "mode": "REHEARSE_ROLLBACK",
+                "operation_id": plan["OPERATION_ID"],
+                "rehearsal_path": str(evidence_path),
+                "production_mutated": False,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
 def validate_bootstrap(args: argparse.Namespace) -> int:
     _root_required()
-    plan = _open_plan(Path(args.plan), args.expected_plan_sha256)
-    _validate_plan_runtime(plan)
-    print(json.dumps({
-        "status": "PASS",
-        "mode": "VALIDATE_BOOTSTRAP",
-        "operation_id": plan["OPERATION_ID"],
-        "production_mutated": False,
-    }, sort_keys=True))
+    plan_path = Path(args.plan)
+    plan = _open_plan(plan_path, args.expected_plan_sha256)
+    _validate_plan_runtime(
+        plan,
+        plan_path=plan_path,
+        plan_sha256=args.expected_plan_sha256,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "mode": "VALIDATE_BOOTSTRAP",
+                "operation_id": plan["OPERATION_ID"],
+                "production_mutated": False,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -544,14 +749,29 @@ def _ensure_legacy_image(
     contract: deploy.DeploymentContract,
     image_id: str,
     artifact: Path,
+    plan: dict[str, Any],
+    plan_path: Path,
+    plan_sha256: str,
 ) -> None:
+    rebound_artifact = _validate_artifact(plan)
+    if rebound_artifact != artifact:
+        raise BootstrapError("ROLLBACK_ARTIFACT_PATH_INVALID")
+    _open_rehearsal(plan_path, plan_sha256, plan, require_unexpired=False)
+    try:
+        verified = verify_rollback_archive(artifact, image_id)
+    except (ImageScanError, OSError) as exc:
+        raise BootstrapError("ROLLBACK_ARCHIVE_STRUCTURE_INVALID") from exc
+    if verified.get("image_id") != image_id:
+        raise BootstrapError("ROLLBACK_ARCHIVE_IDENTITY_INVALID")
     try:
         _inspect_legacy_image(contract, image_id)
         return
     except BootstrapError as exc:
         if exc.code != "LEGACY_IMAGE_MISSING":
             raise
-    result = deploy._run(("docker", "image", "load", "--input", str(artifact)), timeout=300)
+    result = deploy._run(
+        ("docker", "image", "load", "--input", str(artifact)), timeout=300
+    )
     if result.returncode != 0:
         raise BootstrapError("LEGACY_IMAGE_RESTORE_FAILED")
     _inspect_legacy_image(contract, image_id)
@@ -580,7 +800,12 @@ def execute_bootstrap(args: argparse.Namespace) -> int:
     primary: BaseException | None = None
     mutation_started = False
     try:
-        contract, baseline, artifact = _validate_plan_runtime(plan, lease=lease)
+        contract, baseline, artifact = _validate_plan_runtime(
+            plan,
+            lease=lease,
+            plan_path=plan_path,
+            plan_sha256=args.expected_plan_sha256,
+        )
         mutation_started = True
         deploy._compose_recreate_hermes(
             contract,
@@ -599,7 +824,10 @@ def execute_bootstrap(args: argparse.Namespace) -> int:
             protected_secret_names=contract.protected_secret_names,
             run=deploy._run,
         )
-        if result.database_delta_result != "UNCHANGED" or result.qdrant_result != "UNCHANGED":
+        if (
+            result.database_delta_result != "UNCHANGED"
+            or result.qdrant_result != "UNCHANGED"
+        ):
             raise BootstrapError("BOOTSTRAP_STATE_DELTA")
         _write_execution_evidence(
             plan_path,
@@ -607,7 +835,9 @@ def execute_bootstrap(args: argparse.Namespace) -> int:
             original_error=None,
             rollback_error=None,
         )
-        print(json.dumps({"status": "PASS", "mode": "EXECUTE_BOOTSTRAP"}, sort_keys=True))
+        print(
+            json.dumps({"status": "PASS", "mode": "EXECUTE_BOOTSTRAP"}, sort_keys=True)
+        )
         return 0
     except BaseException as exc:
         primary = exc
@@ -620,6 +850,9 @@ def execute_bootstrap(args: argparse.Namespace) -> int:
                 contract,
                 str(plan["LEGACY_IMAGE_ID"]),
                 artifact,
+                plan,
+                plan_path,
+                args.expected_plan_sha256,
             )
             deploy._compose_recreate_hermes(
                 contract,
@@ -656,7 +889,9 @@ def execute_bootstrap(args: argparse.Namespace) -> int:
                 rollback_error = "BOOTSTRAP_EVIDENCE_WRITE_FAILED"
                 status = "FAIL"
         if status == "ROLLED_BACK":
-            raise BootstrapRolledBack("BOOTSTRAP_CANDIDATE_REJECTED_ROLLED_BACK") from exc
+            raise BootstrapRolledBack(
+                "BOOTSTRAP_CANDIDATE_REJECTED_ROLLED_BACK"
+            ) from exc
         raise BootstrapError(rollback_error or "LEGACY_ROLLBACK_FAILED") from exc
     finally:
         try:
@@ -680,6 +915,9 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--candidate-image", required=True)
     plan.add_argument("--candidate-revision", required=True)
     plan.add_argument("--expires-in-seconds", type=int, default=3600)
+    rehearse = subparsers.add_parser("rehearse-rollback")
+    rehearse.add_argument("--plan", required=True)
+    rehearse.add_argument("--expected-plan-sha256", required=True)
     validate = subparsers.add_parser("validate-bootstrap")
     validate.add_argument("--plan", required=True)
     validate.add_argument("--expected-plan-sha256", required=True)
@@ -695,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "plan-bootstrap":
             return plan_bootstrap(args)
+        if args.command == "rehearse-rollback":
+            return rehearse_rollback(args)
         if args.command == "validate-bootstrap":
             return validate_bootstrap(args)
         return execute_bootstrap(args)
@@ -708,7 +948,12 @@ def main(argv: list[str] | None = None) -> int:
         attestation.RuntimeAttestationError,
         preflight.DeployPreflightError,
     ) as exc:
-        print(json.dumps({"status": "FAIL", "error": getattr(exc, "code", "BOOTSTRAP_FAILED")}, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": "FAIL", "error": getattr(exc, "code", "BOOTSTRAP_FAILED")},
+                sort_keys=True,
+            )
+        )
         return 1
 
 

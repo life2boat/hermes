@@ -81,6 +81,14 @@ mount, secret transition, and capacity. Before any bootstrap mutation,
 and binds its path, size, SHA-256, and exact legacy image ID into a root-owned
 mode-`0600` plan under a new mode-`0700` operation directory.
 
+A checksum proves byte stability, not loader recoverability. Before validation,
+`rehearse-rollback` independently verifies Docker/OCI structure and embedded
+config/layer identities, makes Docker accept the exact archive with `image load`,
+re-confirms the legacy image ID and unchanged runtime baseline, then writes
+closed root-private evidence bound to the operation ID, plan SHA-256, archive
+SHA-256, and expected image ID. It does not stop or recreate `hermes-bot` and
+does not change SQLite, Qdrant, feature flags, or secrets.
+
 Read-only with respect to the running production services:
 
 ```bash
@@ -91,6 +99,10 @@ python3 scripts/hermes_legacy_provenance_bootstrap.py plan-bootstrap \
   --secret-source /etc/hermes/hermes-production.env \
   --candidate-image sha256:<64-hex-exact-main-image-id> \
   --candidate-revision <exact-40-character-main-sha>
+
+python3 scripts/hermes_legacy_provenance_bootstrap.py rehearse-rollback \
+  --plan <reviewed-bootstrap-plan-path> \
+  --expected-plan-sha256 <reviewed-bootstrap-plan-sha256>
 
 python3 scripts/hermes_legacy_provenance_bootstrap.py validate-bootstrap \
   --plan <reviewed-bootstrap-plan-path> \

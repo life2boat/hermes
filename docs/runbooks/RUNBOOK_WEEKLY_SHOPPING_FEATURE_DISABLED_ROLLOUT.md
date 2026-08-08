@@ -501,6 +501,9 @@ The staged-copy implementation remains in
 `scripts/hermes_staged_schema_migrate.py`. The single public production
 authorization entrypoint is `scripts/hermes_production_staged_migrate.py`, with
 explicit `prepare-authority`, `plan`, `finalize-authority`, `validate-authority-package`, `attest-runtime`, and `execute` subcommands. The fail-closed default is
+preserved by separate explicit `plan`, `attest-runtime`, and `execute` subcommands.
+The expanded producer lifecycle adds the other commands without collapsing those
+authorization boundaries. The fail-closed default is
 explicit: production execution is disabled by default; there is no default database
 path, environment fallback,
 generic confirmation flag, in-place migration, or implicit container stop.

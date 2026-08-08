@@ -158,11 +158,13 @@ def _write_new_json(
             dir_fd=parent_fd,
             follow_symlinks=False,
         )
+        owner_uid = os.geteuid()  # windows-footgun: ok
+        owner_gid = os.getegid()  # windows-footgun: ok
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
+            or metadata.st_uid != owner_uid
+            or metadata.st_gid != owner_gid
             or stat.S_IMODE(metadata.st_mode) != 0o600
             or metadata.st_size != len(encoded)
         ):

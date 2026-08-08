@@ -140,9 +140,7 @@ def _create_final_authority(
     _write_canonical_document(
         descriptor,
         {
-            "DESCRIPTOR_VERSION": (
-                execution_authority.INVOCATION_DESCRIPTOR_VERSION
-            ),
+            "DESCRIPTOR_VERSION": (execution_authority.INVOCATION_DESCRIPTOR_VERSION),
             "CREATED_AT": production._timestamp(created_at),
             "COMPOSE_PROJECT_NAME": compose_project_name,
             "PROJECT_DIRECTORY": str(repository),
@@ -156,9 +154,7 @@ def _create_final_authority(
                 str(override): _sha256(override),
             },
             "SECRETS_OVERRIDE": _secret_identity(secret),
-            "ENVIRONMENT_SOURCE_CLASS": (
-                "EXISTING_PRODUCTION_ENV_FILE_METADATA_ONLY"
-            ),
+            "ENVIRONMENT_SOURCE_CLASS": ("EXISTING_PRODUCTION_ENV_FILE_METADATA_ONLY"),
             "APPLICATION_SERVICE": application_service,
             "CANONICAL_DB_SOURCE": str(source),
             "CANONICAL_DB_TARGET": "/home/hermes/healbite.db",
@@ -175,12 +171,8 @@ def _create_final_authority(
         {
             "ENVELOPE_VERSION": 1,
             "CREATED_AT": production._timestamp(created_at),
-            "PUBLIC_OPERATIONS_ROOT_APPROVAL_PATH": str(
-                operations_root_approval
-            ),
-            "PUBLIC_OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(
-                operations_root_approval
-            ),
+            "PUBLIC_OPERATIONS_ROOT_APPROVAL_PATH": str(operations_root_approval),
+            "PUBLIC_OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(operations_root_approval),
             "OPERATIONS_ROOT_PATH": str(repository),
             "OPERATIONS_ROOT_HEAD_SHA": revision,
             "OPERATIONS_ROOT_TREE_SHA": tree,
@@ -213,17 +205,11 @@ def _create_final_authority(
                 execution_authority.EXECUTION_AUTHORITY_VERSION
             ),
             "CREATED_AT": production._timestamp(created_at),
-            "EXPIRES_AT": production._timestamp(
-                created_at + timedelta(hours=1)
-            ),
+            "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
             "PLAN_PATH": str(plan_path),
             "PLAN_SHA256": plan_sha256,
-            "OPERATIONS_ROOT_APPROVAL_PATH": str(
-                operations_root_approval
-            ),
-            "OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(
-                operations_root_approval
-            ),
+            "OPERATIONS_ROOT_APPROVAL_PATH": str(operations_root_approval),
+            "OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(operations_root_approval),
             "CLEAN_START_POLICY_PATH": str(clean_start_policy),
             "CLEAN_START_POLICY_SHA256": _sha256(clean_start_policy),
             "APPROVAL_ENVELOPE_PATH": str(envelope),
@@ -244,9 +230,7 @@ def _create_final_authority(
             "SOURCE_DB_SHA256": str(plan["SOURCE_SHA256"]),
             "SOURCE_DB_SIZE": int(plan["SOURCE_SIZE"]),
             "SOURCE_DB_USER_VERSION": int(plan["SOURCE_USER_VERSION"]),
-            "SOURCE_DB_SCHEMA_FINGERPRINT": str(
-                plan["SOURCE_SCHEMA_FINGERPRINT"]
-            ),
+            "SOURCE_DB_SCHEMA_FINGERPRINT": str(plan["SOURCE_SCHEMA_FINGERPRINT"]),
             "SOURCE_DB_PARENT_IDENTITY": plan["SOURCE_PARENT_IDENTITY"],
             "OPERATIONS_ROOT_PATH": str(repository),
             "OPERATIONS_ROOT_HEAD_SHA": revision,
@@ -284,10 +268,7 @@ def _start_synthetic_runtime(
             "--label",
             "com.docker.compose.service=hermes-bot",
             "--mount",
-            (
-                f"type=bind,source={source},"
-                "target=/home/hermes/healbite.db"
-            ),
+            (f"type=bind,source={source},target=/home/hermes/healbite.db"),
             "--entrypoint",
             "/bin/sh",
             previous_image_id,
@@ -330,12 +311,8 @@ def _install_synthetic_runtime_inspector(container_name: str) -> Any:
 def _create_source(path: Path) -> None:
     _private_directory(path.parent)
     with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE legacy_rows (value TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO legacy_rows VALUES ('synthetic')"
-        )
+        connection.execute("CREATE TABLE legacy_rows (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO legacy_rows VALUES ('synthetic')")
     os.chmod(path, 0o600)
 
 
@@ -354,9 +331,7 @@ def _empty_migrated_rows(path: Path) -> bool:
         for name in table_names:
             quoted = '"' + name.replace('"', '""') + '"'
             count = int(
-                connection.execute(
-                    f"SELECT COUNT(*) FROM {quoted}"
-                ).fetchone()[0]
+                connection.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
             )
             if count != 0:
                 return False
@@ -373,14 +348,10 @@ def _inventory_schema_object_count(path: Path) -> int:
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         connection.execute("PRAGMA query_only=ON")
         rows = connection.execute(
-            "SELECT type, name, sql FROM sqlite_master "
-            f"WHERE name IN ({placeholders})",
+            f"SELECT type, name, sql FROM sqlite_master WHERE name IN ({placeholders})",
             tuple(expected),
         ).fetchall()
-    observed = {
-        str(name): str(object_type).lower()
-        for object_type, name, _sql in rows
-    }
+    observed = {str(name): str(object_type).lower() for object_type, name, _sql in rows}
     if observed != {
         name: object_type for name, (object_type, _sql) in expected.items()
     }:
@@ -412,17 +383,56 @@ def main() -> int:
     _private_directory(runtime_root)
     repository_root = runtime_root / "approved-repository"
     subprocess.run(
-        ["git", "clone", "--quiet", "--no-local", str(source_repository_root), str(repository_root)],
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--no-local",
+            str(source_repository_root),
+            str(repository_root),
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=True,
     )
     subprocess.run(
-        ["git", "-C", str(repository_root), "checkout", "--quiet", "--detach", args.target_revision],
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "checkout",
+            "--quiet",
+            "--detach",
+            args.target_revision,
+        ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    contract = production.deployment.load_contract(repository_root)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "remote",
+            "add",
+            contract.canonical_remote,
+            contract.canonical_remote_urls[0],
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "update-ref",
+            contract.allowed_revision_ref,
+            args.target_revision,
+        ],
         check=True,
     )
     os.chmod(repository_root, 0o700)
@@ -453,16 +463,26 @@ def main() -> int:
             private=True,
         )
         head, tree = production._repository_provenance(repository_root)
-        contract_path = (
-            repository_root / production.CANONICAL_CONTRACT_RELATIVE_PATH
-        )
+        contract_path = repository_root / production.CANONICAL_CONTRACT_RELATIVE_PATH
         contract_metadata = contract_path.stat()
         created_at = production._now()
+        operation_id = uuid.uuid4().hex
+        components = [
+            str(item["component"]) for item in production._target_migration_registry()
+        ]
+        canonical = production._canonical_repository_binding(
+            repository_root,
+            head=head,
+        )
         approval = {
-            "APPROVAL_VERSION": 1,
+            "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
+            "OPERATION_ID": operation_id,
+            "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,
             "CREATED_AT": production._timestamp(created_at),
             "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+            **canonical,
             "TARGET_MAIN_SHA": head,
+            "MIGRATION_COMPONENTS": components,
             "APPROVED_REPOSITORY_ROOT": str(repository_root),
             "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
             "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -493,10 +513,12 @@ def main() -> int:
             "DEPLOY_AUTHORIZED": False,
         }
         policy = {
-            "POLICY_VERSION": 1,
+            "POLICY_VERSION": production.CLEAN_START_POLICY_VERSION,
+            "OPERATION_ID": operation_id,
             "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
             "CREATED_AT": production._timestamp(created_at),
             "TARGET_MAIN_SHA": args.target_revision,
+            "MIGRATION_COMPONENTS": components,
             "MIGRATION_IMAGE_ID": args.target_image_id,
             "PRODUCTION_DB_SOURCE_SHA256": source_identity["SOURCE_SHA256"],
             "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
@@ -513,6 +535,8 @@ def main() -> int:
 
         plan_argv = [
             "plan",
+            "--operation-id",
+            operation_id,
             "--repository-root",
             str(repository_root),
             "--db-path",
@@ -563,49 +587,36 @@ def main() -> int:
             plan["PLAN_CREATOR_UID"] != 0
             or plan["PLAN_CREATOR_GID"] != 0
             or plan["DEPLOYMENT_CONTRACT_CANONICAL_PATH"]
-            != str(
-                repository_root
-                / production.CANONICAL_CONTRACT_RELATIVE_PATH
-            )
+            != str(repository_root / production.CANONICAL_CONTRACT_RELATIVE_PATH)
         ):
             raise AssertionError("plan root or contract authority mismatch")
-        if (
-            plan["DEPLOYMENT_CONTRACT_SHA256"]
-            != _sha256(
-                repository_root
-                / production.CANONICAL_CONTRACT_RELATIVE_PATH
-            )
+        if plan["DEPLOYMENT_CONTRACT_SHA256"] != _sha256(
+            repository_root / production.CANONICAL_CONTRACT_RELATIVE_PATH
         ):
             raise AssertionError("deployment contract hash mismatch")
-        if set(path.name for path in plan_path.parent.iterdir()) != {
-            "plan.json"
-        }:
+        if set(path.name for path in plan_path.parent.iterdir()) != {"plan.json"}:
             raise AssertionError("execute evidence exists before quiescence")
 
-        runtime_container_name, compose_project_name = (
-            _start_synthetic_runtime(
-                source=source,
-                previous_image_id=args.previous_image_id,
-            )
+        runtime_container_name, compose_project_name = _start_synthetic_runtime(
+            source=source,
+            previous_image_id=args.previous_image_id,
         )
         original_runtime_inspector = _install_synthetic_runtime_inspector(
             runtime_container_name
         )
-        final_authority_path, final_authority_sha256 = (
-            _create_final_authority(
-                repository=repository_root,
-                source=source,
-                evidence_inputs=evidence_inputs,
-                operations_root_approval=approval_path,
-                clean_start_policy=policy_path,
-                plan_path=plan_path,
-                plan_sha256=str(plan_result["plan_sha256"]),
-                plan=plan,
-                target_image_id=args.target_image_id,
-                previous_image_id=args.previous_image_id,
-                compose_project_name=compose_project_name,
-                application_service="hermes-bot",
-            )
+        final_authority_path, final_authority_sha256 = _create_final_authority(
+            repository=repository_root,
+            source=source,
+            evidence_inputs=evidence_inputs,
+            operations_root_approval=approval_path,
+            clean_start_policy=policy_path,
+            plan_path=plan_path,
+            plan_sha256=str(plan_result["plan_sha256"]),
+            plan=plan,
+            target_image_id=args.target_image_id,
+            previous_image_id=args.previous_image_id,
+            compose_project_name=compose_project_name,
+            application_service="hermes-bot",
         )
 
         execute_argv = [
@@ -637,8 +648,7 @@ def main() -> int:
             or execute_result.get("publish_state") != "FINAL_VERIFIED"
         ):
             raise AssertionError(
-                "public execute failed: "
-                f"{execute_result.get('error_type', 'UNKNOWN')}"
+                f"public execute failed: {execute_result.get('error_type', 'UNKNOWN')}"
             )
 
         (
@@ -647,21 +657,15 @@ def main() -> int:
             final_integrity,
             final_foreign_keys,
         ) = production._read_only_source(source)
-        actual_target_fingerprint = production._target_schema_fingerprint(
-            source
-        )
+        actual_target_fingerprint = production._target_schema_fingerprint(source)
         operation_id = str(plan["OPERATION_ID"])
-        internal_manifest_path = (
-            backup / f"manifest-{operation_id}.json"
-        )
+        internal_manifest_path = backup / f"manifest-{operation_id}.json"
         backup_path = backup / f"backup-{operation_id}.sqlite"
         execution_path = plan_path.parent / "execution.json"
         internal_manifest = json.loads(
             internal_manifest_path.read_text(encoding="ascii")
         )
-        execution = json.loads(
-            execution_path.read_text(encoding="ascii")
-        )
+        execution = json.loads(execution_path.read_text(encoding="ascii"))
 
         checks = {
             "root_context_real": os.geteuid() == 0,  # windows-footgun: ok
@@ -676,23 +680,18 @@ def main() -> int:
             "production_secrets_used": False,
             "network_none": True,
             "plan_creator_uid": plan["PLAN_CREATOR_UID"],
-            "plan_creator_gid_recorded": isinstance(
-                plan["PLAN_CREATOR_GID"], int
-            ),
+            "plan_creator_gid_recorded": isinstance(plan["PLAN_CREATOR_GID"], int),
             "deployment_contract_sha_revalidated": True,
             "quiescence_before_execution_evidence": execution.get(
                 "QUIESCENCE_ACQUIRED_BEFORE_EXECUTION_EVIDENCE"
             )
             is True,
             "backup_durable": (
-                backup_path.is_file()
-                and _sha256(backup_path) == plan["SOURCE_SHA256"]
+                backup_path.is_file() and _sha256(backup_path) == plan["SOURCE_SHA256"]
             ),
             "integrity_check": final_integrity,
             "foreign_key_check": final_foreign_keys,
-            "backfill_rows_created": 0
-            if _empty_migrated_rows(source)
-            else -1,
+            "backfill_rows_created": 0 if _empty_migrated_rows(source) else -1,
             "inventory_schema_object_count": _inventory_schema_object_count(source),
             "final_schema_matches_planned_target": (
                 actual_target_fingerprint
@@ -702,8 +701,7 @@ def main() -> int:
             "final_evidence_valid": (
                 execution.get("STATE") == "COMPLETED"
                 and internal_manifest.get("STATE") == "VERIFIED"
-                and internal_manifest.get("PUBLISH_STATE")
-                == "FINAL_VERIFIED"
+                and internal_manifest.get("PUBLISH_STATE") == "FINAL_VERIFIED"
                 and final_identity["SOURCE_SHA256"]
                 == execution.get("FINAL_TARGET_SHA256")
             ),
@@ -731,9 +729,7 @@ def main() -> int:
             or checks["production_runtime_inspected"] is not False
             or checks["production_secrets_used"] is not False
         ):
-            raise AssertionError(
-                "root integration negative boolean contract failed"
-            )
+            raise AssertionError("root integration negative boolean contract failed")
         if (
             checks["plan_creator_uid"] != 0
             or checks["integrity_check"] != "ok"
@@ -755,9 +751,7 @@ def main() -> int:
         try:
             try:
                 if original_runtime_inspector is not None:
-                    execution_authority._inspect_runtime = (
-                        original_runtime_inspector
-                    )
+                    execution_authority._inspect_runtime = original_runtime_inspector
             finally:
                 if runtime_container_name is not None:
                     _remove_synthetic_runtime(runtime_container_name)

@@ -105,6 +105,13 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 
 ## Procedure
 
+### Authority package lifecycle
+
+**Invariant:** Treat operator authorization as an explicit input, never as an outcome of the generator. Create one non-reusable package per 32-character operation ID in this order: initial approval and clean-start policy, exact read-only plan, externally reviewed companion evidence, plan-bound final authority, package validation, then runtime attestation. The selected migration components must equal the complete canonical migration registry.
+
+**Why:** A producer can prove bindings and file safety but cannot grant permission to mutate production. Creating final authority before the plan, reusing an operation directory, or accepting repository/SHA/image/DB/component/plan drift would allow an approval to authorize a different operation than the reviewer inspected.
+
+**Evidence:** `prepare-authority`, `plan`, `finalize-authority`, and `validate-authority-package` must each return `PASS` for the same operation ID and exact hashes before `attest-runtime` is eligible. Generated files are canonical root-owned mode-`0600` regular files under a new root-owned mode-`0700` operation directory outside Git; collisions, substitution, stale expiry, unknown fields, or any bound-input drift fail closed. See the canonical command sequence in `docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md`.
 1. **Freeze scope and success criteria.** Record the requested source SHA, image, services, database migration, feature flags, and explicit stop point. Treat build, registry publication, migration, deploy, feature activation, secret changes, and smoke tests as separate gates.
 2. **Verify repository provenance.** Fetch the HealBite project remote, resolve its main SHA, and require the worktree HEAD to equal the approved SHA. Require a clean status and a matching trusted remote. Never repair a dirty checkout with reset, clean, stash, rebase, or file copying.
 3. **Run code gates.** Run focused tests through `scripts/run_tests.sh`, then `bash scripts/agent_check.sh`, `git diff --check`, and the full `scripts/run_tests.sh` suite required by repository policy. Stop on any unexplained failure.

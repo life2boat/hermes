@@ -53,8 +53,7 @@ def _inventory_schema_object_count(path: Path) -> int:
     placeholders = ",".join("?" for _ in expected)
     with sqlite3.connect(path) as connection:
         rows = connection.execute(
-            "SELECT type, name, sql FROM sqlite_master "
-            f"WHERE name IN ({placeholders})",
+            f"SELECT type, name, sql FROM sqlite_master WHERE name IN ({placeholders})",
             tuple(expected),
         ).fetchall()
     observed = {
@@ -91,17 +90,23 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "migration_id": INVENTORY_SCHEMA_MIGRATION_ID,
         "migration_sha256": INVENTORY_SCHEMA_MIGRATION_SHA256,
     }
-    assert hashlib.sha256(
-        (INVENTORY_SCHEMA_SQL.strip() + "\n").encode("utf-8")
-    ).hexdigest() == INVENTORY_SCHEMA_MIGRATION_SHA256
+    assert (
+        hashlib.sha256(
+            (INVENTORY_SCHEMA_SQL.strip() + "\n").encode("utf-8")
+        ).hexdigest()
+        == INVENTORY_SCHEMA_MIGRATION_SHA256
+    )
     assert manifest[-1] == {
         "component": "fridge_menu",
         "migration_id": FRIDGE_MENU_SCHEMA_MIGRATION_ID,
         "migration_sha256": FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
     }
-    assert hashlib.sha256(
-        (FRIDGE_MENU_SCHEMA_SQL.strip() + "\n").encode("utf-8")
-    ).hexdigest() == FRIDGE_MENU_SCHEMA_MIGRATION_SHA256
+    assert (
+        hashlib.sha256(
+            (FRIDGE_MENU_SCHEMA_SQL.strip() + "\n").encode("utf-8")
+        ).hexdigest()
+        == FRIDGE_MENU_SCHEMA_MIGRATION_SHA256
+    )
 
 
 def test_registry_rejects_duplicate_component() -> None:
@@ -196,7 +201,7 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
     assert payload["migrations"] == schema_migrate.migration_registry_manifest()
     assert payload["migrations"][-2]["component"] == "inventory"
     assert payload["migrations"][-1]["component"] == "fridge_menu"
-    assert production.PLAN_VERSION == 6
+    assert production.PLAN_VERSION == 7
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
 
 
@@ -218,7 +223,4 @@ def test_target_plan_omits_absent_registry_component(
         "shopping",
         "weekly",
     ]
-    assert all(
-        item["component"] != "inventory"
-        for item in payload["migrations"]
-    )
+    assert all(item["component"] != "inventory" for item in payload["migrations"])

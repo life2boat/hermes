@@ -1,5 +1,17 @@
 # CURRENT_STATE changelog
 
+## 1.2.16 - 2026-08-08
+
+Added:
+- recorded the canonical staged-migration authority-package producer and its explicit initial-authority, plan, companion, final-authority, validation, and runtime-attestation ordering;
+- recorded that operator authorization plus P5B/P6A evidence remain external inputs and are not manufactured by the producer.
+
+Changed:
+- updated repository-state verification to canonical planning base `8f9e1a60f5535cf3b1b843f4c1203e9d1a51f20d`;
+- recorded plan schema v7 and operation-bound approval/policy schema v2.
+
+Safety:
+- production execution, backup, migration, build, deploy, container changes, SQLite writes, Qdrant mutation, and secret changes were not performed.
 ## 1.2.11 - 2026-07-10
 
 Added:

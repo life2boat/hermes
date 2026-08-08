@@ -500,7 +500,10 @@ production DB and its parent must never be mounted in the migration container.
 The staged-copy implementation remains in
 `scripts/hermes_staged_schema_migrate.py`. The single public production
 authorization entrypoint is `scripts/hermes_production_staged_migrate.py`, with
-separate explicit `plan`, `attest-runtime`, and `execute` subcommands. The fail-closed default is
+explicit `prepare-authority`, `plan`, `finalize-authority`, `validate-authority-package`, `attest-runtime`, and `execute` subcommands. The fail-closed default is
+preserved by separate explicit `plan`, `attest-runtime`, and `execute` subcommands.
+The expanded producer lifecycle adds the other commands without collapsing those
+authorization boundaries. The fail-closed default is
 explicit: production execution is disabled by default; there is no default database
 path, environment fallback,
 generic confirmation flag, in-place migration, or implicit container stop.
@@ -537,7 +540,7 @@ of Memory OS, nutrition diary, Telegram admin configuration and out-of-scope tab
 and false execution/deletion state
 both evidence files are opened with NOFOLLOW, hashed and parsed from pinned file
 descriptors before production source inspection; their path, filesystem identity,
-mode and SHA-256 are recorded in plan schema version 6
+mode and SHA-256 are recorded in plan schema version 7
 the only deployment authority is
 <repository-root>/deploy/hermes-production.json opened with NOFOLLOW and pinned
 by file descriptor; caller-selected contract paths are not accepted
@@ -628,9 +631,12 @@ operation ID, source SHA-256, and migration image revision before service stop.
 
 1. Verify the exact-main image ID and OCI revision through the canonical deployment
    source of truth.
-2. Create one immutable production plan while Hermes remains running.
+2. Use the canonical producer to materialize the initial approval and clean-start
+   policy from explicit operator authorization, then create one immutable production
+   plan while Hermes remains running.
 3. Independently review the plan, its mode 0600, canonical JSON, and SHA-256;
-   create and independently approve one complete final-authority v1 artifact.
+   provide the separately reviewed companion evidence, then use the producer to
+   create and validate one complete final-authority v1 artifact bound to that plan.
 4. Run the explicit `attest-runtime` command while Hermes is still running and
    review the adjacent runtime pin with the plan and final authority.
 5. Use a separately approved quiet window in which hermes-bot makes no database
@@ -645,7 +651,12 @@ operation ID, source SHA-256, and migration image revision before service stop.
 10. Retain the plan, execution evidence, displaced source, and durable backup.
 11. Do not enable Family, Weekly mutation, or Shopping in this workflow.
 
-Example plan preparation, not current production authorization:
+Example authority-package preparation, not current production authorization:
+
+The operation ID is supplied by the operator and identifies one reviewed operation;
+the producer does not generate approval. `P5B_EVIDENCE`, `P6A_F1_EVIDENCE`, and
+`SECRETS_OVERRIDE` are separately created and reviewed inputs. The producer binds
+them but never fabricates their claims or emits secret values.
 
 ```bash
 set -euo pipefail
@@ -653,18 +664,13 @@ set -euo pipefail
 HOST_PYTHON="<approved-host-python>"
 GATE="scripts/hermes_production_staged_migrate.py"
 REPOSITORY_ROOT="<exact-clean-repository-root>"
-RUNTIME_PIN="<exact-plan-adjacent-runtime-pin-path>"
-RUNTIME_PIN_SHA256="<exact-runtime-pin-sha256>"
+OPERATION_ID="<reviewed-32-lowercase-hex-operation-id>"
+AUTHORITY_PARENT="<existing-private-authority-parent-outside-git>"
+AUTHORITY_DIRECTORY="$AUTHORITY_PARENT/$OPERATION_ID"
 DB_PATH="<explicit-approved-database-path>"
 BACKUP_PARENT="<explicit-private-backup-parent>"
 STAGING_PARENT="<explicit-private-same-filesystem-staging-parent>"
 EVIDENCE_PARENT="<explicit-private-evidence-parent>"
-OPERATIONS_ROOT_APPROVAL="<reviewed-canonical-approval-path>"
-OPERATIONS_ROOT_APPROVAL_SHA256="<reviewed-approval-sha256>"
-CLEAN_START_POLICY="<reviewed-canonical-policy-path>"
-CLEAN_START_POLICY_SHA256="<reviewed-policy-sha256>"
-FINAL_AUTHORITY="<reviewed-final-authority-v1-path>"
-FINAL_AUTHORITY_SHA256="<reviewed-final-authority-sha256>"
 MIGRATION_IMAGE_ID="<sha256-image-id>"
 MIGRATION_IMAGE_REVISION="<full-40-character-main-sha>"
 PREVIOUS_IMAGE_ID="<sha256-previous-image-id>"
@@ -676,7 +682,30 @@ SOURCE_INODE="$(stat --format='%i' "$DB_PATH")"
 SOURCE_SIZE="$(stat --format='%s' "$DB_PATH")"
 SOURCE_SHA256="$(sha256sum "$DB_PATH" | awk '{print $1}')"
 
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" prepare-authority \
+  --repository-root "$REPOSITORY_ROOT" \
+  --operation-id "$OPERATION_ID" \
+  --authority-parent "$AUTHORITY_PARENT" \
+  --db-path "$DB_PATH" \
+  --expected-source-sha256 "$SOURCE_SHA256" \
+  --migration-image-id "$MIGRATION_IMAGE_ID" \
+  --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
+  --migration-component household \
+  --migration-component weekly \
+  --migration-component shopping \
+  --migration-component inventory \
+  --migration-component fridge_menu \
+  --expires-in-seconds 3600 \
+  --confirm-plan-only-authority PREPARE_PLAN_ONLY_AUTHORITY \
+  --confirm-clean-start-policy CONFIRM_NO_CLIENTS_CLEAN_START
+
+OPERATIONS_ROOT_APPROVAL="$AUTHORITY_DIRECTORY/operations-root-approval.json"
+CLEAN_START_POLICY="$AUTHORITY_DIRECTORY/clean-start-policy.json"
+OPERATIONS_ROOT_APPROVAL_SHA256="<reviewed-producer-output-sha256>"
+CLEAN_START_POLICY_SHA256="<reviewed-producer-output-sha256>"
+
 sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" plan \
+  --operation-id "$OPERATION_ID" \
   --repository-root "$REPOSITORY_ROOT" \
   --db-path "$DB_PATH" \
   --backup-parent "$BACKUP_PARENT" \
@@ -689,23 +718,6 @@ sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" plan \
   --migration-image-id "$MIGRATION_IMAGE_ID" \
   --migration-image-revision "$MIGRATION_IMAGE_REVISION" \
   --previous-image-id "$PREVIOUS_IMAGE_ID" \
-The reviewer then runs the pre-stop attestation before the maintenance stop:
-
-```bash
-sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" attest-runtime \
-  --plan "$APPROVED_PLAN_PATH" \
-  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
-  --confirm-operation-id "$APPROVED_OPERATION_ID" \
-  --confirm-source-sha256 "$APPROVED_SOURCE_SHA256" \
-  --confirm-image-revision "$APPROVED_IMAGE_REVISION" \
-  --confirm-operations-root-approval-sha256 "$APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256" \
-  --confirm-clean-start-policy-sha256 "$APPROVED_CLEAN_START_POLICY_SHA256" \
-  --final-authority "$APPROVED_FINAL_AUTHORITY_PATH" \
-  --expected-final-authority-sha256 "$APPROVED_FINAL_AUTHORITY_SHA256"
-```
-The command is read-only with respect to the production database and creates
-only the durable plan-adjacent runtime pin.
-
   --expected-hostname "$EXPECTED_HOSTNAME" \
   --expected-source-device "$SOURCE_DEVICE" \
   --expected-source-inode "$SOURCE_INODE" \
@@ -715,25 +727,60 @@ only the durable plan-adjacent runtime pin.
   --expires-in-seconds 3600
 ```
 
-The reviewer records the values below from the sanitized plan output. They must not
-be derived from ambient environment during execute:
+The reviewer records `APPROVED_PLAN_PATH` and `APPROVED_PLAN_SHA256` from the
+sanitized plan output, confirms the exact operation/source/image/approval hashes,
+and only then supplies the reviewed companion artifacts:
 
-```text
-APPROVED_PLAN_PATH=<exact-plan-path>
-APPROVED_PLAN_SHA256=<exact-plan-sha256>
-APPROVED_OPERATION_ID=<exact-operation-id>
-APPROVED_SOURCE_SHA256=<exact-source-sha256>
-APPROVED_IMAGE_REVISION=<exact-image-revision>
-APPROVED_OPERATIONS_ROOT_APPROVAL_SHA256=<exact-approval-sha256>
-APPROVED_CLEAN_START_POLICY_SHA256=<exact-policy-sha256>
-APPROVED_FINAL_AUTHORITY_PATH=<exact-authority-path>
-APPROVED_FINAL_AUTHORITY_SHA256=<exact-authority-sha256>
-APPROVED_PLAN_CREATOR_UID=0
-APPROVED_PLAN_CREATOR_GID=<recorded-root-group>
-APPROVED_TARGET_SCHEMA_VERSION=<derived-version>
-APPROVED_TARGET_SCHEMA_FINGERPRINT=<derived-fingerprint>
+```bash
+P5B_EVIDENCE="<reviewed-p5b-evidence-path>"
+P5B_EVIDENCE_SHA256="<reviewed-p5b-evidence-sha256>"
+P6A_F1_EVIDENCE="<reviewed-p6a-f1-evidence-path>"
+P6A_F1_EVIDENCE_SHA256="<reviewed-p6a-f1-evidence-sha256>"
+SECRETS_OVERRIDE="<existing-protected-secrets-override-path>"
+SECRETS_OVERRIDE_SHA256="<reviewed-secrets-override-sha256>"
+
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" finalize-authority \
+  --plan "$APPROVED_PLAN_PATH" \
+  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
+  --confirm-operation-id "$OPERATION_ID" \
+  --authority-directory "$AUTHORITY_DIRECTORY" \
+  --p5b-evidence "$P5B_EVIDENCE" \
+  --expected-p5b-evidence-sha256 "$P5B_EVIDENCE_SHA256" \
+  --p6a-f1-evidence "$P6A_F1_EVIDENCE" \
+  --expected-p6a-f1-evidence-sha256 "$P6A_F1_EVIDENCE_SHA256" \
+  --secrets-override "$SECRETS_OVERRIDE" \
+  --expected-secrets-override-sha256 "$SECRETS_OVERRIDE_SHA256" \
+  --expires-in-seconds 3600 \
+  --confirm-execution-authority AUTHORIZE_EXACT_PLAN_EXECUTION
+
+FINAL_AUTHORITY="$AUTHORITY_DIRECTORY/final-authority.json"
+FINAL_AUTHORITY_SHA256="<reviewed-producer-output-sha256>"
+
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" validate-authority-package \
+  --plan "$APPROVED_PLAN_PATH" \
+  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
+  --confirm-operation-id "$OPERATION_ID" \
+  --final-authority "$FINAL_AUTHORITY" \
+  --expected-final-authority-sha256 "$FINAL_AUTHORITY_SHA256"
+
+sudo env PYTHONDONTWRITEBYTECODE=1 "$HOST_PYTHON" -B "$GATE" attest-runtime \
+  --plan "$APPROVED_PLAN_PATH" \
+  --expected-plan-sha256 "$APPROVED_PLAN_SHA256" \
+  --confirm-operation-id "$OPERATION_ID" \
+  --confirm-source-sha256 "$SOURCE_SHA256" \
+  --confirm-image-revision "$MIGRATION_IMAGE_REVISION" \
+  --confirm-operations-root-approval-sha256 "$OPERATIONS_ROOT_APPROVAL_SHA256" \
+  --confirm-clean-start-policy-sha256 "$CLEAN_START_POLICY_SHA256" \
+  --final-authority "$FINAL_AUTHORITY" \
+  --expected-final-authority-sha256 "$FINAL_AUTHORITY_SHA256"
 ```
 
+The producer uses canonical validator field sets and immediately validates every
+stage. It creates new operation-specific artifacts only; it refuses collisions,
+stale or reordered packages, and repository, SHA, image, DB, component, path, or
+plan drift. `validate-authority-package` and `attest-runtime` do not authorize or
+execute a production mutation. The execute command remains a separate explicit
+approval gate.
 Before execute, verify both approved hashes and leave the exact current Hermes
 runtime running for identity revalidation. Do not hand-assemble an alternate
 Compose chain, stop Qdrant, or mount the production DB into a container. Execute

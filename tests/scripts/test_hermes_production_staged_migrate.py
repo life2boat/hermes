@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import pytest
 
 from scripts import hermes_execution_authority as authority
 from scripts import hermes_production_staged_migrate as production
+from scripts import hermes_release_authority as producer
 from scripts import healbite_schema_migrate as schema_migrate
 from scripts import hermes_staged_schema_migrate as staged
 
@@ -24,6 +26,7 @@ REVISION = "1" * 40
 IMAGE_ID = "sha256:" + "2" * 64
 PREVIOUS_IMAGE_ID = "sha256:" + "3" * 64
 TREE_SHA = "4" * 40
+OPERATION_ID = "5" * 32
 
 PARSER_CASES = (
     "missing_subcommand",
@@ -250,10 +253,18 @@ def _write_unit_evidence(context: UnitContext) -> None:
     contract_metadata = context.manifest.stat()
     created_at = production._now()
     approval = {
-        "APPROVAL_VERSION": 1,
+        "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
+        "OPERATION_ID": OPERATION_ID,
+        "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,
         "CREATED_AT": production._timestamp(created_at),
         "EXPIRES_AT": production._timestamp(created_at + timedelta(hours=1)),
+        "CANONICAL_REPOSITORY": "https://github.com/life2boat/hermes.git",
+        "CANONICAL_REMOTE": "github",
+        "CANONICAL_MAIN_REF": "refs/remotes/github/main",
         "TARGET_MAIN_SHA": REVISION,
+        "MIGRATION_COMPONENTS": [
+            item["component"] for item in production._target_migration_registry()
+        ],
         "APPROVED_REPOSITORY_ROOT": str(context.repository),
         "REPOSITORY_ROOT_DEVICE": root_record["DEVICE"],
         "REPOSITORY_ROOT_INODE": root_record["INODE"],
@@ -284,10 +295,14 @@ def _write_unit_evidence(context: UnitContext) -> None:
         "DEPLOY_AUTHORIZED": False,
     }
     policy = {
-        "POLICY_VERSION": 1,
+        "POLICY_VERSION": production.CLEAN_START_POLICY_VERSION,
+        "OPERATION_ID": OPERATION_ID,
         "DATA_POLICY": "NO_CLIENTS_CLEAN_START",
         "CREATED_AT": production._timestamp(created_at),
         "TARGET_MAIN_SHA": REVISION,
+        "MIGRATION_COMPONENTS": [
+            item["component"] for item in production._target_migration_registry()
+        ],
         "MIGRATION_IMAGE_ID": IMAGE_ID,
         "PRODUCTION_DB_SOURCE_SHA256": production._sha256(context.source),
         "FAMILY_SHOPPING_BACKFILL_REQUIRED": False,
@@ -304,10 +319,7 @@ def _write_unit_evidence(context: UnitContext) -> None:
 
 
 def _path_set(root: Path) -> set[str]:
-    return {
-        str(path.relative_to(root))
-        for path in root.rglob("*")
-    }
+    return {str(path.relative_to(root)) for path in root.rglob("*")}
 
 
 def _fake_directory_record(path: Path, *, private: bool) -> dict[str, int | str]:
@@ -337,10 +349,7 @@ def _unit_write_json_at(
     temporary = f".{name}.{uuid.uuid4().hex}.tmp"
     fd = os.open(
         temporary,
-        os.O_CREAT
-        | os.O_EXCL
-        | os.O_WRONLY
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
         0o600,
         dir_fd=parent_fd,
     )
@@ -370,9 +379,7 @@ def _unit_open_plan(path_value: str, expected_sha: str) -> production.PinnedPlan
         raise production.ProductionGateError("EXPECTED_PLAN_SHA256_INVALID")
     parent_fd = os.open(
         path.parent,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         file_fd = os.open(
@@ -467,11 +474,9 @@ def _install_unit_root(
     monkeypatch.setattr(
         production,
         "validate_trusted_parent_chain",
-        lambda path, *, expected_uid=None: (
-            authority.validate_trusted_parent_chain(
-                path,
-                expected_uid=os.geteuid(),
-            )
+        lambda path, *, expected_uid=None: authority.validate_trusted_parent_chain(
+            path,
+            expected_uid=os.geteuid(),
         ),
     )
     monkeypatch.setattr(
@@ -506,6 +511,15 @@ def _install_unit_root(
     )
     monkeypatch.setattr(
         production,
+        "_canonical_repository_binding",
+        lambda _repository, *, head: {
+            "CANONICAL_REPOSITORY": ("https://github.com/life2boat/hermes.git"),
+            "CANONICAL_REMOTE": "github",
+            "CANONICAL_MAIN_REF": "refs/remotes/github/main",
+        },
+    )
+    monkeypatch.setattr(
+        production,
         "load_execution_authority",
         lambda **_kwargs: _UnitExecutionAuthority(),
     )
@@ -514,9 +528,7 @@ def _install_unit_root(
         production,
         "_require_free_bytes",
         lambda path, minimum: (
-            None
-            if minimum == 1
-            else original_require_free_bytes(path, minimum)
+            None if minimum == 1 else original_require_free_bytes(path, minimum)
         ),
     )
     monkeypatch.setattr(
@@ -559,9 +571,7 @@ def _unit_context(
         backup=backup,
         staging=staging,
         evidence=evidence,
-        operations_root_approval=(
-            evidence_inputs / "approved-operations-root.json"
-        ),
+        operations_root_approval=(evidence_inputs / "approved-operations-root.json"),
         clean_start_policy=evidence_inputs / "clean-start-data-policy.json",
     )
     _write_unit_evidence(context)
@@ -574,6 +584,8 @@ def _plan_argv(context: UnitContext) -> list[str]:
         "plan",
         "--repository-root",
         str(context.repository),
+        "--operation-id",
+        OPERATION_ID,
         "--db-path",
         str(context.source),
         "--backup-parent",
@@ -640,11 +652,7 @@ def _json_result(
 ) -> tuple[dict[str, Any], str]:
     results = _json_results(capfd)
     for stream_name in ("stderr", "stdout"):
-        matching = [
-            result
-            for result in results
-            if result[1] == stream_name
-        ]
+        matching = [result for result in results if result[1] == stream_name]
         if matching:
             return matching[-1]
     raise AssertionError("unreachable")
@@ -687,9 +695,7 @@ def _execute_argv(
         "confirm_clean_start_policy_sha256": str(
             plan.payload["CLEAN_START_POLICY_SHA256"]
         ),
-        "final_authority": str(
-            plan.unit.root / "synthetic-final-authority.json"
-        ),
+        "final_authority": str(plan.unit.root / "synthetic-final-authority.json"),
         "expected_final_authority_sha256": "a" * 64,
         "runtime_pin": str(plan.path.parent / "runtime-pin.json"),
         "expected_runtime_pin_sha256": "b" * 64,
@@ -871,7 +877,14 @@ def test_descriptor_reads_reject_premature_eof(
 def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     parser = production.build_parser()
     choices = parser._subparsers._group_actions[0].choices
-    assert set(choices) == {"plan", "attest-runtime", "execute"}
+    assert set(choices) == {
+        "prepare-authority",
+        "finalize-authority",
+        "validate-authority-package",
+        "plan",
+        "attest-runtime",
+        "execute",
+    }
     plan_help = choices["plan"].format_help()
     attest_help = choices["attest-runtime"].format_help()
     execute_help = choices["execute"].format_help()
@@ -900,7 +913,9 @@ def test_public_contract_has_one_production_surface_and_no_callback() -> None:
     ):
         assert forbidden not in combined
     assert not hasattr(staged, "execute_production_staged")
-    with pytest.raises(staged.OrchestratorError, match="PRODUCTION_AUTHORIZATION_REQUIRED"):
+    with pytest.raises(
+        staged.OrchestratorError, match="PRODUCTION_AUTHORIZATION_REQUIRED"
+    ):
         staged._execute_staged(object(), synthetic=False)
 
 
@@ -933,7 +948,7 @@ def test_runbook_documents_exact_evidence_binding_contract() -> None:
         "--expected-runtime-pin-sha256",
         "attest-runtime",
         "NO_CLIENTS_CLEAN_START",
-        "plan schema version 6",
+        "plan schema version 7",
         "no generic force or skip-validation flag exists",
     ):
         assert required in runbook
@@ -969,14 +984,14 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     )
     assert payload["OPERATIONS_ROOT_APPROVAL_MODE"] == 0o600
     assert payload["OPERATIONS_ROOT_APPROVAL_TREE_SHA"] == TREE_SHA
-    assert payload["CLEAN_START_POLICY_PATH"] == str(
-        context.clean_start_policy
-    )
+    assert payload["CLEAN_START_POLICY_PATH"] == str(context.clean_start_policy)
     assert payload["CLEAN_START_POLICY_SHA256"] == production._sha256(
         context.clean_start_policy
     )
     assert payload["CLEAN_START_POLICY_MODE"] == 0o600
-    assert payload["CLEAN_START_POLICY_VERSION"] == 1
+    assert (
+        payload["CLEAN_START_POLICY_VERSION"] == production.CLEAN_START_POLICY_VERSION
+    )
     assert payload["CLEAN_START_DATA_POLICY"] == "NO_CLIENTS_CLEAN_START"
     assert payload["EXPECTED_FEATURE_FLAGS"] == production.EXPECTED_FEATURE_FLAGS
     assert payload["TARGET_SCHEMA_VERSION"] == target.version
@@ -986,9 +1001,7 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     )
     assert payload["MIGRATION_REGISTRY"][-1]["component"] == "fridge_menu"
     assert payload["SOURCE_USER_VERSION"] == 0
-    assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(
-        context.source.parent
-    )
+    assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(context.source.parent)
     assert payload["PLAN_READ_ONLY"] is True
     assert payload["PLAN_DATABASE_MUTATION"] is False
     assert list(context.backup.iterdir()) == []
@@ -1102,9 +1115,7 @@ def test_plan_rejects_expired_root_approval_before_source_open(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     context = _unit_context(tmp_path, monkeypatch)
-    approval = json.loads(
-        context.operations_root_approval.read_text(encoding="ascii")
-    )
+    approval = json.loads(context.operations_root_approval.read_text(encoding="ascii"))
     approval["CREATED_AT"] = production._timestamp(
         production._now() - timedelta(hours=2)
     )
@@ -1227,9 +1238,7 @@ def test_execute_revalidates_expired_approval_before_source_open(
 ) -> None:
     context = _unit_context(tmp_path, monkeypatch)
     plan = _create_plan(context, capfd)
-    approval = json.loads(
-        context.operations_root_approval.read_text(encoding="ascii")
-    )
+    approval = json.loads(context.operations_root_approval.read_text(encoding="ascii"))
     approval["CREATED_AT"] = production._timestamp(
         production._now() - timedelta(hours=2)
     )
@@ -1239,13 +1248,11 @@ def test_execute_revalidates_expired_approval_before_source_open(
     _write_canonical_document(context.operations_root_approval, approval)
     metadata = context.operations_root_approval.stat()
     approval_sha = production._sha256(context.operations_root_approval)
-    plan.payload.update(
-        {
-            "OPERATIONS_ROOT_APPROVAL_SIZE": metadata.st_size,
-            "OPERATIONS_ROOT_APPROVAL_SHA256": approval_sha,
-            "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT": approval["EXPIRES_AT"],
-        }
-    )
+    plan.payload.update({
+        "OPERATIONS_ROOT_APPROVAL_SIZE": metadata.st_size,
+        "OPERATIONS_ROOT_APPROVAL_SHA256": approval_sha,
+        "OPERATIONS_ROOT_APPROVAL_EXPIRES_AT": approval["EXPIRES_AT"],
+    })
     _rewrite_plan(plan)
     monkeypatch.setattr(
         production,
@@ -1254,12 +1261,15 @@ def test_execute_revalidates_expired_approval_before_source_open(
             AssertionError("source DB must not open after approval expiry")
         ),
     )
-    assert production.main(
-        _execute_argv(
-            plan,
-            confirm_operations_root_approval_sha256=approval_sha,
+    assert (
+        production.main(
+            _execute_argv(
+                plan,
+                confirm_operations_root_approval_sha256=approval_sha,
+            )
         )
-    ) == 1
+        == 1
+    )
     result, _stream = _json_result(capfd)
     assert result["exit_classification"] == "OPERATIONS_ROOT_APPROVAL_EXPIRED"
 
@@ -1514,15 +1524,9 @@ def test_public_execute_gate_matrix_is_fail_closed_with_exact_deltas(
             plan.payload.update(identity)
             plan.payload["SOURCE_SCHEMA_FINGERPRINT"] = old_schema
             _rewrite_plan(plan)
-            argv_overrides["confirm_source_sha256"] = str(
-                plan.payload["SOURCE_SHA256"]
-            )
-            policy = json.loads(
-                context.clean_start_policy.read_text(encoding="ascii")
-            )
-            policy["PRODUCTION_DB_SOURCE_SHA256"] = str(
-                plan.payload["SOURCE_SHA256"]
-            )
+            argv_overrides["confirm_source_sha256"] = str(plan.payload["SOURCE_SHA256"])
+            policy = json.loads(context.clean_start_policy.read_text(encoding="ascii"))
+            policy["PRODUCTION_DB_SOURCE_SHA256"] = str(plan.payload["SOURCE_SHA256"])
             _write_canonical_document(context.clean_start_policy, policy)
             policy_sha = production._sha256(context.clean_start_policy)
             plan.payload["CLEAN_START_POLICY_SHA256"] = policy_sha
@@ -1559,14 +1563,13 @@ def test_public_execute_gate_matrix_is_fail_closed_with_exact_deltas(
                 encoding="ascii",
             )
         elif case == "image_revision_drift":
+
             def image_drift(
                 image_id: str,
                 expected_revision: str | None,
             ) -> str:
                 if image_id == IMAGE_ID and expected_revision is not None:
-                    raise production.ProductionGateError(
-                        "IMAGE_REVISION_MISMATCH"
-                    )
+                    raise production.ProductionGateError("IMAGE_REVISION_MISMATCH")
                 return REVISION
 
             monkeypatch.setattr(production, "_inspect_image", image_drift)
@@ -1624,9 +1627,7 @@ def test_public_schema_failure_cases_preserve_database_and_report_exact_delta(
     assert result["manual_recovery_required"] is False
     assert production._sha256(context.source) == before_hash
     assert _path_set(context.runtime) - before_paths == {
-        str(
-            (plan.path.parent / "execution.json").relative_to(context.runtime)
-        )
+        str((plan.path.parent / "execution.json").relative_to(context.runtime))
     }
 
 
@@ -1693,15 +1694,14 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                 production,
                 "_read_internal_manifest",
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    production.ProductionGateError(
-                        "INTERNAL_MANIFEST_INVALID"
-                    )
+                    production.ProductionGateError("INTERNAL_MANIFEST_INVALID")
                 ),
             )
         elif case == "internal_manifest_close_failure":
             manifest_path = context.backup / (
                 f"manifest-{plan.payload['OPERATION_ID']}.json"
             )
+
             def succeed_with_manifest(
                 _args: Any,
                 *,
@@ -1768,9 +1768,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                 if fd == manifest_fd:
                     manifest_fd = None
                     original_close(fd)
-                    raise OSError(
-                        "synthetic manifest descriptor close failure"
-                    )
+                    raise OSError("synthetic manifest descriptor close failure")
                 original_close(fd)
 
             monkeypatch.setattr(
@@ -1784,6 +1782,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                 fail_manifest_close,
             )
         elif case == "final_target_validation_failure":
+
             def install_validation_failure(
                 _args: Any,
                 *,
@@ -1800,12 +1799,10 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                     ),
                 )
                 print(
-                    json.dumps(
-                        {
-                            "status": "PASS",
-                            "publish_state": "FINAL_VERIFIED",
-                        }
-                    )
+                    json.dumps({
+                        "status": "PASS",
+                        "publish_state": "FINAL_VERIFIED",
+                    })
                 )
                 return 0
 
@@ -1854,9 +1851,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                 production,
                 "_target_schema_fingerprint",
                 lambda _path: (_ for _ in ()).throw(
-                    production.ProductionGateError(
-                        "FINAL_TARGET_HASH_FAILED"
-                    )
+                    production.ProductionGateError("FINAL_TARGET_HASH_FAILED")
                 ),
             )
         elif case == "final_result_emit_failure":
@@ -1867,10 +1862,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
                 *,
                 stream: Any = None,
             ) -> None:
-                if (
-                    payload.get("status") == "PASS"
-                    and payload.get("mode") == "EXECUTE"
-                ):
+                if payload.get("status") == "PASS" and payload.get("mode") == "EXECUTE":
                     raise OSError("synthetic final result failure")
                 original_emit(payload, stream=stream)
 
@@ -1889,14 +1881,10 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
     assert result["manual_recovery_required"] is True
     assert production._sha256(context.source) == before_hash
     expected_path_delta = {
-        str(
-            (plan.path.parent / "execution.json").relative_to(context.runtime)
-        )
+        str((plan.path.parent / "execution.json").relative_to(context.runtime))
     }
     if case == "internal_manifest_close_failure":
-        expected_path_delta.add(
-            str(manifest_path.relative_to(context.runtime))
-        )
+        expected_path_delta.add(str(manifest_path.relative_to(context.runtime)))
     assert _path_set(context.runtime) - before_paths == expected_path_delta
     if case == "external_evidence_write_failure":
         assert stream == "stderr"
@@ -1905,9 +1893,7 @@ def test_public_post_exchange_faults_are_always_publish_uncertain(
         assert stream == "stderr"
         assert result["cleanup_exception_recorded"] is True
         assert result["primary_exception_preserved"] is False
-        assert result["cleanup_failure_codes"] == [
-            "INTERNAL_MANIFEST_CLOSE_FAILED"
-        ]
+        assert result["cleanup_failure_codes"] == ["INTERNAL_MANIFEST_CLOSE_FAILED"]
         assert "synthetic manifest" not in json.dumps(result)
 
 
@@ -1926,16 +1912,10 @@ def test_public_close_failure_matrix_preserves_primary_and_state(
     expected_manual_recovery = True
     expected_durable_evidence = True
     expected_primary_preserved = True
-    expected_primary_error: str | None = (
-        "PRIMARY_POST_EXCHANGE_FAILURE"
-    )
+    expected_primary_error: str | None = "PRIMARY_POST_EXCHANGE_FAILURE"
     expected_stream = "stderr"
     expected_path_delta = {
-        str(
-            (plan.path.parent / "execution.json").relative_to(
-                context.runtime
-            )
-        )
+        str((plan.path.parent / "execution.json").relative_to(context.runtime))
     }
 
     def fail_after_close(
@@ -1962,9 +1942,7 @@ def test_public_close_failure_matrix_preserves_primary_and_state(
         prepared: Any,
     ) -> int:
         prepared.close()
-        raise production.ProductionGateError(
-            "PRIMARY_POST_EXCHANGE_FAILURE"
-        )
+        raise production.ProductionGateError("PRIMARY_POST_EXCHANGE_FAILURE")
 
     if case == "validated_close_before_exchange":
         fail_after_close(
@@ -2084,18 +2062,9 @@ def test_public_close_failure_matrix_preserves_primary_and_state(
     assert result["publish_state"] == expected_state
     assert result["target_may_have_changed"] is expected_target_changed
     assert result["automatic_retry_allowed"] is False
-    assert (
-        result["manual_recovery_required"]
-        is expected_manual_recovery
-    )
-    assert (
-        result["durable_evidence_updated"]
-        is expected_durable_evidence
-    )
-    assert (
-        result["primary_exception_preserved"]
-        is expected_primary_preserved
-    )
+    assert result["manual_recovery_required"] is expected_manual_recovery
+    assert result["durable_evidence_updated"] is expected_durable_evidence
+    assert result["primary_exception_preserved"] is expected_primary_preserved
     assert result.get("primary_error_type") == expected_primary_error
     assert result["cleanup_exception_recorded"] is True
     assert result["status"] == "FAILED"
@@ -2161,7 +2130,6 @@ def test_negative_matrix_contract_is_large_and_public() -> None:
     assert "production.main(" in source
     direct_parser_call = "production.build_parser()" + ".parse_args("
     assert direct_parser_call not in source
-
 
 
 class _RealBoundaryCloseFailure:
@@ -2281,9 +2249,7 @@ def _actual_cleanup_record_for_public_class(
         elif resource_class == "recovery_manifest":
             manifest_path = root / "recovery.json"
             manifest_path.write_text(
-                json.dumps(
-                    {"PUBLISH_STATE": "EXCHANGE_COMPLETED_NOT_VERIFIED"}
-                ),
+                json.dumps({"PUBLISH_STATE": "EXCHANGE_COMPLETED_NOT_VERIFIED"}),
                 encoding="ascii",
             )
             staging_root = _private_directory(root / "staging")
@@ -2395,9 +2361,7 @@ PUBLIC_INTERNAL_CLEANUP_CASES = (
                     "error_code": "SOURCE_SQLITE_LEASE_CLOSE_FAILED",
                 }
             ],
-            "cleanup_failure_codes": [
-                "SOURCE_SQLITE_LEASE_CLOSE_FAILED"
-            ],
+            "cleanup_failure_codes": ["SOURCE_SQLITE_LEASE_CLOSE_FAILED"],
             "backup_available": False,
         },
         "PRIMARY_PRE_EXCHANGE_FAILURE",
@@ -2479,9 +2443,7 @@ PUBLIC_INTERNAL_CLEANUP_CASES = (
                     "error_code": "SOURCE_PINNED_DATABASE_CLOSE_FAILED",
                 }
             ],
-            "cleanup_failure_codes": [
-                "SOURCE_PINNED_DATABASE_CLOSE_FAILED"
-            ],
+            "cleanup_failure_codes": ["SOURCE_PINNED_DATABASE_CLOSE_FAILED"],
             "backup_available": True,
         },
         "PUBLISH_UNCERTAIN",
@@ -2552,11 +2514,7 @@ def test_public_entrypoint_preserves_internal_primary_and_cleanup(
     assert result["durable_evidence_updated"] is True
     assert production._sha256(context.source) == before_hash
     assert _path_set(context.runtime) - before_paths == {
-        str(
-            (plan.path.parent / "execution.json").relative_to(
-                context.runtime
-            )
-        )
+        str((plan.path.parent / "execution.json").relative_to(context.runtime))
     }
 
     evidence = json.loads(
@@ -2763,13 +2721,9 @@ def test_public_entrypoint_accepts_exceptional_preparation_transport(
     assert result["manual_recovery_required"] is True
     assert result["primary_exception_present"] is True
     assert result["primary_exception_preserved"] is True
-    assert result["primary_exit_classification"] == (
-        "PRIMARY_PREPARATION_FAILURE"
-    )
+    assert result["primary_exit_classification"] == ("PRIMARY_PREPARATION_FAILURE")
     assert result["cleanup_exception_count"] == 1
-    assert result["cleanup_failure_codes"] == [
-        "MANIFEST_PARENT_CLOSE_FAILED"
-    ]
+    assert result["cleanup_failure_codes"] == ["MANIFEST_PARENT_CLOSE_FAILED"]
     assert result["durable_evidence_updated"] is False
     assert production._sha256(context.source) == before_hash
     assert _path_set(context.runtime) == before_paths
@@ -2964,3 +2918,315 @@ def test_public_execute_has_one_final_checkpoint_call() -> None:
     execute_source = source.split("def _execute_plan_outcome(", 1)[1]
     execute_source = execute_source.split("def execute_plan(", 1)[0]
     assert execute_source.count("_final_mutation_checkpoint(") == 1
+
+
+def _producer_initial_args(
+    context: UnitContext,
+    authority_parent: Path,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        repository_root=str(context.repository),
+        operation_id=OPERATION_ID,
+        authority_parent=str(authority_parent),
+        db_path=str(context.source),
+        expected_source_sha256=production._sha256(context.source),
+        migration_image_id=IMAGE_ID,
+        migration_image_revision=REVISION,
+        migration_component=producer._operation_components(),
+        expires_in_seconds=3600,
+        confirm_plan_only_authority=producer.PLAN_ONLY_CONFIRMATION,
+        confirm_clean_start_policy=producer.CLEAN_START_CONFIRMATION,
+    )
+
+
+def _prepare_with_producer(
+    context: UnitContext,
+    capfd: pytest.CaptureFixture[str],
+) -> Path:
+    authority_parent = _private_directory(context.runtime / "authority-packages")
+    assert (
+        producer.prepare_initial_authority(
+            _producer_initial_args(context, authority_parent)
+        )
+        == 0
+    )
+    output, stream = _json_result(capfd)
+    assert stream == "stdout"
+    directory = Path(str(output["authority_directory"]))
+    context.operations_root_approval = Path(
+        str(output["operations_root_approval"]["path"])
+    )
+    context.clean_start_policy = Path(str(output["clean_start_policy"]["path"]))
+    return directory
+
+
+def _write_bound_input(path: Path, data: bytes) -> Path:
+    path.write_bytes(data)
+    os.chmod(path, 0o600)
+    return path
+
+
+def _producer_roundtrip(
+    context: UnitContext,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> tuple[PlannedContext, Path, str]:
+    directory = _prepare_with_producer(context, capfd)
+    plan = _create_plan(context, capfd)
+    inputs = _private_directory(context.runtime / "authority-inputs")
+    p5b = _write_bound_input(inputs / "p5b-evidence.md", b"p5b\n")
+    p6a_f1 = _write_bound_input(
+        inputs / "p6a-f1-evidence.md",
+        b"p6a-f1\n",
+    )
+    secret = _write_bound_input(
+        inputs / "secrets-override.yml",
+        b"services: {}\n",
+    )
+    os.chmod(context.repository / "docker-compose.yml", 0o644)
+
+    runtime_payload = {
+        "State": {"Running": True},
+        "Image": PREVIOUS_IMAGE_ID,
+        "Config": {
+            "Labels": {
+                "com.docker.compose.project": "hermes-agent",
+                "com.docker.compose.service": "hermes-bot",
+            }
+        },
+        "Mounts": [
+            {
+                "Source": str(context.source),
+                "Destination": "/home/hermes/healbite.db",
+                "Type": "bind",
+                "RW": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        authority,
+        "_exact_repository_snapshot",
+        lambda _root: (REVISION, TREE_SHA, "6" * 64),
+    )
+    monkeypatch.setattr(authority, "_inspect_image", _fake_image_inspect)
+    monkeypatch.setattr(
+        authority,
+        "_inspect_runtime",
+        lambda _service: runtime_payload,
+    )
+    monkeypatch.setattr(
+        production,
+        "load_execution_authority",
+        authority.load_execution_authority,
+    )
+
+    args = argparse.Namespace(
+        plan=str(plan.path),
+        expected_plan_sha256=plan.sha256,
+        confirm_operation_id=OPERATION_ID,
+        authority_directory=str(directory),
+        p5b_evidence=str(p5b),
+        expected_p5b_evidence_sha256=production._sha256(p5b),
+        p6a_f1_evidence=str(p6a_f1),
+        expected_p6a_f1_evidence_sha256=production._sha256(p6a_f1),
+        secrets_override=str(secret),
+        expected_secrets_override_sha256=production._sha256(secret),
+        expires_in_seconds=1800,
+        confirm_execution_authority=(producer.FINAL_AUTHORITY_CONFIRMATION),
+    )
+    assert producer.finalize_authority_package(args) == 0
+    output, stream = _json_result(capfd)
+    assert stream == "stdout"
+    final_path = Path(str(output["final_authority"]["path"]))
+    final_sha = str(output["final_authority"]["sha256"])
+    return plan, final_path, final_sha
+
+
+def test_authority_package_producer_roundtrip_uses_existing_consumers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan, final_path, final_sha = _producer_roundtrip(
+        context,
+        monkeypatch,
+        capfd,
+    )
+    payload = json.loads(final_path.read_text(encoding="ascii"))
+    assert set(payload) == authority.EXECUTION_AUTHORITY_FIELDS
+    assert payload["PLAN_PATH"] == str(plan.path)
+    assert payload["PLAN_SHA256"] == plan.sha256
+    assert payload["EXECUTION_AUTHORIZED"] is True
+    assert payload["DEPLOY_AUTHORIZED"] is False
+    assert payload["CONTAINS_SECRETS"] is False
+    assert final_sha == production._sha256(final_path)
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    (
+        ("invalid_operation_id", "OPERATION_ID_INVALID"),
+        (
+            "wrong_plan_confirmation",
+            "PLAN_ONLY_OPERATOR_AUTHORIZATION_REQUIRED",
+        ),
+        (
+            "wrong_clean_start_confirmation",
+            "CLEAN_START_OPERATOR_CONFIRMATION_REQUIRED",
+        ),
+        (
+            "wrong_component",
+            "MIGRATION_COMPONENT_SELECTION_MISMATCH",
+        ),
+        (
+            "wrong_source_sha",
+            "AUTHORITY_SOURCE_DATABASE_MISMATCH",
+        ),
+        (
+            "wrong_image",
+            "IMAGE_NOT_AVAILABLE",
+        ),
+        (
+            "wrong_repository",
+            "CANONICAL_REPOSITORY_PROVENANCE_INVALID",
+        ),
+    ),
+)
+def test_initial_authority_producer_fails_closed(
+    case: str,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    authority_parent = _private_directory(context.runtime / "authority-packages")
+    args = _producer_initial_args(context, authority_parent)
+    if case == "invalid_operation_id":
+        args.operation_id = "not-an-operation"
+    elif case == "wrong_plan_confirmation":
+        args.confirm_plan_only_authority = "WRONG"
+    elif case == "wrong_clean_start_confirmation":
+        args.confirm_clean_start_policy = "WRONG"
+    elif case == "wrong_component":
+        args.migration_component = ["fridge_menu"]
+    elif case == "wrong_source_sha":
+        args.expected_source_sha256 = "f" * 64
+    elif case == "wrong_image":
+        monkeypatch.setattr(
+            production,
+            "_inspect_image",
+            lambda *_args: (_ for _ in ()).throw(
+                production.ProductionGateError("IMAGE_NOT_AVAILABLE")
+            ),
+        )
+    elif case == "wrong_repository":
+        monkeypatch.setattr(
+            production,
+            "_canonical_repository_binding",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                production.ProductionGateError(
+                    "CANONICAL_REPOSITORY_PROVENANCE_INVALID"
+                )
+            ),
+        )
+    with pytest.raises(production.ProductionGateError, match=expected):
+        producer.prepare_initial_authority(args)
+
+
+def test_initial_authority_is_non_replayable_and_never_overwrites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    authority_parent = _private_directory(context.runtime / "authority-packages")
+    args = _producer_initial_args(context, authority_parent)
+    assert producer.prepare_initial_authority(args) == 0
+    output, _stream = _json_result(capfd)
+    approval = Path(str(output["operations_root_approval"]["path"]))
+    policy = Path(str(output["clean_start_policy"]["path"]))
+    before = (
+        production._sha256(approval),
+        production._sha256(policy),
+    )
+    with pytest.raises(
+        production.ProductionGateError,
+        match="AUTHORITY_OPERATION_DIRECTORY_COLLISION",
+    ):
+        producer.prepare_initial_authority(args)
+    assert before == (
+        production._sha256(approval),
+        production._sha256(policy),
+    )
+
+
+def test_final_authority_rejects_plan_mutation_after_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    plan, final_path, final_sha = _producer_roundtrip(
+        context,
+        monkeypatch,
+        capfd,
+    )
+    plan.path.write_bytes(plan.path.read_bytes() + b" ")
+    os.chmod(plan.path, 0o600)
+    args = argparse.Namespace(
+        plan=str(plan.path),
+        expected_plan_sha256=plan.sha256,
+        confirm_operation_id=OPERATION_ID,
+        final_authority=str(final_path),
+        expected_final_authority_sha256=final_sha,
+    )
+    with pytest.raises(
+        production.ProductionGateError,
+        match="PLAN_SHA256_MISMATCH",
+    ):
+        producer.validate_authority_package(args)
+
+
+def test_final_authority_cannot_be_created_before_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    context = _unit_context(tmp_path, monkeypatch)
+    directory = _prepare_with_producer(context, capfd)
+    missing = context.evidence / OPERATION_ID / "plan.json"
+    argv = [
+        "finalize-authority",
+        "--plan",
+        str(missing),
+        "--expected-plan-sha256",
+        "a" * 64,
+        "--confirm-operation-id",
+        OPERATION_ID,
+        "--authority-directory",
+        str(directory),
+        "--p5b-evidence",
+        str(context.runtime / "missing-p5b"),
+        "--expected-p5b-evidence-sha256",
+        "b" * 64,
+        "--p6a-f1-evidence",
+        str(context.runtime / "missing-p6a"),
+        "--expected-p6a-f1-evidence-sha256",
+        "c" * 64,
+        "--secrets-override",
+        str(context.runtime / "missing-secrets"),
+        "--expected-secrets-override-sha256",
+        "d" * 64,
+        "--expires-in-seconds",
+        "1800",
+        "--confirm-execution-authority",
+        producer.FINAL_AUTHORITY_CONFIRMATION,
+    ]
+    assert production.main(argv) == 1
+    output, stream = _json_result(capfd)
+    assert stream == "stdout"
+    assert output["status"] == "FAILED"
+    assert output["publish_state"] == "BEFORE_EXCHANGE"
+    assert output["production_execution_enabled"] is False
+    assert not (directory / "final-authority.json").exists()

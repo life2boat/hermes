@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`
+Verified against canonical main: `c6d0852b95a068a3bab7528e656da91ab4274a08`
 
 ## Purpose
 
@@ -87,6 +87,7 @@ filled in from memory.
 | `git log`, `git show`, `git blame` | Exact provenance, intent and whether a change is an ancestor of canonical main |
 | `docs/runbooks/` | Operational procedures; prefer the current linked skill when instructions moved |
 | Tests under `tests/` | Executable behavioral and safety contracts |
+| `knowledge/` | Curated architecture, decision, failure, pattern, operations and AI-agent indexes; follow their links to authoritative contracts |
 
 Chat history is not an architecture record. If a decision matters after the
 task, record it in an ADR, a skill decision-memory section, a design contract,
@@ -94,12 +95,12 @@ or `CURRENT_STATE` as appropriate.
 
 ## Knowledge Pack status
 
-The repository does not currently contain a separately executable component
-named Knowledge Pack. In this Phase 0 foundation, the term means the curated,
-reviewable set of source map, system model, invariants, rulebook, task template,
-ADRs, skills, runbooks and tests. It must not be described as a service,
-database, retrieval pipeline or deployed runtime until such implementation is
-introduced and evidenced in the repository.
+The repository contains a structured `knowledge/` documentation layer covering
+architecture, decisions, failures, patterns, operations and AI-agent lessons.
+Together with the source map, system model, invariants, rulebook, task template,
+ADRs, skills, runbooks and tests, it forms the reviewable Knowledge Pack. It is
+not a service, database, retrieval pipeline or deployed runtime; any future
+executable component requires separate implementation and repository evidence.
 
 ## Fast lookup
 

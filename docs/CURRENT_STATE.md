@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.19
+version: 1.2.20
 updated_at: 2026-08-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b
+state_verified_against_main_sha: c6d0852b95a068a3bab7528e656da91ab4274a08
 production_sha: unknown
 ---
 
@@ -17,9 +17,18 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`.
+  `c6d0852b95a068a3bab7528e656da91ab4274a08`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
+- PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
+- A Phase 0.5 cold-start usability check reconstructed the architecture,
+  forbidden changes, deployment gates and new-task workflow solely from the
+  five foundation documents; result: `PASS`.
+- The Phase 1 repository candidate adds five populated architecture decisions
+  and a structured `knowledge/` layer for architecture, decisions, failures,
+  patterns, operations and AI-agent lessons.
+- The Knowledge Pack remains documentation-only and introduces no runtime,
+  database, container, Qdrant or production behavior.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
   is not the HealBite project remote.
 - Canonical checkout: `/home/hermes/.hermes/hermes-agent`.

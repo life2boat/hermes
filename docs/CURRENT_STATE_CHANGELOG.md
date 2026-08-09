@@ -1,5 +1,26 @@
 # CURRENT_STATE changelog
 
+## 1.2.20 - 2026-08-09
+
+Added:
+- recorded a successful Phase 0.5 cold-start usability check based only on the
+  five AI-engineering foundation documents;
+- added five populated ADRs for semantic memory, SQLite-first dual writes,
+  exact-SHA deployment, user/household isolation and the AI engineering system;
+- added the six-part `knowledge/` structure and a sanitized scanner-failure
+  lesson covering rootfs symlink validation.
+
+Changed:
+- updated repository-state verification to the PR #126 merge commit
+  `c6d0852b95a068a3bab7528e656da91ab4274a08`;
+- linked the source map and system model to the structured Knowledge Pack while
+  preserving executable contracts, skills and tests as authority.
+
+Safety:
+- changes are repository documentation only;
+- runtime/source-code behavior was not changed;
+- production, containers, SQLite, Qdrant and secrets were not changed.
+
 ## 1.2.19 - 2026-08-09
 
 Added:

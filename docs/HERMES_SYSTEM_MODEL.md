@@ -1,7 +1,7 @@
 # Hermes / HealBite System Model
 
 Status: repository-grounded model
-Verified against canonical main: `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`
+Verified against canonical main: `c6d0852b95a068a3bab7528e656da91ab4274a08`
 
 ## Purpose
 
@@ -87,10 +87,12 @@ the reviewable engineering knowledge layer formed by:
 - this system model and `HERMES_SOURCE_MAP.md`;
 - `HERMES_INVARIANTS.md` and `AI_AGENT_RULEBOOK.md`;
 - `TASK_TEMPLATE.md`, ADRs, design contracts, skills and runbooks;
+- the `knowledge/` indexes for architecture, decisions, failures, patterns,
+  operations and AI-agent lessons;
 - executable tests and versioned policies that prove the prose.
 
-It guides agents to authoritative sources. It has no daemon, API, database,
-vector collection or production deployment of its own.
+Phase 1 gives that layer a stable repository structure and populated decision
+records. It still has no daemon, API, database, vector collection or production
 
 ### Tools
 

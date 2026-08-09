@@ -22,6 +22,22 @@ CANONICAL_MAIN_REF=refs/remotes/github/main
 EXPECTED_BASE_SHA=<40-char SHA or CURRENT_CANONICAL_MAIN>
 
 ============================================================
+PREPARE TASK CONTEXT (MANDATORY BEFORE EXECUTION)
+============================================================
+
+Before discovery or modification, run:
+python scripts/prepare_task.py --output .task_context/task-context.json
+
+Record and review:
+- PREPARE_TASK_CONTEXT=PASS|FAIL|BLOCKED
+- TASK_CONTEXT_PATH=.task_context/task-context.json
+- CONTEXT_HEAD_SHA=<must match the intended worktree HEAD>
+- CONTEXT_CHANGED_FILES=<reviewed for unrelated changes>
+- CONTEXT_TEST_EVIDENCE=NOT_AVAILABLE|INCONCLUSIVE
+
+If the script fails or required documentation is missing, stop as `BLOCKED`.
+
+============================================================
 GOAL
 ============================================================
 
@@ -139,8 +155,11 @@ Run only applicable checks and report exact outcomes:
 - DIFF_CHECK: PASS|FAIL|NOT_RUN|INCONCLUSIVE
 - EXACT_HEAD_CI: PASS|FAIL|PENDING|NOT_RUN|INCONCLUSIVE
 - MANUAL_SMOKE: PASS|FAIL|NOT_PERFORMED|INCONCLUSIVE
+- AI_REVIEW_CHECKLIST: PASS|FAIL|BLOCKED|INCONCLUSIVE
+- PRODUCTION_READINESS_CHECKLIST: PASS|FAIL|BLOCKED|NOT_APPLICABLE|INCONCLUSIVE
 
 REQUIRED_TEST_COMMANDS:
+- python scripts/prepare_task.py --output .task_context/task-context.json
 - bash scripts/secret_check.sh
 - scripts/run_tests.sh <focused test paths>
 - bash scripts/agent_check.sh
@@ -170,6 +189,7 @@ BASE_SHA=
 BRANCH=
 WORKTREE=
 FILES_CHANGED=
+TASK_CONTEXT=
 TESTS=
 VALIDATION=
 COMMIT_SHA=

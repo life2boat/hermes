@@ -1,5 +1,27 @@
 # CURRENT_STATE changelog
 
+## 1.2.21 - 2026-08-09
+
+Added:
+- recorded the normal merge of PR #127 and verified the five Phase 1 ADRs plus
+  the six-part Knowledge Pack on canonical main;
+- added AI change-review and production-readiness checklists;
+- added a repository-bound `prepare_task.py` context collector and focused
+  tests for Git binding, tracked-document packaging, safe output boundaries and
+  truthful pytest-cache classification.
+
+Changed:
+- updated repository-state verification to PR #127 merge commit
+  `8cd61d3192bb9b9e0ae507dc5820f6534a7dc52b`;
+- made pre-task context preparation mandatory in `TASK_TEMPLATE.md` and linked
+  the automation/checklists from the source map and AI Knowledge Pack index.
+
+Safety:
+- prepared task context contains repository paths and tracked documentation,
+  never secret values or raw pytest failure identifiers;
+- pytest cache is explicitly non-authoritative and cannot establish PASS;
+- production, containers, SQLite, Qdrant and secrets were not changed.
+
 ## 1.2.20 - 2026-08-09
 
 Added:

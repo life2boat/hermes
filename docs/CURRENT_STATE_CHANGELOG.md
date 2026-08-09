@@ -1,5 +1,23 @@
 # CURRENT_STATE changelog
 
+## 1.2.19 - 2026-08-09
+
+Added:
+- introduced the Phase 0 Hermes engineering foundation: source map, system
+  model, cross-system invariant index, AI-agent rulebook, and task template;
+- classified Knowledge Pack as the versioned engineering-document layer, not a
+  separately implemented runtime component.
+
+Changed:
+- updated repository-state verification to canonical main
+  `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`;
+- linked architectural and operational claims to current code, tests, policies,
+  skills, ADRs, runbooks and Git evidence.
+
+Safety:
+- runtime/source-code behavior was not changed;
+- production, containers, SQLite, Qdrant and secrets were not changed.
+
 ## 1.2.18 - 2026-08-09
 
 Added:

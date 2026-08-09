@@ -192,7 +192,8 @@ RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra 
     rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Signature/test_pss.py && \
     rm -f /opt/hermes/.venv/lib/python3.13/site-packages/tornado/test/test.key && \
     rm -f /opt/hermes/.venv/lib/python3.13/site-packages/youtube_transcript_api/test/assets/youtube.html.static && \
-    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/botocore/data/iam/2010-05-08/examples-1.json
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/botocore/data/iam/2010-05-08/examples-1.json && \
+    rm -rf /root/.cache/uv
 
 # ---------- Verified Playwright artifact closure ----------
 # `playwright_artifacts` is one mandatory read-only BuildKit named context.
@@ -226,7 +227,8 @@ RUN --mount=type=bind,from=playwright_artifacts,source=/,target=/tmp/playwright-
 COPY web/ web/
 COPY ui-tui/ ui-tui/
 RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
+    cd ../ui-tui && npm run build && \
+    rm -rf /tmp/node-compile-cache
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.

@@ -107,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           reference="${{ steps.attest.outputs.image }}"
+          candidate="$RUNNER_TEMP/image-secret-attestation.candidate.json"
           receipt="$RUNNER_TEMP/image-secret-attestation.json"
           docker pull "$reference"
           set +e
@@ -114,49 +115,170 @@ jobs:
             --repository-root "$GITHUB_WORKSPACE" \
             --image "$reference" \
             --expected-source-sha "$GITHUB_SHA" \
-            --output "$receipt" >/dev/null
+            --output "$candidate" >/dev/null
           scanner_rc="$?"
           set -e
           digest="${reference##*@}"
+          receipt_filter='
+            def exact_keys($expected): (keys | sort) == ($expected | sort);
+            def uint:
+              type == "number" and . >= 0 and floor == .;
+            def digest:
+              type == "string" and test("^sha256:[0-9a-f]{64}$");
+            def hex_sha:
+              type == "string" and test("^[0-9a-f]{64}$");
+            def finding_class:
+              . == "PRIVATE_KEY_MATERIAL"
+              or . == "PROTECTED_SECRET_MATERIAL"
+              or . == "KNOWN_PROVIDER_CREDENTIAL"
+              or . == "HIGH_ENTROPY_CREDENTIAL"
+              or . == "CREDENTIAL_IN_URL";
+            def finding_rule:
+              . == "protected-secret-assignment"
+              or . == "telegram-token-assignment"
+              or . == "provider-token-assignment"
+              or . == "high-entropy-secret-assignment"
+              or . == "private-key-block"
+              or . == "credential-bearing-url"
+              or . == "exact-protected-fingerprint";
+            def finding:
+              exact_keys(["finding_class", "layer_id", "path_sha256", "rule_id", "scope"])
+              and (.finding_class | finding_class)
+              and (.rule_id | finding_rule)
+              and (.scope == "metadata" or .scope == "layer")
+              and (.path_sha256 | hex_sha)
+              and (.layer_id == null or (.layer_id | digest));
+            def location:
+              exact_keys(["layer_digest", "path_sha256", "scope"])
+              and (.scope == "metadata" or .scope == "layer")
+              and (.path_sha256 | hex_sha)
+              and (.layer_digest == null or (.layer_digest | digest));
+            def error_receipt:
+              exact_keys([
+                "ERROR", "FINDING_CLASS", "FINDING_COUNT", "FINDING_LOCATION",
+                "IMAGE_DIGEST", "RECEIPT_VERSION", "SCANNER_ERROR_CLASS",
+                "SCANNER_ERROR_CODE", "SCANNER_EXIT_CODE", "SCAN_POLICY_SHA256",
+                "STATUS"
+              ])
+              and .RECEIPT_VERSION == 1
+              and .STATUS == "FAIL"
+              and (.SCANNER_EXIT_CODE | uint)
+              and (.SCANNER_ERROR_CLASS == "PARSE_ERROR"
+                   or .SCANNER_ERROR_CLASS == "IO_ERROR"
+                   or .SCANNER_ERROR_CLASS == "ASSERTION_ERROR"
+                   or .SCANNER_ERROR_CLASS == "CONTRACT_ERROR"
+                   or .SCANNER_ERROR_CLASS == "INTERNAL_ERROR"
+                   or .SCANNER_ERROR_CLASS == "RECEIPT_ERROR")
+              and (.SCANNER_ERROR_CODE | type == "string"
+                   and test("^[A-Z0-9_]+$"))
+              and .ERROR == .SCANNER_ERROR_CODE
+              and .FINDING_COUNT == null
+              and .FINDING_CLASS == []
+              and .FINDING_LOCATION == []
+              and (.SCAN_POLICY_SHA256 == null
+                   or (.SCAN_POLICY_SHA256 | hex_sha));
+            def scan_receipt:
+              exact_keys([
+                "BYTES_SCANNED", "CONFIG_DIGEST", "FILES_SCANNED", "FINDINGS",
+                "FINDING_CLASS", "FINDING_COUNT", "FINDING_LOCATION",
+                "IMAGE_DIGEST", "IMAGE_FINAL_FILESYSTEM_SECRET_FINDINGS",
+                "IMAGE_ID", "IMAGE_LAYER_SECRET_FINDINGS",
+                "IMAGE_METADATA_SECRET_FINDINGS", "IMAGE_OCI_REVISION",
+                "IMAGE_SECRET_FINDINGS", "LAYERS_SCANNED", "LAYER_DIGESTS",
+                "RECEIPT_VERSION", "SCANNER_ERROR_CLASS", "SCANNER_ERROR_CODE",
+                "SCANNER_EXIT_CODE", "SCAN_POLICY_SHA256", "SCAN_POLICY_VERSION",
+                "STATUS", "STORED_LAYER_IDENTITIES"
+              ])
+              and .RECEIPT_VERSION == 1
+              and .SCAN_POLICY_VERSION == 1
+              and (.SCANNER_EXIT_CODE == 0 or .SCANNER_EXIT_CODE == 1)
+              and (.IMAGE_ID | digest)
+              and (.CONFIG_DIGEST | digest)
+              and .CONFIG_DIGEST == .IMAGE_ID
+              and (.IMAGE_OCI_REVISION | type == "string"
+                   and test("^[0-9a-f]{40}$"))
+              and (.IMAGE_SECRET_FINDINGS | uint)
+              and (.IMAGE_METADATA_SECRET_FINDINGS | uint)
+              and (.IMAGE_LAYER_SECRET_FINDINGS | uint)
+              and (.IMAGE_FINAL_FILESYSTEM_SECRET_FINDINGS | uint)
+              and (.LAYERS_SCANNED | uint)
+              and (.FILES_SCANNED | uint)
+              and (.BYTES_SCANNED | uint)
+              and (.SCAN_POLICY_SHA256 | hex_sha)
+              and (.LAYER_DIGESTS | type == "array"
+                   and all(.[]; digest))
+              and (.STORED_LAYER_IDENTITIES | type == "array"
+                   and all(.[];
+                           digest
+                           or (type == "string"
+                               and test("^([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"))))
+              and .LAYERS_SCANNED == (.LAYER_DIGESTS | length)
+              and .LAYERS_SCANNED == (.STORED_LAYER_IDENTITIES | length)
+              and (.FINDINGS | type == "array" and all(.[]; finding))
+              and (.FINDING_CLASS | type == "array"
+                   and all(.[]; finding_class))
+              and (.FINDING_LOCATION | type == "array"
+                   and all(.[]; location))
+              and .FINDING_COUNT == .IMAGE_SECRET_FINDINGS
+              and .FINDING_CLASS == ([.FINDINGS[].finding_class] | unique | sort)
+              and .FINDING_LOCATION == ([
+                    .FINDINGS[]
+                    | {
+                        scope: .scope,
+                        path_sha256: .path_sha256,
+                        layer_digest: .layer_id
+                      }
+                  ])
+              and (
+                if .IMAGE_SECRET_FINDINGS == 0
+                then .STATUS == "PASS"
+                     and .SCANNER_EXIT_CODE == 0
+                     and .SCANNER_ERROR_CLASS == "NONE"
+                     and .SCANNER_ERROR_CODE == null
+                     and .FINDING_CLASS == []
+                     and .FINDING_LOCATION == []
+                else .STATUS == "FAIL"
+                     and .SCANNER_EXIT_CODE == 1
+                     and .SCANNER_ERROR_CLASS == "FINDING"
+                     and .SCANNER_ERROR_CODE == "SECRET_FINDINGS_PRESENT"
+                end
+              );
+            (error_receipt or scan_receipt)
+            and .SCANNER_EXIT_CODE == $rc
+            and .IMAGE_DIGEST == $digest
+            and (.IMAGE_DIGEST | digest)
+          '
+          if [[ -f "$candidate" && ! -L "$candidate" ]] \
+            && jq -e \
+              --argjson rc "$scanner_rc" \
+              --arg digest "$digest" \
+              "$receipt_filter" "$candidate" >/dev/null 2>&1
+          then
+            cp -- "$candidate" "$receipt"
+          else
+            jq -n \
+              --argjson rc "$scanner_rc" \
+              --arg digest "$digest" \
+              '{
+                RECEIPT_VERSION: 1,
+                STATUS: "FAIL",
+                SCANNER_EXIT_CODE: $rc,
+                SCANNER_ERROR_CLASS: "RECEIPT_ERROR",
+                SCANNER_ERROR_CODE: "SCANNER_RECEIPT_INVALID",
+                ERROR: "SCANNER_RECEIPT_INVALID",
+                FINDING_COUNT: null,
+                FINDING_CLASS: [],
+                FINDING_LOCATION: [],
+                SCAN_POLICY_SHA256: null,
+                IMAGE_DIGEST: $digest
+              }' > "$receipt"
+          fi
+          test -f "$receipt"
+          test ! -L "$receipt"
           jq -e \
             --argjson rc "$scanner_rc" \
             --arg digest "$digest" \
-            '.RECEIPT_VERSION == 1
-             and .SCANNER_EXIT_CODE == $rc
-             and .IMAGE_DIGEST == $digest
-             and (.STATUS == "PASS" or .STATUS == "FAIL")
-             and (.SCANNER_ERROR_CLASS == "NONE"
-                  or .SCANNER_ERROR_CLASS == "FINDING"
-                  or .SCANNER_ERROR_CLASS == "PARSE_ERROR"
-                  or .SCANNER_ERROR_CLASS == "IO_ERROR"
-                  or .SCANNER_ERROR_CLASS == "ASSERTION_ERROR"
-                  or .SCANNER_ERROR_CLASS == "CONTRACT_ERROR"
-                  or .SCANNER_ERROR_CLASS == "INTERNAL_ERROR")
-             and (.SCANNER_ERROR_CODE == null
-                  or (.SCANNER_ERROR_CODE | test("^[A-Z0-9_]+$")))
-             and (.FINDING_COUNT == null
-                  or ((.FINDING_COUNT | type) == "number"
-                      and .FINDING_COUNT >= 0
-                      and (.FINDING_COUNT | floor) == .FINDING_COUNT))
-             and (.FINDING_CLASS | type) == "array"
-             and all(.FINDING_CLASS[];
-                     . == "PRIVATE_KEY_MATERIAL"
-                     or . == "PROTECTED_SECRET_MATERIAL"
-                     or . == "KNOWN_PROVIDER_CREDENTIAL"
-                     or . == "HIGH_ENTROPY_CREDENTIAL"
-                     or . == "CREDENTIAL_IN_URL")
-             and (.FINDING_LOCATION | type) == "array"
-             and all(.FINDING_LOCATION[];
-                     (.scope == "metadata" or .scope == "layer")
-                     and (.path_sha256 | test("^[0-9a-f]{64}$"))
-                     and (.layer_digest == null
-                          or (.layer_digest | test("^sha256:[0-9a-f]{64}$"))))
-             and (.SCAN_POLICY_SHA256 | test("^[0-9a-f]{64}$"))
-             and (if $rc == 0
-                  then .STATUS == "PASS" and .SCANNER_ERROR_CLASS == "NONE"
-                  else .STATUS == "FAIL"
-                  end)' \
-            "$receipt" >/dev/null
+            "$receipt_filter" "$receipt" >/dev/null
           echo "scanner_exit_code=$scanner_rc" >> "$GITHUB_OUTPUT"
           echo "receipt_safe=true" >> "$GITHUB_OUTPUT"
 

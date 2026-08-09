@@ -287,6 +287,10 @@ def test_finding_receipt_contains_only_sanitized_locations(tmp_path: Path) -> No
     assert receipt["SCANNER_ERROR_CLASS"] == "FINDING"
     assert receipt["FINDING_COUNT"] == receipt["IMAGE_SECRET_FINDINGS"]
     assert receipt["FINDING_CLASS"] == ["PROTECTED_SECRET_MATERIAL"]
+    assert all(
+        item["layer_digest"].startswith("sha256:")
+        for item in receipt["FINDING_LOCATION"]
+    )
     assert receipt["IMAGE_DIGEST"] == digest
     assert TOKEN not in serialized
     assert "config.env" not in serialized

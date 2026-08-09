@@ -54,8 +54,15 @@ def test_workflow_binds_full_image_scan_to_exact_digest_before_summary() -> None
     assert '--expected-source-sha "$GITHUB_SHA"' in text
     assert "set +e" in text
     assert 'scanner_rc="$?"' in text
+    assert "image-secret-attestation.candidate.json" in text
+    assert "def exact_keys" in text
+    assert 'SCANNER_ERROR_CLASS: "RECEIPT_ERROR"' in text
+    assert 'SCANNER_ERROR_CODE: "SCANNER_RECEIPT_INVALID"' in text
+    assert '[[ -f "$candidate" && ! -L "$candidate" ]]' in text
+    assert 'test ! -L "$receipt"' in text
     assert "receipt_safe=true" in text
     assert "always() && steps.image_scan.outputs.receipt_safe == 'true'" in text
+    assert "image-secret-attestation.candidate.json" not in text[upload:gate]
     assert 'test "${{ steps.image_scan.outputs.scanner_exit_code }}" -eq 0' in text
     assert ".SCANNER_EXIT_CODE == 0" in text
     assert ".FINDING_COUNT == 0" in text

@@ -565,7 +565,9 @@ def _analyze_image_archive_staged(
     ):
         layer_count, files, scanned, evidence = _scan_layer(
             layer_path,
-            layer_id=diff_id if stored_id.endswith(".tar") else stored_id,
+            layer_id=(
+                stored_id if SHA256_RE.fullmatch(stored_id) is not None else diff_id
+            ),
             tree=tree,
             protected_names=names,
             exact_values=values,

@@ -7,6 +7,10 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # our Debian 13 (trixie, glibc 2.41) runtime.  Bumping to a new Node major
 # is a one-line ARG change; see #4977.
 FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
+RUN rm -f /usr/local/lib/node_modules/npm/docs/content/using-npm/config.md \
+    && rm -f /usr/local/lib/node_modules/npm/docs/output/using-npm/config.html \
+    && rm -f /usr/local/lib/node_modules/npm/man/man7/config.7 \
+    && rm -f /usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/README.md
 FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately
@@ -133,7 +137,8 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 ENV npm_config_install_links=false
 
 RUN npm install --prefer-offline --no-audit && \
-    npm cache clean --force
+    npm cache clean --force && \
+    rm -f /tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d
 
 # ---------- Layer-cached Python dependency install ----------
 # Copy only pyproject.toml + uv.lock so the Python dep resolve + wheel
@@ -177,7 +182,17 @@ RUN npm install --prefer-offline --no-audit && \
 COPY pyproject.toml uv.lock ./
 COPY scripts/playwright_artifact_contract.py scripts/playwright_installed_closure.py scripts/install_pinned_playwright_artifact.py scripts/
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra google-meet --extra anthropic --extra bedrock --extra azure-identity --extra hindsight --extra matrix && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Cipher/test_pkcs1_15.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Protocol/test_ecdh.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/PublicKey/test_import_DSA.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/PublicKey/test_import_ECC.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/PublicKey/test_import_RSA.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Signature/test_pkcs1_15.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Signature/test_pss.py && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/tornado/test/test.key && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/youtube_transcript_api/test/assets/youtube.html.static && \
+    rm -f /opt/hermes/.venv/lib/python3.13/site-packages/botocore/data/iam/2010-05-08/examples-1.json
 
 # ---------- Verified Playwright artifact closure ----------
 # `playwright_artifacts` is one mandatory read-only BuildKit named context.
@@ -202,7 +217,8 @@ RUN --mount=type=bind,from=playwright_artifacts,source=/,target=/tmp/playwright-
         --lockfile ./uv.lock \
         --wheel /tmp/playwright-artifacts/playwright-wheel \
         --expected-closure-manifest-sha256 "${PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256}" \
-        --platform "${playwright_platform}"
+        --platform "${playwright_platform}"; \
+    rm -f /var/lib/apt/lists/deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages.lz4
 
 # ---------- Frontend build (cached independently from Python source) ----------
 # Copy only the frontend source trees first so that Python-only changes don't

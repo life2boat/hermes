@@ -1,5 +1,24 @@
 # CURRENT_STATE changelog
 
+## 1.2.18 - 2026-08-09
+
+Added:
+- recorded the repository-only image-secret remediation candidate: five source
+  self-detection rewrites, sixteen pre-layer dependency cleanups, and twenty-nine
+  exact evidence-bound exceptions;
+- recorded fail-closed exception binding to exact path, rule, package version,
+  artifact identity, file hash, and marker shape.
+
+Changed:
+- updated repository-state verification to canonical planning base
+  248d0f7683889bd4b169996f8603031f36afbfb1;
+- marked the expected zero-finding OCI result as NOT CONFIRMED until a post-merge
+  exact-main build and full scan.
+
+Safety:
+- production, containers, SQLite, Qdrant, and secrets were not changed;
+- no production or local production-host image build was performed.
+
 ## 1.2.16 - 2026-08-08
 
 Added:

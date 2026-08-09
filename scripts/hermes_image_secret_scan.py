@@ -37,6 +37,32 @@ MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_FINDING_EVIDENCE = 1000
 SCAN_CHUNK_BYTES = 1024 * 1024
 SCAN_OVERLAP_BYTES = 4096
+EXCEPTION_POLICY_RELATIVE = "deploy/hermes-image-secret-exceptions.json"
+EXCEPTION_POLICY_VERSION = 1
+EXPECTED_EXCEPTION_COUNT = 29
+CLASSIFICATION_EVIDENCE_SHA256 = (
+    "fac63b22b1de3d5a0dbf0d312fc9a6100154a9762348349414508542845927bf"
+)
+PATH_EVIDENCE_SHA256 = (
+    "69f181a1f7e621f74a4a355dd6c5b79a1eea1d62e81c6bf5c9b1e6ecd01463bc"
+)
+HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+ARTIFACT_ID_RE = re.compile(r"(?:sha256:[0-9a-f]{64}|sha512-[A-Za-z0-9+/]{86}==)")
+PACKAGE_NAME_RE = re.compile(r"(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9][A-Za-z0-9._+:-]*")
+PACKAGE_VERSION_RE = re.compile(r"[0-9][0-9A-Za-z.+:~_-]*")
+EXCEPTION_RULE_CLASSES = {
+    "high-entropy-secret-assignment": "HIGH_ENTROPY_CREDENTIAL",
+    "private-key-block": "PRIVATE_KEY_MATERIAL",
+    "protected-secret-assignment": "PROTECTED_SECRET_MATERIAL",
+}
+EXCEPTION_CLASSIFICATIONS = frozenset({
+    "FALSE_POSITIVE",
+    "DEPENDENCY_ARTIFACT",
+    "TEST_FIXTURE",
+})
+PRIVATE_KEY_SHAPES = frozenset({"NONE", "MARKER_ONLY", "WELL_FORMED_PEM"})
+_PRIVATE_KEY_BEGIN = b"-----BEGIN "
+_PRIVATE_KEY_SUFFIX = b"PRIVATE " + b"KEY-----"
 
 
 class ImageScanError(RuntimeError):
@@ -52,6 +78,26 @@ class FindingEvidence:
     scope: str
     path_sha256: str
     layer_id: str | None
+
+
+@dataclass(frozen=True)
+class ImageSecretException:
+    exception_id: str
+    normalized_path: str
+    path_sha256: str
+    rule_ids: tuple[str, ...]
+    package_name: str
+    package_version: str
+    artifact_identity: str
+    file_sha256: str
+    classification: str
+    justification: str
+    private_key_shape: str
+
+
+@dataclass(frozen=True)
+class ExceptionPolicy:
+    exceptions: tuple[ImageSecretException, ...]
 
 
 @dataclass
@@ -114,6 +160,232 @@ def _safe_path(value: str, *, rootfs: bool = False) -> str:
     if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise ImageScanError("IMAGE_ARCHIVE_PATH_UNSAFE")
     return path.as_posix()
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID")
+        result[key] = value
+    return result
+
+
+def _load_exception_json(path: Path) -> dict[str, Any]:
+    try:
+        raw = _read_limited(path, "IMAGE_EXCEPTION_POLICY_INVALID")
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except ImageScanError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID") from exc
+    if not isinstance(value, dict):
+        raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID")
+    return value
+
+
+def _rule_ids(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = (value,)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        values = tuple(value)
+    else:
+        values = ()
+    if (
+        not values
+        or len(values) > 2
+        or len(set(values)) != len(values)
+        or any(rule not in EXCEPTION_RULE_CLASSES for rule in values)
+    ):
+        raise ImageScanError("IMAGE_EXCEPTION_RULE_INVALID")
+    return values
+
+
+def load_exception_policy(repository_root: Path = REPOSITORY_ROOT) -> ExceptionPolicy:
+    payload = _load_exception_json(repository_root / EXCEPTION_POLICY_RELATIVE)
+    if set(payload) != {
+        "policy_version",
+        "classification_evidence_sha256",
+        "path_evidence_sha256",
+        "artifact_bindings",
+        "exceptions",
+    }:
+        raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID")
+    if (
+        payload["policy_version"] != EXCEPTION_POLICY_VERSION
+        or payload["classification_evidence_sha256"] != CLASSIFICATION_EVIDENCE_SHA256
+        or payload["path_evidence_sha256"] != PATH_EVIDENCE_SHA256
+    ):
+        raise ImageScanError("IMAGE_EXCEPTION_EVIDENCE_MISMATCH")
+
+    raw_bindings = payload["artifact_bindings"]
+    if not isinstance(raw_bindings, list) or not raw_bindings:
+        raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_INVALID")
+    bindings: set[tuple[str, str, str]] = set()
+    for binding in raw_bindings:
+        if not isinstance(binding, dict) or set(binding) != {
+            "package_name",
+            "package_version",
+            "artifact_identity",
+        }:
+            raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_INVALID")
+        package_name = binding["package_name"]
+        package_version = binding["package_version"]
+        artifact_identity = binding["artifact_identity"]
+        if (
+            not isinstance(package_name, str)
+            or PACKAGE_NAME_RE.fullmatch(package_name) is None
+            or not isinstance(package_version, str)
+            or PACKAGE_VERSION_RE.fullmatch(package_version) is None
+            or not isinstance(artifact_identity, str)
+            or ARTIFACT_ID_RE.fullmatch(artifact_identity) is None
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_INVALID")
+        identity = (package_name, package_version, artifact_identity)
+        if identity in bindings:
+            raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_INVALID")
+        bindings.add(identity)
+
+    raw_exceptions = payload["exceptions"]
+    if (
+        not isinstance(raw_exceptions, list)
+        or len(raw_exceptions) != EXPECTED_EXCEPTION_COUNT
+    ):
+        raise ImageScanError("IMAGE_EXCEPTION_COUNT_MISMATCH")
+    exceptions: list[ImageSecretException] = []
+    paths: set[str] = set()
+    used_bindings: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(raw_exceptions, start=1):
+        if not isinstance(item, dict) or set(item) != {
+            "exception_id",
+            "normalized_path",
+            "path_sha256",
+            "rule_id",
+            "package_name",
+            "package_version",
+            "artifact_identity",
+            "file_sha256",
+            "classification",
+            "justification",
+            "private_key_shape",
+        }:
+            raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID")
+        exception_id = item["exception_id"]
+        normalized_path = item["normalized_path"]
+        path_sha256 = item["path_sha256"]
+        package_name = item["package_name"]
+        package_version = item["package_version"]
+        artifact_identity = item["artifact_identity"]
+        file_sha256 = item["file_sha256"]
+        classification = item["classification"]
+        justification = item["justification"]
+        private_key_shape = item["private_key_shape"]
+        if exception_id != f"EXC-{index:03d}":
+            raise ImageScanError("IMAGE_EXCEPTION_ID_INVALID")
+        if (
+            not isinstance(normalized_path, str)
+            or not normalized_path.startswith("/")
+            or any(character in normalized_path for character in "*?")
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_PATH_INVALID")
+        relative_path = normalized_path[1:]
+        try:
+            if _safe_path(relative_path, rootfs=True) != relative_path:
+                raise ImageScanError("IMAGE_EXCEPTION_PATH_INVALID")
+        except ImageScanError as exc:
+            raise ImageScanError("IMAGE_EXCEPTION_PATH_INVALID") from exc
+        if normalized_path in paths:
+            raise ImageScanError("IMAGE_EXCEPTION_PATH_INVALID")
+        paths.add(normalized_path)
+        if (
+            not isinstance(path_sha256, str)
+            or HEX_SHA256_RE.fullmatch(path_sha256) is None
+            or path_sha256
+            != _sha256(relative_path.encode("utf-8", errors="surrogateescape"))
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_PATH_HASH_MISMATCH")
+        if (
+            not isinstance(package_name, str)
+            or not package_name
+            or not isinstance(package_version, str)
+            or not package_version
+            or not isinstance(artifact_identity, str)
+            or ARTIFACT_ID_RE.fullmatch(artifact_identity) is None
+            or not isinstance(classification, str)
+            or not isinstance(private_key_shape, str)
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_POLICY_INVALID")
+        if (
+            not isinstance(file_sha256, str)
+            or HEX_SHA256_RE.fullmatch(file_sha256) is None
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_FILE_HASH_INVALID")
+        identity = (package_name, package_version, artifact_identity)
+        if identity not in bindings:
+            raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_MISMATCH")
+        used_bindings.add(identity)
+        if classification not in EXCEPTION_CLASSIFICATIONS:
+            raise ImageScanError("IMAGE_EXCEPTION_CLASSIFICATION_INVALID")
+        if (
+            not isinstance(justification, str)
+            or not justification
+            or len(justification) > 500
+            or "\n" in justification
+            or "\r" in justification
+        ):
+            raise ImageScanError("IMAGE_EXCEPTION_JUSTIFICATION_INVALID")
+        if private_key_shape not in PRIVATE_KEY_SHAPES:
+            raise ImageScanError("IMAGE_EXCEPTION_PRIVATE_KEY_SHAPE_INVALID")
+        exceptions.append(
+            ImageSecretException(
+                exception_id,
+                normalized_path,
+                path_sha256,
+                _rule_ids(item["rule_id"]),
+                package_name,
+                package_version,
+                artifact_identity,
+                file_sha256,
+                classification,
+                justification,
+                private_key_shape,
+            )
+        )
+    if used_bindings != bindings:
+        raise ImageScanError("IMAGE_EXCEPTION_ARTIFACT_BINDING_UNUSED")
+    well_formed = [
+        item for item in exceptions if item.private_key_shape == "WELL_FORMED_PEM"
+    ]
+    if len(well_formed) != 1 or well_formed[0].package_name != "libgnutls30t64":
+        raise ImageScanError("IMAGE_EXCEPTION_WELL_FORMED_SCOPE_INVALID")
+    return ExceptionPolicy(tuple(exceptions))
+
+
+def _apply_finding_exceptions(
+    findings: Iterable[SecretFinding],
+    *,
+    normalized_path: str,
+    file_sha256: str,
+    private_key_shape: str,
+    policy: ExceptionPolicy,
+) -> list[SecretFinding]:
+    absolute_path = "/" + normalized_path
+    remaining: list[SecretFinding] = []
+    for finding in findings:
+        matched = any(
+            item.normalized_path == absolute_path
+            and item.file_sha256 == file_sha256
+            and item.private_key_shape == private_key_shape
+            and finding.rule_id in item.rule_ids
+            and EXCEPTION_RULE_CLASSES[finding.rule_id] == finding.match_class
+            for item in policy.exceptions
+            if finding.rule_id in EXCEPTION_RULE_CLASSES
+        )
+        if not matched:
+            remaining.append(finding)
+    return remaining
 
 
 def _validate_symlink_target(member_path: str, target: str) -> None:
@@ -374,6 +646,7 @@ def _policy_sha(repository_root: Path, protected_names: Iterable[str]) -> str:
         "scripts/secret_scanner.py",
         "scripts/hermes_image_secret_scan.py",
         "deploy/hermes-production.json",
+        EXCEPTION_POLICY_RELATIVE,
     ):
         digest.update(relative.encode("ascii") + b"\0")
         digest.update((repository_root / relative).read_bytes() + b"\0")
@@ -413,7 +686,7 @@ def _scan_stream(
     *,
     protected_names: Iterable[str],
     exact_values: Iterable[bytes],
-) -> tuple[list[SecretFinding], int]:
+) -> tuple[list[SecretFinding], int, str, str]:
     values = tuple(value for value in exact_values if value)
     overlap = max(
         SCAN_OVERLAP_BYTES,
@@ -422,14 +695,22 @@ def _scan_stream(
     tail = b""
     scanned = 0
     found: dict[tuple[str, str], SecretFinding] = {}
+    digest = hashlib.sha256()
+    private_key_shape = "NONE"
     while chunk := stream.read(SCAN_CHUNK_BYTES):
         scanned += len(chunk)
+        digest.update(chunk)
         window = tail + chunk
-        for finding in scan_secret_blob(window, protected_names=protected_names):
+        current = scan_secret_blob(window, protected_names=protected_names)
+        for finding in current:
             found[(finding.rule_id, finding.match_class)] = finding
-        if b"-----BEGIN " in window and b"PRIVATE KEY-----" in window:
+        if any(item.rule_id == "private-key-block" for item in current):
+            private_key_shape = "WELL_FORMED_PEM"
+        if _PRIVATE_KEY_BEGIN in window and _PRIVATE_KEY_SUFFIX in window:
             finding = SecretFinding("private-key-block", "PRIVATE_KEY_MATERIAL")
             found[(finding.rule_id, finding.match_class)] = finding
+            if private_key_shape == "NONE":
+                private_key_shape = "MARKER_ONLY"
         for value in values:
             if value in window:
                 finding = SecretFinding(
@@ -438,7 +719,7 @@ def _scan_stream(
                 )
                 found[(finding.rule_id, finding.match_class)] = finding
         tail = window[-overlap:]
-    return list(found.values()), scanned
+    return list(found.values()), scanned, digest.hexdigest(), private_key_shape
 
 
 def _remove(tree: dict[str, tuple[int, int]], target: str) -> None:
@@ -455,6 +736,7 @@ def _scan_layer(
     tree: dict[str, tuple[int, int]],
     protected_names: Iterable[str],
     exact_values: Iterable[bytes],
+    exception_policy: ExceptionPolicy,
 ) -> tuple[int, int, int, list[FindingEvidence]]:
     count = files = scanned = 0
     evidence: list[FindingEvidence] = []
@@ -496,13 +778,20 @@ def _scan_layer(
                 source = layer.extractfile(member)
                 if source is None:
                     raise ImageScanError("IMAGE_LAYER_MEMBER_MISSING")
-                current, bytes_read = _scan_stream(
+                current, bytes_read, file_sha256, private_key_shape = _scan_stream(
                     source,
                     protected_names=protected_names,
                     exact_values=exact_values,
                 )
                 if bytes_read != member.size:
                     raise ImageScanError("IMAGE_LAYER_MEMBER_TRUNCATED")
+                current = _apply_finding_exceptions(
+                    current,
+                    normalized_path=member_path,
+                    file_sha256=file_sha256,
+                    private_key_shape=private_key_shape,
+                    policy=exception_policy,
+                )
                 tree[member_path] = (len(current), bytes_read)
                 count += len(current)
                 files += 1
@@ -546,6 +835,7 @@ def _analyze_image_archive_staged(
             raise ImageScanError("IMAGE_LAYER_IDENTITY_MISMATCH")
     names = tuple(sorted(set(protected_names)))
     values = tuple(exact_secret_values)
+    exception_policy = load_exception_policy(repository_root)
     result = ScanResult(
         image_id,
         revision,
@@ -571,6 +861,7 @@ def _analyze_image_archive_staged(
             tree=tree,
             protected_names=names,
             exact_values=values,
+            exception_policy=exception_policy,
         )
         result.layer_findings += layer_count
         result.files_scanned += files

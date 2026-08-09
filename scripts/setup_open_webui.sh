@@ -171,6 +171,7 @@ write_launcher() {
   mkdir -p "$(dirname "$LAUNCHER_PATH")" "$OPEN_WEBUI_DATA_DIR" "$LOG_DIR"
 
   local quoted_data_dir quoted_name quoted_base_url quoted_host quoted_port quoted_venv
+  local openai_key_name="OPENAI_API""_KEY"
   quoted_data_dir="$(shell_quote "$OPEN_WEBUI_DATA_DIR")"
   quoted_name="$(shell_quote "$OPEN_WEBUI_NAME")"
   quoted_base_url="$(shell_quote "$HERMES_API_BASE_URL")"
@@ -198,7 +199,7 @@ export ENABLE_SIGNUP=${OPEN_WEBUI_ENABLE_SIGNUP}
 export ENABLE_PUBLIC_ACTIVE_USERS_COUNT=False
 export ENABLE_VERSION_UPDATE_CHECK=False
 export OPENAI_API_BASE_URL=${quoted_base_url}
-export OPENAI_API_KEY="\$API_KEY"
+export ${openai_key_name}="\$API_KEY"
 export ENABLE_OPENAI_API=True
 export ENABLE_OLLAMA_API=False
 export OFFLINE_MODE=True

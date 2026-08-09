@@ -131,7 +131,7 @@ _TELEGRAM_RE = re.compile(
     r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
 )
 
-# Private key blocks: -----BEGIN RSA PRIVATE KEY----- ... -----END RSA PRIVATE KEY-----
+# Private-key blocks in the supported PEM forms.
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
 )

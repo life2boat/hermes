@@ -263,7 +263,14 @@ async def test_runner_priority_media_survives_until_late_drain(
         await release.wait()
         return ""
 
+    async def yield_to_queued_drain(*_args, **_kwargs):
+        # Deterministically exercise the Linux scheduling order that exposed
+        # the race: the child claims the shared event while the parent's
+        # finalizer is suspended before deciding whether to delete its media.
+        await asyncio.sleep(0)
+
     adapter.set_message_handler(handler)
+    adapter.stop_typing = yield_to_queued_drain
     initial = _event(cached)
     task = asyncio.create_task(
         adapter._process_message_background(initial, session_key)
@@ -277,6 +284,79 @@ async def test_runner_priority_media_survives_until_late_drain(
     for drain_task in list(adapter._background_tasks):
         await drain_task
     assert not Path(cached).exists()
+
+
+@pytest.mark.asyncio
+async def test_prestart_cancelled_drain_cleans_media_and_session_guard(
+    private_image_cache: Path,
+) -> None:
+    from gateway.run import GatewayRunner
+
+    cached = cache_image_from_bytes(_png_header(), ext=".png")
+    adapter = _CleanupAdapter(
+        PlatformConfig(enabled=True, token="test-token"),
+        Platform.TELEGRAM,
+    )
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._queued_events = {}
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    initial = _event(cached)
+    session_key = build_session_key(initial.source)
+    created_tasks = []
+
+    async def handler(incoming):
+        assert runner._queue_or_replace_pending_event(session_key, incoming)
+        return ""
+
+    original_create = adapter._create_message_processing_task
+
+    def create_cancelled_drain(incoming, key):
+        task = original_create(incoming, key)
+        task.cancel()
+        created_tasks.append(task)
+        return task
+
+    adapter.set_message_handler(handler)
+    adapter._create_message_processing_task = create_cancelled_drain
+    await adapter._process_message_background(initial, session_key)
+
+    assert len(created_tasks) == 1
+    with pytest.raises(asyncio.CancelledError):
+        await created_tasks[0]
+    await asyncio.sleep(0)
+
+    assert not Path(cached).exists()
+    assert session_key not in adapter._active_sessions
+    assert session_key not in adapter._session_tasks
+
+
+@pytest.mark.asyncio
+async def test_prestart_cleanup_cannot_release_replacement_command_guard(
+    private_image_cache: Path,
+) -> None:
+    cached = cache_image_from_bytes(_png_header(), ext=".png")
+    adapter = _CleanupAdapter(
+        PlatformConfig(enabled=True, token="test-token"),
+        Platform.TELEGRAM,
+    )
+    event = _event(cached)
+    session_key = build_session_key(event.source)
+    original_guard = asyncio.Event()
+    replacement_guard = asyncio.Event()
+    adapter._active_sessions[session_key] = original_guard
+
+    task = adapter._create_message_processing_task(event, session_key)
+    adapter._session_tasks[session_key] = task
+    task.cancel()
+    adapter._active_sessions[session_key] = replacement_guard
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert not Path(cached).exists()
+    assert adapter._active_sessions.get(session_key) is replacement_guard
+    assert session_key not in adapter._session_tasks
 
 
 @pytest.mark.asyncio

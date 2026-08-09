@@ -3825,6 +3825,46 @@ class BasePlatformAdapter(ABC):
         self._discard_text_debounce(session_key)
         return True
 
+    def _create_message_processing_task(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ):
+        """Create a processing task with fail-closed pre-start cleanup.
+
+        Cancelling an ``asyncio.Task`` before its first timeslice means the
+        wrapped coroutine never enters its own ``finally``.  Media ownership
+        may already have moved out of the pending queue at that point, so keep
+        a task-level fallback that removes cached pixels and releases the
+        matching session guard only when this consumer never started.
+        """
+        started = False
+        owned_guard = self._active_sessions.get(session_key)
+
+        async def _run() -> None:
+            nonlocal started
+            started = True
+            await self._process_message_background(event, session_key)
+
+        task = asyncio.create_task(_run())
+
+        if hasattr(task, "add_done_callback"):
+            def _cleanup_if_never_started(done_task) -> None:
+                if started:
+                    return
+                cleanup_cached_image_paths(event.media_urls)
+                if self._session_tasks.get(session_key) is done_task:
+                    self._session_tasks.pop(session_key, None)
+                    if owned_guard is not None:
+                        self._release_session_guard(
+                            session_key,
+                            guard=owned_guard,
+                        )
+
+            task.add_done_callback(_cleanup_if_never_started)
+
+        return task
+
     def _start_session_processing(
         self,
         event: MessageEvent,
@@ -3842,7 +3882,7 @@ class BasePlatformAdapter(ABC):
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
 
-        task = asyncio.create_task(self._process_message_background(event, session_key))
+        task = self._create_message_processing_task(event, session_key)
         self._session_tasks[session_key] = task
         try:
             self._background_tasks.add(task)
@@ -4648,8 +4688,8 @@ class BasePlatformAdapter(ABC):
                 # exhaust at ~2000 frames and SIGSEGV the process.
                 # Mirror the late-arrival drain pattern below: hand off
                 # to a new task and return so this frame can unwind.
-                drain_task = asyncio.create_task(
-                    self._process_message_background(pending_event, session_key)
+                drain_task = self._create_message_processing_task(
+                    pending_event, session_key
                 )
                 # Hand ownership of the session to the drain task so
                 # stale-lock detection keeps working while it runs.
@@ -4689,6 +4729,14 @@ class BasePlatformAdapter(ABC):
             except Exception:
                 pass  # Last resort — don't let error reporting crash the handler
         finally:
+            # Snapshot this invocation's handoff decision before the first
+            # await in cleanup.  A queued drain can start during any await
+            # below and claim the same MessageEvent by clearing the shared
+            # marker.  The parent must still remember that it transferred the
+            # cached files instead of deleting them out from under the child.
+            _media_ownership_transferred_before_cleanup = bool(
+                getattr(event, "_cached_media_ownership_transferred", False)
+            )
             # Stop typing before any deferred callback work.  Post-delivery
             # callbacks may perform platform I/O; a stuck callback must not
             # leave the typing refresh task running indefinitely.
@@ -4773,8 +4821,8 @@ class BasePlatformAdapter(ABC):
                     _active = self._active_sessions.get(session_key)
                     if _active is not None:
                         _active.clear()
-                    drain_task = asyncio.create_task(
-                        self._process_message_background(late_pending, session_key)
+                    drain_task = self._create_message_processing_task(
+                        late_pending, session_key
                     )
                     # Hand ownership of the session to the drain task so stale-lock
                     # detection keeps working while it runs.
@@ -4813,7 +4861,10 @@ class BasePlatformAdapter(ABC):
             # The event's final consumer (including hooks/callbacks) is done.
             # A queued event may have transferred its files to an in-band
             # runner drain; that drain owns cleanup instead of this task.
-            if not getattr(event, "_cached_media_ownership_transferred", False):
+            if (
+                not _media_ownership_transferred_before_cleanup
+                and not getattr(event, "_cached_media_ownership_transferred", False)
+            ):
                 cleanup_cached_image_paths(event.media_urls)
     
     async def cancel_background_tasks(self) -> None:

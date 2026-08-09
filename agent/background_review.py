@@ -24,6 +24,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from agent.message_sanitization import sanitize_durable_multimodal_payload
+
 logger = logging.getLogger(__name__)
 
 
@@ -592,8 +594,14 @@ def spawn_background_review_thread(
     else:
         prompt = getattr(agent, "_SKILL_REVIEW_PROMPT", _SKILL_REVIEW_PROMPT)
 
+    # The review fork is a secondary model consumer. It needs the textual
+    # conversation, never the original image bytes, provider URL, or local
+    # cache handle. Sanitize synchronously so later foreground mutations cannot
+    # race with the daemon thread.
+    sanitized_snapshot = sanitize_durable_multimodal_payload(messages_snapshot)
+
     def _target() -> None:
-        _run_review_in_thread(agent, messages_snapshot, prompt)
+        _run_review_in_thread(agent, sanitized_snapshot, prompt)
 
     return _target, prompt
 

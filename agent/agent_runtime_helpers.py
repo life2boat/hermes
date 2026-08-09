@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.timeouts import get_provider_request_timeout
+from agent.message_sanitization import sanitize_durable_multimodal_payload
 from agent.prompt_builder import format_steer_marker
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.trajectory import convert_scratchpad_to_think
@@ -78,7 +79,9 @@ def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_que
     # Normalize multimodal tool results — trajectories are text-only, so
     # replace image-bearing tool messages with their text_summary to avoid
     # embedding ~1MB base64 blobs into every saved trajectory.
+    messages = sanitize_durable_multimodal_payload(messages)
     messages = [_trajectory_normalize_msg(m) for m in messages]
+    user_query = sanitize_durable_multimodal_payload(user_query)
     trajectory = []
     
     # Add system message with tool definitions

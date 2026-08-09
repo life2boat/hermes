@@ -601,11 +601,20 @@ async def _ssrf_redirect_guard(response):
 
 # Default location: {HERMES_HOME}/cache/images/ (legacy: image_cache/)
 IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
+MAX_CACHED_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_CACHED_IMAGE_DIMENSION = 7900
 
 
 def get_image_cache_dir() -> Path:
     """Return the image cache directory, creating it if it doesn't exist."""
-    IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGE_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # mkdir's mode is affected by umask and does not change an existing
+    # directory. Tighten both cases best-effort; Windows does not implement
+    # POSIX mode bits, so failure must not break media handling there.
+    try:
+        IMAGE_CACHE_DIR.chmod(0o700)
+    except OSError:
+        pass
     return IMAGE_CACHE_DIR
 
 
@@ -641,17 +650,79 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
         ValueError: If *data* does not look like a valid image (e.g. an HTML
             error page returned by the upstream server).
     """
+    if not data or len(data) > MAX_CACHED_IMAGE_BYTES:
+        raise ValueError("Refusing to cache image outside the allowed byte-size range")
     if not _looks_like_image(data):
-        snippet = data[:80].decode("utf-8", errors="replace")
-        raise ValueError(
-            f"Refusing to cache non-image data as {ext} "
-            f"(starts with: {snippet!r})"
-        )
+        # Do not echo an attacker-controlled payload excerpt into logs through
+        # exception formatting. The exception class is sufficient evidence.
+        raise ValueError(f"Refusing to cache non-image data as {ext}")
+
+    # Reuse the existing stdlib-only parser. This avoids decoding a potential
+    # decompression bomb merely to enforce the provider's per-side ceiling.
+    try:
+        from gateway.platforms.yuanbao_media import parse_image_size
+
+        dimensions = parse_image_size(data)
+    except Exception:
+        dimensions = None
+    if not dimensions:
+        raise ValueError("Refusing to cache image with unparseable dimensions")
+    try:
+        width = int(dimensions["width"])
+        height = int(dimensions["height"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Refusing to cache image with unparseable dimensions") from None
+    if width <= 0 or height <= 0:
+        raise ValueError("Refusing to cache image with invalid dimensions")
+    if max(width, height) > MAX_CACHED_IMAGE_DIMENSION:
+        raise ValueError("Refusing to cache image outside the allowed dimension range")
+
     cache_dir = get_image_cache_dir()
     filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
     filepath = cache_dir / filename
-    filepath.write_bytes(data)
+    # O_EXCL prevents an unexpected overwrite and the explicit 0600 mode keeps
+    # cached pixels private independently of the process umask.
+    fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as image_file:
+            image_file.write(data)
+    except BaseException:
+        try:
+            filepath.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    try:
+        filepath.chmod(0o600)
+    except OSError:
+        pass
     return str(filepath)
+
+
+def cleanup_cached_image_paths(paths) -> int:
+    """Best-effort delete trusted inbound image-cache files.
+
+    Arbitrary attachment paths are never removed: every resolved target must
+    remain strictly below the configured image-cache directory. This makes
+    the helper safe to call on a mixed ``MessageEvent.media_urls`` list.
+    """
+    try:
+        cache_root = get_image_cache_dir().resolve()
+    except OSError:
+        return 0
+
+    removed = 0
+    for raw_path in paths or ():
+        try:
+            candidate = Path(raw_path).resolve()
+            candidate.relative_to(cache_root)
+            if candidate == cache_root or not candidate.is_file():
+                continue
+            candidate.unlink()
+            removed += 1
+        except (OSError, TypeError, ValueError):
+            continue
+    return removed
 
 
 async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) -> str:
@@ -1649,7 +1720,7 @@ def merge_pending_message_event(
     event: MessageEvent,
     *,
     merge_text: bool = False,
-) -> None:
+) -> bool:
     """Store or merge a pending event for a session.
 
     Photo bursts/albums often arrive as multiple near-simultaneous PHOTO
@@ -1661,6 +1732,31 @@ def merge_pending_message_event(
     follow-ups so a multi-part user thought is not silently truncated to only
     the last queued fragment.
     """
+    def _source_identity(candidate: MessageEvent):
+        source = getattr(candidate, "source", None)
+        if source is None:
+            return None
+        actor = getattr(source, "user_id_alt", None) or getattr(source, "user_id", None)
+        chat_type = str(getattr(source, "chat_type", "") or "").lower()
+        if actor is None and chat_type not in {"dm", "private"}:
+            return None
+        return (
+            _platform_name(getattr(source, "platform", None)),
+            str(getattr(source, "guild_id", None) or ""),
+            str(
+                getattr(source, "chat_id_alt", None)
+                or getattr(source, "chat_id", None)
+                or ""
+            ),
+            str(getattr(source, "parent_chat_id", None) or ""),
+            str(getattr(source, "thread_id", None) or ""),
+            str(actor or ""),
+        )
+
+    def _accept_media_ownership() -> None:
+        if getattr(event, "media_urls", None):
+            event._cached_media_ownership_transferred = True
+
     existing = pending_messages.get(session_key)
     if existing:
         existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
@@ -1668,12 +1764,23 @@ def merge_pending_message_event(
         existing_has_media = bool(existing.media_urls)
         incoming_has_media = bool(event.media_urls)
 
+        if existing_has_media or incoming_has_media:
+            existing_identity = _source_identity(existing)
+            incoming_identity = _source_identity(event)
+            if (
+                existing_identity is None
+                or incoming_identity is None
+                or existing_identity != incoming_identity
+            ):
+                return False
+
         if existing_is_photo and incoming_is_photo:
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
-            return
+            _accept_media_ownership()
+            return True
 
         if existing_has_media or incoming_has_media:
             if incoming_has_media:
@@ -1691,7 +1798,8 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
-            return
+            _accept_media_ownership()
+            return True
 
         if (
             merge_text
@@ -1700,9 +1808,11 @@ def merge_pending_message_event(
         ):
             if event.text:
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
-            return
+            return True
 
     pending_messages[session_key] = event
+    _accept_media_ownership()
+    return True
 
 
 # Error substrings that indicate a transient *connection* failure worth retrying.
@@ -3543,12 +3653,16 @@ class BasePlatformAdapter(ABC):
             if state is not None and not self._can_merge_text_debounce_events(state.event, event):
                 existing_pending = self._pending_messages.get(session_key)
                 if existing_pending is not None and self._can_merge_text_debounce_events(existing_pending, event):
-                    merge_pending_message_event(
+                    accepted = merge_pending_message_event(
                         self._pending_messages,
                         session_key,
                         event,
                         merge_text=True,
                     )
+                    if not accepted:
+                        cleanup_cached_image_paths(event.media_urls)
+                elif event.media_urls:
+                    cleanup_cached_image_paths(event.media_urls)
                 return
 
         now = time.monotonic()
@@ -3611,24 +3725,31 @@ class BasePlatformAdapter(ABC):
             existing_pending is not None
             and not self._can_merge_text_debounce_events(existing_pending, state.event)
         ):
+            state = store.pop(session_key, None)
+            if state is not None:
+                cleanup_cached_image_paths(state.event.media_urls)
             return False
 
         state = store.pop(session_key, None)
         if state is None:
             return False
-        merge_pending_message_event(
+        accepted = merge_pending_message_event(
             self._pending_messages,
             session_key,
             state.event,
             merge_text=True,
         )
-        return True
+        if not accepted:
+            cleanup_cached_image_paths(state.event.media_urls)
+        return accepted
 
     def _discard_text_debounce(self, session_key: str) -> None:
         """Cancel and drop pending text debounce state for control commands."""
         state = self._text_debounce_store().pop(session_key, None)
         if state is not None and state.task is not None and not state.task.done():
             state.task.cancel()
+        if state is not None:
+            cleanup_cached_image_paths(state.event.media_urls)
 
     # ------------------------------------------------------------------
     # Session task + guard ownership helpers
@@ -3697,7 +3818,9 @@ class BasePlatformAdapter(ABC):
             session_key,
         )
         self._active_sessions.pop(session_key, None)
-        self._pending_messages.pop(session_key, None)
+        stale_pending = self._pending_messages.pop(session_key, None)
+        if stale_pending is not None:
+            cleanup_cached_image_paths(stale_pending.media_urls)
         self._session_tasks.pop(session_key, None)
         self._discard_text_debounce(session_key)
         return True
@@ -3782,7 +3905,9 @@ class BasePlatformAdapter(ABC):
                     exc_info=True,
                 )
         if discard_pending:
-            self._pending_messages.pop(session_key, None)
+            discarded = self._pending_messages.pop(session_key, None)
+            if discarded is not None:
+                cleanup_cached_image_paths(discarded.media_urls)
             self._discard_text_debounce(session_key)
         if release_guard:
             self._release_session_guard(session_key)
@@ -3891,6 +4016,7 @@ class BasePlatformAdapter(ABC):
         enabling interruption support.
         """
         if not self._message_handler:
+            cleanup_cached_image_paths(event.media_urls)
             return
 
         coerce_plaintext_gateway_command(event)
@@ -3943,6 +4069,8 @@ class BasePlatformAdapter(ABC):
                             "[%s] Command '/%s' dispatch failed: %s",
                             self.name, cmd, e, exc_info=True,
                         )
+                    finally:
+                        cleanup_cached_image_paths(event.media_urls)
                     return
 
                 # Other bypass commands (/approve, /deny, /status,
@@ -3971,6 +4099,8 @@ class BasePlatformAdapter(ABC):
                             )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+                finally:
+                    cleanup_cached_image_paths(event.media_urls)
                 return
 
             # Clarify text-capture bypass: if the agent is blocked on a
@@ -4024,11 +4154,21 @@ class BasePlatformAdapter(ABC):
                             "[%s] Clarify text-intercept dispatch failed: %s",
                             self.name, e, exc_info=True,
                         )
+                    finally:
+                        cleanup_cached_image_paths(event.media_urls)
                     return
 
             if self._busy_session_handler is not None:
                 try:
                     if await self._busy_session_handler(event, session_key):
+                        # The gateway busy handler normally transfers this exact
+                        # event into _pending_messages.  Delete only when the
+                        # handler consumed/steered it without transferring cached
+                        # media ownership to the pending turn.
+                        if not getattr(
+                            event, "_cached_media_ownership_transferred", False
+                        ):
+                            cleanup_cached_image_paths(event.media_urls)
                         return
                 except Exception as e:
                     logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)
@@ -4044,7 +4184,11 @@ class BasePlatformAdapter(ABC):
                     session_value=session_key,
                     session_scope="photo_followup_queue",
                 )
-                merge_pending_message_event(self._pending_messages, session_key, event)
+                accepted = merge_pending_message_event(
+                    self._pending_messages, session_key, event
+                )
+                if not accepted:
+                    cleanup_cached_image_paths(event.media_urls)
                 return  # Don't interrupt now - will run after current task completes
 
             if self._is_queue_text_debounce_candidate(event):
@@ -4063,12 +4207,14 @@ class BasePlatformAdapter(ABC):
                     self.name,
                     session_key,
                 )
-                merge_pending_message_event(
+                accepted = merge_pending_message_event(
                     self._pending_messages,
                     session_key,
                     event,
                     merge_text=event.message_type == MessageType.TEXT,
                 )
+                if not accepted:
+                    cleanup_cached_image_paths(event.media_urls)
             return  # Don't process now - will be handled after current task finishes
         
         # Mark session as active BEFORE spawning background task to close
@@ -4078,7 +4224,9 @@ class BasePlatformAdapter(ABC):
         # pattern — set the guard synchronously, not inside the task.)
         # _start_session_processing installs the guard AND the owner-task
         # mapping atomically so stale-lock detection works.
-        self._start_session_processing(event, session_key)
+        if not self._start_session_processing(event, session_key):
+            if not getattr(event, "_cached_media_ownership_transferred", False):
+                cleanup_cached_image_paths(event.media_urls)
     
     @staticmethod
     def _get_human_delay() -> float:
@@ -4109,6 +4257,13 @@ class BasePlatformAdapter(ABC):
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
+        # A queued media event arrives with ownership transferred from its
+        # ingress task. Claim it at this final-consumer boundary. If this same
+        # invocation later re-queues the event, the marker is set again and
+        # the finalizer leaves the files for the next drain owner.
+        if getattr(event, "_cached_media_ownership_transferred", False):
+            event._cached_media_ownership_transferred = False
+
         # Track delivery outcomes for the processing-complete hook
         delivery_attempted = False
         delivery_succeeded = False
@@ -4654,6 +4809,12 @@ class BasePlatformAdapter(ABC):
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
                     del self._session_tasks[session_key]
                     self._release_session_guard(session_key, guard=interrupt_event)
+
+            # The event's final consumer (including hooks/callbacks) is done.
+            # A queued event may have transferred its files to an in-band
+            # runner drain; that drain owns cleanup instead of this task.
+            if not getattr(event, "_cached_media_ownership_transferred", False):
+                cleanup_cached_image_paths(event.media_urls)
     
     async def cancel_background_tasks(self) -> None:
         """Cancel any in-flight background message-processing tasks.
@@ -4703,11 +4864,14 @@ class BasePlatformAdapter(ABC):
         self._background_tasks.clear()
         self._expected_cancelled_tasks.clear()
         self._session_tasks.clear()
+        for pending_event in self._pending_messages.values():
+            cleanup_cached_image_paths(pending_event.media_urls)
         self._pending_messages.clear()
         self._active_sessions.clear()
         for state in list(self._text_debounce_store().values()):
             if state.task is not None and not state.task.done():
                 state.task.cancel()
+            cleanup_cached_image_paths(state.event.media_urls)
         self._text_debounce_store().clear()
 
     def has_pending_interrupt(self, session_key: str) -> bool:

@@ -3342,8 +3342,14 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         # in the LLM vision analysis, not the capture.  Deleting a valid
         # screenshot loses evidence the user might need.  The 24-hour cleanup
         # in _cleanup_old_screenshots prevents unbounded disk growth.
-        logger.warning("browser_vision failed: %s", e, exc_info=True)
-        error_info = {"success": False, "error": f"Error during vision analysis: {str(e)}"}
+        logger.warning(
+            "browser_vision failed (unexpected_error; exception_type=%s)",
+            type(e).__name__,
+        )
+        error_info = {
+            "success": False,
+            "error": "Error during vision analysis: unexpected_error",
+        }
         if screenshot_path.exists():
             error_info["screenshot_path"] = str(screenshot_path)
             error_info["note"] = "Screenshot was captured but vision analysis failed. You can still share it via MEDIA:<path>."

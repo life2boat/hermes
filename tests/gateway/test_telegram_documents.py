@@ -58,11 +58,11 @@ from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
 # Helpers to build mock Telegram objects
 # ---------------------------------------------------------------------------
 
-def _make_file_obj(data: bytes = b"hello"):
+def _make_file_obj(data: bytes = b"hello", file_path: str = "documents/file.pdf"):
     """Create a mock Telegram File with download_as_bytearray."""
     f = AsyncMock()
     f.download_as_bytearray = AsyncMock(return_value=bytearray(data))
-    f.file_path = "documents/file.pdf"
+    f.file_path = file_path
     return f
 
 
@@ -263,7 +263,11 @@ class TestDocumentDownloadBlock:
     @pytest.mark.asyncio
     async def test_png_document_is_routed_as_image(self, adapter):
         """Telegram documents that are really PNGs should use the image path."""
-        file_obj = _make_file_obj(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        file_obj = _make_file_obj(
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00" * 8
+            + (1).to_bytes(4, "big") * 2
+        )
         doc = _make_document(file_name="screenshot.png", mime_type="image/png", file_size=9, file_obj=file_obj)
         msg = _make_message(document=doc)
         update = _make_update(msg)
@@ -283,7 +287,11 @@ class TestDocumentDownloadBlock:
     @pytest.mark.asyncio
     async def test_jpeg_document_with_caption_is_routed_as_image(self, adapter):
         """JPEG documents with captions should stay on the vision image path."""
-        file_obj = _make_file_obj(b"\xff\xd8\xff\xe0" + b"\x00" * 32, file_path="documents/meal.jpg")
+        jpeg = (
+            b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01"
+            + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        )
+        file_obj = _make_file_obj(jpeg, file_path="documents/meal.jpg")
         doc = _make_document(file_name="meal.jpg", mime_type="image/jpeg", file_size=36, file_obj=file_obj)
         msg = _make_message(document=doc, caption="что на фото?")
         update = _make_update(msg)
@@ -305,7 +313,9 @@ class TestDocumentDownloadBlock:
     async def test_webp_document_without_extension_is_routed_as_image(self, adapter):
         """MIME-only WEBP documents should still count as image context."""
         file_obj = _make_file_obj(
-            b"RIFF" + b"\x24\x00\x00\x00" + b"WEBPVP8 " + b"\x10\x00\x00\x00" + b"\x00" * 16,
+            b"RIFF" + b"\x24\x00\x00\x00" + b"WEBPVP8 "
+            + b"\x00" * 7 + b"\x9d\x01\x2a"
+            + (1).to_bytes(2, "little") * 2,
             file_path="documents/file",
         )
         doc = _make_document(file_name=None, mime_type="image/webp", file_size=36, file_obj=file_obj)
@@ -526,8 +536,10 @@ class TestMediaGroups:
         with patch("gateway.platforms.telegram.cache_image_from_bytes", return_value="/tmp/one.jpg"):
             await adapter._handle_media_message(_make_update(msg), MagicMock())
 
-        assert "album-2" in adapter._media_group_events
-        assert "album-2" in adapter._media_group_tasks
+        assert len(adapter._media_group_events) == 1
+        assert len(adapter._media_group_tasks) == 1
+        batch_key = next(iter(adapter._media_group_events))
+        assert batch_key.endswith(":album:album-2")
 
         await adapter.disconnect()
         await asyncio.sleep(adapter.MEDIA_GROUP_WAIT_SECONDS + 0.05)

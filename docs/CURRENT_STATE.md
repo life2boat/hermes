@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.22
+version: 1.2.23
 updated_at: 2026-08-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 14064c7291d53f4ea1f7e00e901fbb9dbab08907
+state_verified_against_main_sha: 713c90a1849d5bc415f6ab8378345b0f67415df1
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `14064c7291d53f4ea1f7e00e901fbb9dbab08907`.
+  `713c90a1849d5bc415f6ab8378345b0f67415df1`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -30,6 +30,22 @@ Git.
 - PR #128 merged the Phase 2 execution layer: AI change-review and production-
   readiness checklists, mandatory pre-task context preparation in the task
   template, and `scripts/prepare_task.py` with focused tests.
+- PR #129 merged the operational-adoption layer: mandatory prepared context in
+  `AGENTS.md`, the task lifecycle, and the sanitized failure-capture loop.
+- The repository Qwen Vision integration remains opt-in and provider-scoped:
+  canonical `alibaba`/`qwen-dashscope` selects DashScope with an explicit model,
+  `qwen-oauth` remains a distinct Portal identity, and ambiguous bare `qwen`
+  fails closed. No default Qwen vision model or production activation is added.
+- The uploaded still-image `vision_analyze_tool` Qwen/DashScope route keeps the
+  strict one-external-request policy. Its failure becomes a sanitized
+  user-safe failure and does not silently forward pixels to another provider.
+  Browser screenshot and video tools retain their separately bounded capture,
+  resize, and multi-frame semantics.
+- Durable SQLite sessions, JSON snapshots, context compression, trajectories,
+  background review, and Memory OS inputs receive a text-only sanitized copy
+  of multimodal messages. Inbound Telegram image files are session/actor-bound,
+  private-mode cached, and removed after their final consumer, failure,
+  cancellation, or abandoned-batch cleanup.
 - Prepared task context binds Git SHA, branch, changed paths, tracked core docs
   and ADRs; pytest cache is classified as non-authoritative and cannot prove a
   test PASS.
@@ -222,6 +238,11 @@ Git.
 ## 3. Active Blockers
 
 ### P0 ? External Qwen benchmarks confirmed no rollout-eligible provider
+
+The following benchmark gate is historical deployment-eligibility evidence. It
+does not negate the repository-level, opt-in provider wiring recorded in the
+current-state summary above: no Qwen route is active in production, and the
+benchmark harness is not evidence of a deployable runtime.
 
 Confirmed state:
 
@@ -450,7 +471,11 @@ Repository state that remains true:
 - No branch, worktree or patch was created for that obsolete base.
 - The blocker was closed by the updated V2-R1 playbook.
 
-## 6. Next Allowed Sequence
+## 6. Historical Benchmark Sequence (Production Eligibility Only)
+
+The sequence below remains applicable to any future production activation or
+model-quality decision; it is not a prohibition on repository-only routing
+contracts and tests:
 
 For Qwen:
 

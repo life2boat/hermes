@@ -71,6 +71,7 @@ class QwenProfile(ProviderProfile):
 
 
 qwen = QwenProfile(
+    requires_explicit_vision_model=True,
     name="qwen-oauth",
     aliases=("qwen", "qwen-portal", "qwen-cli"),
     env_vars=("QWEN_API_KEY",),

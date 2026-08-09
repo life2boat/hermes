@@ -624,6 +624,13 @@ def _classify_expected_vision_error(error: Exception) -> str | None:
         return "provider_unavailable"
 
     err_str = str(error).lower()
+    # These are locally generated, deterministic validation failures. Map
+    # them to closed categories so callers retain actionable UX without ever
+    # echoing arbitrary provider/SDK exception text.
+    if isinstance(error, PermissionError) and "blocked by website policy" in err_str:
+        return "source_blocked"
+    if isinstance(error, ValueError) and "only real image files" in err_str:
+        return "invalid_image"
     if any(
         hint in err_str
         for hint in (
@@ -642,7 +649,18 @@ def _classify_expected_vision_error(error: Exception) -> str | None:
         )
     ):
         return "request_rejected"
+    if _is_image_size_error(error):
+        return "payload_rejected"
     return None
+
+
+def _safe_vision_error_detail(error_kind: str) -> str:
+    """Return a static user-facing detail for a closed error category."""
+    return {
+        "invalid_image": "Only real image files are supported for vision analysis.",
+        "source_blocked": "Blocked by website policy.",
+        "payload_rejected": "Image too large for vision API.",
+    }.get(error_kind, error_kind)
 
 
 def _safe_vision_failure_analysis(
@@ -663,6 +681,12 @@ def _safe_vision_failure_analysis(
             "The provider rejected the image request. "
             "Try sending a smaller, clearer image, or describe the meal in text."
         )
+    if expected_kind == "invalid_image":
+        return "Only real image files are supported for vision analysis."
+    if expected_kind == "source_blocked":
+        return "The image source is blocked by website policy."
+    if expected_kind == "payload_rejected":
+        return "The image is too large. Try sending a smaller image."
     return (
         "There was a problem with the request and the image could not be analyzed."
     )
@@ -891,8 +915,8 @@ async def _vision_analyze_native(
         )
 
     except Exception as exc:
-        logger.warning("Native vision fast path failed: %s", exc)
-        return tool_error(f"Native vision failed: {exc}", success=False)
+        logger.warning("Native vision fast path failed (unexpected_error; exception_type=%s)", type(exc).__name__)
+        return tool_error('Native vision failed: unexpected_error', success=False)
     finally:
         # Only delete temp files we created — never user-provided paths.
         if should_cleanup and temp_image_path is not None:
@@ -1169,14 +1193,22 @@ async def vision_analyze_tool(
         else:
             expected_error_kind = _classify_expected_vision_error(e)
             if expected_error_kind is not None:
-                error_msg = f"Error analyzing image: {expected_error_kind}"
+                error_msg = (
+                    "Error analyzing image: "
+                    f"{_safe_vision_error_detail(expected_error_kind)}"
+                )
                 logger.warning(
                     "Vision image analysis unavailable (%s)",
                     expected_error_kind,
                 )
             else:
-                error_msg = f"Error analyzing image: {str(e)}"
-                logger.error("%s", error_msg, exc_info=True)
+                error_msg = "Error analyzing image: unexpected_error"
+                redacted_error = RuntimeError("vision_error_details_redacted")
+                logger.error(
+                    "Vision image analysis failed (unexpected_error; exception_type=%s)",
+                    type(e).__name__,
+                    exc_info=(RuntimeError, redacted_error, None),
+                )
 
         if temp_image_path is None:
             logger.info(
@@ -1630,16 +1662,14 @@ async def video_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     except Exception as e:
-        error_msg = f"Error analyzing video: {str(e)}"
-        logger.error("%s", error_msg, exc_info=True)
-
         err_str = str(e).lower()
         if any(hint in err_str for hint in (
             "402", "insufficient", "payment required", "credits", "billing",
         )):
+            error_kind = "provider_billing"
             analysis = (
                 "Insufficient credits or payment required. Please top up your "
-                f"API provider account and try again. Error: {e}"
+                "API provider account and try again."
             )
         elif any(hint in err_str for hint in (
             "does not support", "not support video",
@@ -1647,24 +1677,32 @@ async def video_analyze_tool(
             "unrecognized request argument", "video input",
             "video_url",
         )):
+            error_kind = "request_rejected"
             analysis = (
-                f"The model does not support video analysis or the request was "
-                f"rejected. Ensure you're using a video-capable model "
-                f"(e.g. google/gemini-2.5-flash). Error: {e}"
+                "The model does not support video analysis or the request was "
+                "rejected. Ensure you're using a video-capable model."
             )
         elif any(hint in err_str for hint in (
             "too large", "payload", "413", "content_too_large",
             "request_too_large", "exceeds", "size limit",
         )):
+            error_kind = "payload_rejected"
             analysis = (
                 "The video is too large for the API. Try compressing or trimming "
-                f"the video (max ~50 MB). Error: {e}"
+                "the video (max ~50 MB)."
             )
         else:
+            error_kind = "unexpected_error"
             analysis = (
                 "There was a problem with the request and the video could not "
-                f"be analyzed. Error: {e}"
+                "be analyzed."
             )
+        error_msg = f"Error analyzing video: {error_kind}"
+        logger.error(
+            "Video analysis failed (%s; exception_type=%s)",
+            error_kind,
+            type(e).__name__,
+        )
 
         result = {
             "success": False,

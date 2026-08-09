@@ -668,8 +668,11 @@ class TestSaveSessionLogRedactsSecrets:
         snapshot = json.loads(snapshot_text)
         parts = snapshot["messages"][0]["content"]
         assert "gsk_abc123def456ghi789jkl012mno" not in parts[0]["text"]
-        # Image part preserved untouched
-        assert parts[1]["image_url"]["url"].startswith("data:image")
+        # Image bytes are never persisted in the optional durable snapshot.
+        assert parts[1] == {
+            'type': 'text',
+            'text': '[Image omitted from durable context]',
+        }
 
 
 class TestGetMessagesUpToLastAssistant:

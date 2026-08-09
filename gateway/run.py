@@ -1293,6 +1293,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     _reply_anchor_for_event,
+    cleanup_cached_image_paths,
     merge_pending_message_event,
 )
 from gateway.restart import (
@@ -3713,13 +3714,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # it up.  Clearing happens on /new and /reset via
     # _handle_reset_command.
 
-    def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
+    def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> bool:
         """Append a /queue event to the FIFO chain for a session."""
         if adapter is None:
-            return
+            return False
         pending_slot = getattr(adapter, "_pending_messages", None)
         if pending_slot is None:
-            return
+            return False
         queued_events = getattr(self, "_queued_events", None)
         if queued_events is None:
             queued_events = {}
@@ -3728,6 +3729,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             queued_events.setdefault(session_key, []).append(queued_event)
         else:
             pending_slot[session_key] = queued_event
+        if getattr(queued_event, "media_urls", None):
+            queued_event._cached_media_ownership_transferred = True
+        return True
 
     def _promote_queued_event(
         self,
@@ -4301,10 +4305,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # still small enough to never threaten memory.
     _BUSY_QUEUE_MAX_PENDING = 32
 
-    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
+    def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> bool:
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
-            return
+            return False
         # #28503 — Previously this called ``merge_pending_message_event``
         # with the default ``merge_text=False``, which silently OVERWROTE
         # the single pending slot when consecutive text messages arrived
@@ -4322,13 +4326,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             or bool(getattr(event, "media_urls", None))
         ):
             # Preserve photo-burst / media-merge semantics for the head slot.
-            merge_pending_message_event(
+            accepted = merge_pending_message_event(
                 adapter._pending_messages,
                 session_key,
                 event,
                 merge_text=event.message_type == MessageType.TEXT,
             )
-            return
+            if accepted:
+                return True
+            # Different actors/sources must not share one media turn. Keep
+            # the incoming event as a separate FIFO item when capacity allows.
 
         if self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING:
             _log_safe_session_event(
@@ -4338,9 +4345,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 level=logging.WARNING,
                 fields={"queue_cap": self._BUSY_QUEUE_MAX_PENDING},
             )
-            return
+            return False
 
-        self._enqueue_fifo(session_key, event, adapter)
+        return self._enqueue_fifo(session_key, event, adapter)
 
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
@@ -4455,12 +4462,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # successful steer — the text already landed inside the run and
         # must NOT also be replayed as a next-turn user message.
         if not steered:
-            merge_pending_message_event(
-                adapter._pending_messages,
-                session_key,
-                event,
-                merge_text=event.message_type == MessageType.TEXT,
+            existing = adapter._pending_messages.get(session_key)
+            has_media = bool(getattr(event, "media_urls", None)) or bool(
+                getattr(existing, "media_urls", None)
             )
+            if has_media:
+                self._queue_or_replace_pending_event(session_key, event)
+            else:
+                merge_pending_message_event(
+                    adapter._pending_messages,
+                    session_key,
+                    event,
+                    merge_text=event.message_type == MessageType.TEXT,
+                )
 
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
@@ -6697,6 +6711,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._weight_reminder_scheduler = None
                 self._weight_reminder_scheduler_task = None
 
+            for overflow in getattr(self, "_queued_events", {}).values():
+                for queued_event in overflow:
+                    cleanup_cached_image_paths(
+                        getattr(queued_event, "media_urls", None)
+                    )
+            getattr(self, "_queued_events", {}).clear()
+
             for platform, adapter in list(self.adapters.items()):
                 _adapter_started_at = time.monotonic()
                 try:
@@ -7765,7 +7786,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 adapter = self.adapters.get(source.platform)
                 if adapter:
-                    merge_pending_message_event(adapter._pending_messages, _quick_key, event)
+                    self._queue_or_replace_pending_event(_quick_key, event)
                 return None
 
             _telegram_followup_grace = float(
@@ -7789,7 +7810,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     if self._busy_input_mode == "queue":
-                        self._enqueue_fifo(_quick_key, event, adapter)
+                        self._queue_or_replace_pending_event(_quick_key, event)
+                    elif getattr(event, "media_urls", None) or getattr(
+                        adapter._pending_messages.get(_quick_key), "media_urls", None
+                    ):
+                        self._queue_or_replace_pending_event(_quick_key, event)
                     else:
                         merge_pending_message_event(
                             adapter._pending_messages,
@@ -7816,12 +7841,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # agent starts.
                 adapter = self.adapters.get(source.platform)
                 if adapter:
-                    merge_pending_message_event(
-                        adapter._pending_messages,
-                        _quick_key,
-                        event,
-                        merge_text=True,
-                    )
+                    if getattr(event, "media_urls", None):
+                        self._queue_or_replace_pending_event(_quick_key, event)
+                    else:
+                        merge_pending_message_event(
+                            adapter._pending_messages,
+                            _quick_key,
+                            event,
+                            merge_text=True,
+                        )
                 return None
             if self._draining:
                 if self._queue_during_drain_enabled():
@@ -12927,11 +12955,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 image_ref=self._healbite_image_ref(source, event),
                 occurred_at=event.timestamp,
             )
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "[Gateway][vision_failed] nutrition diary analysis exception path=%s",
-                image_paths[0],
-                exc_info=True,
+                "[Gateway][vision_failed] nutrition diary analysis error_type=%s",
+                exc.__class__.__name__,
             )
             return user_text, False, None
         if not outcome.available:
@@ -12975,7 +13002,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enriched_parts = []
         for path in image_paths:
             try:
-                logger.debug("Auto-analyzing user image: %s", path)
+                logger.debug("Auto-analyzing user image")
                 result_json = await vision_analyze_tool(
                     image_url=path,
                     user_prompt=analysis_prompt,
@@ -12984,28 +13011,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if result.get("success"):
                     description = result.get("analysis", "")
                     description = sanitize_context(description)
-                    logger.info("[Gateway][vision_success] path=%s", path)
+                    logger.info("[Gateway][vision_success]")
                     enriched_parts.append(
-                        f"[The user sent an image~ Here's what I can see:\n{description}]\n"
-                        f"[If you need a closer look, use vision_analyze with "
-                        f"image_url: {path} ~]"
+                        f"[The user sent an image~ Here's what I can see:\n{description}]"
                     )
                 else:
-                    logger.warning(
-                        "[Gateway][vision_failed] non_success_result path=%s",
-                        path,
-                    )
+                    logger.warning("[Gateway][vision_failed] non_success_result")
                     logger.warning(
                         "Vision auto-analysis returned a non-success result for user image"
                     )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "[Gateway][vision_failed] exception path=%s",
-                    path,
-                )
-                logger.warning(
-                    "Vision auto-analysis failed for a user image",
-                    exc_info=True,
+                    "[Gateway][vision_failed] exception error_type=%s",
+                    exc.__class__.__name__,
                 )
 
         if enriched_parts:
@@ -13871,7 +13889,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if adapter and hasattr(adapter, "interrupt_session_activity"):
             await adapter.interrupt_session_activity(session_key, source.chat_id)
         if adapter and hasattr(adapter, "get_pending_message"):
-            adapter.get_pending_message(session_key)  # consume and discard
+            discarded = adapter.get_pending_message(session_key)
+            if discarded is not None:
+                cleanup_cached_image_paths(getattr(discarded, "media_urls", None))
+        overflow = getattr(self, "_queued_events", {}).pop(session_key, [])
+        for discarded in overflow:
+            cleanup_cached_image_paths(getattr(discarded, "media_urls", None))
         self._pending_messages.pop(session_key, None)
         if release_running_state:
             self._release_running_agent_state(session_key)
@@ -15949,8 +15972,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         if _skipped:
                             logger.warning(
-                                "Native image attachment: skipped %d unreadable path(s): %s",
-                                len(_skipped), _skipped,
+                                "Native image attachment: skipped %d unreadable path(s)",
+                                len(_skipped),
                             )
                         if any(p.get("type") == "image_url" for p in _parts):
                             _run_message: Any = _parts
@@ -16430,6 +16453,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     logger.debug("Long-running notification error: %s", _ne)
 
         _notify_task = asyncio.create_task(_notify_long_running())
+        _claimed_pending_event = None
 
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
@@ -16641,6 +16665,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             pending = None
             if result and adapter and session_key:
                 pending_event = _dequeue_pending_event(adapter, session_key)
+                if pending_event is not None:
+                    _claimed_pending_event = pending_event
+                    pending_event._cached_media_ownership_transferred = False
                 # /queue overflow: after consuming the adapter's "next-up"
                 # slot, promote the next queued event into it so the
                 # recursive run's drain will see it.  This keeps the slot
@@ -16648,6 +16675,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # order, and (b) causes any mid-chain /queue to correctly
                 # route to overflow rather than jumping the queue.
                 pending_event = self._promote_queued_event(session_key, adapter, pending_event)
+                if pending_event is not None:
+                    _claimed_pending_event = pending_event
+                    pending_event._cached_media_ownership_transferred = False
                 if result.get("interrupted") and not pending_event and result.get("interrupt_message"):
                     interrupt_message = result.get("interrupt_message")
                     if _is_control_interrupt_message(interrupt_message):
@@ -16779,7 +16809,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     adapter = self.adapters.get(source.platform)
                     if adapter and pending_event:
-                        merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+                        accepted = self._queue_or_replace_pending_event(
+                            session_key, pending_event
+                        )
+                        if not accepted:
+                            cleanup_cached_image_paths(
+                                getattr(pending_event, "media_urls", None)
+                            )
                     elif adapter and hasattr(adapter, 'queue_message'):
                         adapter.queue_message(session_key, pending)
                     return result_holder[0] or {"final_response": response, "messages": history}
@@ -16914,6 +16950,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 progress_task.cancel()
             interrupt_monitor.cancel()
             _notify_task.cancel()
+            if (
+                _claimed_pending_event is not None
+                and not getattr(
+                    _claimed_pending_event,
+                    "_cached_media_ownership_transferred",
+                    False,
+                )
+            ):
+                cleanup_cached_image_paths(
+                    getattr(_claimed_pending_event, "media_urls", None)
+                )
+            _claimed_pending_event = None
 
             # Wait for stream consumer to finish its final edit
             if stream_task:

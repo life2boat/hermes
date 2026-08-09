@@ -30,6 +30,7 @@ from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
 )
+from agent.message_sanitization import sanitize_durable_multimodal_payload
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -1011,8 +1012,9 @@ class ContextCompressor(ContextEngine):
         (API keys, tokens, passwords) from leaking into the summary that
         gets sent to the auxiliary model and persisted across compactions.
         """
+        safe_turns = sanitize_durable_multimodal_payload(turns)
         parts = []
-        for msg in turns:
+        for msg in safe_turns:
             role = msg.get("role", "unknown")
             content = redact_sensitive_text(msg.get("content") or "")
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
@@ -1071,6 +1073,9 @@ class ContextCompressor(ContextEngine):
         structure so downstream prompts can recover gracefully after a provider
         outage or summary-model failure.
         """
+        turns_to_summarize = sanitize_durable_multimodal_payload(
+            turns_to_summarize
+        )
         user_asks: list[str] = []
         assistant_actions: list[str] = []
         tool_actions: list[str] = []

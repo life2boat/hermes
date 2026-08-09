@@ -547,7 +547,29 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
             normalized = main_prov
         else:
             return "custom"
-    return _PROVIDER_ALIASES.get(normalized, normalized)
+    normalized = _PROVIDER_ALIASES.get(normalized, normalized)
+
+    # Bare ``qwen`` is intentionally not canonical here.  It has referred to
+    # both Qwen Portal OAuth and Alibaba Cloud/DashScope in different public
+    # registries.  Auxiliary callers must select the credential and endpoint
+    # contract explicitly: ``qwen-oauth`` or ``alibaba`` (including the
+    # unambiguous profile aliases ``qwen-portal`` / ``qwen-dashscope``).
+    if normalized == 'qwen':
+        return normalized
+
+    # Provider plugins own aliases.  Resolve them declaratively so auxiliary
+    # routing does not need provider-name branches as new backends are added.
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(normalized)
+        if profile is not None:
+            return profile.name
+    except Exception:
+        # Provider discovery is optional in reduced installations; preserve
+        # the historical normalized identifier when it is unavailable.
+        pass
+    return normalized
 
 
 # Sentinel: when returned by _fixed_temperature_for_model(), callers must
@@ -4510,6 +4532,26 @@ def _normalize_vision_provider(provider: Optional[str]) -> str:
     return _normalize_aux_provider(provider)
 
 
+def _vision_provider_requires_explicit_model(provider: Optional[str]) -> bool:
+    '''Return whether a Vision provider must receive an explicit model.
+
+    The decision is declarative in the provider profile. Bare qwen is
+    retained as an ambiguous, fail-closed sentinel because it historically
+    referred to both Portal OAuth and DashScope credentials.
+    '''
+    normalized = _normalize_vision_provider(provider)
+    if normalized == 'qwen':
+        return True
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(normalized)
+        return bool(profile and profile.requires_explicit_vision_model)
+    except Exception:
+        # A missing optional profile must not weaken the reserved alias gate.
+        return False
+
+
 def _resolve_strict_vision_backend(
     provider: str,
     model: Optional[str] = None,
@@ -4581,6 +4623,13 @@ def resolve_vision_provider_client(
         "vision", provider, model, base_url, api_key
     )
     requested = _normalize_vision_provider(requested)
+    if _vision_provider_requires_explicit_model(requested) and (
+        not isinstance(resolved_model, str) or not resolved_model.strip()
+    ):
+        logger.warning(
+            'Vision provider requested without an explicit model; refusing client resolution'
+        )
+        return requested, None, None
 
     def _finalize(resolved_provider: str, sync_client: Any, default_model: Optional[str]):
         if sync_client is None:

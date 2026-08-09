@@ -34,6 +34,26 @@ def _make_timeout_error() -> httpx.TimeoutException:
     return httpx.TimeoutException("timed out")
 
 
+def _valid_png_bytes() -> bytes:
+    """Return a dimension-bearing 1x1 PNG fixture for cache success tests."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00" * 8
+        + (1).to_bytes(4, "big")
+        + (1).to_bytes(4, "big")
+    )
+
+
+def _valid_jpeg_bytes() -> bytes:
+    """Return a minimal JPEG fixture with a 1x1 SOF0 frame."""
+    return (
+        b"\xff\xd8"
+        b"\xff\xc0\x00\x11\x08\x00\x01\x00\x01"
+        b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        b"\xff\xd9"
+    )
+
+
 # ---------------------------------------------------------------------------
 # cache_image_from_bytes (base.py)
 # ---------------------------------------------------------------------------
@@ -45,13 +65,13 @@ class TestCacheImageFromBytes:
     def test_caches_valid_jpeg(self, tmp_path, monkeypatch):
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
         from gateway.platforms.base import cache_image_from_bytes
-        path = cache_image_from_bytes(b"\xff\xd8\xff fake jpeg data", ".jpg")
+        path = cache_image_from_bytes(_valid_jpeg_bytes(), ".jpg")
         assert path.endswith(".jpg")
 
     def test_caches_valid_png(self, tmp_path, monkeypatch):
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
         from gateway.platforms.base import cache_image_from_bytes
-        path = cache_image_from_bytes(b"\x89PNG\r\n\x1a\n fake png data", ".png")
+        path = cache_image_from_bytes(_valid_png_bytes(), ".png")
         assert path.endswith(".png")
 
     def test_rejects_html_content(self, tmp_path, monkeypatch):
@@ -63,7 +83,7 @@ class TestCacheImageFromBytes:
     def test_rejects_empty_data(self, tmp_path, monkeypatch):
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
         from gateway.platforms.base import cache_image_from_bytes
-        with pytest.raises(ValueError, match="non-image data"):
+        with pytest.raises(ValueError, match="byte-size range"):
             cache_image_from_bytes(b"", ".jpg")
 
     def test_rejects_plain_text(self, tmp_path, monkeypatch):
@@ -86,7 +106,7 @@ class TestCacheImageFromUrl:
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 
         fake_response = MagicMock()
-        fake_response.content = b"\xff\xd8\xff fake jpeg"
+        fake_response.content = _valid_jpeg_bytes()
         fake_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
@@ -110,7 +130,7 @@ class TestCacheImageFromUrl:
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 
         fake_response = MagicMock()
-        fake_response.content = b"\xff\xd8\xff image data"
+        fake_response.content = _valid_jpeg_bytes()
         fake_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
@@ -140,7 +160,7 @@ class TestCacheImageFromUrl:
         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 
         ok_response = MagicMock()
-        ok_response.content = b"\xff\xd8\xff image data"
+        ok_response.content = _valid_jpeg_bytes()
         ok_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
@@ -474,7 +494,7 @@ class TestSSRFRedirectGuard:
         )
 
         ok_response = MagicMock()
-        ok_response.content = b"\xff\xd8\xff fake jpeg"
+        ok_response.content = _valid_jpeg_bytes()
         ok_response.raise_for_status = MagicMock()
         ok_response.is_redirect = False
 
@@ -595,7 +615,7 @@ class TestSlackDownloadSlackFile:
         adapter = _make_slack_adapter()
 
         fake_response = MagicMock()
-        fake_response.content = b"\x89PNG\r\n\x1a\n fake png"
+        fake_response.content = _valid_png_bytes()
         fake_response.raise_for_status = MagicMock()
         fake_response.headers = {"content-type": "image/png"}
 
@@ -649,7 +669,7 @@ class TestSlackDownloadSlackFile:
         adapter = _make_slack_adapter()
 
         fake_response = MagicMock()
-        fake_response.content = b"\x89PNG\r\n\x1a\n image bytes"
+        fake_response.content = _valid_png_bytes()
         fake_response.raise_for_status = MagicMock()
         fake_response.headers = {"content-type": "image/png"}
 

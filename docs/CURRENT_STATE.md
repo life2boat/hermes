@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.17
-updated_at: 2026-08-08
+version: 1.2.18
+updated_at: 2026-08-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: aabc5c3a52bf48be2d710823cd4da45e8b0281ea
+state_verified_against_main_sha: 248d0f7683889bd4b169996f8603031f36afbfb1
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `aabc5c3a52bf48be2d710823cd4da45e8b0281ea`.
+  `248d0f7683889bd4b169996f8603031f36afbfb1`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -31,6 +31,13 @@ Git.
 - The remote-build workflow has read-only repository access plus package
   publication access. It is not a deployment workflow and does not authorize a
   production image pull, container recreate, configuration change, or DB write.
+- The repository remediation candidate binds 29 image-secret exceptions to
+  exact paths, rules, package versions, artifact identities, and file hashes;
+  it also removes 16 dependency artifacts before they enter recoverable final
+  image layers and rewrites five scanner self-detections without weakening
+  runtime detection.
+- A zero-finding OCI result for that candidate is NOT CONFIRMED until a new
+  post-merge exact-main image build and full image-secret scan complete.
 - Read-only status check on 2026-08-07 found the `hermes-bot` container
   stopped. This implementation task did not start, rebuild, restart or recreate it.
 - Last confirmed Qdrant runtime: running, restart count 0.

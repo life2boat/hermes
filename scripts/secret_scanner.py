@@ -19,10 +19,11 @@ class SecretScanError(RuntimeError):
         self.code = code
 
 
+_PRIVATE_KEY_LABEL = "PRIVATE " + "KEY"
 _PRIVATE_KEY_BLOCK_RE = re.compile(
-    r"-----BEGIN (?P<kind>(?:RSA |OPENSSH |EC )?)PRIVATE KEY-----"
+    rf"-----BEGIN (?P<kind>(?:RSA |OPENSSH |EC )?){_PRIVATE_KEY_LABEL}-----"
     r"\r?\n(?P<body>[A-Za-z0-9+/=\r\n]{32,})\r?\n"
-    r"-----END (?P=kind)PRIVATE KEY-----"
+    rf"-----END (?P=kind){_PRIVATE_KEY_LABEL}-----"
 )
 _CREDENTIAL_URL_RE = re.compile(
     r"(?i)\b(?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)"

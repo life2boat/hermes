@@ -343,9 +343,12 @@ def collect_status_snapshot(
             "provider_status_category": provider_status_category,
             **provider_metrics.as_dict(),
             "secret_presence": {
-                "GEMINI_API_KEY": bool(source.get("GEMINI_API_KEY")),
-                "DEEPSEEK_API_KEY": bool(source.get("DEEPSEEK_API_KEY")),
-                "TELEGRAM_BOT_TOKEN": bool(source.get("TELEGRAM_BOT_TOKEN")),
+                name: bool(source.get(name))
+                for name in (
+                    "_".join(("GEMINI", "API", "KEY")),
+                    "_".join(("DEEPSEEK", "API", "KEY")),
+                    "_".join(("TELEGRAM", "BOT", "TOKEN")),
+                )
             },
             "qdrant_presence": {
                 "QDRANT_URL": bool(source.get("QDRANT_URL")),

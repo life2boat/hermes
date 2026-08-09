@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.18
+version: 1.2.19
 updated_at: 2026-08-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 248d0f7683889bd4b169996f8603031f36afbfb1
+state_verified_against_main_sha: 8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `248d0f7683889bd4b169996f8603031f36afbfb1`.
+  `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - The local `origin` remote points to upstream `NousResearch/hermes-agent` and
@@ -153,6 +153,12 @@ Git.
   was performed while adding this repository tooling.
 - This documentation refactor does not build, deploy, restart, change
   production configuration, write SQLite, or mutate Qdrant.
+- The Phase 0 engineering foundation now defines a repository-grounded source
+  map, system model, invariant index, AI-agent decision rulebook, and reusable
+  task template under `docs/`. These documents link to existing executable
+  contracts and do not introduce a new runtime service or production topology.
+- `Knowledge Pack` currently names this versioned engineering-document set; a
+  separately executable Knowledge Pack component is not implemented or deployed.
 
 ## 2. Stable Capabilities
 

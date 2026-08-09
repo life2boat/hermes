@@ -37,6 +37,27 @@ Rules:
 - historical state belongs in docs/CURRENT_STATE_CHANGELOG.md;
 - never store secrets, credentials, private IDs or raw provider responses in these files.
 
+## Mandatory AI Engineering Lifecycle
+
+Before starting any implementation, you **MUST** run
+`scripts/prepare_task.py` and read the generated context package. Run it in
+the intended clean worktree before discovery, design or editing:
+
+```bash
+python scripts/prepare_task.py --output .task_context/task-context.json
+```
+
+The context package is local evidence, not a Git artifact and not proof that
+tests passed. Review its Git provenance, changed-file list, tracked-document
+hashes and test-evidence classification. If preparation fails or required
+documentation is missing, classify the task as `BLOCKED`; do not substitute
+chat history or a stale checkout.
+
+Follow [`docs/TASK_LIFECYCLE.md`](docs/TASK_LIFECYCLE.md) for every task and
+[`docs/FAILURE_CAPTURE_LOOP.md`](docs/FAILURE_CAPTURE_LOOP.md) after a serious
+incident. Apply the AI and production-readiness checklists at the phases named
+there; they do not override a task's explicit authority or stop boundary.
+
 ## Режим автономной работы Codex
 
 Работай максимально самостоятельно и не запрашивай подтверждение перед обычными действиями разработки.

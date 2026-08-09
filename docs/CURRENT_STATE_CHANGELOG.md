@@ -1,5 +1,20 @@
 # CURRENT_STATE changelog
 
+## 1.2.22 - 2026-08-09
+
+Added:
+- recorded the normal merge of PR #128 and its Phase 2 execution layer:
+  repository-bound task-context preparation, AI review, and production-
+  readiness checklists.
+
+Changed:
+- updated repository-state verification to the PR #128 merge commit
+  `14064c7291d53f4ea1f7e00e901fbb9dbab08907`.
+
+Safety:
+- this state update records repository documentation and automation only;
+- production, containers, SQLite, Qdrant and secrets were not changed.
+
 ## 1.2.21 - 2026-08-09
 
 Added:

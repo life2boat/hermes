@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.21
+version: 1.2.22
 updated_at: 2026-08-09
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 8cd61d3192bb9b9e0ae507dc5820f6534a7dc52b
+state_verified_against_main_sha: 14064c7291d53f4ea1f7e00e901fbb9dbab08907
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `8cd61d3192bb9b9e0ae507dc5820f6534a7dc52b`.
+  `14064c7291d53f4ea1f7e00e901fbb9dbab08907`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -27,9 +27,9 @@ Git.
 - PR #127 merged five populated architecture decisions and the structured
   `knowledge/` layer for architecture, decisions, failures, patterns,
   operations and AI-agent lessons into canonical main.
-- The Phase 2 repository candidate adds AI change-review and production-
-  readiness checklists, mandates pre-task context preparation in the task
-  template, and introduces `scripts/prepare_task.py` with focused tests.
+- PR #128 merged the Phase 2 execution layer: AI change-review and production-
+  readiness checklists, mandatory pre-task context preparation in the task
+  template, and `scripts/prepare_task.py` with focused tests.
 - Prepared task context binds Git SHA, branch, changed paths, tracked core docs
   and ADRs; pytest cache is classified as non-authoritative and cannot prove a
   test PASS.

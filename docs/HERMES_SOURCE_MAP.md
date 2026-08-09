@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `8cd61d3192bb9b9e0ae507dc5820f6534a7dc52b`
+Verified against canonical main: `14064c7291d53f4ea1f7e00e901fbb9dbab08907`
 
 ## Purpose
 
@@ -31,7 +31,7 @@ filled in from memory.
 | Concern | Primary sources | What they establish |
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
-| AI task preparation and review | `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Repository-bound context capture, review evidence and fail-closed readiness classification |
+| AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -89,6 +89,7 @@ filled in from memory.
 | `docs/runbooks/` | Operational procedures; prefer the current linked skill when instructions moved |
 | Tests under `tests/` | Executable behavioral and safety contracts |
 | `knowledge/` | Curated architecture, decision, failure, pattern, operations and AI-agent indexes; follow their links to authoritative contracts |
+| `docs/FAILURE_CAPTURE_LOOP.md` | Required sanitized learning loop after a serious incident; links the incident record to a test, ADR, skill or runbook as appropriate |
 
 Chat history is not an architecture record. If a decision matters after the
 task, record it in an ADR, a skill decision-memory section, a design contract,

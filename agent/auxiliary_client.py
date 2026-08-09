@@ -3829,6 +3829,26 @@ def resolve_provider_client(
     # Normalise aliases
     provider = _normalize_aux_provider(provider)
 
+    # A user-declared named custom provider keeps precedence over a bundled
+    # profile alias.  In particular, the custom profile declares ``local`` as
+    # an alias for ``custom``; canonicalising it before the named-custom lookup
+    # would enter the global custom-endpoint branch and return early when that
+    # endpoint has no credentials.  Preserve the configured raw name so the
+    # existing named-custom resolver below can honour it.  With no matching
+    # config entry, the declarative profile alias remains authoritative.
+    named_provider = original_provider
+    if named_provider.startswith("custom:"):
+        named_provider = named_provider.split(":", 1)[1].strip()
+    if named_provider and named_provider != provider:
+        try:
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+
+            if _get_named_custom_provider(named_provider) is not None:
+                provider = named_provider
+        except Exception:
+            # Reduced installations may not expose runtime config helpers.
+            pass
+
     # Universal model-resolution fallback chain.  Callers (notably title
     # generation, vision, session search, and other auxiliary tasks) can
     # reach this function without an explicit model — the user picked their

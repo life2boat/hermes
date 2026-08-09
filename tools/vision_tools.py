@@ -1426,6 +1426,14 @@ _MAX_VIDEO_BASE64_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
 _VIDEO_SIZE_WARN_BYTES = 20 * 1024 * 1024
 
 
+class _InvalidVideoSourceError(ValueError):
+    """A locally validated video source is neither a file nor a safe URL."""
+
+
+class _UnsupportedVideoFormatError(ValueError):
+    """A locally validated video file has no supported MIME mapping."""
+
+
 def _detect_video_mime_type(video_path: Path) -> Optional[str]:
     """Return a video MIME type based on file extension, or None if unsupported."""
     ext = video_path.suffix.lower()
@@ -1565,9 +1573,7 @@ async def video_analyze_tool(
             await _download_video(video_url, temp_video_path)
             should_cleanup = True
         else:
-            raise ValueError(
-                "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
-            )
+            raise _InvalidVideoSourceError
 
         video_size_bytes = temp_video_path.stat().st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
@@ -1575,10 +1581,7 @@ async def video_analyze_tool(
 
         detected_mime = _detect_video_mime_type(temp_video_path)
         if not detected_mime:
-            raise ValueError(
-                f"Unsupported video format: '{temp_video_path.suffix}'. "
-                f"Supported: {', '.join(sorted(_VIDEO_MIME_TYPES.keys()))}"
-            )
+            raise _UnsupportedVideoFormatError
 
         if video_size_bytes > _VIDEO_SIZE_WARN_BYTES:
             logger.warning("Video is %.1f MB — may be slow or rejected", video_size_mb)
@@ -1663,7 +1666,16 @@ async def video_analyze_tool(
 
     except Exception as e:
         err_str = str(e).lower()
-        if any(hint in err_str for hint in (
+        if isinstance(e, _InvalidVideoSourceError):
+            error_kind = "invalid_video_source"
+            analysis = (
+                "Invalid video source. Provide an HTTP/HTTPS URL or a valid "
+                "local file path."
+            )
+        elif isinstance(e, _UnsupportedVideoFormatError):
+            error_kind = "unsupported_video_format"
+            analysis = "Unsupported video format. Use a supported video file type."
+        elif any(hint in err_str for hint in (
             "402", "insufficient", "payment required", "credits", "billing",
         )):
             error_kind = "provider_billing"

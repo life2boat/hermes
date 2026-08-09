@@ -1047,7 +1047,7 @@ def _group_document_message(*, chat_id=-100, caption="Este arquivo", document=No
     )
 
 
-def test_unmentioned_photo_observed_with_cached_path(monkeypatch, tmp_path):
+def test_unmentioned_photo_observed_without_cached_path(monkeypatch, tmp_path):
     async def _run():
         adapter = _make_adapter(
             require_mention=True, allowed_chats=["-100"],
@@ -1069,8 +1069,8 @@ def test_unmentioned_photo_observed_with_cached_path(monkeypatch, tmp_path):
         _, message, _ = store.messages[0]
         assert message["observed"] is True
         assert "Veja esta foto" in message["content"]
-        assert "image" in message["content"]
-        assert str(cached_path) in message["content"]
+        assert "[Observed Telegram image attachment.]" in message["content"]
+        assert str(cached_path) not in message["content"]
         assert store.sources[0].user_id is None
 
     asyncio.run(_run())

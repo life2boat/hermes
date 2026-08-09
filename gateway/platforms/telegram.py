@@ -5505,10 +5505,15 @@ class TelegramAdapter(BasePlatformAdapter):
             event.message_type = MessageType.PHOTO
         elif cached.kind == "video":
             event.message_type = MessageType.VIDEO
-        event.text = self._append_observed_note(
-            event.text,
-            f"[Observed Telegram {cached.kind} attachment.]",
+        # Pixel paths are ephemeral and must never enter the durable observed
+        # transcript. Other attachment kinds keep their existing context note:
+        # the cached path is how the agent can access those durable files.
+        observed_note = (
+            "[Observed Telegram image attachment.]"
+            if cached.kind == "image"
+            else cached.context_note()
         )
+        event.text = self._append_observed_note(event.text, observed_note)
         logger.info("[Telegram] Cached observed group attachment kind=%s", cached.kind)
 
     def _observed_media_source(self, msg: Message):

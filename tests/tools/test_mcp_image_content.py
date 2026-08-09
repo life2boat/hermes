@@ -125,8 +125,15 @@ class TestCacheMcpImageBlock:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from tools.mcp_tool import _cache_mcp_image_block
 
-        # minimal JPEG SOI marker + filler
-        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 100 + b"\xff\xd9"
+        # Minimal dimension-bearing JPEG: SOI + 1x1 SOF0 + EOI. The image
+        # cache deliberately rejects signature-only payloads whose dimensions
+        # cannot be parsed.
+        jpeg = (
+            b"\xff\xd8"
+            b"\xff\xc0\x00\x11\x08\x00\x01\x00\x01"
+            b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+            b"\xff\xd9"
+        )
         block = SimpleNamespace(
             data=base64.b64encode(jpeg).decode("ascii"),
             mimeType="image/jpeg",

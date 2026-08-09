@@ -11,6 +11,7 @@ Every new task should first prepare a repository-bound context package:
 Generated context belongs under the ignored `.task_context/` directory and is
 local evidence, not a Git artifact or a test PASS receipt. Then review:
 
+- [`docs/TASK_LIFECYCLE.md`](../../docs/TASK_LIFECYCLE.md)
 - [`docs/AI_AGENT_RULEBOOK.md`](../../docs/AI_AGENT_RULEBOOK.md)
 - [`docs/TASK_TEMPLATE.md`](../../docs/TASK_TEMPLATE.md)
 - [`docs/HERMES_SOURCE_MAP.md`](../../docs/HERMES_SOURCE_MAP.md)
@@ -21,3 +22,6 @@ local evidence, not a Git artifact or a test PASS receipt. Then review:
 
 Lessons recorded here should identify the evidence behind them, distinguish
 planning from implementation authority, and state the required stop boundary.
+For serious incidents, use the mandatory
+[`docs/FAILURE_CAPTURE_LOOP.md`](../../docs/FAILURE_CAPTURE_LOOP.md) before
+recording a sanitized reusable lesson.

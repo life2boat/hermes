@@ -128,8 +128,6 @@ jobs:
               expected_by_layer = {}
               for item in expected:
                   expected_by_layer.setdefault(item["layer_id"], []).append(item)
-              if set(expected_by_layer) - set(registry_layers):
-                  raise ValueError("RECEIPT_LAYER_NOT_IN_MANIFEST")
 
               with tarfile.open(archive, "r") as outer:
                   manifest_member = outer.extractfile("manifest.json")
@@ -156,10 +154,15 @@ jobs:
                   diff_ids = ((config.get("rootfs") or {}).get("diff_ids"))
                   if not isinstance(diff_ids, list) or len(diff_ids) != len(layer_names) or len(diff_ids) != len(registry_layers):
                       raise ValueError("LAYER_COUNT_MISMATCH")
-                  layer_map = dict(zip(registry_layers, zip(diff_ids, layer_names), strict=True))
+                  # The scanner records the uncompressed diff ID for Docker-save
+                  # layouts. Pair it by position with the corresponding immutable
+                  # compressed registry descriptor; both sequences are validated.
+                  layer_map = dict(zip(diff_ids, zip(registry_layers, layer_names), strict=True))
+                  if set(expected_by_layer) - set(layer_map):
+                      raise ValueError("RECEIPT_LAYER_NOT_IN_CONFIG")
                   matches = {}
-                  for registry_digest, findings in expected_by_layer.items():
-                      _diff_id, layer_name = layer_map[registry_digest]
+                  for diff_id, findings in expected_by_layer.items():
+                      _registry_digest, layer_name = layer_map[diff_id]
                       layer_member = outer.extractfile(layer_name)
                       if layer_member is None:
                           raise ValueError("DOCKER_SAVE_LAYER_MISSING")
@@ -175,7 +178,7 @@ jobs:
                               source = layer.extractfile(member)
                               if source is None:
                                   raise ValueError("LAYER_MEMBER_MISSING")
-                              matches[(registry_digest, path_sha256)] = (path, hash_member(source))
+                              matches[(diff_id, path_sha256)] = (path, hash_member(source))
                   resolved = []
                   for index, finding in enumerate(expected, start=1):
                       key = (finding["layer_id"], finding["path_sha256"])
@@ -185,11 +188,11 @@ jobs:
                       classification, action, package_origin = classify(path)
                       if classification == "UNRESOLVED":
                           raise ValueError("FINDING_ORIGIN_NOT_CLASSIFIED")
-                      diff_id, _layer_name = layer_map[finding["layer_id"]]
+                      registry_digest, _layer_name = layer_map[finding["layer_id"]]
                       resolved.append({
                           "finding_id": f"F{index:02d}",
                           "receipt_layer_digest": finding["layer_id"],
-                          "diff_id": diff_id,
+                          "registry_layer_digest": registry_digest,
                           "normalized_path": path,
                           "path_sha256": finding["path_sha256"],
                           "file_sha256": file_sha256,
@@ -212,9 +215,17 @@ jobs:
               }
               safe_write(payload)
           except Exception as exc:
+              safe_codes = {
+                  "CONFIG_DIGEST_MISMATCH", "DOCKER_SAVE_CONFIG_MISSING",
+                  "DOCKER_SAVE_MANIFEST_INVALID", "DOCKER_SAVE_MANIFEST_MISSING",
+                  "FINDING_ORIGIN_NOT_CLASSIFIED", "FINDING_PATH_NOT_RESOLVED",
+                  "LAYER_COUNT_MISMATCH", "LAYER_MEMBER_MISSING",
+                  "OCI_REVISION_MISMATCH", "RECEIPT_LAYER_NOT_IN_CONFIG",
+                  "REGISTRY_LAYER_IDENTITY_INVALID", "UNSAFE_ARCHIVE_PATH",
+              }
               safe_write({
                   "status": "FAIL",
-                  "error_code": str(exc) if str(exc).isupper() and " " not in str(exc) else "FORENSIC_RESOLUTION_FAILED",
+                  "error_code": str(exc) if str(exc) in safe_codes else "FORENSIC_RESOLUTION_FAILED",
                   "target_image": image,
                   "oci_revision": expected_revision,
               })

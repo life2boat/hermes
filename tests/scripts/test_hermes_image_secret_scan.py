@@ -6,6 +6,7 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,19 @@ def _tar_bytes(entries: list[tuple[str, bytes]]) -> bytes:
             info.size = len(payload)
             info.mode = 0o600
             archive.addfile(info, io.BytesIO(payload))
+    return stream.getvalue()
+
+
+def _link_tar_bytes(
+    name: str, target: str, *, link_type: bytes = tarfile.SYMTYPE
+) -> bytes:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        info = tarfile.TarInfo(name)
+        info.type = link_type
+        info.linkname = target
+        info.mode = 0o777
+        archive.addfile(info)
     return stream.getvalue()
 
 
@@ -96,6 +110,41 @@ def test_clean_image_passes(tmp_path: Path) -> None:
     assert contract["STATUS"] == "PASS"
     assert contract["IMAGE_SECRET_FINDINGS"] == 0
     assert contract["LAYERS_SCANNED"] == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [
+        ("usr/bin/tini", "/init"),
+        ("usr/bin/tool", "../lib/tool"),
+    ],
+)
+def test_in_root_symlink_targets_pass(tmp_path: Path, name: str, target: str) -> None:
+    path, image_id = _docker_archive(tmp_path, [_link_tar_bytes(name, target)])
+
+    contract = _scan(path, image_id).contract()
+
+    assert contract["STATUS"] == "PASS"
+    assert contract["LAYERS_SCANNED"] == 1
+
+
+def test_symlink_target_cannot_escape_image_root(tmp_path: Path) -> None:
+    path, image_id = _docker_archive(
+        tmp_path, [_link_tar_bytes("opt/app/link", "../../../host")]
+    )
+
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_PATH_UNSAFE"):
+        _scan(path, image_id)
+
+
+def test_absolute_hardlink_target_remains_denied(tmp_path: Path) -> None:
+    path, image_id = _docker_archive(
+        tmp_path,
+        [_link_tar_bytes("usr/bin/tini", "/init", link_type=tarfile.LNKTYPE)],
+    )
+
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_PATH_UNSAFE"):
+        _scan(path, image_id)
 
 
 def test_secret_in_final_filesystem_fails(tmp_path: Path) -> None:
@@ -219,6 +268,113 @@ def test_contract_never_contains_secret_value(tmp_path: Path) -> None:
     serialized = json.dumps(_scan(path, image_id).contract(), sort_keys=True)
     assert TOKEN not in serialized
     assert "config.env" not in serialized
+
+
+def test_finding_receipt_contains_only_sanitized_locations(tmp_path: Path) -> None:
+    path, image_id = _docker_archive(
+        tmp_path,
+        [_tar_bytes([("run/config.env", f"TELEGRAM_BOT_TOKEN={TOKEN}".encode())])],
+    )
+    digest = "sha256:" + "d" * 64
+
+    receipt = scanner._scan_receipt(
+        _scan(path, image_id).contract(),
+        f"ghcr.io/life2boat/hermes@{digest}",
+    )
+    serialized = json.dumps(receipt, sort_keys=True)
+
+    assert receipt["SCANNER_EXIT_CODE"] == 1
+    assert receipt["SCANNER_ERROR_CLASS"] == "FINDING"
+    assert receipt["FINDING_COUNT"] == receipt["IMAGE_SECRET_FINDINGS"]
+    assert receipt["FINDING_CLASS"] == ["PROTECTED_SECRET_MATERIAL"]
+    assert all(
+        item["layer_digest"].startswith("sha256:")
+        for item in receipt["FINDING_LOCATION"]
+    )
+    assert receipt["IMAGE_DIGEST"] == digest
+    assert TOKEN not in serialized
+    assert "config.env" not in serialized
+
+
+def test_structural_failure_writes_sanitized_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    digest = "sha256:" + "d" * 64
+    output = tmp_path / "failure.json"
+
+    def fail(_args: object) -> int:
+        raise scanner.ImageScanError("IMAGE_ARCHIVE_PATH_UNSAFE")
+
+    monkeypatch.setattr(scanner, "scan_local_image", fail)
+    monkeypatch.setattr(
+        scanner.deploy,
+        "load_contract",
+        lambda _root: SimpleNamespace(protected_secret_names=()),
+    )
+    if not hasattr(scanner.os, "fchmod"):
+        monkeypatch.setattr(scanner.os, "fchmod", lambda *_args: None, raising=False)
+    status = scanner.main([
+        "--repository-root",
+        str(Path(scanner.__file__).resolve().parents[1]),
+        "--image",
+        f"ghcr.io/life2boat/hermes@{digest}",
+        "--expected-source-sha",
+        REVISION,
+        "--output",
+        str(output),
+    ])
+    receipt = json.loads(output.read_text(encoding="ascii"))
+
+    assert status == 1
+    assert receipt == json.loads(capsys.readouterr().out)
+    assert receipt["SCANNER_ERROR_CLASS"] == "PARSE_ERROR"
+    assert receipt["SCANNER_ERROR_CODE"] == "IMAGE_ARCHIVE_PATH_UNSAFE"
+    assert receipt["FINDING_COUNT"] is None
+    assert receipt["FINDING_CLASS"] == []
+    assert receipt["FINDING_LOCATION"] == []
+    assert receipt["IMAGE_DIGEST"] == digest
+    assert len(receipt["SCAN_POLICY_SHA256"]) == 64
+
+
+def test_unexpected_failure_receipt_never_exposes_exception_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    digest = "sha256:" + "e" * 64
+    output = tmp_path / "failure.json"
+
+    def fail(_args: object) -> int:
+        raise RuntimeError(f"unsafe diagnostic detail: {TOKEN}")
+
+    monkeypatch.setattr(scanner, "scan_local_image", fail)
+    monkeypatch.setattr(
+        scanner.deploy,
+        "load_contract",
+        lambda _root: SimpleNamespace(protected_secret_names=()),
+    )
+    if not hasattr(scanner.os, "fchmod"):
+        monkeypatch.setattr(scanner.os, "fchmod", lambda *_args: None, raising=False)
+    status = scanner.main([
+        "--repository-root",
+        str(Path(scanner.__file__).resolve().parents[1]),
+        "--image",
+        f"ghcr.io/life2boat/hermes@{digest}",
+        "--expected-source-sha",
+        REVISION,
+        "--output",
+        str(output),
+    ])
+    serialized = output.read_text(encoding="ascii") + capsys.readouterr().out
+
+    assert status == 1
+    assert TOKEN not in serialized
+    assert "unsafe diagnostic detail" not in serialized
+    assert json.loads(output.read_text(encoding="ascii"))["SCANNER_ERROR_CLASS"] == (
+        "INTERNAL_ERROR"
+    )
 
 
 def test_mutable_tag_cannot_satisfy_provenance(

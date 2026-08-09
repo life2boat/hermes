@@ -164,6 +164,7 @@ from agent.message_sanitization import (  # noqa: F401
     _sanitize_tools_non_ascii,
     _strip_images_from_messages,
     _sanitize_structure_non_ascii,
+    sanitize_durable_multimodal_payload,
 )
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1562,8 +1563,12 @@ class AIAgent:
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
             for msg in messages[flush_from:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content")
+                # SessionDB is a durable boundary. Sanitize a copied message
+                # before extracting any persisted field so image payloads and
+                # cache paths never land in state.db.
+                safe_msg = sanitize_durable_multimodal_payload(msg)
+                role = safe_msg.get("role", "unknown")
+                content = safe_msg.get("content")
                 # Persist multimodal tool results as their text summary only —
                 # base64 images would bloat the session DB and aren't useful
                 # for cross-session replay.
@@ -1580,25 +1585,25 @@ class AIAgent:
                     content = "\n".join(_txt) if _txt else None
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
+                    tool_calls_data = sanitize_durable_multimodal_payload([
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in msg.tool_calls
-                    ]
-                elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
+                    ])
+                elif isinstance(safe_msg.get("tool_calls"), list):
+                    tool_calls_data = safe_msg["tool_calls"]
                 self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
                     content=content,
-                    tool_name=msg.get("tool_name"),
+                    tool_name=safe_msg.get("tool_name"),
                     tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    tool_call_id=safe_msg.get("tool_call_id"),
+                    finish_reason=safe_msg.get("finish_reason"),
+                    reasoning=safe_msg.get("reasoning") if role == "assistant" else None,
+                    reasoning_content=safe_msg.get("reasoning_content") if role == "assistant" else None,
+                    reasoning_details=safe_msg.get("reasoning_details") if role == "assistant" else None,
+                    codex_reasoning_items=safe_msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    codex_message_items=safe_msg.get("codex_message_items") if role == "assistant" else None,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -2209,6 +2214,11 @@ class AIAgent:
         messages = messages or self._session_messages
         if not messages:
             return
+        # JSON snapshots are durable secondary artifacts, not part of the
+        # foreground provider request. Preserve the live message list while
+        # removing raw image bytes/URLs and generated cache-path hints from
+        # the copy written to disk.
+        messages = sanitize_durable_multimodal_payload(messages)
 
         # Re-derive the target path each call so /branch and /compress
         # session-id changes land in the right file without any re-point
@@ -2221,7 +2231,10 @@ class AIAgent:
         try:
             cleaned = []
             for msg in messages:
-                if msg.get("role") == "assistant" and msg.get("content"):
+                if (
+                    msg.get("role") == "assistant"
+                    and isinstance(msg.get("content"), str)
+                ):
                     msg = dict(msg)
                     msg["content"] = self._clean_session_content(msg["content"])
                 # Defence-in-depth: redact credentials from every message

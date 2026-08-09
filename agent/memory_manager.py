@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+from agent.message_sanitization import sanitize_durable_multimodal_payload
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -399,11 +400,12 @@ class MemoryManager:
         providers = list(self._providers)
         if not providers:
             return
+        safe_query = sanitize_durable_multimodal_payload(query)
 
         def _run() -> None:
             for provider in providers:
                 try:
-                    provider.queue_prefetch(query, session_id=session_id)
+                    provider.queue_prefetch(safe_query, session_id=session_id)
                 except Exception as e:
                     logger.debug(
                         "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
@@ -454,21 +456,28 @@ class MemoryManager:
         providers = list(self._providers)
         if not providers:
             return
+        safe_user_content = sanitize_durable_multimodal_payload(user_content)
+        safe_assistant_content = sanitize_durable_multimodal_payload(assistant_content)
+        safe_messages = (
+            None
+            if messages is None
+            else sanitize_durable_multimodal_payload(messages)
+        )
 
         def _run() -> None:
             for provider in providers:
                 try:
-                    if messages is not None and self._provider_sync_accepts_messages(provider):
+                    if safe_messages is not None and self._provider_sync_accepts_messages(provider):
                         provider.sync_turn(
-                            user_content,
-                            assistant_content,
+                            safe_user_content,
+                            safe_assistant_content,
                             session_id=session_id,
-                            messages=messages,
+                            messages=safe_messages,
                         )
                     else:
                         provider.sync_turn(
-                            user_content,
-                            assistant_content,
+                            safe_user_content,
+                            safe_assistant_content,
                             session_id=session_id,
                         )
                 except Exception as e:
@@ -628,7 +637,9 @@ class MemoryManager:
         """Notify all providers of session end."""
         for provider in self._providers:
             try:
-                provider.on_session_end(messages)
+                provider.on_session_end(
+                    sanitize_durable_multimodal_payload(messages)
+                )
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_session_end failed: %s",

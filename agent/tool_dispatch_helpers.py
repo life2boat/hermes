@@ -30,6 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent.message_sanitization import sanitize_durable_multimodal_payload
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
 )
@@ -295,26 +296,27 @@ def _extract_error_preview(result: Any, max_len: int = 180) -> str:
 
 
 def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip image blobs from a message for trajectory saving.
+    """Strip image payloads and references from a trajectory message.
 
-    Returns a shallow copy with multimodal tool results replaced by their
-    text_summary, and image parts in content lists replaced by
-    `[screenshot]` placeholders. Keeps the message schema otherwise intact.
+    The whole copied message crosses the durable sanitizer so tool arguments,
+    cache paths, signed URLs, and auxiliary metadata cannot reintroduce pixels
+    after the content-level normalization.
     """
     if not isinstance(msg, dict):
-        return msg
+        return sanitize_durable_multimodal_payload(msg)
+    normalized = msg
     content = msg.get("content")
     if _is_multimodal_tool_result(content):
-        return {**msg, "content": _multimodal_text_summary(content)}
-    if isinstance(content, list):
+        normalized = {**msg, "content": _multimodal_text_summary(content)}
+    elif isinstance(content, list):
         cleaned = []
         for p in content:
             if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
                 cleaned.append({"type": "text", "text": "[screenshot]"})
             else:
                 cleaned.append(p)
-        return {**msg, "content": cleaned}
-    return msg
+        normalized = {**msg, "content": cleaned}
+    return sanitize_durable_multimodal_payload(normalized)
 
 
 def make_tool_result_message(name: str, content: Any, tool_call_id: str) -> dict:

@@ -28,6 +28,197 @@ logger = logging.getLogger(__name__)
 _SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
 
 
+# Durable consumers (session snapshots, background review, and Memory OS
+# providers) must never receive the image payload that the foreground model
+# needs for the current request. Keep the placeholder stable so downstream
+# code and tests can recognize the boundary without learning anything about
+# the source URL/path or the image bytes.
+DURABLE_IMAGE_PLACEHOLDER = '[Image omitted from durable context]'
+_DURABLE_IMAGE_REFERENCE_PLACEHOLDER = '[Image reference omitted from durable context]'
+_DURABLE_BINARY_PLACEHOLDER = '[Binary payload omitted from durable context]'
+
+_DURABLE_IMAGE_PART_TYPES = frozenset({'image', 'image_url', 'input_image'})
+_DURABLE_IMAGE_REFERENCE_KEYS = frozenset({
+    'browser_screenshot',
+    'browser_screenshots',
+    'image_base64',
+    'image_bytes',
+    'image_data',
+    'image_path',
+    'image_paths',
+    'image_uri',
+    'image_uris',
+    'image_url',
+    'image_urls',
+    'input_image',
+    'screenshot_base64',
+    'screenshot_bytes',
+    'screenshot_data',
+    'screenshot_path',
+    'screenshot_paths',
+    'screenshot_uri',
+    'screenshot_uris',
+    'screenshot_url',
+    'screenshot_urls',
+    'screenshot',
+    'screenshots',
+})
+_DATA_IMAGE_URL_RE = re.compile(
+    r'data:image/[a-z0-9.+-]+(?:;[a-z0-9.+_=-]+)*,[a-z0-9+/=_-]+',
+    re.IGNORECASE,
+)
+_REMOTE_IMAGE_URL_RE = re.compile(
+    r'https?://[^\s<>\x22\x27\]\[]+\.(?:avif|gif|heic|jpeg|jpg|png|webp)'
+    r'(?:\?[^\s<>\x22\x27\]\[]*)?',
+    re.IGNORECASE,
+)
+_NAMED_SCREENSHOT_URL_RE = re.compile(
+    r'(?i)(?P<label>\b(?:screenshot(?:s)?[ _]?(?:url|uri)|'
+    r'opaque[ _]+screenshot))\s*(?P<separator>[:=])\s*'
+    r'(?P<url>(?:https?://|data:image/)[^\s<>\x22\x27\]\[]+)',
+)
+_DURABLE_IMAGE_CACHE_PATH_RE = re.compile(
+    r'(?:(?:[a-z]:[\\/])|/|~/)(?:[^\s<>\x22\x27\]\[]+[\\/])*'
+    r'(?:cache[\\/](?:images|screenshots)|image_cache|browser_screenshots)'
+    r'[\\/][^\s<>\x22\x27\]\[]+',
+    re.IGNORECASE,
+)
+_DURABLE_BROWSER_SCREENSHOT_PATH_RE = re.compile(
+    r'(?:(?:[a-z]:[\\/])|/|~/)(?:[^\s<>\x22\x27\]\[]+[\\/])*'
+    r'browser_screenshot(?:_[^\s<>\x22\x27\]\[/\\]*)?'
+    r'\.(?:avif|gif|heic|jpeg|jpg|png|webp)',
+    re.IGNORECASE,
+)
+_DURABLE_RELATIVE_SCREENSHOT_CACHE_PATH_RE = re.compile(
+    r'(?<![A-Za-z0-9_.-])(?:\.[\\/])?'
+    r'(?:cache[\\/](?:images|screenshots)|image_cache|browser_screenshots)'
+    r'[\\/][^\s<>\x22\x27\]\[]+',
+    re.IGNORECASE,
+)
+_DURABLE_RELATIVE_BROWSER_SCREENSHOT_PATH_RE = re.compile(
+    r'(?<![A-Za-z0-9_.-])(?:\.[\\/])?browser_screenshot'
+    r'(?:_[^\s<>\x22\x27\]\[/\\]*)?'
+    r'\.(?:avif|gif|heic|jpeg|jpg|png|webp)',
+    re.IGNORECASE,
+)
+_GENERATED_IMAGE_ATTACHMENT_HINT_RE = re.compile(
+    r'\[Image attached(?: at)?:[^\]\r\n]*\]',
+    re.IGNORECASE,
+)
+_GENERATED_VISION_REEXAMINE_HINT_RE = re.compile(
+    r'\[If you need a closer look,\s*use vision_analyze with\s+'
+    r'image_url:\s*[^\]\r\n]*\]',
+    re.IGNORECASE,
+)
+_JSON_IMAGE_FIELD_RE = re.compile(
+    r'(?:\x22)?\b(?:(?:image|screenshot)_'
+    r'(?:base64|bytes|data|path|paths|uri|uris|url|urls)|input_image|'
+    r'browser_screenshots?|screenshots?)'
+    r'\b(?:\x22)?\s*:',
+    re.IGNORECASE,
+)
+
+
+def _sanitize_durable_multimodal_text(text: str) -> str:
+    '''Remove generated image references from a durable text value.
+
+    Ordinary prose and ordinary filesystem paths are intentionally left alone.
+    Raw data/image URLs, recognized remote image URLs, Hermes cache paths, and
+    generated media-reference annotations are rewritten. JSON-encoded tool
+    arguments are parsed only when they contain a known image field, allowing
+    nested vision payloads to cross the same boundary safely.
+    '''
+    sanitized = _DATA_IMAGE_URL_RE.sub(_DURABLE_IMAGE_REFERENCE_PLACEHOLDER, text)
+    sanitized = _REMOTE_IMAGE_URL_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _NAMED_SCREENSHOT_URL_RE.sub(
+        lambda match: (
+            f"{match.group('label')}{match.group('separator')} "
+            f"{_DURABLE_IMAGE_REFERENCE_PLACEHOLDER}"
+        ),
+        sanitized,
+    )
+    sanitized = _DURABLE_IMAGE_CACHE_PATH_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _DURABLE_BROWSER_SCREENSHOT_PATH_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _DURABLE_RELATIVE_SCREENSHOT_CACHE_PATH_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _DURABLE_RELATIVE_BROWSER_SCREENSHOT_PATH_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _GENERATED_IMAGE_ATTACHMENT_HINT_RE.sub(
+        DURABLE_IMAGE_PLACEHOLDER,
+        sanitized,
+    )
+    sanitized = _GENERATED_VISION_REEXAMINE_HINT_RE.sub(
+        _DURABLE_IMAGE_REFERENCE_PLACEHOLDER,
+        sanitized,
+    )
+
+    candidate = sanitized.lstrip()
+    if candidate.startswith(('{', '[')) and _JSON_IMAGE_FIELD_RE.search(sanitized):
+        try:
+            parsed = json.loads(sanitized)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return sanitized
+        cleaned = sanitize_durable_multimodal_payload(parsed)
+        if cleaned != parsed:
+            return json.dumps(cleaned, ensure_ascii=False, separators=(',', ':'))
+    return sanitized
+
+
+def sanitize_durable_multimodal_payload(payload: Any, *, _parent_key: str = '') -> Any:
+    '''Return a recursively sanitized copy for durable/secondary consumers.
+
+    This helper is deliberately not used on the foreground provider request:
+    the current model still receives the original image. At persistence and
+    secondary-consumer boundaries it replaces OpenAI, Responses, and Anthropic
+    image blocks, key-addressed image and screenshot references, raw image
+    data URLs, binary values, and Hermes-generated cache-path hints with
+    stable placeholders.
+
+    The input is never mutated. Non-image text and structure are preserved.
+    '''
+    normalized_parent = str(_parent_key or '').lower()
+    if normalized_parent in _DURABLE_IMAGE_REFERENCE_KEYS:
+        if isinstance(payload, (list, tuple)):
+            placeholders = [_DURABLE_IMAGE_REFERENCE_PLACEHOLDER for _ in payload]
+            return tuple(placeholders) if isinstance(payload, tuple) else placeholders
+        return _DURABLE_IMAGE_REFERENCE_PLACEHOLDER
+
+    if isinstance(payload, dict):
+        part_type = str(payload.get('type') or '').lower()
+        if part_type in _DURABLE_IMAGE_PART_TYPES:
+            return {
+                'type': 'text',
+                'text': DURABLE_IMAGE_PLACEHOLDER,
+            }
+        return {
+            key: sanitize_durable_multimodal_payload(value, _parent_key=str(key))
+            for key, value in payload.items()
+        }
+
+    if isinstance(payload, list):
+        return [sanitize_durable_multimodal_payload(value) for value in payload]
+    if isinstance(payload, tuple):
+        return tuple(sanitize_durable_multimodal_payload(value) for value in payload)
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        return _DURABLE_BINARY_PLACEHOLDER
+    if isinstance(payload, str):
+        return _sanitize_durable_multimodal_text(payload)
+    return payload
+
+
 def _sanitize_surrogates(text: str) -> str:
     """Replace lone surrogate code points with U+FFFD (replacement character).
 
@@ -430,6 +621,8 @@ def _sanitize_structure_non_ascii(payload: Any) -> bool:
 
 
 __all__ = [
+    'DURABLE_IMAGE_PLACEHOLDER',
+    'sanitize_durable_multimodal_payload',
     "_SURROGATE_RE",
     "_sanitize_surrogates",
     "_sanitize_structure_surrogates",

@@ -4,6 +4,7 @@ from providers import register_provider
 from providers.base import ProviderProfile
 
 alibaba = ProviderProfile(
+    requires_explicit_vision_model=True,
     name="alibaba",
     aliases=("dashscope", "alibaba-cloud", "qwen-dashscope"),
     env_vars=("DASHSCOPE_API_KEY",),

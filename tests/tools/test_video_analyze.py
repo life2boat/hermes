@@ -198,7 +198,11 @@ class TestVideoAnalyzeTool:
         result = self._run(video_analyze_tool("/nonexistent/video.mp4", "What?"))
         data = json.loads(result)
         assert data["success"] is False
-        assert "invalid video source" in data["analysis"].lower()
+        assert data["error"] == "Error analyzing video: invalid_video_source"
+        assert data["analysis"] == (
+            "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
+        )
+        assert "/nonexistent/video.mp4" not in json.dumps(data)
 
     def test_unsupported_format(self, tmp_path):
         """Unsupported extension raises error."""
@@ -208,7 +212,12 @@ class TestVideoAnalyzeTool:
         result = self._run(video_analyze_tool(str(video), "What is this?"))
         data = json.loads(result)
         assert data["success"] is False
-        assert "unsupported video format" in data["analysis"].lower()
+        assert data["error"] == "Error analyzing video: unsupported_video_format"
+        assert data["analysis"] == (
+            "Unsupported video format. Use a supported video file type."
+        )
+        assert str(video) not in json.dumps(data)
+        assert ".flv" not in json.dumps(data)
 
     def test_video_too_large(self, tmp_path, monkeypatch):
         """Video exceeding max size is rejected."""

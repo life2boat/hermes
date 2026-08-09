@@ -92,6 +92,7 @@ class ProviderProfile:
         ""  # cheap model for auxiliary tasks (compression, vision, etc.)
     )
     # empty = use main model
+    requires_explicit_vision_model: bool = False
 
     # ── Hooks (override in subclass for complex providers) ───
 

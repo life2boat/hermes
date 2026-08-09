@@ -770,8 +770,11 @@ def camofox_vision(question: str, annotate: bool = False,
             "analysis": analysis,
             "screenshot_path": screenshot_path,
         })
-    except Exception as e:
-        return tool_error(str(e), success=False)
+    except Exception:
+        return tool_error(
+            "Vision browser operation failed: unexpected_error",
+            success=False,
+        )
 
 
 def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:

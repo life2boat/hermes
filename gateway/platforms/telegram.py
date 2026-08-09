@@ -9,6 +9,7 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -85,6 +86,8 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
     cache_image_from_bytes,
+    cleanup_cached_image_paths,
+    MAX_CACHED_IMAGE_BYTES,
     cache_audio_from_bytes,
     cache_video_from_bytes,
     cache_document_from_bytes,
@@ -1945,6 +1948,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if pending_media_group_tasks:
             await asyncio.gather(*pending_media_group_tasks, return_exceptions=True)
         self._media_group_tasks.clear()
+        for pending_event in self._media_group_events.values():
+            cleanup_cached_image_paths(pending_event.media_urls)
         self._media_group_events.clear()
 
         if self._app:
@@ -1959,10 +1964,18 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Error during Telegram disconnect: %s", self.name, e, exc_info=True)
         self._release_platform_lock()
 
-        for task in self._pending_photo_batch_tasks.values():
+        pending_photo_tasks = list(self._pending_photo_batch_tasks.values())
+        for task in pending_photo_tasks:
             if task and not task.done():
                 task.cancel()
+        awaitable_photo_tasks = [
+            task for task in pending_photo_tasks if inspect.isawaitable(task)
+        ]
+        if awaitable_photo_tasks:
+            await asyncio.gather(*awaitable_photo_tasks, return_exceptions=True)
         self._pending_photo_batch_tasks.clear()
+        for pending_event in self._pending_photo_batches.values():
+            cleanup_cached_image_paths(pending_event.media_urls)
         self._pending_photo_batches.clear()
 
         self._mark_disconnected()
@@ -5345,6 +5358,12 @@ class TelegramAdapter(BasePlatformAdapter):
         photo = self._largest_photo_size(photo_message)
         if photo is None:
             return False
+        try:
+            declared_size = int(getattr(photo, "file_size", None) or 0)
+        except (TypeError, ValueError):
+            declared_size = 0
+        if declared_size > MAX_CACHED_IMAGE_BYTES:
+            return False
 
         logger.info(
             "[Telegram][vision_input_received] source=telegram kind=photo context=%s mime=unknown size_bucket=%s",
@@ -5468,7 +5487,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 filename = os.path.basename(getattr(file_obj, "file_path", "") or "")
             cached = cache_media_bytes(data, filename=filename, mime_type=mime, default_kind=kind)
         except Exception as exc:
-            logger.warning("[Telegram] Failed to cache observed group media: %s", exc, exc_info=True)
+            logger.warning(
+                "[Telegram] Failed to cache observed group media error_type=%s",
+                exc.__class__.__name__,
+            )
             return
 
         if cached is None:
@@ -5483,8 +5505,16 @@ class TelegramAdapter(BasePlatformAdapter):
             event.message_type = MessageType.PHOTO
         elif cached.kind == "video":
             event.message_type = MessageType.VIDEO
-        event.text = self._append_observed_note(event.text, cached.context_note())
-        logger.info("[Telegram] Cached observed group %s at %s", cached.kind, cached.path)
+        # Pixel paths are ephemeral and must never enter the durable observed
+        # transcript. Other attachment kinds keep their existing context note:
+        # the cached path is how the agent can access those durable files.
+        observed_note = (
+            "[Observed Telegram image attachment.]"
+            if cached.kind == "image"
+            else cached.context_note()
+        )
+        event.text = self._append_observed_note(event.text, observed_note)
+        logger.info("[Telegram] Cached observed group attachment kind=%s", cached.kind)
 
     def _observed_media_source(self, msg: Message):
         """Return (telegram_file_source, filename, mime, default_kind) or Nones."""
@@ -8544,14 +8574,30 @@ class TelegramAdapter(BasePlatformAdapter):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+        actor_id = event.source.user_id_alt or event.source.user_id or "anonymous"
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
-            return f"{session_key}:album:{media_group_id}"
-        return f"{session_key}:photo-burst"
+            return f"{session_key}:actor:{actor_id}:album:{media_group_id}"
+        return f"{session_key}:actor:{actor_id}:photo-burst"
+
+    @staticmethod
+    def _media_batch_source_identity(event: MessageEvent) -> tuple[str, ...]:
+        """Return the strict actor/chat identity allowed to share cached pixels."""
+        source = event.source
+        platform = getattr(source.platform, "value", source.platform)
+        return (
+            str(platform or ""),
+            str(source.chat_id or ""),
+            str(source.thread_id or ""),
+            str(source.user_id_alt or ""),
+            str(source.user_id or ""),
+        )
 
     async def _flush_photo_batch(self, batch_key: str) -> None:
         """Send a buffered photo burst/album as a single MessageEvent."""
         current_task = asyncio.current_task()
+        event = None
+        handed_off = False
         try:
             await asyncio.sleep(self._media_batch_delay_seconds)
             event = self._pending_photo_batches.pop(batch_key, None)
@@ -8559,7 +8605,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
             logger.info("[Telegram] Flushing photo batch media_count=%d", len(event.media_urls))
             await self.handle_message(event)
+            handed_off = True
         finally:
+            if (
+                event is not None
+                and not handed_off
+                and not getattr(event, "_cached_media_ownership_transferred", False)
+            ):
+                cleanup_cached_image_paths(event.media_urls)
             if self._pending_photo_batch_tasks.get(batch_key) is current_task:
                 self._pending_photo_batch_tasks.pop(batch_key, None)
 
@@ -8569,6 +8622,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if existing is None:
             self._pending_photo_batches[batch_key] = event
         else:
+            if (
+                self._media_batch_source_identity(existing)
+                != self._media_batch_source_identity(event)
+            ):
+                logger.warning(
+                    "[Telegram] Rejected photo batch item with mismatched source"
+                )
+                cleanup_cached_image_paths(event.media_urls)
+                return
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
@@ -8599,10 +8661,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 _event = self._build_message_event(_m, _observe_type, update_id=update.update_id)
                 if _m.caption:
                     _event.text = self._clean_bot_trigger_text(_m.caption)
-                await self._cache_observed_media(_m, _event)
-                self._observe_unmentioned_group_message(
-                    _m, _event.message_type, update_id=update.update_id, event=_event
-                )
+                try:
+                    await self._cache_observed_media(_m, _event)
+                    self._observe_unmentioned_group_message(
+                        _m, _event.message_type, update_id=update.update_id, event=_event
+                    )
+                finally:
+                    cleanup_cached_image_paths(_event.media_urls)
+                    _event.media_urls.clear()
+                    _event.media_types.clear()
             return
 
         msg = update.message
@@ -8635,7 +8702,8 @@ class TelegramAdapter(BasePlatformAdapter):
         # Download photo to local image cache so the vision tool can access it
         # even after Telegram's ephemeral file URLs expire (~1 hour).
         if msg.photo:
-            if await self._cache_photo_message_to_event(msg, event, context="photo"):
+            cached_photo = await self._cache_photo_message_to_event(msg, event, context="photo")
+            if cached_photo:
                 self._log_healbite_marker(
                     "healbite_route_selected",
                     msg=msg,
@@ -8649,6 +8717,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     batch_key = self._photo_batch_key(event, msg)
                     self._enqueue_photo_event(batch_key, event)
                 return
+            event.text = (
+                "The image could not be processed safely. "
+                "Ask the user to send a smaller supported image or provide text instead."
+            )
+            event.media_urls.clear()
+            event.media_types.clear()
+            await self.handle_message(event)
+            return
 
         # Download voice/audio messages to cache for STT transcription
         if msg.voice:
@@ -8846,35 +8922,65 @@ class TelegramAdapter(BasePlatformAdapter):
         Telegram delivers albums as multiple updates with a shared media_group_id.
         If we forward each item immediately, the gateway thinks the second image is a
         new user message and interrupts the first. We debounce briefly and merge the
-        attachments into a single MessageEvent.
+        attachments into a single MessageEvent. The untrusted Telegram group id is
+        scoped to the Hermes session, and every merge requires an exact source match.
         """
-        existing = self._media_group_events.get(media_group_id)
+        from gateway.session import build_session_key
+
+        self._apply_topic_recovery(event)
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        batch_key = f"{session_key}:album:{media_group_id}"
+        existing = self._media_group_events.get(batch_key)
         if existing is None:
-            self._media_group_events[media_group_id] = event
+            self._media_group_events[batch_key] = event
         else:
+            if (
+                self._media_batch_source_identity(existing)
+                != self._media_batch_source_identity(event)
+            ):
+                logger.warning(
+                    "[Telegram] Rejected media-group item with mismatched source"
+                )
+                cleanup_cached_image_paths(event.media_urls)
+                return
             existing.media_urls.extend(event.media_urls)
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = self._merge_caption(existing.text, event.text)
 
-        prior_task = self._media_group_tasks.get(media_group_id)
+        prior_task = self._media_group_tasks.get(batch_key)
         if prior_task:
             prior_task.cancel()
 
-        self._media_group_tasks[media_group_id] = asyncio.create_task(
-            self._flush_media_group_event(media_group_id)
+        self._media_group_tasks[batch_key] = asyncio.create_task(
+            self._flush_media_group_event(batch_key)
         )
 
-    async def _flush_media_group_event(self, media_group_id: str) -> None:
+    async def _flush_media_group_event(self, batch_key: str) -> None:
+        current_task = asyncio.current_task()
+        event = None
+        handed_off = False
         try:
             await asyncio.sleep(self.MEDIA_GROUP_WAIT_SECONDS)
-            event = self._media_group_events.pop(media_group_id, None)
+            event = self._media_group_events.pop(batch_key, None)
             if event is not None:
                 await self.handle_message(event)
+                handed_off = True
         except asyncio.CancelledError:
             return
         finally:
-            self._media_group_tasks.pop(media_group_id, None)
+            if (
+                event is not None
+                and not handed_off
+                and not getattr(event, "_cached_media_ownership_transferred", False)
+            ):
+                cleanup_cached_image_paths(event.media_urls)
+            if self._media_group_tasks.get(batch_key) is current_task:
+                self._media_group_tasks.pop(batch_key, None)
 
     async def _handle_sticker(self, msg: Message, event: "MessageEvent") -> None:
         """
@@ -8911,6 +9017,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return
 
         # Cache miss -- download and analyze
+        cached_path = None
         try:
             file_obj = await sticker.get_file()
             image_bytes = await file_obj.download_as_bytearray()
@@ -8940,6 +9047,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 f"a sticker with emoji {emoji}" if emoji else "a sticker",
                 emoji, set_name,
             )
+        finally:
+            if cached_path:
+                cleanup_cached_image_paths([cached_path])
 
     def _reload_dm_topics_from_config(self) -> None:
         """Re-read dm_topics from config.yaml and load any new thread_ids into cache.

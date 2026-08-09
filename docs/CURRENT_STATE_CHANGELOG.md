@@ -1,5 +1,26 @@
 # CURRENT_STATE changelog
 
+## 1.2.23 - 2026-08-09
+
+Added:
+- recorded the normal merge of PR #129 and the complete operational-adoption
+  documentation layer;
+- recorded the opt-in, provider-registry Qwen/DashScope Vision route and the
+  explicit separation from Qwen Portal OAuth;
+- recorded durable multimodal sanitization plus ownership-bound, turn-scoped
+  Telegram image cleanup.
+
+Changed:
+- updated repository-state verification to the PR #129 merge commit
+  `713c90a1849d5bc415f6ab8378345b0f67415df1`;
+- made ambiguous bare `qwen` auxiliary routing fail closed while preserving
+  explicit `alibaba`, `qwen-dashscope`, and `qwen-oauth` identities.
+
+Safety:
+- no default Qwen model, cross-provider image fallback, or production feature
+  activation was introduced;
+- production, containers, SQLite, Qdrant, and secrets were not changed.
+
 ## 1.2.22 - 2026-08-09
 
 Added:

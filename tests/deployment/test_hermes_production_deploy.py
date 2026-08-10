@@ -338,6 +338,7 @@ def test_manifest_is_canonical_and_secret_free() -> None:
         "NOUS_API_KEY",
         "OPENAI_API_KEY",
         "QWEN_API_KEY",
+        "DASHSCOPE_API_KEY",
         "TELEGRAM_BOT_TOKEN",
     }
     assert contract.approved_secret_source == Path("/etc/hermes/hermes-production.env")
@@ -349,6 +350,15 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.database_source == Path("/var/lib/hermes/production-db/healbite.db")
     assert contract.lease_path == Path("/run/hermes/hermes-deployment-operation.json")
     assert FAKE_SECRET not in text
+
+
+def test_photo_activation_contract_defaults_to_disabled_empty_allowlists() -> None:
+    contract = deploy.load_contract()
+
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ENABLED"] == "false"
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ALLOWLIST"] == ""
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_UI_ENABLED"] == "false"
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST"] == ""
 
 
 def test_pinned_manifest_bytes_use_canonical_loader_without_reopen(
@@ -383,6 +393,12 @@ def test_pinned_manifest_bytes_use_canonical_loader_without_reopen(
         ("HEALBITE_HOUSEHOLDS_ENABLED", True, False),
         ("HEALBITE_HOUSEHOLDS_ENABLED", "false", False),
         ("HEALBITE_HOUSEHOLDS_ENABLED", False, True),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", True, False),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", "false", False),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", False, True),
+        ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", True, False),
+        ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", "false", False),
+        ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", False, True),
         ("HEALBITE_SHOPPING_LIST_ENABLED", True, False),
         ("HEALBITE_SHOPPING_LIST_ENABLED", "false", False),
         ("HEALBITE_SHOPPING_LIST_ENABLED", False, True),

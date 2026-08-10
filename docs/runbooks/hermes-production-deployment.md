@@ -30,7 +30,7 @@ the authoritative detailed contract consumed by deployment tooling and tests.
 | Secret override | regular deployment-operator-owned file, mode `0600` |
 | Approved secret source class | explicit protected dotenv file outside the repository |
 | Approved production source | `/etc/hermes/hermes-production.env`, root-owned, mode `0600` |
-| Protected override variables | six manifest-declared variables; only `TELEGRAM_BOT_TOKEN` is required on a clean install |
+| Protected override variables | seven manifest-declared variables; only `TELEGRAM_BOT_TOKEN` is required on a clean install |
 
 The canonical Compose order is deterministic:
 
@@ -39,7 +39,9 @@ The canonical Compose order is deterministic:
 3. `/run/hermes/hermes-secrets-override.yml`
 
 The production override explicitly keeps `HEALBITE_SHOPPING_LIST_ENABLED=false`
-and its allowlist empty. Other feature settings are not changed by this contract.
+and its allowlist empty. It also keeps both Inventory Photo gates disabled with
+empty allowlists. Those defaults are an activation boundary, not a deployment
+mechanism: enabling a feature requires its separate authorization contract.
 
 The inert `x-hermes-feature-state-inventory` Compose extension records the complete
 P1 inventory without changing service environment values. Its nine canonical

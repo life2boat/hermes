@@ -349,11 +349,12 @@ def load_contract(
     if owner_uids != [0]:
         _fail("secret-source-owners")
     protected_raw = secrets.get("protected_variables")
-    if not isinstance(protected_raw, list) or len(protected_raw) != 6:
+    if not isinstance(protected_raw, list) or len(protected_raw) != 7:
         _fail("protected-secret-manifest")
     protected: list[ProtectedSecretSpec] = []
     expected_secret_names = {
         "DEEPSEEK_API_KEY",
+        "DASHSCOPE_API_KEY",
         "GEMINI_API_KEY",
         "NOUS_API_KEY",
         "OPENAI_API_KEY",
@@ -431,6 +432,10 @@ def load_contract(
     expected_manifest_gates: dict[str, object] = {
         "HEALBITE_HOUSEHOLDS_ENABLED": False,
         "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_ENABLED": False,
+        "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": False,
+        "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
         "HEALBITE_SHOPPING_LIST_ENABLED": False,
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }
@@ -439,6 +444,10 @@ def load_contract(
     normalized_feature_gates = {
         "HEALBITE_HOUSEHOLDS_ENABLED": "false",
         "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
         "HEALBITE_SHOPPING_LIST_ENABLED": "false",
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }

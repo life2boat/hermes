@@ -205,3 +205,48 @@ class TestConfigIssueDataclass:
         a = ConfigIssue("error", "msg", "hint")
         b = ConfigIssue("error", "msg", "hint")
         assert a == b
+
+class TestDashScopeVisionActivationContract:
+    """DashScope Vision remains opt-in and provider-owned."""
+
+    @staticmethod
+    def _errors(config):
+        return [issue.message for issue in validate_config_structure(config) if issue.severity == "error"]
+
+    def test_dashscope_requires_explicit_model(self):
+        errors = self._errors({"auxiliary": {"vision": {"provider": "alibaba"}}})
+
+        assert any("explicit model" in message.lower() for message in errors)
+
+    def test_dashscope_rejects_inline_secret_and_endpoint_overrides(self):
+        errors = self._errors({
+            "auxiliary": {
+                "vision": {
+                    "provider": "alibaba",
+                    "model": "operator-selected-model",
+                    "api_key": "not-allowed",
+                    "api_key_env": "NOT_ALLOWED",
+                    "key_env": "NOT_ALLOWED",
+                    "base_url": "https://not-allowed.example",
+                }
+            }
+        })
+
+        assert any("provider-owned" in message for message in errors)
+
+    def test_qwen_alias_is_rejected_for_dashscope_vision(self):
+        errors = self._errors({
+            "auxiliary": {
+                "vision": {
+                    "provider": "qwen-oauth",
+                    "model": "operator-selected-model",
+                }
+            }
+        })
+
+        assert any("explicit alibaba provider" in message for message in errors)
+
+    def test_default_configuration_does_not_require_dashscope_secret(self):
+        errors = self._errors({"auxiliary": {"vision": {"provider": "auto"}}})
+
+        assert not any("DashScope Vision" in message for message in errors)

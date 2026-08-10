@@ -46,7 +46,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -219,6 +219,10 @@ def _normalize_llm_call_policy(
 ) -> LLMCallPolicy:
     if policy is None:
         return VISION_DEFAULT_LLM_CALL_POLICY if task == "vision" else DEFAULT_LLM_CALL_POLICY
+    if task == "vision" and policy.fallback_provider:
+        # Pixels are a separate privacy boundary: no caller can silently
+        # forward them to a different provider by supplying a loose policy.
+        return replace(policy, fallback_provider=False)
     return policy
 
 

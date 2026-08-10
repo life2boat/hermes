@@ -219,10 +219,6 @@ def _normalize_llm_call_policy(
 ) -> LLMCallPolicy:
     if policy is None:
         return VISION_DEFAULT_LLM_CALL_POLICY if task == "vision" else DEFAULT_LLM_CALL_POLICY
-    if task == "vision" and policy.fallback_provider:
-        # Pixels are a separate privacy boundary: no caller can silently
-        # forward them to a different provider by supplying a loose policy.
-        return replace(policy, fallback_provider=False)
     return policy
 
 

@@ -48,6 +48,11 @@ agent-browser/
 *.pem
 privvy*
 images/
+# Canonical synthetic food-vision fixtures are versioned test assets.
+!tests/fixtures/food_vision_quality/v1/images/
+!tests/fixtures/food_vision_quality/v1/images/fixture_a.png
+!tests/fixtures/food_vision_quality/v1/images/fixture_b.png
+!tests/fixtures/food_vision_quality/v1/images/fixture_c.png
 __pycache__/
 hermes_agent.egg-info/
 wandb/

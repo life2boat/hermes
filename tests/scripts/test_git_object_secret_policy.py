@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -597,3 +598,26 @@ def test_exit_code_aggregation_prioritizes_internal_error() -> None:
     assert policy.aggregate_exit_code(()) == 0
     assert policy.aggregate_exit_code((security,)) == 1
     assert policy.aggregate_exit_code((security, internal)) == 2
+
+
+def test_canonical_binary_fixture_exception_is_exact_path_and_hash_bound():
+    repository_root = SOURCE_ROOT
+    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v1/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for fixture in manifest["fixtures"]:
+        relative_path = f"tests/fixtures/food_vision_quality/v1/{fixture['image_path']}"
+        image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
+        data = image_path.read_bytes()
+        descriptor = policy.GitObjectDescriptor(
+            path=relative_path,
+            mode="100644",
+            object_type="blob",
+            oid="0" * 40,
+        )
+
+        clean = policy.scan_git_object(descriptor, lambda _oid: data)
+        assert clean.result is policy.GitObjectResult.CLEAN
+
+        tampered = policy.scan_git_object(descriptor, lambda _oid: data + b"tampered")
+        assert tampered.result is policy.GitObjectResult.BINARY_DENIED

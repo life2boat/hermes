@@ -286,3 +286,19 @@ def test_quality_and_schema_failures_cannot_force_pass(tmp_path, monkeypatch, pa
         assert receipt["hermes_schema_compatibility"] == "FAIL"
     else:
         assert receipt["aggregate"][metric] < expected
+
+
+def test_checked_in_food_vision_v1_assets_match_manifest():
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v1/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["fixture_set_version"] == "food_vision_quality_v1"
+    fixtures = manifest["fixtures"]
+    assert len(fixtures) == 3
+
+    for fixture in fixtures:
+        image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
+        image_path.relative_to(manifest_path.parent.resolve())
+        assert image_path.is_file()
+        assert hashlib.sha256(image_path.read_bytes()).hexdigest() == fixture["image_sha256"]

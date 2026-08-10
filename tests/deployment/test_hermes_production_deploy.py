@@ -1381,6 +1381,10 @@ def test_feature_flags_remain_disabled() -> None:
     assert override["services"]["hermes-bot"]["environment"] == {
         "HEALBITE_HOUSEHOLDS_ENABLED": "false",
         "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": "false",
+        "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
         "HEALBITE_SHOPPING_LIST_ENABLED": "false",
         "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
     }

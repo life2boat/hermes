@@ -106,6 +106,11 @@ Git.
   (confirm/cancel/replace/add/remove/weight) without generic-agent handoff.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
+- A canonical non-production provider-executing quality harness now exists at
+  `scripts/run_food_vision_quality.py`, bound to the versioned synthetic
+  `food_vision_quality_v1` manifest and sanitized receipts. It has not executed
+  a real candidate model: Qwen rollout eligibility remains blocked and no model
+  is approved.
 - The Stage-1 food-vision prompt remains shorter, provider-neutral, and no
   longer anchored to the failed benchmark plate or pastry labels.
 - Local confirmation requirement is derived deterministically from validated

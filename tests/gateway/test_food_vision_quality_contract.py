@@ -4,6 +4,11 @@ import json
 
 import pytest
 
+from gateway.food_vision_quality import (
+    canonical_food_component,
+    score_food_vision_payload,
+)
+
 from gateway.healbite_nutrition_diary import (
     FOOD_VISION_SCHEMA_VERSION,
     MIN_ITEM_CONFIDENCE,
@@ -519,3 +524,28 @@ def test_generic_ambiguous_label_remains_schema_valid():
     assert validation.status == "NEEDS_CLARIFICATION"
     assert validation.inventory is not None
     assert validation.reason == "clarification_required"
+
+
+# The provider harness and offline contract share canonical normalization and
+# scoring while preserving the legacy assertion-facing metric keys below.
+def _canonical_component(name: str) -> str:
+    return canonical_food_component(name)
+
+
+def _evaluate_quality(payload_text: str, *, expected_components: set[str], expected_clarification: bool) -> dict[str, float]:
+    sauces = {item for item in expected_components if item in {"mayonnaise", "yellow_sauce", "sour_cream", "sauce"}}
+    score = score_food_vision_payload(
+        payload_text,
+        expected_food_items=expected_components - sauces,
+        expected_sauce_items=sauces,
+        expected_needs_clarification=expected_clarification,
+    )
+    return {
+        "major_component_precision": float(score["major_component_precision"]),
+        "major_component_recall": float(score["major_component_recall"]),
+        "sauce_recall": float(score["sauce_recall"]),
+        "unsupported_combined_title_count": float(score["unsupported_combined_title_count"]),
+        "aggregate_macro_violation_count": float(score["unsafe_aggregate_count"]),
+        "invalid_output_staged_count": float(score["invalid_aggregate_count"]),
+        "low_confidence_gate_correctness": float(score["low_confidence_gate_correctness"]),
+    }

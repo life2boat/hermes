@@ -46,7 +46,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -5684,7 +5684,6 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -5702,6 +5701,14 @@ def call_llm(
     )
 
     if task == "vision":
+        # DashScope Vision is the opt-in image route.  Its data must never be
+        # silently forwarded to another provider, even if a caller supplied a
+        # permissive legacy policy. Other established Vision routes retain
+        # their explicit fallback behavior.
+        vision_fallback_allowed = (
+            call_policy.fallback_provider
+            and _normalize_aux_provider(resolved_provider) != "alibaba"
+        )
         resolved_provider, client, final_model = _resolve_vision_call_backend(
             resolved_provider=resolved_provider,
             resolved_model=resolved_model,
@@ -6209,7 +6216,6 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -6227,6 +6233,14 @@ async def async_call_llm(
     )
 
     if task == "vision":
+        # DashScope Vision is the opt-in image route.  Its data must never be
+        # silently forwarded to another provider, even if a caller supplied a
+        # permissive legacy policy. Other established Vision routes retain
+        # their explicit fallback behavior.
+        vision_fallback_allowed = (
+            call_policy.fallback_provider
+            and _normalize_aux_provider(resolved_provider) != "alibaba"
+        )
         resolved_provider, client, final_model = _resolve_vision_call_backend(
             resolved_provider=resolved_provider,
             resolved_model=resolved_model,

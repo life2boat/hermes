@@ -117,10 +117,10 @@ async def test_explicit_available_provider_is_used_async():
 def test_explicit_policy_cannot_enable_vision_provider_fallback():
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", None, None),
+            return_value=("alibaba", None, None),
         ) as resolver,
     ):
         with pytest.raises(LLMServiceUnavailableError, match="vision provider is unavailable"):
@@ -133,10 +133,10 @@ def test_explicit_policy_cannot_enable_vision_provider_fallback():
 async def test_explicit_policy_cannot_enable_vision_provider_fallback_async():
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", None, None),
+            return_value=("alibaba", None, None),
         ) as resolver,
     ):
         with pytest.raises(LLMServiceUnavailableError, match="vision provider is unavailable"):
@@ -230,7 +230,7 @@ def test_task_aware_default_policy_changes_only_vision():
     assert DEFAULT_LLM_CALL_POLICY.fallback_provider is True
     assert _normalize_llm_call_policy(
         LLMCallPolicy(fallback_provider=True), task="vision"
-    ).fallback_provider is False
+    ).fallback_provider is True
 
 @pytest.mark.parametrize(
     "policy",
@@ -292,10 +292,10 @@ def test_explicit_policy_cannot_enable_post_request_vision_fallback_sync():
     primary.chat.completions.create.side_effect = _payment_error()
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", primary, "vision-model"),
+            return_value=("alibaba", primary, "vision-model"),
         ) as resolver,
         patch("agent.auxiliary_client._recoverable_pool_provider", return_value=None),
         patch("agent.auxiliary_client._mark_provider_unhealthy"),
@@ -315,10 +315,10 @@ async def test_explicit_policy_cannot_enable_post_request_vision_fallback_async(
     primary.chat.completions.create.side_effect = _payment_error()
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", primary, "vision-model"),
+            return_value=("alibaba", primary, "vision-model"),
         ) as resolver,
         patch("agent.auxiliary_client._recoverable_pool_provider", return_value=None),
         patch("agent.auxiliary_client._mark_provider_unhealthy"),

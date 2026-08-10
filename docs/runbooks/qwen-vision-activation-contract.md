@@ -29,11 +29,12 @@ require `DASHSCOPE_API_KEY`.
 
 ## Request and fallback boundary
 
-Vision requests are fail-closed. For `task="vision"`, a caller cannot turn on
-cross-provider fallback through a custom call policy. A provider initialization
-failure or request failure returns the existing safe unavailable/error path;
-it must not forward image data to another provider. Standard text-task fallback
-behavior is unchanged.
+DashScope Vision requests are fail-closed. For `provider="alibaba"` and
+`task="vision"`, a caller cannot turn on cross-provider fallback through a
+custom call policy. A provider initialization failure or request failure returns
+the existing safe unavailable/error path; it must not forward image data to
+another provider. Standard text-task fallback behavior and unrelated Vision
+provider contracts are unchanged.
 
 ## Future activation gate
 

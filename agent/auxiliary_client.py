@@ -6052,7 +6052,11 @@ def call_llm(
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
+        if (
+            (vision_fallback_allowed if task == "vision" else call_policy.fallback_provider)
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 # Resolve the actual provider label (resolved_provider may be
@@ -6508,7 +6512,11 @@ async def async_call_llm(
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
+        if (
+            (vision_fallback_allowed if task == "vision" else call_policy.fallback_provider)
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 _mark_provider_unhealthy(

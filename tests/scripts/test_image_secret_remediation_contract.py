@@ -271,6 +271,9 @@ def test_group_c_cleanup_is_bound_to_creating_instructions() -> None:
         item for item in instructions if item.startswith("RUN npm install")
     )
     uv_sync = next(item for item in instructions if item.startswith("RUN uv sync"))
+    frontend_build = next(
+        item for item in instructions if item.startswith("RUN cd web && npm run build")
+    )
     playwright = next(
         item
         for item in instructions
@@ -308,11 +311,16 @@ def test_group_c_cleanup_is_bound_to_creating_instructions() -> None:
     }
 
     for instruction, paths in expected_by_instruction.items():
-        assert "rm -rf" not in instruction
         for path in paths:
             assert f"rm -f {path}" in instruction
             assert "*" not in path
             assert "?" not in path
+
+    assert "rm -rf" not in npm_install
+    assert "rm -rf" not in node_source_cleanup
+    assert "rm -rf" not in playwright
+    assert "rm -rf /root/.cache/uv" in uv_sync
+    assert "rm -rf /tmp/node-compile-cache" in frontend_build
 
 
 def test_full_scanner_still_detects_high_entropy_and_protected_material() -> None:

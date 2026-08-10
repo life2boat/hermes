@@ -108,6 +108,14 @@
         "destination_variable": "QWEN_API_KEY",
         "allow_empty": false,
         "removal_requires_authorization": true
+      },
+      {
+        "name": "DASHSCOPE_API_KEY",
+        "required": false,
+        "source_class": "approved-production-secret-source",
+        "destination_variable": "DASHSCOPE_API_KEY",
+        "allow_empty": false,
+        "removal_requires_authorization": true
       }
     ],
     "ambient_environment_allowed": false
@@ -216,6 +224,10 @@
   "feature_gates": {
     "HEALBITE_HOUSEHOLDS_ENABLED": false,
     "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
+    "HEALBITE_INVENTORY_PHOTO_ENABLED": false,
+    "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
+    "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": false,
+    "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
     "HEALBITE_SHOPPING_LIST_ENABLED": false,
     "HEALBITE_SHOPPING_LIST_ALLOWLIST": ""
   }

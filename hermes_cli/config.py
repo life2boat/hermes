@@ -4290,6 +4290,45 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                 f"Move '{key}' under the appropriate section",
             ))
 
+    # DashScope Qwen Vision is an explicit opt-in route. It must use the
+    # provider profile for credentials, and a model name is mandatory because
+    # the repository deliberately has no rollout-default Qwen Vision model.
+    auxiliary = config.get("auxiliary")
+    vision = auxiliary.get("vision") if isinstance(auxiliary, dict) else None
+    if vision is not None:
+        if not isinstance(vision, dict):
+            issues.append(ConfigIssue(
+                "error",
+                "auxiliary.vision must be a mapping",
+                "Use provider/model settings under auxiliary.vision.",
+            ))
+        else:
+            provider = str(vision.get("provider", "")).strip().lower()
+            if provider in {"alibaba", "qwen-dashscope"}:
+                if not str(vision.get("model", "")).strip():
+                    issues.append(ConfigIssue(
+                        "error",
+                        "DashScope Vision requires an explicit model",
+                        "Set auxiliary.vision.model only after model eligibility approval.",
+                    ))
+                forbidden = {
+                    name
+                    for name in ("api_key", "api_key_env", "key_env", "base_url")
+                    if str(vision.get(name, "")).strip()
+                }
+                if forbidden:
+                    issues.append(ConfigIssue(
+                        "error",
+                        "DashScope Vision credentials and endpoint are provider-owned",
+                        "Remove auxiliary.vision " + ", ".join(sorted(forbidden))
+                        + "; use the DASHSCOPE_API_KEY provider profile.",
+                    ))
+            elif provider in {"qwen", "qwen-oauth", "qwen-portal"}:
+                issues.append(ConfigIssue(
+                    "error",
+                    "Qwen Vision requires the explicit alibaba provider",
+                    "Use provider: alibaba with an explicit approved model; do not use QWEN_API_KEY as a DashScope alias.",
+                ))
     return issues
 
 

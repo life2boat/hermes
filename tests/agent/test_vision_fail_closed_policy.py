@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -114,46 +114,35 @@ async def test_explicit_available_provider_is_used_async():
     client.chat.completions.create.assert_awaited_once()
 
 
-def test_explicit_provider_fallback_requires_explicit_policy():
-    client = _sync_client()
+def test_explicit_policy_cannot_enable_vision_provider_fallback():
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            side_effect=[("gemini", None, None), ("nous", client, "fallback-model")],
+            return_value=("alibaba", None, None),
         ) as resolver,
     ):
-        call_llm(task="vision", messages=[], call_policy=policy)
+        with pytest.raises(LLMServiceUnavailableError, match="vision provider is unavailable"):
+            call_llm(task="vision", messages=[], call_policy=policy)
 
-    assert resolver.call_count == 2
-    assert resolver.call_args_list[1] == call(
-        provider="auto",
-        model="vision-model",
-        async_mode=False,
-    )
+    assert resolver.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_explicit_provider_fallback_requires_explicit_policy_async():
-    client = _async_client()
+async def test_explicit_policy_cannot_enable_vision_provider_fallback_async():
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            side_effect=[("gemini", None, None), ("nous", client, "fallback-model")],
+            return_value=("alibaba", None, None),
         ) as resolver,
     ):
-        await async_call_llm(task="vision", messages=[], call_policy=policy)
+        with pytest.raises(LLMServiceUnavailableError, match="vision provider is unavailable"):
+            await async_call_llm(task="vision", messages=[], call_policy=policy)
 
-    assert resolver.call_count == 2
-    assert resolver.call_args_list[1] == call(
-        provider="auto",
-        model="vision-model",
-        async_mode=True,
-    )
-
+    assert resolver.call_count == 1
 
 def test_single_request_policy_never_resolves_foreign_provider():
     with (
@@ -239,7 +228,9 @@ def test_task_aware_default_policy_changes_only_vision():
     assert VISION_DEFAULT_LLM_CALL_POLICY.fallback_provider is False
     assert _normalize_llm_call_policy(None, task="compression") is DEFAULT_LLM_CALL_POLICY
     assert DEFAULT_LLM_CALL_POLICY.fallback_provider is True
-
+    assert _normalize_llm_call_policy(
+        LLMCallPolicy(fallback_provider=True), task="vision"
+    ).fallback_provider is True
 
 @pytest.mark.parametrize(
     "policy",
@@ -296,59 +287,46 @@ async def test_explicit_provider_request_failure_does_not_fallback_async(policy)
     main_fallback.assert_not_called()
 
 
-def test_explicit_policy_can_enable_post_request_fallback_sync():
+def test_explicit_policy_cannot_enable_post_request_vision_fallback_sync():
     primary = _sync_client()
     primary.chat.completions.create.side_effect = _payment_error()
-    fallback = _sync_client()
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", primary, "vision-model"),
+            return_value=("alibaba", primary, "vision-model"),
         ) as resolver,
         patch("agent.auxiliary_client._recoverable_pool_provider", return_value=None),
         patch("agent.auxiliary_client._mark_provider_unhealthy"),
-        patch(
-            "agent.auxiliary_client._try_configured_fallback_chain",
-            return_value=(fallback, "fallback-model", "configured"),
-        ) as configured_fallback,
+        patch("agent.auxiliary_client._try_configured_fallback_chain") as configured_fallback,
     ):
-        result = call_llm(task="vision", messages=[], call_policy=policy)
+        with pytest.raises(Exception, match="synthetic payment failure"):
+            call_llm(task="vision", messages=[], call_policy=policy)
 
-    assert result.choices[0].message.content == "ok"
     assert resolver.call_count == 1
-    configured_fallback.assert_called_once()
-    fallback.chat.completions.create.assert_called_once()
+    primary.chat.completions.create.assert_called_once()
+    configured_fallback.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_explicit_policy_can_enable_post_request_fallback_async():
+async def test_explicit_policy_cannot_enable_post_request_vision_fallback_async():
     primary = _async_client()
     primary.chat.completions.create.side_effect = _payment_error()
-    sync_fallback = _sync_client()
-    async_fallback = _async_client()
     policy = LLMCallPolicy(fallback_provider=True)
     with (
-        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("gemini")),
+        patch("agent.auxiliary_client._resolve_task_provider_model", return_value=_resolved("alibaba")),
         patch(
             "agent.auxiliary_client.resolve_vision_provider_client",
-            return_value=("gemini", primary, "vision-model"),
+            return_value=("alibaba", primary, "vision-model"),
         ) as resolver,
         patch("agent.auxiliary_client._recoverable_pool_provider", return_value=None),
         patch("agent.auxiliary_client._mark_provider_unhealthy"),
-        patch(
-            "agent.auxiliary_client._try_configured_fallback_chain",
-            return_value=(sync_fallback, "fallback-model", "configured"),
-        ) as configured_fallback,
-        patch(
-            "agent.auxiliary_client._to_async_client",
-            return_value=(async_fallback, "fallback-model"),
-        ),
+        patch("agent.auxiliary_client._try_configured_fallback_chain") as configured_fallback,
     ):
-        result = await async_call_llm(task="vision", messages=[], call_policy=policy)
+        with pytest.raises(Exception, match="synthetic payment failure"):
+            await async_call_llm(task="vision", messages=[], call_policy=policy)
 
-    assert result.choices[0].message.content == "ok"
     assert resolver.call_count == 1
-    configured_fallback.assert_called_once()
-    async_fallback.chat.completions.create.assert_awaited_once()
+    primary.chat.completions.create.assert_awaited_once()
+    configured_fallback.assert_not_called()

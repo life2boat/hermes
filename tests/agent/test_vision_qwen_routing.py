@@ -57,6 +57,31 @@ def test_qwen_oauth_does_not_borrow_dashscope_credentials(monkeypatch):
     resolver.assert_not_called()
 
 
+def test_dashscope_does_not_alias_qwen_api_key(monkeypatch):
+    monkeypatch.delenv('DASHSCOPE_API_KEY', raising=False)
+    monkeypatch.setenv('QWEN_API_KEY', 'must-not-be-dashscope-alias')
+
+    with patch('agent.auxiliary_client.OpenAI') as openai_client:
+        resolved, client, model = auxiliary_client.resolve_vision_provider_client(
+            provider='alibaba',
+            model='operator-selected-model',
+        )
+
+    assert (resolved, client, model) == ('alibaba', None, None)
+    openai_client.assert_not_called()
+
+
+def test_unknown_vision_provider_fails_closed_without_client_creation():
+    with patch('agent.auxiliary_client.OpenAI') as openai_client:
+        resolved, client, model = auxiliary_client.resolve_vision_provider_client(
+            provider='unknown-provider',
+            model='operator-selected-model',
+        )
+
+    assert (resolved, client, model) == ('unknown-provider', None, None)
+    openai_client.assert_not_called()
+
+
 def test_bare_qwen_alias_fails_closed_instead_of_guessing(monkeypatch):
     monkeypatch.setenv('DASHSCOPE_API_KEY', 'must-not-select-dashscope')
 

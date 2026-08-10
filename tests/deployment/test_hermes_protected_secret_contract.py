@@ -24,6 +24,7 @@ PROTECTED_NAMES = (
     "NOUS_API_KEY",
     "OPENAI_API_KEY",
     "QWEN_API_KEY",
+    "DASHSCOPE_API_KEY",
 )
 OPTIONAL_NAMES = frozenset(PROTECTED_NAMES[1:])
 SYNTHETIC_VALUES = {
@@ -78,7 +79,7 @@ def _override_environment(path: Path) -> dict[str, str]:
     return document["services"]["hermes-bot"]["environment"]
 
 
-def test_manifest_declares_complete_six_key_policy() -> None:
+def test_manifest_declares_complete_seven_key_policy() -> None:
     contract = deploy.load_contract()
     assert contract.protected_secret_names == PROTECTED_NAMES
     assert contract.required_secret_names == ("TELEGRAM_BOT_TOKEN",)
@@ -91,7 +92,7 @@ def test_manifest_declares_complete_six_key_policy() -> None:
     )
 
 
-def test_complete_six_key_source_is_accepted_without_value_normalization(
+def test_complete_seven_key_source_is_accepted_without_value_normalization(
     protected_contract,
 ) -> None:
     contract, source = protected_contract
@@ -177,7 +178,7 @@ def test_invalid_approved_sources_fail_closed(
         deploy.read_required_secrets(contract, source)
 
 
-def test_staged_generator_emits_exact_six_key_set(
+def test_staged_generator_emits_exact_seven_key_set(
     protected_contract,
 ) -> None:
     contract, source = protected_contract

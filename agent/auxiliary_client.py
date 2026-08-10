@@ -5680,7 +5680,6 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -5698,6 +5697,14 @@ def call_llm(
     )
 
     if task == "vision":
+        # DashScope Vision is the opt-in image route.  Its data must never be
+        # silently forwarded to another provider, even if a caller supplied a
+        # permissive legacy policy. Other established Vision routes retain
+        # their explicit fallback behavior.
+        vision_fallback_allowed = (
+            call_policy.fallback_provider
+            and _normalize_aux_provider(resolved_provider) != "alibaba"
+        )
         resolved_provider, client, final_model = _resolve_vision_call_backend(
             resolved_provider=resolved_provider,
             resolved_model=resolved_model,
@@ -6045,7 +6052,11 @@ def call_llm(
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
+        if (
+            (vision_fallback_allowed if task == "vision" else call_policy.fallback_provider)
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 # Resolve the actual provider label (resolved_provider may be
@@ -6205,7 +6216,6 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    vision_fallback_allowed = call_policy is not None and call_policy.fallback_provider
     call_policy = _normalize_llm_call_policy(call_policy, task=task)
     if request_telemetry is None and call_policy.max_external_requests is not None:
         request_telemetry = ExternalRequestTelemetry()
@@ -6223,6 +6233,14 @@ async def async_call_llm(
     )
 
     if task == "vision":
+        # DashScope Vision is the opt-in image route.  Its data must never be
+        # silently forwarded to another provider, even if a caller supplied a
+        # permissive legacy policy. Other established Vision routes retain
+        # their explicit fallback behavior.
+        vision_fallback_allowed = (
+            call_policy.fallback_provider
+            and _normalize_aux_provider(resolved_provider) != "alibaba"
+        )
         resolved_provider, client, final_model = _resolve_vision_call_backend(
             resolved_provider=resolved_provider,
             resolved_model=resolved_model,
@@ -6494,7 +6512,11 @@ async def async_call_llm(
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
         is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if call_policy.fallback_provider and should_fallback and (is_auto or is_capacity_error):
+        if (
+            (vision_fallback_allowed if task == "vision" else call_policy.fallback_provider)
+            and should_fallback
+            and (is_auto or is_capacity_error)
+        ):
             if _is_payment_error(first_err):
                 reason = "payment error"
                 _mark_provider_unhealthy(

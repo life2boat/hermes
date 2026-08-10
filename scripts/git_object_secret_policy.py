@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 from collections.abc import Callable, Iterable
@@ -13,6 +14,17 @@ from scripts.secret_scanner import SecretScanError, scan_secret_bytes
 SUPPORTED_REGULAR_MODES = frozenset({"100644", "100755"})
 MAX_GIT_BLOB_BYTES = 64 * 1024 * 1024
 _OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_CANONICAL_BINARY_FIXTURE_SHA256 = {
+    "tests/fixtures/food_vision_quality/v1/images/fixture_a.png": (
+        "6b6353881f478f30fc4f5f2dce1cd73b0e2f204774edd44b3b19b97dc0891ddf"
+    ),
+    "tests/fixtures/food_vision_quality/v1/images/fixture_b.png": (
+        "1856235c560e1108d7974708e331849e017a6b78c6a9305ed678016e81466cf2"
+    ),
+    "tests/fixtures/food_vision_quality/v1/images/fixture_c.png": (
+        "a9647c2b0e5efd6d55a4d3d23d15ea93b9e46ae3de330936c24dbec8b6632f53"
+    ),
+}
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 
 
@@ -154,6 +166,14 @@ def scan_git_object(
             descriptor,
             GitObjectResult.UNSUPPORTED_OBJECT,
             "GIT_LFS_POINTER_UNSUPPORTED",
+            size=size,
+        )
+    expected_fixture_sha256 = _CANONICAL_BINARY_FIXTURE_SHA256.get(descriptor.path)
+    if expected_fixture_sha256 is not None and hashlib.sha256(data).hexdigest() == expected_fixture_sha256:
+        return _outcome(
+            descriptor,
+            GitObjectResult.CLEAN,
+            None,
             size=size,
         )
     if b"\x00" in data:

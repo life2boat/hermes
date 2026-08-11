@@ -27,6 +27,23 @@ def test_committed_corpus_and_baseline_pass_deterministically() -> None:
     assert first.critical_failed == 0
 
 
+def test_corpus_digest_is_newline_independent(tmp_path: Path) -> None:
+    corpus = tmp_path / "agent_behaviour"
+    shutil.copytree(EVAL_ROOT, corpus)
+    original = run_evals(corpus, use_baseline=False)
+    paths = [corpus / "manifest.json"]
+    paths.extend((corpus / "datasets").glob("*.jsonl"))
+    paths.extend((corpus / "fixtures" / "traces").glob("*.json"))
+    for path in paths:
+        normalized = path.read_bytes().replace(b"\r\n", b"\n")
+        path.write_bytes(normalized.replace(b"\n", b"\r\n"))
+
+    converted = run_evals(corpus, use_baseline=False)
+    assert converted.status is Status.PASS
+    assert converted.corpus_digest == original.corpus_digest
+    assert converted == original
+
+
 def test_smoke_and_category_selection_pass() -> None:
     smoke = run_evals(EVAL_ROOT, smoke=True)
     authority = run_evals(EVAL_ROOT, category="authority")

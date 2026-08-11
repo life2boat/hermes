@@ -203,6 +203,26 @@ def _load_manifest(eval_root: Path) -> tuple[Mapping[str, object], bytes]:
     return payload, data
 
 
+def _canonical_corpus_bytes(data: bytes, relative: str) -> bytes:
+    if relative.endswith(".jsonl"):
+        payload: object = []
+        entries = []
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            if len(line) > MAX_DATASET_LINE_BYTES:
+                _blocked()
+            entries.append(_parse_json(line))
+        payload = entries
+    elif relative.endswith(".json"):
+        payload = _parse_json(data)
+    else:
+        _blocked()
+    return json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
 def _corpus_digest(eval_root: Path, manifest: Mapping[str, object]) -> str:
     digest = hashlib.sha256()
     paths = ["manifest.json"]
@@ -223,7 +243,8 @@ def _corpus_digest(eval_root: Path, manifest: Mapping[str, object]) -> str:
         data = load_fixture_bytes(eval_root, relative)
         digest.update(relative.encode("utf-8"))
         digest.update(b"\x00")
-        digest.update(hashlib.sha256(data).digest())
+        canonical = _canonical_corpus_bytes(data, relative)
+        digest.update(hashlib.sha256(canonical).digest())
     return digest.hexdigest()
 
 

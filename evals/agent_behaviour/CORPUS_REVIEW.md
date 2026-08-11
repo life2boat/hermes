@@ -5,7 +5,7 @@ Status: **CANDID ? human review not yet performed.**
 Approval must bind the exact PR head, dataset version, and corpus digest.
 
 - Dataset version: agent-behaviour-v1
-- Corpus digest: 70e79342b03cdbb7a76ceeeca985d03ac64acfb9f1595a1e4468d0ed2898d0d3
+- Corpus digest: 68cf8811eca263179d8387bf79f22d80a9ab420b70b2500469751d8f5173b8c8
 - Reviewed PR head: NOT_PERFORMED
 - Human reviewer: NOT_PERFORMED
 - Review decision: NOT_PERFORMED

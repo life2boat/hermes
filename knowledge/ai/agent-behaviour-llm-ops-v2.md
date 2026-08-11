@@ -31,14 +31,20 @@ digest-bound baseline. PR-4 implements model policy version 1 and cost policy
 version 1: the closed task/model/reasoning matrix, explicit substitution and
 provider-boundary evidence, complete call-category accounting, deterministic
 decimal budgets, and external rate-card schema version 1 with canonical digest
-identity.
+identity. PR-5 implements release gate schema/policy version 1, deterministic
+merge and production-release aggregation, canonical release receipts, and the
+read-only exact-head `Agent Release Gate` workflow. Its conservative merge
+profile independently requires code, GOLDEN offline behaviour, secret-scan,
+and adversarial evidence.
 
 The corpus is GOLDEN / HUMAN_REVIEW=PASS. Its review evidence binds the dataset
 and immutable corpus identity, engine version, and candidate reviewed head;
 promotion-only metadata may change the PR head only while that digest remains
 identical. Model/cost evaluation is provider-free and emits sanitized stable
 PASS/FAIL/BLOCKED receipts; unknown required cost evidence is never zero and a
-model recommendation never grants authority. Release-gate aggregation, CI
-behaviour gating, and failure-candidate automation remain planned. The package
-is a repository library, not product runtime capability or production
-activation.
+model recommendation never grants authority. Release aggregation likewise
+never infers one gate from another: merge-only success leaves cost, live
+behaviour, and production readiness visible as `NOT_PERFORMED`, not PASS. The
+package and workflow are repository engineering controls, not product runtime
+capability or production activation. Governed Failure-to-Eval candidate
+automation remains planned for PR-6.

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.28
+version: 1.2.29
 updated_at: 2026-08-11
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 72087833d868fbbd7015b7e50e9d17891bf99e69
+state_verified_against_main_sha: 79d8c5bb7f75f479a4277ab255c633fae685cb80
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `72087833d868fbbd7015b7e50e9d17891bf99e69`.
+  `79d8c5bb7f75f479a4277ab255c633fae685cb80`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -61,8 +61,18 @@ Git.
 - `scripts/check_llm_ops_policy.py` exposes these contracts offline with stable
   JSON and distinct PASS/FAIL/BLOCKED exit codes. It performs no provider or
   pricing lookup. The combined `LLMOpsReceipt` is not a release gate.
-- Release-gate aggregation, CI behaviour enforcement, and Failure-to-Eval
-  candidate automation remain NOT_IMPLEMENTED.
+- Release gate schema/policy version `1` implements closed `MERGE` and
+  `PRODUCTION_RELEASE` targets, deterministic sensitivity-derived requirements,
+  independent fixed-schema gate evidence, exact source binding, technical
+  blocker/governance separation, canonical receipts, and stable
+  PASS/FAIL/BLOCKED CLI exits.
+- The read-only `Agent Release Gate` pull-request workflow evaluates the exact
+  PR head. Its conservative merge profile independently runs code, GOLDEN
+  offline behaviour, secret-scan, and adversarial evidence. It reports cost,
+  live behaviour, and production readiness as optional `NOT_PERFORMED`; a
+  merge PASS never becomes a production-release PASS.
+- Failure-to-Eval candidate automation remains NOT_IMPLEMENTED and belongs to
+  PR-6.
 - This repository-only update changes no product runtime, provider route,
   database, Qdrant state, secret, feature flag, container, or production state.
 - The repository Qwen Vision integration remains opt-in and provider-scoped:

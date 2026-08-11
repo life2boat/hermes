@@ -1,7 +1,7 @@
 # Hermes / HealBite System Model
 
 Status: repository-grounded model
-Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
+Verified against canonical main: `79d8c5bb7f75f479a4277ab255c633fae685cb80`
 
 ## Purpose
 
@@ -113,11 +113,15 @@ components. The repository has a provider-free deterministic behaviour eval
 engine, closed assertions/graders, human-reviewed GOLDEN corpus, and baseline
 comparison. The same stdlib-only layer now has versioned executable model
 recommendation/substitution receipts and deterministic usage/cost receipts
-bound to external canonical rate-card identity. These policies make no model
-or pricing network calls and cannot expand task authority. The release-gate
-runner, CI behaviour gate, and failure-candidate automation remain PLANNED; no
-new daemon, provider call path, database, worker, or production topology exists
-because of this layer.
+bound to external canonical rate-card identity. Release gate schema/policy
+version `1` adds deterministic merge and production-release aggregation over
+independent fixed-schema evidence, plus a read-only exact-head PR workflow for
+the conservative merge profile. A merge PASS reports production eligibility as
+`NOT_PERFORMED`; it cannot grant deployment authority. These policies make no
+model or pricing network calls and cannot expand task authority. Failure-to-
+Eval candidate automation remains planned for PR-6; no new daemon, provider
+call path, database, worker, or production topology exists because of this
+layer.
 
 ### Tools
 
@@ -159,7 +163,7 @@ topology without code and runtime evidence.
 | Semantic search | Qdrant adapter and hydrated results | Durable truth; raw Qdrant payloads are never sufficient authority |
 | Release | Versioned policy, exact-main build, attestations, deploy/migration tools | Operator authority, production credentials, provider infrastructure |
 | Engineering knowledge | Versioned docs, ADRs, skills, tests, Git history | Chat memory and uncommitted operator notes |
-| Engineering control | Evidence contracts, offline behaviour graders/runner, GOLDEN corpus, executable model selection and deterministic cost-budget policy | Production authority; release aggregation and CI enforcement remain separately governed |
+| Engineering control | Evidence contracts, offline behaviour graders/runner, GOLDEN corpus, executable model/cost policies, release aggregator, and exact-head merge CI | Production authority and live/cost/readiness evidence; a merge decision cannot authorize production |
 
 ## Runtime architecture
 

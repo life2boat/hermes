@@ -1,5 +1,26 @@
 # CURRENT_STATE changelog
 
+## 1.2.29 - 2026-08-11
+
+Added:
+- added release gate schema/policy version `1`, closed merge/production targets,
+  sensitivity-derived requirements, source identity, technical blockers,
+  governance observations, canonical receipts, and PASS/FAIL/BLOCKED CLI exits;
+- added the read-only exact-head `Agent Release Gate` workflow with independent
+  code, GOLDEN offline behaviour, secret-scan, and adversarial evidence.
+
+Changed:
+- marked executable merge and production-release aggregation implemented while
+  keeping merge eligibility distinct from production authority;
+- verified repository documentation against canonical main
+  `79d8c5bb7f75f479a4277ab255c633fae685cb80`.
+
+Safety:
+- the approved GOLDEN corpus and digest are unchanged;
+- no product runtime, production, containers, SQLite, Qdrant, secrets,
+  provider calls, live smoke, build activation, or deployment were changed.
+
+
 ## 1.2.28 - 2026-08-11
 
 Added:

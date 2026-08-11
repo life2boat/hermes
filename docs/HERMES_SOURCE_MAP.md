@@ -32,7 +32,7 @@ filled in from memory.
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
 | AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
-| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `scripts/run_agent_behaviour_evals.py`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, candidate corpus/baseline, and governed model/cost/release concepts |
+| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `ai_engineering/model_policy.py`, `ai_engineering/cost_policy.py`, `scripts/run_agent_behaviour_evals.py`, `scripts/check_llm_ops_policy.py`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, GOLDEN corpus/baseline, executable model selection and cost budgets, plus separately governed release concepts |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -108,11 +108,12 @@ executable component requires separate implementation and repository evidence.
 The stdlib-only ai_engineering library implements closed behaviour trace
 and scenario schemas, sanitization, canonical serialization/digest, safe
 fixture loading, provider-free replay, deterministic graders, and the offline
-eval runner. evals/agent_behaviour is the versioned candidate corpus with a
-digest-bound baseline and review table; human approval is still required before
-calling it golden. This is not a service or product runtime. The release-gate
-aggregator, executable model/cost policy, CI behaviour gate, and governed
-failure-candidate automation remain PLANNED.
+eval runner. `evals/agent_behaviour` is the human-reviewed GOLDEN corpus with a
+digest-bound baseline and review evidence. The library also implements the
+versioned provider-free model-selection/substitution policy, usage accounting,
+external rate-card identity, and deterministic cost-budget evaluation. This is
+not a service or product runtime. The release-gate aggregator, CI behaviour
+gate, and governed failure-candidate automation remain PLANNED.
 
 ## Fast lookup
 

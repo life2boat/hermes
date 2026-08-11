@@ -92,6 +92,8 @@ behaviour-eval evidence.
 The schema, sanitizer, canonical serializer, digest, fixture loader,
 deterministic replay substrate, closed assertion registry, deterministic
 graders, and offline behaviour-eval runner are implemented in ai_engineering.
-The versioned behaviour corpus is a candidate pending exact human review; it is
-not yet a golden corpus. Model/cost policy, release-gate aggregation, the CI
-behaviour gate, and governed failure-candidate automation remain PLANNED.
+The versioned behaviour corpus is GOLDEN after exact digest-bound human review.
+Model recommendation/substitution and cost-budget policy are executable,
+provider-free, sanitized subsystems; they do not expand task authority.
+Release-gate aggregation, the CI behaviour gate, and governed failure-candidate
+automation remain PLANNED.

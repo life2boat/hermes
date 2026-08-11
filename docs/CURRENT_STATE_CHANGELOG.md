@@ -1,5 +1,28 @@
 # CURRENT_STATE changelog
 
+## 1.2.28 - 2026-08-11
+
+Added:
+- added executable model policy version `1`, the closed task/model/reasoning
+  matrix, explicit substitution/provider-change validation, and sanitized
+  deterministic model-policy receipts;
+- added cost policy version `1`, complete call-category accounting, typed
+  budgets, deterministic decimal estimation, external rate-card schema version
+  `1`, canonical pricing identity, currency checks, and LLM Ops receipts;
+- added the offline `scripts/check_llm_ops_policy.py` CLI and focused synthetic
+  tests without provider calls or real pricing claims.
+
+Changed:
+- marked model selection and cost-budget evaluation implemented while keeping
+  release-gate aggregation and CI enforcement explicitly not implemented;
+- verified repository documentation against canonical main
+  `72087833d868fbbd7015b7e50e9d17891bf99e69`.
+
+Safety:
+- the approved GOLDEN corpus and digest are unchanged;
+- no product runtime, production, containers, SQLite, Qdrant, secrets,
+  provider calls, or network-based evals were changed.
+
 
 ## 1.2.27 - 2026-08-11
 

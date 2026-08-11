@@ -1,7 +1,7 @@
 # Hermes / HealBite Engineering Invariants
 
 Status: normative engineering contract
-Verified against canonical main: `8d87aaabfb613c2c1844a0c9352a0c6c11fedf2b`
+Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
 
 ## How to use this document
 
@@ -325,6 +325,93 @@ assumptions are true; a human preference is not substitute evidence.
 `INCONCLUSIVE` or absence.
 
 **Authority:** `skills/deploy/SKILL.md`.
+
+## AI behaviour and LLM Ops invariants
+
+### AI1 (INV-AI-V2-001). Code PASS is not production release eligibility
+
+**Invariant:** Code PASS alone does not prove production release eligibility.
+
+**Why:** Code tests do not prove agent authority, required behaviour, security,
+cost limits, current production readiness, or rollback safety.
+
+**Evidence:** Separate gate matrix with task-required behaviour, security, cost,
+and production-readiness statuses.
+
+**Authority:** `docs/AGENT_RELEASE_GATES.md`.
+
+### AI2 (INV-AI-V2-002). Behaviour evidence is independent
+
+**Invariant:** Required behavioural evidence may not be inferred from code
+tests.
+
+**Why:** A command can succeed while violating scope, authority, or the stop
+boundary.
+
+**Evidence:** Deterministic behaviour cases bound to the task and exact source.
+
+**Authority:** `docs/AGENT_BEHAVIOUR_CONTRACT.md`,
+`docs/BEHAVIOUR_EVALS.md`.
+
+### AI3 (INV-AI-V2-003). Missing evidence never becomes PASS
+
+**Invariant:** `UNKNOWN`, `NOT_RUN`, and `INCONCLUSIVE` required evidence never
+becomes PASS.
+
+**Why:** Aggregating absence into success silently bypasses fail-closed gates.
+
+**Evidence:** Gate aggregation tests for missing and ambiguous evidence.
+
+**Authority:** `docs/AGENT_RELEASE_GATES.md`.
+
+### AI4 (INV-AI-V2-004). Model choice does not expand authority
+
+**Invariant:** A selected or recommended model never expands task authority.
+
+**Why:** Capability is not permission to access secrets, mutate production, or
+cross the task's stop boundary.
+
+**Evidence:** Model-policy receipt plus unchanged allowed/forbidden effect
+classes across selection and substitution.
+
+**Authority:** `docs/LLM_OPS_POLICY.md`.
+
+### AI5 (INV-AI-V2-005). Self-improvement is candidate-only
+
+**Invariant:** An agent-generated improvement remains a candidate until the
+repository lifecycle passes.
+
+**Why:** Direct self-modification would bypass eval, review, CI, and activation
+authority.
+
+**Evidence:** Candidate PR, required evals, exact-head CI, review, and merge
+record before any separately authorized activation.
+
+**Authority:** `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`.
+
+### AI6 (INV-AI-V2-006). Critical behaviour is not solely LLM-judged
+
+**Invariant:** Critical behaviour decisions cannot rely solely on LLM-as-judge.
+
+**Why:** A probabilistic or unavailable judge cannot be the only authority for
+security and production release outcomes.
+
+**Evidence:** Human-reviewed expected outcomes and deterministic assertions;
+LLM-as-judge classified as supplemental only.
+
+**Authority:** `docs/BEHAVIOUR_EVALS.md`.
+
+### AI7 (INV-AI-V2-007). Eval fixtures are sanitized
+
+**Invariant:** Behaviour/eval fixtures contain no secrets or private production
+data.
+
+**Why:** Reproducible test evidence must not become a durable disclosure path.
+
+**Evidence:** Fixed-schema fixtures, secret scan, and review showing only
+sanitized classifications and synthetic or approved data.
+
+**Authority:** `docs/BEHAVIOUR_EVALS.md`, `scripts/secret_check.sh`.
 
 ## Change validation invariant
 

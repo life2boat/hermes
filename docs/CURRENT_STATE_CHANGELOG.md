@@ -1,5 +1,23 @@
 # CURRENT_STATE changelog
 
+## 1.2.24 - 2026-08-11
+
+Added:
+- established the Hermes AI Engineering System v2 behaviour, evaluation,
+  LLM Ops, release-gate, and procedure-lifecycle contracts;
+- added ADR-0074 through ADR-0077 and Knowledge Pack navigation.
+
+Changed:
+- extended the v1 lifecycle, Source Map, System Model, and Invariants with the
+  v2 contract layer;
+- updated repository-state verification to canonical main
+  `160262d5f87254a26e8791b7637ec960c386b791`.
+
+Safety:
+- executable behaviour evaluation, release-gate aggregation, cost evaluation,
+  and CI behaviour gates remain `NOT_IMPLEMENTED`;
+- production, runtime, containers, SQLite, Qdrant, and secrets were not changed.
+
 ## 1.2.23 - 2026-08-09
 
 Added:

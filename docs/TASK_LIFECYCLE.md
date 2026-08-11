@@ -80,6 +80,33 @@ Record durable, confirmed learning in its canonical place:
 Do not duplicate an authoritative procedure in passive documentation. Link to
 the source that owns the contract instead.
 
+## v2 behaviour and LLM Ops extension
+
+Hermes AI Engineering System v2 extends, rather than replaces, the lifecycle.
+Task classification determines which additional controls are required:
+
+```text
+Task
+-> prepare_task
+-> behaviour/model classification
+-> implementation
+-> code validation
+-> behaviour eval
+-> security gate
+-> cost gate
+-> AI review
+-> production readiness
+-> merge/release
+-> failure/eval feedback
+```
+
+The authoritative semantics live in
+[`AGENT_BEHAVIOUR_CONTRACT.md`](AGENT_BEHAVIOUR_CONTRACT.md),
+[`BEHAVIOUR_EVALS.md`](BEHAVIOUR_EVALS.md),
+[`LLM_OPS_POLICY.md`](LLM_OPS_POLICY.md), and
+[`AGENT_RELEASE_GATES.md`](AGENT_RELEASE_GATES.md). PR-1 defines this contract;
+the executable behaviour runner and CI gate remain `PLANNED`.
+
 ## Completion evidence
 
 A task is complete only when its final report distinguishes completed work from

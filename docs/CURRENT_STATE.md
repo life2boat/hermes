@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.23
-updated_at: 2026-08-09
+version: 1.2.24
+updated_at: 2026-08-11
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 713c90a1849d5bc415f6ab8378345b0f67415df1
+state_verified_against_main_sha: 160262d5f87254a26e8791b7637ec960c386b791
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `713c90a1849d5bc415f6ab8378345b0f67415df1`.
+  `160262d5f87254a26e8791b7637ec960c386b791`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -32,6 +32,17 @@ Git.
   template, and `scripts/prepare_task.py` with focused tests.
 - PR #129 merged the operational-adoption layer: mandatory prepared context in
   `AGENTS.md`, the task lifecycle, and the sanitized failure-capture loop.
+- The Hermes AI Engineering System v2 architecture/contracts foundation now
+  defines agent behaviour, deterministic-first behaviour evaluation, LLM Ops
+  policy, distinct merge and production-release gates, and the
+  Skill-to-Loop-to-Graph maturity lifecycle.
+- ADR-0074 through ADR-0077 record the corresponding durable decisions,
+  including candidate-only governed agent improvement.
+- The executable behaviour trace/replay format, behaviour-eval runner,
+  release-gate aggregator, cost evaluator, and CI behaviour gate are
+  `NOT_IMPLEMENTED`; they remain planned follow-up work.
+- This contracts-only update changes no product runtime, provider route,
+  database, Qdrant state, secret, feature flag, container, or production state.
 - The repository Qwen Vision integration remains opt-in and provider-scoped:
   canonical `alibaba`/`qwen-dashscope` selects DashScope with an explicit model,
   `qwen-oauth` remains a distinct Portal identity, and ambiguous bare `qwen`

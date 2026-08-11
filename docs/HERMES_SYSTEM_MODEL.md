@@ -1,7 +1,7 @@
 # Hermes / HealBite System Model
 
 Status: repository-grounded model
-Verified against canonical main: `c6d0852b95a068a3bab7528e656da91ab4274a08`
+Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
 
 ## Purpose
 
@@ -93,6 +93,26 @@ the reviewable engineering knowledge layer formed by:
 
 Phase 1 gives that layer a stable repository structure and populated decision
 records. It still has no daemon, API, database, vector collection or production
+topology.
+
+### Engineering Control Layer
+
+Hermes AI Engineering System v2 defines a conceptual engineering-control layer
+around the existing lifecycle:
+
+```text
+Code validation
+Behaviour validation
+Security validation
+Cost validation
+Production readiness
+```
+
+These are evidence and release-decision boundaries, not product/runtime
+components. PR-1 adds authoritative documentation only. The behaviour-eval
+engine, release-gate runner, cost evaluator, and CI behaviour gate are
+`PLANNED`; no new daemon, provider call path, database, worker, or production
+topology exists because of this layer.
 
 ### Tools
 
@@ -134,6 +154,7 @@ topology without code and runtime evidence.
 | Semantic search | Qdrant adapter and hydrated results | Durable truth; raw Qdrant payloads are never sufficient authority |
 | Release | Versioned policy, exact-main build, attestations, deploy/migration tools | Operator authority, production credentials, provider infrastructure |
 | Engineering knowledge | Versioned docs, ADRs, skills, tests, Git history | Chat memory and uncommitted operator notes |
+| Engineering control | Code, behaviour, security, cost and readiness evidence contracts | Production authority; planned runners do not exist until implemented and tested |
 
 ## Runtime architecture
 

@@ -7,16 +7,23 @@ feature flag, or authorize deployment.
 
 ## Fixture and request contract
 
-The versioned fixture set is `food_vision_quality_v1` at
-`tests/fixtures/food_vision_quality/v1/manifest.json`. It contains exactly
-three deterministic, purpose-created synthetic PNG fixtures. The manifest binds
-each fixture ID to a SHA-256 and expected components; a mismatch fails before
-any provider request.
+The harness supports only the explicit fixture-set allowlist
+`food_vision_quality_v1` and `food_vision_quality_v2`. Each manifest binds
+exactly three fixture IDs to SHA-256 hashes and expected components; a manifest
+or image mismatch fails before any provider request.
 
-The request budget is exactly the number of enabled manifest fixtures: v1 is
-three fixtures and therefore at most three external requests. Each fixture gets
-one `VISION_SINGLE_REQUEST_LLM_CALL_POLICY` call. Retries, credential recovery
-retries, model refreshes, and cross-provider fallbacks are all disabled.
+`v1` is immutable historical geometric-synthetic evidence, retained despite its replay-instability and representativeness concern. `v2` at
+`tests/fixtures/food_vision_quality/v2/manifest.json` contains purpose-created,
+photorealistic synthetic scenes with an ordinary-food scene, a non-food
+distractor scene, and a condiment scene. It improves candidate visual
+representativeness, but does not prove real-world accuracy or rollout
+eligibility. The v2 provenance record is kept beside its manifest.
+
+The request budget is exactly the number of enabled manifest fixtures: both
+supported versions contain three fixtures and therefore allow at most three
+external requests. Each fixture gets one `VISION_SINGLE_REQUEST_LLM_CALL_POLICY`
+call. Retries, credential recovery retries, model refreshes, and cross-provider
+fallbacks are all disabled.
 
 ## Provider and credential boundary
 

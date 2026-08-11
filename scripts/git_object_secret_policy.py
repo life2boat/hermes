@@ -24,6 +24,15 @@ _CANONICAL_BINARY_FIXTURE_SHA256 = {
     "tests/fixtures/food_vision_quality/v1/images/fixture_c.png": (
         "a9647c2b0e5efd6d55a4d3d23d15ea93b9e46ae3de330936c24dbec8b6632f53"
     ),
+    "tests/fixtures/food_vision_quality/v2/images/fixture_a.png": (
+        "a4e259a7ec6a37b6b26dedd1671e9fddfca6528cf417642b504134121cbdb412"
+    ),
+    "tests/fixtures/food_vision_quality/v2/images/fixture_b.png": (
+        "44d4b162fe04a9255e83d0d310ee4315afc2cf794c13fdc045b4ff6b32ed7f9a"
+    ),
+    "tests/fixtures/food_vision_quality/v2/images/fixture_c.png": (
+        "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd"
+    ),
 }
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 

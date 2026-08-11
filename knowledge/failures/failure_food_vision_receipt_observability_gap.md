@@ -10,8 +10,20 @@
 
 ## Root-cause status
 
-The quality failure remains **INCONCLUSIVE**. The proven defect was insufficient sanitized receipt observability; neither model capability failure, scorer failure nor fixture validity failure is established. The fixtures' real-photo representativeness remains an open question.
+The quality failure remains **INCONCLUSIVE**. Receipt v2 now preserves
+sanitized match/miss/unexpected classifications, but the same immutable v1 bytes
+can still produce materially different semantic predictions across executions.
+Neither model capability failure, scorer failure, nor fixture invalidity is
+therefore established. The historical v1 set was never proven representative of
+real food photography.
 
 ## Resolution and lesson
 
-Add bounded diagnostics derived only from schema-validated inventory labels. Never persist raw provider responses, image data, credentials, request identifiers or user identifiers. Counts-only quality receipts cannot explain a zero-score result; future evidence must preserve safe match/miss/unexpected classifications.
+Add bounded diagnostics derived only from schema-validated inventory labels.
+Never persist raw provider responses, image data, credentials, request
+identifiers, or user identifiers. Counts-only quality receipts cannot explain a
+zero-score result; evidence must preserve safe match/miss/unexpected
+classifications. The follow-up `food_vision_quality_v2` fixture set adds
+purpose-created photorealistic scenes while retaining exact hashes, the same
+scoring thresholds, and the strict no-request dry-run contract. It is a more
+representative candidate benchmark, not proof of production performance.

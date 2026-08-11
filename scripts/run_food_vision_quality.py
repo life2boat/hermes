@@ -26,6 +26,12 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 
 
+SUPPORTED_FIXTURE_SET_VERSIONS = frozenset({
+    "food_vision_quality_v1",
+    "food_vision_quality_v2",
+})
+# Kept as the default only for existing callers that construct an in-memory v1
+# manifest. Receipt provenance always comes from the verified manifest.
 FIXTURE_SET_VERSION = "food_vision_quality_v1"
 RECEIPT_SCHEMA_VERSION = 2
 REQUIRED_PROVIDER = "alibaba"
@@ -54,7 +60,10 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], st
         manifest = json.loads(manifest_bytes)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HarnessInputError("FIXTURE_MANIFEST_INVALID") from exc
-    if not isinstance(manifest, dict) or manifest.get("fixture_set_version") != FIXTURE_SET_VERSION:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("fixture_set_version") not in SUPPORTED_FIXTURE_SET_VERSIONS
+    ):
         raise HarnessInputError("FIXTURE_MANIFEST_INVALID")
     fixtures = manifest.get("fixtures")
     if not isinstance(fixtures, list) or len(fixtures) != 3:
@@ -129,10 +138,16 @@ def _safe_fixture_entry(
     }
 
 
-def _receipt_base(args: argparse.Namespace, *, manifest_sha256: str | None, fixture_count: int) -> dict[str, Any]:
+def _receipt_base(
+    args: argparse.Namespace,
+    *,
+    fixture_set_version: str | None,
+    manifest_sha256: str | None,
+    fixture_count: int,
+) -> dict[str, Any]:
     return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
-        "fixture_set_version": FIXTURE_SET_VERSION,
+        "fixture_set_version": fixture_set_version,
         "manifest_sha256": manifest_sha256,
         "provider": args.provider,
         "model": args.model,
@@ -315,16 +330,23 @@ async def _execute(args: argparse.Namespace, fixtures: list[dict[str, Any]], rec
 def run(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     manifest_sha256: str | None = None
+    fixture_set_version: str | None = None
     fixtures: list[dict[str, Any]] = []
     try:
         if args.provider != REQUIRED_PROVIDER:
             raise HarnessInputError("UNSUPPORTED_PROVIDER")
         if not args.model.strip():
             raise HarnessInputError("MODEL_REQUIRED")
-        _, fixtures, manifest_sha256 = _load_manifest(args.fixture_manifest)
+        manifest, fixtures, manifest_sha256 = _load_manifest(args.fixture_manifest)
+        fixture_set_version = manifest["fixture_set_version"]
         verified_fixtures = [_read_verified_fixture(args.fixture_manifest, fixture) for fixture in fixtures]
         del verified_fixtures
-        receipt = _receipt_base(args, manifest_sha256=manifest_sha256, fixture_count=len(fixtures))
+        receipt = _receipt_base(
+            args,
+            fixture_set_version=fixture_set_version,
+            manifest_sha256=manifest_sha256,
+            fixture_count=len(fixtures),
+        )
         if not args.execute_provider:
             receipt.update({
                 "status": "DRY_RUN",
@@ -349,7 +371,12 @@ def run(argv: list[str] | None = None) -> int:
         print(f"CREDENTIAL_PRESENT={'true' if receipt['credential_present'] else 'false'}")
         return exit_code
     except HarnessInputError as exc:
-        receipt = _receipt_base(args, manifest_sha256=manifest_sha256, fixture_count=len(fixtures))
+        receipt = _receipt_base(
+            args,
+            fixture_set_version=fixture_set_version,
+            manifest_sha256=manifest_sha256,
+            fixture_count=len(fixtures),
+        )
         receipt.update({"status": "BLOCKED", "error_class": exc.error_class})
         _write_receipt(args.receipt_out, receipt)
         print("CREDENTIAL_PRESENT=NOT_CHECKED")

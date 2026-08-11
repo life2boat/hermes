@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -67,7 +69,12 @@ def _response(payload: str) -> SimpleNamespace:
     )
 
 
-def _manifest(tmp_path: Path, *, corrupt_hash: bool = False) -> Path:
+def _manifest(
+    tmp_path: Path,
+    *,
+    corrupt_hash: bool = False,
+    fixture_set_version: str = harness.FIXTURE_SET_VERSION,
+) -> Path:
     fixture_dir = tmp_path / "fixtures"
     fixture_dir.mkdir()
     fixtures = []
@@ -93,7 +100,7 @@ def _manifest(tmp_path: Path, *, corrupt_hash: bool = False) -> Path:
         )
     manifest_path = fixture_dir / "manifest.json"
     manifest_path.write_text(
-        json.dumps({"fixture_set_version": harness.FIXTURE_SET_VERSION, "fixtures": fixtures}),
+        json.dumps({"fixture_set_version": fixture_set_version, "fixtures": fixtures}),
         encoding="utf-8",
     )
     return manifest_path
@@ -288,20 +295,124 @@ def test_quality_and_schema_failures_cannot_force_pass(tmp_path, monkeypatch, pa
         assert receipt["aggregate"][metric] < expected
 
 
-def test_checked_in_food_vision_v1_assets_match_manifest():
+@pytest.mark.parametrize(
+    ("fixture_version", "expected_manifest_sha256"),
+    [
+        ("v1", "1552cce9af6d0d2337c1754213c00b8ba13dbbee9acff2c938761c920174e456"),
+        ("v2", "46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3"),
+    ],
+)
+def test_checked_in_food_vision_assets_match_manifest(
+    fixture_version: str,
+    expected_manifest_sha256: str | None,
+):
     repository_root = Path(__file__).resolve().parents[2]
-    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v1/manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    relative_manifest_path = f"tests/fixtures/food_vision_quality/{fixture_version}/manifest.json"
+    manifest_path = repository_root / relative_manifest_path
+    manifest = json.loads(manifest_path.read_bytes())
 
-    assert manifest["fixture_set_version"] == "food_vision_quality_v1"
-    fixtures = manifest["fixtures"]
-    assert len(fixtures) == 3
+    assert manifest["fixture_set_version"] == f"food_vision_quality_{fixture_version}"
+    assert len(manifest["fixtures"]) == 3
+    if expected_manifest_sha256 is not None:
+        committed_manifest = subprocess.run(
+            ["git", "show", f"HEAD:{relative_manifest_path}"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert hashlib.sha256(committed_manifest).hexdigest() == expected_manifest_sha256
 
-    for fixture in fixtures:
+    for fixture in manifest["fixtures"]:
         image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
         image_path.relative_to(manifest_path.parent.resolve())
         assert image_path.is_file()
         assert hashlib.sha256(image_path.read_bytes()).hexdigest() == fixture["image_sha256"]
+
+
+def test_food_vision_manifests_have_canonical_lf_identity():
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_paths = sorted(
+        (repository_root / "tests/fixtures/food_vision_quality").glob("*/manifest.json")
+    )
+    assert {path.parent.name for path in manifest_paths} == {"v1", "v2"}
+
+    for manifest_path in manifest_paths:
+        relative_path = manifest_path.relative_to(repository_root).as_posix()
+        canonical_bytes = subprocess.run(
+            ["git", "show", f"HEAD:{relative_path}"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert b"\r\n" not in canonical_bytes
+        attributes = subprocess.run(
+            ["git", "check-attr", "eol", "--", relative_path],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert attributes == f"{relative_path}: eol: lf"
+
+
+def test_v2_dry_run_validates_manifest_and_makes_zero_provider_requests(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v2/manifest.json"
+    receipt_path = tmp_path / "receipt.json"
+
+    def fail_dependencies():
+        raise AssertionError("dry run must not load provider dependencies")
+
+    monkeypatch.setattr(harness, "_provider_dependencies", fail_dependencies)
+
+    assert harness.run(_args(manifest_path, receipt_path)) == 0
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["fixture_set_version"] == "food_vision_quality_v2"
+    assert receipt["manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert receipt["status"] == "DRY_RUN"
+    assert receipt["requests_used"] == 0
+    assert receipt["credential_present"] == "NOT_CHECKED"
+
+
+def test_unsupported_fixture_version_fails_closed_without_provider_request(tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path, fixture_set_version="food_vision_quality_v3")
+    receipt_path = tmp_path / "receipt.json"
+
+    def fail_dependencies():
+        raise AssertionError("unsupported version must not load provider dependencies")
+
+    monkeypatch.setattr(harness, "_provider_dependencies", fail_dependencies)
+
+    assert harness.run(_args(manifest, receipt_path)) == 2
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["error_class"] == "FIXTURE_MANIFEST_INVALID"
+    assert receipt["fixture_set_version"] is None
+    assert receipt["requests_used"] == 0
+
+
+def test_tampered_v2_png_fails_before_provider_request(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    source_root = repository_root / "tests/fixtures/food_vision_quality/v2"
+    fixture_root = tmp_path / "v2"
+    shutil.copytree(source_root, fixture_root)
+    image_path = fixture_root / "images/fixture_a.png"
+    image_path.write_bytes(image_path.read_bytes() + b"tampered")
+    receipt_path = tmp_path / "receipt.json"
+
+    def fail_dependencies():
+        raise AssertionError("hash mismatch must not load provider dependencies")
+
+    monkeypatch.setattr(harness, "_provider_dependencies", fail_dependencies)
+
+    assert harness.run(_args(fixture_root / "manifest.json", receipt_path)) == 2
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["error_class"] == "FIXTURE_HASH_MISMATCH"
+    assert receipt["requests_used"] == 0
 
 
 def test_receipt_v2_preserves_safe_fixture_diagnostics_without_raw_provider_content(tmp_path, monkeypatch):

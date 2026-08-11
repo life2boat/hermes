@@ -8,3 +8,6 @@ web/package-lock.json linguist-generated=true
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# Keep versioned food-Vision manifest identity stable across checkout platforms.
+tests/fixtures/food_vision_quality/*/manifest.json text eol=lf

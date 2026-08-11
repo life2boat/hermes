@@ -9,6 +9,7 @@ implementation.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+import re
 from typing import Any
 
 from gateway.healbite_nutrition_diary import validate_food_vision_inventory
@@ -23,6 +24,13 @@ QUALITY_THRESHOLDS: dict[str, float | int] = {
 }
 
 _SAUCE_COMPONENTS = {"mayonnaise", "yellow_sauce", "sour_cream", "sauce"}
+_DIAGNOSTIC_MAX_LABEL_LENGTH = 120
+_DIAGNOSTIC_MAX_REDACTIONS = 12
+_DIAGNOSTIC_UNSAFE_LABEL = "[REDACTED_LABEL]"
+_DIAGNOSTIC_UNSAFE_RE = re.compile(
+    r"(?:data\s*:|https?://|base64|bearer\s+|api[_-]?key|authorization|password|secret|token)",
+    re.IGNORECASE,
+)
 
 
 def canonical_food_component(name: str) -> str:
@@ -71,6 +79,96 @@ def _canonical_expected(items: Iterable[str], aliases: Mapping[str, Iterable[str
     return {_canonical_with_alias(item, aliases) for item in items}
 
 
+def _safe_diagnostic_label(label: object) -> tuple[str, bool]:
+    """Return a bounded receipt label without persisting untrusted text."""
+
+    if not isinstance(label, str):
+        return _DIAGNOSTIC_UNSAFE_LABEL, True
+    normalized = " ".join(
+        "".join(character if character.isprintable() else " " for character in label).split()
+    )
+    if (
+        not normalized
+        or len(normalized) > _DIAGNOSTIC_MAX_LABEL_LENGTH
+        or _DIAGNOSTIC_UNSAFE_RE.search(normalized)
+    ):
+        return _DIAGNOSTIC_UNSAFE_LABEL, True
+    return normalized, False
+
+
+def _safe_diagnostic_labels(labels: Iterable[object]) -> tuple[list[str], int]:
+    safe: list[str] = []
+    redactions = 0
+    string_labels = []
+    for value in labels:
+        if isinstance(value, str):
+            string_labels.append(value)
+        else:
+            redactions += 1
+    for label in sorted(set(string_labels)):
+        sanitized, redacted = _safe_diagnostic_label(label)
+        if redacted:
+            redactions += 1
+        if sanitized not in safe:
+            safe.append(sanitized)
+        if redactions >= _DIAGNOSTIC_MAX_REDACTIONS:
+            break
+    return safe, redactions
+
+
+def _empty_diagnostics() -> dict[str, Any]:
+    return {
+        "validated_prediction_labels": [],
+        "canonical_predicted_components": [],
+        "matched_expected_components": [],
+        "missed_expected_components": [],
+        "unexpected_predicted_components": [],
+        "canonical_predicted_sauces": [],
+        "matched_expected_sauces": [],
+        "missed_expected_sauces": [],
+        "diagnostic_redaction_count": 0,
+    }
+
+
+def _diagnostics(
+    *,
+    actual_components: set[str],
+    expected_components: set[str],
+    actual_sauces: set[str],
+    expected_sauces: set[str],
+    validated_labels: Iterable[object],
+) -> dict[str, Any]:
+    labels, label_redactions = _safe_diagnostic_labels(validated_labels)
+    canonical_predictions, canonical_redactions = _safe_diagnostic_labels(actual_components)
+    matched, matched_redactions = _safe_diagnostic_labels(actual_components & expected_components)
+    missed, missed_redactions = _safe_diagnostic_labels(expected_components - actual_components)
+    unexpected, unexpected_redactions = _safe_diagnostic_labels(actual_components - expected_components)
+    predicted_sauces, predicted_sauce_redactions = _safe_diagnostic_labels(actual_sauces)
+    matched_sauces, matched_sauce_redactions = _safe_diagnostic_labels(actual_sauces & expected_sauces)
+    missed_sauces, missed_sauce_redactions = _safe_diagnostic_labels(expected_sauces - actual_sauces)
+    return {
+        "validated_prediction_labels": labels,
+        "canonical_predicted_components": canonical_predictions,
+        "matched_expected_components": matched,
+        "missed_expected_components": missed,
+        "unexpected_predicted_components": unexpected,
+        "canonical_predicted_sauces": predicted_sauces,
+        "matched_expected_sauces": matched_sauces,
+        "missed_expected_sauces": missed_sauces,
+        "diagnostic_redaction_count": min(
+            _DIAGNOSTIC_MAX_REDACTIONS,
+            label_redactions
+            + canonical_redactions
+            + matched_redactions
+            + missed_redactions
+            + unexpected_redactions
+            + predicted_sauce_redactions
+            + matched_sauce_redactions
+            + missed_sauce_redactions,
+        ),
+    }
+
+
 def score_food_vision_payload(
     payload_text: str,
     *,
@@ -78,7 +176,7 @@ def score_food_vision_payload(
     expected_sauce_items: Iterable[str],
     expected_needs_clarification: bool,
     allowed_aliases: Mapping[str, Iterable[str]] | None = None,
-) -> dict[str, float | int | bool]:
+) -> dict[str, Any]:
     """Validate and score one application-format provider response.
 
     Returned counts make aggregate scoring deterministic while the percentage
@@ -108,6 +206,7 @@ def score_food_vision_payload(
             "expected_sauce_count": len(expected_sauces),
             "schema_valid": False,
             "normalized_prediction_count": 0,
+            "diagnostics": _empty_diagnostics(),
         }
 
     actual_components = {_canonical_with_alias(item.normalized_name, allowed_aliases) for item in validation.inventory.items}
@@ -139,6 +238,13 @@ def score_food_vision_payload(
         "expected_sauce_count": len(expected_sauces),
         "schema_valid": True,
         "normalized_prediction_count": len(actual_components),
+        "diagnostics": _diagnostics(
+            actual_components=actual_components,
+            expected_components=expected_components,
+            actual_sauces=actual_sauces,
+            expected_sauces=expected_sauces,
+            validated_labels=(item.normalized_name for item in validation.inventory.items),
+        ),
     }
 
 

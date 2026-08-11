@@ -45,10 +45,12 @@ The receipt path must be new. Store execution evidence outside a Git worktree.
 
 ## Decision rule
 
-The receipt contains only versioned fixture IDs and hashes, static request/error
-classes, counts, aggregate metrics, and timestamps. It never includes image
-bytes, data URLs, absolute paths, prompt text, raw provider responses, headers,
-or credentials.
+The version-2 receipt contains versioned fixture IDs and hashes, static
+request/error classes, bounded schema-validated prediction diagnostics, counts,
+aggregate metrics, and timestamps. Diagnostics expose only sanitized labels and
+canonical match/miss/unexpected sets; they never include image bytes, data URLs,
+absolute paths, prompt text, raw provider responses, headers, request IDs, or
+credentials. Historical version-1 receipts remain valid evidence.
 
 Eligibility passes only when all hashes pass, all three requests are used once,
 the provider response is application-schema valid for every fixture, and:

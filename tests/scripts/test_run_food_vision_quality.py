@@ -302,3 +302,36 @@ def test_checked_in_food_vision_v1_assets_match_manifest():
         image_path.relative_to(manifest_path.parent.resolve())
         assert image_path.is_file()
         assert hashlib.sha256(image_path.read_bytes()).hexdigest() == fixture["image_sha256"]
+
+
+def test_receipt_v2_preserves_safe_fixture_diagnostics_without_raw_provider_content(tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path)
+    receipt_path = tmp_path / "receipt.json"
+    calls = []
+    payloads = [_payload("wrong-a"), _payload("wrong-b"), _payload("wrong-c")]
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "synthetic-test-key")
+
+    async def fake_provider(**kwargs):
+        kwargs["request_telemetry"].external_request_attempts += 1
+        calls.append(kwargs)
+        return _response(payloads[len(calls) - 1])
+
+    _install_provider(monkeypatch, fake_provider)
+
+    assert harness.run(_args(manifest, receipt_path, execute=True)) == 1
+
+    receipt_text = receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    assert receipt["schema_version"] == 2
+    assert receipt["quality_gate"] == "FAIL"
+    assert receipt["aggregate"]["precision"] == 0.0
+    assert receipt["aggregate"]["recall"] == 0.0
+    assert len(calls) == 3
+    for expected, fixture in zip(("wrong-a", "wrong-b", "wrong-c"), receipt["fixtures"]):
+        diagnostics = fixture["diagnostics"]
+        assert diagnostics["matched_expected_components"] == []
+        assert diagnostics["missed_expected_components"]
+        assert diagnostics["unexpected_predicted_components"] == [expected]
+        assert diagnostics["validated_prediction_labels"] == [expected]
+    for forbidden in ("data:image", "base64", "DASHSCOPE_API_KEY", "synthetic-test-key"):
+        assert forbidden not in receipt_text

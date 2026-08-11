@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.27
+version: 1.2.28
 updated_at: 2026-08-11
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 7626623a92a87d7fa49ccb9b8488ef34b763dad8
+state_verified_against_main_sha: 72087833d868fbbd7015b7e50e9d17891bf99e69
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `7626623a92a87d7fa49ccb9b8488ef34b763dad8`.
+  `72087833d868fbbd7015b7e50e9d17891bf99e69`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -49,9 +49,20 @@ Git.
   dataset version `agent-behaviour-v1`, engine version `1`, approved candidate
   head `fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20`, and corpus digest
   `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`.
-- Executable model policy, cost evaluator, release-gate aggregator, CI
-  behaviour gate, and Failure-to-Eval candidate automation remain
-  NOT_IMPLEMENTED.
+- Model policy version `1` implements the closed seven-class engineering task
+  matrix, reasoning requirements, explicit substitution classes, provider-
+  change evidence, sanitized receipts, and the invariant that model capability
+  never expands authority.
+- Cost policy version `1` implements explicit call/token/cost budgets, complete
+  primary/retry/judge/fallback/live-eval accounting, deterministic decimal
+  estimation, externally supplied rate-card schema version `1`, canonical
+  rate-card SHA-256 identity, currency checks, and fail-closed required unknown
+  evidence. `UNKNOWN` cost never becomes zero.
+- `scripts/check_llm_ops_policy.py` exposes these contracts offline with stable
+  JSON and distinct PASS/FAIL/BLOCKED exit codes. It performs no provider or
+  pricing lookup. The combined `LLMOpsReceipt` is not a release gate.
+- Release-gate aggregation, CI behaviour enforcement, and Failure-to-Eval
+  candidate automation remain NOT_IMPLEMENTED.
 - This repository-only update changes no product runtime, provider route,
   database, Qdrant state, secret, feature flag, container, or production state.
 - The repository Qwen Vision integration remains opt-in and provider-scoped:

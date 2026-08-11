@@ -1,0 +1,17 @@
+{
+  "currency": "USD",
+  "models": {
+    "GPT-5.6 Sol": {
+      "input_per_million_tokens": "2",
+      "output_per_million_tokens": "4",
+      "per_call": "0.01"
+    },
+    "GPT-5.6 Terra": {
+      "input_per_million_tokens": "1",
+      "output_per_million_tokens": "2",
+      "per_call": "0.005"
+    }
+  },
+  "pricing_source_id": "synthetic-rate-card-v1",
+  "schema_version": 1
+}

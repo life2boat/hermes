@@ -27,11 +27,18 @@ PR-1 established the architecture and contracts. PR-2 implemented the
 stdlib-only ai_engineering trace/replay substrate. PR-3 adds compatible
 scenario schema v2, deterministic graders, a closed assertion registry, an
 offline eval runner/CLI, stable reports, a versioned 49-case corpus, and a
-digest-bound baseline.
+digest-bound baseline. PR-4 implements model policy version 1 and cost policy
+version 1: the closed task/model/reasoning matrix, explicit substitution and
+provider-boundary evidence, complete call-category accounting, deterministic
+decimal budgets, and external rate-card schema version 1 with canonical digest
+identity.
 
 The corpus is GOLDEN / HUMAN_REVIEW=PASS. Its review evidence binds the dataset
 and immutable corpus identity, engine version, and candidate reviewed head;
 promotion-only metadata may change the PR head only while that digest remains
-identical. Executable model/cost policy, release-gate aggregation, CI behaviour
-gating, and failure-candidate automation remain planned. The package is a
-repository library, not product runtime capability or production activation.
+identical. Model/cost evaluation is provider-free and emits sanitized stable
+PASS/FAIL/BLOCKED receipts; unknown required cost evidence is never zero and a
+model recommendation never grants authority. Release-gate aggregation, CI
+behaviour gating, and failure-candidate automation remain planned. The package
+is a repository library, not product runtime capability or production
+activation.

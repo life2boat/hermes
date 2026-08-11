@@ -11,6 +11,9 @@ BEHAVIOUR_TRACE_SCHEMA_VERSION = 1
 SCENARIO_SCHEMA_VERSION = 2
 SUPPORTED_SCENARIO_SCHEMA_VERSIONS = (1, 2)
 BEHAVIOUR_EVAL_ENGINE_VERSION = 1
+MODEL_POLICY_VERSION = 1
+COST_POLICY_VERSION = 1
+RATE_CARD_SCHEMA_VERSION = 1
 
 
 class Status(StrEnum):
@@ -23,6 +26,47 @@ class Status(StrEnum):
     NOT_PERFORMED = "NOT_PERFORMED"
     UNKNOWN = "UNKNOWN"
     INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class TaskClass(StrEnum):
+    """Closed engineering task taxonomy owned by the model policy."""
+
+    REPOSITORY_SEARCH_LOGS = "REPOSITORY_SEARCH_LOGS"
+    SMALL_PRECISE_FIX = "SMALL_PRECISE_FIX"
+    BOUNDED_IMPLEMENTATION = "BOUNDED_IMPLEMENTATION"
+    ARCHITECTURE = "ARCHITECTURE"
+    MIGRATION_ROLLBACK_DESIGN = "MIGRATION_ROLLBACK_DESIGN"
+    SECURITY_AUDIT = "SECURITY_AUDIT"
+    HIGH_RISK_PRODUCTION_DEPLOYMENT_OR_MIGRATION = (
+        "HIGH_RISK_PRODUCTION_DEPLOYMENT_OR_MIGRATION"
+    )
+
+
+class ReasoningLevel(StrEnum):
+    """Closed reasoning taxonomy used by deterministic selection checks."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    VERY_HIGH = "VERY_HIGH"
+
+
+class SubstitutionClass(StrEnum):
+    """Explicit model-substitution classifications."""
+
+    NONE = "NONE"
+    ALLOWED_ALTERNATIVE = "ALLOWED_ALTERNATIVE"
+    ESCALATION = "ESCALATION"
+    FALLBACK = "FALLBACK"
+    PROVIDER_CHANGE = "PROVIDER_CHANGE"
+
+
+class LLMOpsPolicyError(ValueError):
+    """Fail-closed policy/configuration error exposing only a stable code."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 class StopBoundary(StrEnum):
@@ -239,3 +283,101 @@ class EvalRunResult:
     datasets: tuple[DatasetResult, ...]
     baseline_status: Status
     corpus_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRecommendation:
+    policy_version: int
+    task_class: TaskClass
+    recommended_model: str
+    allowed_alternatives: tuple[str, ...]
+    recommended_reasoning: ReasoningLevel
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityBoundary:
+    """Task authority evidence that model selection may compare, never expand."""
+
+    allowed_effect_classes: tuple[EffectClass, ...]
+    forbidden_effect_classes: tuple[EffectClass, ...]
+    stop_boundary: StopBoundary
+    production_authorized: bool
+    secret_access_authorized: bool
+    data_access_authorized: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPolicyReceipt:
+    policy_version: int
+    task_class: TaskClass | None
+    recommended_model: str | None
+    actual_model: str | None
+    recommended_reasoning: ReasoningLevel | None
+    actual_reasoning: ReasoningLevel | None
+    substitution_class: SubstitutionClass | None
+    substitution_reason_code: str | None
+    authority_status: Status
+    status: Status
+    reason_codes: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetLimits:
+    max_model_calls: int | None
+    max_input_tokens: int | None
+    max_output_tokens: int | None
+    max_estimated_cost: str | None
+    currency: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class UsageAccounting:
+    primary_calls: int | None
+    retry_calls: int | None
+    judge_calls: int | None
+    fallback_calls: int | None
+    live_eval_calls: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRate:
+    input_per_million_tokens: str
+    output_per_million_tokens: str
+    per_call: str
+
+
+@dataclass(frozen=True, slots=True)
+class RateCard:
+    schema_version: int
+    pricing_source_id: str
+    currency: str
+    models: tuple[tuple[str, ModelRate], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CostPolicyReceipt:
+    policy_version: int
+    budget: BudgetLimits
+    usage: UsageAccounting
+    total_model_calls: int | None
+    model_call_status: Status
+    input_token_status: Status
+    output_token_status: Status
+    estimated_cost_status: Status
+    estimated_cost: str | None
+    currency: str | None
+    pricing_source_id: str | None
+    rate_card_digest: str | None
+    status: Status
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LLMOpsReceipt:
+    model_policy_receipt: ModelPolicyReceipt
+    cost_policy_receipt: CostPolicyReceipt
+    overall_status: Status

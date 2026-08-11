@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.25
+version: 1.2.27
 updated_at: 2026-08-11
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 6c2aa61755eb213c4d64bfd7c269e526723f9e86
+state_verified_against_main_sha: 7626623a92a87d7fa49ccb9b8488ef34b763dad8
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `6c2aa61755eb213c4d64bfd7c269e526723f9e86`.
+  `7626623a92a87d7fa49ccb9b8488ef34b763dad8`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -39,14 +39,19 @@ Git.
   Skill-to-Loop-to-Graph maturity lifecycle.
 - ADR-0074 through ADR-0077 record the corresponding durable decisions,
   including candidate-only governed agent improvement.
-- The stdlib-only ai_engineering package implements schema version 1 behaviour
-  traces and scenarios, recursive evidence sanitization, canonical JSON and
-  SHA-256 identities, safe fixture loading, and deterministic provider-free
-  replay.
-- Behaviour graders, a golden behaviour corpus, an eval runner, executable
-  model policy, cost evaluator, release-gate aggregator, CI behaviour gate, and
-  Failure-to-Eval candidate automation remain `NOT_IMPLEMENTED`. These are
-  separate reviewed follow-up stages.
+- The stdlib-only ai_engineering package implements schema version 1
+  behaviour traces, compatible scenario schema v1 reads, explicit scenario
+  schema v2, recursive evidence sanitization, canonical JSON/SHA-256 identity,
+  safe fixture loading, and deterministic provider-free replay.
+- Deterministic graders, a closed assertion registry, offline eval runner,
+  stable machine reports, and digest-bound baseline comparison are implemented.
+  The 49-case corpus is GOLDEN following independent human review bound to
+  dataset version `agent-behaviour-v1`, engine version `1`, approved candidate
+  head `fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20`, and corpus digest
+  `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`.
+- Executable model policy, cost evaluator, release-gate aggregator, CI
+  behaviour gate, and Failure-to-Eval candidate automation remain
+  NOT_IMPLEMENTED.
 - This repository-only update changes no product runtime, provider route,
   database, Qdrant state, secret, feature flag, container, or production state.
 - The repository Qwen Vision integration remains opt-in and provider-scoped:

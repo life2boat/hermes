@@ -89,7 +89,9 @@ behaviour-eval evidence.
 - [`AI_AGENT_RULEBOOK.md`](AI_AGENT_RULEBOOK.md) remains the operational
   decision protocol.
 
-The schema, sanitizer, canonical serializer, digest, fixture loader, and
-deterministic replay substrate are implemented in ai_engineering. A behaviour-eval
-engine, graders, release-gate runner, and CI behaviour gate remain `PLANNED`
-and require separate reviewed PRs.
+The schema, sanitizer, canonical serializer, digest, fixture loader,
+deterministic replay substrate, closed assertion registry, deterministic
+graders, and offline behaviour-eval runner are implemented in ai_engineering.
+The versioned behaviour corpus is a candidate pending exact human review; it is
+not yet a golden corpus. Model/cost policy, release-gate aggregation, the CI
+behaviour gate, and governed failure-candidate automation remain PLANNED.

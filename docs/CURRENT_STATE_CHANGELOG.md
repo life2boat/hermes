@@ -1,6 +1,50 @@
 # CURRENT_STATE changelog
 
 
+## 1.2.27 - 2026-08-11
+
+Added:
+- promoted the versioned 49-case deterministic behaviour corpus to GOLDEN
+  after explicit human/operator review;
+- recorded the approval anchor: candidate head
+  `fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20`, dataset version
+  `agent-behaviour-v1`, engine version `1`, and immutable corpus digest
+  `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`.
+
+Changed:
+- corpus lifecycle state is GOLDEN; promotion metadata is intentionally
+  excluded from the immutable behavioural-content digest.
+
+Safety:
+- approval remains valid only while the exact corpus digest is unchanged;
+- no product runtime, production, containers, SQLite, Qdrant, secrets,
+  provider calls, or network-based evals were changed.
+
+
+## 1.2.26 - 2026-08-11
+
+Added:
+- added deterministic behaviour graders, a closed assertion registry, the
+  offline eval runner/CLI, stable reports, and baseline comparison;
+- added a 49-case synthetic/sanitized corpus across nine categories with 43
+  explicit critical cases and a corpus-digest-bound review table.
+
+Changed:
+- advanced the scenario contract to schema v2 with required
+  canonical_source_or_fixture_version while preserving identifiable v1 reads
+  and v1 canonical serialization;
+- updated Source Map, System Model, behaviour contracts, Current State, and the
+  Knowledge Pack to separate technical implementation from golden promotion.
+
+Safety:
+- corpus status remains CANDIDATE; human review is NOT_PERFORMED and must bind
+  exact dataset version, corpus digest, and PR head before merge;
+- model/cost policy, release aggregation, CI gating, and failure-candidate
+  automation remain not implemented;
+- no product runtime, production, containers, SQLite, Qdrant, secrets, provider
+  calls, or network-based evals were changed.
+
+
 ## 1.2.25 - 2026-08-11
 
 Added:

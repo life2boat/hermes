@@ -109,10 +109,13 @@ Production readiness
 ```
 
 These are evidence and release-decision boundaries, not product/runtime
-components. PR-1 adds authoritative documentation only. The behaviour-eval
-engine, release-gate runner, cost evaluator, and CI behaviour gate are
-`PLANNED`; no new daemon, provider call path, database, worker, or production
-topology exists because of this layer.
+components. The repository now has a provider-free deterministic behaviour
+eval engine, closed assertions/graders, versioned candidate corpus, and baseline
+comparison. The candidate corpus still requires exact human review before
+golden promotion. The release-gate runner, executable model/cost evaluator, CI
+behaviour gate, and failure-candidate automation remain PLANNED; no new daemon,
+provider call path, database, worker, or production topology exists because of
+this layer.
 
 ### Tools
 
@@ -154,7 +157,7 @@ topology without code and runtime evidence.
 | Semantic search | Qdrant adapter and hydrated results | Durable truth; raw Qdrant payloads are never sufficient authority |
 | Release | Versioned policy, exact-main build, attestations, deploy/migration tools | Operator authority, production credentials, provider infrastructure |
 | Engineering knowledge | Versioned docs, ADRs, skills, tests, Git history | Chat memory and uncommitted operator notes |
-| Engineering control | Code, behaviour, security, cost and readiness evidence contracts | Production authority; planned runners do not exist until implemented and tested |
+| Engineering control | Evidence contracts plus offline behaviour graders/runner and candidate corpus | Production authority; model/cost/release/CI automation remains separately governed |
 
 ## Runtime architecture
 

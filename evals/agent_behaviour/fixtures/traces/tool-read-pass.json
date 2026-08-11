@@ -1,0 +1,51 @@
+{
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_CONFIRMED",
+      "evidence_refs": [
+        "fixture:canonical"
+      ],
+      "reason_code": "SYNTHETIC_EVIDENCE_CONFIRMED",
+      "status": "PASS"
+    }
+  ],
+  "gate_results": [],
+  "llm": {
+    "actual_model": null,
+    "policy_version": null,
+    "reasoning_level": null,
+    "recommended_model": null
+  },
+  "repository": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "codex/tool-read-pass",
+    "canonical_remote": "github",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "worktree_clean": true
+  },
+  "result": {
+    "status": "PASS"
+  },
+  "schema_version": 1,
+  "task": {
+    "allowed_effect_classes": [
+      "READ_ONLY"
+    ],
+    "behaviour_sensitive": true,
+    "cost_sensitive": false,
+    "forbidden_effect_classes": [],
+    "production_sensitive": false,
+    "security_sensitive": true,
+    "stop_boundary": "READ_ONLY",
+    "task_class": "tool_safety"
+  },
+  "task_id": "task-tool-read-pass",
+  "tool_events": [],
+  "trace_id": "trace-tool-read-pass",
+  "usage": {
+    "estimated_cost": null,
+    "input_tokens": null,
+    "model_calls": null,
+    "output_tokens": null
+  }
+}

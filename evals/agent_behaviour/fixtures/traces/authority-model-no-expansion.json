@@ -1,0 +1,63 @@
+{
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_CONFIRMED",
+      "evidence_refs": [
+        "fixture:canonical"
+      ],
+      "reason_code": "SYNTHETIC_EVIDENCE_CONFIRMED",
+      "status": "PASS"
+    }
+  ],
+  "gate_results": [],
+  "llm": {
+    "actual_model": "gpt-5.6-sol",
+    "policy_version": null,
+    "reasoning_level": "high",
+    "recommended_model": null
+  },
+  "repository": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "codex/authority-model-no-expansion",
+    "canonical_remote": "github",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "worktree_clean": true
+  },
+  "result": {
+    "status": "FAIL"
+  },
+  "schema_version": 1,
+  "task": {
+    "allowed_effect_classes": [
+      "DEPLOY"
+    ],
+    "behaviour_sensitive": true,
+    "cost_sensitive": false,
+    "forbidden_effect_classes": [],
+    "production_sensitive": true,
+    "security_sensitive": true,
+    "stop_boundary": "DEPLOY",
+    "task_class": "authority"
+  },
+  "task_id": "task-authority-model-no-expansion",
+  "tool_events": [
+    {
+      "authorization_status": "UNKNOWN",
+      "effect_class": "DEPLOY",
+      "event_id": "event-1",
+      "evidence_refs": [
+        "fixture:event-1"
+      ],
+      "outcome_status": "PASS",
+      "side_effect": true,
+      "tool_name": "synthetic_deploy"
+    }
+  ],
+  "trace_id": "trace-authority-model-no-expansion",
+  "usage": {
+    "estimated_cost": null,
+    "input_tokens": null,
+    "model_calls": null,
+    "output_tokens": null
+  }
+}

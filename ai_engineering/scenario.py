@@ -11,6 +11,7 @@ from typing import NoReturn
 
 from ai_engineering.contracts import (
     SCENARIO_SCHEMA_VERSION,
+    SUPPORTED_SCENARIO_SCHEMA_VERSIONS,
     EffectClass,
     ReplayResult,
     ScenarioAssertion,
@@ -25,7 +26,7 @@ from ai_engineering.trace import deserialize_trace, normalize_trace, serialize_t
 
 MAX_FIXTURE_BYTES = 1_048_576
 
-_SCENARIO_FIELDS = frozenset(
+_SCENARIO_V1_FIELDS = frozenset(
     {
         "schema_version",
         "case_id",
@@ -39,6 +40,9 @@ _SCENARIO_FIELDS = frozenset(
         "sanitized_input_reference",
         "deterministic_assertions",
     }
+)
+_SCENARIO_V2_FIELDS = frozenset(
+    {*_SCENARIO_V1_FIELDS, "canonical_source_or_fixture_version"}
 )
 _ASSERTION_FIELDS = frozenset({"kind", "expected"})
 
@@ -114,10 +118,12 @@ def validate_scenario(value: ScenarioDefinition | Mapping[str, object]) -> Scena
     if isinstance(value, ScenarioDefinition):
         return validate_scenario(normalize_scenario(value))
     reject_forbidden_raw_fields(value)
-    payload = _exact_fields(value, _SCENARIO_FIELDS)
-    version = payload["schema_version"]
-    if version != SCENARIO_SCHEMA_VERSION or isinstance(version, bool):
+    raw = _mapping(value)
+    version = raw.get("schema_version")
+    if isinstance(version, bool) or version not in SUPPORTED_SCENARIO_SCHEMA_VERSIONS:
         _fail("TRACE_SCHEMA_VERSION_UNSUPPORTED")
+    fields = _SCENARIO_V1_FIELDS if version == 1 else _SCENARIO_V2_FIELDS
+    payload = _exact_fields(raw, fields)
     try:
         stop_boundary = StopBoundary(payload["expected_stop_boundary"])
     except (ValueError, TypeError):
@@ -139,7 +145,7 @@ def validate_scenario(value: ScenarioDefinition | Mapping[str, object]) -> Scena
             ScenarioAssertion(kind=_identifier(assertion["kind"]), expected=expected)
         )
     scenario = ScenarioDefinition(
-        schema_version=SCENARIO_SCHEMA_VERSION,
+        schema_version=version,
         case_id=_identifier(payload["case_id"]),
         dataset_version=_identifier(payload["dataset_version"]),
         task_classification=_identifier(payload["task_classification"]),
@@ -150,6 +156,11 @@ def validate_scenario(value: ScenarioDefinition | Mapping[str, object]) -> Scena
         expected_status=expected_status,
         sanitized_input_reference=_identifier(payload["sanitized_input_reference"]),
         deterministic_assertions=tuple(assertions),
+        canonical_source_or_fixture_version=(
+            _identifier(payload["canonical_source_or_fixture_version"])
+            if version == SCENARIO_SCHEMA_VERSION
+            else None
+        ),
     )
     verify_sanitized_evidence(normalize_scenario(scenario))
     return scenario
@@ -158,7 +169,11 @@ def validate_scenario(value: ScenarioDefinition | Mapping[str, object]) -> Scena
 def normalize_scenario(value: ScenarioDefinition | Mapping[str, object]) -> dict[str, object]:
     if not isinstance(value, ScenarioDefinition):
         value = validate_scenario(value)
-    return {
+    if value.schema_version == 1 and value.canonical_source_or_fixture_version is not None:
+        _fail("TRACE_UNEXPECTED_FIELD")
+    if value.schema_version == 2 and value.canonical_source_or_fixture_version is None:
+        _fail("TRACE_REQUIRED_FIELD_MISSING")
+    normalized = {
         "schema_version": value.schema_version,
         "case_id": value.case_id,
         "dataset_version": value.dataset_version,
@@ -174,6 +189,11 @@ def normalize_scenario(value: ScenarioDefinition | Mapping[str, object]) -> dict
             for item in value.deterministic_assertions
         ],
     }
+    if value.schema_version == 2:
+        normalized["canonical_source_or_fixture_version"] = (
+            value.canonical_source_or_fixture_version
+        )
+    return normalized
 
 
 def serialize_scenario(value: ScenarioDefinition | Mapping[str, object]) -> str:
@@ -186,7 +206,7 @@ def serialize_scenario(value: ScenarioDefinition | Mapping[str, object]) -> str:
     )
 
 
-def _safe_fixture_bytes(fixture_root: Path, relative_path: str | Path) -> bytes:
+def load_fixture_bytes(fixture_root: Path, relative_path: str | Path) -> bytes:
     if not isinstance(relative_path, (str, Path)):
         _fail("TRACE_PATH_OUTSIDE_ROOT")
     reference = os.fspath(relative_path)
@@ -223,7 +243,7 @@ def _safe_fixture_bytes(fixture_root: Path, relative_path: str | Path) -> bytes:
 def load_trace_fixture(fixture_root: Path, relative_path: str | Path):
     """Load a sanitized trace fixture confined to an approved root."""
 
-    return deserialize_trace(_safe_fixture_bytes(fixture_root, relative_path))
+    return deserialize_trace(load_fixture_bytes(fixture_root, relative_path))
 
 
 def load_scenario_fixture(
@@ -231,7 +251,7 @@ def load_scenario_fixture(
 ) -> ScenarioDefinition:
     """Load a scenario definition without executing assertions or graders."""
 
-    data = _safe_fixture_bytes(fixture_root, relative_path)
+    data = load_fixture_bytes(fixture_root, relative_path)
     try:
         payload = json.loads(
             data.decode("utf-8"),

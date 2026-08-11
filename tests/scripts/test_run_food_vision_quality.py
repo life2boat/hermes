@@ -329,6 +329,32 @@ def test_checked_in_food_vision_assets_match_manifest(
         assert hashlib.sha256(image_path.read_bytes()).hexdigest() == fixture["image_sha256"]
 
 
+def test_food_vision_manifests_have_canonical_lf_identity():
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_paths = sorted(
+        (repository_root / "tests/fixtures/food_vision_quality").glob("*/manifest.json")
+    )
+    assert {path.parent.name for path in manifest_paths} == {"v1", "v2"}
+
+    for manifest_path in manifest_paths:
+        relative_path = manifest_path.relative_to(repository_root).as_posix()
+        canonical_bytes = subprocess.run(
+            ["git", "show", f"HEAD:{relative_path}"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert b"\r\n" not in canonical_bytes
+        attributes = subprocess.run(
+            ["git", "check-attr", "eol", "--", relative_path],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert attributes == f"{relative_path}: eol: lf"
+
+
 def test_v2_dry_run_validates_manifest_and_makes_zero_provider_requests(tmp_path, monkeypatch):
     repository_root = Path(__file__).resolve().parents[2]
     manifest_path = repository_root / "tests/fixtures/food_vision_quality/v2/manifest.json"

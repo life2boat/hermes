@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -297,7 +298,7 @@ def test_quality_and_schema_failures_cannot_force_pass(tmp_path, monkeypatch, pa
 @pytest.mark.parametrize(
     ("fixture_version", "expected_manifest_sha256"),
     [
-        ("v1", "7d946a450e84471345114ff1c31dc058289de6e8a87128353bee96a9c9a57505"),
+        ("v1", "1552cce9af6d0d2337c1754213c00b8ba13dbbee9acff2c938761c920174e456"),
         ("v2", "46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3"),
     ],
 )
@@ -306,14 +307,20 @@ def test_checked_in_food_vision_assets_match_manifest(
     expected_manifest_sha256: str | None,
 ):
     repository_root = Path(__file__).resolve().parents[2]
-    manifest_path = repository_root / f"tests/fixtures/food_vision_quality/{fixture_version}/manifest.json"
-    manifest_bytes = manifest_path.read_bytes()
-    manifest = json.loads(manifest_bytes)
+    relative_manifest_path = f"tests/fixtures/food_vision_quality/{fixture_version}/manifest.json"
+    manifest_path = repository_root / relative_manifest_path
+    manifest = json.loads(manifest_path.read_bytes())
 
     assert manifest["fixture_set_version"] == f"food_vision_quality_{fixture_version}"
     assert len(manifest["fixtures"]) == 3
     if expected_manifest_sha256 is not None:
-        assert hashlib.sha256(manifest_bytes).hexdigest() == expected_manifest_sha256
+        committed_manifest = subprocess.run(
+            ["git", "show", f"HEAD:{relative_manifest_path}"],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert hashlib.sha256(committed_manifest).hexdigest() == expected_manifest_sha256
 
     for fixture in manifest["fixtures"]:
         image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)

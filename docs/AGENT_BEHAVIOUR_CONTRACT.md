@@ -68,10 +68,11 @@ closed.
 
 ## Evidence boundaries
 
-Behaviour evidence must be reviewable, task-bound, and sanitized. A future
-machine-readable trace should bind at least the task classification, canonical
+Behaviour evidence must be reviewable, task-bound, and sanitized. The
+schema-versioned trace in ai_engineering binds task classification, canonical
 SHA, allowed and forbidden effects, required stop boundary, selected model
-policy, tool/effect classes, status, and deterministic evidence references.
+policy, tool/effect classes, status, and deterministic evidence references. Its
+canonical JSON digest makes equivalent sanitized evidence reproducible.
 
 Raw prompts, model chain-of-thought, secrets, private identifiers, user
 messages, raw provider responses, and raw production logs are not acceptable
@@ -88,6 +89,7 @@ behaviour-eval evidence.
 - [`AI_AGENT_RULEBOOK.md`](AI_AGENT_RULEBOOK.md) remains the operational
   decision protocol.
 
-This PR establishes the contract only. An executable behaviour-eval engine,
-release-gate runner, and CI behaviour gate are `PLANNED` and require separate
-reviewed PRs.
+The schema, sanitizer, canonical serializer, digest, fixture loader, and
+deterministic replay substrate are implemented in ai_engineering. A behaviour-eval
+engine, graders, release-gate runner, and CI behaviour gate remain `PLANNED`
+and require separate reviewed PRs.

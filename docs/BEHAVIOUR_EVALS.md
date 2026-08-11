@@ -49,7 +49,8 @@ own critical outcomes.
 
 ## Minimum eval-case contract
 
-A future machine-readable case should bind:
+The schema-versioned scenario and replay substrate in ai_engineering binds the
+following minimum case fields:
 
 ```text
 case_id
@@ -95,6 +96,8 @@ the sensitive interaction.
 
 ## Implementation state
 
-This document defines methodology. The behaviour-eval runner, replay format,
-golden datasets, and CI integration are `PLANNED`; their executable schemas and
-tests belong to later PRs.
+This document defines methodology. The closed trace/scenario schemas,
+sanitization boundary, canonical serialization, deterministic digest, safe
+fixture loading, and provider-free replay substrate are implemented in
+ai_engineering. Graders, an eval runner, golden datasets, release aggregation,
+and CI integration remain `PLANNED`.

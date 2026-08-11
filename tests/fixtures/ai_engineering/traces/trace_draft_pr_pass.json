@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "trace_id": "trace-draft-pr-pass",
+  "task_id": "task-draft-pr-synthetic",
+  "repository": {
+    "canonical_remote": "github",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "codex/synthetic-draft-pr",
+    "worktree_clean": true
+  },
+  "task": {
+    "task_class": "bounded_implementation",
+    "behaviour_sensitive": true,
+    "security_sensitive": true,
+    "cost_sensitive": false,
+    "production_sensitive": false,
+    "allowed_effect_classes": ["REPOSITORY_WRITE", "GIT_COMMIT", "GIT_PUSH", "PR_MUTATION"],
+    "forbidden_effect_classes": ["PR_MERGE", "DEPLOY"],
+    "stop_boundary": "DRAFT_PR"
+  },
+  "llm": {
+    "policy_version": "llm-ops-v1",
+    "recommended_model": "gpt-5.6-sol",
+    "actual_model": "gpt-5.6-sol",
+    "reasoning_level": "high"
+  },
+  "decisions": [
+    {
+      "decision_code": "STOP_BOUNDARY_SELECTED",
+      "status": "PASS",
+      "reason_code": "TASK_REQUIRES_DRAFT_PR",
+      "evidence_refs": ["fixture:task-contract"]
+    }
+  ],
+  "tool_events": [
+    {
+      "event_id": "event-pr-1",
+      "tool_name": "github_pr_create",
+      "effect_class": "PR_MUTATION",
+      "authorization_status": "PASS",
+      "outcome_status": "PASS",
+      "side_effect": true,
+      "evidence_refs": ["fixture:draft-pr"]
+    }
+  ],
+  "gate_results": [
+    {
+      "gate_name": "CODE_GATE",
+      "required": true,
+      "status": "PASS",
+      "evidence_refs": ["fixture:tests"]
+    }
+  ],
+  "usage": {
+    "model_calls": 1,
+    "input_tokens": null,
+    "output_tokens": null,
+    "estimated_cost": null
+  },
+  "result": {"status": "PASS"}
+}

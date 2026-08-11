@@ -1,5 +1,24 @@
 # CURRENT_STATE changelog
 
+
+## 1.2.25 - 2026-08-11
+
+Added:
+- added the stdlib-only ai_engineering package with closed schema-version 1
+  behaviour trace and scenario contracts;
+- added recursive sanitized-evidence validation, canonical JSON, SHA-256
+  identity, bounded fixture loading, provider-free replay, and synthetic trace
+  fixtures.
+
+Changed:
+- updated the v2 contracts, Source Map, Current State, and Knowledge Pack entry
+  to distinguish the implemented trace/replay substrate from planned graders
+  and release automation;
+- updated repository-state verification to canonical main
+  `6c2aa61755eb213c4d64bfd7c269e526723f9e86`.
+
+Safety:
+- product runtime, production, containers, SQLite, Qdrant, and secrets were not
 ## 1.2.24 - 2026-08-11
 
 Added:

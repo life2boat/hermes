@@ -27,6 +27,13 @@ ADRS = tuple(
 )
 
 KNOWLEDGE = "knowledge/ai/agent-behaviour-llm-ops-v2.md"
+EXECUTABLE_CONTRACTS = (
+    "ai_engineering/contracts.py",
+    "ai_engineering/trace.py",
+    "ai_engineering/redaction.py",
+    "ai_engineering/scenario.py",
+)
+
 
 
 def _read(relative_path: str) -> str:
@@ -89,6 +96,9 @@ def test_navigation_indexes_reference_authoritative_sources() -> None:
 
     for relative_path in CONTRACTS:
         assert Path(relative_path).name in source_map
+    for relative_path in EXECUTABLE_CONTRACTS:
+        assert (ROOT / relative_path).is_file(), relative_path
+        assert relative_path in source_map
     assert Path(KNOWLEDGE).name in knowledge_index
     for relative_path in ADRS:
         assert Path(relative_path).name in decision_index

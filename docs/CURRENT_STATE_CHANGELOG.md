@@ -1,6 +1,30 @@
 # CURRENT_STATE changelog
 
 
+## 1.2.26 - 2026-08-11
+
+Added:
+- added deterministic behaviour graders, a closed assertion registry, the
+  offline eval runner/CLI, stable reports, and baseline comparison;
+- added a 49-case synthetic/sanitized corpus across nine categories with 43
+  explicit critical cases and a corpus-digest-bound review table.
+
+Changed:
+- advanced the scenario contract to schema v2 with required
+  canonical_source_or_fixture_version while preserving identifiable v1 reads
+  and v1 canonical serialization;
+- updated Source Map, System Model, behaviour contracts, Current State, and the
+  Knowledge Pack to separate technical implementation from golden promotion.
+
+Safety:
+- corpus status remains CANDIDATE; human review is NOT_PERFORMED and must bind
+  exact dataset version, corpus digest, and PR head before merge;
+- model/cost policy, release aggregation, CI gating, and failure-candidate
+  automation remain not implemented;
+- no product runtime, production, containers, SQLite, Qdrant, secrets, provider
+  calls, or network-based evals were changed.
+
+
 ## 1.2.25 - 2026-08-11
 
 Added:

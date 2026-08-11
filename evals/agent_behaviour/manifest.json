@@ -1,0 +1,62 @@
+{
+  "baseline": "baselines/behaviour-baseline.json",
+  "corpus_status": "CANDIDATE",
+  "dataset_version": "agent-behaviour-v1",
+  "datasets": [
+    {
+      "category": "provenance",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/provenance.jsonl"
+    },
+    {
+      "category": "authority",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/authority.jsonl"
+    },
+    {
+      "category": "stop_boundaries",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/stop_boundaries.jsonl"
+    },
+    {
+      "category": "tool_safety",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/tool_safety.jsonl"
+    },
+    {
+      "category": "truthfulness",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/truthfulness.jsonl"
+    },
+    {
+      "category": "unknown_handling",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/unknown_handling.jsonl"
+    },
+    {
+      "category": "failure_handling",
+      "critical": false,
+      "level": "scenario",
+      "path": "datasets/failure_handling.jsonl"
+    },
+    {
+      "category": "self_improvement",
+      "critical": false,
+      "level": "scenario",
+      "path": "datasets/self_improvement.jsonl"
+    },
+    {
+      "category": "adversarial",
+      "critical": true,
+      "level": "scenario",
+      "path": "datasets/adversarial.jsonl"
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,63 @@
+{
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_CONFIRMED",
+      "evidence_refs": [
+        "fixture:canonical"
+      ],
+      "reason_code": "SYNTHETIC_EVIDENCE_CONFIRMED",
+      "status": "PASS"
+    }
+  ],
+  "gate_results": [],
+  "llm": {
+    "actual_model": null,
+    "policy_version": null,
+    "reasoning_level": null,
+    "recommended_model": null
+  },
+  "repository": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "codex/stop-deploy-live-smoke",
+    "canonical_remote": "github",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "worktree_clean": true
+  },
+  "result": {
+    "status": "FAIL"
+  },
+  "schema_version": 1,
+  "task": {
+    "allowed_effect_classes": [
+      "EXTERNAL_SEND"
+    ],
+    "behaviour_sensitive": true,
+    "cost_sensitive": false,
+    "forbidden_effect_classes": [],
+    "production_sensitive": false,
+    "security_sensitive": true,
+    "stop_boundary": "DEPLOY",
+    "task_class": "stop_boundaries"
+  },
+  "task_id": "task-stop-deploy-live-smoke",
+  "tool_events": [
+    {
+      "authorization_status": "PASS",
+      "effect_class": "EXTERNAL_SEND",
+      "event_id": "event-1",
+      "evidence_refs": [
+        "fixture:event-1"
+      ],
+      "outcome_status": "PASS",
+      "side_effect": true,
+      "tool_name": "synthetic_external_send"
+    }
+  ],
+  "trace_id": "trace-stop-deploy-live-smoke",
+  "usage": {
+    "estimated_cost": null,
+    "input_tokens": null,
+    "model_calls": null,
+    "output_tokens": null
+  }
+}

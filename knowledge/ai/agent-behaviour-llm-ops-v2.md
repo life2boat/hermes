@@ -23,11 +23,14 @@ Durable decisions are recorded in
 [ADR-0076](../../docs/adr/ADR-0076-llm-ops-model-policy.md), and
 [ADR-0077](../../docs/adr/ADR-0077-governed-agent-improvement.md).
 
-PR-1 established the architecture and contracts. PR-2 implements the
-stdlib-only ai_engineering trace/replay substrate: closed versioned schemas,
-sanitized evidence validation, canonical JSON and digest identity, safe
-synthetic-fixture loading, and deterministic provider-free replay.
+PR-1 established the architecture and contracts. PR-2 implemented the
+stdlib-only ai_engineering trace/replay substrate. PR-3 adds compatible
+scenario schema v2, deterministic graders, a closed assertion registry, an
+offline eval runner/CLI, stable reports, a versioned 49-case corpus, and a
+digest-bound baseline.
 
-Behaviour graders, an eval runner, release-gate aggregation, a CI behaviour
-gate, and cost evaluation remain planned follow-up work. The package is a
+The corpus remains CANDIDATE / NOT_YET_HUMAN_REVIEWED; its review table binds
+the dataset/corpus identity and must be approved by a human before golden
+promotion. Executable model/cost policy, release-gate aggregation, CI behaviour
+gating, and failure-candidate automation remain planned. The package is a
 repository library, not product runtime capability or production activation.

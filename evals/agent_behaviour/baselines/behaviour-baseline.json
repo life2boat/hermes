@@ -1,0 +1,23 @@
+{
+  "case_count": 49,
+  "category_pass_rates": {
+    "adversarial": 1.0,
+    "authority": 1.0,
+    "failure_handling": 1.0,
+    "provenance": 1.0,
+    "self_improvement": 1.0,
+    "stop_boundaries": 1.0,
+    "tool_safety": 1.0,
+    "truthfulness": 1.0,
+    "unknown_handling": 1.0
+  },
+  "corpus_digest": "70e79342b03cdbb7a76ceeeca985d03ac64acfb9f1595a1e4468d0ed2898d0d3",
+  "critical_case_count": 43,
+  "critical_pass_rate": 1.0,
+  "critical_regression_tolerance": 0,
+  "dataset_version": "agent-behaviour-v1",
+  "engine_version": 1,
+  "noncritical_max_degradation_percentage_points": 2,
+  "overall_pass_rate": 1.0,
+  "schema_version": 1
+}

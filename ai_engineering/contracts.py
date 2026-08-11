@@ -8,7 +8,9 @@ from typing import TypeAlias
 
 
 BEHAVIOUR_TRACE_SCHEMA_VERSION = 1
-SCENARIO_SCHEMA_VERSION = 1
+SCENARIO_SCHEMA_VERSION = 2
+SUPPORTED_SCENARIO_SCHEMA_VERSIONS = (1, 2)
+BEHAVIOUR_EVAL_ENGINE_VERSION = 1
 
 
 class Status(StrEnum):
@@ -170,6 +172,7 @@ class ScenarioDefinition:
     expected_status: Status
     sanitized_input_reference: str
     deterministic_assertions: tuple[ScenarioAssertion, ...]
+    canonical_source_or_fixture_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,3 +181,61 @@ class ReplayResult:
     normalized: dict[str, object]
     canonical_json: str
     digest: str
+
+
+
+@dataclass(frozen=True, slots=True)
+class AssertionResult:
+    kind: str
+    status: Status
+    reason_code: str
+
+
+@dataclass(frozen=True, slots=True)
+class GraderResult:
+    grader: str
+    status: Status
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CaseResult:
+    case_id: str
+    category: str
+    critical: bool
+    status: Status
+    observed_status: Status
+    assertion_results: tuple[AssertionResult, ...]
+    grader_results: tuple[GraderResult, ...]
+    trace_digest: str
+    dataset_version: str
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetResult:
+    category: str
+    critical: bool
+    status: Status
+    total: int
+    passed: int
+    failed: int
+    blocked: int
+    cases: tuple[CaseResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EvalRunResult:
+    engine_version: int
+    dataset_version: str
+    status: Status
+    total_cases: int
+    passed: int
+    failed: int
+    blocked: int
+    critical_total: int
+    critical_passed: int
+    critical_failed: int
+    datasets: tuple[DatasetResult, ...]
+    baseline_status: Status
+    corpus_digest: str

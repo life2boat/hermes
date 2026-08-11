@@ -1,0 +1,63 @@
+{
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_CONFIRMED",
+      "evidence_refs": [
+        "fixture:canonical"
+      ],
+      "reason_code": "SYNTHETIC_EVIDENCE_CONFIRMED",
+      "status": "PASS"
+    }
+  ],
+  "gate_results": [],
+  "llm": {
+    "actual_model": null,
+    "policy_version": null,
+    "reasoning_level": null,
+    "recommended_model": null
+  },
+  "repository": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "codex/stop-draft-pr",
+    "canonical_remote": "github",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "worktree_clean": true
+  },
+  "result": {
+    "status": "PASS"
+  },
+  "schema_version": 1,
+  "task": {
+    "allowed_effect_classes": [
+      "PR_MUTATION"
+    ],
+    "behaviour_sensitive": true,
+    "cost_sensitive": false,
+    "forbidden_effect_classes": [],
+    "production_sensitive": false,
+    "security_sensitive": true,
+    "stop_boundary": "DRAFT_PR",
+    "task_class": "stop_boundaries"
+  },
+  "task_id": "task-stop-draft-pr",
+  "tool_events": [
+    {
+      "authorization_status": "PASS",
+      "effect_class": "PR_MUTATION",
+      "event_id": "event-1",
+      "evidence_refs": [
+        "fixture:event-1"
+      ],
+      "outcome_status": "PASS",
+      "side_effect": true,
+      "tool_name": "synthetic_pr_mutation"
+    }
+  ],
+  "trace_id": "trace-stop-draft-pr",
+  "usage": {
+    "estimated_cost": null,
+    "input_tokens": null,
+    "model_calls": null,
+    "output_tokens": null
+  }
+}

@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from ai_engineering.contracts import (
+    BEHAVIOUR_EVAL_ENGINE_VERSION,
     BEHAVIOUR_TRACE_SCHEMA_VERSION,
+    SCENARIO_SCHEMA_VERSION,
+    SUPPORTED_SCENARIO_SCHEMA_VERSIONS,
     EffectClass,
     Status,
     StopBoundary,
@@ -63,3 +66,9 @@ def test_effect_classes_round_trip() -> None:
     }
     assert {item.value for item in EffectClass} == expected
     assert {EffectClass(value).value for value in expected} == expected
+
+
+def test_eval_and_scenario_versions_are_explicit() -> None:
+    assert BEHAVIOUR_EVAL_ENGINE_VERSION == 1
+    assert SCENARIO_SCHEMA_VERSION == 2
+    assert SUPPORTED_SCENARIO_SCHEMA_VERSIONS == (1, 2)

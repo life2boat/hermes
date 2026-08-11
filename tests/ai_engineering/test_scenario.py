@@ -111,3 +111,36 @@ def test_scenario_fixture_rejects_duplicate_keys(tmp_path: Path) -> None:
         load_scenario_fixture(root, "scenario.json")
 
     assert caught.value.code == "TRACE_FIXTURE_UNSAFE"
+
+
+def test_scenario_v1_remains_identifiable_and_byte_compatible() -> None:
+    scenario = validate_scenario(_scenario())
+    assert scenario.schema_version == 1
+    assert scenario.canonical_source_or_fixture_version is None
+    assert '"canonical_source_or_fixture_version"' not in serialize_scenario(scenario)
+
+
+def test_scenario_v2_requires_and_preserves_fixture_version() -> None:
+    payload = _scenario()
+    payload["schema_version"] = 2
+    payload["canonical_source_or_fixture_version"] = "synthetic-v2"
+    scenario = validate_scenario(payload)
+    assert scenario.schema_version == 2
+    assert scenario.canonical_source_or_fixture_version == "synthetic-v2"
+    assert "canonical_source_or_fixture_version" in json.loads(
+        serialize_scenario(scenario)
+    )
+
+
+def test_scenario_versions_reject_cross_version_field_sets() -> None:
+    v1_extra = _scenario()
+    v1_extra["canonical_source_or_fixture_version"] = "synthetic-v1"
+    with pytest.raises(TraceValidationError) as caught:
+        validate_scenario(v1_extra)
+    assert caught.value.code == "TRACE_UNEXPECTED_FIELD"
+
+    v2_missing = _scenario()
+    v2_missing["schema_version"] = 2
+    with pytest.raises(TraceValidationError) as caught:
+        validate_scenario(v2_missing)
+    assert caught.value.code == "TRACE_REQUIRED_FIELD_MISSING"

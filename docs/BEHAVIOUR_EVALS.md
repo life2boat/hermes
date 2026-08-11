@@ -96,8 +96,15 @@ the sensitive interaction.
 
 ## Implementation state
 
-This document defines methodology. The closed trace/scenario schemas,
-sanitization boundary, canonical serialization, deterministic digest, safe
-fixture loading, and provider-free replay substrate are implemented in
-ai_engineering. Graders, an eval runner, golden datasets, release aggregation,
-and CI integration remain `PLANNED`.
+The closed trace/scenario schemas, sanitization boundary, canonical
+serialization, deterministic digest, safe fixture loading, provider-free replay,
+closed assertion registry, deterministic graders, offline eval runner, and
+baseline comparison are implemented in ai_engineering. The scenario contract
+reads schema v1 without reinterpretation and requires
+canonical_source_or_fixture_version in schema v2.
+
+The committed evals/agent_behaviour corpus is versioned and sanitized, but its
+state is CANDIDATE until a human reviewer approves the exact dataset version,
+corpus digest, and PR head recorded in CORPUS_REVIEW.md. Technical CI does not
+self-certify it as golden. Executable model/cost policy, release aggregation,
+CI behaviour gating, and Failure-to-Eval automation remain PLANNED.

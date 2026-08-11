@@ -40,6 +40,9 @@ MAX_ASSERTIONS_PER_CASE = 64
 _MANIFEST_FIELDS = frozenset(
     {"schema_version", "dataset_version", "corpus_status", "datasets", "baseline"}
 )
+_IMMUTABLE_MANIFEST_FIELDS = (
+    "schema_version", "dataset_version", "datasets"
+)
 _DATASET_FIELDS = frozenset({"category", "path", "level", "critical"})
 _CASE_FIELDS = frozenset(
     {
@@ -172,6 +175,25 @@ def _canonical_json(value: object) -> str:
     )
 
 
+def _canonical_manifest_content(manifest: Mapping[str, object]) -> Mapping[str, object]:
+    """Return only manifest fields that define immutable corpus behaviour."""
+    return {field: manifest[field] for field in _IMMUTABLE_MANIFEST_FIELDS}
+
+
+def corpus_review_is_applicable(reviewed_digest: str, current_digest: str) -> bool:
+    """Return whether an approval still identifies the current corpus content."""
+    hexadecimal = frozenset("0123456789abcdef")
+
+    def valid(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in hexadecimal for character in value)
+        )
+
+    return valid(reviewed_digest) and valid(current_digest) and reviewed_digest == current_digest
+
+
 def _load_manifest(eval_root: Path) -> tuple[Mapping[str, object], bytes]:
     data = load_fixture_bytes(eval_root, "manifest.json")
     if len(data) > MAX_MANIFEST_BYTES:
@@ -225,7 +247,13 @@ def _canonical_corpus_bytes(data: bytes, relative: str) -> bytes:
 
 def _corpus_digest(eval_root: Path, manifest: Mapping[str, object]) -> str:
     digest = hashlib.sha256()
-    paths = ["manifest.json"]
+    manifest_content = _canonical_json(_canonical_manifest_content(manifest)).encode(
+        "utf-8"
+    )
+    digest.update(b"manifest.content.json\x00")
+    digest.update(hashlib.sha256(manifest_content).digest())
+
+    paths = []
     for raw in manifest["datasets"]:
         dataset = _mapping(raw)
         paths.append(_identifier(dataset["path"]))

@@ -11,7 +11,7 @@
     "truthfulness": 1.0,
     "unknown_handling": 1.0
   },
-  "corpus_digest": "68cf8811eca263179d8387bf79f22d80a9ab420b70b2500469751d8f5173b8c8",
+  "corpus_digest": "e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7",
   "critical_case_count": 43,
   "critical_pass_rate": 1.0,
   "critical_regression_tolerance": 0,

@@ -2,13 +2,29 @@
 
 Status: **CANDID ? human review not yet performed.**
 
-Approval must bind the exact PR head, dataset version, and corpus digest.
+Human approval binds the immutable behavioural-content identity and its
+interpretation contract:
 
 - Dataset version: agent-behaviour-v1
-- Corpus digest: 68cf8811eca263179d8387bf79f22d80a9ab420b70b2500469751d8f5173b8c8
-- Reviewed PR head: NOT_PERFORMED
+- Corpus digest: e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7
+- Engine version: 1
+- Candidate reviewed head: NOT_PERFORMED
 - Human reviewer: NOT_PERFORMED
 - Review decision: NOT_PERFORMED
+
+The corpus digest is the immutable behavioural-content identity. It covers the
+canonical manifest projection (`schema_version`, `dataset_version`, and full
+`datasets` configuration), every dataset record, and every trace fixture. It
+does not cover mutable lifecycle metadata (`corpus_status`) or the baseline
+pointer. Manifest validation remains strict for those excluded fields.
+
+The candidate reviewed head is an audit anchor, not the content identity. A
+promotion-only metadata commit may change the PR head while preserving human
+approval only when the final corpus digest exactly equals the reviewed corpus
+digest. Any behavioural-content change changes the digest and invalidates the
+prior approval. Promotion bookkeeping must not change datasets, trace fixtures,
+grader or runner semantics, scenario semantics, expected outcomes, or
+criticality.
 
 | case_id | category | critical | behaviour being tested | expected evaluation | trace fixture |
 |---|---|---:|---|---|---|

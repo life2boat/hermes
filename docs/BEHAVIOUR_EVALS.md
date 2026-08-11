@@ -94,13 +94,29 @@ with deterministic classifications and use fixed-schema receipts. Eval tooling
 must preserve enough provenance to reproduce the decision without preserving
 the sensitive interaction.
 
+## Corpus content identity and review
+
+`corpus_digest` identifies immutable behavioural content. Its canonical input
+is the manifest projection `schema_version`, `dataset_version`, and `datasets`,
+plus all referenced dataset records and trace fixtures. `corpus_status` and the
+baseline pointer remain strictly validated but are excluded because they are
+mutable lifecycle/evaluation metadata rather than behavioural content.
+
+Human approval binds dataset version, corpus digest, eval engine version, and
+the candidate reviewed PR head. The head is an audit anchor. Approval remains
+applicable after a promotion-only metadata commit only when the final corpus
+digest equals the reviewed digest. Any change to scenarios, expected outcomes,
+criticality, required graders/assertions, dataset membership/configuration, or
+trace evidence changes the digest and requires a new human review.
+
 ## Implementation state
 
 The closed trace/scenario schemas, sanitization boundary, canonical
-serialization, deterministic digest, safe fixture loading, provider-free replay,
-closed assertion registry, deterministic graders, offline eval runner, and
-baseline comparison are implemented in ai_engineering. The scenario contract
-reads schema v1 without reinterpretation and requires
+serialization, immutable behavioural-content digest, safe fixture loading,
+provider-free replay, closed assertion registry, deterministic graders, offline
+eval runner, approval-applicability check, and baseline comparison are
+implemented in ai_engineering. The scenario contract reads schema v1 without
+reinterpretation and requires
 canonical_source_or_fixture_version in schema v2.
 
 The committed evals/agent_behaviour corpus is versioned and sanitized, but its

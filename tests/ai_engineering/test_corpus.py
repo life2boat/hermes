@@ -80,3 +80,7 @@ def test_review_file_does_not_self_assert_human_approval() -> None:
     assert "human review not yet performed" in review
     assert "Review decision: NOT_PERFORMED" in review
     assert "Human reviewer: NOT_PERFORMED" in review
+    assert "Candidate reviewed head: NOT_PERFORMED" in review
+    assert "Engine version: 1" in review
+    assert "promotion-only metadata commit" in review
+    assert "behavioural-content change changes the digest" in review

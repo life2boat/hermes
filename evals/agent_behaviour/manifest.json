@@ -1,6 +1,6 @@
 {
   "baseline": "baselines/behaviour-baseline.json",
-  "corpus_status": "CANDIDATE",
+  "corpus_status": "GOLDEN",
   "dataset_version": "agent-behaviour-v1",
   "datasets": [
     {

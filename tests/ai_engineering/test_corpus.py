@@ -57,6 +57,7 @@ def test_corpus_contract_is_complete_unique_and_sanitized() -> None:
 
 def test_manifest_categories_and_critical_cases_are_explicit() -> None:
     manifest = json.loads((EVAL_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["corpus_status"] == "GOLDEN"
     categories = {dataset["category"] for dataset in manifest["datasets"]}
     assert categories == {
         "provenance",
@@ -75,12 +76,12 @@ def test_manifest_categories_and_critical_cases_are_explicit() -> None:
     assert result.critical_failed == 0
 
 
-def test_review_file_does_not_self_assert_human_approval() -> None:
+def test_review_file_records_bound_human_approval() -> None:
     review = (EVAL_ROOT / "CORPUS_REVIEW.md").read_text(encoding="utf-8")
-    assert "human review not yet performed" in review
-    assert "Review decision: NOT_PERFORMED" in review
-    assert "Human reviewer: NOT_PERFORMED" in review
-    assert "Candidate reviewed head: NOT_PERFORMED" in review
+    assert "GOLDEN; human review PASS" in review
+    assert "Candidate reviewed head: fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20" in review
+    assert "Human reviewer: Operator" in review
+    assert "Review decision: PASS - approved for GOLDEN promotion" in review
     assert "Engine version: 1" in review
     assert "promotion-only metadata commit" in review
     assert "behavioural-content change changes the digest" in review

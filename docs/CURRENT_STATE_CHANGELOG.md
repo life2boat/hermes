@@ -1,6 +1,26 @@
 # CURRENT_STATE changelog
 
 
+## 1.2.27 - 2026-08-11
+
+Added:
+- promoted the versioned 49-case deterministic behaviour corpus to GOLDEN
+  after explicit human/operator review;
+- recorded the approval anchor: candidate head
+  `fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20`, dataset version
+  `agent-behaviour-v1`, engine version `1`, and immutable corpus digest
+  `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`.
+
+Changed:
+- corpus lifecycle state is GOLDEN; promotion metadata is intentionally
+  excluded from the immutable behavioural-content digest.
+
+Safety:
+- approval remains valid only while the exact corpus digest is unchanged;
+- no product runtime, production, containers, SQLite, Qdrant, secrets,
+  provider calls, or network-based evals were changed.
+
+
 ## 1.2.26 - 2026-08-11
 
 Added:

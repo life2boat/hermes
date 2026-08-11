@@ -29,8 +29,9 @@ scenario schema v2, deterministic graders, a closed assertion registry, an
 offline eval runner/CLI, stable reports, a versioned 49-case corpus, and a
 digest-bound baseline.
 
-The corpus remains CANDIDATE / NOT_YET_HUMAN_REVIEWED; its review table binds
-the dataset/corpus identity and must be approved by a human before golden
-promotion. Executable model/cost policy, release-gate aggregation, CI behaviour
+The corpus is GOLDEN / HUMAN_REVIEW=PASS. Its review evidence binds the dataset
+and immutable corpus identity, engine version, and candidate reviewed head;
+promotion-only metadata may change the PR head only while that digest remains
+identical. Executable model/cost policy, release-gate aggregation, CI behaviour
 gating, and failure-candidate automation remain planned. The package is a
 repository library, not product runtime capability or production activation.

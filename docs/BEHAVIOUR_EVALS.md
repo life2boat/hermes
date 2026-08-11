@@ -120,7 +120,8 @@ reinterpretation and requires
 canonical_source_or_fixture_version in schema v2.
 
 The committed evals/agent_behaviour corpus is versioned and sanitized, but its
-state is CANDIDATE until a human reviewer approves the exact dataset version,
-corpus digest, and PR head recorded in CORPUS_REVIEW.md. Technical CI does not
-self-certify it as golden. Executable model/cost policy, release aggregation,
-CI behaviour gating, and Failure-to-Eval automation remain PLANNED.
+state is GOLDEN following human review bound to its exact dataset version,
+corpus digest, engine version, and candidate reviewed head in CORPUS_REVIEW.md.
+Technical CI did not self-certify it as golden. Executable model/cost policy,
+release aggregation, CI behaviour gating, and Failure-to-Eval automation remain
+PLANNED.

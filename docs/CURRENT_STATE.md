@@ -1,6 +1,6 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.26
+version: 1.2.27
 updated_at: 2026-08-11
 status: active
 source_of_truth: true
@@ -45,8 +45,10 @@ Git.
   safe fixture loading, and deterministic provider-free replay.
 - Deterministic graders, a closed assertion registry, offline eval runner,
   stable machine reports, and digest-bound baseline comparison are implemented.
-  The 49-case corpus is CANDIDATE / NOT_YET_HUMAN_REVIEWED; CI cannot promote
-  it to golden without exact human approval recorded in CORPUS_REVIEW.md.
+  The 49-case corpus is GOLDEN following independent human review bound to
+  dataset version `agent-behaviour-v1`, engine version `1`, approved candidate
+  head `fa77b12cb9a0f1b1e8b0eaa596cd41092fdfdb20`, and corpus digest
+  `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`.
 - Executable model policy, cost evaluator, release-gate aggregator, CI
   behaviour gate, and Failure-to-Eval candidate automation remain
   NOT_IMPLEMENTED.

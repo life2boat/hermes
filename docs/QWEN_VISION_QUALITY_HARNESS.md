@@ -12,7 +12,7 @@ The harness supports only the explicit fixture-set allowlist
 exactly three fixture IDs to SHA-256 hashes and expected components; a manifest
 or image mismatch fails before any provider request.
 
-`v1` is immutable historical evidence. `v2` at
+`v1` is immutable historical geometric-synthetic evidence, retained despite its replay-instability and representativeness concern. `v2` at
 `tests/fixtures/food_vision_quality/v2/manifest.json` contains purpose-created,
 photorealistic synthetic scenes with an ordinary-food scene, a non-food
 distractor scene, and a condiment scene. It improves candidate visual

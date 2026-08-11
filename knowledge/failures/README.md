@@ -16,3 +16,5 @@ hardening sequence; this directory holds its sanitized, reviewable records.
 Initial record:
 
 - [Image scanner rejected an absolute rootfs symlink](failure_image_scanner_absolute_symlink.md)
+
+- [Food-Vision receipt observability gap](failure_food_vision_receipt_observability_gap.md)

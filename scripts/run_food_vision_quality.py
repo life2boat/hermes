@@ -27,6 +27,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 
 FIXTURE_SET_VERSION = "food_vision_quality_v1"
+RECEIPT_SCHEMA_VERSION = 2
 REQUIRED_PROVIDER = "alibaba"
 PROVIDER_TIMEOUT_SECONDS = 60
 
@@ -99,7 +100,14 @@ def _read_verified_fixture(manifest_path: Path, fixture: dict[str, Any]) -> byte
     return image_bytes
 
 
-def _safe_fixture_entry(fixture: dict[str, Any], *, status: str, schema_valid: bool | None = None, prediction_count: int = 0) -> dict[str, Any]:
+def _safe_fixture_entry(
+    fixture: dict[str, Any],
+    *,
+    status: str,
+    schema_valid: bool | None = None,
+    prediction_count: int = 0,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "fixture_id": fixture["id"],
         "image_sha256": fixture["image_sha256"],
@@ -107,12 +115,23 @@ def _safe_fixture_entry(fixture: dict[str, Any], *, status: str, schema_valid: b
         "schema_valid": schema_valid,
         "normalized_prediction_count": prediction_count,
         "expected_count": len(fixture["expected_food_items"]) + len(fixture["expected_sauce_items"]),
+        "diagnostics": diagnostics or {
+            "validated_prediction_labels": [],
+            "canonical_predicted_components": [],
+            "matched_expected_components": [],
+            "missed_expected_components": [],
+            "unexpected_predicted_components": [],
+            "canonical_predicted_sauces": [],
+            "matched_expected_sauces": [],
+            "missed_expected_sauces": [],
+            "diagnostic_redaction_count": 0,
+        },
     }
 
 
 def _receipt_base(args: argparse.Namespace, *, manifest_sha256: str | None, fixture_count: int) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "fixture_set_version": FIXTURE_SET_VERSION,
         "manifest_sha256": manifest_sha256,
         "provider": args.provider,
@@ -273,6 +292,7 @@ async def _execute(args: argparse.Namespace, fixtures: list[dict[str, Any]], rec
             status="PASS" if score["schema_valid"] else "SCHEMA_INVALID",
             schema_valid=bool(score["schema_valid"]),
             prediction_count=int(score["normalized_prediction_count"]),
+            diagnostics=score.get("diagnostics"),
         ))
         if not score["schema_valid"]:
             schema_invalid = True

@@ -600,13 +600,16 @@ def test_exit_code_aggregation_prioritizes_internal_error() -> None:
     assert policy.aggregate_exit_code((security, internal)) == 2
 
 
-def test_canonical_binary_fixture_exception_is_exact_path_and_hash_bound():
+@pytest.mark.parametrize("fixture_version", ("v1", "v2"))
+def test_canonical_binary_fixture_exception_is_exact_path_and_hash_bound(
+    fixture_version: str,
+):
     repository_root = SOURCE_ROOT
-    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v1/manifest.json"
+    manifest_path = repository_root / f"tests/fixtures/food_vision_quality/{fixture_version}/manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     for fixture in manifest["fixtures"]:
-        relative_path = f"tests/fixtures/food_vision_quality/v1/{fixture['image_path']}"
+        relative_path = f"tests/fixtures/food_vision_quality/{fixture_version}/{fixture['image_path']}"
         image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
         data = image_path.read_bytes()
         descriptor = policy.GitObjectDescriptor(

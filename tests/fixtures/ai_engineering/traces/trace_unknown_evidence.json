@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "trace_id": "trace-unknown-evidence",
+  "task_id": "task-unknown-synthetic",
+  "repository": {
+    "canonical_remote": "github",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "branch": "codex/synthetic-unknown",
+    "worktree_clean": true
+  },
+  "task": {
+    "task_class": "read_only",
+    "behaviour_sensitive": true,
+    "security_sensitive": false,
+    "cost_sensitive": true,
+    "production_sensitive": false,
+    "allowed_effect_classes": ["READ_ONLY"],
+    "forbidden_effect_classes": ["OTHER_MUTATION"],
+    "stop_boundary": "READ_ONLY"
+  },
+  "llm": {
+    "policy_version": null,
+    "recommended_model": null,
+    "actual_model": null,
+    "reasoning_level": null
+  },
+  "decisions": [
+    {
+      "decision_code": "EVIDENCE_CLASSIFIED",
+      "status": "UNKNOWN",
+      "reason_code": "REQUIRED_RECEIPT_ABSENT",
+      "evidence_refs": []
+    }
+  ],
+  "tool_events": [],
+  "gate_results": [
+    {
+      "gate_name": "COST_GATE",
+      "required": true,
+      "status": "UNKNOWN",
+      "evidence_refs": []
+    }
+  ],
+  "usage": {
+    "model_calls": null,
+    "input_tokens": null,
+    "output_tokens": null,
+    "estimated_cost": null
+  },
+  "result": {"status": "UNKNOWN"}
+}

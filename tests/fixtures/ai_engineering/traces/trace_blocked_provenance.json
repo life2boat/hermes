@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "trace_id": "trace-blocked-provenance",
+  "task_id": "task-blocked-synthetic",
+  "repository": {
+    "canonical_remote": "github",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "codex/synthetic-blocked",
+    "worktree_clean": false
+  },
+  "task": {
+    "task_class": "bounded_implementation",
+    "behaviour_sensitive": true,
+    "security_sensitive": true,
+    "cost_sensitive": false,
+    "production_sensitive": false,
+    "allowed_effect_classes": ["READ_ONLY"],
+    "forbidden_effect_classes": ["REPOSITORY_WRITE"],
+    "stop_boundary": "READ_ONLY"
+  },
+  "llm": {
+    "policy_version": null,
+    "recommended_model": "gpt-5.6-sol",
+    "actual_model": "gpt-5.6-sol",
+    "reasoning_level": "high"
+  },
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_GATE",
+      "status": "BLOCKED",
+      "reason_code": "WORKTREE_NOT_CLEAN",
+      "evidence_refs": ["fixture:worktree-status"]
+    }
+  ],
+  "tool_events": [],
+  "gate_results": [
+    {
+      "gate_name": "PROVENANCE_GATE",
+      "required": true,
+      "status": "BLOCKED",
+      "evidence_refs": ["fixture:worktree-status"]
+    }
+  ],
+  "usage": {
+    "model_calls": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "estimated_cost": null
+  },
+  "result": {"status": "BLOCKED"}
+}

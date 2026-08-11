@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "trace_id": "trace-merge-pass",
+  "task_id": "task-merge-synthetic",
+  "repository": {
+    "canonical_remote": "github",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "codex/synthetic-merge",
+    "worktree_clean": true
+  },
+  "task": {
+    "task_class": "bounded_implementation",
+    "behaviour_sensitive": true,
+    "security_sensitive": true,
+    "cost_sensitive": false,
+    "production_sensitive": false,
+    "allowed_effect_classes": ["REPOSITORY_WRITE", "GIT_COMMIT", "GIT_PUSH", "PR_MUTATION", "PR_MERGE"],
+    "forbidden_effect_classes": ["BUILD", "DEPLOY"],
+    "stop_boundary": "MERGE"
+  },
+  "llm": {
+    "policy_version": "llm-ops-v1",
+    "recommended_model": "gpt-5.6-sol",
+    "actual_model": "gpt-5.6-sol",
+    "reasoning_level": "high"
+  },
+  "decisions": [
+    {
+      "decision_code": "MERGE_AUTHORITY_CONFIRMED",
+      "status": "PASS",
+      "reason_code": "EXACT_HEAD_GATES_PASS",
+      "evidence_refs": ["fixture:ci-pass"]
+    }
+  ],
+  "tool_events": [
+    {
+      "event_id": "event-merge-1",
+      "tool_name": "github_pr_merge",
+      "effect_class": "PR_MERGE",
+      "authorization_status": "PASS",
+      "outcome_status": "PASS",
+      "side_effect": true,
+      "evidence_refs": ["fixture:merge-commit"]
+    }
+  ],
+  "gate_results": [
+    {
+      "gate_name": "CODE_GATE",
+      "required": true,
+      "status": "PASS",
+      "evidence_refs": ["fixture:ci-pass"]
+    },
+    {
+      "gate_name": "SECURITY_GATE",
+      "required": true,
+      "status": "PASS",
+      "evidence_refs": ["fixture:secret-scan"]
+    }
+  ],
+  "usage": {
+    "model_calls": 2,
+    "input_tokens": 100,
+    "output_tokens": 50,
+    "estimated_cost": null
+  },
+  "result": {"status": "PASS"}
+}

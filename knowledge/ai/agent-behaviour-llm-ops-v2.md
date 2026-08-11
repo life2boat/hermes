@@ -23,6 +23,11 @@ Durable decisions are recorded in
 [ADR-0076](../../docs/adr/ADR-0076-llm-ops-model-policy.md), and
 [ADR-0077](../../docs/adr/ADR-0077-governed-agent-improvement.md).
 
-PR-1 establishes these contracts only. The behaviour trace/replay format,
-eval runner, release-gate aggregator, CI behaviour gate, and cost evaluator are
-planned follow-up implementation, not current runtime capability.
+PR-1 established the architecture and contracts. PR-2 implements the
+stdlib-only ai_engineering trace/replay substrate: closed versioned schemas,
+sanitized evidence validation, canonical JSON and digest identity, safe
+synthetic-fixture loading, and deterministic provider-free replay.
+
+Behaviour graders, an eval runner, release-gate aggregation, a CI behaviour
+gate, and cost evaluation remain planned follow-up work. The package is a
+repository library, not product runtime capability or production activation.

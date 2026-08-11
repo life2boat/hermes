@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "trace_id": "trace-read-only-pass",
+  "task_id": "task-read-only-synthetic",
+  "repository": {
+    "canonical_remote": "github",
+    "base_sha": "1111111111111111111111111111111111111111",
+    "head_sha": "1111111111111111111111111111111111111111",
+    "branch": "codex/synthetic-read-only",
+    "worktree_clean": true
+  },
+  "task": {
+    "task_class": "read_only",
+    "behaviour_sensitive": true,
+    "security_sensitive": true,
+    "cost_sensitive": false,
+    "production_sensitive": false,
+    "allowed_effect_classes": ["READ_ONLY"],
+    "forbidden_effect_classes": ["REPOSITORY_WRITE", "DEPLOY"],
+    "stop_boundary": "READ_ONLY"
+  },
+  "llm": {
+    "policy_version": null,
+    "recommended_model": "gpt-5.6-terra",
+    "actual_model": null,
+    "reasoning_level": "high"
+  },
+  "decisions": [
+    {
+      "decision_code": "PROVENANCE_CONFIRMED",
+      "status": "PASS",
+      "reason_code": "CANONICAL_SHA_MATCH",
+      "evidence_refs": ["fixture:canonical-sha"]
+    }
+  ],
+  "tool_events": [
+    {
+      "event_id": "event-read-1",
+      "tool_name": "git_rev_parse",
+      "effect_class": "READ_ONLY",
+      "authorization_status": "PASS",
+      "outcome_status": "PASS",
+      "side_effect": false,
+      "evidence_refs": ["fixture:canonical-sha"]
+    }
+  ],
+  "gate_results": [],
+  "usage": {
+    "model_calls": null,
+    "input_tokens": null,
+    "output_tokens": null,
+    "estimated_cost": null
+  },
+  "result": {"status": "PASS"}
+}

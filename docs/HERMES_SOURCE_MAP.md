@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
+Verified against canonical main: `6c2aa61755eb213c4d64bfd7c269e526723f9e86`
 
 ## Purpose
 
@@ -32,7 +32,7 @@ filled in from memory.
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
 | AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
-| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md` | Behaviour semantics, eval methodology, model/cost policy concepts, merge-versus-release gates, and governed procedure maturity |
+| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py` | Behaviour semantics, closed trace/scenario schemas, sanitized canonical evidence, deterministic replay/digest, model/cost policy concepts, merge-versus-release gates, and governed procedure maturity |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -105,9 +105,11 @@ ADRs, skills, runbooks and tests, it forms the reviewable Knowledge Pack. It is
 not a service, database, retrieval pipeline or deployed runtime; any future
 executable component requires separate implementation and repository evidence.
 
-The v2 behaviour-eval runner, release-gate aggregator, cost evaluator, and CI
-behaviour gate are `PLANNED`. Their contracts exist in the sources above; no
-`ai_engineering` runtime or executable gate is implied by this map.
+The stdlib-only ai_engineering library implements closed behaviour trace and
+scenario schemas, sanitization, canonical serialization/digest, safe fixture
+loading, and provider-free replay. It is not a service or product runtime. The
+v2 behaviour-eval runner, graders, release-gate aggregator, cost evaluator, and
+CI behaviour gate remain `PLANNED`.
 
 ## Fast lookup
 

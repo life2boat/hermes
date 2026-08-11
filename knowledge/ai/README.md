@@ -25,3 +25,9 @@ planning from implementation authority, and state the required stop boundary.
 For serious incidents, use the mandatory
 [`docs/FAILURE_CAPTURE_LOOP.md`](../../docs/FAILURE_CAPTURE_LOOP.md) before
 recording a sanitized reusable lesson.
+
+Hermes AI Engineering System v2 navigation:
+
+- [`agent-behaviour-llm-ops-v2.md`](agent-behaviour-llm-ops-v2.md) links the
+  authoritative behaviour, eval, model-policy, release-gate, procedure-maturity,
+  and ADR contracts without duplicating them.

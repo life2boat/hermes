@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `14064c7291d53f4ea1f7e00e901fbb9dbab08907`
+Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
 
 ## Purpose
 
@@ -32,6 +32,7 @@ filled in from memory.
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
 | AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
+| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md` | Behaviour semantics, eval methodology, model/cost policy concepts, merge-versus-release gates, and governed procedure maturity |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -103,6 +104,10 @@ Together with the source map, system model, invariants, rulebook, task template,
 ADRs, skills, runbooks and tests, it forms the reviewable Knowledge Pack. It is
 not a service, database, retrieval pipeline or deployed runtime; any future
 executable component requires separate implementation and repository evidence.
+
+The v2 behaviour-eval runner, release-gate aggregator, cost evaluator, and CI
+behaviour gate are `PLANNED`. Their contracts exist in the sources above; no
+`ai_engineering` runtime or executable gate is implied by this map.
 
 ## Fast lookup
 

@@ -13,6 +13,17 @@ skill.
 Read `HERMES_SOURCE_MAP.md` to find evidence and
 `HERMES_INVARIANTS.md` to identify what must remain true.
 
+For Hermes AI Engineering System v2, use the linked authoritative contracts
+rather than recreating their rules in a task prompt:
+
+- [`AGENT_BEHAVIOUR_CONTRACT.md`](AGENT_BEHAVIOUR_CONTRACT.md) for behaviour
+  semantics;
+- [`BEHAVIOUR_EVALS.md`](BEHAVIOUR_EVALS.md) for eval methodology;
+- [`LLM_OPS_POLICY.md`](LLM_OPS_POLICY.md) for model/cost policy;
+- [`AGENT_RELEASE_GATES.md`](AGENT_RELEASE_GATES.md) for gate semantics;
+- [`SKILL_LOOP_GRAPH_LIFECYCLE.md`](SKILL_LOOP_GRAPH_LIFECYCLE.md) for
+  procedure maturity and governed improvement.
+
 ## Decision protocol
 
 ### 1. Parse the contract

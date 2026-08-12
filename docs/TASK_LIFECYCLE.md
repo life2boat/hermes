@@ -104,8 +104,11 @@ The authoritative semantics live in
 [`AGENT_BEHAVIOUR_CONTRACT.md`](AGENT_BEHAVIOUR_CONTRACT.md),
 [`BEHAVIOUR_EVALS.md`](BEHAVIOUR_EVALS.md),
 [`LLM_OPS_POLICY.md`](LLM_OPS_POLICY.md), and
-[`AGENT_RELEASE_GATES.md`](AGENT_RELEASE_GATES.md). PR-1 defines this contract;
-the executable behaviour runner and CI gate remain `PLANNED`.
+[`AGENT_RELEASE_GATES.md`](AGENT_RELEASE_GATES.md). The executable behaviour
+runner, model/cost policy, release gate and exact-head CI are repository
+controls. Failure-to-Eval candidates and procedure-maturity receipts are also
+offline evidence only: they require review, eval, PR, CI and merge before a
+separately authorized repository change can promote anything.
 
 ## Completion evidence
 

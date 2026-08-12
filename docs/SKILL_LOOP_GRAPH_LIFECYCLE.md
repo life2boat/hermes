@@ -89,7 +89,8 @@ but may not directly mutate production policy or activate the candidate.
 
 ## Evidence and implementation state
 
-Future graph candidates should bind the source procedure version, eval dataset,
-required invariants, allowed effect classes, failure branches, regression
-suite, and promotion approval. This PR defines the lifecycle only; a graph
-compiler, trace store, and automatic promotion mechanism are not implemented.
+The executable maturity evaluator binds the source procedure version, eval
+dataset reference, required invariants, allowed effect classes, criteria and
+remaining agent-controlled judgement. It produces only a `PASS`, `FAIL`, or
+`BLOCKED` graph-candidate determination. A graph compiler, trace store, and
+automatic promotion mechanism remain intentionally out of scope.

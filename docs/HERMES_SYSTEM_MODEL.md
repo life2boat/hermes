@@ -1,7 +1,7 @@
 # Hermes / HealBite System Model
 
 Status: repository-grounded model
-Verified against canonical main: `79d8c5bb7f75f479a4277ab255c633fae685cb80`
+Verified against canonical main: `86d334f0b3285e14c74f9f507dc3406735c376b3`
 
 ## Purpose
 
@@ -118,10 +118,10 @@ version `1` adds deterministic merge and production-release aggregation over
 independent fixed-schema evidence, plus a read-only exact-head PR workflow for
 the conservative merge profile. A merge PASS reports production eligibility as
 `NOT_PERFORMED`; it cannot grant deployment authority. These policies make no
-model or pricing network calls and cannot expand task authority. Failure-to-
-Eval candidate automation remains planned for PR-6; no new daemon, provider
-call path, database, worker, or production topology exists because of this
-layer.
+model or pricing network calls and cannot expand task authority. Failure-to-Eval
+candidate construction and procedure-maturity evaluation are now offline,
+candidate/review controls; they create no daemon, provider call path, database,
+worker, graph compiler, or production topology and cannot expand authority.
 
 ### Tools
 

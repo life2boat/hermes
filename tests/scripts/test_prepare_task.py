@@ -41,6 +41,16 @@ def _repository(tmp_path: Path) -> Path:
     return root
 
 
+def test_core_documents_include_v2_normative_contracts() -> None:
+    assert {
+        "docs/AGENT_BEHAVIOUR_CONTRACT.md",
+        "docs/BEHAVIOUR_EVALS.md",
+        "docs/LLM_OPS_POLICY.md",
+        "docs/AGENT_RELEASE_GATES.md",
+        "docs/SKILL_LOOP_GRAPH_LIFECYCLE.md",
+    }.issubset(CORE_DOCUMENTS)
+
+
 def test_context_binds_git_changes_docs_and_safe_pytest_classification(
     tmp_path: Path,
 ) -> None:

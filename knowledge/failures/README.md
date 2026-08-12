@@ -12,6 +12,11 @@ inference rather than a proven fact.
 Use [`docs/FAILURE_CAPTURE_LOOP.md`](../../docs/FAILURE_CAPTURE_LOOP.md) after
 every serious incident. It defines the required evidence, decision-memory and
 hardening sequence; this directory holds its sanitized, reviewable records.
+A record can be referenced by a Failure-to-Eval candidate, but the candidate
+must remain outside the Golden corpus and cannot self-promote. Use the
+candidate builder only with sanitized repository evidence and follow its
+review -> dataset change -> eval -> PR -> CI -> merge path before proposing a
+durable change.
 
 Initial record:
 

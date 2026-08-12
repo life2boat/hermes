@@ -95,5 +95,8 @@ graders, and offline behaviour-eval runner are implemented in ai_engineering.
 The versioned behaviour corpus is GOLDEN after exact digest-bound human review.
 Model recommendation/substitution and cost-budget policy are executable,
 provider-free, sanitized subsystems; they do not expand task authority.
-Release-gate aggregation, the CI behaviour gate, and governed failure-candidate
-automation remain PLANNED.
+Release-gate aggregation and the exact-head CI behaviour gate are implemented.
+Failure-to-Eval candidate construction and procedure maturity are deterministic,
+provider-free repository controls. They cannot self-approve a candidate, mutate
+the Golden corpus, compile a graph, grant authority, or activate a runtime or
+production change.

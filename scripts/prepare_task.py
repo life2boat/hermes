@@ -23,6 +23,11 @@ CORE_DOCUMENTS = (
     "docs/AI_AGENT_RULEBOOK.md",
     "docs/TASK_TEMPLATE.md",
     "docs/CURRENT_STATE.md",
+    "docs/AGENT_BEHAVIOUR_CONTRACT.md",
+    "docs/BEHAVIOUR_EVALS.md",
+    "docs/LLM_OPS_POLICY.md",
+    "docs/AGENT_RELEASE_GATES.md",
+    "docs/SKILL_LOOP_GRAPH_LIFECYCLE.md",
 )
 CANONICAL_MAIN_REF = "refs/remotes/github/main"
 

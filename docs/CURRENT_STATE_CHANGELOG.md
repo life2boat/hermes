@@ -1,5 +1,19 @@
 # CURRENT_STATE changelog
 
+## 1.2.30 - 2026-08-12
+
+Added:
+- added the PR-6 implementation candidate: deterministic Failure-to-Eval
+  candidate construction, candidate-only output storage, and procedure-maturity
+  receipts with explicit agent-judgement and authority-separation evidence.
+
+Changed:
+- updated the v2 lifecycle and prepared context to reference executable policy.
+
+Safety:
+- the Golden corpus and its digest remain unchanged; no runtime, production,
+  database, Qdrant, secret, provider, deployment, or live-smoke action occurred.
+
 ## 1.2.29 - 2026-08-11
 
 Added:

@@ -43,6 +43,14 @@ an unverified report; classify unsupported claims as `UNKNOWN` or
    `INCONCLUSIVE`, and the next authorized action. Do not close an incident
    solely because a workaround hid the symptom.
 
+## Candidate boundary
+
+A sanitized, repository-bound failure may be converted to an offline candidate
+with `scripts/build_failure_eval_candidate.py`. The builder verifies its
+failure record and trace identity but creates no Golden member, policy change,
+graph, runtime action, or production mutation. Review, dataset change, eval,
+PR, CI, and merge remain separate required lifecycle steps.
+
 ## Relationship to the task lifecycle
 
 The incident loop feeds Step 8 of [`TASK_LIFECYCLE.md`](TASK_LIFECYCLE.md).

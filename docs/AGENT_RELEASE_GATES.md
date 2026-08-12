@@ -129,5 +129,7 @@ and exact-head merge CI are `IMPLEMENTED`. The CI workflow has no provider or
 production credentials and performs no live smoke, deploy, runtime, database,
 Qdrant, or secret mutation. Production release remains governed by the current
 task, explicit authority, versioned deployment policy, procedural skills, and
-separately supplied live/cost/readiness evidence. Governed Failure-to-Eval
-candidate automation remains planned for PR-6.
+separately supplied live/cost/readiness evidence. Failure-to-Eval candidates
+and procedure-maturity receipts are offline repository evidence; neither can
+grant merge, production-release, deployment, runtime, data, vector, or secret
+mutation authority.

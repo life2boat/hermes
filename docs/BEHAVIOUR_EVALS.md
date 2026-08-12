@@ -123,5 +123,8 @@ The committed evals/agent_behaviour corpus is versioned and sanitized, but its
 state is GOLDEN following human review bound to its exact dataset version,
 corpus digest, engine version, and candidate reviewed head in CORPUS_REVIEW.md.
 Technical CI did not self-certify it as golden. Executable model/cost policy,
-release aggregation, CI behaviour gating, and Failure-to-Eval automation remain
-PLANNED.
+release aggregation and CI behaviour gating are implemented. Failure evidence
+can now produce only a deterministic `CANDIDATE` outside the Golden corpus;
+human review, dataset change, eval, PR, CI and merge remain required for any
+promotion. Candidate automation cannot self-certify GOLDEN content or mutate
+production policy.

@@ -57,6 +57,14 @@ Follow [`docs/TASK_LIFECYCLE.md`](docs/TASK_LIFECYCLE.md) for every task and
 [`docs/FAILURE_CAPTURE_LOOP.md`](docs/FAILURE_CAPTURE_LOOP.md) after a serious
 incident. Apply the AI and production-readiness checklists at the phases named
 there; they do not override a task's explicit authority or stop boundary.
+For v2-sensitive work, record the task classification and applicable behaviour,
+security, cost, live and production-readiness gates in the task template. Use
+the executable checks named by the lifecycle rather than recreating policy in a
+prompt or report. A failure may create only a sanitized Failure-to-Eval
+candidate through `scripts/build_failure_eval_candidate.py`; it cannot promote
+Golden content or mutate policy. Procedure maturity evidence never compiles a
+graph, expands authority, or authorizes production. Preserve `NOT_PERFORMED`,
+`UNKNOWN`, and `INCONCLUSIVE` rather than inferring a PASS.
 
 ## Режим автономной работы Codex
 

@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `79d8c5bb7f75f479a4277ab255c633fae685cb80`
+Verified against canonical main: `86d334f0b3285e14c74f9f507dc3406735c376b3`
 
 ## Purpose
 
@@ -32,7 +32,7 @@ filled in from memory.
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
 | AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
-| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `ai_engineering/model_policy.py`, `ai_engineering/cost_policy.py`, `ai_engineering/release_gate.py`, `scripts/run_agent_behaviour_evals.py`, `scripts/check_llm_ops_policy.py`, `scripts/check_agent_release_gate.py`, `.github/workflows/agent-release-gate.yml`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, GOLDEN corpus/baseline, executable model/cost policies, and distinct exact-head merge/production release decisions |
+| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `ai_engineering/model_policy.py`, `ai_engineering/cost_policy.py`, `ai_engineering/release_gate.py`, `ai_engineering/failure_candidate.py`, `ai_engineering/procedure_maturity.py`, `scripts/run_agent_behaviour_evals.py`, `scripts/check_llm_ops_policy.py`, `scripts/check_agent_release_gate.py`, `scripts/build_failure_eval_candidate.py`, `scripts/check_procedure_maturity.py`, `.github/workflows/agent-release-gate.yml`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, GOLDEN corpus/baseline, executable model/cost policies, candidate-only failure feedback, procedure-maturity evidence, and distinct exact-head merge/production release decisions |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -116,8 +116,9 @@ gate schema/policy version `1`. The release gate consumes independent fixed-
 schema code, behaviour, security, live, cost, and production-readiness evidence
 without inferring one gate from another. The read-only exact-head PR workflow
 enforces the conservative merge profile while reporting production eligibility
-as `NOT_PERFORMED`. This is not a service or product runtime. Governed
-failure-candidate automation remains planned for PR-6.
+as `NOT_PERFORMED`. This is not a service or product runtime. Failure-candidate
+automation and procedure-maturity evaluation are offline candidate/review
+controls; they cannot mutate the Golden corpus or grant authority.
 
 ## Fast lookup
 

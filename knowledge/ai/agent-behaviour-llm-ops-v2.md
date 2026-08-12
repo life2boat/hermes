@@ -46,5 +46,8 @@ model recommendation never grants authority. Release aggregation likewise
 never infers one gate from another: merge-only success leaves cost, live
 behaviour, and production readiness visible as `NOT_PERFORMED`, not PASS. The
 package and workflow are repository engineering controls, not product runtime
-capability or production activation. Governed Failure-to-Eval candidate
-automation remains planned for PR-6.
+capability or production activation. PR-6 adds deterministic Failure-to-Eval
+candidates and procedure-maturity receipts. Both are candidate/review evidence
+only: they cannot self-approve GOLDEN promotion, compile a graph, expand
+authority, or mutate production. Final v2 completion remains pending the
+exact-head PR validation and merge.

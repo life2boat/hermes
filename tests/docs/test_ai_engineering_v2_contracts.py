@@ -104,7 +104,7 @@ def test_navigation_indexes_reference_authoritative_sources() -> None:
         assert Path(relative_path).name in decision_index
 
 
-def test_contracts_do_not_claim_planned_runtime_exists() -> None:
+def test_contracts_describe_offline_candidates_without_stale_planning_claims() -> None:
     combined = "\n".join(
         _read(path)
         for path in (
@@ -114,8 +114,12 @@ def test_contracts_do_not_claim_planned_runtime_exists() -> None:
             KNOWLEDGE,
         )
     )
-    assert "NOT IMPLEMENTED" in combined or "NOT_IMPLEMENTED" in combined
-    assert "PLANNED" in combined or "planned" in combined
+    assert "remains NOT_IMPLEMENTED" not in combined
+    assert "remains planned" not in combined
+    assert "belongs to PR-6" not in combined
+    assert "candidate" in combined.casefold()
+    normalized = " ".join(combined.split())
+    assert "authority" in normalized and "cannot" in normalized
 
 
 def test_new_markdown_links_resolve() -> None:

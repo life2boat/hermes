@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.31
+version: 1.2.32
 updated_at: 2026-08-12
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 0498663186123d0b0568d2cc56ac498d59939a34
+state_verified_against_main_sha: caadf124d006a543af012ac2b9b42343fc7524d0
 production_sha: unknown
 ---
 
@@ -158,9 +158,8 @@ Git.
   are present in the test suite.
 - A canonical non-production provider-executing quality harness now exists at
   `scripts/run_food_vision_quality.py`, bound to the versioned synthetic
-  `food_vision_quality_v1` manifest and sanitized receipts. It has not executed
-  a real candidate model: Qwen rollout eligibility remains blocked and no model
-  is approved.
+  `food_vision_quality_v1` and `food_vision_quality_v2` manifests and sanitized
+  receipts. Qwen rollout eligibility remains blocked and no model is approved.
 - The Stage-1 food-vision prompt remains shorter, provider-neutral, and no
   longer anchored to the failed benchmark plate or pastry labels.
 - Local confirmation requirement is derived deterministically from validated
@@ -189,8 +188,21 @@ Git.
   `0.222222`, major-component recall `0.555556`, sauce recall `0.5`,
   confirmation correctness `1.000`, ambiguity gate pass `true`, aggregate
   nutrition violations `0`, and invalid staging `0`.
-- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
-  quality-benchmarked.
+- Historical `qwen3.6-flash` quality evidence was previously recorded as a 3-request
+  benchmark with precision `0.7777777777777778`, recall `0.7777777777777778`, and
+  sauce recall `0.3333333333333333`; its exact receipt is unavailable, so its
+  diagnostics cannot be reconstructed.
+- A replacement `qwen3.6-flash` run on canonical main
+  `caadf124d006a543af012ac2b9b42343fc7524d0`, using manifest
+  `46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3`, used
+  exactly 3 provider requests, 0 retries, and 0 fallbacks. Its durable receipt
+  SHA256 is `7b6c07a2912237bf353407ff3806560bce5b1b5ebd54b9f40b362f96f00efdc6`;
+  aggregate precision was `1.0`, recall `0.3333333333333333`, sauce recall
+  `0.0`, unsafe aggregate count `0`, and invalid aggregate count `2`.
+- The replacement quality gate failed with schema-invalid responses: fixture B
+  matched three normalized components, while fixtures A and C were schema-invalid.
+  This replacement is new evidence and does not reconstruct the lost historical receipt;
+  Qwen remains not rollout-eligible.
 - The `qwen3.6-plus` benchmark improved aggregate precision and recall versus
   `qwen3.7-plus`, but both remained below the quality gate and neither became a
   benchmark candidate.
@@ -340,8 +352,21 @@ Confirmed state:
   `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
 - `qwen3.6-plus` has now completed the same three-image benchmark and remained
   `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
-- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
-  quality-benchmarked.
+- Historical `qwen3.6-flash` quality evidence was previously recorded as a 3-request
+  benchmark with precision `0.7777777777777778`, recall `0.7777777777777778`, and
+  sauce recall `0.3333333333333333`; its exact receipt is unavailable, so its
+  diagnostics cannot be reconstructed.
+- A replacement `qwen3.6-flash` run on canonical main
+  `caadf124d006a543af012ac2b9b42343fc7524d0`, using manifest
+  `46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3`, used
+  exactly 3 provider requests, 0 retries, and 0 fallbacks. Its durable receipt
+  SHA256 is `7b6c07a2912237bf353407ff3806560bce5b1b5ebd54b9f40b362f96f00efdc6`;
+  aggregate precision was `1.0`, recall `0.3333333333333333`, sauce recall
+  `0.0`, unsafe aggregate count `0`, and invalid aggregate count `2`.
+- The replacement quality gate failed with schema-invalid responses: fixture B
+  matched three normalized components, while fixtures A and C were schema-invalid.
+  This replacement is new evidence and does not reconstruct the lost historical receipt;
+  Qwen remains not rollout-eligible.
 - `qwen3-vl-8b-instruct` remains `QWEN_FAIL_CLOSED_COMPATIBLE`,
   `benchmark_candidate=false`.
 - `qwen3.6-plus` safety and schema handling passed: schema validity `3/3`,

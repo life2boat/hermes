@@ -51,6 +51,15 @@ failure record and trace identity but creates no Golden member, policy change,
 graph, runtime action, or production mutation. Review, dataset change, eval,
 PR, CI, and merge remain separate required lifecycle steps.
 
+## Prompt failure regression
+
+When the root cause is prompt quality, classify it using
+[`contracts/PROMPT_FAILURE_TAXONOMY.md`](contracts/PROMPT_FAILURE_TAXONOMY.md). A
+sanitized reproducible failure becomes a candidate regression fixture. Add a curated
+example only when it fixes the demonstrated semantic gap; then update the smallest
+PromptSpec component, run deterministic prompt and behaviour evals, and retain the
+fixture. The loop cannot self-promote a corpus, record raw prompts, or expand authority.
+
 ## Relationship to the task lifecycle
 
 The incident loop feeds Step 8 of [`TASK_LIFECYCLE.md`](TASK_LIFECYCLE.md).

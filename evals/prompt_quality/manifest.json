@@ -1,0 +1,6 @@
+{
+  "cases": "cases.jsonl",
+  "corpus_status": "CANDIDATE",
+  "dataset_version": "prompt-quality-v1",
+  "schema_version": 1
+}

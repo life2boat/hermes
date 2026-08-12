@@ -109,6 +109,17 @@ digest equals the reviewed digest. Any change to scenarios, expected outcomes,
 criticality, required graders/assertions, dataset membership/configuration, or
 trace evidence changes the digest and requires a new human review.
 
+## Prompt-quality evaluation
+
+Prompt quality has a separate provider-free corpus and deterministic runner defined by
+[`contracts/PROMPT_EVAL_CONTRACT.md`](contracts/PROMPT_EVAL_CONTRACT.md). It tests
+PromptSpec validation, compilation boundaries, missing evidence, ambiguous tasks,
+structured output, prompt injection, multi-step ordering, failure semantics, and a
+historical regression. A prompt-quality PASS is required evidence for prompt-system
+changes but does not replace the human-reviewed GOLDEN behaviour corpus or authorize
+production. Its lifecycle status remains explicit; CI must not self-promote a candidate
+corpus to GOLDEN.
+
 ## Implementation state
 
 The closed trace/scenario schemas, sanitization boundary, canonical

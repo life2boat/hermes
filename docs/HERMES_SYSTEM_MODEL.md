@@ -123,6 +123,14 @@ candidate construction and procedure-maturity evaluation are now offline,
 candidate/review controls; they create no daemon, provider call path, database,
 worker, graph compiler, or production topology and cannot expand authority.
 
+The control layer also owns the Prompt Engineering System. Complex prompts are
+represented as versioned `PromptSpec` values, compiled deterministically against
+declared model capabilities, checked by a closed validator/linter, and evaluated
+against a sanitized provider-free corpus. Behaviour trace schema v2 stores only prompt
+identity, digest, model, context-source references, eval version, and output-schema
+identity; it stores neither raw prompts nor private reasoning. The prompt system makes
+no provider call and grants no runtime or production authority.
+
 ### Tools
 
 Tool modules self-register through `tools/registry.py`; `model_tools.py`

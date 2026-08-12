@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.31
+version: 1.2.32
 updated_at: 2026-08-12
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 0498663186123d0b0568d2cc56ac498d59939a34
+state_verified_against_main_sha: caadf124d006a543af012ac2b9b42343fc7524d0
 production_sha: unknown
 ---
 
@@ -15,9 +15,24 @@ Git.
 
 ## 1. Summary
 
+- The Prompt Engineering System version `1` candidate extends the stdlib-only
+  engineering-control layer. It provides typed `PromptSpec`, deterministic tagged/
+  Markdown compilation, relevant/current/authoritative context selection, untrusted-
+  input isolation, structured validator/linter diagnostics, model-capability checks,
+  versioned prompt provenance, and a provider-free eight-case regression corpus.
+- Behaviour Trace schema version `2` adds closed prompt provenance while retaining
+  schema-v1 replay compatibility. Traces store no compiled prompt, dynamic payload,
+  raw chain-of-thought, secret, credential, raw provider response, or private message.
+- The prompt-quality corpus is technically `PASS` at digest
+  `d52adea60862ad5ca2b71a23dfd506adc02ca8dcb3b6270ab79a51bc949c86ea`,
+  but remains lifecycle state `CANDIDATE`; human review is `NOT_PERFORMED`. The
+  candidate exact-head Agent Release Gate workflow runs this provider-free corpus as a separate
+  technical step. Neither prompt quality nor trace metadata grants provider or
+  production authority.
+
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `0498663186123d0b0568d2cc56ac498d59939a34`.
+  `caadf124d006a543af012ac2b9b42343fc7524d0`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.

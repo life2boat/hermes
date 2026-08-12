@@ -71,6 +71,18 @@ jobs:
             --task-id "pr-$PR_NUMBER" \
             --json-out release-gate-report.json
 
+      - name: Evaluate exact-head prompt quality corpus
+        run: uv run python scripts/run_prompt_quality_evals.py --json-out "$GITHUB_WORKSPACE/prompt-quality-report.json"
+
+      - name: Upload sanitized prompt-quality receipt
+        if: always() && hashFiles('prompt-quality-report.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prompt-quality-${{ github.event.pull_request.head.sha }}
+          path: prompt-quality-report.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload sanitized release-gate receipt
         if: always() && hashFiles('release-gate-report.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

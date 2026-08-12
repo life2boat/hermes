@@ -53,6 +53,14 @@ hashes and test-evidence classification. If preparation fails or required
 documentation is missing, classify the task as `BLOCKED`; do not substitute
 chat history or a stale checkout.
 
+Complex prompts **MUST** be built from `ai_engineering.PromptSpec` or an
+equivalent structured contract and validated before provider dispatch. Do not improvise
+large monolithic prompts when task context, execution order, constraints, failure
+behaviour, or output contract can be represented explicitly. Prompt changes **MUST**
+run the relevant deterministic prompt-quality and behaviour evals. Never persist raw
+prompt payloads, untrusted input, private reasoning, secrets, or credentials as trace
+evidence.
+
 Follow [`docs/TASK_LIFECYCLE.md`](docs/TASK_LIFECYCLE.md) for every task and
 [`docs/FAILURE_CAPTURE_LOOP.md`](docs/FAILURE_CAPTURE_LOOP.md) after a serious
 incident. Apply the AI and production-readiness checklists at the phases named

@@ -25,6 +25,10 @@ CORE_DOCUMENTS = (
     "docs/CURRENT_STATE.md",
     "docs/AGENT_BEHAVIOUR_CONTRACT.md",
     "docs/BEHAVIOUR_EVALS.md",
+    "docs/contracts/PROMPT_DESIGN_CONTRACT.md",
+    "docs/contracts/PROMPT_EVAL_CONTRACT.md",
+    "docs/contracts/PROMPT_FAILURE_TAXONOMY.md",
+    "docs/PROMPT_AUTHORING_GUIDE.md",
     "docs/LLM_OPS_POLICY.md",
     "docs/AGENT_RELEASE_GATES.md",
     "docs/SKILL_LOOP_GRAPH_LIFECYCLE.md",
@@ -252,7 +256,9 @@ def _output_path(repository_root: Path, requested: Path) -> Path:
     return output
 
 
-def _write_context(repository_root: Path, requested: Path, payload: dict[str, Any]) -> str:
+def _write_context(
+    repository_root: Path, requested: Path, payload: dict[str, Any]
+) -> str:
     output = _output_path(repository_root, requested)
     output.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"

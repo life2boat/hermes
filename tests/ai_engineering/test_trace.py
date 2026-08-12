@@ -17,7 +17,9 @@ from ai_engineering.trace import (
 )
 
 
-FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "ai_engineering" / "traces"
+FIXTURE_ROOT = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "ai_engineering" / "traces"
+)
 
 
 def _payload(name: str = "trace_merge_pass.json") -> dict[str, object]:
@@ -40,7 +42,7 @@ def test_required_field_missing_has_stable_error() -> None:
 
 def test_unsupported_schema_version_has_stable_error() -> None:
     payload = _payload()
-    payload["schema_version"] = 2
+    payload["schema_version"] = 3
     with pytest.raises(TraceValidationError) as caught:
         validate_trace(payload)
     assert caught.value.code == "TRACE_SCHEMA_VERSION_UNSUPPORTED"
@@ -75,7 +77,9 @@ def test_invalid_effect_class_has_stable_error() -> None:
         "raw_production_log_payload",
     ],
 )
-def test_private_reasoning_and_raw_payload_fields_are_rejected(forbidden_key: str) -> None:
+def test_private_reasoning_and_raw_payload_fields_are_rejected(
+    forbidden_key: str,
+) -> None:
     payload = _payload()
     payload["decisions"] = [{forbidden_key: "runtime-generated-private-value"}]
     with pytest.raises(TraceValidationError) as caught:
@@ -115,7 +119,9 @@ def test_serialization_and_digest_are_deterministic() -> None:
 
 def test_duplicate_json_keys_are_rejected() -> None:
     canonical = serialize_trace(_payload())
-    duplicate = canonical.replace('"schema_version":1', '"schema_version":1,"schema_version":1')
+    duplicate = canonical.replace(
+        '"schema_version":1', '"schema_version":1,"schema_version":1'
+    )
     with pytest.raises(TraceValidationError) as caught:
         deserialize_trace(duplicate)
     assert caught.value.code == "TRACE_JSON_INVALID"
@@ -123,4 +129,6 @@ def test_duplicate_json_keys_are_rejected() -> None:
 
 def test_fixture_loader_returns_same_canonical_identity() -> None:
     trace = load_trace_fixture(FIXTURE_ROOT, "trace_read_only_pass.json")
-    assert trace_digest(trace) == trace_digest(deserialize_trace(serialize_trace(trace)))
+    assert trace_digest(trace) == trace_digest(
+        deserialize_trace(serialize_trace(trace))
+    )

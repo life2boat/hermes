@@ -46,8 +46,11 @@ model recommendation never grants authority. Release aggregation likewise
 never infers one gate from another: merge-only success leaves cost, live
 behaviour, and production readiness visible as `NOT_PERFORMED`, not PASS. The
 package and workflow are repository engineering controls, not product runtime
-capability or production activation. PR-6 adds deterministic Failure-to-Eval
-candidates and procedure-maturity receipts. Both are candidate/review evidence
-only: they cannot self-approve GOLDEN promotion, compile a graph, expand
-authority, or mutate production. Final v2 completion remains pending the
-exact-head PR validation and merge.
+capability or production activation. PR-1 through PR-6 now form the completed
+v2 foundation: contracts; trace and replay; deterministic evals and
+human-reviewed GOLDEN corpus; model and cost policy; release gates and CI; and
+Failure-to-Eval plus procedure-maturity controls. PR #144 merged PR-6 into
+canonical main. `HERMES_AI_ENGINEERING_SYSTEM_V2=COMPLETE` means that this
+repository-contract foundation is complete, not that candidates may
+self-promote GOLDEN content, compile a graph, expand authority, mutate
+production, auto-deploy, or improve without bounded review.

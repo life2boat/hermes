@@ -1,5 +1,20 @@
 # CURRENT_STATE changelog
 
+## 1.2.31 - 2026-08-12
+
+Changed:
+- closed the post-merge source-of-truth state after PR #144 merged PR-6 at
+  canonical main `0498663186123d0b0568d2cc56ac498d59939a34`;
+- marked the Hermes AI Engineering System v2 repository-contract foundation
+  complete while preserving review-only Failure-to-Eval and procedure-maturity
+  boundaries.
+
+Safety:
+- the GOLDEN corpus remains unchanged at digest
+  `e2580fb10c6d02a55ace0efc9092bd6f3092a9a3a188515c5dba32b44708c8c7`;
+- no runtime, production, database, Qdrant, secret, provider, deployment, or
+  live-smoke action occurred.
+
 ## 1.2.30 - 2026-08-12
 
 Added:

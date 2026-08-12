@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.30
+version: 1.2.31
 updated_at: 2026-08-12
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 86d334f0b3285e14c74f9f507dc3406735c376b3
+state_verified_against_main_sha: 0498663186123d0b0568d2cc56ac498d59939a34
 production_sha: unknown
 ---
 
@@ -17,7 +17,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `79d8c5bb7f75f479a4277ab255c633fae685cb80`.
+  `0498663186123d0b0568d2cc56ac498d59939a34`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -71,11 +71,15 @@ Git.
   offline behaviour, secret-scan, and adversarial evidence. It reports cost,
   live behaviour, and production readiness as optional `NOT_PERFORMED`; a
   merge PASS never becomes a production-release PASS.
-- PR-6 implementation candidate adds deterministic Failure-to-Eval candidate
-  construction plus procedure-maturity receipts. Both remain offline,
-  review-only evidence: they cannot mutate the Golden corpus, compile a graph,
-  expand authority, or change a runtime or production system. Final v2
-  completion remains pending exact-head CI and merge.
+- PR #144 merged PR-6 into canonical main. It implements deterministic
+  Failure-to-Eval candidate construction and procedure-maturity receipts. Both
+  remain offline, review-only evidence: they cannot mutate the Golden corpus,
+  self-promote a candidate, compile a graph, expand authority, or change a
+  runtime or production system.
+- `HERMES_AI_ENGINEERING_SYSTEM_V2=COMPLETE`: the v2 repository-contract
+  foundation is complete. It does not authorize autonomous production actions,
+  Golden self-promotion, graph compilation, auto-deploy, or unbounded
+  self-improvement.
 - This repository-only update changes no product runtime, provider route,
   database, Qdrant state, secret, feature flag, container, or production state.
 - The repository Qwen Vision integration remains opt-in and provider-scoped:

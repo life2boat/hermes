@@ -1,7 +1,7 @@
 # Hermes / HealBite Source Map
 
 Status: authoritative navigation map
-Verified against canonical main: `7626623a92a87d7fa49ccb9b8488ef34b763dad8`
+Verified against canonical main: `79d8c5bb7f75f479a4277ab255c633fae685cb80`
 
 ## Purpose
 
@@ -32,7 +32,7 @@ filled in from memory.
 | --- | --- | --- |
 | Project intent and layout | `AGENTS.md`, `README.md` | Hermes purpose, narrow-core policy, prompt-cache invariant, component map, contribution rules |
 | AI task lifecycle, preparation and review | `docs/TASK_LIFECYCLE.md`, `scripts/prepare_task.py`, `docs/TASK_TEMPLATE.md`, `docs/AI_REVIEW_CHECKLIST.md`, `docs/PRODUCTION_READINESS_CHECKLIST.md` | Required task sequence, repository-bound context capture, review evidence and fail-closed readiness classification |
-| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `ai_engineering/model_policy.py`, `ai_engineering/cost_policy.py`, `scripts/run_agent_behaviour_evals.py`, `scripts/check_llm_ops_policy.py`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, GOLDEN corpus/baseline, executable model selection and cost budgets, plus separately governed release concepts |
+| AI Behaviour & LLM Ops | `docs/AGENT_BEHAVIOUR_CONTRACT.md`, `docs/BEHAVIOUR_EVALS.md`, `docs/LLM_OPS_POLICY.md`, `docs/AGENT_RELEASE_GATES.md`, `docs/SKILL_LOOP_GRAPH_LIFECYCLE.md`, `ai_engineering/contracts.py`, `ai_engineering/trace.py`, `ai_engineering/redaction.py`, `ai_engineering/scenario.py`, `ai_engineering/graders.py`, `ai_engineering/eval_runner.py`, `ai_engineering/model_policy.py`, `ai_engineering/cost_policy.py`, `ai_engineering/release_gate.py`, `scripts/run_agent_behaviour_evals.py`, `scripts/check_llm_ops_policy.py`, `scripts/check_agent_release_gate.py`, `.github/workflows/agent-release-gate.yml`, `evals/agent_behaviour/` | Behaviour semantics, closed evidence, deterministic replay/grading, GOLDEN corpus/baseline, executable model/cost policies, and distinct exact-head merge/production release decisions |
 | Agent core | `run_agent.py`, `agent/`, `agent/conversation_loop.py` | `AIAgent`, conversation/tool loop, transport adapters, context, retries, compression, provider-facing behavior |
 | Model/provider routing | `hermes_cli/runtime_provider.py`, `agent/auxiliary_client.py`, `agent/transports/`, `providers/` | Runtime provider resolution, API transports, auxiliary model calls, provider isolation and fallback boundaries |
 | Tools | `tools/registry.py`, `model_tools.py`, `toolsets.py`, `tools/` | Tool registration, discovery, schemas, availability gates, toolset filtering, dispatch |
@@ -75,7 +75,7 @@ filled in from memory.
 | Command/tool authorization | `tools/approval.py`, `agent/tool_guardrails.py`, `toolsets.py` | Approval boundaries and which tools can reach a model/runtime context |
 | Gateway identity and access | `gateway/authz_mixin.py`, `gateway/slash_access.py`, `gateway/session.py`, platform adapters | Sender/chat/session scope and fail-closed authorization |
 | Telegram safety | `skills/telegram/SKILL.md`, `gateway/platforms/telegram.py`, `gateway/status.py` | Token secrecy, single polling owner, safe diagnostics and no-send health checks |
-| Source secret scanning | `scripts/secret_check.sh`, `scripts/secret_scanner.py`, `.dockerignore` | Tracked/staged source screening and build-context exclusions |
+| Source secret scanning | `scripts/secret_check.sh`, `scripts/secret_scanner.py`, `.dockerignore` | Staged changes, exact base-to-candidate Git-tree screening, and build-context exclusions |
 | Image secret scanning | `scripts/hermes_image_secret_scan.py`, `deploy/hermes-image-secret-exceptions.json` | Metadata, layer and final-filesystem scanning with exact evidence-bound exceptions |
 | Production secrets | `deploy/hermes-production.json`, `scripts/hermes_production_deploy.py` | Approved source path, ownership/mode, closed variable set and value-preserving publication contract |
 
@@ -111,9 +111,13 @@ fixture loading, provider-free replay, deterministic graders, and the offline
 eval runner. `evals/agent_behaviour` is the human-reviewed GOLDEN corpus with a
 digest-bound baseline and review evidence. The library also implements the
 versioned provider-free model-selection/substitution policy, usage accounting,
-external rate-card identity, and deterministic cost-budget evaluation. This is
-not a service or product runtime. The release-gate aggregator, CI behaviour
-gate, and governed failure-candidate automation remain PLANNED.
+external rate-card identity, deterministic cost-budget evaluation, and release
+gate schema/policy version `1`. The release gate consumes independent fixed-
+schema code, behaviour, security, live, cost, and production-readiness evidence
+without inferring one gate from another. The read-only exact-head PR workflow
+enforces the conservative merge profile while reporting production eligibility
+as `NOT_PERFORMED`. This is not a service or product runtime. Governed
+failure-candidate automation remains planned for PR-6.
 
 ## Fast lookup
 

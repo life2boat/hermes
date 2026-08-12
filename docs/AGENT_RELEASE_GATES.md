@@ -19,8 +19,9 @@ authorized.
 | Gate | Question | Typical evidence |
 | --- | --- | --- |
 | CODE_GATE | Does the changed implementation/document contract pass required code and repository checks? | Focused tests, regressions, lint/type checks, exact-head CI. |
-| BEHAVIOUR_GATE | Did the agent follow required authority, scope, status, and stop-boundary behaviour? | Required deterministic evals and, only when classified, live evals. |
+| BEHAVIOUR_GATE | Did the agent follow required authority, scope, status, and stop-boundary behaviour offline? | Required deterministic GOLDEN eval evidence. |
 | SECURITY_GATE | Are required identity, secret, tool, data, and release invariants proven? | Security/adversarial cases, scans, fixed-schema evidence. |
+| LIVE_BEHAVIOUR_GATE | Did the exact release candidate pass separately authorized live behaviour checks? | Sanitized fixed-schema live evidence; never inferred from offline evals. |
 | COST_GATE | Is required call/token/output/estimated-cost evidence within the task budget? | Versioned budget receipt. |
 | PRODUCTION_READINESS_GATE | Is the exact candidate safe and authorized for the current production state? | Production readiness checklist and applicable procedural skill evidence. |
 
@@ -87,9 +88,46 @@ observations, technical blockers, and the final decision. It must not infer a
 gate from another gate: code PASS is not behaviour PASS, and merge eligibility
 is not production authority.
 
+## Executable decision layer
+
+The offline contract has explicit identities:
+
+```text
+RELEASE_GATE_SCHEMA_VERSION=1
+RELEASE_GATE_POLICY_VERSION=1
+```
+
+`ai_engineering/release_gate.py` implements the closed target and gate
+taxonomies, deterministic requirement derivation, typed source/evidence,
+technical blocker and governance observation records, canonical JSON, and
+receipt SHA-256 identity. `scripts/check_agent_release_gate.py` exposes
+`evaluate` and conservative `ci-merge` modes.
+
+The target plus sensitivity classification derives required gates. A caller
+cannot mark a derived required gate optional. Every required gate needs its own
+explicit PASS; FAIL produces FAIL, while BLOCKED, UNKNOWN, NOT_RUN,
+NOT_PERFORMED, or INCONCLUSIVE produces BLOCKED. Governance observations stay
+visible without changing either eligibility decision.
+
+For `target=MERGE`, the production decision is always reported as
+`NOT_PERFORMED`. For `target=PRODUCTION_RELEASE`, merge eligibility plus every
+derived live, cost, and production-readiness gate is evaluated. This aggregation
+does not grant production authority or perform a production operation.
+
+The `Agent Release Gate` pull-request workflow checks out
+`github.event.pull_request.head.sha` directly with read-only permissions and
+full history. Its conservative merge profile runs `agent_check.sh`, the full
+GOLDEN behaviour corpus, an independent exact base-to-candidate Git-tree
+secret scan, and the adversarial
+behaviour category. Cost, live behaviour, and production readiness remain
+visible as optional `NOT_PERFORMED` evidence for this merge-only decision.
+
 ## Implementation state
 
-These semantics are authoritative documentation. The executable release-gate
-aggregator and CI behaviour gate are `PLANNED`; production remains governed by
-the current task, versioned deployment policy, procedural skills, and existing
-technical gates until separate implementation PRs land.
+The executable release aggregator, merge/production decision receipts, CLI,
+and exact-head merge CI are `IMPLEMENTED`. The CI workflow has no provider or
+production credentials and performs no live smoke, deploy, runtime, database,
+Qdrant, or secret mutation. Production release remains governed by the current
+task, explicit authority, versioned deployment policy, procedural skills, and
+separately supplied live/cost/readiness evidence. Governed Failure-to-Eval
+candidate automation remains planned for PR-6.

@@ -100,6 +100,13 @@ Task
 -> failure/eval feedback
 ```
 
+For a complex model-facing task, the implementation phase also follows the canonical
+Prompt Engineering workflow: select authoritative current context, construct a
+versioned `PromptSpec`, isolate dynamic input, compile for declared capabilities, run
+the validator/linter, and execute the relevant prompt-quality regressions. A malformed
+prompt is repaired at its PromptSpec source and is not sent or patched with arbitrary
+trailing text.
+
 The authoritative semantics live in
 [`AGENT_BEHAVIOUR_CONTRACT.md`](AGENT_BEHAVIOUR_CONTRACT.md),
 [`BEHAVIOUR_EVALS.md`](BEHAVIOUR_EVALS.md),

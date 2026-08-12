@@ -7,7 +7,8 @@ from enum import StrEnum
 from typing import TypeAlias
 
 
-BEHAVIOUR_TRACE_SCHEMA_VERSION = 1
+BEHAVIOUR_TRACE_SCHEMA_VERSION = 2
+SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS = (1, 2)
 SCENARIO_SCHEMA_VERSION = 2
 SUPPORTED_SCENARIO_SCHEMA_VERSIONS = (1, 2)
 BEHAVIOUR_EVAL_ENGINE_VERSION = 1
@@ -183,6 +184,18 @@ class TraceResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptTraceEvidence:
+    prompt_id: str
+    prompt_version: str
+    prompt_digest: str
+    prompt_template_version: str
+    eval_set_version: str
+    model_id: str
+    context_source_ids: tuple[str, ...]
+    output_schema_version: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class BehaviourTrace:
     schema_version: int
     trace_id: str
@@ -195,6 +208,7 @@ class BehaviourTrace:
     gate_results: tuple[GateResult, ...]
     usage: UsageEvidence
     result: TraceResult
+    prompt: PromptTraceEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +239,6 @@ class ReplayResult:
     normalized: dict[str, object]
     canonical_json: str
     digest: str
-
 
 
 @dataclass(frozen=True, slots=True)

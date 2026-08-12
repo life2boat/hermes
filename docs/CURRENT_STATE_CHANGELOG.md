@@ -1,5 +1,25 @@
 # CURRENT_STATE changelog
 
+## 1.2.32 - 2026-08-12
+
+Added:
+- added PromptSpec schema/compiler/validator/linter contracts, versioned prompt
+  provenance, Behaviour Trace schema v2 prompt evidence, and a sanitized eight-case
+  provider-free prompt-quality corpus;
+- added exact-head prompt-quality CI, canonical prompt authoring/eval/failure docs,
+  ADR-0078, prepared-context inclusion, and the mandatory AGENTS prompt rule.
+
+Changed:
+- preserved Behaviour Trace schema-v1 replay while making schema v2 the current
+  writer contract;
+- recorded the prompt corpus as technical PASS but lifecycle CANDIDATE with human
+  review explicitly NOT_PERFORMED.
+
+Safety:
+- no provider call, runtime, production, database, Qdrant, secret, credential,
+  deployment, or live-smoke action occurred; raw prompts and private reasoning remain
+  forbidden trace evidence.
+
 ## 1.2.31 - 2026-08-12
 
 Changed:

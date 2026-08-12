@@ -5,6 +5,7 @@ import pytest
 from ai_engineering.contracts import (
     BEHAVIOUR_EVAL_ENGINE_VERSION,
     BEHAVIOUR_TRACE_SCHEMA_VERSION,
+    SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS,
     SCENARIO_SCHEMA_VERSION,
     SUPPORTED_SCENARIO_SCHEMA_VERSIONS,
     EffectClass,
@@ -14,7 +15,8 @@ from ai_engineering.contracts import (
 
 
 def test_trace_schema_version_is_explicit() -> None:
-    assert BEHAVIOUR_TRACE_SCHEMA_VERSION == 1
+    assert BEHAVIOUR_TRACE_SCHEMA_VERSION == 2
+    assert SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS == (1, 2)
 
 
 def test_status_taxonomy_is_exact() -> None:

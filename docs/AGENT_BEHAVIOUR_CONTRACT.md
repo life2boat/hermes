@@ -78,6 +78,12 @@ Raw prompts, model chain-of-thought, secrets, private identifiers, user
 messages, raw provider responses, and raw production logs are not acceptable
 behaviour-eval evidence.
 
+Prompt provenance follows [`contracts/PROMPT_DESIGN_CONTRACT.md`](contracts/PROMPT_DESIGN_CONTRACT.md).
+Behaviour trace schema v1 remains replay-compatible. Schema v2 adds a closed, sanitized
+prompt-provenance object containing only identifiers, a SHA-256 prompt digest, selected
+model identity, context-source references, eval-set version, and optional output-schema
+version. Raw prompt text and dynamic input remain forbidden evidence.
+
 ## Relationship to other contracts
 
 - [`BEHAVIOUR_EVALS.md`](BEHAVIOUR_EVALS.md) owns evaluation methodology.

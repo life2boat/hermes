@@ -1,4 +1,4 @@
-"""Validation and canonical serialization for behaviour trace schema v1."""
+"""Validation and canonical serialization for behaviour trace schemas v1-v2."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, NoReturn, TypeVar
+from typing import Any, NoReturn, TypeVar, cast
 
 from ai_engineering.contracts import (
     BEHAVIOUR_TRACE_SCHEMA_VERSION,
+    SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS,
     BehaviourTrace,
     DecisionEvent,
     EffectClass,
     GateResult,
     LLMEvidence,
+    PromptTraceEvidence,
     RepositoryEvidence,
     Status,
     StopBoundary,
@@ -25,7 +27,10 @@ from ai_engineering.contracts import (
     TraceValidationError,
     UsageEvidence,
 )
-from ai_engineering.redaction import reject_forbidden_raw_fields, verify_sanitized_evidence
+from ai_engineering.redaction import (
+    reject_forbidden_raw_fields,
+    verify_sanitized_evidence,
+)
 
 
 MAX_TRACE_BYTES = 1_048_576
@@ -35,58 +40,76 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$")
 _REASONING_LEVELS = frozenset({"low", "medium", "high"})
 
-_TRACE_FIELDS = frozenset(
-    {
-        "schema_version",
-        "trace_id",
-        "task_id",
-        "repository",
-        "task",
-        "llm",
-        "decisions",
-        "tool_events",
-        "gate_results",
-        "usage",
-        "result",
-    }
-)
-_REPOSITORY_FIELDS = frozenset(
-    {"canonical_remote", "base_sha", "head_sha", "branch", "worktree_clean"}
-)
-_TASK_FIELDS = frozenset(
-    {
-        "task_class",
-        "behaviour_sensitive",
-        "security_sensitive",
-        "cost_sensitive",
-        "production_sensitive",
-        "allowed_effect_classes",
-        "forbidden_effect_classes",
-        "stop_boundary",
-    }
-)
-_LLM_FIELDS = frozenset(
-    {"policy_version", "recommended_model", "actual_model", "reasoning_level"}
-)
-_DECISION_FIELDS = frozenset(
-    {"decision_code", "status", "reason_code", "evidence_refs"}
-)
-_TOOL_FIELDS = frozenset(
-    {
-        "event_id",
-        "tool_name",
-        "effect_class",
-        "authorization_status",
-        "outcome_status",
-        "side_effect",
-        "evidence_refs",
-    }
-)
+_TRACE_V1_FIELDS = frozenset({
+    "schema_version",
+    "trace_id",
+    "task_id",
+    "repository",
+    "task",
+    "llm",
+    "decisions",
+    "tool_events",
+    "gate_results",
+    "usage",
+    "result",
+})
+_TRACE_V2_FIELDS = frozenset({*_TRACE_V1_FIELDS, "prompt"})
+_REPOSITORY_FIELDS = frozenset({
+    "canonical_remote",
+    "base_sha",
+    "head_sha",
+    "branch",
+    "worktree_clean",
+})
+_TASK_FIELDS = frozenset({
+    "task_class",
+    "behaviour_sensitive",
+    "security_sensitive",
+    "cost_sensitive",
+    "production_sensitive",
+    "allowed_effect_classes",
+    "forbidden_effect_classes",
+    "stop_boundary",
+})
+_LLM_FIELDS = frozenset({
+    "policy_version",
+    "recommended_model",
+    "actual_model",
+    "reasoning_level",
+})
+_DECISION_FIELDS = frozenset({
+    "decision_code",
+    "status",
+    "reason_code",
+    "evidence_refs",
+})
+_TOOL_FIELDS = frozenset({
+    "event_id",
+    "tool_name",
+    "effect_class",
+    "authorization_status",
+    "outcome_status",
+    "side_effect",
+    "evidence_refs",
+})
 _GATE_FIELDS = frozenset({"gate_name", "required", "status", "evidence_refs"})
-_USAGE_FIELDS = frozenset(
-    {"model_calls", "input_tokens", "output_tokens", "estimated_cost"}
-)
+_USAGE_FIELDS = frozenset({
+    "model_calls",
+    "input_tokens",
+    "output_tokens",
+    "estimated_cost",
+})
 _RESULT_FIELDS = frozenset({"status"})
+_PROMPT_FIELDS = frozenset({
+    "prompt_id",
+    "prompt_version",
+    "prompt_digest",
+    "prompt_template_version",
+    "eval_set_version",
+    "model_id",
+    "context_source_ids",
+    "output_schema_version",
+})
 
 _EnumT = TypeVar("_EnumT", Status, StopBoundary, EffectClass)
 
@@ -98,7 +121,7 @@ def _fail(code: str) -> NoReturn:
 def _mapping(value: object) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         _fail("TRACE_REQUIRED_FIELD_MISSING")
-    return value
+    return cast(Mapping[str, object], value)
 
 
 def _exact_fields(value: object, expected: frozenset[str]) -> Mapping[str, object]:
@@ -313,16 +336,37 @@ def _result(value: object) -> TraceResult:
     return TraceResult(status=_status(payload["status"]))
 
 
+def _prompt(value: object) -> PromptTraceEvidence:
+    payload = _exact_fields(value, _PROMPT_FIELDS)
+    digest = payload["prompt_digest"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        _fail("TRACE_VALUE_INVALID")
+    return PromptTraceEvidence(
+        prompt_id=_identifier(payload["prompt_id"]),
+        prompt_version=_identifier(payload["prompt_version"]),
+        prompt_digest=digest,
+        prompt_template_version=_identifier(payload["prompt_template_version"]),
+        eval_set_version=_identifier(payload["eval_set_version"]),
+        model_id=_identifier(payload["model_id"]),
+        context_source_ids=_references(payload["context_source_ids"]),
+        output_schema_version=_optional_identifier(payload["output_schema_version"]),
+    )
+
+
 def _trace_from_mapping(value: Mapping[str, object]) -> BehaviourTrace:
     reject_forbidden_raw_fields(value)
-    payload = _exact_fields(value, _TRACE_FIELDS)
-    schema_version = payload["schema_version"]
-    if schema_version != BEHAVIOUR_TRACE_SCHEMA_VERSION or isinstance(
-        schema_version, bool
+    raw_version = value.get("schema_version")
+    if (
+        not isinstance(raw_version, int)
+        or isinstance(raw_version, bool)
+        or raw_version not in SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS
     ):
         _fail("TRACE_SCHEMA_VERSION_UNSUPPORTED")
+    schema_version = raw_version
+    fields = _TRACE_V1_FIELDS if schema_version == 1 else _TRACE_V2_FIELDS
+    payload = _exact_fields(value, fields)
     trace = BehaviourTrace(
-        schema_version=BEHAVIOUR_TRACE_SCHEMA_VERSION,
+        schema_version=schema_version,
         trace_id=_identifier(payload["trace_id"]),
         task_id=_identifier(payload["task_id"]),
         repository=_repository(payload["repository"]),
@@ -333,13 +377,14 @@ def _trace_from_mapping(value: Mapping[str, object]) -> BehaviourTrace:
         gate_results=_gate_results(payload["gate_results"]),
         usage=_usage(payload["usage"]),
         result=_result(payload["result"]),
+        prompt=_prompt(payload["prompt"]) if schema_version == 2 else None,
     )
     verify_sanitized_evidence(_trace_to_dict(trace))
     return trace
 
 
 def _trace_to_dict(trace: BehaviourTrace) -> dict[str, object]:
-    return {
+    normalized: dict[str, object] = {
         "schema_version": trace.schema_version,
         "trace_id": trace.trace_id,
         "task_id": trace.task_id,
@@ -356,7 +401,9 @@ def _trace_to_dict(trace: BehaviourTrace) -> dict[str, object]:
             "security_sensitive": trace.task.security_sensitive,
             "cost_sensitive": trace.task.cost_sensitive,
             "production_sensitive": trace.task.production_sensitive,
-            "allowed_effect_classes": [item.value for item in trace.task.allowed_effect_classes],
+            "allowed_effect_classes": [
+                item.value for item in trace.task.allowed_effect_classes
+            ],
             "forbidden_effect_classes": [
                 item.value for item in trace.task.forbidden_effect_classes
             ],
@@ -406,10 +453,26 @@ def _trace_to_dict(trace: BehaviourTrace) -> dict[str, object]:
         },
         "result": {"status": trace.result.status.value},
     }
+    if trace.schema_version == 2:
+        if trace.prompt is None:
+            _fail("TRACE_REQUIRED_FIELD_MISSING")
+        normalized["prompt"] = {
+            "prompt_id": trace.prompt.prompt_id,
+            "prompt_version": trace.prompt.prompt_version,
+            "prompt_digest": trace.prompt.prompt_digest,
+            "prompt_template_version": trace.prompt.prompt_template_version,
+            "eval_set_version": trace.prompt.eval_set_version,
+            "model_id": trace.prompt.model_id,
+            "context_source_ids": list(trace.prompt.context_source_ids),
+            "output_schema_version": trace.prompt.output_schema_version,
+        }
+    elif trace.prompt is not None:
+        _fail("TRACE_UNEXPECTED_FIELD")
+    return normalized
 
 
 def validate_trace(value: BehaviourTrace | Mapping[str, object]) -> BehaviourTrace:
-    """Validate and return an immutable schema-v1 trace."""
+    """Validate and return an immutable supported-version trace."""
 
     if isinstance(value, BehaviourTrace):
         return _trace_from_mapping(_trace_to_dict(value))
@@ -441,7 +504,9 @@ class _DuplicateJsonKey(ValueError):
     pass
 
 
-def _object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:

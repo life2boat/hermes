@@ -16,6 +16,10 @@ Authoritative sources:
   eligibility from production release eligibility.
 - [Skill -> Loop -> Graph Lifecycle](../../docs/SKILL_LOOP_GRAPH_LIFECYCLE.md)
   defines procedure maturity and governed improvement.
+- [Prompt Design Contract](../../docs/contracts/PROMPT_DESIGN_CONTRACT.md),
+  [Prompt Evaluation Contract](../../docs/contracts/PROMPT_EVAL_CONTRACT.md), and
+  [Prompt Failure Taxonomy](../../docs/contracts/PROMPT_FAILURE_TAXONOMY.md) define
+  structured prompt engineering, deterministic quality gates, and regression repair.
 
 Durable decisions are recorded in
 [ADR-0074](../../docs/adr/ADR-0074-agent-behaviour-contract.md),

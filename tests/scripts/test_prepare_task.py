@@ -45,6 +45,10 @@ def test_core_documents_include_v2_normative_contracts() -> None:
     assert {
         "docs/AGENT_BEHAVIOUR_CONTRACT.md",
         "docs/BEHAVIOUR_EVALS.md",
+        "docs/contracts/PROMPT_DESIGN_CONTRACT.md",
+        "docs/contracts/PROMPT_EVAL_CONTRACT.md",
+        "docs/contracts/PROMPT_FAILURE_TAXONOMY.md",
+        "docs/PROMPT_AUTHORING_GUIDE.md",
         "docs/LLM_OPS_POLICY.md",
         "docs/AGENT_RELEASE_GATES.md",
         "docs/SKILL_LOOP_GRAPH_LIFECYCLE.md",
@@ -94,14 +98,12 @@ def test_cli_writes_context_only_under_ignored_task_context(
 ) -> None:
     root = _repository(tmp_path)
 
-    result = main(
-        [
-            "--repository-root",
-            str(root),
-            "--output",
-            ".task_context/task-context.json",
-        ]
-    )
+    result = main([
+        "--repository-root",
+        str(root),
+        "--output",
+        ".task_context/task-context.json",
+    ])
 
     assert result == 0
     output = root / ".task_context" / "task-context.json"
@@ -121,14 +123,12 @@ def test_cli_rejects_output_outside_task_context(
     root = _repository(tmp_path)
     escaped = tmp_path / "escaped.json"
 
-    result = main(
-        [
-            "--repository-root",
-            str(root),
-            "--output",
-            str(escaped),
-        ]
-    )
+    result = main([
+        "--repository-root",
+        str(root),
+        "--output",
+        str(escaped),
+    ])
 
     assert result == 2
     assert not escaped.exists()

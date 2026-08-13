@@ -8,6 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterator
 
+from gateway.memory.convergence import (
+    MemoryVectorConvergence,
+    VectorSyncBatchResult,
+    VectorSyncStatus,
+)
 from gateway.memory.analytics import MemoryAnalyticsLogger
 from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
@@ -26,6 +31,7 @@ CREATE TABLE IF NOT EXISTS {_FACTS_TABLE} (
     entity TEXT NOT NULL,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
+    vector_revision INTEGER NOT NULL DEFAULT 1,
     source TEXT,
     trust_score REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -109,6 +115,12 @@ class HealBiteMemoryBridge:
             and getattr(qdrant_adapter, "enabled", True)
             and env_flag("MEMORY_VECTOR_ENABLED", default=False)
         )
+        self._convergence = MemoryVectorConvergence(
+            self.db_path,
+            qdrant_adapter=qdrant_adapter,
+            vector_enabled=self._vector_enabled,
+            fact_text=self._fact_text,
+        )
         self.min_trust_score = float(min_trust_score)
         if self.qdrant_adapter is not None:
             self.qdrant_adapter.embedding_adapter = self.embedding_adapter
@@ -119,6 +131,8 @@ class HealBiteMemoryBridge:
         )
         self._fts_enabled = False
         self._initialize_schema()
+        if self._vector_enabled and self._executor is not None:
+            self._executor.submit(self.process_vector_sync_batch)
 
     def close(self) -> None:
         if self._executor is not None:
@@ -135,6 +149,7 @@ class HealBiteMemoryBridge:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
+            self._convergence.ensure_schema(conn)
             try:
                 conn.executescript(_FTS_SQL)
                 self._fts_enabled = True
@@ -162,7 +177,8 @@ class HealBiteMemoryBridge:
         user_id = require_memory_user_id(user_id)
         with self._connect() as conn:
             row = conn.execute(
-                f"SELECT id FROM {_FACTS_TABLE} WHERE user_id = ? AND entity = ? AND key = ?",
+                f"SELECT id, vector_revision FROM {_FACTS_TABLE} "
+                "WHERE user_id = ? AND entity = ? AND key = ?",
                 (user_id, entity, key),
             ).fetchone()
             if row is None:
@@ -174,28 +190,43 @@ class HealBiteMemoryBridge:
                     (user_id, entity, key, value, source, trust_score),
                 )
                 sqlite_id = int(cursor.lastrowid)
+                revision = 1
             else:
                 sqlite_id = int(row["id"])
+                revision = int(row["vector_revision"]) + 1
                 conn.execute(
                     f"""
                     UPDATE {_FACTS_TABLE}
-                    SET value = ?, source = ?, trust_score = ?, updated_at = CURRENT_TIMESTAMP
+                    SET value = ?, source = ?, trust_score = ?, vector_revision = ?,
+                        updated_at = CURRENT_TIMESTAMP
                     WHERE id = ? AND user_id = ?
                     """,
-                    (value, source, trust_score, sqlite_id, user_id),
+                    (value, source, trust_score, revision, sqlite_id, user_id),
                 )
-        fact = self.get_fact(sqlite_id=sqlite_id, user_id=user_id)
-        if fact is not None:
-            self._schedule_qdrant_sync(fact)
+            self._convergence.enqueue_upsert(
+                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision
+            )
+        self._schedule_reconciliation()
         return sqlite_id
 
     def delete_fact(self, *, sqlite_id: int, user_id: int) -> None:
         user_id = require_memory_user_id(user_id)
         with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT vector_revision FROM {_FACTS_TABLE} WHERE id = ? AND user_id = ?",
+                (sqlite_id, user_id),
+            ).fetchone()
+            if row is None:
+                return
+            revision = int(row["vector_revision"]) + 1
             conn.execute(
                 f"DELETE FROM {_FACTS_TABLE} WHERE id = ? AND user_id = ?",
                 (sqlite_id, user_id),
             )
+            self._convergence.enqueue_delete(
+                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision
+            )
+        self._schedule_reconciliation()
 
     def get_fact(self, *, sqlite_id: int, user_id: int) -> dict[str, Any] | None:
         user_id = require_memory_user_id(user_id)
@@ -290,13 +321,29 @@ class HealBiteMemoryBridge:
         )
         return results
 
-    def _schedule_qdrant_sync(self, fact: dict[str, Any]) -> None:
+    def _schedule_reconciliation(self) -> None:
         if not self._vector_enabled or self.qdrant_adapter is None:
             return
         if self._executor is None:
-            self._push_fact_to_qdrant(fact)
+            self.process_vector_sync_batch()
             return
-        self._executor.submit(self._push_fact_to_qdrant, fact)
+        self._executor.submit(self.process_vector_sync_batch)
+
+    def process_vector_sync_batch(
+        self,
+        *,
+        batch_size: int = 25,
+        time_budget_seconds: float = 2.0,
+        retry_blocked: bool = False,
+    ) -> VectorSyncBatchResult:
+        return self._convergence.process_batch(
+            batch_size=batch_size,
+            time_budget_seconds=time_budget_seconds,
+            retry_blocked=retry_blocked,
+        )
+
+    def get_vector_sync_status(self) -> VectorSyncStatus:
+        return self._convergence.get_status()
 
     def _push_fact_to_qdrant(self, fact: dict[str, Any]) -> bool:
         if self.qdrant_adapter is None:

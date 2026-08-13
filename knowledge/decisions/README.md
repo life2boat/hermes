@@ -19,6 +19,7 @@ Hermes AI Engineering System v2 decisions:
 - [ADR-0075: Separate Behaviour Evals from Production Release Gates](../../docs/adr/ADR-0075-behaviour-evals-release-gates.md)
 - [ADR-0076: Versioned LLM Ops Model Policy](../../docs/adr/ADR-0076-llm-ops-model-policy.md)
 - [ADR-0077: Governed Agent Improvement through Repository Candidates](../../docs/adr/ADR-0077-governed-agent-improvement.md)
+- [ADR-0079: Durable SQLite-to-Qdrant Memory Convergence](../../docs/adr/ADR-0079-durable-memory-vector-convergence.md)
 
 Summaries here must link to one authoritative ADR rather than restating the full
 decision.

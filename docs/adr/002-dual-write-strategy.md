@@ -1,5 +1,8 @@
 # ADR-002: SQLite-First Dual-Write Strategy
 
+> The authority direction in this ADR remains valid. Its best-effort delivery
+> mechanism is superseded by ADR-0079's durable transactional outbox.
+
 ## Problem
 
 Memory facts must be durable in SQLite and discoverable through Qdrant, but the
@@ -23,17 +26,10 @@ points are absent.
 
 ## Decision
 
-Use a SQLite-first, asynchronous best-effort dual-write strategy.
-
-1. Validate the normalized user scope and write the durable fact to SQLite.
-2. Commit SQLite successfully before attempting the derived-index mutation.
-3. Schedule or perform the Qdrant upsert with the same normalized ownership
-   identity and deterministic point identity.
-4. Treat Qdrant failure as index lag, not as failure of the durable write.
-5. Reconcile from SQLite to Qdrant through explicit, bounded tooling and record
-   deterministic evidence of the examined identities and outcomes.
-6. Do not infer delete convergence from an upsert-only pass or from equal
-   aggregate counts.
+Use a SQLite-first authority direction. ADR-0079 refines delivery: the fact
+mutation and minimal revisioned vector intent commit atomically in SQLite, then
+a bounded worker performs owner-scoped idempotent upsert/delete reconciliation.
+Qdrant failure remains index lag rather than failure of the canonical write.
 
 ## Alternatives Considered
 

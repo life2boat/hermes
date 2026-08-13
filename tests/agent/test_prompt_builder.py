@@ -217,7 +217,11 @@ class TestParseSkillFile:
 
 class TestPromptBuilderImports:
     def test_module_import_does_not_eagerly_import_skills_tool(self, monkeypatch):
+        import agent as agent_package
+
         original_import = builtins.__import__
+        original_module = sys.modules["agent.prompt_builder"]
+        original_package_attr = agent_package.prompt_builder
 
         def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
             if name == "tools.skills_tool" or (
@@ -229,9 +233,15 @@ class TestPromptBuilderImports:
         monkeypatch.delitem(sys.modules, "agent.prompt_builder", raising=False)
         monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-        module = importlib.import_module("agent.prompt_builder")
-
-        assert hasattr(module, "build_skills_system_prompt")
+        try:
+            module = importlib.import_module("agent.prompt_builder")
+            assert hasattr(module, "build_skills_system_prompt")
+        finally:
+            # Importing a submodule also replaces the attribute on its parent
+            # package. Restore both references so later tests patch the same
+            # module object that their module-level imports came from.
+            sys.modules["agent.prompt_builder"] = original_module
+            agent_package.prompt_builder = original_package_attr
 
 
 # =========================================================================

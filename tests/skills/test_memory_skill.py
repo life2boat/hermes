@@ -32,10 +32,10 @@ def test_memory_skill_keeps_sqlite_authoritative():
             "qdrant and sqlite fts as derived search indexes",
             "sqlite schema/content fingerprints remain unchanged",
         ),
-        "dual-write reconciliation": (
-            "commit the sqlite fact first",
-            "two writes as non-atomic",
-            "deletes also do not remove stale qdrant points",
+        "durable convergence": (
+            "commit each applicable memory os fact mutation",
+            "durable outbox",
+            "restart recovery source",
         ),
         "qdrant mutation boundary": (
             "default to read-only metadata and `--dry-run`",

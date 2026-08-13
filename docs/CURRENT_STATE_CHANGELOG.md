@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.39 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #153 merged the
+  product-aligned `food_vision_quality_v3` candidate contract at canonical main
+  `57b4376464d0d40926320ced73e5d4b601dea86e`.
+
+Safety:
+- lifecycle remains `CANDIDATE`, human visual review remains `NOT_PERFORMED`,
+  and no provider model was selected or executed;
+- v1/v2 fixture bytes and contracts remain unchanged, and production, database,
+  Qdrant, secrets, feature flags, deployment, and runtime remain unchanged.
+
 ## 1.2.38 - 2026-08-13
 
 Added:

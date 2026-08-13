@@ -397,14 +397,14 @@ def intent_digest(value: TaskIntent | Mapping[str, object]) -> str:
 
 
 def validate_intent_revision(parent: TaskIntent, current: TaskIntent) -> None:
+    if intent_digest(parent) == intent_digest(current):
+        _fail_intent("SELF_SUPERSESSION")
     if parent.task_id != current.task_id:
         _fail_intent("BROKEN_PARENT_IDENTITY")
     if current.intent_revision != parent.intent_revision + 1:
         _fail_intent("BROKEN_PARENT_IDENTITY")
     if current.parent_intent_digest != intent_digest(parent):
         _fail_intent("BROKEN_PARENT_IDENTITY")
-    if current.parent_intent_digest == intent_digest(current):
-        _fail_intent("SELF_SUPERSESSION")
 
 
 @dataclass(frozen=True, slots=True)

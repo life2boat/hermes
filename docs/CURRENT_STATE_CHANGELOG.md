@@ -1,5 +1,21 @@
 # CURRENT_STATE changelog
 
+## 1.2.42 - 2026-08-13
+
+Added:
+- added a thin Antigravity workspace rule, task-bootstrap skill, and read-only
+  onboarding prompt that reference the canonical Hermes engineering contracts;
+- recorded serialized executor ownership: Antigravity primary, Codex reserve
+  after explicit handoff, and Manus read-only research and assurance.
+
+Changed:
+- advanced current-state verification to canonical main
+  `cbeb9535ae9cac0c1bca382d7f86fa7172f74722` before the bounded integration PR.
+
+Safety:
+- the adapters grant no production, provider, database, Qdrant, secret,
+  feature-flag, deployment, runtime, or live-smoke authority.
+
 ## 1.2.41 - 2026-08-13
 
 Changed:

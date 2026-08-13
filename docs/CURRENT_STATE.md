@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.41
+version: 1.2.42
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 6e433bc9a30ed0211d26123cc852be73dc88ed58
+state_verified_against_main_sha: cbeb9535ae9cac0c1bca382d7f86fa7172f74722
 production_sha: unknown
 ---
 
@@ -14,6 +14,15 @@ external notes are archive/evidence only unless this file has been updated in
 Git.
 
 ## 1. Summary
+
+- The repository now contains a thin Google Antigravity workspace adapter:
+  an Always-On-intent core rule, a task-bootstrap skill, and a read-only
+  onboarding prompt. These files point back to `AGENTS.md`, current state,
+  lifecycle, invariants, ADRs, and `scripts/prepare_task.py`; they do not create
+  a competing source of truth or grant production/provider mutation authority.
+- Antigravity is the intended primary day-to-day executor, Codex is the reserve
+  executor after an explicit ownership handoff, and Manus remains read-only
+  research and assurance. Only one executor may mutate a branch or worktree.
 
 - The Prompt Engineering System version `1`, merged by PR #147, extends the stdlib-only
   engineering-control layer. It provides typed `PromptSpec`, deterministic tagged/
@@ -32,7 +41,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `6e433bc9a30ed0211d26123cc852be73dc88ed58`.
+  `cbeb9535ae9cac0c1bca382d7f86fa7172f74722`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.

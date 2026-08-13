@@ -300,6 +300,7 @@ def test_quality_and_schema_failures_cannot_force_pass(tmp_path, monkeypatch, pa
     [
         ("v1", "1552cce9af6d0d2337c1754213c00b8ba13dbbee9acff2c938761c920174e456"),
         ("v2", "46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3"),
+        ("v3", "543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202"),
     ],
 )
 def test_checked_in_food_vision_assets_match_manifest(
@@ -314,17 +315,26 @@ def test_checked_in_food_vision_assets_match_manifest(
     assert manifest["fixture_set_version"] == f"food_vision_quality_{fixture_version}"
     assert len(manifest["fixtures"]) == 3
     if expected_manifest_sha256 is not None:
-        committed_manifest = subprocess.run(
-            ["git", "show", f"HEAD:{relative_manifest_path}"],
-            cwd=repository_root,
-            check=True,
-            capture_output=True,
-        ).stdout
-        assert hashlib.sha256(committed_manifest).hexdigest() == expected_manifest_sha256
+        if fixture_version == "v3":
+            identity_bytes = manifest_path.read_bytes()
+        else:
+            identity_bytes = subprocess.run(
+                ["git", "show", f"HEAD:{relative_manifest_path}"],
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+            ).stdout
+        assert hashlib.sha256(identity_bytes).hexdigest() == expected_manifest_sha256
 
     for fixture in manifest["fixtures"]:
-        image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
-        image_path.relative_to(manifest_path.parent.resolve())
+        if fixture_version == "v3":
+            image_path = (repository_root / fixture["image_path"]).resolve(strict=True)
+            image_path.relative_to(
+                (repository_root / "tests/fixtures/food_vision_quality/v2/images").resolve()
+            )
+        else:
+            image_path = (manifest_path.parent / fixture["image_path"]).resolve(strict=True)
+            image_path.relative_to(manifest_path.parent.resolve())
         assert image_path.is_file()
         assert hashlib.sha256(image_path.read_bytes()).hexdigest() == fixture["image_sha256"]
 
@@ -334,16 +344,11 @@ def test_food_vision_manifests_have_canonical_lf_identity():
     manifest_paths = sorted(
         (repository_root / "tests/fixtures/food_vision_quality").glob("*/manifest.json")
     )
-    assert {path.parent.name for path in manifest_paths} == {"v1", "v2"}
+    assert {path.parent.name for path in manifest_paths} == {"v1", "v2", "v3"}
 
     for manifest_path in manifest_paths:
         relative_path = manifest_path.relative_to(repository_root).as_posix()
-        canonical_bytes = subprocess.run(
-            ["git", "show", f"HEAD:{relative_path}"],
-            cwd=repository_root,
-            check=True,
-            capture_output=True,
-        ).stdout
+        canonical_bytes = manifest_path.read_bytes()
         assert b"\r\n" not in canonical_bytes
         attributes = subprocess.run(
             ["git", "check-attr", "eol", "--", relative_path],
@@ -376,7 +381,7 @@ def test_v2_dry_run_validates_manifest_and_makes_zero_provider_requests(tmp_path
 
 
 def test_unsupported_fixture_version_fails_closed_without_provider_request(tmp_path, monkeypatch):
-    manifest = _manifest(tmp_path, fixture_set_version="food_vision_quality_v3")
+    manifest = _manifest(tmp_path, fixture_set_version="food_vision_quality_v4")
     receipt_path = tmp_path / "receipt.json"
 
     def fail_dependencies():
@@ -478,3 +483,120 @@ def test_receipt_v3_preserves_schema_reason_without_raw_provider_content(tmp_pat
     assert diagnostics["schema_error_code"] == "invalid_json"
     assert diagnostics["schema_error_summary"] == "OTHER_PROVEN_CAUSE"
     assert raw_provider_fragment not in receipt_text
+
+
+def test_v3_dry_run_reuses_bound_v2_images_without_provider_request(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest_path = repository_root / "tests/fixtures/food_vision_quality/v3/manifest.json"
+    receipt_path = tmp_path / "receipt.json"
+
+    def fail_dependencies():
+        raise AssertionError("dry run must not load provider dependencies")
+
+    monkeypatch.setattr(harness, "_provider_dependencies", fail_dependencies)
+
+    assert harness.run(_args(manifest_path, receipt_path, model="not-selected")) == 0
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["schema_version"] == 3
+    assert receipt["fixture_set_version"] == "food_vision_quality_v3"
+    assert receipt["manifest_sha256"] == "543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202"
+    assert receipt["request_budget"] == 3
+    assert receipt["requests_used"] == 0
+    assert receipt["status"] == "DRY_RUN"
+
+
+def test_v3_manifest_and_review_package_are_digest_bound():
+    repository_root = Path(__file__).resolve().parents[2]
+    fixture_root = repository_root / "tests/fixtures/food_vision_quality/v3"
+    manifest_bytes = (fixture_root / "manifest.json").read_bytes()
+    review = json.loads((fixture_root / "review-package.json").read_bytes())
+
+    assert review["lifecycle"] == "CANDIDATE"
+    assert review["human_visual_review"] == "NOT_PERFORMED"
+    assert review["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
+    assert [item["id"] for item in review["fixtures"]] == [
+        "general-food-recognition",
+        "mixed-food-with-distractor",
+        "separate-condiments",
+    ]
+
+
+def test_v3_manifest_unknown_field_fails_closed(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    source = repository_root / "tests/fixtures/food_vision_quality/v3/manifest.json"
+    manifest = json.loads(source.read_bytes())
+    manifest["unknown_contract"] = True
+    tampered = tmp_path / "manifest.json"
+    tampered.write_text(json.dumps(manifest), encoding="utf-8")
+    receipt_path = tmp_path / "receipt.json"
+
+    monkeypatch.setattr(
+        harness,
+        "_provider_dependencies",
+        lambda: (_ for _ in ()).throw(AssertionError("preflight must not load provider")),
+    )
+
+    assert harness.run(_args(tampered, receipt_path, model="not-selected")) == 2
+    assert _read_receipt(receipt_path)["error_class"] == "FIXTURE_MANIFEST_INVALID"
+
+
+def test_v3_product_statuses_fit_receipt_v3_without_raw_provider_content(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest = repository_root / "tests/fixtures/food_vision_quality/v3/manifest.json"
+    receipt_path = tmp_path / "receipt.json"
+    payloads = [
+        _payload("apple", "banana", "bread"),
+        _payload("carrot", "cucumber", "cheese"),
+        _payload("ketchup", "yellow_sauce", "sauce", sauce_names=("ketchup", "yellow_sauce", "sauce")),
+    ]
+    calls = []
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "synthetic-test-key")
+
+    async def fake_provider(**kwargs):
+        kwargs["request_telemetry"].external_request_attempts += 1
+        calls.append(kwargs)
+        return _response(payloads[len(calls) - 1])
+
+    _install_provider(monkeypatch, fake_provider)
+
+    assert harness.run(_args(manifest, receipt_path, execute=True)) == 0
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["schema_version"] == 3
+    assert [fixture["request_status_class"] for fixture in receipt["fixtures"]] == [
+        "RECOGNITION_CORRECT",
+        "RECOGNITION_CORRECT",
+        "AMBIGUOUS_BUT_SAFELY_CLARIFIED",
+    ]
+    assert receipt["status"] == "PASS"
+    assert receipt["quality_gate"] == "PASS"
+
+
+def test_v3_unsupported_specificity_fails_product_contract(tmp_path, monkeypatch):
+    repository_root = Path(__file__).resolve().parents[2]
+    manifest = repository_root / "tests/fixtures/food_vision_quality/v3/manifest.json"
+    receipt_path = tmp_path / "receipt.json"
+    payloads = [
+        _payload("apple", "banana", "bread"),
+        _payload("carrot", "cucumber", "cheese"),
+        _payload("ketchup", "yellow_sauce", "sour_cream", sauce_names=("ketchup", "yellow_sauce", "sour_cream")),
+    ]
+    calls = []
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "synthetic-test-key")
+
+    async def fake_provider(**kwargs):
+        kwargs["request_telemetry"].external_request_attempts += 1
+        calls.append(kwargs)
+        return _response(payloads[len(calls) - 1])
+
+    _install_provider(monkeypatch, fake_provider)
+
+    assert harness.run(_args(manifest, receipt_path, execute=True)) == 1
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt["schema_version"] == 3
+    assert receipt["fixtures"][2]["request_status_class"] == "UNSUPPORTED_SPECIFICITY"
+    assert receipt["error_class"] == "PRODUCT_CONTRACT_FAILED"
+    assert receipt["status"] == "FAIL"
+    assert receipt["cross_provider_fallbacks"] == 0

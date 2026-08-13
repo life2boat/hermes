@@ -1,0 +1,90 @@
+{
+  "fixture_set_version": "food_vision_quality_v3",
+  "lifecycle": "CANDIDATE",
+  "human_visual_review_required": true,
+  "fixtures": [
+    {
+      "id": "general-food-recognition",
+      "image_path": "tests/fixtures/food_vision_quality/v2/images/fixture_a.png",
+      "image_sha256": "a4e259a7ec6a37b6b26dedd1671e9fddfca6528cf417642b504134121cbdb412",
+      "expected_food_items": [
+        "apple",
+        "banana",
+        "bread"
+      ],
+      "expected_sauce_items": [],
+      "allowed_aliases": {
+        "apple": [
+          "red apple"
+        ],
+        "bread": [
+          "bread roll",
+          "roll"
+        ]
+      },
+      "ignored_items": [],
+      "expected_needs_clarification": true,
+      "expected_invalid": false,
+      "ambiguity_items": []
+    },
+    {
+      "id": "mixed-food-with-distractor",
+      "image_path": "tests/fixtures/food_vision_quality/v2/images/fixture_b.png",
+      "image_sha256": "44d4b162fe04a9255e83d0d310ee4315afc2cf794c13fdc045b4ff6b32ed7f9a",
+      "expected_food_items": [
+        "carrot",
+        "cucumber",
+        "cheese"
+      ],
+      "expected_sauce_items": [],
+      "allowed_aliases": {
+        "cucumber": [
+          "green cucumber"
+        ]
+      },
+      "ignored_items": [
+        "empty cup"
+      ],
+      "expected_needs_clarification": true,
+      "expected_invalid": false,
+      "ambiguity_items": []
+    },
+    {
+      "id": "separate-condiments",
+      "image_path": "tests/fixtures/food_vision_quality/v2/images/fixture_c.png",
+      "image_sha256": "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd",
+      "expected_food_items": [],
+      "expected_sauce_items": [
+        "ketchup",
+        "yellow_sauce",
+        "sauce"
+      ],
+      "allowed_aliases": {
+        "ketchup": [
+          "tomato sauce"
+        ],
+        "yellow_sauce": [
+          "mustard"
+        ],
+        "sauce": [
+          "white sauce"
+        ]
+      },
+      "ignored_items": [],
+      "expected_needs_clarification": true,
+      "expected_invalid": false,
+      "ambiguity_items": [
+        {
+          "generic_label": "sauce",
+          "plausible_specific_labels": [
+            "mayonnaise",
+            "sour_cream",
+            "yogurt"
+          ],
+          "exact_subtype_supported": false,
+          "clarification_required": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,5 +1,28 @@
 # CURRENT_STATE changelog
 
+## 1.2.38 - 2026-08-13
+
+Added:
+- added provider-neutral `food_vision_quality_v3` as a `CANDIDATE`
+  successor with a closed ambiguity contract, unsupported-specificity outcome,
+  digest-bound review package, and provider-free dry-run support;
+- reused the exact three v2 image hashes without copying or modifying fixture
+  bytes; retained A/B controls and replaced only C reference semantics with the
+  runtime-canonical generic `sauce` plus clarification policy.
+
+Changed:
+- extended the harness allowlist and scorer additively for v3 while retaining
+  runtime schema `food_vision_inventory_v1`, receipt schema version 3, three-
+  request budget, zero retries/fallbacks, and unchanged quality thresholds;
+- recorded Fixture D as not required because existing fixtures already cover
+  exact recognition, distractor rejection, resolvable condiments, and visual
+  ambiguity.
+
+Safety:
+- v1/v2 manifests, expectations, provenance and image bytes remain unchanged;
+- human visual review remains `NOT_PERFORMED`, no provider model is selected or
+  executed, and production/database/Qdrant/secret/feature/deployment state is
+  unchanged.
 ## 1.2.37 - 2026-08-13
 
 Changed:

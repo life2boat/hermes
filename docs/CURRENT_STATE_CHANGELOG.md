@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.48 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #163 merged the
+  canonical staged Memory Convergence migration at canonical main
+  `b3653ca0ddc9841291cdfee80abe47ba126067de`.
+
+Safety:
+- the closure is repository documentation only; no production, database,
+  Qdrant, secret, feature-flag, deployment, runtime, or live-smoke state changed.
+
 ## 1.2.47 - 2026-08-13
 
 Changed:

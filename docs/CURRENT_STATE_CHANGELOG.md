@@ -1,5 +1,20 @@
 # CURRENT_STATE changelog
 
+## 1.2.33 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #147 merged the Prompt
+  Engineering and Prompt Quality System at canonical main
+  `9f5e8ff03d4bfbb673292775082a8801002a3e32`;
+- preserved the prompt corpus lifecycle state `CANDIDATE` and human review state
+  `NOT_PERFORMED` while recording its provider-free technical gate as PASS.
+
+Safety:
+- no provider call, runtime, production, database, Qdrant, secret, credential,
+  deployment, or live-smoke action occurred;
+- raw prompts, dynamic payloads, private reasoning, and raw chain-of-thought remain
+  forbidden trace evidence.
+
 ## 1.2.32 - 2026-08-12
 
 Added:

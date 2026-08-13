@@ -1,5 +1,28 @@
 # CURRENT_STATE changelog
 
+## 1.2.36 - 2026-08-13
+
+Added:
+- bound the exact sanitized replacement receipt by SHA256 and completed
+  provider-free schema, runtime-parity, and fixture-validity forensics;
+- added receipt schema version 3 with closed local validator reason codes and
+  coarse trigger summaries for future schema-invalid evidence.
+
+Changed:
+- recorded benchmark/runtime schema parity as passing for
+  food_vision_inventory_v1;
+- recorded historical A/C trigger detail as unrecoverable from immutable
+  receipt v2, Fixture A as low-complexity schema nonconformance, and Fixture C
+  as product-relevant but visually ambiguous at the exact sour-cream label;
+- classified v2 as requiring a new immutable successor rather than changing
+  historical manifest or fixture bytes.
+
+Safety:
+- no provider request was performed and no provider response, prompt, image,
+  identifier, path, credential, or request payload is added to receipt v3;
+- prompt corpus digest/lifecycle and all production, database, Qdrant, secret,
+  feature flag, deployment, and runtime state remain unchanged.
+
 ## 1.2.35 - 2026-08-13
 
 Changed:

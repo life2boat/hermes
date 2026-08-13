@@ -515,6 +515,7 @@ def write_runtime_status(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    memory_vector: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
     path = _get_runtime_status_path()
@@ -535,6 +536,8 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = max(0, int(active_agents))
+    if memory_vector is not _UNSET:
+        payload["memory_vector"] = dict(memory_vector)
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})

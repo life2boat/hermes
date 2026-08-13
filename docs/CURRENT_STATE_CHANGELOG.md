@@ -1,5 +1,17 @@
 # CURRENT_STATE changelog
 
+## 1.2.45 - 2026-08-13
+
+Changed:
+- accepted Memory Convergence v1.1 with gateway-owned bounded startup/periodic
+  reconciliation, privacy-safe alertable health, owner-scoped repair and
+  read-only historical orphan classification.
+
+Safety:
+- tests use disposable SQLite and fake clients only; production migration,
+  vector activation, live Qdrant scan/delete, provider calls and deployment
+  were not performed.
+
 ## 1.2.44 - 2026-08-13
 
 Changed:

@@ -2723,6 +2723,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._stop_task: Optional[asyncio.Task] = None
         self._weight_reminder_scheduler = None
         self._weight_reminder_scheduler_task: Optional[asyncio.Task] = None
+        self._memory_vector_runtime = None
         
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
@@ -5735,6 +5736,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._wire_teams_pipeline_runtime()
 
         self._running = True
+        await self._start_memory_vector_runtime_if_configured()
         self._update_runtime_status("running")
         
         # Emit gateway:startup hook
@@ -5896,6 +5898,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if self._weight_reminder_scheduler_task is not None:
             self._background_tasks.add(self._weight_reminder_scheduler_task)
             self._weight_reminder_scheduler_task.add_done_callback(self._background_tasks.discard)
+
+    async def _start_memory_vector_runtime_if_configured(self) -> None:
+        from gateway.memory.runtime import MemoryVectorRuntime
+
+        runtime = MemoryVectorRuntime.from_environment()
+        self._memory_vector_runtime = runtime
+        await runtime.start()
+
+    async def _stop_memory_vector_runtime(self) -> None:
+        runtime = getattr(self, "_memory_vector_runtime", None)
+        self._memory_vector_runtime = None
+        if runtime is not None:
+            await runtime.stop()
 
 
     async def _handoff_watcher(self, interval: float = 2.0) -> None:
@@ -6561,6 +6576,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
+            await GatewayRunner._stop_memory_vector_runtime(self)
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.

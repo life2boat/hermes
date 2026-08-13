@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.44
+version: 1.2.45
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: ac9b4f0e4d8d7a1d117f1fa4301bf2d138e95ca0
+state_verified_against_main_sha: a0625b85d3adac1168a33ef4876a351bca2528ef
 production_sha: unknown
 ---
 
@@ -12,6 +12,20 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Memory Convergence v1.1 repository state
+
+- SQLite remains authoritative and Qdrant remains derived and untrusted.
+- When `MEMORY_VECTOR_ENABLED=true`, the gateway owns one bounded task per
+  process: immediate startup recovery plus periodic bounded ticks. Disabled
+  mode creates no runtime database or Qdrant side effect.
+- Runtime status publishes aggregate convergence/alert state and reconciliation
+  timestamps without fact content, vectors, payloads, identifiers or secrets.
+- BLOCKED repair requires one owner and explicit bounded outbox operation ids.
+- Historical orphan classification is offline/read-only; live scan and delete
+  are not performed or authorized.
+- This is repository implementation and acceptance, not proof of production
+  migration, activation or live reconciliation.
 
 ## 1. Summary
 

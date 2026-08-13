@@ -203,7 +203,7 @@ def test_qdrant_results_are_validated_against_sqlite(tmp_path):
     mock_client.search.return_value = [
         QdrantMemoryHit(
             sqlite_id=sqlite_id,
-            payload={"sqlite_id": sqlite_id, "user_id": 33},
+            payload={"sqlite_id": sqlite_id, "user_id": 33, "vector_revision": 1},
             score=0.99,
         )
     ]
@@ -283,7 +283,7 @@ def test_qdrant_result_is_dropped_when_trust_score_below_threshold(tmp_path):
     mock_client.search.return_value = [
         QdrantMemoryHit(
             sqlite_id=sqlite_id,
-            payload={"sqlite_id": sqlite_id, "user_id": 66},
+            payload={"sqlite_id": sqlite_id, "user_id": 66, "vector_revision": 1},
             score=0.95,
         )
     ]
@@ -308,7 +308,7 @@ def test_mismatched_qdrant_user_id_is_hard_blocked(tmp_path):
     mock_client.search.return_value = [
         QdrantMemoryHit(
             sqlite_id=sqlite_id,
-            payload={"sqlite_id": sqlite_id, "user_id": 88},
+            payload={"sqlite_id": sqlite_id, "user_id": 88, "vector_revision": 1},
             score=0.88,
         )
     ]
@@ -318,6 +318,38 @@ def test_mismatched_qdrant_user_id_is_hard_blocked(tmp_path):
     assert results != []
     assert all(item["retrieval_source"] != "qdrant" for item in results)
     assert all(item["user_id"] == 77 for item in results)
+    bridge.close()
+
+
+def test_stale_qdrant_revision_is_rejected_and_sqlite_fallback_remains_authoritative(tmp_path):
+    mock_client = MagicMock()
+    bridge = _build_bridge(tmp_path, mock_client)
+    sqlite_id = bridge.upsert_fact(
+        user_id=91,
+        entity="profile",
+        key="goal",
+        value="old value",
+        source="user",
+    )
+    bridge.upsert_fact(
+        user_id=91,
+        entity="profile",
+        key="goal",
+        value="canonical new value",
+        source="user",
+    )
+    mock_client.search.return_value = [
+        QdrantMemoryHit(
+            sqlite_id=sqlite_id,
+            payload={"sqlite_id": sqlite_id, "user_id": 91, "vector_revision": 1},
+            score=0.99,
+        )
+    ]
+
+    results = bridge.search_relevant_facts(user_id=91, query="canonical", limit=2)
+
+    assert results[0]["value"] == "canonical new value"
+    assert results[0]["retrieval_source"] != "qdrant"
     bridge.close()
 
 

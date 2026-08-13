@@ -34,22 +34,24 @@ from ai_engineering.task_analysis import (
 _MAX_FILE_BYTES = 512 * 1024  # 512 KB
 
 
+class _SafeReadError(Exception):
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
 def _safe_read(path: Path) -> bytes:
     """Read a file with basic safety checks."""
     if path.is_symlink():
-        print(f"analyze_task: UNSAFE_PATH: {path}", file=sys.stderr)
-        sys.exit(2)
+        raise _SafeReadError(f"analyze_task: UNSAFE_PATH: {path}")
     if not path.is_file():
-        print(f"analyze_task: FILE_NOT_FOUND: {path}", file=sys.stderr)
-        sys.exit(2)
+        raise _SafeReadError(f"analyze_task: FILE_NOT_FOUND: {path}")
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        print(f"analyze_task: FILE_UNREADABLE: {exc}", file=sys.stderr)
-        sys.exit(2)
+        raise _SafeReadError(f"analyze_task: FILE_UNREADABLE: {exc}") from exc
     if len(raw) > _MAX_FILE_BYTES:
-        print(f"analyze_task: FILE_TOO_LARGE: {path}", file=sys.stderr)
-        sys.exit(2)
+        raise _SafeReadError(f"analyze_task: FILE_TOO_LARGE: {path}")
     return raw
 
 
@@ -86,8 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
     # Load and validate inputs.
-    intent_raw = _safe_read(args.intent)
-    lineage_raw = _safe_read(args.lineage)
+    try:
+        intent_raw = _safe_read(args.intent)
+        lineage_raw = _safe_read(args.lineage)
+    except _SafeReadError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
 
     try:
         intent = load_intent_from_bytes(intent_raw)

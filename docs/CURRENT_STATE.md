@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.34
+version: 1.2.35
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 17eac437bf7ed898938b37d4db4fefb053d06cec
+state_verified_against_main_sha: e4305e773db60e28b5a2a10071c3ecac48dceac9
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `17eac437bf7ed898938b37d4db4fefb053d06cec`.
+  `e4305e773db60e28b5a2a10071c3ecac48dceac9`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.

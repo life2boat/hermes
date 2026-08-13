@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.43
+version: 1.2.44
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: e102b64dcfdea0120c891ba1298fecfd6c75cb62
+state_verified_against_main_sha: ac9b4f0e4d8d7a1d117f1fa4301bf2d138e95ca0
 production_sha: unknown
 ---
 

@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.44 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #159 merged durable
+  SQLite-to-Qdrant memory convergence at canonical main
+  `ac9b4f0e4d8d7a1d117f1fa4301bf2d138e95ca0`.
+
+Safety:
+- the closure is repository documentation only; no production, database,
+  Qdrant, secret, feature-flag, deployment, runtime, or live-smoke state changed.
+
 ## 1.2.43 - 2026-08-13
 
 Changed:

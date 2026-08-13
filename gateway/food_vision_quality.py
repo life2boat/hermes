@@ -215,6 +215,7 @@ def score_food_vision_payload(
     expected_sauce_items: Iterable[str],
     expected_needs_clarification: bool,
     allowed_aliases: Mapping[str, Iterable[str]] | None = None,
+    ambiguity_items: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate and score one application-format provider response.
 
@@ -225,6 +226,16 @@ def score_food_vision_payload(
     expected_food = _canonical_expected(expected_food_items, allowed_aliases)
     expected_sauces = _canonical_expected(expected_sauce_items, allowed_aliases)
     expected_components = expected_food | expected_sauces
+    ambiguity_policies = tuple(
+        (
+            _canonical_with_alias(str(item["generic_label"]), allowed_aliases),
+            _canonical_expected(item["plausible_specific_labels"], allowed_aliases),
+            bool(item["exact_subtype_supported"]),
+            bool(item["clarification_required"]),
+        )
+        for item in (ambiguity_items or ())
+    )
+    clarification_required = expected_needs_clarification or any(policy[3] for policy in ambiguity_policies)
     validation = validate_food_vision_inventory(payload_text)
     if validation.inventory is None:
         schema_error_code, schema_error_summary = _schema_error_diagnostic(validation.reason)
@@ -246,6 +257,8 @@ def score_food_vision_payload(
             "expected_sauce_count": len(expected_sauces),
             "schema_valid": False,
             "normalized_prediction_count": 0,
+            "unsupported_specificity_count": 0,
+            "product_outcome": "UNSAFE_OUTPUT" if unsafe else "SCHEMA_INVALID",
             "diagnostics": _empty_diagnostics(
                 schema_error_code=schema_error_code,
                 schema_error_summary=schema_error_summary,
@@ -260,9 +273,29 @@ def score_food_vision_payload(
     }
     true_positive = len(actual_components & expected_components)
     sauce_true_positive = len(actual_sauces & expected_sauces)
+    unsupported_specificity = set().union(
+        *(
+            actual_components & specific_labels
+            for _generic, specific_labels, exact_supported, _clarification in ambiguity_policies
+            if not exact_supported
+        ),
+        set(),
+    )
     precision = true_positive / len(actual_components) if actual_components else 0.0
     recall = true_positive / len(expected_components) if expected_components else 1.0
     sauce_recall = sauce_true_positive / len(expected_sauces) if expected_sauces else 1.0
+    clarification_correct = (validation.status == "NEEDS_CLARIFICATION") == clarification_required
+    recognition_correct = precision == 1.0 and recall == 1.0 and sauce_recall == 1.0
+    if unsupported_specificity:
+        product_outcome = "UNSUPPORTED_SPECIFICITY"
+    elif not recognition_correct:
+        product_outcome = "RECOGNITION_MISS"
+    elif not clarification_correct:
+        product_outcome = "CLARIFICATION_REQUIRED"
+    elif ambiguity_policies:
+        product_outcome = "AMBIGUOUS_BUT_SAFELY_CLARIFIED"
+    else:
+        product_outcome = "RECOGNITION_CORRECT"
     return {
         "major_component_precision": precision,
         "major_component_recall": recall,
@@ -270,9 +303,7 @@ def score_food_vision_payload(
         "unsafe_aggregate_count": 0,
         "invalid_aggregate_count": 0,
         "unsupported_combined_title_count": 0,
-        "low_confidence_gate_correctness": int(
-            (validation.status == "NEEDS_CLARIFICATION") == expected_needs_clarification
-        ),
+        "low_confidence_gate_correctness": int(clarification_correct),
         "true_positive_count": true_positive,
         "predicted_count": len(actual_components),
         "expected_count": len(expected_components),
@@ -281,6 +312,8 @@ def score_food_vision_payload(
         "expected_sauce_count": len(expected_sauces),
         "schema_valid": True,
         "normalized_prediction_count": len(actual_components),
+        "unsupported_specificity_count": len(unsupported_specificity),
+        "product_outcome": product_outcome,
         "diagnostics": _diagnostics(
             actual_components=actual_components,
             expected_components=expected_components,

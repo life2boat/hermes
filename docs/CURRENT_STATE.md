@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.37
+version: 1.2.38
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: e97df4b4804aa637a6992c7b64f6d94836d3d3db
+state_verified_against_main_sha: a983688cab9c3c4d0824cc905f52cd981ecabf80
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `e97df4b4804aa637a6992c7b64f6d94836d3d3db`.
+  `a983688cab9c3c4d0824cc905f52cd981ecabf80`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -172,9 +172,10 @@ Git.
 - Offline mixed-plate food-vision quality fixtures and deterministic thresholds
   are present in the test suite.
 - A canonical non-production provider-executing quality harness now exists at
-  `scripts/run_food_vision_quality.py`, bound to the versioned synthetic
-  `food_vision_quality_v1` and `food_vision_quality_v2` manifests and sanitized
-  receipts. Qwen rollout eligibility remains blocked and no model is approved.
+  `scripts/run_food_vision_quality.py`, bound to immutable synthetic
+  `food_vision_quality_v1`/`v2`, candidate `food_vision_quality_v3`, and
+  sanitized receipt-v3 evidence. Qwen rollout eligibility remains blocked and
+  no model is approved.
 - The Stage-1 food-vision prompt remains shorter, provider-neutral, and no
   longer anchored to the failed benchmark plate or pastry labels.
 - Local confirmation requirement is derived deterministically from validated
@@ -248,6 +249,21 @@ Git.
   coarse static trigger class. It never records provider output, prompts, image
   data, identifiers, paths, credentials, or request payloads. Historical
   version-2 evidence remains unchanged.
+- Product-aligned `food_vision_quality_v3` is a provider-neutral `CANDIDATE`
+  successor at manifest SHA256
+  `543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202`.
+  It reuses all three exact v2 PNG identities without copying or changing them.
+  A/B preserve recognition and distractor controls. C requires ketchup,
+  generic yellow sauce, and generic `sauce` plus clarification; plausible exact
+  white-condiment subtypes are unsupported specificity, not schema invalidity.
+- The v3 review package SHA256 is
+  `9d67211c005ad5b7758e67ce6f58c8c5d5a29d6739039f463dc2cb2d9c7762a1`.
+  Human visual review is `NOT_PERFORMED`; reviewer count is unspecified by the
+  repository contract. No Fixture D was added because A/B already test exact
+  recognition and C contains both resolvable and ambiguous condiment evidence.
+- V3 keeps runtime schema `food_vision_inventory_v1`, request budget 3, retries
+  0, cross-provider fallback 0, receipt schema version 3, and all existing
+  quality thresholds. Provider execution remains outside this repository task.
 - The three-image benchmark remains a release gate only and is too small to
   establish general superiority or inferiority of one model over another.
 - No provider is eligible for rollout, automatic provider selection remains

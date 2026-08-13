@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "fixture_set_version": "food_vision_quality_v3",
+  "lifecycle": "CANDIDATE",
+  "human_visual_review": "NOT_PERFORMED",
+  "manifest_sha256": "543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202",
+  "fixtures": [
+    {
+      "id": "general-food-recognition",
+      "image_sha256": "a4e259a7ec6a37b6b26dedd1671e9fddfca6528cf417642b504134121cbdb412",
+      "visually_supported_labels": [
+        "apple",
+        "banana",
+        "bread"
+      ],
+      "plausible_alternatives": [],
+      "exact_subtype_supported": true,
+      "clarification_expected": true
+    },
+    {
+      "id": "mixed-food-with-distractor",
+      "image_sha256": "44d4b162fe04a9255e83d0d310ee4315afc2cf794c13fdc045b4ff6b32ed7f9a",
+      "visually_supported_labels": [
+        "carrot",
+        "cucumber",
+        "cheese"
+      ],
+      "plausible_alternatives": [],
+      "exact_subtype_supported": true,
+      "clarification_expected": true
+    },
+    {
+      "id": "separate-condiments",
+      "image_sha256": "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd",
+      "visually_supported_labels": [
+        "ketchup",
+        "yellow_sauce",
+        "sauce"
+      ],
+      "plausible_alternatives": [
+        "mayonnaise",
+        "sour_cream",
+        "yogurt"
+      ],
+      "exact_subtype_supported": false,
+      "clarification_expected": true
+    }
+  ]
+}

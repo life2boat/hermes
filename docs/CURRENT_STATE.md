@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.38
+version: 1.2.39
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: a983688cab9c3c4d0824cc905f52cd981ecabf80
+state_verified_against_main_sha: 57b4376464d0d40926320ced73e5d4b601dea86e
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `a983688cab9c3c4d0824cc905f52cd981ecabf80`.
+  `57b4376464d0d40926320ced73e5d4b601dea86e`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -252,6 +252,8 @@ Git.
 - Product-aligned `food_vision_quality_v3` is a provider-neutral `CANDIDATE`
   successor at manifest SHA256
   `543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202`.
+  PR #153 merged this immutable candidate contract into canonical main at
+  `57b4376464d0d40926320ced73e5d4b601dea86e`.
   It reuses all three exact v2 PNG identities without copying or changing them.
   A/B preserve recognition and distractor controls. C requires ketchup,
   generic yellow sauce, and generic `sauce` plus clarification; plausible exact

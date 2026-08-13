@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.35 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #149 merged the current-main
+  Qwen `qwen3.6-flash` replacement evidence at canonical main
+  `e4305e773db60e28b5a2a10071c3ecac48dceac9`;
+- recorded PR #146 as superseded by the semantic current-main replacement rather
+  than merged from its stale conflicting branch.
+
+Safety:
+- prompt corpus digest and lifecycle remain unchanged;
+- no provider request, production, database, Qdrant, secret, feature flag,
+  deployment, or runtime activation occurred.
 ## 1.2.34 - 2026-08-13
 
 Added:

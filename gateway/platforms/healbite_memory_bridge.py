@@ -141,7 +141,7 @@ class HealBiteMemoryBridge:
             self.analytics_logger.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=0.25)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -334,12 +334,23 @@ class HealBiteMemoryBridge:
         *,
         batch_size: int = 25,
         time_budget_seconds: float = 2.0,
-        retry_blocked: bool = False,
     ) -> VectorSyncBatchResult:
         return self._convergence.process_batch(
             batch_size=batch_size,
             time_budget_seconds=time_budget_seconds,
-            retry_blocked=retry_blocked,
+        )
+
+    def repair_blocked_vector_sync(
+        self,
+        *,
+        owner_user_id: int,
+        operation_ids: list[int] | tuple[int, ...],
+        time_budget_seconds: float = 2.0,
+    ) -> VectorSyncBatchResult:
+        return self._convergence.repair_blocked_operations(
+            owner_user_id=require_memory_user_id(owner_user_id),
+            operation_ids=operation_ids,
+            time_budget_seconds=time_budget_seconds,
         )
 
     def get_vector_sync_status(self) -> VectorSyncStatus:
@@ -401,6 +412,11 @@ class HealBiteMemoryBridge:
                 continue
             fact = facts_by_id.get(hit.sqlite_id)
             if fact is None:
+                continue
+            payload_revision = hit.payload.get("vector_revision")
+            if type(payload_revision) is not int:
+                continue
+            if payload_revision != int(fact["vector_revision"]):
                 continue
             if float(fact.get("trust_score") or 0.0) < min_trust_score:
                 continue

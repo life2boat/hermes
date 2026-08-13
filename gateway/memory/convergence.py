@@ -16,6 +16,8 @@ _DEFAULT_MAX_ATTEMPTS = 8
 _MAX_BACKOFF_SECONDS = 300.0
 _VALID_OPERATIONS = frozenset({"UPSERT", "DELETE"})
 _READY_STATES = ("PENDING", "RETRY")
+_DEFAULT_ALERT_AGE_SECONDS = _MAX_BACKOFF_SECONDS * 2
+_MAX_REPAIR_OPERATIONS = 25
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,11 +40,14 @@ class VectorSyncStatus:
     blocked_count: int
     oldest_pending_age_seconds: float | None
     last_success_at: float | None
+    last_reconciliation_at: float | None
     last_error_class: str | None
     processed_count: int
     succeeded_count: int
     failed_count: int
     superseded_count: int
+    alert_status: str
+    alert_reasons: tuple[str, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -60,6 +65,7 @@ class MemoryVectorConvergence:
         fact_text: Callable[[dict[str, Any]], str],
         clock: Callable[[], float] = time.time,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        alert_age_seconds: float = _DEFAULT_ALERT_AGE_SECONDS,
     ) -> None:
         self.db_path = Path(db_path)
         self.qdrant_adapter = qdrant_adapter
@@ -67,9 +73,10 @@ class MemoryVectorConvergence:
         self.fact_text = fact_text
         self.clock = clock
         self.max_attempts = max(1, int(max_attempts))
+        self.alert_age_seconds = max(1.0, float(alert_age_seconds))
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=0.25)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -114,11 +121,21 @@ class MemoryVectorConvergence:
                 failed_count INTEGER NOT NULL DEFAULT 0,
                 superseded_count INTEGER NOT NULL DEFAULT 0,
                 last_success_at REAL,
+                last_reconciliation_at REAL,
                 last_error_class TEXT
             );
             INSERT OR IGNORE INTO {META_TABLE}(singleton_id) VALUES (1);
             """
         )
+
+        meta_columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({META_TABLE})").fetchall()
+        }
+        if "last_reconciliation_at" not in meta_columns:
+            conn.execute(
+                f"ALTER TABLE {META_TABLE} ADD COLUMN last_reconciliation_at REAL"
+            )
 
         seeded = conn.execute(
             f"SELECT schema_seeded FROM {META_TABLE} WHERE singleton_id = 1"
@@ -198,7 +215,6 @@ class MemoryVectorConvergence:
         *,
         batch_size: int = 25,
         time_budget_seconds: float = 2.0,
-        retry_blocked: bool = False,
     ) -> VectorSyncBatchResult:
         if not self.vector_enabled or self.qdrant_adapter is None:
             status = self.get_status()
@@ -218,9 +234,13 @@ class MemoryVectorConvergence:
         budget = max(0.001, float(time_budget_seconds))
         started = time.perf_counter()
         now = float(self.clock())
-        selected_states = (*_READY_STATES, "BLOCKED") if retry_blocked else _READY_STATES
+        selected_states = _READY_STATES
         placeholders = ", ".join("?" for _ in selected_states)
         with self._connect() as conn:
+            conn.execute(
+                f"UPDATE {META_TABLE} SET last_reconciliation_at = ? WHERE singleton_id = 1",
+                (now,),
+            )
             rows = conn.execute(
                 f"""
                 SELECT * FROM {OUTBOX_TABLE}
@@ -247,6 +267,71 @@ class MemoryVectorConvergence:
             else:
                 blocked += 1
 
+        status = self.get_status()
+        return VectorSyncBatchResult(
+            status=status.status,
+            processed=processed,
+            succeeded=succeeded,
+            retried=retried,
+            blocked=blocked,
+            superseded=superseded,
+            remaining=status.pending_count + status.retryable_count + status.blocked_count,
+        )
+
+    def repair_blocked_operations(
+        self,
+        *,
+        owner_user_id: int,
+        operation_ids: list[int] | tuple[int, ...],
+        time_budget_seconds: float = 2.0,
+    ) -> VectorSyncBatchResult:
+        """Retry only explicitly selected blocked operations in one owner scope."""
+        if type(owner_user_id) is not int or owner_user_id <= 0:
+            raise ValueError("owner_user_id must be a positive integer")
+        normalized_ids = tuple(dict.fromkeys(operation_ids))
+        if not normalized_ids or len(normalized_ids) > _MAX_REPAIR_OPERATIONS:
+            raise ValueError("operation_ids must contain between 1 and 25 unique ids")
+        if any(type(item) is not int or item <= 0 for item in normalized_ids):
+            raise ValueError("operation_ids must contain only positive integers")
+        if not self.vector_enabled or self.qdrant_adapter is None:
+            status = self.get_status()
+            return VectorSyncBatchResult(
+                status=status.status,
+                processed=0,
+                succeeded=0,
+                retried=0,
+                blocked=0,
+                superseded=0,
+                remaining=status.pending_count + status.retryable_count + status.blocked_count,
+            )
+
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM {OUTBOX_TABLE}
+                WHERE state = 'BLOCKED' AND user_id = ?
+                  AND id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                (owner_user_id, *normalized_ids),
+            ).fetchall()
+
+        started = time.perf_counter()
+        processed = succeeded = retried = blocked = superseded = 0
+        for row in rows:
+            if time.perf_counter() - started >= max(0.001, float(time_budget_seconds)):
+                break
+            processed += 1
+            outcome = self._process_operation(dict(row), now=float(self.clock()))
+            if outcome == "SUCCEEDED":
+                succeeded += 1
+            elif outcome == "SUPERSEDED":
+                superseded += 1
+            elif outcome == "RETRY":
+                retried += 1
+            else:
+                blocked += 1
         status = self.get_status()
         return VectorSyncBatchResult(
             status=status.status,
@@ -512,14 +597,38 @@ class MemoryVectorConvergence:
             status = "PENDING"
         else:
             status = "CONVERGED"
+        oldest_age = None if oldest is None else max(0.0, now - float(oldest))
+        alert_reasons: list[str] = []
+        if blocked:
+            alert_reasons.append("BLOCKED_WORK")
+        if oldest_age is not None and oldest_age >= self.alert_age_seconds:
+            alert_reasons.append("STALE_BACKLOG")
+        last_reconciliation = (
+            None
+            if meta["last_reconciliation_at"] is None
+            else float(meta["last_reconciliation_at"])
+        )
+        if (
+            self.vector_enabled
+            and last_reconciliation is not None
+            and now - last_reconciliation >= self.alert_age_seconds
+        ):
+            alert_reasons.append("RECONCILER_STALE")
+        if alert_reasons:
+            alert_status = "ALERT"
+        elif retryable or pending:
+            alert_status = "WATCH"
+        else:
+            alert_status = "OK"
         return VectorSyncStatus(
             status=status,
             vector_enabled=self.vector_enabled,
             pending_count=pending,
             retryable_count=retryable,
             blocked_count=blocked,
-            oldest_pending_age_seconds=(None if oldest is None else max(0.0, now - float(oldest))),
+            oldest_pending_age_seconds=oldest_age,
             last_success_at=(None if meta["last_success_at"] is None else float(meta["last_success_at"])),
+            last_reconciliation_at=last_reconciliation,
             last_error_class=(
                 unresolved_error["last_error_class"]
                 if unresolved_error is not None
@@ -529,4 +638,6 @@ class MemoryVectorConvergence:
             succeeded_count=int(meta["succeeded_count"]),
             failed_count=int(meta["failed_count"]),
             superseded_count=int(meta["superseded_count"]),
+            alert_status=alert_status,
+            alert_reasons=tuple(alert_reasons),
         )

@@ -62,7 +62,7 @@ filled in from memory.
 | Concern | Primary sources | What they establish |
 | --- | --- | --- |
 | Hermes session state | `hermes_state.py` | Durable conversation/session records and FTS behavior |
-| HealBite Memory OS | `gateway/platforms/healbite_memory_bridge.py`, `gateway/memory/convergence.py` | SQLite fact source of truth, atomic durable vector intents, bounded reconciliation, user-scoped access and FTS/LIKE fallback |
+| HealBite Memory OS | `gateway/platforms/healbite_memory_bridge.py`, `gateway/memory/convergence.py`, `gateway/memory/runtime.py`, `gateway/memory/orphan_classifier.py` | SQLite fact source of truth, atomic durable vector intents, gateway-owned bounded reconciliation, privacy-safe health, owner-scoped repair, offline orphan classification, user-scoped access and FTS/LIKE fallback |
 | Qdrant adapter | `gateway/memory/qdrant_adapter.py`, `gateway/memory/embedding_adapter.py`, `gateway/memory/settings.py` | Optional derived semantic index, scoped deterministic point upsert/delete, strong reconciliation acknowledgement, user filters and graceful degradation |
 | Memory operations | `skills/memory/SKILL.md`, `RUNBOOK_MEMORY_OS.md`, `scripts/rebuild_qdrant_memory_index.py` | Read-only baseline, reconciliation, mutation authorization, backup and recovery procedure |
 | Product data | `gateway/healbite_*_schema.py`, `gateway/healbite_*.py` | HealBite SQLite schema and service-level user/household rules |

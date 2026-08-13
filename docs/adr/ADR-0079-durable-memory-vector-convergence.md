@@ -64,6 +64,16 @@ has no recursive retry or sleep loop. A Qdrant client initialization failure can
 be retried on a later due tick. One operation failure does not prevent later
 operations in the same batch from being examined.
 
+The normal gateway owns one reconciliation task when vector mode is enabled.
+It performs a bounded startup tick and bounded periodic ticks, publishes
+privacy-safe health through the existing runtime-status model, and stops with a
+bounded wait. Durable intent remains the shutdown/restart guarantee. Vector-off
+startup does not create/open the canonical database or contact Qdrant.
+
+Terminal repair is not a global queue reset. It requires an explicit bounded
+set of internal operation ids and one owner scope, then revalidates canonical
+owner, existence and revision before applying the ordinary idempotent operation.
+
 ## Migration and Rollback
 
 The Memory Bridge's existing idempotent schema initialization is the canonical
@@ -116,3 +126,5 @@ Observability contains counts, age, timestamps and closed error classes only.
 - Terminally blocked operations require an explicitly authorized repair action.
 - Full historical orphan discovery remains a separate, explicitly authorized
   collection-reconciliation scope; this design processes known durable intents.
+- Repository v1.1 provides an offline classifier but no deletion API or
+  live-scan authorization.

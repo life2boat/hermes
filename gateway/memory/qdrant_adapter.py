@@ -172,6 +172,25 @@ class QdrantMemoryAdapter:
             self._client_failed = False
             self._collection_ready = False
 
+    def _invalidate_client(self) -> None:
+        self._client = None
+        self._client_failed = True
+        self._collection_ready = False
+
+    @staticmethod
+    def _strong_acknowledged(result: Any, *, wait: bool) -> bool:
+        if not wait:
+            return True
+        status = getattr(result, "status", None)
+        if status is None and isinstance(result, dict):
+            nested = result.get("result")
+            status = nested.get("status") if isinstance(nested, dict) else result.get("status")
+        if hasattr(status, "value"):
+            status = status.value
+        if hasattr(status, "name") and not isinstance(status, str):
+            status = status.name
+        return isinstance(status, str) and status.lower() == "completed"
+
     def _vector_config(self) -> Any:
         try:
             from qdrant_client import models
@@ -210,6 +229,7 @@ class QdrantMemoryAdapter:
             self._collection_ready = True
             return True
         except Exception as exc:
+            self._invalidate_client()
             logger.warning(
                 "failed to ensure Qdrant collection: collection=%s error_type=%s",
                 self.collection_name,
@@ -240,12 +260,16 @@ class QdrantMemoryAdapter:
             },
         }
         try:
-            client.upsert(
+            result = client.upsert(
                 collection_name=self.collection_name,
                 points=[point],
                 wait=wait,
             )
-            return True
+            if self._strong_acknowledged(result, wait=wait):
+                return True
+            if wait:
+                logger.warning("Qdrant upsert did not return a strong completed acknowledgement")
+            return False
         except TypeError:
             if wait:
                 logger.warning("Qdrant client cannot prove strong upsert acknowledgement")
@@ -254,9 +278,11 @@ class QdrantMemoryAdapter:
                 client.upsert(collection_name=self.collection_name, points=[point])
                 return True
             except Exception as exc:
+                self._invalidate_client()
                 logger.warning("failed to upsert semantic memory point: error_type=%s", exc.__class__.__name__)
                 return False
         except Exception as exc:
+            self._invalidate_client()
             logger.warning("failed to upsert semantic memory point: error_type=%s", exc.__class__.__name__)
             return False
 
@@ -276,12 +302,16 @@ class QdrantMemoryAdapter:
             return False
         point_id = self.point_id(sqlite_id=sqlite_id, user_id=user_id)
         try:
-            client.delete(
+            result = client.delete(
                 collection_name=self.collection_name,
                 points_selector=[point_id],
                 wait=wait,
             )
-            return True
+            if self._strong_acknowledged(result, wait=wait):
+                return True
+            if wait:
+                logger.warning("Qdrant delete did not return a strong completed acknowledgement")
+            return False
         except TypeError:
             if wait:
                 logger.warning("Qdrant client cannot prove strong delete acknowledgement")
@@ -293,12 +323,14 @@ class QdrantMemoryAdapter:
                 )
                 return True
             except Exception as exc:
+                self._invalidate_client()
                 logger.warning(
                     "failed to delete semantic memory point: error_type=%s",
                     exc.__class__.__name__,
                 )
                 return False
         except Exception as exc:
+            self._invalidate_client()
             logger.warning(
                 "failed to delete semantic memory point: error_type=%s",
                 exc.__class__.__name__,

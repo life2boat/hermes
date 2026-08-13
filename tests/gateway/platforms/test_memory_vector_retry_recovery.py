@@ -12,6 +12,7 @@ def test_failed_client_initialization_recovers_on_due_retry(tmp_path, monkeypatc
     clock = [100.0]
     client = MagicMock()
     client.get_collection.return_value = {}
+    client.upsert.return_value = {"status": "completed"}
     attempts = {"count": 0}
 
     def factory():

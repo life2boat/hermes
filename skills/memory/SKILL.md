@@ -99,7 +99,7 @@ The current rebuild implementation is **upsert-only**. A successful rebuild repo
 4. **Validate user isolation.** Confirm every SQLite access is scoped by normalized `user_id` and Qdrant payload hydration re-checks ownership in SQLite. Never copy identifiers or payloads into reports.
 5. **Back up before SQLite mutation.** Use the SQLite backup API or approved online equivalent. Record checksum, run `PRAGMA integrity_check`, restore into a separate temporary database, and re-check integrity. Do not use a plain copy while writers are active.
 6. **Run a dry rebuild.** Keep `MEMORY_VECTOR_ENABLED=false` and use `--dry-run` against the resolved database or rehearsal copy. Confirm the candidate count matches the expected SQLite scope without contacting Qdrant.
-7. **Classify convergence.** Inspect aggregate durable outbox state and safe error classes first. `PENDING`/`DEGRADED`/`BLOCKED` is not converged. An equal global count does not prove identity equality or absence of unknown historical orphan points.
+7. **Classify convergence.** Inspect aggregate durable outbox state and safe error classes first. `PENDING`/`DEGRADED`/`BLOCKED` is not converged. An equal global count does not prove identity equality or absence of unknown historical orphan points. Inspect the gateway runtime-status `memory_vector` object when available: `WATCH` is temporary backlog and `ALERT` is blocked, stale backlog, or stale reconciler evidence. Never print raw rows.
 8. **Choose the least-mutating repair.** Prefer an authorized bounded tick over known durable intents. Use rebuild/replacement workflows only for historical drift outside the outbox; never infer a global delete set from counts.
 9. **Rebuild only with approval.** Pin the resolved Qdrant URL, collection, vector size, and DB path. Keep logs aggregate-only. Stop on adapter errors, negative results, unexpected candidate counts, or configuration drift.
 10. **Verify exact behavior.** Re-run safe counts and readiness, sample retrieval through the application hydration path, confirm user isolation, and verify SQLite fingerprints did not change during a Qdrant-only repair.
@@ -118,6 +118,8 @@ The current rebuild implementation is **upsert-only**. A successful rebuild repo
 
 - Assuming equal SQLite and Qdrant counts prove reconciliation.
 - Treating the upsert rebuild as deletion of stale Qdrant points.
+- Using the offline orphan classifier as deletion authority; it is read-only
+  evidence and always requires separate cleanup authorization.
 - Reading or reporting raw memory values, user IDs, Telegram IDs, or vector payloads.
 - Passing a guessed DB path and accidentally creating a new empty SQLite file.
 - Enabling vector search, replacing a collection, or restarting the bot as part of diagnosis without approval.

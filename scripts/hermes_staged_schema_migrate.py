@@ -2064,10 +2064,11 @@ def _execute_staged_body(
                 continue
             if table in migrated_counts and migrated_counts[table] != 0:
                 raise OrchestratorError("BACKFILL_ROWS_CREATED")
-        try:
-            _validate_memory_data_transition(source_lease.connection, staging_db)
-        except sqlite3.DatabaseError as exc:
-            raise OrchestratorError("MEMORY_DATA_TRANSITION_INVALID") from exc
+        if "memory_os_facts" in expected_names:
+            try:
+                _validate_memory_data_transition(source_lease.connection, staging_db)
+            except sqlite3.DatabaseError as exc:
+                raise OrchestratorError("MEMORY_DATA_TRANSITION_INVALID") from exc
         metadata = staging_db.stat()
         if (
             stat.S_IMODE(metadata.st_mode) != 0o600

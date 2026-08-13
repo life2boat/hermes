@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.37 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #151 merged the bounded
+  food-Vision receipt-v3 schema observability repair at canonical main
+  e97df4b4804aa637a6992c7b64f6d94836d3d3db.
+
+Safety:
+- no provider request, production, database, Qdrant, secret, feature flag,
+  deployment, or runtime activation occurred;
+- historical v2 manifest, images and receipt, quality thresholds, Prompt
+  corpus digest, lifecycle, and human-review state remain unchanged.
+
 ## 1.2.36 - 2026-08-13
 
 Added:

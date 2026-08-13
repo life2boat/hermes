@@ -6576,7 +6576,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
-            await self._stop_memory_vector_runtime()
+            await GatewayRunner._stop_memory_vector_runtime(self)
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.

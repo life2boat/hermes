@@ -27,3 +27,11 @@ classifications. The follow-up `food_vision_quality_v2` fixture set adds
 purpose-created photorealistic scenes while retaining exact hashes, the same
 scoring thresholds, and the strict no-request dry-run contract. It is a more
 representative candidate benchmark, not proof of production performance.
+
+A second bounded gap was proven by the immutable version-2 replacement receipt:
+schema-invalid fixtures retained no validator reason, so malformed JSON, field
+shape errors, and local invariant rejections could not be distinguished after
+the provider response was discarded. Receipt version 3 closes that gap using
+only the local validator's closed reason code and a coarse static trigger class.
+It still never persists provider output or any request payload. Historical
+version-2 evidence remains immutable; its missing reasons cannot be reconstructed.

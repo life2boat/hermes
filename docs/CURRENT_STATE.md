@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.35
+version: 1.2.36
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: e4305e773db60e28b5a2a10071c3ecac48dceac9
+state_verified_against_main_sha: 4f15e24dea039eae96406c542213bc06f3f51232
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `e4305e773db60e28b5a2a10071c3ecac48dceac9`.
+  `4f15e24dea039eae96406c542213bc06f3f51232`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -228,6 +228,26 @@ Git.
 - The simple-plate sample produced `0.0` major-component precision and `0.0`
   major-component recall for `qwen3.6-plus`; this is a confirmed benchmark
   outcome, not a confirmed root cause.
+- Provider-free forensics verified the exact private receipt digest and
+  sanitization. The benchmark and runtime both use
+  food_vision_inventory_v1, the same _VISION_PROMPT, the same
+  validate_food_vision_inventory validator, and fail-closed local confirmation
+  semantics; benchmark/runtime schema parity is PASS.
+- Historical receipt schema version 2 retained only SCHEMA_INVALID for fixtures
+  A and C and did not retain the local validator reason. Their exact trigger
+  cannot be reconstructed, so schema-invalid observability for that immutable
+  run is INSUFFICIENT; no visual-recognition failure is inferred.
+- Fixture A is a low-complexity separated apple/banana/bread control, so the
+  smallest proven failure class is schema nonconformance. Fixture C is a
+  product-relevant condiment scene, but its unlabelled white sauce is visually
+  ambiguous between sour cream and similar white condiments. Exact sour-cream
+  scoring is therefore too specific for the runtime generic-label plus
+  clarification policy; benchmark v2 requires a new immutable successor rather
+  than mutation.
+- Receipt schema version 3 records only the validator closed reason code and a
+  coarse static trigger class. It never records provider output, prompts, image
+  data, identifiers, paths, credentials, or request payloads. Historical
+  version-2 evidence remains unchanged.
 - The three-image benchmark remains a release gate only and is too small to
   establish general superiority or inferiority of one model over another.
 - No provider is eligible for rollout, automatic provider selection remains

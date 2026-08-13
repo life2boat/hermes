@@ -52,12 +52,15 @@ The receipt path must be new. Store execution evidence outside a Git worktree.
 
 ## Decision rule
 
-The version-2 receipt contains versioned fixture IDs and hashes, static
-request/error classes, bounded schema-validated prediction diagnostics, counts,
-aggregate metrics, and timestamps. Diagnostics expose only sanitized labels and
-canonical match/miss/unexpected sets; they never include image bytes, data URLs,
-absolute paths, prompt text, raw provider responses, headers, request IDs, or
-credentials. Historical version-1 receipts remain valid evidence.
+The version-3 receipt contains versioned fixture IDs and hashes, static
+request/error classes, bounded schema-validated prediction diagnostics, closed
+validator reason codes and coarse trigger summaries, counts, aggregate metrics,
+and timestamps. Diagnostics expose only sanitized labels, canonical
+match/miss/unexpected sets, and values from the local validator's closed reason
+registry; they never include image bytes, data URLs, absolute paths, prompt text,
+raw provider responses, headers, request IDs, or credentials. Historical
+version-1 and version-2 receipts remain valid evidence, but a version-2
+SCHEMA_INVALID result does not identify its exact validator trigger.
 
 Eligibility passes only when all hashes pass, all three requests are used once,
 the provider response is application-schema valid for every fixture, and:

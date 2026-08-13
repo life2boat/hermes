@@ -37,6 +37,8 @@ def test_diagnostics_explain_zero_match_without_changing_scores():
         expected_needs_clarification=False,
     )
     diagnostics = score["diagnostics"]
+    assert diagnostics["schema_error_code"] == "NONE"
+    assert diagnostics["schema_error_summary"] == "NONE"
     assert score["schema_valid"] is True
     assert score["normalized_prediction_count"] == 2
     assert score["true_positive_count"] == 0
@@ -75,3 +77,20 @@ def test_untrusted_validated_label_is_redacted_without_raw_content():
     assert "provider.invalid" not in serialized
     assert "base64" not in serialized
     assert "[REDACTED_LABEL]" in serialized
+
+
+def test_schema_invalid_diagnostics_preserve_only_closed_validator_reason():
+    raw_provider_fragment = "not-json-private-provider-fragment"
+    score = score_food_vision_payload(
+        raw_provider_fragment,
+        expected_food_items=["apple"],
+        expected_sauce_items=[],
+        expected_needs_clarification=True,
+    )
+
+    diagnostics = score["diagnostics"]
+    serialized = json.dumps(diagnostics, ensure_ascii=True)
+    assert score["schema_valid"] is False
+    assert diagnostics["schema_error_code"] == "invalid_json"
+    assert diagnostics["schema_error_summary"] == "OTHER_PROVEN_CAUSE"
+    assert raw_provider_fragment not in serialized

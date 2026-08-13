@@ -33,7 +33,7 @@ SUPPORTED_FIXTURE_SET_VERSIONS = frozenset({
 # Kept as the default only for existing callers that construct an in-memory v1
 # manifest. Receipt provenance always comes from the verified manifest.
 FIXTURE_SET_VERSION = "food_vision_quality_v1"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 REQUIRED_PROVIDER = "alibaba"
 PROVIDER_TIMEOUT_SECONDS = 60
 
@@ -125,6 +125,8 @@ def _safe_fixture_entry(
         "normalized_prediction_count": prediction_count,
         "expected_count": len(fixture["expected_food_items"]) + len(fixture["expected_sauce_items"]),
         "diagnostics": diagnostics or {
+            "schema_error_code": "NOT_EVALUATED",
+            "schema_error_summary": "NOT_EVALUATED",
             "validated_prediction_labels": [],
             "canonical_predicted_components": [],
             "matched_expected_components": [],

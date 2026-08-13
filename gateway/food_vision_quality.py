@@ -31,6 +31,29 @@ _DIAGNOSTIC_UNSAFE_RE = re.compile(
     r"(?:data\s*:|https?://|base64|bearer\s+|api[_-]?key|authorization|password|secret|token)",
     re.IGNORECASE,
 )
+_SCHEMA_ERROR_SUMMARIES = {
+    "invalid_json": "OTHER_PROVEN_CAUSE",
+    "aggregate_nutrition_present": "LOCAL_INVARIANT_REJECTION",
+    "unknown_top_level_fields": "UNKNOWN_FIELD",
+    "unsupported_schema_version": "INVALID_ENUM",
+    "empty_items": "OTHER_PROVEN_CAUSE",
+    "too_many_items": "LOCAL_INVARIANT_REJECTION",
+    "invalid_overall_confidence": "OTHER_PROVEN_CAUSE",
+    "invalid_needs_user_confirmation": "FIELD_TYPE_MISMATCH",
+    "invalid_warnings": "FIELD_TYPE_MISMATCH",
+    "too_many_warnings": "LOCAL_INVARIANT_REJECTION",
+    "invalid_warning_text": "OTHER_PROVEN_CAUSE",
+    "item_not_object": "FIELD_TYPE_MISMATCH",
+    "aggregate_item_field_present": "LOCAL_INVARIANT_REJECTION",
+    "unknown_item_fields": "UNKNOWN_FIELD",
+    "empty_item_name": "MISSING_REQUIRED_FIELD",
+    "invalid_item_confidence": "OTHER_PROVEN_CAUSE",
+    "invalid_is_sauce": "FIELD_TYPE_MISMATCH",
+    "negative_grams": "LOCAL_INVARIANT_REJECTION",
+    "invalid_gram_range": "LOCAL_INVARIANT_REJECTION",
+    "absurd_portion_range": "LOCAL_INVARIANT_REJECTION",
+    "combined_dish_title": "LOCAL_INVARIANT_REJECTION",
+}
 
 
 def canonical_food_component(name: str) -> str:
@@ -116,8 +139,22 @@ def _safe_diagnostic_labels(labels: Iterable[object]) -> tuple[list[str], int]:
     return safe, redactions
 
 
-def _empty_diagnostics() -> dict[str, Any]:
+def _schema_error_diagnostic(reason: str) -> tuple[str, str]:
+    """Return only closed, non-provider schema failure evidence."""
+
+    if reason in _SCHEMA_ERROR_SUMMARIES:
+        return reason, _SCHEMA_ERROR_SUMMARIES[reason]
+    return "unknown_validation_failure", "UNKNOWN"
+
+
+def _empty_diagnostics(
+    *,
+    schema_error_code: str = "NONE",
+    schema_error_summary: str = "NONE",
+) -> dict[str, Any]:
     return {
+        "schema_error_code": schema_error_code,
+        "schema_error_summary": schema_error_summary,
         "validated_prediction_labels": [],
         "canonical_predicted_components": [],
         "matched_expected_components": [],
@@ -147,6 +184,8 @@ def _diagnostics(
     matched_sauces, matched_sauce_redactions = _safe_diagnostic_labels(actual_sauces & expected_sauces)
     missed_sauces, missed_sauce_redactions = _safe_diagnostic_labels(expected_sauces - actual_sauces)
     return {
+        "schema_error_code": "NONE",
+        "schema_error_summary": "NONE",
         "validated_prediction_labels": labels,
         "canonical_predicted_components": canonical_predictions,
         "matched_expected_components": matched,
@@ -188,6 +227,7 @@ def score_food_vision_payload(
     expected_components = expected_food | expected_sauces
     validation = validate_food_vision_inventory(payload_text)
     if validation.inventory is None:
+        schema_error_code, schema_error_summary = _schema_error_diagnostic(validation.reason)
         unsafe = 1 if validation.reason == "aggregate_nutrition_present" else 0
         invalid = 0 if unsafe else 1
         return {
@@ -206,7 +246,10 @@ def score_food_vision_payload(
             "expected_sauce_count": len(expected_sauces),
             "schema_valid": False,
             "normalized_prediction_count": 0,
-            "diagnostics": _empty_diagnostics(),
+            "diagnostics": _empty_diagnostics(
+                schema_error_code=schema_error_code,
+                schema_error_summary=schema_error_summary,
+            ),
         }
 
     actual_components = {_canonical_with_alias(item.normalized_name, allowed_aliases) for item in validation.inventory.items}

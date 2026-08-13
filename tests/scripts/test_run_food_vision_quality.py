@@ -415,7 +415,7 @@ def test_tampered_v2_png_fails_before_provider_request(tmp_path, monkeypatch):
     assert receipt["requests_used"] == 0
 
 
-def test_receipt_v2_preserves_safe_fixture_diagnostics_without_raw_provider_content(tmp_path, monkeypatch):
+def test_receipt_v3_preserves_safe_fixture_diagnostics_without_raw_provider_content(tmp_path, monkeypatch):
     manifest = _manifest(tmp_path)
     receipt_path = tmp_path / "receipt.json"
     calls = []
@@ -433,16 +433,48 @@ def test_receipt_v2_preserves_safe_fixture_diagnostics_without_raw_provider_cont
 
     receipt_text = receipt_path.read_text(encoding="utf-8")
     receipt = json.loads(receipt_text)
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
     assert receipt["quality_gate"] == "FAIL"
     assert receipt["aggregate"]["precision"] == 0.0
     assert receipt["aggregate"]["recall"] == 0.0
     assert len(calls) == 3
     for expected, fixture in zip(("wrong-a", "wrong-b", "wrong-c"), receipt["fixtures"]):
         diagnostics = fixture["diagnostics"]
+        assert diagnostics["schema_error_code"] == "NONE"
+        assert diagnostics["schema_error_summary"] == "NONE"
         assert diagnostics["matched_expected_components"] == []
         assert diagnostics["missed_expected_components"]
         assert diagnostics["unexpected_predicted_components"] == [expected]
         assert diagnostics["validated_prediction_labels"] == [expected]
     for forbidden in ("data:image", "base64", "DASHSCOPE_API_KEY", "synthetic-test-key"):
         assert forbidden not in receipt_text
+
+
+def test_receipt_v3_preserves_schema_reason_without_raw_provider_content(tmp_path, monkeypatch):
+    manifest = _manifest(tmp_path)
+    receipt_path = tmp_path / "receipt.json"
+    raw_provider_fragment = "not-json-private-provider-fragment"
+    payloads = [
+        raw_provider_fragment,
+        _payload("banana"),
+        _payload("sauce", sauce_names=("sauce",)),
+    ]
+    calls = []
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "synthetic-test-key")
+
+    async def fake_provider(**kwargs):
+        kwargs["request_telemetry"].external_request_attempts += 1
+        calls.append(kwargs)
+        return _response(payloads[len(calls) - 1])
+
+    _install_provider(monkeypatch, fake_provider)
+
+    assert harness.run(_args(manifest, receipt_path, execute=True)) == 1
+
+    receipt_text = receipt_path.read_text(encoding="utf-8")
+    receipt = json.loads(receipt_text)
+    diagnostics = receipt["fixtures"][0]["diagnostics"]
+    assert receipt["schema_version"] == 3
+    assert diagnostics["schema_error_code"] == "invalid_json"
+    assert diagnostics["schema_error_summary"] == "OTHER_PROVEN_CAUSE"
+    assert raw_provider_fragment not in receipt_text

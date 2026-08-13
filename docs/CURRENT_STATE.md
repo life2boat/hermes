@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.33
+version: 1.2.34
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 9f5e8ff03d4bfbb673292775082a8801002a3e32
+state_verified_against_main_sha: 17eac437bf7ed898938b37d4db4fefb053d06cec
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `9f5e8ff03d4bfbb673292775082a8801002a3e32`.
+  `17eac437bf7ed898938b37d4db4fefb053d06cec`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -173,9 +173,8 @@ Git.
   are present in the test suite.
 - A canonical non-production provider-executing quality harness now exists at
   `scripts/run_food_vision_quality.py`, bound to the versioned synthetic
-  `food_vision_quality_v1` manifest and sanitized receipts. It has not executed
-  a real candidate model: Qwen rollout eligibility remains blocked and no model
-  is approved.
+  `food_vision_quality_v1` and `food_vision_quality_v2` manifests and sanitized
+  receipts. Qwen rollout eligibility remains blocked and no model is approved.
 - The Stage-1 food-vision prompt remains shorter, provider-neutral, and no
   longer anchored to the failed benchmark plate or pastry labels.
 - Local confirmation requirement is derived deterministically from validated
@@ -204,8 +203,22 @@ Git.
   `0.222222`, major-component recall `0.555556`, sauce recall `0.5`,
   confirmation correctness `1.000`, ambiguity gate pass `true`, aggregate
   nutrition violations `0`, and invalid staging `0`.
-- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
-  quality-benchmarked.
+- Historical `qwen3.6-flash` quality evidence was previously recorded as a
+  3-request benchmark with precision `0.7777777777777778`, recall
+  `0.7777777777777778`, and sauce recall `0.3333333333333333`; its exact
+  receipt is unavailable, so its diagnostics cannot be reconstructed.
+- A replacement `qwen3.6-flash` run on canonical main
+  `caadf124d006a543af012ac2b9b42343fc7524d0`, using manifest SHA256
+  `46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3`,
+  used exactly 3 provider requests, 0 retries, and 0 cross-provider fallbacks.
+  Its durable private receipt SHA256 is
+  `7b6c07a2912237bf353407ff3806560bce5b1b5ebd54b9f40b362f96f00efdc6`;
+  aggregate precision was `1.0`, recall `0.3333333333333333`, sauce recall
+  `0.0`, unsafe aggregate count `0`, and invalid aggregate count `2`.
+- The replacement quality gate failed: fixture B matched three normalized
+  components, while fixtures A and C were schema-invalid. This replacement is
+  new evidence and does not reconstruct the lost historical receipt;
+  `qwen3.6-flash` remains not rollout-eligible.
 - The `qwen3.6-plus` benchmark improved aggregate precision and recall versus
   `qwen3.7-plus`, but both remained below the quality gate and neither became a
   benchmark candidate.
@@ -355,8 +368,17 @@ Confirmed state:
   `NEXTGEN_QWEN_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
 - `qwen3.6-plus` has now completed the same three-image benchmark and remained
   `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE`, `benchmark_candidate=false`.
-- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is still not
-  quality-benchmarked.
+- Historical `qwen3.6-flash` quality evidence has no recoverable exact receipt;
+  its detailed diagnostics remain unknown and must not be reconstructed.
+- The replacement `qwen3.6-flash` execution on main
+  `caadf124d006a543af012ac2b9b42343fc7524d0` used manifest SHA256
+  `46eeef07535bf814167e2dab8c8c700ff4de14e1d47ecf7f8cfab21f6f3896c3`
+  and exactly 3 requests, 0 retries, and 0 fallbacks. Receipt SHA256 is
+  `7b6c07a2912237bf353407ff3806560bce5b1b5ebd54b9f40b362f96f00efdc6`.
+- Replacement aggregate precision was `1.0`, recall `0.3333333333333333`,
+  sauce recall `0.0`, unsafe aggregate count `0`, and invalid aggregate count
+  `2`. Fixture B matched three normalized components; fixtures A and C were
+  schema-invalid. The quality gate failed and no Qwen model became eligible.
 - `qwen3-vl-8b-instruct` remains `QWEN_FAIL_CLOSED_COMPATIBLE`,
   `benchmark_candidate=false`.
 - `qwen3.6-plus` safety and schema handling passed: schema validity `3/3`,
@@ -505,7 +527,8 @@ Current recorded state:
   aggregate nutrition violations `0`, and invalid staging `0`.
 - `qwen3.6-plus` final classification is
   `QWEN36_PLUS_FAIL_CLOSED_COMPATIBLE` with `benchmark_candidate=false`.
-- `qwen3.6-flash` remains `ACCESS_SCHEMA_PASS` only and is not benchmarked.
+- The replacement `qwen3.6-flash` v2 benchmark failed with two schema-invalid
+  fixtures; `benchmark_candidate=false` and model eligibility remains `FAIL`.
 - Eligible providers: none.
 - Automatic provider selection: false.
 - Deployment authorized: false.
@@ -557,8 +580,9 @@ For Qwen:
    alias limitations, or prompt-contract behavior.
 3. Do not change prompt, manifest, aliases, thresholds, runtime integration, or
    deployment policy before that provider-free analysis is complete and reviewed.
-4. `qwen3.6-flash` remains a possible future benchmark candidate only after
-   separate approval.
+4. Treat the replacement `qwen3.6-flash` failure as evidence for provider-free
+   schema forensics; do not authorize another model until benchmark parity and
+   diagnostic observability are established.
 5. Reusing the same benchmark context would establish controlled external
    benchmark-path model quality only; it would not prove current Hermes OAuth
    runtime compatibility, production integration readiness, or deployment

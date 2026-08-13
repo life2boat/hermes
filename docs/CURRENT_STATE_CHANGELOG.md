@@ -1,5 +1,30 @@
 # CURRENT_STATE changelog
 
+## 1.2.34 - 2026-08-13
+
+Added:
+- recorded durable replacement `food_vision_quality_v2` evidence for
+  `qwen3.6-flash` on canonical main
+  `caadf124d006a543af012ac2b9b42343fc7524d0`;
+- recorded receipt SHA256
+  `7b6c07a2912237bf353407ff3806560bce5b1b5ebd54b9f40b362f96f00efdc6`,
+  exact request policy (3 requests, 0 retries, 0 fallbacks), sanitized outcomes,
+  and aggregate metrics.
+
+Changed:
+- distinguished the lost historical v2 receipt and unresolved diagnostics from
+  the new replacement execution;
+- recorded that the replacement quality gate failed and no Qwen model is
+  rollout-approved;
+- preserved Prompt System v1, prompt corpus digest
+  `d52adea60862ad5ca2b71a23dfd506adc02ca8dcb3b6270ab79a51bc949c86ea`,
+  lifecycle `CANDIDATE`, and human review `NOT_PERFORMED`.
+
+Safety:
+- no provider request, production, database, Qdrant, secret, feature flag,
+  deployment, or runtime activation occurred; the private receipt remains
+  outside the repository.
+
 ## 1.2.33 - 2026-08-13
 
 Changed:

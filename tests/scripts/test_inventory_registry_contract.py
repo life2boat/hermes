@@ -76,6 +76,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "shopping",
         "inventory",
         "fridge_menu",
+        "memory_convergence",
     )
     manifest = schema_migrate.migration_registry_manifest()
     assert tuple(item["component"] for item in manifest) == (
@@ -84,6 +85,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "shopping",
         "inventory",
         "fridge_menu",
+        "memory_convergence",
     )
     assert manifest[-2] == {
         "component": "inventory",
@@ -195,6 +197,7 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
         "fridge_menu",
         "household",
         "inventory",
+        "memory_convergence",
         "shopping",
         "weekly",
     ]
@@ -222,6 +225,7 @@ def test_target_plan_omits_absent_registry_component(
     assert payload["components"] == [
         "fridge_menu",
         "household",
+        "memory_convergence",
         "shopping",
         "weekly",
     ]

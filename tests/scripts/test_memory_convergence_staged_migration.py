@@ -18,6 +18,7 @@ from gateway.memory.schema import (
     classify_memory_convergence_schema,
     migrate_memory_convergence_schema,
     validate_memory_convergence_schema,
+    validate_memory_convergence_staged_transition,
 )
 from gateway.platforms.healbite_memory_bridge import HealBiteMemoryBridge
 from scripts import healbite_schema_migrate
@@ -169,6 +170,38 @@ def test_m06_representative_revisions_seed_canonical_revision() -> None:
             (202, 4),
             (303, 9),
         ]
+
+
+def test_staged_transition_accepts_only_exact_legacy_seed() -> None:
+    with sqlite3.connect(":memory:") as before, sqlite3.connect(":memory:") as after:
+        _legacy_facts(before, [(101, "synthetic-a"), (202, "synthetic-b")])
+        before.commit()
+        before.backup(after)
+        migrate_memory_convergence_schema(after, now=0.0)
+        validate_memory_convergence_staged_transition(
+            before,
+            after,
+            seed_timestamp=0.0,
+        )
+
+
+def test_staged_transition_rejects_noncanonical_outbox_backfill() -> None:
+    with sqlite3.connect(":memory:") as before, sqlite3.connect(":memory:") as after:
+        _legacy_facts(before, [(101, "synthetic")])
+        before.commit()
+        before.backup(after)
+        migrate_memory_convergence_schema(after, now=0.0)
+        after.execute(
+            f"INSERT INTO {OUTBOX_TABLE}(user_id, fact_id, operation, fact_revision, "
+            "state, next_attempt_at, created_at, updated_at) "
+            "VALUES (202, 999, 'DELETE', 1, 'PENDING', 0, 0, 0)"
+        )
+        with pytest.raises(sqlite3.DatabaseError, match="seed count is invalid"):
+            validate_memory_convergence_staged_transition(
+                before,
+                after,
+                seed_timestamp=0.0,
+            )
 
 
 def test_m07_m09_t05_known_partial_and_missing_index_are_additive() -> None:

@@ -317,5 +317,146 @@ def validate_memory_convergence_schema(conn: sqlite3.Connection) -> None:
         raise sqlite3.DatabaseError("memory convergence staged migration is required")
 
 
+def _table_rows(
+    conn: sqlite3.Connection,
+    table: str,
+) -> tuple[tuple[str, ...], tuple[tuple[object, ...], ...]]:
+    columns = tuple(str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")'))
+    if not columns:
+        return (), ()
+    projection = ", ".join(f'"{column}"' for column in columns)
+    order_column = "id" if "id" in columns else "singleton_id"
+    rows = tuple(
+        tuple(row)
+        for row in conn.execute(
+            f'SELECT {projection} FROM "{table}" ORDER BY "{order_column}"'
+        )
+    )
+    return columns, rows
+
+
+def validate_memory_convergence_staged_transition(
+    before: sqlite3.Connection,
+    after: sqlite3.Connection,
+    *,
+    seed_timestamp: float,
+) -> None:
+    """Prove that staged migration changed only canonical Memory seed state."""
+
+    before_state = classify_memory_convergence_schema(before)
+    if before_state is MemorySchemaClassification.INCOMPATIBLE:
+        raise sqlite3.DatabaseError("memory convergence source schema is incompatible")
+    validate_memory_convergence_schema(after)
+
+    before_facts_columns, before_facts = _table_rows(before, FACTS_TABLE)
+    after_facts_columns, after_facts = _table_rows(after, FACTS_TABLE)
+    if before_facts_columns:
+        preserved_columns = tuple(
+            column for column in before_facts_columns if column != "vector_revision"
+        )
+        before_projection = tuple(before_facts_columns.index(column) for column in preserved_columns)
+        after_projection = tuple(after_facts_columns.index(column) for column in preserved_columns)
+        if tuple(
+            tuple(row[index] for index in before_projection) for row in before_facts
+        ) != tuple(tuple(row[index] for index in after_projection) for row in after_facts):
+            raise sqlite3.DatabaseError("memory convergence facts changed during migration")
+    elif after_facts:
+        raise sqlite3.DatabaseError("memory convergence migration created facts")
+
+    before_outbox_columns, before_outbox = _table_rows(before, OUTBOX_TABLE)
+    after_outbox_columns, after_outbox = _table_rows(after, OUTBOX_TABLE)
+    before_meta_columns, before_meta = _table_rows(before, META_TABLE)
+    after_meta_columns, after_meta = _table_rows(after, META_TABLE)
+
+    if before_state is MemorySchemaClassification.CURRENT:
+        if (
+            before_facts != after_facts
+            or before_outbox != after_outbox
+            or before_meta != after_meta
+        ):
+            raise sqlite3.DatabaseError("current memory convergence data changed")
+        return
+
+    seed_was_complete = False
+    if before_meta_columns and before_meta:
+        seeded_index = before_meta_columns.index("schema_seeded")
+        seed_was_complete = int(before_meta[0][seeded_index]) == 1
+
+    if before_outbox and not set(before_outbox).issubset(set(after_outbox)):
+        raise sqlite3.DatabaseError("memory convergence migration changed existing outbox rows")
+
+    if seed_was_complete:
+        if before_outbox != after_outbox:
+            raise sqlite3.DatabaseError("seeded memory convergence outbox changed")
+    else:
+        fact_id_index = after_facts_columns.index("id")
+        fact_user_index = after_facts_columns.index("user_id")
+        fact_revision_index = after_facts_columns.index("vector_revision")
+        outbox_indexes = {
+            column: after_outbox_columns.index(column)
+            for column in (
+                "user_id", "fact_id", "operation", "fact_revision",
+                "state", "attempt_count", "next_attempt_at", "last_error_class",
+                "created_at", "updated_at",
+            )
+        }
+        expected_signatures = {
+            (row[fact_user_index], row[fact_id_index], "UPSERT", row[fact_revision_index])
+            for row in after_facts
+        }
+        before_signatures = {
+            (
+                row[before_outbox_columns.index("user_id")],
+                row[before_outbox_columns.index("fact_id")],
+                row[before_outbox_columns.index("operation")],
+                row[before_outbox_columns.index("fact_revision")],
+            )
+            for row in before_outbox
+        }
+        after_by_signature = {
+            (
+                row[outbox_indexes["user_id"]], row[outbox_indexes["fact_id"]],
+                row[outbox_indexes["operation"]], row[outbox_indexes["fact_revision"]],
+            ): row
+            for row in after_outbox
+        }
+        if len(after_outbox) != len(before_outbox) + len(
+            expected_signatures - before_signatures
+        ) or not expected_signatures.issubset(after_by_signature):
+            raise sqlite3.DatabaseError("memory convergence seed count is invalid")
+        for signature in expected_signatures - before_signatures:
+            row = after_by_signature[signature]
+            if (
+                row[outbox_indexes["state"]] != "PENDING"
+                or int(row[outbox_indexes["attempt_count"]]) != 0
+                or float(row[outbox_indexes["next_attempt_at"]]) != 0.0
+                or row[outbox_indexes["last_error_class"]] is not None
+                or float(row[outbox_indexes["created_at"]]) != float(seed_timestamp)
+                or float(row[outbox_indexes["updated_at"]]) != float(seed_timestamp)
+            ):
+                raise sqlite3.DatabaseError("memory convergence seed payload is invalid")
+
+    if len(after_meta) != 1:
+        raise sqlite3.DatabaseError("memory convergence meta singleton is invalid")
+    after_meta_map = dict(zip(after_meta_columns, after_meta[0], strict=True))
+    if int(after_meta_map["singleton_id"]) != 1 or int(after_meta_map["schema_seeded"]) != 1:
+        raise sqlite3.DatabaseError("memory convergence completion marker is invalid")
+    if before_meta:
+        before_meta_map = dict(zip(before_meta_columns, before_meta[0], strict=True))
+        before_meta_map["schema_seeded"] = 1
+        if before_meta_map != after_meta_map:
+            raise sqlite3.DatabaseError("memory convergence meta counters changed")
+    elif any(
+        after_meta_map[column] != expected
+        for column, expected in (
+            ("processed_count", 0), ("succeeded_count", 0),
+            ("failed_count", 0), ("superseded_count", 0),
+            ("last_success_at", None), ("last_reconciliation_at", None),
+            ("last_error_class", None),
+        )
+    ):
+        raise sqlite3.DatabaseError("memory convergence meta defaults are invalid")
+
+
 def schema_statements() -> Sequence[str]:
     return MEMORY_CONVERGENCE_SCHEMA_STATEMENTS

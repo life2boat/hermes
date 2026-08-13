@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.43 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #157 merged the thin
+  Antigravity executor context bridge at canonical main
+  `e102b64dcfdea0120c891ba1298fecfd6c75cb62`.
+
+Safety:
+- no production, provider, database, Qdrant, secret, feature-flag,
+  deployment, runtime, or live-smoke state changed.
+
 ## 1.2.42 - 2026-08-13
 
 Added:

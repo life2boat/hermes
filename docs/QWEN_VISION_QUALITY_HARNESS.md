@@ -27,8 +27,13 @@ white condiment, requires clarification, and rejects plausible narrower labels
 as unsupported specificity. Exact ketchup and generic yellow-sauce recognition
 remain required. No fourth fixture is needed because A/B already exercise exact
 recognition and C includes both resolvable and ambiguous condiment evidence.
-The v3 manifest and review package require a separate digest-bound human visual
-review before provider execution may treat the candidate truth as reviewed.
+The exact V3 manifest, review package, and three fixture hashes have a
+digest-bound human visual review PASS. The immutable sanitized receipt is
+`tests/fixtures/food_vision_quality/v3/human-review.json`; it records only the
+review date, role `HUMAN_OPERATOR`, exact reviewed identities, closed fixture
+assertions, and verdicts. V3 remains `CANDIDATE`: reviewed reference truth does
+not approve a model. The harness validates this receipt before every V3 dry run
+or provider execution and fails before credential/provider access on mismatch.
 
 The request budget is exactly the number of enabled manifest fixtures: all
 supported versions contain three fixtures and therefore allow at most three
@@ -54,8 +59,9 @@ requests. Normal CI must use this default behavior.
 python scripts/run_food_vision_quality.py \
   --provider alibaba \
   --model qwen3.6-flash \
-  --fixture-manifest tests/fixtures/food_vision_quality/v1/manifest.json \
-  --receipt-out /private/evidence/qwen-quality-v1.json \
+  --fixture-manifest tests/fixtures/food_vision_quality/v3/manifest.json \
+  --human-review-receipt tests/fixtures/food_vision_quality/v3/human-review.json \
+  --receipt-out /private/evidence/qwen-quality-v3.json \
   --execute-provider
 ```
 

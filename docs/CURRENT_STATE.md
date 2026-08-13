@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.39
+version: 1.2.40
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 57b4376464d0d40926320ced73e5d4b601dea86e
+state_verified_against_main_sha: 309ba39bd5e9425cfbf0ea3cb5d2199d0ca1ae22
 production_sha: unknown
 ---
 
@@ -32,7 +32,7 @@ Git.
 
 - Project remote: `healbite-project/main` in `life2boat/hermes`.
 - Project state in this document was verified against HealBite main SHA:
-  `57b4376464d0d40926320ced73e5d4b601dea86e`.
+  `309ba39bd5e9425cfbf0ea3cb5d2199d0ca1ae22`.
 - This verification SHA records repository state and Source-of-Truth docs closure
   only; it does not identify a deployed production revision.
 - PR #126 merged the Phase 0 AI-engineering foundation into canonical main.
@@ -260,9 +260,16 @@ Git.
   white-condiment subtypes are unsupported specificity, not schema invalidity.
 - The v3 review package SHA256 is
   `9d67211c005ad5b7758e67ce6f58c8c5d5a29d6739039f463dc2cb2d9c7762a1`.
-  Human visual review is `NOT_PERFORMED`; reviewer count is unspecified by the
-  repository contract. No Fixture D was added because A/B already test exact
-  recognition and C contains both resolvable and ambiguous condiment evidence.
+  A human operator reviewed those exact canonical Git bytes and all three exact
+  fixture hashes on 2026-08-13. The sanitized immutable human-review receipt at
+  `tests/fixtures/food_vision_quality/v3/human-review.json` has SHA256
+  `5b353d37be2ca9ebb6f7c54909ca4f049e6c9982bb2a19045c97ec7f6fecd12d`;
+  overall visual review is `PASS`. Fixture C confirms that the white sauce's
+  exact subtype is not visually provable and generic `sauce` plus clarification
+  is correct. Reviewer provenance is role-only (`HUMAN_OPERATOR`), with no
+  personal identity recorded. Lifecycle remains `CANDIDATE`: reference truth is
+  reviewed, but no provider model is evaluated or approved. No Fixture D was
+  added because existing fixtures cover the required evidence.
 - V3 keeps runtime schema `food_vision_inventory_v1`, request budget 3, retries
   0, cross-provider fallback 0, receipt schema version 3, and all existing
   quality thresholds. Provider execution remains outside this repository task.

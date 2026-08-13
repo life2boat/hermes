@@ -53,7 +53,7 @@ filled in from memory.
 | Exact-main image build | `.github/workflows/healbite-exact-main-ghcr.yml`, `scripts/build_verified_playwright_image.py`, `scripts/attest_remote_registry_image.py`, `scripts/hermes_image_secret_scan.py` | Exact Git-tree build, immutable registry identity, OCI revision and full image-secret evidence |
 | Ordinary deploy | `scripts/hermes_production_deploy.sh`, `scripts/hermes_production_deploy.py` | Read-only planning, technical gates, exact-image recreation, post-state attestation and image rollback |
 | Legacy provenance transition | `scripts/hermes_legacy_provenance_bootstrap.py` | One-time, fail-closed transition from an unlabelled legacy runtime to a provenance-valid exact-main image |
-| Staged schema migration | `scripts/hermes_production_staged_migrate.py`, `scripts/hermes_execution_authority.py`, `scripts/hermes_release_authority.py` | Authority package, effective migration scope, staging/exchange, evidence and rollback constraints |
+| Staged schema migration | `scripts/healbite_schema_migrate.py`, `scripts/hermes_production_staged_migrate.py`, `scripts/hermes_execution_authority.py`, `scripts/hermes_release_authority.py`, `gateway/memory/schema.py` | Ordered schema registry, including the shared Memory Convergence schema contract, authority package, effective mutation scope, staging/exchange, evidence and rollback constraints |
 | Operator procedure | `skills/deploy/SKILL.md`, `docs/runbooks/hermes-production-deployment.md`, `docs/runbooks/hermes-remote-exact-main-build.md` | Required order, evidence, failure and recovery semantics |
 | Feature rollout detail | `docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md` and feature runbooks | Feature-specific rollout and migration gates; these do not override the deploy skill |
 
@@ -62,7 +62,7 @@ filled in from memory.
 | Concern | Primary sources | What they establish |
 | --- | --- | --- |
 | Hermes session state | `hermes_state.py` | Durable conversation/session records and FTS behavior |
-| HealBite Memory OS | `gateway/platforms/healbite_memory_bridge.py`, `gateway/memory/convergence.py`, `gateway/memory/runtime.py`, `gateway/memory/orphan_classifier.py` | SQLite fact source of truth, atomic durable vector intents, gateway-owned bounded reconciliation, privacy-safe health, owner-scoped repair, offline orphan classification, user-scoped access and FTS/LIKE fallback |
+| HealBite Memory OS | `gateway/memory/schema.py`, `gateway/platforms/healbite_memory_bridge.py`, `gateway/memory/convergence.py`, `gateway/memory/runtime.py`, `gateway/memory/orphan_classifier.py` | Single staged/runtime schema authority, SQLite fact source of truth, atomic durable vector intents, gateway-owned bounded reconciliation, privacy-safe health, owner-scoped repair, offline orphan classification, user-scoped access and FTS/LIKE fallback |
 | Qdrant adapter | `gateway/memory/qdrant_adapter.py`, `gateway/memory/embedding_adapter.py`, `gateway/memory/settings.py` | Optional derived semantic index, scoped deterministic point upsert/delete, strong reconciliation acknowledgement, user filters and graceful degradation |
 | Memory operations | `skills/memory/SKILL.md`, `RUNBOOK_MEMORY_OS.md`, `scripts/rebuild_qdrant_memory_index.py` | Read-only baseline, reconciliation, mutation authorization, backup and recovery procedure |
 | Product data | `gateway/healbite_*_schema.py`, `gateway/healbite_*.py` | HealBite SQLite schema and service-level user/household rules |

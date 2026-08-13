@@ -1,6 +1,6 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.46
+version: 1.2.47
 updated_at: 2026-08-13
 status: active
 source_of_truth: true
@@ -24,6 +24,10 @@ Git.
 - BLOCKED repair requires one owner and explicit bounded outbox operation ids.
 - Historical orphan classification is offline/read-only; live scan and delete
   are not performed or authorized.
+- The canonical staged migration registry now includes one ordered
+  `memory_convergence` component backed by the shared stdlib-only
+  `gateway/memory/schema.py` contract. Production startup validates this schema
+  read-only; safe development/test initialization may still create it.
 - This is repository implementation and acceptance, not proof of production
   migration, activation or live reconciliation.
 

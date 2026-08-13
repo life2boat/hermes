@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.47 - 2026-08-13
+
+Changed:
+- added the ordered canonical `memory_convergence` staged migration component,
+  strict additive schema classification, transactional legacy intent seed, and
+  read-only production runtime schema validation through one shared schema
+  authority.
+
+Safety:
+- validation uses disposable SQLite only; production, Qdrant, providers,
+  secrets, feature flags, deployment and live runtime were not accessed or
+  changed.
+
 ## 1.2.46 - 2026-08-13
 
 Changed:

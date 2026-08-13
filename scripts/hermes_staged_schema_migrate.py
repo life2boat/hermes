@@ -1051,6 +1051,33 @@ def _database_snapshot(path: Path) -> tuple[tuple[tuple[str, str, str], ...], di
     )
 
 
+def _validate_memory_data_transition(
+    source: sqlite3.Connection,
+    staging_db: Path,
+) -> None:
+    from gateway.memory.schema import validate_memory_convergence_staged_transition
+
+    conn = sqlite3.connect(f"file:{staging_db}?mode=ro", uri=True)
+
+    def validate() -> None:
+        conn.execute("PRAGMA query_only=ON")
+        validate_memory_convergence_staged_transition(
+            source,
+            conn,
+            seed_timestamp=0.0,
+        )
+
+    _run_body_with_owned_cleanup(
+        validate,
+        (
+            "MEMORY_TRANSITION_CONNECTION",
+            "SCOPED_RESOURCE_RELEASE",
+            "MEMORY_TRANSITION_CONNECTION_CLOSE_FAILED",
+            conn.close,
+        ),
+    )
+
+
 def _expected_schema_names() -> set[str]:
     from scripts.healbite_schema_migrate import _component_statements
 
@@ -2015,7 +2042,14 @@ def _execute_staged_body(
         migrated_objects, migrated_counts = _database_snapshot(staging_db)
         if _sidecars(staging_db):
             raise OrchestratorError("MIGRATED_DATABASE_INVALID")
+        memory_data_tables = {
+            "memory_os_facts",
+            "memory_os_vector_sync_outbox",
+            "memory_os_vector_sync_meta",
+        }
         for table, count in baseline_counts.items():
+            if table in memory_data_tables:
+                continue
             if migrated_counts.get(table) != count:
                 raise OrchestratorError("LEGACY_DATA_MUTATED")
         baseline_names = {name for _kind, name, _sql in baseline_objects}
@@ -2026,8 +2060,15 @@ def _execute_staged_body(
         if migrated_names - baseline_names - expected_names:
             raise OrchestratorError("UNKNOWN_SCHEMA_OBJECTS")
         for table in expected_names - baseline_names:
+            if table in memory_data_tables:
+                continue
             if table in migrated_counts and migrated_counts[table] != 0:
                 raise OrchestratorError("BACKFILL_ROWS_CREATED")
+        if "memory_os_facts" in expected_names:
+            try:
+                _validate_memory_data_transition(source_lease.connection, staging_db)
+            except sqlite3.DatabaseError as exc:
+                raise OrchestratorError("MEMORY_DATA_TRANSITION_INVALID") from exc
         metadata = staging_db.stat()
         if (
             stat.S_IMODE(metadata.st_mode) != 0o600

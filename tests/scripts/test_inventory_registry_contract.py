@@ -76,6 +76,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "shopping",
         "inventory",
         "fridge_menu",
+        "memory_convergence",
     )
     manifest = schema_migrate.migration_registry_manifest()
     assert tuple(item["component"] for item in manifest) == (
@@ -84,8 +85,9 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "shopping",
         "inventory",
         "fridge_menu",
+        "memory_convergence",
     )
-    assert manifest[-2] == {
+    assert manifest[-3] == {
         "component": "inventory",
         "migration_id": INVENTORY_SCHEMA_MIGRATION_ID,
         "migration_sha256": INVENTORY_SCHEMA_MIGRATION_SHA256,
@@ -96,7 +98,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         ).hexdigest()
         == INVENTORY_SCHEMA_MIGRATION_SHA256
     )
-    assert manifest[-1] == {
+    assert manifest[-2] == {
         "component": "fridge_menu",
         "migration_id": FRIDGE_MENU_SCHEMA_MIGRATION_ID,
         "migration_sha256": FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
@@ -195,12 +197,13 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
         "fridge_menu",
         "household",
         "inventory",
+        "memory_convergence",
         "shopping",
         "weekly",
     ]
     assert payload["migrations"] == schema_migrate.migration_registry_manifest()
-    assert payload["migrations"][-2]["component"] == "inventory"
-    assert payload["migrations"][-1]["component"] == "fridge_menu"
+    assert payload["migrations"][-3]["component"] == "inventory"
+    assert payload["migrations"][-1]["component"] == "memory_convergence"
     assert production.PLAN_VERSION == 8
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
     assert "EXPECTED_MUTATION_COMPONENTS" in production.PLAN_FIELDS
@@ -222,6 +225,7 @@ def test_target_plan_omits_absent_registry_component(
     assert payload["components"] == [
         "fridge_menu",
         "household",
+        "memory_convergence",
         "shopping",
         "weekly",
     ]

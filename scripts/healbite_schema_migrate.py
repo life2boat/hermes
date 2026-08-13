@@ -41,6 +41,14 @@ from gateway.healbite_weekly_menu_schema import (
     migrate_weekly_menu_schema_v1_to_v2,
 )
 from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
+from gateway.memory.schema import (
+    MEMORY_CONVERGENCE_MIGRATION_ID,
+    MEMORY_CONVERGENCE_MIGRATION_SHA256,
+    MEMORY_CONVERGENCE_MIGRATION_SOURCE,
+    classify_memory_convergence_schema,
+    migrate_memory_convergence_schema,
+    schema_statements as memory_convergence_schema_statements,
+)
 
 
 class ExitClassification(str, Enum):
@@ -756,6 +764,13 @@ def _component_registry() -> tuple[MigrationComponent, ...]:
                 source_sql=FRIDGE_MENU_SCHEMA_SQL,
                 expected_sha256=FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
             ),
+            _component(
+                "memory_convergence",
+                memory_convergence_schema_statements(),
+                migration_id=MEMORY_CONVERGENCE_MIGRATION_ID,
+                source_sql=MEMORY_CONVERGENCE_MIGRATION_SOURCE,
+                expected_sha256=MEMORY_CONVERGENCE_MIGRATION_SHA256,
+            ),
         )
     )
 
@@ -786,6 +801,9 @@ def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassifi
         name: _classify_component_schema(conn, name, statements)
         for name, statements in _component_statements().items()
     }
+    plans["memory_convergence"] = SchemaClassification(
+        classify_memory_convergence_schema(conn).value
+    )
     weekly_state = detect_weekly_menu_schema_state(conn)
     if weekly_state is WeeklyMenuSchemaState.CANONICAL:
         plans["weekly"] = SchemaClassification.CURRENT
@@ -991,11 +1009,18 @@ def _migrate_borrowed_connection(
             if name == "weekly" and is_weekly_menu_schema_v1(conn):
                 migrate_weekly_menu_schema_v1_to_v2(conn)
             if before is not SchemaClassification.CURRENT:
-                _apply_component(conn, name, statements_by_component[name])
-            after = _classify_component_schema(
-                conn,
-                name,
-                statements_by_component[name],
+                if name == "memory_convergence":
+                    migrate_memory_convergence_schema(conn, now=0.0)
+                else:
+                    _apply_component(conn, name, statements_by_component[name])
+            after = (
+                SchemaClassification(classify_memory_convergence_schema(conn).value)
+                if name == "memory_convergence"
+                else _classify_component_schema(
+                    conn,
+                    name,
+                    statements_by_component[name],
+                )
             )
             if (
                 name == "weekly"

@@ -6,10 +6,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from gateway.memory.schema import (
+    FACTS_TABLE,
+    META_TABLE,
+    OUTBOX_TABLE,
+    migrate_memory_convergence_schema,
+)
 
-OUTBOX_TABLE = "memory_os_vector_sync_outbox"
-META_TABLE = "memory_os_vector_sync_meta"
-FACTS_TABLE = "memory_os_facts"
 
 _MAX_BATCH_SIZE = 100
 _DEFAULT_MAX_ATTEMPTS = 8
@@ -81,82 +84,7 @@ class MemoryVectorConvergence:
         return conn
 
     def ensure_schema(self, conn: sqlite3.Connection) -> None:
-        columns = {
-            str(row[1])
-            for row in conn.execute(f"PRAGMA table_info({FACTS_TABLE})").fetchall()
-        }
-        if "vector_revision" not in columns:
-            conn.execute(
-                f"ALTER TABLE {FACTS_TABLE} "
-                "ADD COLUMN vector_revision INTEGER NOT NULL DEFAULT 1"
-            )
-
-        conn.executescript(
-            f"""
-            CREATE TABLE IF NOT EXISTS {OUTBOX_TABLE} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                fact_id INTEGER NOT NULL,
-                operation TEXT NOT NULL CHECK(operation IN ('UPSERT', 'DELETE')),
-                fact_revision INTEGER NOT NULL CHECK(fact_revision > 0),
-                state TEXT NOT NULL DEFAULT 'PENDING'
-                    CHECK(state IN ('PENDING', 'RETRY', 'BLOCKED')),
-                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                next_attempt_at REAL NOT NULL DEFAULT 0,
-                last_error_class TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                UNIQUE(user_id, fact_id, fact_revision, operation)
-            );
-            CREATE INDEX IF NOT EXISTS idx_{OUTBOX_TABLE}_ready
-                ON {OUTBOX_TABLE}(state, next_attempt_at, id);
-            CREATE INDEX IF NOT EXISTS idx_{OUTBOX_TABLE}_fact_revision
-                ON {OUTBOX_TABLE}(user_id, fact_id, fact_revision);
-
-            CREATE TABLE IF NOT EXISTS {META_TABLE} (
-                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
-                schema_seeded INTEGER NOT NULL DEFAULT 0 CHECK(schema_seeded IN (0, 1)),
-                processed_count INTEGER NOT NULL DEFAULT 0,
-                succeeded_count INTEGER NOT NULL DEFAULT 0,
-                failed_count INTEGER NOT NULL DEFAULT 0,
-                superseded_count INTEGER NOT NULL DEFAULT 0,
-                last_success_at REAL,
-                last_reconciliation_at REAL,
-                last_error_class TEXT
-            );
-            INSERT OR IGNORE INTO {META_TABLE}(singleton_id) VALUES (1);
-            """
-        )
-
-        meta_columns = {
-            str(row[1])
-            for row in conn.execute(f"PRAGMA table_info({META_TABLE})").fetchall()
-        }
-        if "last_reconciliation_at" not in meta_columns:
-            conn.execute(
-                f"ALTER TABLE {META_TABLE} ADD COLUMN last_reconciliation_at REAL"
-            )
-
-        seeded = conn.execute(
-            f"SELECT schema_seeded FROM {META_TABLE} WHERE singleton_id = 1"
-        ).fetchone()
-        if seeded is not None and int(seeded[0]) == 0:
-            now = float(self.clock())
-            conn.execute(
-                f"""
-                INSERT OR IGNORE INTO {OUTBOX_TABLE}(
-                    user_id, fact_id, operation, fact_revision,
-                    state, next_attempt_at, created_at, updated_at
-                )
-                SELECT user_id, id, 'UPSERT', vector_revision,
-                       'PENDING', 0, ?, ?
-                FROM {FACTS_TABLE}
-                """,
-                (now, now),
-            )
-            conn.execute(
-                f"UPDATE {META_TABLE} SET schema_seeded = 1 WHERE singleton_id = 1"
-            )
+        migrate_memory_convergence_schema(conn, now=float(self.clock()))
 
     def enqueue_upsert(
         self,

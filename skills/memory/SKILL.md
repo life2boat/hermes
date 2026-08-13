@@ -67,13 +67,13 @@ The current rebuild implementation is **upsert-only**. A successful rebuild repo
 
 **Evidence:** Verify Qdrant hits are hydrated from user-scoped SQLite rows, SQLite-only fallback returns authoritative facts, and SQLite schema/content fingerprints remain unchanged during a Qdrant-only operation.
 
-### Dual-write and reconciliation
+### Durable convergence
 
-**Invariant:** Commit the SQLite fact first and only then schedule the derived Qdrant upsert. Treat the two writes as non-atomic and retain reconciliation as an explicit maintenance responsibility.
+**Invariant:** Commit each applicable Memory OS fact mutation and its minimal revisioned `UPSERT`/`DELETE` intent in one SQLite transaction. Qdrant remains an asynchronous derived target; the durable outbox, not an in-memory Future, is the restart recovery source.
 
-**Why:** The current dual-write path crosses two stores and may complete in SQLite before an asynchronous Qdrant upsert succeeds. Deletes also do not remove stale Qdrant points, so a successful write or equal count alone cannot prove convergence.
+**Why:** Qdrant cannot share the SQLite transaction. Durable intent closes the post-commit crash window, preserves delete semantics, and keeps canonical writes available during an index outage.
 
-**Evidence:** Compare SQLite candidate identities with hydrated Qdrant identities, record candidate/upsert counts and adapter failures, and keep the stale-point classification visible after every dry run or rebuild.
+**Evidence:** Inspect aggregate outbox status (`CONVERGED`, `PENDING`, `DEGRADED`, `BLOCKED`), process known intents with the bounded reconciliation tick, and retain owner/revision/retry evidence without raw fact content. Equal global counts still do not prove absence of historical pre-outbox orphans.
 
 ### Qdrant mutation boundary
 
@@ -99,8 +99,8 @@ The current rebuild implementation is **upsert-only**. A successful rebuild repo
 4. **Validate user isolation.** Confirm every SQLite access is scoped by normalized `user_id` and Qdrant payload hydration re-checks ownership in SQLite. Never copy identifiers or payloads into reports.
 5. **Back up before SQLite mutation.** Use the SQLite backup API or approved online equivalent. Record checksum, run `PRAGMA integrity_check`, restore into a separate temporary database, and re-check integrity. Do not use a plain copy while writers are active.
 6. **Run a dry rebuild.** Keep `MEMORY_VECTOR_ENABLED=false` and use `--dry-run` against the resolved database or rehearsal copy. Confirm the candidate count matches the expected SQLite scope without contacting Qdrant.
-7. **Classify reconciliation.** A lower Qdrant count suggests missing derived points. An equal count does not prove identity equality. A higher count or known deletes suggests stale points because the rebuild path upserts and does not delete orphans.
-8. **Choose the least-mutating repair.** For missing points, an authorized rebuild can upsert SQLite facts. For suspected stale points or schema/vector-size drift, prepare a separately approved replacement-collection workflow instead of deleting the live collection in place.
+7. **Classify convergence.** Inspect aggregate durable outbox state and safe error classes first. `PENDING`/`DEGRADED`/`BLOCKED` is not converged. An equal global count does not prove identity equality or absence of unknown historical orphan points.
+8. **Choose the least-mutating repair.** Prefer an authorized bounded tick over known durable intents. Use rebuild/replacement workflows only for historical drift outside the outbox; never infer a global delete set from counts.
 9. **Rebuild only with approval.** Pin the resolved Qdrant URL, collection, vector size, and DB path. Keep logs aggregate-only. Stop on adapter errors, negative results, unexpected candidate counts, or configuration drift.
 10. **Verify exact behavior.** Re-run safe counts and readiness, sample retrieval through the application hydration path, confirm user isolation, and verify SQLite fingerprints did not change during a Qdrant-only repair.
 11. **Use SQLite-only fallback when needed.** With explicit configuration and restart authorization, disable vector search and keep Qdrant running. Verify FTS/LIKE recall and service health. Do not delete Qdrant as part of fallback.

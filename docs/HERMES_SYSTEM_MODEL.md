@@ -48,8 +48,9 @@ eligible in production.
 HealBite Memory OS is implemented by
 `gateway/platforms/healbite_memory_bridge.py` with settings and adapters under
 `gateway/memory/`. It writes authoritative, user-scoped facts to SQLite,
-supports SQLite FTS5/LIKE fallback, and can asynchronously upsert a derived
-semantic representation to Qdrant.
+supports SQLite FTS5/LIKE fallback, and commits a minimal derived-vector intent
+to a durable SQLite outbox in the same transaction as each applicable fact
+mutation. A bounded worker reconciles that derived state to Qdrant.
 
 This is distinct from the broader Hermes memory-provider/plugin system under
 `agent/memory_*`, `tools/memory_tool.py` and `plugins/memory/`. Engineers must
@@ -63,8 +64,9 @@ unavailable. The repository Compose model defines a `qdrant` service with a
 persistent volume, but runtime identity and health remain deployment facts.
 
 Qdrant is a derived index for HealBite Memory OS, not the authority for facts.
-The current rebuild path is upsert-only; equal counts do not prove identity
-convergence and deleted SQLite facts can leave stale vector points.
+Durable revisioned `UPSERT` and `DELETE` intents provide normal mutation
+convergence. The separate historical rebuild path remains upsert-only, so equal
+counts still do not prove that unknown pre-outbox orphan points are absent.
 
 ### SQLite
 
@@ -225,8 +227,10 @@ images and flags must be discovered read-only before an operation.
 ### Memory recall/write
 
 1. A normalized `user_id` scopes the request.
-2. Writes commit to SQLite first.
-3. An optional, non-atomic Qdrant upsert is scheduled.
+2. The fact mutation and revisioned vector-sync intent commit atomically in
+   authoritative SQLite.
+3. A bounded at-least-once worker applies scoped idempotent Qdrant upserts or
+   deletes with strong acknowledgement; failures remain durable retry/block state.
 4. Reads may query Qdrant, but every hit is rehydrated from user-scoped SQLite.
 5. FTS5 or LIKE provides authoritative fallback when vector search is disabled,
    unavailable or yields no valid hydrated result.

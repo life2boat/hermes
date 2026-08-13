@@ -343,6 +343,11 @@ Git.
 - Provider errors must remain masked from users.
 - HealBite uses SQLite as the source of truth for product data.
 - Memory OS treats SQLite as source of truth and Qdrant as rebuildable index.
+- Memory-vector convergence is implemented in the repository with an atomic
+  SQLite fact/outbox transaction, revisioned owner-scoped `UPSERT`/`DELETE`,
+  bounded at-least-once reconciliation, strong Qdrant acknowledgement, durable
+  retry/block state and privacy-safe aggregate health. This is repository state,
+  not proof of production migration, activation or live Qdrant reconciliation.
 - User isolation and fail-closed cleanup are project invariants.
 - Weight and water tracking have passed previous controlled production smokes.
 - Weekly menu backend mutation and validated draft generation were merged in PR43.

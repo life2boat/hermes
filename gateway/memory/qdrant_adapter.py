@@ -63,6 +63,20 @@ class _RestQdrantClient:
             payload={"points": points},
         )
 
+    def delete(
+        self,
+        *,
+        collection_name: str,
+        points_selector: list[str],
+        wait: bool = False,
+    ) -> dict[str, Any]:
+        suffix = "?wait=true" if wait else "?wait=false"
+        return self._request(
+            "POST",
+            f"collections/{collection_name}/points/delete{suffix}",
+            payload={"points": points_selector},
+        )
+
     def search(
         self,
         *,
@@ -152,6 +166,12 @@ class QdrantMemoryAdapter:
             self._client_failed = True
         return self._client
 
+    def reset_connection_for_retry(self) -> None:
+        if self._client_failed:
+            self._client = None
+            self._client_failed = False
+            self._collection_ready = False
+
     def _vector_config(self) -> Any:
         try:
             from qdrant_client import models
@@ -204,6 +224,7 @@ class QdrantMemoryAdapter:
         user_id: int,
         text: str,
         payload: dict[str, Any],
+        wait: bool = False,
     ) -> bool:
         client = self._get_client()
         if client is None or not self.ensure_collection():
@@ -222,10 +243,13 @@ class QdrantMemoryAdapter:
             client.upsert(
                 collection_name=self.collection_name,
                 points=[point],
-                wait=False,
+                wait=wait,
             )
             return True
         except TypeError:
+            if wait:
+                logger.warning("Qdrant client cannot prove strong upsert acknowledgement")
+                return False
             try:
                 client.upsert(collection_name=self.collection_name, points=[point])
                 return True
@@ -234,6 +258,51 @@ class QdrantMemoryAdapter:
                 return False
         except Exception as exc:
             logger.warning("failed to upsert semantic memory point: error_type=%s", exc.__class__.__name__)
+            return False
+
+    @staticmethod
+    def point_id(*, sqlite_id: int, user_id: int) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"healbite-memory:{user_id}:{sqlite_id}"))
+
+    def delete_fact(
+        self,
+        *,
+        sqlite_id: int,
+        user_id: int,
+        wait: bool = False,
+    ) -> bool:
+        client = self._get_client()
+        if client is None or not self.ensure_collection():
+            return False
+        point_id = self.point_id(sqlite_id=sqlite_id, user_id=user_id)
+        try:
+            client.delete(
+                collection_name=self.collection_name,
+                points_selector=[point_id],
+                wait=wait,
+            )
+            return True
+        except TypeError:
+            if wait:
+                logger.warning("Qdrant client cannot prove strong delete acknowledgement")
+                return False
+            try:
+                client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=[point_id],
+                )
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "failed to delete semantic memory point: error_type=%s",
+                    exc.__class__.__name__,
+                )
+                return False
+        except Exception as exc:
+            logger.warning(
+                "failed to delete semantic memory point: error_type=%s",
+                exc.__class__.__name__,
+            )
             return False
 
     def search(self, *, query_text: str, user_id: int, limit: int = 5) -> list[QdrantMemoryHit]:

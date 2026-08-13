@@ -108,16 +108,35 @@ not occur.
 ### D4. Transactional state changes fail closed
 
 **Invariant:** Multi-row or multi-table product changes commit atomically or
-leave no partial durable state. External dual writes are treated as non-atomic
-and reconciled explicitly.
+leave no partial durable state. For Memory OS, the canonical fact mutation and
+minimal derived-vector intent share one SQLite transaction; the external
+Qdrant mutation remains asynchronous and recoverable.
 
-**Why:** A partial save can violate domain constraints; a successful SQLite
-write does not imply a successful asynchronous Qdrant write.
+**Why:** A partial save can violate domain constraints. A successful SQLite
+write does not prove immediate Qdrant convergence, but it must prove that
+restart-safe synchronization intent exists.
 
-**Evidence:** Rollback/error injection tests, foreign-key checks, unchanged
-pre/post counts on failure and reconciliation evidence for external indexes.
+**Evidence:** Rollback/error injection tests, foreign-key checks, atomic
+fact/outbox tests and durable reconciliation evidence for external indexes.
 
 **Authority:** HealBite stores/services, `skills/memory/SKILL.md`, focused tests.
+
+### D5. Memory vector convergence is revisioned and owner-scoped
+
+**Invariant:** Every applicable Memory OS insert, update or delete has a durable
+owner-bound vector operation. Duplicate delivery is idempotent; a stale upsert
+or delete cannot win over a newer fact generation/revision; failed work remains
+privacy-safe `PENDING`, `DEGRADED` or `BLOCKED` state.
+
+**Why:** An ephemeral Future, accepted-but-unconfirmed request or timestamp-only
+ordering cannot prove eventual derived-state correctness across crash/restart.
+
+**Evidence:** Disposable SQLite migration tests, failure injection before/after
+commit and acknowledgement, restart/replay, delete/recreate, owner-mismatch,
+bounded-batch and aggregate-observability tests.
+
+**Authority:** `docs/adr/ADR-0079-durable-memory-vector-convergence.md`,
+`gateway/memory/convergence.py`, `skills/memory/SKILL.md`.
 
 ## Telegram invariants
 

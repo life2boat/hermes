@@ -6,6 +6,29 @@ This contract accepts repository behaviour only. SQLite is authoritative;
 Qdrant is a derived, rebuildable semantic index. Repository implementation is
 not evidence that production was migrated or that vector mode is active.
 
+## Canonical staged migration contract
+
+The ordered canonical registry now contains exactly one `memory_convergence`
+component after `fridge_menu`. Its stdlib-only schema authority is
+`gateway/memory/schema.py`; both the repository migration CLI and safe
+development/test initialization consume that contract. Production runtime
+initialization validates the staged schema read-only and fails closed when the
+component is not `CURRENT`; it does not substitute startup DDL for the staged
+migration.
+
+The component classifies `ABSENT`, a closed set of additive
+`KNOWN_COMPATIBLE_PARTIAL` layouts, `CURRENT`, and all other layouts as
+`INCOMPATIBLE`. Migration adds `vector_revision INTEGER NOT NULL DEFAULT 1`,
+the durable outbox/meta tables and their exact constraints/indexes, then seeds
+one `UPSERT` intent per legacy fact before setting the completion marker in the
+same SQLite transaction. Seed rows contain owner, canonical fact id, revision,
+operation and scheduling metadata only; fact text, embeddings, prompts,
+provider output and secrets are never copied. No Qdrant or provider code is
+imported or called by the migration.
+
+Repository status is `IMPLEMENTED_IN_REPOSITORY`. It is not
+`MIGRATED_IN_PRODUCTION` or `ACTIVE_IN_PRODUCTION`.
+
 The normal gateway owns one bounded reconciliation task per process when
 `MEMORY_VECTOR_ENABLED=true`. It performs an immediate startup tick and then a
 bounded periodic tick. When the flag is false it does not open/create the
@@ -135,7 +158,8 @@ false. A live scan or deletion requires a separate future authorization.
 2. Stop writers under the production deployment authority.
 3. Create and verify a fresh SQLite backup and rollback image artifact.
 4. Require pre-migration `integrity_check=ok` and zero FK violations.
-5. Classify schema; run only the additive bridge-owned migration.
+5. Bind the exact ordered expected/effective component scope and run only the
+   canonical staged `memory_convergence` migration.
 6. Require post-migration integrity/FK checks, expected tables/indexes,
    `vector_revision=1` defaults, and exactly one seed intent per legacy fact.
 7. Keep vector mode off initially; restart and verify gateway/Telegram health.

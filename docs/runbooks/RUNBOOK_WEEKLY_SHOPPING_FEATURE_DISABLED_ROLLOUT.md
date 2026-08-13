@@ -549,8 +549,8 @@ and both allowlists must be empty in that pinned canonical contract
 the target schema version and fingerprint are derived from trusted migration
 code, recorded in the plan, and independently recalculated during execute;
 the same plan records the ordered canonical migration registry with component
-identity and SHA-256, including the Inventory migration, and execute rejects
-any registry drift
+identity and SHA-256, including Inventory, fridge-menu, and the ordered
+`memory_convergence` component, and execute rejects any registry drift
 the authority producer requires the complete ordered canonical registry as
 MIGRATION_COMPONENTS and a separate ordered, unique, known
 EXPECTED_MUTATION_COMPONENTS subset; the latter is operator authorization for

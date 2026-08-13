@@ -17,29 +17,13 @@ from gateway.memory.analytics import MemoryAnalyticsLogger
 from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter, QdrantMemoryHit
+from gateway.memory.schema import FACTS_TABLE, validate_memory_convergence_schema
 
 logger = logging.getLogger(__name__)
 
-_FACTS_TABLE = "memory_os_facts"
+_FACTS_TABLE = FACTS_TABLE
 _FTS_TABLE = "memory_os_facts_fts"
 _FTS_TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
-
-_SCHEMA_SQL = f"""
-CREATE TABLE IF NOT EXISTS {_FACTS_TABLE} (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    entity TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT NOT NULL,
-    vector_revision INTEGER NOT NULL DEFAULT 1,
-    source TEXT,
-    trust_score REAL NOT NULL DEFAULT 0.5,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_{_FACTS_TABLE}_user_id ON {_FACTS_TABLE}(user_id);
-CREATE INDEX IF NOT EXISTS idx_{_FACTS_TABLE}_user_entity_key ON {_FACTS_TABLE}(user_id, entity, key);
-"""
 
 _FTS_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS {_FTS_TABLE} USING fts5(
@@ -101,6 +85,7 @@ class HealBiteMemoryBridge:
         analytics_logger: MemoryAnalyticsLogger | None = None,
         background_write: bool = True,
         min_trust_score: float = 0.0,
+        ensure_schema_on_init: bool = True,
     ) -> None:
         self.db_path = Path(db_path)
         self.embedding_adapter = embedding_adapter or EmbeddingAdapter()
@@ -130,7 +115,10 @@ class HealBiteMemoryBridge:
             else None
         )
         self._fts_enabled = False
-        self._initialize_schema()
+        if ensure_schema_on_init:
+            self._initialize_schema()
+        else:
+            self._validate_staged_schema()
         if self._vector_enabled and self._executor is not None:
             self._executor.submit(self.process_vector_sync_batch)
 
@@ -148,7 +136,6 @@ class HealBiteMemoryBridge:
     def _initialize_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            conn.executescript(_SCHEMA_SQL)
             self._convergence.ensure_schema(conn)
             try:
                 conn.executescript(_FTS_SQL)
@@ -163,6 +150,16 @@ class HealBiteMemoryBridge:
                 else:
                     raise
         self.analytics_logger.ensure_schema()
+
+    def _validate_staged_schema(self) -> None:
+        if not self.db_path.is_file():
+            raise sqlite3.DatabaseError("memory convergence database is unavailable")
+        with self._connect() as conn:
+            validate_memory_convergence_schema(conn)
+            self._fts_enabled = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (_FTS_TABLE,),
+            ).fetchone() is not None
 
     def upsert_fact(
         self,

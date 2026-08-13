@@ -76,11 +76,14 @@ owner, existence and revision before applying the ordinary idempotent operation.
 
 ## Migration and Rollback
 
-The Memory Bridge's existing idempotent schema initialization is the canonical
-owner of `memory_os_facts`; it adds `vector_revision`, creates the outbox/meta
-tables and indexes, and seeds exactly one pending upsert for each legacy fact.
-The seed and its completion marker share a SQLite transaction. Re-running the
-initializer does not duplicate intents.
+`gateway/memory/schema.py` is the single low-level schema authority for
+`memory_os_facts` convergence state. The ordered production migration registry
+owns a `memory_convergence` component that adds `vector_revision`, creates the
+outbox/meta tables and indexes, and seeds exactly one pending upsert for each
+legacy fact. The seed and its completion marker share the staged migration's
+SQLite transaction. Safe development/test initialization reuses the same
+contract; production runtime startup validates it read-only and cannot replace
+the staged migration. Re-running either path does not duplicate intents.
 
 There is no destructive downgrade migration. Code rollback may leave the new
 tables/column unused; SQLite readers tolerate additive schema. Before any future

@@ -71,6 +71,7 @@ class MemoryVectorRuntime:
             db_path,
             qdrant_adapter=adapter,
             background_write=False,
+            ensure_schema_on_init=False,
         )
 
     @property

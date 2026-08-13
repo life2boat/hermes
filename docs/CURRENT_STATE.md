@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.48
-updated_at: 2026-08-13
+version: 1.2.49
+updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: b3653ca0ddc9841291cdfee80abe47ba126067de
+state_verified_against_main_sha: 47aba42207d4b593c3de9da5bc85e6326e05696a
 production_sha: unknown
 ---
 
@@ -12,6 +12,16 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Hermes Intent Control Plane PR-1
+
+- `TaskIntent` schema version 1 and `TaskLineage` schema version 1 are implemented and merged (PR #165, with corrective restoration in PR #166).
+- `scripts/prepare_task.py` integrates `--intent` to enforce exact base-SHA binding and canonical task intent validation.
+- The `TaskIntent` contract supports canonical serialization, deterministic digests, revision chains, and strict lineage relation validation.
+- Raw prompt and chat storage remain forbidden; this architecture relies on operator intent bounding.
+- PR #166 repaired the accidental truncation of `prepare_task.py` during intermediate local testing; the final canonical main contains the intended correct source.
+- Production, database, Qdrant, secrets, deployment, and providers remain unchanged.
+- NOT YET IMPLEMENTED: PR-2 Cross-Artifact Analyzer, PR-3 Clarify + Requirements Quality Gate, PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
 
 ## Memory Convergence v1.1 repository state
 

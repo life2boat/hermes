@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "fixture_set_version": "food_vision_quality_v3",
+  "review_date": "2026-08-13",
+  "reviewer_role": "HUMAN_OPERATOR",
+  "canonical_source_sha": "309ba39bd5e9425cfbf0ea3cb5d2199d0ca1ae22",
+  "manifest_sha256": "543948ff57e27327ec1233a282a62fb230d39b12c02cde0e63e96955500e4202",
+  "review_package_sha256": "9d67211c005ad5b7758e67ce6f58c8c5d5a29d6739039f463dc2cb2d9c7762a1",
+  "fixture_hashes": {
+    "general-food-recognition": "a4e259a7ec6a37b6b26dedd1671e9fddfca6528cf417642b504134121cbdb412",
+    "mixed-food-with-distractor": "44d4b162fe04a9255e83d0d310ee4315afc2cf794c13fdc045b4ff6b32ed7f9a",
+    "separate-condiments": "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd"
+  },
+  "fixture_verdicts": [
+    {
+      "fixture_id": "general-food-recognition",
+      "verdict": "PASS",
+      "assertions": {
+        "visible_apple": true,
+        "visible_banana": true,
+        "visible_bread": true,
+        "other_material_food": "none"
+      }
+    },
+    {
+      "fixture_id": "mixed-food-with-distractor",
+      "verdict": "PASS",
+      "assertions": {
+        "visible_carrot": true,
+        "visible_cucumber": true,
+        "visible_cheese": true,
+        "empty_cup_is_non_food_distractor": true,
+        "other_material_food": "none"
+      }
+    },
+    {
+      "fixture_id": "separate-condiments",
+      "verdict": "PASS",
+      "assertions": {
+        "visible_red_ketchup_or_tomato_sauce": true,
+        "visible_yellow_sauce": true,
+        "visible_white_sauce_generic": true,
+        "white_exact_subtype_visually_provable": false,
+        "white_could_reasonably_be_mayonnaise": true,
+        "white_could_reasonably_be_yogurt_or_similar": true,
+        "generic_sauce_plus_clarification_correct": true
+      }
+    }
+  ],
+  "overall_verdict": "PASS"
+}

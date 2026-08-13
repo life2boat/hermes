@@ -22,6 +22,11 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+from scripts.food_vision_human_review import (  # noqa: E402
+    HumanReviewError,
+    load_and_validate_human_review,
+)
+
 
 
 
@@ -68,6 +73,7 @@ _V3_SOURCE_IMAGE_PATHS = {
     "separate-condiments": "tests/fixtures/food_vision_quality/v2/images/fixture_c.png",
 }
 _V3_SOURCE_IMAGE_ROOT = _REPOSITORY_ROOT / "tests/fixtures/food_vision_quality/v2/images"
+_V3_REVIEW_PACKAGE_PATH = _REPOSITORY_ROOT / "tests/fixtures/food_vision_quality/v3/review-package.json"
 
 
 class HarnessInputError(ValueError):
@@ -335,6 +341,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True)
     parser.add_argument("--fixture-manifest", type=Path, required=True)
     parser.add_argument("--receipt-out", type=Path, required=True)
+    parser.add_argument("--human-review-receipt", type=Path)
     parser.add_argument("--execute-provider", action="store_true")
     return parser.parse_args(argv)
 
@@ -470,6 +477,18 @@ def run(argv: list[str] | None = None) -> int:
             raise HarnessInputError("MODEL_REQUIRED")
         manifest, fixtures, manifest_sha256 = _load_manifest(args.fixture_manifest)
         fixture_set_version = manifest["fixture_set_version"]
+        if fixture_set_version == _V3_FIXTURE_SET_VERSION:
+            review_receipt = args.human_review_receipt or args.fixture_manifest.with_name(
+                "human-review.json"
+            )
+            try:
+                load_and_validate_human_review(
+                    review_receipt,
+                    manifest_path=args.fixture_manifest,
+                    review_package_path=_V3_REVIEW_PACKAGE_PATH,
+                )
+            except HumanReviewError as exc:
+                raise HarnessInputError(exc.code) from exc
         verified_fixtures = [
             _read_verified_fixture(args.fixture_manifest, fixture, fixture_set_version)
             for fixture in fixtures

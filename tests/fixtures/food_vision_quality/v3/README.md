@@ -1,6 +1,9 @@
 # Food-Vision quality fixtures v3
 
-Status: `CANDIDATE`; human visual review has not been performed.
+Status: `CANDIDATE`; human visual review is `PASS` for the exact manifest,
+review-package, and fixture identities. The separate immutable
+`human-review.json` records only minimum role-based, digest-bound evidence.
+This approves benchmark reference truth, not a provider model.
 
 V3 reuses the exact three repository-owned synthetic PNG byte identities from
 v2. It does not copy or mutate them. The manifest points to the immutable v2
@@ -16,5 +19,6 @@ not pixel-supported and requires clarification.
 Fixture D is not required: A and B already test exact recognition, while C
 contains both visually resolvable condiments and the required ambiguity case.
 
-Human review must bind the exact manifest and review-package digests before a
-provider benchmark may treat this candidate reference truth as reviewed.
+Every V3 dry run or provider execution validates `human-review.json` against
+the exact manifest, review-package, and fixture hashes before entering the
+provider boundary.

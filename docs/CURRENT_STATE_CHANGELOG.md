@@ -1,5 +1,23 @@
 # CURRENT_STATE changelog
 
+## 1.2.40 - 2026-08-13
+
+Added:
+- bound the operator's visual PASS to the exact V3 manifest, review package,
+  and three fixture hashes through a closed, sanitized, immutable review
+  receipt using role-only reviewer provenance;
+- required V3 dry runs and provider executions to validate that receipt before
+  entering the provider or credential boundary.
+
+Changed:
+- recorded benchmark reference truth as human-reviewed while retaining the
+  documented `CANDIDATE` lifecycle and leaving model eligibility `FAIL`.
+
+Safety:
+- no fixture, manifest semantic, threshold, provider receipt schema, model,
+  provider request, production, database, Qdrant, secret, feature, deployment,
+  or runtime state changed.
+
 ## 1.2.39 - 2026-08-13
 
 Changed:

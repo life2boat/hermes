@@ -1,5 +1,17 @@
 # CURRENT_STATE changelog
 
+## 1.2.41 - 2026-08-13
+
+Changed:
+- closed the post-merge source-of-truth state after PR #155 bound the exact
+  Food Vision Quality V3 human-review PASS at canonical main
+  `6e433bc9a30ed0211d26123cc852be73dc88ed58`.
+
+Safety:
+- V3 remains `CANDIDATE`, no provider model was selected or executed, and no
+  production, database, Qdrant, secret, feature flag, deployment, or runtime
+  state changed.
+
 ## 1.2.40 - 2026-08-13
 
 Added:

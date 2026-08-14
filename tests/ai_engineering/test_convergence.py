@@ -31,6 +31,7 @@ from ai_engineering.convergence import (
     evaluate_convergence,
     serialize_convergence_report,
     serialize_evidence_bundle,
+    validate_evidence_bundle,
 )
 from ai_engineering.requirements_gate import (
     CLARIFICATION_SCHEMA_VERSION,
@@ -424,14 +425,22 @@ def test_unknown_targets(
         DUMMY_DIGEST,
     )
 
+    b2_obs = (*dummy_bundle.observations, obs4)
+    b2_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [{"observation_id": o.observation_id} for o in b2_obs],
+    })
     b2 = EvidenceBundle(
         schema_version=1,
-        bundle_id=DUMMY_DIGEST2,
+        bundle_id=b2_bundle_id,
         task_id=dummy_bundle.task_id,
         intent_digest=dummy_bundle.intent_digest,
         analysis_id=dummy_bundle.analysis_id,
         subject_sha=dummy_bundle.subject_sha,
-        observations=(*dummy_bundle.observations, obs4),
+        observations=b2_obs,
     )
 
     report = evaluate_convergence(
@@ -515,14 +524,22 @@ def test_failure_dominates(
         DUMMY_DIGEST,
     )
 
+    b2_obs = (obs1, dummy_bundle.observations[1], dummy_bundle.observations[2])
+    b2_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [{"observation_id": o.observation_id} for o in b2_obs],
+    })
     b2 = EvidenceBundle(
         schema_version=1,
-        bundle_id=DUMMY_DIGEST2,
+        bundle_id=b2_bundle_id,
         task_id=dummy_bundle.task_id,
         intent_digest=dummy_bundle.intent_digest,
         analysis_id=dummy_bundle.analysis_id,
         subject_sha=dummy_bundle.subject_sha,
-        observations=(obs1, dummy_bundle.observations[1], dummy_bundle.observations[2]),
+        observations=b2_obs,
     )
 
     report = evaluate_convergence(
@@ -543,17 +560,25 @@ def test_failure_dominates(
 def test_missing_evidence_observation_does_not_satisfy(
     dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
 ):
+    b2_obs = (
+        dummy_bundle.observations[1],
+        dummy_bundle.observations[2],
+    )  # missing EV1
+    b2_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [{"observation_id": o.observation_id} for o in b2_obs],
+    })
     b2 = EvidenceBundle(
         schema_version=1,
-        bundle_id=DUMMY_DIGEST2,
+        bundle_id=b2_bundle_id,
         task_id=dummy_bundle.task_id,
         intent_digest=dummy_bundle.intent_digest,
         analysis_id=dummy_bundle.analysis_id,
         subject_sha=dummy_bundle.subject_sha,
-        observations=(
-            dummy_bundle.observations[1],
-            dummy_bundle.observations[2],
-        ),  # missing EV1
+        observations=b2_obs,
     )
     report = evaluate_convergence(
         dummy_intent,
@@ -648,14 +673,22 @@ def test_no_acceptance_criteria(
     }
     intent = deserialize_intent(json.dumps(intent_payload))
     # The lineage and bundle will now have orphan evidence or mismatches, but the primary error will be NO_ACCEPTANCE_CRITERIA
+    b2_obs = (dummy_bundle.observations[2],)  # only gate
+    b2_bundle_id = _compute_bundle_id({
+        "task_id": intent.task_id,
+        "intent_digest": intent_digest(intent),
+        "analysis_id": DUMMY_DIGEST2,
+        "subject_sha": DUMMY_SHA,
+        "observations": [{"observation_id": o.observation_id} for o in b2_obs],
+    })
     b2 = EvidenceBundle(
         schema_version=1,
-        bundle_id=DUMMY_DIGEST2,
+        bundle_id=b2_bundle_id,
         task_id=intent.task_id,
         intent_digest=intent_digest(intent),
         analysis_id=DUMMY_DIGEST2,
         subject_sha=DUMMY_SHA,
-        observations=(dummy_bundle.observations[2],),  # only gate
+        observations=b2_obs,
     )
     report = evaluate_convergence(
         intent,
@@ -690,6 +723,7 @@ def test_convergence_report_round_trip(
 def test_changed_outcome_changed_convergence_id(
     dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
 ):
+    # H-PR4-001 fix: b2 must have a correctly recomputed bundle_id — not a stale one.
     report1 = evaluate_convergence(
         dummy_intent,
         dummy_clarification,
@@ -719,14 +753,23 @@ def test_changed_outcome_changed_convergence_id(
         DUMMY_DIGEST,
     )
 
+    # Compute the correct bundle_id for b2 with the updated observation.
+    b2_obs = (obs1, dummy_bundle.observations[1], dummy_bundle.observations[2])
+    b2_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [{"observation_id": o.observation_id} for o in b2_obs],
+    })
     b2 = EvidenceBundle(
         schema_version=1,
-        bundle_id=DUMMY_DIGEST2,
+        bundle_id=b2_bundle_id,
         task_id=dummy_bundle.task_id,
         intent_digest=dummy_bundle.intent_digest,
         analysis_id=dummy_bundle.analysis_id,
         subject_sha=dummy_bundle.subject_sha,
-        observations=(obs1, dummy_bundle.observations[1], dummy_bundle.observations[2]),
+        observations=b2_obs,
     )
     report2 = evaluate_convergence(
         dummy_intent,
@@ -739,3 +782,302 @@ def test_changed_outcome_changed_convergence_id(
     )
 
     assert report1.convergence_id != report2.convergence_id
+
+
+# ---------------------------------------------------------------------------
+# H-PR4-001: Direct-API tamper protection regressions
+# ---------------------------------------------------------------------------
+
+
+def test_validate_evidence_bundle_accepts_valid_dataclass(dummy_bundle):
+    """DIRECT_API_VALID_CANONICAL_BUNDLE=PASS."""
+    validated = validate_evidence_bundle(dummy_bundle)
+    assert validated.bundle_id == dummy_bundle.bundle_id
+    assert validated == dummy_bundle
+
+
+def test_direct_api_tampered_observation_id(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_TAMPERED_OBSERVATION_ID=FAIL_CLOSED (H-PR4-001 Manus exact repro)."""
+    import dataclasses
+
+    tampered_bundle = dataclasses.replace(
+        dummy_bundle,
+        bundle_id="f" * 64,
+        observations=tuple(
+            dataclasses.replace(obs, observation_id="0" * 64)
+            for obs in dummy_bundle.observations
+        ),
+    )
+    with pytest.raises(ConvergenceError) as exc:
+        evaluate_convergence(
+            dummy_intent,
+            dummy_clarification,
+            dummy_quality_review,
+            dummy_lineage,
+            tampered_bundle,
+            DUMMY_SHA,
+            DUMMY_SHA,
+        )
+    assert exc.value.code == "TAMPERED_OBSERVATION_ID"
+
+
+def test_direct_api_tampered_bundle_id(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_TAMPERED_BUNDLE_ID=FAIL_CLOSED."""
+    import dataclasses
+
+    # Observation IDs are correct, but bundle_id is stale/wrong.
+    tampered_bundle = dataclasses.replace(dummy_bundle, bundle_id="e" * 64)
+    with pytest.raises(ConvergenceError) as exc:
+        evaluate_convergence(
+            dummy_intent,
+            dummy_clarification,
+            dummy_quality_review,
+            dummy_lineage,
+            tampered_bundle,
+            DUMMY_SHA,
+            DUMMY_SHA,
+        )
+    assert exc.value.code == "TAMPERED_BUNDLE_ID"
+
+
+def test_direct_api_changed_observation_stale_id(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_CHANGED_OBSERVATION_STALE_ID=FAIL_CLOSED."""
+    import dataclasses
+
+    # Change observation semantic content (outcome PASS->FAIL) but keep stale observation_id.
+    original_obs = dummy_bundle.observations[0]
+    tampered_obs = dataclasses.replace(
+        original_obs,
+        outcome=ObservationOutcome.FAIL,
+        # observation_id deliberately NOT updated — stale
+    )
+    tampered_bundle = dataclasses.replace(
+        dummy_bundle,
+        observations=(tampered_obs,) + dummy_bundle.observations[1:],
+    )
+    with pytest.raises(ConvergenceError) as exc:
+        evaluate_convergence(
+            dummy_intent,
+            dummy_clarification,
+            dummy_quality_review,
+            dummy_lineage,
+            tampered_bundle,
+            DUMMY_SHA,
+            DUMMY_SHA,
+        )
+    assert exc.value.code == "TAMPERED_OBSERVATION_ID"
+
+
+def test_direct_api_recomputed_observation_stale_bundle_id(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_RECOMPUTED_OBSERVATION_STALE_BUNDLE_ID=FAIL_CLOSED."""
+    import dataclasses
+
+    # observation_id is correctly recomputed from new outcome but bundle_id is stale.
+    obs1_payload = {
+        "target_kind": "LINEAGE_EVIDENCE",
+        "target_id": "EV1",
+        "outcome": "FAIL",
+        "producer_id": "pytest",
+        "artifact_ref": "log.txt",
+        "artifact_digest": DUMMY_DIGEST,
+    }
+    new_obs1_id = _compute_observation_id(obs1_payload)
+    new_obs1 = EvidenceObservation(
+        new_obs1_id,
+        TargetKind.LINEAGE_EVIDENCE,
+        "EV1",
+        ObservationOutcome.FAIL,
+        "pytest",
+        "log.txt",
+        DUMMY_DIGEST,
+    )
+    tampered_bundle = dataclasses.replace(
+        dummy_bundle,
+        bundle_id=dummy_bundle.bundle_id,  # original (now stale) bundle_id
+        observations=(new_obs1,) + dummy_bundle.observations[1:],
+    )
+    with pytest.raises(ConvergenceError) as exc:
+        evaluate_convergence(
+            dummy_intent,
+            dummy_clarification,
+            dummy_quality_review,
+            dummy_lineage,
+            tampered_bundle,
+            DUMMY_SHA,
+            DUMMY_SHA,
+        )
+    assert exc.value.code == "TAMPERED_BUNDLE_ID"
+
+
+def test_direct_api_valid_wrong_task_context(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_VALID_WRONG_TASK_CONTEXT=NOT_CONVERGED.
+
+    A self-consistent bundle bound to wrong task_id passes validate_evidence_bundle
+    but evaluate_convergence reports NOT_CONVERGED with EVIDENCE_TASK_MISMATCH.
+    This is intentional context-mismatch semantics, not an integrity error.
+    """
+    import dataclasses
+
+    # Build a self-consistent bundle with a different task_id.
+    obs0 = dummy_bundle.observations[0]
+    obs1 = dummy_bundle.observations[1]
+    obs2 = dummy_bundle.observations[2]
+    wrong_bundle_id = _compute_bundle_id({
+        "task_id": "WRONG-TASK",
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [
+            {"observation_id": o.observation_id} for o in (obs0, obs1, obs2)
+        ],
+    })
+    wrong_task_bundle = EvidenceBundle(
+        schema_version=1,
+        bundle_id=wrong_bundle_id,
+        task_id="WRONG-TASK",
+        intent_digest=dummy_bundle.intent_digest,
+        analysis_id=dummy_bundle.analysis_id,
+        subject_sha=dummy_bundle.subject_sha,
+        observations=(obs0, obs1, obs2),
+    )
+    # Must pass integrity validation
+    validated = validate_evidence_bundle(wrong_task_bundle)
+    assert validated.task_id == "WRONG-TASK"
+    # Must be rejected as context mismatch, not integrity error
+    report = evaluate_convergence(
+        dummy_intent,
+        dummy_clarification,
+        dummy_quality_review,
+        dummy_lineage,
+        wrong_task_bundle,
+        DUMMY_SHA,
+        DUMMY_SHA,
+    )
+    assert report.status == ConvergenceStatus.NOT_CONVERGED
+    assert ConvergenceBlockingReason.EVIDENCE_TASK_MISMATCH in report.blocking_reasons
+
+
+def test_direct_api_valid_wrong_intent_context(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_VALID_WRONG_INTENT_CONTEXT=NOT_CONVERGED."""
+    wrong_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": DUMMY_DIGEST2,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [
+            {"observation_id": o.observation_id} for o in dummy_bundle.observations
+        ],
+    })
+    wrong_intent_bundle = EvidenceBundle(
+        schema_version=1,
+        bundle_id=wrong_bundle_id,
+        task_id=dummy_bundle.task_id,
+        intent_digest=DUMMY_DIGEST2,
+        analysis_id=dummy_bundle.analysis_id,
+        subject_sha=dummy_bundle.subject_sha,
+        observations=dummy_bundle.observations,
+    )
+    validated = validate_evidence_bundle(wrong_intent_bundle)
+    assert validated.intent_digest == DUMMY_DIGEST2
+    report = evaluate_convergence(
+        dummy_intent,
+        dummy_clarification,
+        dummy_quality_review,
+        dummy_lineage,
+        wrong_intent_bundle,
+        DUMMY_SHA,
+        DUMMY_SHA,
+    )
+    assert report.status == ConvergenceStatus.NOT_CONVERGED
+    assert ConvergenceBlockingReason.EVIDENCE_INTENT_MISMATCH in report.blocking_reasons
+
+
+def test_direct_api_valid_wrong_analysis_context(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_VALID_WRONG_ANALYSIS_CONTEXT=NOT_CONVERGED."""
+    wrong_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": DUMMY_DIGEST2,
+        "subject_sha": dummy_bundle.subject_sha,
+        "observations": [
+            {"observation_id": o.observation_id} for o in dummy_bundle.observations
+        ],
+    })
+    wrong_analysis_bundle = EvidenceBundle(
+        schema_version=1,
+        bundle_id=wrong_bundle_id,
+        task_id=dummy_bundle.task_id,
+        intent_digest=dummy_bundle.intent_digest,
+        analysis_id=DUMMY_DIGEST2,
+        subject_sha=dummy_bundle.subject_sha,
+        observations=dummy_bundle.observations,
+    )
+    validated = validate_evidence_bundle(wrong_analysis_bundle)
+    assert validated.analysis_id == DUMMY_DIGEST2
+    report = evaluate_convergence(
+        dummy_intent,
+        dummy_clarification,
+        dummy_quality_review,
+        dummy_lineage,
+        wrong_analysis_bundle,
+        DUMMY_SHA,
+        DUMMY_SHA,
+    )
+    assert report.status == ConvergenceStatus.NOT_CONVERGED
+    assert (
+        ConvergenceBlockingReason.EVIDENCE_ANALYSIS_MISMATCH in report.blocking_reasons
+    )
+
+
+def test_direct_api_valid_wrong_subject_sha_context(
+    dummy_intent, dummy_clarification, dummy_quality_review, dummy_lineage, dummy_bundle
+):
+    """DIRECT_API_VALID_WRONG_SUBJECT_CONTEXT=NOT_CONVERGED."""
+    wrong_bundle_id = _compute_bundle_id({
+        "task_id": dummy_bundle.task_id,
+        "intent_digest": dummy_bundle.intent_digest,
+        "analysis_id": dummy_bundle.analysis_id,
+        "subject_sha": DUMMY_SHA2,
+        "observations": [
+            {"observation_id": o.observation_id} for o in dummy_bundle.observations
+        ],
+    })
+    wrong_sha_bundle = EvidenceBundle(
+        schema_version=1,
+        bundle_id=wrong_bundle_id,
+        task_id=dummy_bundle.task_id,
+        intent_digest=dummy_bundle.intent_digest,
+        analysis_id=dummy_bundle.analysis_id,
+        subject_sha=DUMMY_SHA2,
+        observations=dummy_bundle.observations,
+    )
+    validated = validate_evidence_bundle(wrong_sha_bundle)
+    assert validated.subject_sha == DUMMY_SHA2
+    report = evaluate_convergence(
+        dummy_intent,
+        dummy_clarification,
+        dummy_quality_review,
+        dummy_lineage,
+        wrong_sha_bundle,
+        DUMMY_SHA,
+        DUMMY_SHA,
+    )
+    assert report.status == ConvergenceStatus.NOT_CONVERGED
+    assert (
+        ConvergenceBlockingReason.EVIDENCE_SUBJECT_SHA_MISMATCH
+        in report.blocking_reasons
+    )

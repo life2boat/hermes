@@ -61,7 +61,10 @@ analysis_id = sha256 of a canonical identity payload that includes:
   schema_version, intent_digest, lineage_digest, source_base_sha,
   expected_base_sha (or empty string), and canonical full finding set.
 
-lineage_digest is computed from serialize_lineage() (PR-1 canonical serializer).
+lineage_digest is computed by extracting validated TaskLineage nodes and edges,
+performing deterministic node sorting (by kind then node_id) and edge sorting
+(by relation, source_id, then target_id), formatting as a canonical JSON graph,
+and computing its SHA-256 digest.
 
 CLI safety
 ----------
@@ -323,6 +326,8 @@ def validate_report(value: Mapping[str, object]) -> dict[str, Any]:
         value["analysis_id"]
     ):
         raise AnalysisReportError("REPORT_ANALYSIS_ID_INVALID")
+    if not isinstance(value["intent_task_id"], str) or not value["intent_task_id"]:
+        raise AnalysisReportError("REPORT_INTENT_TASK_ID_INVALID")
     if not isinstance(value["intent_digest"], str) or not _SHA256_RE.fullmatch(
         value["intent_digest"]
     ):
@@ -356,6 +361,10 @@ def validate_report(value: Mapping[str, object]) -> dict[str, Any]:
             or "primary_reference" not in f
         ):
             raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+
+        if not isinstance(f["message"], str):
+            raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+
         try:
             FindingSeverity(f["severity"])
             FindingCode(f["code"])
@@ -370,6 +379,11 @@ def validate_report(value: Mapping[str, object]) -> dict[str, Any]:
         ):
             raise AnalysisReportError("REPORT_FINDINGS_INVALID")
 
+        if not isinstance(pref["artifact_kind"], str) or not pref["artifact_kind"]:
+            raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+        if not isinstance(pref["identity"], str) or not pref["identity"]:
+            raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+
         rel_refs = f.get("related_references", [])
         if not isinstance(rel_refs, list):
             raise AnalysisReportError("REPORT_FINDINGS_INVALID")
@@ -380,6 +394,42 @@ def validate_report(value: Mapping[str, object]) -> dict[str, Any]:
                 or "identity" not in rref
             ):
                 raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+
+            if not isinstance(rref["artifact_kind"], str) or not rref["artifact_kind"]:
+                raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+            if not isinstance(rref["identity"], str) or not rref["identity"]:
+                raise AnalysisReportError("REPORT_FINDINGS_INVALID")
+
+    summary = value["summary"]
+    if not isinstance(summary, dict):
+        raise AnalysisReportError("REPORT_SUMMARY_INVALID")
+
+    for key in ("total", "errors", "warnings", "infos"):
+        if key not in summary:
+            raise AnalysisReportError("REPORT_SUMMARY_INVALID")
+        val = summary[key]
+        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+            raise AnalysisReportError("REPORT_SUMMARY_INVALID")
+
+    findings = value["findings"]
+    actual_total = len(findings)
+    actual_errors = sum(
+        1 for f in findings if f.get("severity") == FindingSeverity.ERROR.value
+    )
+    actual_warnings = sum(
+        1 for f in findings if f.get("severity") == FindingSeverity.WARNING.value
+    )
+    actual_infos = sum(
+        1 for f in findings if f.get("severity") == FindingSeverity.INFO.value
+    )
+
+    if (
+        summary["total"] != actual_total
+        or summary["errors"] != actual_errors
+        or summary["warnings"] != actual_warnings
+        or summary["infos"] != actual_infos
+    ):
+        raise AnalysisReportError("REPORT_SUMMARY_INVALID")
 
     return dict(value)
 
@@ -766,6 +816,12 @@ def analyze(
         lineage = validate_lineage(lineage)
     except LineageValidationError as exc:
         raise AnalysisInputError(f"LINEAGE_INVALID_{exc.code}") from exc
+
+    if expected_base_sha is not None:
+        if not isinstance(expected_base_sha, str) or not _SHA1_RE.fullmatch(
+            expected_base_sha
+        ):
+            raise AnalysisInputError("EXPECTED_BASE_SHA_INVALID")
 
     ctx = _AnalysisContext(
         intent=intent,

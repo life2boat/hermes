@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.49
+version: 1.2.50
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: a99663f6e6bdf5bde7c738ff844c1fa7f09c0f32
+state_verified_against_main_sha: 432aacfd0fd30e65fd788bec8d8f8ec934a8e1ef
 production_sha: unknown
 ---
 
@@ -12,6 +12,21 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Hermes Intent Control Plane PR-5 — Effective Policy / Source Attribution
+
+- PR-5 Effective Policy / Source Attribution is IMPLEMENTED (PR #174).
+- `EffectivePolicyReport` schema v1 is implemented in `ai_engineering/effective_policy.py`.
+- Resolves task-level policy, invariants, and required gates against exact Git-committed repository revisions (`subject_sha`).
+- Exact `TaskIntent` source attribution binds constraints, allowed/forbidden mutations, and stop boundary to the TaskIntent digest.
+- Invariant resolution resolves canonical engineering invariants from `docs/HERMES_INVARIANTS.md` (e.g. `R1`, `AI1`, `INV-AI-V2-001`).
+- Required-gate resolution resolves canonical release gates from `ai_engineering.release_gate.GateName` and `docs/AGENT_RELEASE_GATES.md`.
+- Unresolved references remain explicit (`resolution_status=UNRESOLVED`, report `status=INCOMPLETE`).
+- Public dataclass and deserialization validation boundaries enforce fail-closed integrity defense against tampered IDs and broken bindings (H-PR4-001 defense).
+- CLI `scripts/explain_effective_policy.py` provides offline explainability with safe path and output alias protections.
+- `PROVIDER_CALLS=0`, `NETWORK_REQUIRED=false`, `LLM_AS_POLICY_RESOLVER=false`, `POLICY_AUTO_INFERENCE=false`, `EFFECTIVE_POLICY_EXPANDS_AUTHORITY=false`.
+- `EXTERNAL_EVIDENCE_AUTHENTICITY_VERIFIED=false`: M-PR4-001 external evidence authenticity remains a known non-blocking residual limitation.
+- Production, database, Qdrant, secrets, and deployment remain unchanged.
 
 ## Hermes Intent Control Plane PR-1
 

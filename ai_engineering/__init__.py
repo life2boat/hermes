@@ -102,9 +102,11 @@ from ai_engineering.effective_policy import (
     resolve_effective_policy,
     serialize_effective_policy_report,
     validate_effective_policy_report,
+    validate_effective_policy_report_structure,
     validate_policy_resolution,
     validate_policy_source,
     validate_task_policy,
+    verify_effective_policy_report,
 )
 
 __all__ = [
@@ -198,7 +200,9 @@ __all__ = [
     "resolve_effective_policy",
     "serialize_effective_policy_report",
     "validate_effective_policy_report",
+    "validate_effective_policy_report_structure",
     "validate_policy_resolution",
     "validate_policy_source",
     "validate_task_policy",
+    "verify_effective_policy_report",
 ]

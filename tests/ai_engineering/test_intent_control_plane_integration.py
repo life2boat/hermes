@@ -30,6 +30,7 @@ from ai_engineering.effective_policy import (
     ResolutionStatus,
     resolve_effective_policy,
     validate_effective_policy_report,
+    verify_effective_policy_report,
 )
 from ai_engineering.requirements_gate import (
     CLARIFICATION_SCHEMA_VERSION,
@@ -380,9 +381,19 @@ class GateName(str, Enum):
 
         validated_policy = validate_effective_policy_report(policy_report)
         assert validated_policy.status == EffectivePolicyStatus.COMPLETE
-        assert validated_policy.intent_digest == i_digest
-        assert validated_policy.subject_sha == subject_sha
-        assert len(validated_policy.unresolved_references) == 0
+
+        # PR-5.1: Authoritative semantic verification against trusted intent and git sources
+        verified_policy = verify_effective_policy_report(
+            report=validated_policy,
+            intent=intent,
+            repository_root="/mock/repo",
+            subject_sha=subject_sha,
+            git_reader=mock_git_reader,
+        )
+        assert verified_policy.status == EffectivePolicyStatus.COMPLETE
+        assert verified_policy.intent_digest == i_digest
+        assert verified_policy.subject_sha == subject_sha
+        assert len(verified_policy.unresolved_references) == 0
 
         # Verify all 4 invariants resolved
         assert len(validated_policy.invariant_resolutions) == 4

@@ -34,9 +34,11 @@ from ai_engineering.effective_policy import (
     resolve_effective_policy,
     serialize_effective_policy_report,
     validate_effective_policy_report,
+    validate_effective_policy_report_structure,
     validate_policy_resolution,
     validate_policy_source,
     validate_task_policy,
+    verify_effective_policy_report,
 )
 from ai_engineering.release_gate import GateName
 from ai_engineering.task_intent import (
@@ -700,3 +702,595 @@ class TestExplainEffectivePolicyCLI:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
         assert proc.returncode == 2
         assert "SAFE_WRITE_VIOLATION" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# PR-5.1: Authoritative Semantic Verification & H-V1-PR5-001 Regressions
+# ---------------------------------------------------------------------------
+
+
+class TestAuthoritativeSemanticVerification:
+    """Authoritative semantic verification against trusted TaskIntent and Git sources."""
+
+    def test_valid_complete_report_passes_verification(self) -> None:
+        intent = make_sample_intent(
+            applicable_invariants=("R1", "AI1"),
+            required_gates=("CODE_GATE", "SECURITY_GATE"),
+        )
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert report.status == EffectivePolicyStatus.COMPLETE
+
+        # Authoritative semantic verification passes
+        verified = verify_effective_policy_report(
+            report=report,
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert verified.effective_policy_id == report.effective_policy_id
+        assert verified.status == EffectivePolicyStatus.COMPLETE
+
+    def test_valid_incomplete_report_passes_verification(self) -> None:
+        intent = make_sample_intent(
+            applicable_invariants=("R1", "UNKNOWN_INV_1"),
+            required_gates=("CODE_GATE", "UNKNOWN_GATE_1"),
+        )
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert report.status == EffectivePolicyStatus.INCOMPLETE
+
+        # INCOMPLETE report is a valid artifact and passes verification as INCOMPLETE
+        verified = verify_effective_policy_report(
+            report=report,
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert verified.effective_policy_id == report.effective_policy_id
+        assert verified.status == EffectivePolicyStatus.INCOMPLETE
+
+    def test_deserialized_bytes_and_json_string_verification(self) -> None:
+        intent = make_sample_intent(
+            applicable_invariants=("R1",), required_gates=("CODE_GATE",)
+        )
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        report_json = serialize_effective_policy_report(report)
+
+        # Verify from JSON str
+        verified_str = verify_effective_policy_report(
+            report=report_json,
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert verified_str.effective_policy_id == report.effective_policy_id
+
+        # Verify from UTF-8 bytes
+        verified_bytes = verify_effective_policy_report(
+            report=report_json.encode("utf-8"),
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert verified_bytes.effective_policy_id == report.effective_policy_id
+
+    def test_structural_alias_functions_identically(self) -> None:
+        intent = make_sample_intent()
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+        assert (
+            validate_effective_policy_report_structure(report).effective_policy_id
+            == validate_effective_policy_report(report).effective_policy_id
+        )
+
+    def test_hv1_pr5_001_forged_unknown_invariant_fails_authoritative_verification(
+        self,
+    ) -> None:
+        """H-V1-PR5-001: Forged UNKNOWN_INVARIANT marked RESOLVED fails semantic verification."""
+        intent = make_sample_intent(
+            applicable_invariants=("R1",), required_gates=("CODE_GATE",)
+        )
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+
+        # Attacker replaces resolved invariant R1 with UNKNOWN_INVARIANT marked RESOLVED
+        forged_inv = list(report.invariant_resolutions)
+        forged_inv[0] = PolicyResolution(
+            reference_kind=ReferenceKind.INVARIANT,
+            requested_reference="UNKNOWN_INVARIANT",
+            resolution_status=ResolutionStatus.RESOLVED,
+            canonical_reference="UNKNOWN_INVARIANT",
+            source_id=forged_inv[0].source_id,
+            source_path=forged_inv[0].source_path,
+            source_selector=forged_inv[0].source_selector,
+            reason_codes=(),
+        )
+
+        raw_dict = _make_report_dict(
+            report,
+            invariant_resolutions=forged_inv,
+            unresolved_references=[],
+            status=EffectivePolicyStatus.COMPLETE,
+        )
+        forged_id = compute_effective_policy_id(raw_dict)
+
+        forged_report = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=EffectivePolicyStatus.COMPLETE,
+            policy_sources=report.policy_sources,
+            task_policy=report.task_policy,
+            invariant_resolutions=tuple(forged_inv),
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=(),
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+
+        # Structural integrity accepts internally consistent forged report
+        struct_res = validate_effective_policy_report(forged_report)
+        assert struct_res.status == EffectivePolicyStatus.COMPLETE
+
+        # Authoritative semantic verification MUST FAIL CLOSED
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                report=forged_report,
+                intent=intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in (
+            "INVARIANT_RESOLUTION_MISMATCH",
+            "POLICY_ID_MISMATCH",
+            "SEMANTIC_VERIFICATION_FAILED",
+        )
+
+    def test_hv1_pr5_001_forged_unknown_gate_fails_authoritative_verification(
+        self,
+    ) -> None:
+        """H-V1-PR5-001: Forged UNKNOWN_GATE marked RESOLVED fails semantic verification."""
+        intent = make_sample_intent(
+            applicable_invariants=("R1",), required_gates=("CODE_GATE",)
+        )
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+
+        # Attacker replaces resolved gate CODE_GATE with UNKNOWN_GATE marked RESOLVED
+        forged_gates = list(report.required_gate_resolutions)
+        forged_gates[0] = PolicyResolution(
+            reference_kind=ReferenceKind.REQUIRED_GATE,
+            requested_reference="UNKNOWN_GATE",
+            resolution_status=ResolutionStatus.RESOLVED,
+            canonical_reference="UNKNOWN_GATE",
+            source_id=forged_gates[0].source_id,
+            source_path=forged_gates[0].source_path,
+            source_selector=forged_gates[0].source_selector,
+            reason_codes=(),
+        )
+
+        raw_dict = _make_report_dict(
+            report,
+            required_gate_resolutions=forged_gates,
+            unresolved_references=[],
+            status=EffectivePolicyStatus.COMPLETE,
+        )
+        forged_id = compute_effective_policy_id(raw_dict)
+
+        forged_report = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=EffectivePolicyStatus.COMPLETE,
+            policy_sources=report.policy_sources,
+            task_policy=report.task_policy,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=tuple(forged_gates),
+            unresolved_references=(),
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+
+        # Structural integrity accepts internally consistent forged report
+        struct_res = validate_effective_policy_report(forged_report)
+        assert struct_res.status == EffectivePolicyStatus.COMPLETE
+
+        # Authoritative semantic verification MUST FAIL CLOSED
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                report=forged_report,
+                intent=intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in (
+            "REQUIRED_GATE_RESOLUTION_MISMATCH",
+            "POLICY_ID_MISMATCH",
+            "SEMANTIC_VERIFICATION_FAILED",
+        )
+
+    def test_task_policy_forgery_fails_verification(self) -> None:
+        """Forged TaskPolicyAttribution claims fail authoritative semantic verification."""
+        intent = make_sample_intent()
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+
+        # 1. Changed constraints
+        forged_tp_constraints = TaskPolicyAttribution(
+            task_id=report.task_policy.task_id,
+            intent_revision=report.task_policy.intent_revision,
+            intent_digest=report.task_policy.intent_digest,
+            source_base_sha=report.task_policy.source_base_sha,
+            constraints=("FORGED_NO_LIMITS",),
+            allowed_mutations=report.task_policy.allowed_mutations,
+            forbidden_mutations=report.task_policy.forbidden_mutations,
+            stop_boundary=report.task_policy.stop_boundary,
+            source_id=report.task_policy.source_id,
+        )
+        raw_dict = _make_report_dict(report, task_policy=forged_tp_constraints)
+        forged_id = compute_effective_policy_id(raw_dict)
+        forged_report = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=report.status,
+            policy_sources=report.policy_sources,
+            task_policy=forged_tp_constraints,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=report.unresolved_references,
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+        assert validate_effective_policy_report(forged_report).status == report.status
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                forged_report,
+                intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in ("TASK_POLICY_MISMATCH", "POLICY_ID_MISMATCH")
+
+        # 2. Changed allowed_mutations
+        forged_tp_allowed = TaskPolicyAttribution(
+            task_id=report.task_policy.task_id,
+            intent_revision=report.task_policy.intent_revision,
+            intent_digest=report.task_policy.intent_digest,
+            source_base_sha=report.task_policy.source_base_sha,
+            constraints=report.task_policy.constraints,
+            allowed_mutations=("FORGED_ALL",),
+            forbidden_mutations=report.task_policy.forbidden_mutations,
+            stop_boundary=report.task_policy.stop_boundary,
+            source_id=report.task_policy.source_id,
+        )
+        raw_dict = _make_report_dict(report, task_policy=forged_tp_allowed)
+        forged_id = compute_effective_policy_id(raw_dict)
+        forged_report_allowed = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=report.status,
+            policy_sources=report.policy_sources,
+            task_policy=forged_tp_allowed,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=report.unresolved_references,
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                forged_report_allowed,
+                intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in ("TASK_POLICY_MISMATCH", "POLICY_ID_MISMATCH")
+
+        # 3. Changed forbidden_mutations
+        forged_tp_forbidden = TaskPolicyAttribution(
+            task_id=report.task_policy.task_id,
+            intent_revision=report.task_policy.intent_revision,
+            intent_digest=report.task_policy.intent_digest,
+            source_base_sha=report.task_policy.source_base_sha,
+            constraints=report.task_policy.constraints,
+            allowed_mutations=report.task_policy.allowed_mutations,
+            forbidden_mutations=(),
+            stop_boundary=report.task_policy.stop_boundary,
+            source_id=report.task_policy.source_id,
+        )
+        raw_dict = _make_report_dict(report, task_policy=forged_tp_forbidden)
+        forged_id = compute_effective_policy_id(raw_dict)
+        forged_report_forbidden = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=report.status,
+            policy_sources=report.policy_sources,
+            task_policy=forged_tp_forbidden,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=report.unresolved_references,
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                forged_report_forbidden,
+                intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in ("TASK_POLICY_MISMATCH", "POLICY_ID_MISMATCH")
+
+        # 4. Changed stop_boundary
+        forged_tp_stop = TaskPolicyAttribution(
+            task_id=report.task_policy.task_id,
+            intent_revision=report.task_policy.intent_revision,
+            intent_digest=report.task_policy.intent_digest,
+            source_base_sha=report.task_policy.source_base_sha,
+            constraints=report.task_policy.constraints,
+            allowed_mutations=report.task_policy.allowed_mutations,
+            forbidden_mutations=report.task_policy.forbidden_mutations,
+            stop_boundary="STOP_NEVER",
+            source_id=report.task_policy.source_id,
+        )
+        raw_dict = _make_report_dict(report, task_policy=forged_tp_stop)
+        forged_id = compute_effective_policy_id(raw_dict)
+        forged_report_stop = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=report.status,
+            policy_sources=report.policy_sources,
+            task_policy=forged_tp_stop,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=report.unresolved_references,
+            precedence_source_id=report.precedence_source_id,
+            authority_expansion=False,
+        )
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                forged_report_stop,
+                intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in ("TASK_POLICY_MISMATCH", "POLICY_ID_MISMATCH")
+
+    def test_forged_source_blob_fails_verification(self) -> None:
+        """Arbitrary content_sha256 in PolicySource fails authoritative semantic verification."""
+        intent = make_sample_intent()
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+
+        # Attacker replaces content_sha256 with fake hash and recomputes source_id
+        forged_sources = list(report.policy_sources)
+        fake_sha256 = "f" * 64
+        fake_source_id = compute_source_id(
+            forged_sources[0].source_kind,
+            forged_sources[0].path,
+            forged_sources[0].subject_sha,
+            fake_sha256,
+        )
+        forged_sources[0] = PolicySource(
+            source_id=fake_source_id,
+            source_kind=forged_sources[0].source_kind,
+            path=forged_sources[0].path,
+            subject_sha=forged_sources[0].subject_sha,
+            content_sha256=fake_sha256,
+        )
+
+        raw_dict = _make_report_dict(
+            report, policy_sources=forged_sources, precedence_source_id=fake_source_id
+        )
+        forged_id = compute_effective_policy_id(raw_dict)
+        forged_report = EffectivePolicyReport(
+            schema_version=report.schema_version,
+            effective_policy_id=forged_id,
+            task_id=report.task_id,
+            intent_digest=report.intent_digest,
+            intent_revision=report.intent_revision,
+            source_base_sha=report.source_base_sha,
+            subject_sha=report.subject_sha,
+            status=report.status,
+            policy_sources=tuple(forged_sources),
+            task_policy=report.task_policy,
+            invariant_resolutions=report.invariant_resolutions,
+            required_gate_resolutions=report.required_gate_resolutions,
+            unresolved_references=report.unresolved_references,
+            precedence_source_id=fake_source_id,
+            authority_expansion=False,
+        )
+
+        assert validate_effective_policy_report(forged_report).status == report.status
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                forged_report,
+                intent,
+                repository_root=".",
+                subject_sha=SAMPLE_SUBJECT_SHA,
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in (
+            "POLICY_SOURCE_MISMATCH",
+            "PRECEDENCE_SOURCE_MISMATCH",
+            "POLICY_ID_MISMATCH",
+        )
+
+    def test_wrong_subject_sha_fails_verification(self) -> None:
+        """Report with mismatched subject_sha fails authoritative semantic verification."""
+        intent = make_sample_intent()
+        report = resolve_effective_policy(
+            intent=intent,
+            repository_root=".",
+            subject_sha=SAMPLE_SUBJECT_SHA,
+            git_reader=make_mock_git_reader(),
+        )
+
+        with pytest.raises(EffectivePolicyValidationError) as exc:
+            verify_effective_policy_report(
+                report=report,
+                intent=intent,
+                repository_root=".",
+                subject_sha=ALT_SUBJECT_SHA,  # Different subject_sha
+                git_reader=make_mock_git_reader(),
+            )
+        assert exc.value.code in (
+            "SUBJECT_SHA_MISMATCH",
+            "POLICY_SOURCE_MISMATCH",
+            "POLICY_ID_MISMATCH",
+        )
+
+
+def _make_report_dict(
+    report: EffectivePolicyReport,
+    task_policy: TaskPolicyAttribution | None = None,
+    policy_sources: list[PolicySource] | None = None,
+    invariant_resolutions: list[PolicyResolution] | None = None,
+    required_gate_resolutions: list[PolicyResolution] | None = None,
+    unresolved_references: list[str] | None = None,
+    precedence_source_id: str | None = None,
+    status: EffectivePolicyStatus | None = None,
+) -> dict[str, Any]:
+    tp = task_policy or report.task_policy
+    sources = policy_sources or list(report.policy_sources)
+    invs = invariant_resolutions or list(report.invariant_resolutions)
+    gates = required_gate_resolutions or list(report.required_gate_resolutions)
+    unres = (
+        unresolved_references
+        if unresolved_references is not None
+        else list(report.unresolved_references)
+    )
+    prec_id = precedence_source_id or report.precedence_source_id
+    st = str(status or report.status)
+
+    return {
+        "authority_expansion": False,
+        "intent_digest": report.intent_digest,
+        "intent_revision": report.intent_revision,
+        "invariant_resolutions": [
+            {
+                "canonical_reference": r.canonical_reference,
+                "reason_codes": list(r.reason_codes),
+                "reference_kind": str(r.reference_kind),
+                "requested_reference": r.requested_reference,
+                "resolution_status": str(r.resolution_status),
+                "source_id": r.source_id,
+                "source_path": r.source_path,
+                "source_selector": r.source_selector,
+            }
+            for r in invs
+        ],
+        "policy_sources": [
+            {
+                "content_sha256": s.content_sha256,
+                "path": s.path,
+                "source_id": s.source_id,
+                "source_kind": str(s.source_kind),
+                "subject_sha": s.subject_sha,
+            }
+            for s in sources
+        ],
+        "precedence_source_id": prec_id,
+        "required_gate_resolutions": [
+            {
+                "canonical_reference": r.canonical_reference,
+                "reason_codes": list(r.reason_codes),
+                "reference_kind": str(r.reference_kind),
+                "requested_reference": r.requested_reference,
+                "resolution_status": str(r.resolution_status),
+                "source_id": r.source_id,
+                "source_path": r.source_path,
+                "source_selector": r.source_selector,
+            }
+            for r in gates
+        ],
+        "schema_version": report.schema_version,
+        "source_base_sha": report.source_base_sha,
+        "status": st,
+        "subject_sha": report.subject_sha,
+        "task_id": report.task_id,
+        "task_policy": {
+            "allowed_mutations": list(tp.allowed_mutations),
+            "constraints": list(tp.constraints),
+            "forbidden_mutations": list(tp.forbidden_mutations),
+            "intent_digest": tp.intent_digest,
+            "intent_revision": tp.intent_revision,
+            "source_base_sha": tp.source_base_sha,
+            "source_id": tp.source_id,
+            "stop_boundary": tp.stop_boundary,
+            "task_id": tp.task_id,
+        },
+        "unresolved_references": unres,
+    }

@@ -520,7 +520,21 @@ def validate_task_policy(
 def validate_effective_policy_report(
     report: EffectivePolicyReport | Mapping[str, object],
 ) -> EffectivePolicyReport:
-    """Validate a complete EffectivePolicyReport and verify all deterministic IDs and invariants."""
+    """Validate structural integrity and hash identity of an EffectivePolicyReport.
+
+    Proves:
+    - Schema version and field types conform to specification.
+    - String formats and regexes are well-formed.
+    - source_id calculations match their constituent fields.
+    - effective_policy_id hash matches canonical payload hashing.
+    - Internal consistency between resolutions and unresolved_references list.
+
+    Does NOT prove:
+    - Canonical policy membership against repository Git blobs.
+    - Semantic origin of TaskPolicyAttribution fields from TaskIntent.
+
+    Callers requiring authoritative semantic verification MUST use verify_effective_policy_report().
+    """
     if isinstance(report, EffectivePolicyReport):
         raw_report: Mapping[str, object] = {
             "schema_version": report.schema_version,
@@ -769,6 +783,13 @@ def validate_effective_policy_report(
         precedence_source_id=precedence_id,
         authority_expansion=False,
     )
+
+
+def validate_effective_policy_report_structure(
+    report: EffectivePolicyReport | Mapping[str, object],
+) -> EffectivePolicyReport:
+    """Explicit alias for structural validation of an EffectivePolicyReport."""
+    return validate_effective_policy_report(report)
 
 
 # ---------------------------------------------------------------------------
@@ -1235,3 +1256,80 @@ def resolve_effective_policy(
     )
 
     return validate_effective_policy_report(report)
+
+
+# ---------------------------------------------------------------------------
+# Authoritative Semantic Verification
+# ---------------------------------------------------------------------------
+
+
+def verify_effective_policy_report(
+    report: EffectivePolicyReport | Mapping[str, object] | str | bytes,
+    intent: TaskIntent | Mapping[str, object],
+    repository_root: Path | str = ".",
+    subject_sha: str | None = None,
+    git_reader: Callable[[str, str], bytes] | None = None,
+) -> EffectivePolicyReport:
+    """Authoritatively verify an EffectivePolicyReport against trusted TaskIntent and Git sources.
+
+    Re-resolves the canonical expected policy from the trusted TaskIntent and canonical Git
+    blobs at subject_sha, then verifies that the supplied report matches canonical semantic truth.
+
+    Fails closed if the report contains forged resolutions (e.g. unknown invariants or gates
+    marked RESOLVED), forged task policy claims (constraints, mutations, stop boundary),
+    mismatched subject_sha, or altered policy sources.
+    """
+    if isinstance(report, (str, bytes)):
+        validated_report = deserialize_effective_policy_report(report)
+    elif isinstance(report, (EffectivePolicyReport, Mapping)):
+        validated_report = validate_effective_policy_report(report)
+    else:
+        _fail("VALUE_INVALID")
+
+    validated_intent = validate_intent(intent)
+
+    if subject_sha is not None:
+        target_subject_sha = _sha40(subject_sha)
+    else:
+        target_subject_sha = validated_intent.source_base_sha
+
+    expected_report = resolve_effective_policy(
+        intent=validated_intent,
+        repository_root=repository_root,
+        subject_sha=target_subject_sha,
+        git_reader=git_reader,
+    )
+
+    if validated_report.task_id != expected_report.task_id:
+        _fail("TASK_ID_MISMATCH")
+    if validated_report.intent_digest != expected_report.intent_digest:
+        _fail("INTENT_DIGEST_MISMATCH")
+    if validated_report.intent_revision != expected_report.intent_revision:
+        _fail("INTENT_REVISION_MISMATCH")
+    if validated_report.source_base_sha != expected_report.source_base_sha:
+        _fail("SOURCE_BASE_SHA_MISMATCH")
+    if validated_report.subject_sha != expected_report.subject_sha:
+        _fail("SUBJECT_SHA_MISMATCH")
+    if validated_report.status != expected_report.status:
+        _fail("STATUS_MISMATCH")
+    if validated_report.precedence_source_id != expected_report.precedence_source_id:
+        _fail("PRECEDENCE_SOURCE_MISMATCH")
+    if validated_report.task_policy != expected_report.task_policy:
+        _fail("TASK_POLICY_MISMATCH")
+    if validated_report.policy_sources != expected_report.policy_sources:
+        _fail("POLICY_SOURCE_MISMATCH")
+    if validated_report.invariant_resolutions != expected_report.invariant_resolutions:
+        _fail("INVARIANT_RESOLUTION_MISMATCH")
+    if (
+        validated_report.required_gate_resolutions
+        != expected_report.required_gate_resolutions
+    ):
+        _fail("REQUIRED_GATE_RESOLUTION_MISMATCH")
+    if validated_report.unresolved_references != expected_report.unresolved_references:
+        _fail("UNRESOLVED_REFERENCES_MISMATCH")
+    if validated_report.effective_policy_id != expected_report.effective_policy_id:
+        _fail("POLICY_ID_MISMATCH")
+    if validated_report.authority_expansion is not False:
+        _fail("VALUE_INVALID")
+
+    return validated_report

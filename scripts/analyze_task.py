@@ -2,7 +2,10 @@
 
 Usage:
     python scripts/analyze_task.py --intent INTENT.json --lineage LINEAGE.json
-    python scripts/analyze_task.py --intent INTENT.json --lineage LINEAGE.json --output report.json
+    python scripts/analyze_task.py --intent INTENT.json --lineage LINEAGE.json \
+        --expected-sha <40-hex-chars>
+    python scripts/analyze_task.py --intent INTENT.json --lineage LINEAGE.json \
+        --output report.json
 
 Exit codes:
     0 = analysis completed, no ERROR findings
@@ -13,12 +16,18 @@ Properties:
     Read-only  – never mutates input artifacts.
     Offline    – zero provider calls, zero network calls.
     Deterministic – same inputs produce byte-equivalent JSON output.
+
+Deferred rules (not implemented in schema v1):
+    MUTATION_OUTSIDE_ALLOWED_SCOPE   – missing canonical path reference in lineage schema
+    MUTATION_IN_FORBIDDEN_SCOPE      – missing canonical path reference in lineage schema
+    REQUIRED_GATE_COVERAGE           – missing canonical gate-to-lineage mapping
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,6 +41,7 @@ from ai_engineering.task_analysis import (
 )
 
 _MAX_FILE_BYTES = 512 * 1024  # 512 KB
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class _SafeReadError(Exception):
@@ -67,10 +77,29 @@ Exit codes:
 
 The analyzer is READ ONLY and OFFLINE. It never mutates input artifacts
 and never makes provider or network calls.
+
+SOURCE_IDENTITY_MISMATCH is only checked when --expected-sha is supplied.
+Without an independent anchor, source-SHA verification cannot be deterministic.
+
+Deferred rules (not implemented in schema v1):
+  MUTATION_OUTSIDE_ALLOWED_SCOPE   – no canonical path reference in lineage schema
+  MUTATION_IN_FORBIDDEN_SCOPE      – no canonical path reference in lineage schema
+  REQUIRED_GATE_COVERAGE           – no canonical gate-to-lineage mapping
 """,
     )
     p.add_argument("--intent", type=Path, required=True, help="Path to TaskIntent JSON file.")
     p.add_argument("--lineage", type=Path, required=True, help="Path to TaskLineage JSON file.")
+    p.add_argument(
+        "--expected-sha",
+        dest="expected_sha",
+        type=str,
+        default=None,
+        help=(
+            "Independent canonical base SHA (40 hex chars) to verify against "
+            "intent.source_base_sha. When omitted, SOURCE_IDENTITY_MISMATCH "
+            "is not checked."
+        ),
+    )
     p.add_argument(
         "--output",
         type=Path,
@@ -86,6 +115,17 @@ and never makes provider or network calls.
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+
+    # Validate --expected-sha format before reading files.
+    expected_sha: str | None = None
+    if args.expected_sha is not None:
+        if _SHA_RE.fullmatch(args.expected_sha) is None:
+            print(
+                f"analyze_task: EXPECTED_SHA_INVALID: must be 40 lowercase hex chars",
+                file=sys.stderr,
+            )
+            return 2
+        expected_sha = args.expected_sha
 
     # Load and validate inputs.
     try:
@@ -108,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Run analysis (read-only, offline, deterministic).
-    report = analyze(intent, lineage)
+    report = analyze(intent, lineage, expected_base_sha=expected_sha)
 
     # Output.
     canonical_json = serialize_report(report)
@@ -126,7 +166,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.human or args.output is None:
-        # Always print human-readable summary when no --output, or when --human flag set.
         d = report_to_dict(report)
         print(f"analysis_id : {report.analysis_id}")
         print(f"intent      : {report.intent_task_id}")
@@ -143,7 +182,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    ref: {f.primary_reference.artifact_kind}::{f.primary_reference.identity}")
 
     if args.output is not None and not args.human:
-        # If writing to file and not asked for human output, print just the path.
         print(f"ANALYSIS_REPORT_WRITTEN={args.output}")
 
     return 1 if report.has_errors else 0

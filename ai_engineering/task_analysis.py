@@ -8,30 +8,54 @@ Contract
 * SCHEMA_VERSION = 1
 
 Analysis report schema v1 identifies cross-artifact inconsistencies between:
-  TaskIntent, AcceptanceCriteria, TaskLineage nodes/edges,
-  mutation boundaries, and required gates.
+  TaskIntent, AcceptanceCriteria, TaskLineage nodes/edges, and source identity.
 
-Rules implemented
------------------
+Rules implemented in schema v1
+-------------------------------
 ORPHAN_ACCEPTANCE_CRITERION   – criterion with no TASK→IMPLEMENTS edge
+                                 (scoped identity <task_id>::<criterion_id>)
 ORPHAN_EXECUTION_TASK          – TASK node with no IMPLEMENTS edge
 ORPHAN_EVIDENCE                – EVIDENCE node with no VERIFIES edge
-MUTATION_OUTSIDE_ALLOWED_SCOPE – edge-referenced path outside allowed_mutations
-MUTATION_IN_FORBIDDEN_SCOPE   – edge-referenced path matches forbidden_mutations
-REQUIRED_GATE_UNCOVERED       – required_gate with no structured coverage node
-SOURCE_IDENTITY_MISMATCH      – lineage INTENT node_id doesn't match intent task_id,
-                                 or base-SHA marker node conflicts with intent SHA
+SOURCE_IDENTITY_MISMATCH      – intent.source_base_sha != expected_base_sha
+                                 (when an independent expected SHA is supplied)
+TASK_IDENTITY_INCONSISTENCY   – lineage INTENT node_id doesn't match task_id
+                                 (task-identity consistency check, not SHA check)
 
-Not implemented in PR-2 (deferred)
-------------------------------------
+Rules deferred (no canonical structured mapping in schema v1)
+-------------------------------------------------------------
+MUTATION_OUTSIDE_ALLOWED_SCOPE
+  Reason: DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  PR-1 TaskLineage has no canonical structured path-reference type.
+  Inferring filesystem paths from arbitrary TASK node_ids (e.g. "feature/auth",
+  "TASK/001") violates the deterministic structural-certainty requirement.
+
+MUTATION_IN_FORBIDDEN_SCOPE
+  Reason: DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  Same reason as above.
+
+REQUIRED_GATE_COVERAGE
+  Reason: DEFERRED_DUE_TO_MISSING_CANONICAL_MAPPING
+  PR-1 lineage schema defines no GATE node kind. Matching required_gate strings
+  against arbitrary lineage node_ids creates an undocumented naming convention,
+  not a provable structural mapping.
+
+Not implemented in PR-2
+-----------------------
 Clarify, Converge, LLM-as-judge, auto-remediation, remote artifact fetch.
+
+Criterion identity
+------------------
+Only canonical scoped identity is accepted:
+
+    <task_id>::<criterion_id>
+
+Bare criterion_id is NOT a canonical reference in the Cross-Artifact Analyzer.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,10 +103,8 @@ class FindingCode(StrEnum):
     ORPHAN_ACCEPTANCE_CRITERION = "ORPHAN_ACCEPTANCE_CRITERION"
     ORPHAN_EXECUTION_TASK = "ORPHAN_EXECUTION_TASK"
     ORPHAN_EVIDENCE = "ORPHAN_EVIDENCE"
-    MUTATION_OUTSIDE_ALLOWED_SCOPE = "MUTATION_OUTSIDE_ALLOWED_SCOPE"
-    MUTATION_IN_FORBIDDEN_SCOPE = "MUTATION_IN_FORBIDDEN_SCOPE"
-    REQUIRED_GATE_UNCOVERED = "REQUIRED_GATE_UNCOVERED"
     SOURCE_IDENTITY_MISMATCH = "SOURCE_IDENTITY_MISMATCH"
+    TASK_IDENTITY_INCONSISTENCY = "TASK_IDENTITY_INCONSISTENCY"
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +116,8 @@ class FindingCode(StrEnum):
 class ArtifactReference:
     """A stable, scoped reference to an artifact element."""
 
-    artifact_kind: str  # e.g. "INTENT", "LINEAGE_NODE", "LINEAGE_EDGE"
-    identity: str  # scoped identity (task_id::criterion_id, node_id, etc.)
+    artifact_kind: str  # e.g. "INTENT", "LINEAGE_NODE", "CRITERION"
+    identity: str       # scoped identity (task_id::criterion_id, node_id, etc.)
     label: str | None = None  # optional human-readable label
 
 
@@ -125,10 +147,10 @@ class AnalysisReport:
     """Output of one cross-artifact analysis run."""
 
     schema_version: int
-    analysis_id: str  # deterministic: sha256 of canonical finding set + intent digest
+    analysis_id: str        # deterministic sha256 of canonical finding set + intent digest
     intent_task_id: str
     intent_digest: str
-    source_base_sha: str
+    source_base_sha: str    # copied from TaskIntent — verified against expected_base_sha
     findings: tuple[Finding, ...]
 
     @property
@@ -145,7 +167,7 @@ class AnalysisReport:
 
 
 # ---------------------------------------------------------------------------
-# Analysis errors (input validation)
+# Analysis input error
 # ---------------------------------------------------------------------------
 
 
@@ -211,45 +233,12 @@ def serialize_report(report: AnalysisReport) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Path-matching helpers (deterministic, no filesystem access)
-# ---------------------------------------------------------------------------
-
-
-def _normalize_path(p: str) -> str:
-    """Normalize path separators to forward slashes."""
-    return p.replace("\\", "/")
-
-
-def _path_matches_pattern(path: str, pattern: str) -> bool:
-    """Check if a normalized path is within or equal to a normalized pattern prefix.
-
-    A pattern ending with '/' matches any path with that prefix.
-    An exact pattern matches only that exact path.
-    """
-    np = _normalize_path(path)
-    npat = _normalize_path(pattern)
-    if npat.endswith("/"):
-        return np == npat.rstrip("/") or np.startswith(npat)
-    return np == npat or np.startswith(npat + "/")
-
-
-def _in_allowed(path: str, allowed: tuple[str, ...]) -> bool:
-    """Return True if path is covered by at least one allowed_mutations pattern."""
-    return any(_path_matches_pattern(path, a) for a in allowed)
-
-
-def _in_forbidden(path: str, forbidden: tuple[str, ...]) -> bool:
-    """Return True if path matches any forbidden_mutations pattern."""
-    return any(_path_matches_pattern(path, f) for f in forbidden)
-
-
-# ---------------------------------------------------------------------------
 # Finding deduplication key
 # ---------------------------------------------------------------------------
 
 
 def _finding_key(f: Finding) -> str:
-    """Stable deduplication key for a finding (prevents duplicate reporting)."""
+    """Stable deduplication key — prevents duplicate reporting of same logical issue."""
     return f"{f.code.value}::{f.primary_reference.artifact_kind}::{f.primary_reference.identity}"
 
 
@@ -262,6 +251,7 @@ def _finding_key(f: Finding) -> str:
 class _AnalysisContext:
     intent: TaskIntent
     lineage: TaskLineage
+    expected_base_sha: str | None
     findings: list[Finding] = field(default_factory=list)
     _seen_keys: set[str] = field(default_factory=set)
 
@@ -273,29 +263,64 @@ class _AnalysisContext:
 
 
 # ---------------------------------------------------------------------------
-# Rule implementations
+# Rule: source identity mismatch
 # ---------------------------------------------------------------------------
 
 
 def _rule_source_identity(ctx: _AnalysisContext) -> None:
-    """SOURCE_IDENTITY_MISMATCH: lineage INTENT nodes must match intent.task_id."""
+    """SOURCE_IDENTITY_MISMATCH: intent.source_base_sha != expected_base_sha.
+
+    Only fires when an independent expected_base_sha is supplied to analyze().
+    Without an independent anchor, source-SHA verification cannot be deterministic.
+    """
+    if ctx.expected_base_sha is None:
+        return
+    if ctx.intent.source_base_sha != ctx.expected_base_sha:
+        ctx.add(Finding(
+            code=FindingCode.SOURCE_IDENTITY_MISMATCH,
+            severity=FindingSeverity.ERROR,
+            message=(
+                f"TaskIntent source_base_sha '{ctx.intent.source_base_sha}' "
+                f"does not match the supplied expected base SHA "
+                f"'{ctx.expected_base_sha}'. "
+                "Artifacts may originate from a different repository state."
+            ),
+            primary_reference=ArtifactReference(
+                artifact_kind="INTENT",
+                identity=ctx.intent.task_id,
+                label="TaskIntent.source_base_sha",
+            ),
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Rule: task identity consistency
+# ---------------------------------------------------------------------------
+
+
+def _rule_task_identity_consistency(ctx: _AnalysisContext) -> None:
+    """TASK_IDENTITY_INCONSISTENCY: lineage INTENT nodes must match intent.task_id.
+
+    This is task-identity consistency, not SHA verification.
+    An INTENT node whose node_id differs from intent.task_id indicates the
+    lineage was built for a different task context.
+    """
     intent = ctx.intent
     lineage = ctx.lineage
-    intent_nodes = [n for n in lineage.nodes if n.kind == NodeKind.INTENT]
-    for node in intent_nodes:
-        if node.node_id != intent.task_id:
+    for node in lineage.nodes:
+        if node.kind == NodeKind.INTENT and node.node_id != intent.task_id:
             ctx.add(Finding(
-                code=FindingCode.SOURCE_IDENTITY_MISMATCH,
+                code=FindingCode.TASK_IDENTITY_INCONSISTENCY,
                 severity=FindingSeverity.ERROR,
                 message=(
                     f"Lineage INTENT node '{node.node_id}' does not match "
                     f"TaskIntent task_id '{intent.task_id}'. "
-                    "Artifacts may originate from different task contexts."
+                    "The lineage graph was likely built for a different task."
                 ),
                 primary_reference=ArtifactReference(
                     artifact_kind="LINEAGE_NODE",
                     identity=node.node_id,
-                    label=f"INTENT node in lineage",
+                    label="INTENT node mismatch",
                 ),
                 related_references=(
                     ArtifactReference(
@@ -307,43 +332,53 @@ def _rule_source_identity(ctx: _AnalysisContext) -> None:
             ))
 
 
+# ---------------------------------------------------------------------------
+# Rule: orphan acceptance criterion
+# ---------------------------------------------------------------------------
+
+
+def _scoped_criterion_id(task_id: str, criterion_id: str) -> str:
+    """Return canonical scoped criterion identity: <task_id>::<criterion_id>."""
+    return f"{task_id}::{criterion_id}"
+
+
 def _rule_orphan_acceptance_criterion(ctx: _AnalysisContext) -> None:
-    """ORPHAN_ACCEPTANCE_CRITERION: criterion with no TASK IMPLEMENTS edge."""
+    """ORPHAN_ACCEPTANCE_CRITERION: criterion with no TASK→IMPLEMENTS edge.
+
+    Criterion matching uses ONLY canonical scoped identity:
+        <task_id>::<criterion_id>
+
+    Bare criterion_id is not accepted as a canonical reference.
+    This matches PR-2 scoped-identity policy.
+    """
     intent = ctx.intent
     lineage = ctx.lineage
 
-    # Build set of criterion node_ids that have at least one IMPLEMENTS edge pointing to them.
-    implemented_criteria: set[str] = set()
+    # Build set of scoped criterion node_ids that are IMPLEMENTS targets.
+    implemented_targets: set[str] = set()
     for edge in lineage.edges:
         if edge.relation == RelationKind.IMPLEMENTS:
-            implemented_criteria.add(edge.target_id)
+            implemented_targets.add(edge.target_id)
 
-    # For each acceptance criterion, check if its scoped id appears as a CRITERION node
-    # that is the target of an IMPLEMENTS edge.
-    criterion_node_ids = {
+    # Build set of CRITERION node_ids declared in the lineage.
+    criterion_node_ids: set[str] = {
         n.node_id for n in lineage.nodes if n.kind == NodeKind.CRITERION
     }
 
     for crit in intent.acceptance_criteria:
-        scoped_id = f"{intent.task_id}::{crit.criterion_id}"
-        # Match by exact scoped id or by bare criterion_id (for backward compat)
-        has_impl = (
-            scoped_id in implemented_criteria
-            or crit.criterion_id in implemented_criteria
-        )
-        # Also check that the criterion is represented as a node
-        is_node = (
-            scoped_id in criterion_node_ids
-            or crit.criterion_id in criterion_node_ids
-        )
+        scoped_id = _scoped_criterion_id(intent.task_id, crit.criterion_id)
+
+        has_impl = scoped_id in implemented_targets
+        is_node = scoped_id in criterion_node_ids
+
         if not has_impl:
             ctx.add(Finding(
                 code=FindingCode.ORPHAN_ACCEPTANCE_CRITERION,
                 severity=FindingSeverity.ERROR,
                 message=(
-                    f"Acceptance criterion '{crit.criterion_id}' "
-                    f"(task '{intent.task_id}') has no TASK→IMPLEMENTS edge. "
-                    "No execution task is recorded as implementing this criterion."
+                    f"Acceptance criterion '{scoped_id}' has no TASK→IMPLEMENTS edge. "
+                    "No execution task is recorded as implementing this criterion. "
+                    "Canonical scoped identity required: <task_id>::<criterion_id>."
                 ),
                 primary_reference=ArtifactReference(
                     artifact_kind="CRITERION",
@@ -352,13 +387,14 @@ def _rule_orphan_acceptance_criterion(ctx: _AnalysisContext) -> None:
                 ),
             ))
         elif not is_node:
-            # Criterion implemented but not declared as a node — WARNING
+            # Edge target exists but no CRITERION node declared — WARNING
             ctx.add(Finding(
                 code=FindingCode.ORPHAN_ACCEPTANCE_CRITERION,
                 severity=FindingSeverity.WARNING,
                 message=(
-                    f"Acceptance criterion '{crit.criterion_id}' has an IMPLEMENTS edge "
-                    "but is not declared as a CRITERION node in the lineage graph."
+                    f"Acceptance criterion '{scoped_id}' has a TASK→IMPLEMENTS edge "
+                    "but no corresponding CRITERION node is declared in the lineage graph. "
+                    "Declare a CRITERION node with the canonical scoped identity."
                 ),
                 primary_reference=ArtifactReference(
                     artifact_kind="CRITERION",
@@ -366,6 +402,11 @@ def _rule_orphan_acceptance_criterion(ctx: _AnalysisContext) -> None:
                     label=crit.statement[:120] if crit.statement else None,
                 ),
             ))
+
+
+# ---------------------------------------------------------------------------
+# Rule: orphan execution task
+# ---------------------------------------------------------------------------
 
 
 def _rule_orphan_execution_task(ctx: _AnalysisContext) -> None:
@@ -394,6 +435,11 @@ def _rule_orphan_execution_task(ctx: _AnalysisContext) -> None:
             ))
 
 
+# ---------------------------------------------------------------------------
+# Rule: orphan evidence
+# ---------------------------------------------------------------------------
+
+
 def _rule_orphan_evidence(ctx: _AnalysisContext) -> None:
     """ORPHAN_EVIDENCE: EVIDENCE node with no outgoing VERIFIES edge."""
     lineage = ctx.lineage
@@ -419,109 +465,10 @@ def _rule_orphan_evidence(ctx: _AnalysisContext) -> None:
             ))
 
 
-def _rule_mutation_boundaries(ctx: _AnalysisContext) -> None:
-    """Check TASK nodes with path-shaped IDs against allowed/forbidden mutation boundaries.
-
-    A TASK node_id is treated as a repository path reference only when it contains
-    a path separator ('/' or '\\') — a deterministic structural signal.
-    This avoids false positives from abstract task identifiers like 'TASK-001'.
-    """
-    intent = ctx.intent
-    lineage = ctx.lineage
-
-    for node in lineage.nodes:
-        if node.kind != NodeKind.TASK:
-            continue
-        # Only analyze node_ids that look like repository paths.
-        if "/" not in node.node_id and "\\" not in node.node_id:
-            continue
-
-        path = node.node_id
-        in_forbidden = _in_forbidden(path, intent.forbidden_mutations)
-        in_allowed = _in_allowed(path, intent.allowed_mutations)
-
-        if in_forbidden:
-            ctx.add(Finding(
-                code=FindingCode.MUTATION_IN_FORBIDDEN_SCOPE,
-                severity=FindingSeverity.ERROR,
-                message=(
-                    f"TASK node '{path}' references a path that matches "
-                    f"a forbidden_mutations pattern in TaskIntent '{intent.task_id}'. "
-                    "Forbidden scope takes precedence over allowed scope."
-                ),
-                primary_reference=ArtifactReference(
-                    artifact_kind="LINEAGE_NODE",
-                    identity=path,
-                    label="TASK in forbidden scope",
-                ),
-                related_references=(
-                    ArtifactReference(
-                        artifact_kind="INTENT",
-                        identity=intent.task_id,
-                        label="TaskIntent.forbidden_mutations",
-                    ),
-                ),
-            ))
-        elif not in_allowed and intent.allowed_mutations:
-            # Only report outside-allowed if allowed_mutations is non-empty.
-            # An empty allowed_mutations list means no path-level restriction.
-            ctx.add(Finding(
-                code=FindingCode.MUTATION_OUTSIDE_ALLOWED_SCOPE,
-                severity=FindingSeverity.ERROR,
-                message=(
-                    f"TASK node '{path}' references a path outside "
-                    f"allowed_mutations in TaskIntent '{intent.task_id}'."
-                ),
-                primary_reference=ArtifactReference(
-                    artifact_kind="LINEAGE_NODE",
-                    identity=path,
-                    label="TASK outside allowed scope",
-                ),
-                related_references=(
-                    ArtifactReference(
-                        artifact_kind="INTENT",
-                        identity=intent.task_id,
-                        label="TaskIntent.allowed_mutations",
-                    ),
-                ),
-            ))
-
-
-def _rule_required_gate_coverage(ctx: _AnalysisContext) -> None:
-    """REQUIRED_GATE_UNCOVERED: required_gate with no structured coverage node.
-
-    A gate is considered "covered" when a lineage node whose node_id exactly
-    matches the gate identifier exists. This is the only deterministic
-    structural representation available in schema v1.
-
-    If required_gates is empty, no findings are emitted.
-    """
-    intent = ctx.intent
-    lineage = ctx.lineage
-
-    node_ids = {n.node_id for n in lineage.nodes}
-
-    for gate in intent.required_gates:
-        if gate not in node_ids:
-            ctx.add(Finding(
-                code=FindingCode.REQUIRED_GATE_UNCOVERED,
-                severity=FindingSeverity.WARNING,
-                message=(
-                    f"Required gate '{gate}' from TaskIntent '{intent.task_id}' "
-                    "has no corresponding lineage node. "
-                    "No structured gate coverage is recorded."
-                ),
-                primary_reference=ArtifactReference(
-                    artifact_kind="INTENT",
-                    identity=f"{intent.task_id}::gate::{gate}",
-                    label=gate,
-                ),
-            ))
-
-
 # ---------------------------------------------------------------------------
 # Finding sort key (deterministic ordering)
 # ---------------------------------------------------------------------------
+
 
 _SEVERITY_ORDER = {
     FindingSeverity.ERROR: 0,
@@ -532,9 +479,7 @@ _SEVERITY_ORDER = {
 
 def _finding_sort_key(f: Finding) -> tuple[int, str, str, str]:
     """Deterministic sort: severity → code → primary identity → related identities."""
-    related = "|".join(
-        sorted(r.identity for r in f.related_references)
-    )
+    related = "|".join(sorted(r.identity for r in f.related_references))
     return (
         _SEVERITY_ORDER[f.severity],
         f.code.value,
@@ -560,24 +505,53 @@ def _compute_analysis_id(intent_dgst: str, findings: tuple[Finding, ...]) -> str
 # ---------------------------------------------------------------------------
 
 
-def analyze(intent: TaskIntent, lineage: TaskLineage) -> AnalysisReport:
+def analyze(
+    intent: TaskIntent,
+    lineage: TaskLineage,
+    *,
+    expected_base_sha: str | None = None,
+) -> AnalysisReport:
     """Run all analysis rules and return a deterministic AnalysisReport.
+
+    Parameters
+    ----------
+    intent:
+        Validated TaskIntent (schema v1).
+    lineage:
+        Validated TaskLineage (schema v1).
+    expected_base_sha:
+        Optional independent canonical base SHA to verify against
+        intent.source_base_sha. When None, SOURCE_IDENTITY_MISMATCH is
+        not emitted (no independent anchor is available).
 
     Guarantees
     ----------
     * Read-only: inputs are never mutated.
     * Offline: no network or provider calls.
-    * Deterministic: same inputs → same report.
+    * Deterministic: same inputs + same expected_base_sha → same report.
     * Deduplicated: one logical issue → one finding.
+
+    Deferred rules (not implemented in schema v1)
+    ---------------------------------------------
+    MUTATION_OUTSIDE_ALLOWED_SCOPE, MUTATION_IN_FORBIDDEN_SCOPE:
+        Deferred due to missing canonical structured mutation path reference
+        in TaskLineage schema v1.
+
+    REQUIRED_GATE_COVERAGE:
+        Deferred due to missing canonical gate-to-lineage-node mapping
+        in TaskLineage schema v1.
     """
-    ctx = _AnalysisContext(intent=intent, lineage=lineage)
+    ctx = _AnalysisContext(
+        intent=intent,
+        lineage=lineage,
+        expected_base_sha=expected_base_sha,
+    )
 
     _rule_source_identity(ctx)
+    _rule_task_identity_consistency(ctx)
     _rule_orphan_acceptance_criterion(ctx)
     _rule_orphan_execution_task(ctx)
     _rule_orphan_evidence(ctx)
-    _rule_mutation_boundaries(ctx)
-    _rule_required_gate_coverage(ctx)
 
     sorted_findings = tuple(sorted(ctx.findings, key=_finding_sort_key))
     dgst = intent_digest(intent)
@@ -596,14 +570,6 @@ def analyze(intent: TaskIntent, lineage: TaskLineage) -> AnalysisReport:
 # ---------------------------------------------------------------------------
 # Input loading helpers (used by CLI)
 # ---------------------------------------------------------------------------
-
-
-class AnalysisReportLoadError(ValueError):
-    """Raised when a serialized report cannot be loaded."""
-
-    def __init__(self, code: str) -> None:
-        self.code = code
-        super().__init__(code)
 
 
 def load_lineage_from_bytes(raw: bytes) -> TaskLineage:

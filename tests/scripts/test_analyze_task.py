@@ -3,9 +3,9 @@
 Covers:
 - Exit code 0 (no errors)
 - Exit code 1 (errors found)
-- Exit code 2 (invalid input)
+- Exit code 2 (invalid input, missing file)
 - --output flag
-- --human flag
+- --expected-sha flag (SOURCE_IDENTITY_MISMATCH)
 - Read-only: input files not mutated
 """
 
@@ -86,6 +86,50 @@ class TestCliExitCodes:
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main(["--intent", str(intent), "--lineage", str(lineage)])
         assert result == 2
+        captured = capsys.readouterr()
+        assert "analyze_task:" in captured.err
+
+    def test_exit_2_invalid_expected_sha(self, tmp_path: Path, capsys) -> None:
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--expected-sha", "not-a-sha",
+        ])
+        assert result == 2
+        captured = capsys.readouterr()
+        assert "EXPECTED_SHA_INVALID" in captured.err
+
+
+class TestCliExpectedSha:
+    def test_matching_expected_sha_exit_0(self, tmp_path: Path) -> None:
+        sha = "b" * 40
+        intent = _write_intent(tmp_path / "intent.json", source_base_sha=sha)
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--expected-sha", sha,
+        ])
+        assert result == 0
+
+    def test_mismatched_expected_sha_exit_1(self, tmp_path: Path) -> None:
+        intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--expected-sha", "c" * 40,
+        ])
+        assert result == 1
+
+    def test_no_expected_sha_no_mismatch(self, tmp_path: Path) -> None:
+        intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        # No --expected-sha: SOURCE_IDENTITY_MISMATCH not checked
+        result = main(["--intent", str(intent), "--lineage", str(lineage)])
+        assert result == 0
 
 
 class TestCliOutput:

@@ -140,9 +140,15 @@ class TestReportSchema:
         report = analyze(_make_intent(), _empty_lineage())
         d = report_to_dict(report)
         for key in (
-            "schema_version", "analysis_id", "intent_task_id", "intent_digest",
-            "lineage_digest", "source_base_sha", "expected_base_sha",
-            "findings", "summary",
+            "schema_version",
+            "analysis_id",
+            "intent_task_id",
+            "intent_digest",
+            "lineage_digest",
+            "source_base_sha",
+            "expected_base_sha",
+            "findings",
+            "summary",
         ):
             assert key in d, f"Missing required field: {key}"
         summary = d["summary"]
@@ -189,20 +195,24 @@ class TestCanonicalInputValidation:
         bad_intent = _make_intent()
         # Force an invalid schema version via object.__setattr__ on frozen dataclass
         import dataclasses
+
         bad_intent_dict = dataclasses.asdict(bad_intent)
         bad_intent_dict["schema_version"] = 99
-        raw = json.dumps(bad_intent_dict | {
-            "status": "READY",
-            "task_class": "BOUNDED_IMPLEMENTATION",
-            "stop_boundary": "LOCAL_DIFF",
-            "acceptance_criteria": [],
-            "constraints": [],
-            "allowed_mutations": [],
-            "forbidden_mutations": [],
-            "unknowns": [],
-            "applicable_invariants": [],
-            "required_gates": [],
-        }).encode("utf-8")
+        raw = json.dumps(
+            bad_intent_dict
+            | {
+                "status": "READY",
+                "task_class": "BOUNDED_IMPLEMENTATION",
+                "stop_boundary": "LOCAL_DIFF",
+                "acceptance_criteria": [],
+                "constraints": [],
+                "allowed_mutations": [],
+                "forbidden_mutations": [],
+                "unknowns": [],
+                "applicable_invariants": [],
+                "required_gates": [],
+            }
+        ).encode("utf-8")
         with pytest.raises(AnalysisInputError) as exc:
             load_intent_from_bytes(raw)
         assert "INTENT_INVALID" in exc.value.code
@@ -353,8 +363,12 @@ class TestDeterministicSerialization:
         lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         report = analyze(intent, lineage)
         severities = [f.severity for f in report.findings]
-        error_indices = [i for i, s in enumerate(severities) if s == FindingSeverity.ERROR]
-        warning_indices = [i for i, s in enumerate(severities) if s == FindingSeverity.WARNING]
+        error_indices = [
+            i for i, s in enumerate(severities) if s == FindingSeverity.ERROR
+        ]
+        warning_indices = [
+            i for i, s in enumerate(severities) if s == FindingSeverity.WARNING
+        ]
         if error_indices and warning_indices:
             assert max(error_indices) < min(warning_indices)
 
@@ -429,11 +443,19 @@ class TestOrphanAcceptanceCriterion:
     def test_scoped_criterion_id_accepted_pass(self) -> None:
         intent = _make_intent(task_id="MY-TASK", criteria=[("AC-1", "stmt")])
         lineage = _make_lineage(
-            nodes=[("MY-TASK", "INTENT"), ("MY-TASK::AC-1", "CRITERION"), ("T1", "TASK")],
+            nodes=[
+                ("MY-TASK", "INTENT"),
+                ("MY-TASK::AC-1", "CRITERION"),
+                ("T1", "TASK"),
+            ],
             edges=[("T1", "MY-TASK::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) == 0
 
     def test_bare_criterion_id_not_canonical(self) -> None:
@@ -444,7 +466,11 @@ class TestOrphanAcceptanceCriterion:
             edges=[("T1", "AC-1", "IMPLEMENTS")],  # bare, not scoped
         )
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) >= 1
         assert any(f.severity == FindingSeverity.ERROR for f in orphans)
 
@@ -452,15 +478,25 @@ class TestOrphanAcceptanceCriterion:
         intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "stmt")])
         lineage = _empty_lineage()
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) == 1
         assert orphans[0].primary_reference.identity == "TASK-001::AC-1"
 
     def test_criterion_without_implementing_task_is_error(self) -> None:
-        intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "Must pass tests")])
+        intent = _make_intent(
+            task_id="TASK-001", criteria=[("AC-1", "Must pass tests")]
+        )
         lineage = _empty_lineage()
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) >= 1
         assert all(f.severity == FindingSeverity.ERROR for f in orphans)
 
@@ -471,7 +507,11 @@ class TestOrphanAcceptanceCriterion:
             edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("T2", "T::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) == 0
 
     def test_one_task_many_criteria_pass(self) -> None:
@@ -481,7 +521,11 @@ class TestOrphanAcceptanceCriterion:
             edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("T1", "T::AC-2", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        orphans = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+        ]
         assert len(orphans) == 0
 
     def test_multiple_criteria_some_orphaned(self) -> None:
@@ -490,7 +534,11 @@ class TestOrphanAcceptanceCriterion:
             criteria=[("AC-1", "s1"), ("AC-2", "s2"), ("AC-3", "s3")],
         )
         lineage = _make_lineage(
-            nodes=[("TASK-001::AC-1", "CRITERION"), ("TASK-001::AC-2", "CRITERION"), ("T1", "TASK")],
+            nodes=[
+                ("TASK-001::AC-1", "CRITERION"),
+                ("TASK-001::AC-2", "CRITERION"),
+                ("T1", "TASK"),
+            ],
             edges=[("T1", "TASK-001::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
@@ -508,7 +556,8 @@ class TestOrphanAcceptanceCriterion:
         lineage = _empty_lineage()
         report = analyze(intent, lineage)
         orphans = [
-            f for f in report.findings
+            f
+            for f in report.findings
             if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
             and f.primary_reference.identity == "TASK-001::AC-1"
         ]
@@ -528,14 +577,18 @@ class TestOrphanExecutionTask:
             edges=[("T1", "T::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
-        orphan_tasks = [f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK]
+        orphan_tasks = [
+            f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK
+        ]
         assert len(orphan_tasks) == 0
 
     def test_task_without_criterion_is_warning(self) -> None:
         intent = _make_intent()
         lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         report = analyze(intent, lineage)
-        orphan_tasks = [f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK]
+        orphan_tasks = [
+            f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK
+        ]
         assert len(orphan_tasks) == 1
         assert orphan_tasks[0].severity == FindingSeverity.WARNING
 
@@ -546,7 +599,9 @@ class TestOrphanExecutionTask:
             edges=[("T1", "T::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
-        orphan_tasks = [f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK]
+        orphan_tasks = [
+            f for f in report.findings if f.code == FindingCode.ORPHAN_EXECUTION_TASK
+        ]
         assert len(orphan_tasks) == 1
         assert orphan_tasks[0].primary_reference.identity == "T2"
 
@@ -564,14 +619,18 @@ class TestOrphanEvidence:
             edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("E1", "T1", "VERIFIES")],
         )
         report = analyze(intent, lineage)
-        orphan_evid = [f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE]
+        orphan_evid = [
+            f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE
+        ]
         assert len(orphan_evid) == 0
 
     def test_evidence_without_verifies_is_warning(self) -> None:
         intent = _make_intent()
         lineage = _make_lineage(nodes=[("E1", "EVIDENCE")], edges=[])
         report = analyze(intent, lineage)
-        orphan_evid = [f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE]
+        orphan_evid = [
+            f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE
+        ]
         assert len(orphan_evid) == 1
         assert orphan_evid[0].severity == FindingSeverity.WARNING
 
@@ -589,14 +648,18 @@ class TestSourceIdentityMismatch:
         intent = _make_intent(source_base_sha=sha)
         lineage = _empty_lineage()
         report = analyze(intent, lineage, expected_base_sha=sha)
-        mismatch = [f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH]
+        mismatch = [
+            f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH
+        ]
         assert len(mismatch) == 0
 
     def test_mismatched_expected_sha_is_error(self) -> None:
         intent = _make_intent(source_base_sha="a" * 40)
         lineage = _empty_lineage()
         report = analyze(intent, lineage, expected_base_sha="c" * 40)
-        mismatch = [f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH]
+        mismatch = [
+            f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH
+        ]
         assert len(mismatch) == 1
         assert mismatch[0].severity == FindingSeverity.ERROR
 
@@ -605,7 +668,9 @@ class TestSourceIdentityMismatch:
         intent = _make_intent(source_base_sha="a" * 40)
         lineage = _empty_lineage()
         report = analyze(intent, lineage)  # no expected_base_sha
-        mismatch = [f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH]
+        mismatch = [
+            f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH
+        ]
         assert len(mismatch) == 0
 
     def test_report_source_base_sha_field(self) -> None:
@@ -633,14 +698,22 @@ class TestTaskIdentityInconsistency:
         intent = _make_intent(task_id="TASK-001")
         lineage = _make_lineage(nodes=[("TASK-001", "INTENT")], edges=[])
         report = analyze(intent, lineage)
-        incons = [f for f in report.findings if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY]
+        incons = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY
+        ]
         assert len(incons) == 0
 
     def test_mismatched_intent_node_is_error(self) -> None:
         intent = _make_intent(task_id="TASK-001")
         lineage = _make_lineage(nodes=[("DIFFERENT-TASK", "INTENT")], edges=[])
         report = analyze(intent, lineage)
-        incons = [f for f in report.findings if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY]
+        incons = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY
+        ]
         assert len(incons) >= 1
         assert all(f.severity == FindingSeverity.ERROR for f in incons)
 
@@ -648,7 +721,11 @@ class TestTaskIdentityInconsistency:
         intent = _make_intent(task_id="TASK-001")
         lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         report = analyze(intent, lineage)
-        incons = [f for f in report.findings if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY]
+        incons = [
+            f
+            for f in report.findings
+            if f.code == FindingCode.TASK_IDENTITY_INCONSISTENCY
+        ]
         assert len(incons) == 0
 
 
@@ -673,7 +750,10 @@ class TestPathHeuristicFalsePositives:
     ]
 
     def _assert_no_mutation_findings(self, report) -> None:
-        mutation_codes = {"MUTATION_OUTSIDE_ALLOWED_SCOPE", "MUTATION_IN_FORBIDDEN_SCOPE"}
+        mutation_codes = {
+            "MUTATION_OUTSIDE_ALLOWED_SCOPE",
+            "MUTATION_IN_FORBIDDEN_SCOPE",
+        }
         for f in report.findings:
             assert f.code.value not in mutation_codes, (
                 f"Unexpected mutation finding {f.code} for path-like node_id"
@@ -815,7 +895,9 @@ class TestReadOnlyGuarantee:
 
 
 class TestOfflineGuarantee:
-    def test_analyze_makes_no_network_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_analyze_makes_no_network_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import socket
 
         def _no_connect(*args, **kwargs):
@@ -865,7 +947,9 @@ class TestInputLoading:
         assert "INTENT_INVALID" in exc.value.code
 
     def test_load_lineage_valid(self) -> None:
-        raw = json.dumps({"schema_version": 1, "nodes": [], "edges": []}).encode("utf-8")
+        raw = json.dumps({"schema_version": 1, "nodes": [], "edges": []}).encode(
+            "utf-8"
+        )
         lineage = load_lineage_from_bytes(raw)
         assert lineage.nodes == ()
 
@@ -873,3 +957,198 @@ class TestInputLoading:
         with pytest.raises(AnalysisInputError) as exc:
             load_lineage_from_bytes(b"{bad}")
         assert "LINEAGE" in exc.value.code
+
+
+# ---------------------------------------------------------------------------
+# PR-2.1 EXPECTED_BASE_SHA_API_VALIDATION
+# ---------------------------------------------------------------------------
+
+
+class TestExpectedBaseShaApiValidation:
+    def test_valid_expected_base_sha(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        report = analyze(intent, lineage, expected_base_sha="a" * 40)
+        assert report.expected_base_sha == "a" * 40
+
+    def test_invalid_expected_base_sha_short(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        with pytest.raises(AnalysisInputError) as exc:
+            analyze(intent, lineage, expected_base_sha="a" * 39)
+        assert exc.value.code == "EXPECTED_BASE_SHA_INVALID"
+
+    def test_invalid_expected_base_sha_non_hex(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        with pytest.raises(AnalysisInputError) as exc:
+            analyze(intent, lineage, expected_base_sha="z" * 40)
+        assert exc.value.code == "EXPECTED_BASE_SHA_INVALID"
+
+    def test_invalid_expected_base_sha_uppercase(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        with pytest.raises(AnalysisInputError) as exc:
+            analyze(intent, lineage, expected_base_sha="A" * 40)
+        assert exc.value.code == "EXPECTED_BASE_SHA_INVALID"
+
+    def test_invalid_expected_base_sha_non_string(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        with pytest.raises(AnalysisInputError) as exc:
+            analyze(intent, lineage, expected_base_sha=12345)  # type: ignore
+        assert exc.value.code == "EXPECTED_BASE_SHA_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# PR-2.1 REPORT_ROUND_TRIP
+# ---------------------------------------------------------------------------
+
+
+class TestReportRoundTrip:
+    def test_analyze_output_always_validates(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+
+        # Test with expected_base_sha=None
+        report1 = analyze(intent, lineage)
+        serialized1 = serialize_report(report1)
+        deserialize_report(serialized1)  # should not raise
+
+        # Test with valid expected_base_sha
+        report2 = analyze(intent, lineage, expected_base_sha="a" * 40)
+        serialized2 = serialize_report(report2)
+        deserialize_report(serialized2)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# PR-2.1 SUMMARY_CONSISTENCY_VALIDATION
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryConsistencyValidation:
+    def _valid_report_dict(self) -> dict:
+        report = analyze(_make_intent(), _empty_lineage())
+        return json.loads(serialize_report(report))
+
+    def test_valid_summary_pass(self) -> None:
+        d = self._valid_report_dict()
+        validate_report(d)  # should not raise
+
+    def test_wrong_total_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"]["total"] = 999
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_wrong_error_count_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"]["errors"] = 999
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_wrong_warning_count_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"]["warnings"] = 999
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_wrong_info_count_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"]["infos"] = 999
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_negative_summary_value_fail(self) -> None:
+        d = self._valid_report_dict()
+        # Create a report with 0 findings so we can safely edit counts to match negative
+        # But wait, actual length is 0. If we set total to -1 it will fail the actual_total == total check.
+        # So we just test that even if they match, a negative value is rejected. Wait, the code checks if val < 0 first.
+        d["summary"]["total"] = -1
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_boolean_summary_value_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"]["total"] = True
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+    def test_malformed_summary_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["summary"] = []
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_SUMMARY_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# PR-2.1 REPORT_STRUCTURED_FIELD_VALIDATION
+# ---------------------------------------------------------------------------
+
+
+class TestReportStructuredFieldValidation:
+    def _valid_report_dict_with_findings(self) -> dict:
+        intent = _make_intent(task_id="T1")
+        lineage = _make_lineage(nodes=[("DIFFERENT-TASK", "INTENT")], edges=[])
+        report = analyze(intent, lineage)
+        assert len(report.findings) > 0
+        return json.loads(serialize_report(report))
+
+    def test_intent_task_id_non_empty_string(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        d["intent_task_id"] = ""
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_INTENT_TASK_ID_INVALID"
+
+        d["intent_task_id"] = 123
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_INTENT_TASK_ID_INVALID"
+
+    def test_finding_message_is_string(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        d["findings"][0]["message"] = 123
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_FINDINGS_INVALID"
+
+    def test_primary_reference_artifact_kind_non_empty(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        d["findings"][0]["primary_reference"]["artifact_kind"] = ""
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_FINDINGS_INVALID"
+
+    def test_primary_reference_identity_non_empty(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        d["findings"][0]["primary_reference"]["identity"] = ""
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_FINDINGS_INVALID"
+
+    def test_related_reference_artifact_kind_non_empty(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        # Ensure there is a related reference
+        d["findings"][0]["related_references"] = [
+            {"artifact_kind": "", "identity": "123"}
+        ]
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_FINDINGS_INVALID"
+
+    def test_related_reference_identity_non_empty(self) -> None:
+        d = self._valid_report_dict_with_findings()
+        d["findings"][0]["related_references"] = [
+            {"artifact_kind": "INTENT", "identity": ""}
+        ]
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert exc.value.code == "REPORT_FINDINGS_INVALID"

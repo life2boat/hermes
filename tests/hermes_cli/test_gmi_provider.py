@@ -16,6 +16,27 @@ if "dotenv" not in sys.modules:
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
     sys.modules["dotenv"] = fake_dotenv
 
+if "rich" not in sys.modules:
+    try:
+        import rich
+    except ImportError:
+        fake_rich = types.ModuleType("rich")
+        fake_console = types.ModuleType("rich.console")
+        fake_console.Console = lambda *a, **kw: types.SimpleNamespace(
+            print=lambda *x, **y: None
+        )
+        fake_panel = types.ModuleType("rich.panel")
+        fake_panel.Panel = lambda *a, **kw: None
+        fake_table = types.ModuleType("rich.table")
+        fake_table.Table = lambda *a, **kw: None
+        fake_rich.console = fake_console
+        fake_rich.panel = fake_panel
+        fake_rich.table = fake_table
+        sys.modules["rich"] = fake_rich
+        sys.modules["rich.console"] = fake_console
+        sys.modules["rich.panel"] = fake_panel
+        sys.modules["rich.table"] = fake_table
+
 from hermes_cli.auth import resolve_provider
 from hermes_cli.config import load_config
 from hermes_cli.models import (
@@ -56,7 +77,9 @@ class TestGmiAliases:
         assert normalize_provider("gmicloud") == "gmi"
 
     def test_providers_normalize_provider(self):
-        from hermes_cli.providers import normalize_provider as normalize_provider_in_providers
+        from hermes_cli.providers import (
+            normalize_provider as normalize_provider_in_providers,
+        )
 
         assert normalize_provider_in_providers("gmi-cloud") == "gmi"
         assert normalize_provider_in_providers("gmicloud") == "gmi"
@@ -85,6 +108,8 @@ class TestGmiModelCatalog:
         assert "gmi" in slugs
 
     def test_provider_model_ids_prefers_live_api(self, monkeypatch):
+        from providers import get_provider_profile
+
         monkeypatch.setattr(
             "hermes_cli.auth.resolve_api_key_provider_credentials",
             lambda provider_id: {
@@ -94,9 +119,11 @@ class TestGmiModelCatalog:
                 "source": "GMI_API_KEY",
             },
         )
+        profile = get_provider_profile("gmi")
         monkeypatch.setattr(
-            "hermes_cli.models.fetch_api_models",
-            lambda api_key, base_url: [
+            profile,
+            "fetch_models",
+            lambda *args, **kwargs: [
                 "openai/gpt-5.4-mini",
                 "zai-org/GLM-5.1-FP8",
             ],
@@ -108,6 +135,8 @@ class TestGmiModelCatalog:
         ]
 
     def test_provider_model_ids_falls_back_to_static_models(self, monkeypatch):
+        from providers import get_provider_profile
+
         monkeypatch.setattr(
             "hermes_cli.auth.resolve_api_key_provider_credentials",
             lambda provider_id: {
@@ -117,7 +146,60 @@ class TestGmiModelCatalog:
                 "source": "GMI_API_KEY",
             },
         )
-        monkeypatch.setattr("hermes_cli.models.fetch_api_models", lambda api_key, base_url: None)
+        profile = get_provider_profile("gmi")
+        monkeypatch.setattr(
+            profile,
+            "fetch_models",
+            lambda *args, **kwargs: None,
+        )
+
+        assert provider_model_ids("gmi") == list(_PROVIDER_MODELS["gmi"])
+
+    @pytest.mark.parametrize("alias", ["gmi", "gmi-cloud", "gmicloud"])
+    def test_provider_model_ids_aliases_fall_back_identically(self, alias, monkeypatch):
+        from providers import get_provider_profile
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "gmi-live-key",
+                "base_url": "https://api.gmi-serving.com/v1",
+                "source": "GMI_API_KEY",
+            },
+        )
+        profile = get_provider_profile("gmi")
+        monkeypatch.setattr(
+            profile,
+            "fetch_models",
+            lambda *args, **kwargs: None,
+        )
+
+        assert provider_model_ids(alias) == list(_PROVIDER_MODELS["gmi"])
+
+    def test_provider_model_ids_independent_of_models_dev_cache(self, monkeypatch):
+        """GMI static fallback is strictly curated and must not merge models.dev data."""
+        from providers import get_provider_profile
+
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            lambda provider_id: {
+                "provider": provider_id,
+                "api_key": "gmi-live-key",
+                "base_url": "https://api.gmi-serving.com/v1",
+                "source": "GMI_API_KEY",
+            },
+        )
+        profile = get_provider_profile("gmi")
+        monkeypatch.setattr(
+            profile,
+            "fetch_models",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "agent.models_dev.list_agentic_models",
+            lambda provider: ["unexpected-vendor/unexpected-model-from-cache"],
+        )
 
         assert provider_model_ids("gmi") == list(_PROVIDER_MODELS["gmi"])
 
@@ -213,7 +295,9 @@ class TestGmiDoctor:
 
         assert "API key or custom endpoint configured" in out
         assert "GMI Cloud" in out
-        assert any(url == "https://api.gmi-serving.com/v1/models" for url, _, _ in calls)
+        assert any(
+            url == "https://api.gmi-serving.com/v1/models" for url, _, _ in calls
+        )
 
 
 class TestGmiModelMetadata:
@@ -235,18 +319,23 @@ class TestGmiModelMetadata:
         assert _infer_provider_from_url("https://api.gmi-serving.com/v1") == "gmi"
 
     def test_known_gmi_endpoint_still_uses_endpoint_metadata(self):
-        with patch(
-            "agent.model_metadata.get_cached_context_length",
-            return_value=None,
-        ), patch(
-            "agent.model_metadata.fetch_endpoint_model_metadata",
-            return_value={"anthropic/claude-opus-4.6": {"context_length": 409600}},
-        ), patch(
-            "agent.models_dev.lookup_models_dev_context",
-            return_value=None,
-        ), patch(
-            "agent.model_metadata.fetch_model_metadata",
-            return_value={},
+        with (
+            patch(
+                "agent.model_metadata.get_cached_context_length",
+                return_value=None,
+            ),
+            patch(
+                "agent.model_metadata.fetch_endpoint_model_metadata",
+                return_value={"anthropic/claude-opus-4.6": {"context_length": 409600}},
+            ),
+            patch(
+                "agent.models_dev.lookup_models_dev_context",
+                return_value=None,
+            ),
+            patch(
+                "agent.model_metadata.fetch_model_metadata",
+                return_value={},
+            ),
         ):
             result = get_model_context_length(
                 "anthropic/claude-opus-4.6",
@@ -269,7 +358,9 @@ class TestGmiAuxiliary:
         assert client is not None
         assert model == "google/gemini-3.1-flash-lite-preview"
         assert mock_openai.call_args.kwargs["api_key"] == "gmi-test-key"
-        assert mock_openai.call_args.kwargs["base_url"] == "https://api.gmi-serving.com/v1"
+        assert (
+            mock_openai.call_args.kwargs["base_url"] == "https://api.gmi-serving.com/v1"
+        )
         # GMI profile declares default_headers with a HermesAgent User-Agent
         # for traffic attribution. The generic profile-fallback branch in
         # resolve_provider_client should carry it through to the OpenAI client.
@@ -318,16 +409,25 @@ class TestGmiMainFlow:
     def test_select_provider_and_model_routes_gmi_to_generic_flow(self, monkeypatch):
         recorded: dict[str, str] = {}
 
-        monkeypatch.setattr("hermes_cli.auth.resolve_provider", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_provider", lambda *args, **kwargs: None
+        )
 
         def fake_prompt_provider_choice(choices, default=0):
-            return next(i for i, label in enumerate(choices) if label.startswith("GMI Cloud"))
+            return next(
+                i for i, label in enumerate(choices) if label.startswith("GMI Cloud")
+            )
 
         def fake_model_flow_api_key_provider(config, provider_id, current_model=""):
             recorded["provider_id"] = provider_id
 
-        monkeypatch.setattr("hermes_cli.main._prompt_provider_choice", fake_prompt_provider_choice)
-        monkeypatch.setattr("hermes_cli.main._model_flow_api_key_provider", fake_model_flow_api_key_provider)
+        monkeypatch.setattr(
+            "hermes_cli.main._prompt_provider_choice", fake_prompt_provider_choice
+        )
+        monkeypatch.setattr(
+            "hermes_cli.main._model_flow_api_key_provider",
+            fake_model_flow_api_key_provider,
+        )
 
         from hermes_cli.main import select_provider_and_model
 
@@ -338,17 +438,22 @@ class TestGmiMainFlow:
     def test_model_flow_api_key_provider_persists_gmi_selection(self, monkeypatch):
         monkeypatch.setenv("GMI_API_KEY", "gmi-test-key")
 
-        with patch(
-            "hermes_cli.models.fetch_api_models",
-            return_value=["zai-org/GLM-5.1-FP8", "openai/gpt-5.4-mini"],
-        ), patch(
-            "hermes_cli.auth._prompt_model_selection",
-            return_value="openai/gpt-5.4-mini",
-        ), patch(
-            "hermes_cli.auth.deactivate_provider",
-        ), patch(
-            "builtins.input",
-            return_value="",
+        with (
+            patch(
+                "hermes_cli.models.fetch_api_models",
+                return_value=["zai-org/GLM-5.1-FP8", "openai/gpt-5.4-mini"],
+            ),
+            patch(
+                "hermes_cli.auth._prompt_model_selection",
+                return_value="openai/gpt-5.4-mini",
+            ),
+            patch(
+                "hermes_cli.auth.deactivate_provider",
+            ),
+            patch(
+                "builtins.input",
+                return_value="",
+            ),
         ):
             from hermes_cli.main import _model_flow_api_key_provider
 

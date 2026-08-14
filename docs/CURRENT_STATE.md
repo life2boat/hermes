@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.51
+version: 1.2.52
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 112b865f7a2906bdf33e302d7a7a1d2118db1826
+state_verified_against_main_sha: dbebea42967ed0bb2d4f5f95da01fca32c5d0723
 production_sha: unknown
 ---
 
@@ -15,17 +15,20 @@ Git.
 
 ## Hermes Intent Control Plane v1 — Final Adoption & Lifecycle Integration
 
-- Hermes Intent Control Plane v1 is COMPLETE_AND_ADOPTED (PR #165, #166, #168, #169, #170, #171, #172, #174, #175).
-- Status: `STATUS=COMPLETE_AND_ADOPTED`.
+- Hermes Intent Control Plane v1 is COMPLETE_AND_ADOPTED (PR #165, #166, #168, #169, #170, #171, #172, #174, #175, #176).
+- Status: `HERMES_INTENT_CONTROL_PLANE_V1=COMPLETE_AND_ADOPTED`.
 - All planned capabilities are implemented, verified, and adopted into canonical workflow:
   - **TaskIntent / TaskLineage**: Schema version 1, exact base-SHA binding, canonical serialization, and lineage DAG relations.
   - **Cross-Artifact Analyzer**: Deterministic offline semantic and structural consistency verification.
   - **Clarify & Requirements Quality Gate**: Non-mutating clarification and formal criteria gating (`RequirementsGateReport`).
   - **Evidence-Bound Convergence**: Deterministic evaluation of acceptance criteria and release gate evidence against exact TaskIntent and subject SHA (`ConvergenceReport`).
   - **EvidenceBundle Public Integrity (PR-4.1)**: Fail-closed tampering defense on public API boundary (`H_PR4_001=CLOSED`).
-  - **Effective Policy / Source Attribution (PR-5)**: Deterministic resolution of applicable invariants and required release gates to exact Git blobs (`EffectivePolicyReport`).
+  - **Effective Policy / Source Attribution (PR-5 & PR-5.1)**: Deterministic resolution of applicable invariants and required release gates to exact Git blobs (`EffectivePolicyReport`). PR-5.1 closed `H_V1_PR5_001` via `verify_effective_policy_report()`, enforcing authoritative semantic re-verification against trusted `TaskIntent`, `subject_sha`, and canonical Git blobs (`H_V1_PR5_001=CLOSED`). Structural validation alone is untrusted for semantic resolution.
   - **Lifecycle & Template Adoption**: Fully integrated into `docs/TASK_LIFECYCLE.md`, `docs/TASK_TEMPLATE.md`, `AGENTS.md`, and `docs/HERMES_SOURCE_MAP.md`.
-- Residual limitation: `M_PR4_001=KNOWN_NON_BLOCKING_EXTERNAL_AUTHENTICITY_LIMITATION` (external authenticity of artifact refs/digests is bounded to Git-committed objects and local execution).
+- Residual limitations:
+  - `M_PR4_001=KNOWN_NON_BLOCKING_EXTERNAL_AUTHENTICITY_LIMITATION` (external authenticity of artifact refs/digests is bounded to Git-committed objects and local execution).
+  - `M_V1_PR5_001=NON_BLOCKING_KNOWN_BOUNDARY` (remote CI/external provider signing remains out of scope).
+  - `M_V1_ADOPTION_001=ACCEPTED_NON_BLOCKING_DESIGN_BOUNDARY` (lifecycle adopted as engineering contract/workflow; runtime orchestrator not implemented).
 - Non-negotiable architectural boundaries:
   - `PROVIDER_CALLS=0`
   - `NETWORK_REQUIRED_FOR_CORE=false`

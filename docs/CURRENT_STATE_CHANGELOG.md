@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.52 - 2026-08-14
+
+Changed:
+- closed the post-merge source-of-truth state after PR #176 implemented authoritative
+  semantic verification for Effective Policy (PR-5.1) at canonical main
+  `dbebea42967ed0bb2d4f5f95da01fca32c5d0723`, successfully closing H-V1-PR5-001.
+- verified that `verify_effective_policy_report()` provides fail-closed authoritative
+  defense against forged invariant and required gate resolutions, with full 100% CI pass.
+
+Safety:
+- the closure is repository documentation and offline contract verification only;
+  no production, database, Qdrant, secrets, deployment, or live runtime changed.
+
 ## 1.2.51 - 2026-08-14
 
 Changed:

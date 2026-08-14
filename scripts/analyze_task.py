@@ -45,37 +45,17 @@ from ai_engineering.task_analysis import (
     serialize_report,
 )
 
-_MAX_FILE_BYTES = 512 * 1024  # 512 KB
+try:
+    from scripts._cli_utils import (
+        SafeReadError,
+        check_output_alias,
+        resolve_path,
+        safe_read,
+    )
+except ImportError:
+    from _cli_utils import SafeReadError, check_output_alias, resolve_path, safe_read
+
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
-
-class _SafeReadError(Exception):
-    def __init__(self, message: str) -> None:
-        self.message = message
-        super().__init__(message)
-
-
-def _safe_read(path: Path) -> bytes:
-    """Read a file with basic safety checks."""
-    if path.is_symlink():
-        raise _SafeReadError(f"analyze_task: UNSAFE_PATH: {path}")
-    if not path.is_file():
-        raise _SafeReadError(f"analyze_task: FILE_NOT_FOUND: {path}")
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise _SafeReadError(f"analyze_task: FILE_UNREADABLE: {exc}") from exc
-    if len(raw) > _MAX_FILE_BYTES:
-        raise _SafeReadError(f"analyze_task: FILE_TOO_LARGE: {path}")
-    return raw
-
-
-def _resolve_path(p: Path) -> Path:
-    """Resolve a path for alias comparison (absolute, no symlinks)."""
-    try:
-        return p.resolve()
-    except OSError:
-        return p.absolute()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -151,60 +131,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output aliasing protection — resolve before reading input.
     if args.output is not None:
-        import os
+        from scripts._cli_utils import OutputAliasError
 
-        output_resolved = _resolve_path(args.output)
-        intent_resolved = _resolve_path(args.intent)
-        lineage_resolved = _resolve_path(args.lineage)
-
-        if output_resolved == intent_resolved:
-            print(
-                "analyze_task: SAFE_WRITE_VIOLATION: --output resolves to --intent path",
-                file=sys.stderr,
+        try:
+            check_output_alias(
+                args.output,
+                {"--intent": args.intent, "--lineage": args.lineage},
+                "analyze_task",
             )
+        except OutputAliasError as exc:
+            print(exc.message, file=sys.stderr)
             return 2
-        if output_resolved == lineage_resolved:
-            print(
-                "analyze_task: SAFE_WRITE_VIOLATION: --output resolves to --lineage path",
-                file=sys.stderr,
-            )
-            return 2
-
-        if output_resolved.exists():
-            if intent_resolved.exists():
-                try:
-                    if os.path.samefile(output_resolved, intent_resolved):
-                        print(
-                            "analyze_task: SAFE_WRITE_VIOLATION: --output aliases --intent (samefile)",
-                            file=sys.stderr,
-                        )
-                        return 2
-                except OSError as exc:
-                    print(
-                        f"analyze_task: SAFE_WRITE_CHECK_FAILED: could not check --intent alias: {exc}",
-                        file=sys.stderr,
-                    )
-                    return 2
-            if lineage_resolved.exists():
-                try:
-                    if os.path.samefile(output_resolved, lineage_resolved):
-                        print(
-                            "analyze_task: SAFE_WRITE_VIOLATION: --output aliases --lineage (samefile)",
-                            file=sys.stderr,
-                        )
-                        return 2
-                except OSError as exc:
-                    print(
-                        f"analyze_task: SAFE_WRITE_CHECK_FAILED: could not check --lineage alias: {exc}",
-                        file=sys.stderr,
-                    )
-                    return 2
 
     # Load and validate inputs.
     try:
-        intent_raw = _safe_read(args.intent)
-        lineage_raw = _safe_read(args.lineage)
-    except _SafeReadError as exc:
+        intent_raw = safe_read(args.intent, "analyze_task")
+        lineage_raw = safe_read(args.lineage, "analyze_task")
+    except SafeReadError as exc:
         print(exc.message, file=sys.stderr)
         return 2
 

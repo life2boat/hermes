@@ -8,12 +8,24 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
+
+
 from pathlib import Path
 from typing import NoReturn
 
 from ai_engineering.contracts import Status, TraceValidationError
-from ai_engineering.redaction import reject_forbidden_raw_fields, verify_sanitized_evidence
+from ai_engineering.redaction import (
+    reject_forbidden_raw_fields,
+    verify_sanitized_evidence,
+)
 from ai_engineering.trace import deserialize_trace, trace_digest
 
 
@@ -22,45 +34,41 @@ MAX_FAILURE_EVIDENCE_BYTES = 1_048_576
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_INPUT_FIELDS = frozenset(
-    {
-        "schema_version",
-        "candidate_id",
-        "failure_record_ref",
-        "trace_reference",
-        "trace_digest",
-        "base_dataset_version",
-        "base_corpus_digest",
-        "proposed_category",
-        "proposed_behaviour",
-        "proposed_criticality",
-        "proposed_expected_evaluation_status",
-        "required_behaviour_dimensions",
-        "reason_codes",
-        "promotion_intent",
-    }
-)
-_CANDIDATE_FIELDS = frozenset(
-    {
-        "schema_version",
-        "candidate_id",
-        "failure_record_ref",
-        "trace_reference",
-        "trace_digest",
-        "base_dataset_version",
-        "base_corpus_digest",
-        "proposed_category",
-        "proposed_behaviour",
-        "proposed_criticality",
-        "proposed_expected_evaluation_status",
-        "required_behaviour_dimensions",
-        "candidate_status",
-        "human_review_status",
-        "promotion_authorized",
-        "reason_codes",
-        "candidate_digest",
-    }
-)
+_INPUT_FIELDS = frozenset({
+    "schema_version",
+    "candidate_id",
+    "failure_record_ref",
+    "trace_reference",
+    "trace_digest",
+    "base_dataset_version",
+    "base_corpus_digest",
+    "proposed_category",
+    "proposed_behaviour",
+    "proposed_criticality",
+    "proposed_expected_evaluation_status",
+    "required_behaviour_dimensions",
+    "reason_codes",
+    "promotion_intent",
+})
+_CANDIDATE_FIELDS = frozenset({
+    "schema_version",
+    "candidate_id",
+    "failure_record_ref",
+    "trace_reference",
+    "trace_digest",
+    "base_dataset_version",
+    "base_corpus_digest",
+    "proposed_category",
+    "proposed_behaviour",
+    "proposed_criticality",
+    "proposed_expected_evaluation_status",
+    "required_behaviour_dimensions",
+    "candidate_status",
+    "human_review_status",
+    "promotion_authorized",
+    "reason_codes",
+    "candidate_digest",
+})
 
 
 class CandidateStatus(StrEnum):
@@ -237,12 +245,16 @@ def _safe_reference(
     return data
 
 
-def _evidence_from_input(repository_root: Path, value: Mapping[str, object]) -> FailureEvidence:
+def _evidence_from_input(
+    repository_root: Path, value: Mapping[str, object]
+) -> FailureEvidence:
     try:
         reject_forbidden_raw_fields(value)
         verify_sanitized_evidence(value)
     except TraceValidationError as exc:
-        raise FailureCandidatePolicyError("FAILURE_CANDIDATE_RAW_EVIDENCE_FORBIDDEN") from exc
+        raise FailureCandidatePolicyError(
+            "FAILURE_CANDIDATE_RAW_EVIDENCE_FORBIDDEN"
+        ) from exc
     payload = _exact_fields(value, _INPUT_FIELDS)
     if payload["schema_version"] != FAILURE_CANDIDATE_SCHEMA_VERSION:
         _fail("FAILURE_CANDIDATE_SCHEMA_VERSION_UNSUPPORTED")
@@ -283,7 +295,9 @@ def _evidence_from_input(repository_root: Path, value: Mapping[str, object]) -> 
         proposed_expected_evaluation_status=_status(
             payload["proposed_expected_evaluation_status"]
         ),
-        required_behaviour_dimensions=_identifiers(payload["required_behaviour_dimensions"]),
+        required_behaviour_dimensions=_identifiers(
+            payload["required_behaviour_dimensions"]
+        ),
         reason_codes=_identifiers(payload["reason_codes"]),
     )
 
@@ -388,7 +402,9 @@ def serialize_failure_eval_candidate(value: FailureEvalCandidate) -> str:
     )
 
 
-def make_failure_candidate_receipt(candidate: FailureEvalCandidate) -> FailureCandidateReceipt:
+def make_failure_candidate_receipt(
+    candidate: FailureEvalCandidate,
+) -> FailureCandidateReceipt:
     return FailureCandidateReceipt(
         schema_version=FAILURE_CANDIDATE_SCHEMA_VERSION,
         status=Status.PASS,
@@ -397,7 +413,9 @@ def make_failure_candidate_receipt(candidate: FailureEvalCandidate) -> FailureCa
     )
 
 
-def normalize_failure_candidate_receipt(value: FailureCandidateReceipt) -> dict[str, object]:
+def normalize_failure_candidate_receipt(
+    value: FailureCandidateReceipt,
+) -> dict[str, object]:
     result: dict[str, object] = {
         "schema_version": value.schema_version,
         "status": value.status.value,
@@ -417,7 +435,9 @@ def write_failure_eval_candidate(
 
     try:
         root = repository_root.resolve(strict=True)
-        candidates_root = (root / "evals/agent_behaviour/candidates").resolve(strict=True)
+        candidates_root = (root / "evals/agent_behaviour/candidates").resolve(
+            strict=True
+        )
         if candidates_root.is_symlink() or not candidates_root.is_dir():
             _fail("FAILURE_CANDIDATE_OUTPUT_UNSAFE")
         target = output_path if output_path.is_absolute() else root / output_path

@@ -11,7 +11,16 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
+
+
 from pathlib import Path
 from typing import NoReturn
 
@@ -118,63 +127,53 @@ class ReleaseGateReceipt:
 
 
 _GATE_ORDER = tuple(GateName)
-_UNRESOLVED = frozenset(
-    {
-        Status.BLOCKED,
-        Status.NOT_RUN,
-        Status.NOT_PERFORMED,
-        Status.UNKNOWN,
-        Status.INCONCLUSIVE,
-    }
-)
+_UNRESOLVED = frozenset({
+    Status.BLOCKED,
+    Status.NOT_RUN,
+    Status.NOT_PERFORMED,
+    Status.UNKNOWN,
+    Status.INCONCLUSIVE,
+})
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+ -]{0,255}$")
 _REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,127}$")
 
-_SOURCE_FIELDS = frozenset(
-    {
-        "repository",
-        "canonical_remote",
-        "base_sha",
-        "candidate_sha",
-        "observed_head_sha",
-        "task_id",
-    }
-)
-_CLASSIFICATION_FIELDS = frozenset(
-    {
-        "task_classification",
-        "behaviour_sensitive",
-        "security_sensitive",
-        "cost_sensitive",
-        "production_sensitive",
-        "live_behaviour_required",
-    }
-)
-_GATE_FIELDS = frozenset(
-    {
-        "gate_name",
-        "required",
-        "status",
-        "evidence_refs",
-        "reason_codes",
-        "evidence_digest",
-    }
-)
+_SOURCE_FIELDS = frozenset({
+    "repository",
+    "canonical_remote",
+    "base_sha",
+    "candidate_sha",
+    "observed_head_sha",
+    "task_id",
+})
+_CLASSIFICATION_FIELDS = frozenset({
+    "task_classification",
+    "behaviour_sensitive",
+    "security_sensitive",
+    "cost_sensitive",
+    "production_sensitive",
+    "live_behaviour_required",
+})
+_GATE_FIELDS = frozenset({
+    "gate_name",
+    "required",
+    "status",
+    "evidence_refs",
+    "reason_codes",
+    "evidence_digest",
+})
 _BLOCKER_FIELDS = frozenset({"code", "status", "evidence_refs", "scope"})
-_REQUEST_FIELDS = frozenset(
-    {
-        "schema_version",
-        "policy_version",
-        "target",
-        "source_identity",
-        "task_classification",
-        "gate_results",
-        "technical_blockers",
-        "governance_observations",
-    }
-)
+_REQUEST_FIELDS = frozenset({
+    "schema_version",
+    "policy_version",
+    "target",
+    "source_identity",
+    "task_classification",
+    "gate_results",
+    "technical_blockers",
+    "governance_observations",
+})
 
 
 class _DuplicateJsonKey(ValueError):
@@ -321,19 +320,15 @@ def evaluate_release(
 
     try:
         target = ReleaseTarget(target)
-        source = _parse_source(
-            {
-                "repository": source.repository,
-                "canonical_remote": source.canonical_remote,
-                "base_sha": source.base_sha,
-                "candidate_sha": source.candidate_sha,
-                "observed_head_sha": source.observed_head_sha,
-                "task_id": source.task_id,
-            }
-        )
-        classification = _parse_classification(
-            _classification_payload(classification)
-        )
+        source = _parse_source({
+            "repository": source.repository,
+            "canonical_remote": source.canonical_remote,
+            "base_sha": source.base_sha,
+            "candidate_sha": source.candidate_sha,
+            "observed_head_sha": source.observed_head_sha,
+            "task_id": source.task_id,
+        })
+        classification = _parse_classification(_classification_payload(classification))
         validated_gates = tuple(
             _parse_gate(_normalize_gate(gate)) for gate in gate_results
         )
@@ -411,9 +406,7 @@ def evaluate_release(
         production_eligible = _aggregate(production_statuses)
 
     target_status = (
-        merge_eligible
-        if target is ReleaseTarget.MERGE
-        else production_eligible
+        merge_eligible if target is ReleaseTarget.MERGE else production_eligible
     )
     reasons = [f"MERGE_ELIGIBLE_{merge_eligible.value}"]
     if target is ReleaseTarget.PRODUCTION_RELEASE:
@@ -583,9 +576,7 @@ def evaluate_release_mapping(value: Mapping[str, object]) -> ReleaseGateReceipt:
     blockers = tuple(
         _parse_blocker(item) for item in _sequence(payload["technical_blockers"])
     )
-    observations = _unique_strings(
-        payload["governance_observations"], _reason_code
-    )
+    observations = _unique_strings(payload["governance_observations"], _reason_code)
     return evaluate_release(
         target=target,
         source=source,

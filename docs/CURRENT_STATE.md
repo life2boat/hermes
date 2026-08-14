@@ -4,7 +4,7 @@ version: 1.2.49
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 47aba42207d4b593c3de9da5bc85e6326e05696a
+state_verified_against_main_sha: 66b3f40ea68852100530d4654ecf8edbdb026a9a
 production_sha: unknown
 ---
 
@@ -29,6 +29,7 @@ Git.
 - It detects ORPHAN_ACCEPTANCE_CRITERION (scoped identity only), ORPHAN_EXECUTION_TASK, ORPHAN_EVIDENCE, SOURCE_IDENTITY_MISMATCH (when an independent expected_base_sha is supplied), and TASK_IDENTITY_INCONSISTENCY.
 - The `analysis_id` is a strict, canonical payload digest linking the validated intent, lineage digest (canonically graph-sorted), expected_base_sha, and full finding semantics.
 - Path-based mutation boundary analysis and gate coverage analysis are explicitly DEFERRED due to missing canonical mappings in the v1 lineage schema.
+- AnalysisReport v1 schema enforcement and `expected_base_sha` strict-typing and hard-link alias protections are merged via PR #169.
 
 ## Memory Convergence v1.1 repository state
 

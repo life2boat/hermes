@@ -34,3 +34,17 @@ Source precedence follows `docs/HERMES_SOURCE_MAP.md`:
 - **Report Status**:
   - `COMPLETE`: All declared invariants and gates are successfully resolved.
   - `INCOMPLETE`: One or more declared references cannot be resolved.
+
+## Verification Boundaries (PR-5.1)
+
+1. **Structural / ID Integrity (`validate_effective_policy_report`)**:
+   - Proves schema shape, field types, string formats, internal hash consistency, and payload ID derivation.
+   - Does **not** prove canonical policy membership, Git blob authenticity, or TaskIntent semantic origin.
+   - Deserialization or structural validation alone is **untrusted** with respect to semantic claims.
+
+2. **Authoritative Semantic Verification (`verify_effective_policy_report`)**:
+   - Re-verifies report against trusted inputs: exact `TaskIntent`, exact `subject_sha`, and canonical Git blobs.
+   - Deterministically re-resolves expected policy via `resolve_effective_policy()`.
+   - Requires exact semantic equality across task policy attribution, policy sources, invariant resolutions, gate resolutions, unresolved references, and policy ID.
+   - Fails closed on forged `RESOLVED` declarations for unknown invariants/gates, forged task policy claims, or altered source hashes.
+   - No caller may treat an EffectivePolicyReport as trustworthy proof of `COMPLETE` policy resolution without passing authoritative semantic verification.

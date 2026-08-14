@@ -12,9 +12,11 @@ Without an explicit attribution and resolution layer, agents and operators canno
 2. Compute deterministic cryptographic identities (`source_id`, `effective_policy_id`) over canonical JSON representations.
 3. Establish fail-closed validation on both dataclass and deserialization boundaries (protecting against tampered IDs and broken bindings).
 4. Restrict resolution to exact explicit matching without LLM inference, fuzzy matching, or authority expansion.
+5. In PR-5.1 (H-V1-PR5-001 defense), distinguish structural/ID integrity validation (`validate_effective_policy_report`) from authoritative semantic verification (`verify_effective_policy_report`). Require authoritative re-verification against trusted `TaskIntent`, `subject_sha`, and canonical Git blobs before accepting an EffectivePolicyReport as proof of complete resolution.
 
 ## Consequences
 - **Positive**: Complete deterministic explainability of task policy and invariant/gate sources.
 - **Positive**: Zero network, zero LLM calls, and zero external runtime dependencies.
+- **Positive**: Strict defense against forged invariant/gate resolutions and forged task-policy claims (H-V1-PR5-001 closed).
 - **Boundary**: Does not verify remote CI or external provider authenticity (M-PR4-001 residual boundary).
 - **Safety**: Resolution cannot broaden task authority, modify database state, or bypass release gates.

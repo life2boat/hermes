@@ -4,7 +4,7 @@ version: 1.2.49
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 66b3f40ea68852100530d4654ecf8edbdb026a9a
+state_verified_against_main_sha: 9be8377116db42627df4409652d823a833386090
 production_sha: unknown
 ---
 
@@ -21,7 +21,15 @@ Git.
 - Raw prompt and chat storage remain forbidden; this architecture relies on operator intent bounding.
 - PR #166 repaired the accidental truncation of `prepare_task.py` during intermediate local testing; the final canonical main contains the intended correct source.
 - Production, database, Qdrant, secrets, deployment, and providers remain unchanged.
-- NOT YET IMPLEMENTED: PR-3 Clarify + Requirements Quality Gate, PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
+- NOT YET IMPLEMENTED: PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
+
+## Hermes Intent Control Plane PR-3
+
+- The PR-3 Clarify + Requirements Quality Gate was merged in PR #170.
+- Clarification checks ensure the TaskIntent has no unresolved blocking unknowns (`clarify_task.py`).
+- Requirements Gate (`requirements_gate.py`) verifies the intent digest and task revision against the intent, ensuring the intent is READY and produces a formal `RequirementsGateReport`.
+- A passing PR-3 gate sets `REQUIREMENTS_READY_FOR_DOWNSTREAM_ENGINEERING=true`.
+- The logic remains deterministic, offline (PROVIDER_CALLS=0), and preserves invariant `CLARIFY_MUTATES_TASK_INTENT=false`.
 
 ## Hermes Intent Control Plane PR-2
 

@@ -4,7 +4,7 @@ version: 1.2.49
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: b047003aa7d0690443a7c0961c62b41341dfd59b
+state_verified_against_main_sha: a99663f6e6bdf5bde7c738ff844c1fa7f09c0f32
 production_sha: unknown
 ---
 
@@ -35,7 +35,21 @@ Git.
 - NETWORK_REQUIRED=false.
 - CONVERGENCE_MUTATES_INPUTS=false.
 - Convergence does NOT authorize production or deployment.
-- PR-5 Effective Policy / Source Attribution remains NOT YET IMPLEMENTED.
+- PR-5 Effective Policy / Source Attribution is now READY (not yet implemented).
+
+## Hermes Intent Control Plane PR-4.1
+
+- PR-4.1 closed H-PR4-001 (independent Manus adversarial audit, SEVERITY=HIGH). Merged in PR #172.
+- `evaluate_convergence` now validates `EvidenceBundle` at its public boundary via `validate_evidence_bundle()`.
+- Direct dataclass construction cannot bypass `observation_id` integrity validation.
+- Direct dataclass construction cannot bypass `bundle_id` integrity validation.
+- Self-inconsistent evidence (tampered IDs) fails closed with `ConvergenceError`.
+- Self-consistent evidence bound to the wrong context (wrong task / intent / analysis / subject SHA) remains `NOT_CONVERGED` — not converted to an integrity error.
+- `validate_evidence_bundle()` is a single canonical validator: both dataclass and mapping/JSON inputs go through the same `_validate_bundle_from_mapping()` path. No duplicate integrity algorithm exists.
+- H-PR4-001 is CLOSED. `FALSE_CONVERGENCE_REPRODUCTION=BLOCKED`.
+- M-PR4-001 remains a non-blocking limitation: external authenticity of `artifact_ref` / `artifact_digest` / `producer_id` is NOT independently verified by PR-4 or PR-4.1.
+- PROVIDER_CALLS=0. NETWORK_REQUIRED=false. CONVERGENCE_MUTATES_INPUTS=false.
+- Production, database, Qdrant, secrets, and deployment remain unchanged.
 
 ## Hermes Intent Control Plane PR-3
 

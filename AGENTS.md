@@ -65,6 +65,10 @@ Follow [`docs/TASK_LIFECYCLE.md`](docs/TASK_LIFECYCLE.md) for every task and
 [`docs/FAILURE_CAPTURE_LOOP.md`](docs/FAILURE_CAPTURE_LOOP.md) after a serious
 incident. Apply the AI and production-readiness checklists at the phases named
 there; they do not override a task's explicit authority or stop boundary.
+For `INTENT_CONTROL_PLANE=REQUIRED` tasks, use `TaskIntent`, invoke `prepare_task.py`
+with `--intent`, preserve intent → criterion → task → evidence lineage, and evaluate
+canonical evidence-bound convergence before claiming engineering convergence; never
+infer production authority from convergence or effective policy.
 For v2-sensitive work, record the task classification and applicable behaviour,
 security, cost, live and production-readiness gates in the task template. Use
 the executable checks named by the lifecycle rather than recreating policy in a

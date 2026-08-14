@@ -1,7 +1,7 @@
 # Hermes / HealBite Engineering Invariants
 
 Status: normative engineering contract
-Verified against canonical main: `160262d5f87254a26e8791b7637ec960c386b791`
+Verified against canonical main: `fed59bd3a5b547c0f4ddfceffa59ee7787950844`
 
 ## How to use this document
 

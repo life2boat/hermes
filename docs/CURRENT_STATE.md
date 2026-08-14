@@ -21,7 +21,14 @@ Git.
 - Raw prompt and chat storage remain forbidden; this architecture relies on operator intent bounding.
 - PR #166 repaired the accidental truncation of `prepare_task.py` during intermediate local testing; the final canonical main contains the intended correct source.
 - Production, database, Qdrant, secrets, deployment, and providers remain unchanged.
-- NOT YET IMPLEMENTED: PR-2 Cross-Artifact Analyzer, PR-3 Clarify + Requirements Quality Gate, PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
+- NOT YET IMPLEMENTED: PR-3 Clarify + Requirements Quality Gate, PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
+
+## Hermes Intent Control Plane PR-2
+
+- The deterministic, offline, read-only Cross-Artifact Analyzer (`scripts/analyze_task.py`) was merged in PR #168.
+- It detects ORPHAN_ACCEPTANCE_CRITERION (scoped identity only), ORPHAN_EXECUTION_TASK, ORPHAN_EVIDENCE, SOURCE_IDENTITY_MISMATCH (when an independent expected_base_sha is supplied), and TASK_IDENTITY_INCONSISTENCY.
+- The `analysis_id` is a strict, canonical payload digest linking the validated intent, lineage digest (canonically graph-sorted), expected_base_sha, and full finding semantics.
+- Path-based mutation boundary analysis and gate coverage analysis are explicitly DEFERRED due to missing canonical mappings in the v1 lineage schema.
 
 ## Memory Convergence v1.1 repository state
 

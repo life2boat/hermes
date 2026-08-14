@@ -4,7 +4,7 @@ version: 1.2.49
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 9be8377116db42627df4409652d823a833386090
+state_verified_against_main_sha: b047003aa7d0690443a7c0961c62b41341dfd59b
 production_sha: unknown
 ---
 
@@ -21,7 +21,21 @@ Git.
 - Raw prompt and chat storage remain forbidden; this architecture relies on operator intent bounding.
 - PR #166 repaired the accidental truncation of `prepare_task.py` during intermediate local testing; the final canonical main contains the intended correct source.
 - Production, database, Qdrant, secrets, deployment, and providers remain unchanged.
-- NOT YET IMPLEMENTED: PR-4 Evidence-Bound Convergence, PR-5 Effective Policy / Source Attribution. (These are deferred to later PRs).
+- PR-4 Evidence-Bound Convergence is IMPLEMENTED.
+- PR #171 merged it.
+- EvidenceBundle schema v1 is implemented.
+- ConvergenceReport schema v1 is implemented.
+- Convergence recomputes canonical PR-3 Requirements Gate and PR-2 analysis.
+- Evidence is bound to exact intent / analysis / subject SHA.
+- Acceptance-criterion and required-gate evidence are evaluated deterministically.
+- FAIL evidence dominates contradictory PASS evidence.
+- LLM_AS_JUDGE=false.
+- LLM_SELF_DECLARED_CONVERGENCE=false.
+- PROVIDER_CALLS=0.
+- NETWORK_REQUIRED=false.
+- CONVERGENCE_MUTATES_INPUTS=false.
+- Convergence does NOT authorize production or deployment.
+- PR-5 Effective Policy / Source Attribution remains NOT YET IMPLEMENTED.
 
 ## Hermes Intent Control Plane PR-3
 

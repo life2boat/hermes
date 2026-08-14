@@ -102,8 +102,12 @@ Deferred rules (not implemented in schema v1):
   REQUIRED_GATE_COVERAGE           DEFERRED_DUE_TO_MISSING_CANONICAL_MAPPING
 """,
     )
-    p.add_argument("--intent", type=Path, required=True, help="Path to TaskIntent JSON file.")
-    p.add_argument("--lineage", type=Path, required=True, help="Path to TaskLineage JSON file.")
+    p.add_argument(
+        "--intent", type=Path, required=True, help="Path to TaskIntent JSON file."
+    )
+    p.add_argument(
+        "--lineage", type=Path, required=True, help="Path to TaskLineage JSON file."
+    )
     p.add_argument(
         "--expected-sha",
         dest="expected_sha",
@@ -147,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output aliasing protection — resolve before reading input.
     if args.output is not None:
+        import os
+
         output_resolved = _resolve_path(args.output)
         intent_resolved = _resolve_path(args.intent)
         lineage_resolved = _resolve_path(args.lineage)
@@ -163,6 +169,28 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+
+        if output_resolved.exists():
+            if intent_resolved.exists():
+                try:
+                    if os.path.samefile(output_resolved, intent_resolved):
+                        print(
+                            "analyze_task: SAFE_WRITE_VIOLATION: --output aliases --intent (samefile)",
+                            file=sys.stderr,
+                        )
+                        return 2
+                except OSError:
+                    pass
+            if lineage_resolved.exists():
+                try:
+                    if os.path.samefile(output_resolved, lineage_resolved):
+                        print(
+                            "analyze_task: SAFE_WRITE_VIOLATION: --output aliases --lineage (samefile)",
+                            file=sys.stderr,
+                        )
+                        return 2
+                except OSError:
+                    pass
 
     # Load and validate inputs.
     try:
@@ -212,16 +240,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"lineage_dgst : {report.lineage_digest}")
         print(f"intent       : {report.intent_task_id}")
         print(f"base_sha     : {report.source_base_sha}")
-        print(f"findings     : {d['summary']['total']} total  "
-              f"({d['summary']['errors']} errors, "
-              f"{d['summary']['warnings']} warnings, "
-              f"{d['summary']['infos']} infos)")
+        print(
+            f"findings     : {d['summary']['total']} total  "
+            f"({d['summary']['errors']} errors, "
+            f"{d['summary']['warnings']} warnings, "
+            f"{d['summary']['infos']} infos)"
+        )
         if report.findings:
             print()
             for f in report.findings:
                 print(f"  [{f.severity.value}] {f.code.value}")
                 print(f"    {f.message}")
-                print(f"    ref: {f.primary_reference.artifact_kind}::{f.primary_reference.identity}")
+                print(
+                    f"    ref: {f.primary_reference.artifact_kind}::{f.primary_reference.identity}"
+                )
 
     if args.output is not None and not args.human:
         print(f"ANALYSIS_REPORT_WRITTEN={args.output}")

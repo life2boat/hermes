@@ -818,7 +818,7 @@ def analyze(
         raise AnalysisInputError(f"LINEAGE_INVALID_{exc.code}") from exc
 
     if expected_base_sha is not None:
-        if not isinstance(expected_base_sha, str) or not _SHA1_RE.fullmatch(
+        if type(expected_base_sha) is not str or not _SHA1_RE.fullmatch(
             expected_base_sha
         ):
             raise AnalysisInputError("EXPECTED_BASE_SHA_INVALID")

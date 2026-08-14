@@ -95,9 +95,12 @@ class TestCliExitCodes:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--expected-sha", "not-a-sha",
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--expected-sha",
+            "not-a-sha",
         ])
         assert result == 2
         assert "EXPECTED_SHA_INVALID" in capsys.readouterr().err
@@ -114,9 +117,12 @@ class TestOutputAliasingProtection:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--output", str(intent),
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(intent),
         ])
         assert result == 2
         assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
@@ -126,9 +132,12 @@ class TestOutputAliasingProtection:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--output", str(lineage),
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(lineage),
         ])
         assert result == 2
         assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
@@ -141,9 +150,12 @@ class TestOutputAliasingProtection:
         # Path.resolve() canonicalises both sides so alias is detected
         alias = tmp_path / "sub" / ".." / "intent.json"
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--output", str(alias),
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(alias),
         ])
         assert result == 2
         assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
@@ -154,12 +166,73 @@ class TestOutputAliasingProtection:
         lineage = _write_lineage(tmp_path / "lineage.json")
         output = tmp_path / "report.json"
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--output", str(output),
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(output),
         ])
         assert result == 0
         assert output.exists()
+
+    def test_output_hardlink_to_intent_fail(self, tmp_path: Path, capsys) -> None:
+        """HARDLINK_OUTPUT_TO_INTENT=FAIL_CLOSED (exit 2)."""
+        import os
+
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        output = tmp_path / "output.json"
+        try:
+            os.link(intent, output)
+        except OSError:
+            pytest.skip("Hard links not supported on this filesystem")
+
+        h_intent_before = hashlib.sha256(intent.read_bytes()).hexdigest()
+
+        result = main([
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(output),
+        ])
+
+        h_intent_after = hashlib.sha256(intent.read_bytes()).hexdigest()
+        assert h_intent_before == h_intent_after
+
+        assert result == 2
+        assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
+
+    def test_output_hardlink_to_lineage_fail(self, tmp_path: Path, capsys) -> None:
+        """HARDLINK_OUTPUT_TO_LINEAGE=FAIL_CLOSED (exit 2)."""
+        import os
+
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        output = tmp_path / "output.json"
+        try:
+            os.link(lineage, output)
+        except OSError:
+            pytest.skip("Hard links not supported on this filesystem")
+
+        h_lineage_before = hashlib.sha256(lineage.read_bytes()).hexdigest()
+
+        result = main([
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(output),
+        ])
+
+        h_lineage_after = hashlib.sha256(lineage.read_bytes()).hexdigest()
+        assert h_lineage_before == h_lineage_after
+
+        assert result == 2
+        assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -172,16 +245,32 @@ class TestCliExpectedSha:
         sha = "b" * 40
         intent = _write_intent(tmp_path / "intent.json", source_base_sha=sha)
         lineage = _write_lineage(tmp_path / "lineage.json")
-        assert main([
-            "--intent", str(intent), "--lineage", str(lineage), "--expected-sha", sha,
-        ]) == 0
+        assert (
+            main([
+                "--intent",
+                str(intent),
+                "--lineage",
+                str(lineage),
+                "--expected-sha",
+                sha,
+            ])
+            == 0
+        )
 
     def test_mismatched_expected_sha_exit_1(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
         lineage = _write_lineage(tmp_path / "lineage.json")
-        assert main([
-            "--intent", str(intent), "--lineage", str(lineage), "--expected-sha", "c" * 40,
-        ]) == 1
+        assert (
+            main([
+                "--intent",
+                str(intent),
+                "--lineage",
+                str(lineage),
+                "--expected-sha",
+                "c" * 40,
+            ])
+            == 1
+        )
 
     def test_no_expected_sha_no_mismatch(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
@@ -200,7 +289,12 @@ class TestCliOutput:
         lineage = _write_lineage(tmp_path / "lineage.json")
         report_path = tmp_path / "report.json"
         result = main([
-            "--intent", str(intent), "--lineage", str(lineage), "--output", str(report_path),
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(report_path),
         ])
         assert result == 0
         assert report_path.exists()
@@ -217,8 +311,22 @@ class TestCliOutput:
         )
         lineage = _write_lineage(tmp_path / "lineage.json")
         out1, out2 = tmp_path / "r1.json", tmp_path / "r2.json"
-        main(["--intent", str(intent), "--lineage", str(lineage), "--output", str(out1)])
-        main(["--intent", str(intent), "--lineage", str(lineage), "--output", str(out2)])
+        main([
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(out1),
+        ])
+        main([
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(out2),
+        ])
         assert out1.read_bytes() == out2.read_bytes()
 
 

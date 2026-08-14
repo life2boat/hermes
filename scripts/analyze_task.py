@@ -36,6 +36,11 @@ import re
 import sys
 from pathlib import Path
 
+# Ensure repository root is on sys.path when script is executed directly
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from ai_engineering.task_analysis import (
     AnalysisInputError,
     analyze,

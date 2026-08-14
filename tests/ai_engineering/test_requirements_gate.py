@@ -561,6 +561,8 @@ def test_cli_clarify_task_subprocess(tmp_path):
     import sys
     from ai_engineering.task_intent import serialize_intent
 
+    repo_root = Path(__file__).resolve().parents[2]
+
     # 1. Valid READY intent -> Exit 0
     intent_ready = make_valid_intent(status=IntentStatus.READY)
     intent_file = tmp_path / "intent_ready.json"
@@ -572,6 +574,7 @@ def test_cli_clarify_task_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res.returncode == 0
     assert out_file.exists()
@@ -590,6 +593,7 @@ def test_cli_clarify_task_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res2.returncode == 1
 
@@ -601,6 +605,7 @@ def test_cli_clarify_task_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res3.returncode == 2
 
@@ -610,6 +615,7 @@ def test_cli_clarify_task_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res4.returncode == 2
 
@@ -618,6 +624,8 @@ def test_cli_requirements_gate_subprocess(tmp_path):
     import subprocess
     import sys
     from ai_engineering.task_intent import serialize_intent
+
+    repo_root = Path(__file__).resolve().parents[2]
 
     intent = make_valid_intent(status=IntentStatus.READY)
     intent_file = tmp_path / "intent.json"
@@ -650,6 +658,7 @@ def test_cli_requirements_gate_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res.returncode == 0
     assert out_file.exists()
@@ -679,6 +688,7 @@ def test_cli_requirements_gate_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res2.returncode == 1
 
@@ -699,5 +709,6 @@ def test_cli_requirements_gate_subprocess(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res3.returncode == 2

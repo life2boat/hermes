@@ -1045,6 +1045,8 @@ def test_cli_converge_task_subprocess(
     )
     from ai_engineering.convergence import serialize_evidence_bundle
 
+    repo_root = Path(__file__).resolve().parents[2]
+
     intent_f = tmp_path / "intent.json"
     intent_f.write_text(serialize_intent(dummy_intent), encoding="utf-8")
 
@@ -1089,6 +1091,7 @@ def test_cli_converge_task_subprocess(
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res.returncode == 0
     assert out_f.exists()
@@ -1118,6 +1121,7 @@ def test_cli_converge_task_subprocess(
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res2.returncode == 2
 
@@ -1144,5 +1148,6 @@ def test_cli_converge_task_subprocess(
         capture_output=True,
         text=True,
         check=False,
+        cwd=repo_root,
     )
     assert res3.returncode == 1

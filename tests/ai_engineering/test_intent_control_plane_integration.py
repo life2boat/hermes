@@ -600,7 +600,8 @@ class GateName(str, Enum):
         intent_file.write_text(serialize_intent(intent), encoding="utf-8")
 
         # Step 1: scripts/prepare_task.py --intent
-        context_file = Path(".task_context/test_cli_e2e_context.json")
+        repo_root = Path(__file__).resolve().parents[2]
+        context_file = repo_root / ".task_context" / "test_cli_e2e_context.json"
         try:
             p1 = subprocess.run(
                 [
@@ -614,6 +615,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p1.returncode == 0, f"prepare_task failed: {p1.stderr}"
             assert context_file.exists()
@@ -632,6 +634,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p2.returncode == 0, f"clarify_task failed: {p2.stderr}"
             assert clar_file.exists()
@@ -669,6 +672,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p3.returncode == 0, f"requirements_gate failed: {p3.stderr}"
             assert req_gate_file.exists()
@@ -715,6 +719,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p4.returncode == 0, f"analyze_task failed: {p4.stderr}"
             assert analysis_file.exists()
@@ -775,6 +780,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p5.returncode == 0, f"converge_task failed: {p5.stderr}"
             assert conv_file.exists()
@@ -793,6 +799,7 @@ class GateName(str, Enum):
                 capture_output=True,
                 text=True,
                 check=False,
+                cwd=repo_root,
             )
             assert p6.returncode == 0, f"explain_effective_policy failed: {p6.stderr}"
             assert policy_file.exists()

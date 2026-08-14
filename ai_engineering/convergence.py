@@ -247,33 +247,161 @@ _BUNDLE_FIELDS = frozenset({
 })
 
 
-def _compute_observation_id(obs: dict[str, Any]) -> str:
+def compute_observation_id(
+    target_kind: TargetKind | str,
+    target_id: str,
+    outcome: ObservationOutcome | str,
+    producer_id: str,
+    artifact_ref: str,
+    artifact_digest: str,
+    schema_version: int = EVIDENCE_BUNDLE_SCHEMA_VERSION,
+) -> str:
+    """Compute deterministic observation ID from semantic observation fields."""
+    kind_val = (
+        target_kind.value if isinstance(target_kind, TargetKind) else str(target_kind)
+    )
+    outcome_val = (
+        outcome.value
+        if isinstance(outcome, ObservationOutcome)
+        else str(outcome)
+    )
     payload = {
-        "schema_version": EVIDENCE_BUNDLE_SCHEMA_VERSION,
-        "target_kind": obs["target_kind"],
-        "target_id": obs["target_id"],
-        "outcome": obs["outcome"],
-        "producer_id": obs["producer_id"],
-        "artifact_ref": obs["artifact_ref"],
-        "artifact_digest": obs["artifact_digest"],
+        "artifact_digest": str(artifact_digest),
+        "artifact_ref": str(artifact_ref),
+        "outcome": outcome_val,
+        "producer_id": str(producer_id),
+        "schema_version": schema_version,
+        "target_id": str(target_id),
+        "target_kind": kind_val,
     }
     return _compute_digest(payload)
 
 
-def _compute_bundle_id(payload: dict[str, Any]) -> str:
+def _compute_observation_id(obs: dict[str, Any]) -> str:
+    return compute_observation_id(
+        target_kind=obs["target_kind"],
+        target_id=obs["target_id"],
+        outcome=obs["outcome"],
+        producer_id=obs["producer_id"],
+        artifact_ref=obs["artifact_ref"],
+        artifact_digest=obs["artifact_digest"],
+    )
+
+
+def create_evidence_observation(
+    target_kind: TargetKind | str,
+    target_id: str,
+    outcome: ObservationOutcome | str,
+    producer_id: str,
+    artifact_ref: str,
+    artifact_digest: str,
+) -> EvidenceObservation:
+    """Public factory to construct a canonical EvidenceObservation with deterministic observation_id."""
+    kind_enum = (
+        _enum(target_kind, TargetKind, "VALUE_INVALID")
+        if isinstance(target_kind, str)
+        else target_kind
+    )
+    outcome_enum = (
+        _enum(outcome, ObservationOutcome, "VALUE_INVALID")
+        if isinstance(outcome, str)
+        else outcome
+    )
+    t_id = (
+        _identifier(target_id)
+        if kind_enum == TargetKind.LINEAGE_EVIDENCE
+        else _string(target_id)
+    )
+    p_id = _string(producer_id)
+    a_ref = _string(artifact_ref)
+    a_dgst = _digest(artifact_digest)
+
+    obs_id = compute_observation_id(
+        target_kind=kind_enum,
+        target_id=t_id,
+        outcome=outcome_enum,
+        producer_id=p_id,
+        artifact_ref=a_ref,
+        artifact_digest=a_dgst,
+    )
+    return EvidenceObservation(
+        observation_id=obs_id,
+        target_kind=kind_enum,
+        target_id=t_id,
+        outcome=outcome_enum,
+        producer_id=p_id,
+        artifact_ref=a_ref,
+        artifact_digest=a_dgst,
+    )
+
+
+def compute_bundle_id(
+    task_id: str,
+    intent_digest: str,
+    analysis_id: str,
+    subject_sha: str,
+    observations: Sequence[EvidenceObservation | Mapping[str, Any] | str],
+    schema_version: int = EVIDENCE_BUNDLE_SCHEMA_VERSION,
+) -> str:
+    """Compute deterministic bundle ID from bundle metadata and observation IDs."""
+    obs_list = []
+    for obs in observations:
+        if isinstance(obs, EvidenceObservation):
+            obs_list.append({"observation_id": obs.observation_id})
+        elif isinstance(obs, Mapping):
+            obs_list.append({"observation_id": str(obs["observation_id"])})
+        else:
+            obs_list.append({"observation_id": str(obs)})
     return _compute_digest({
-        "schema_version": EVIDENCE_BUNDLE_SCHEMA_VERSION,
-        "task_id": payload["task_id"],
-        "intent_digest": payload["intent_digest"],
-        "analysis_id": payload["analysis_id"],
-        "subject_sha": payload["subject_sha"],
-        "observations": [
-            {
-                "observation_id": obs["observation_id"],
-            }
-            for obs in payload["observations"]
-        ],
+        "analysis_id": str(analysis_id),
+        "intent_digest": str(intent_digest),
+        "observations": obs_list,
+        "schema_version": schema_version,
+        "subject_sha": str(subject_sha),
+        "task_id": str(task_id),
     })
+
+
+def _compute_bundle_id(payload: dict[str, Any]) -> str:
+    return compute_bundle_id(
+        task_id=payload["task_id"],
+        intent_digest=payload["intent_digest"],
+        analysis_id=payload["analysis_id"],
+        subject_sha=payload["subject_sha"],
+        observations=payload["observations"],
+    )
+
+
+def create_evidence_bundle(
+    task_id: str,
+    intent_digest: str,
+    analysis_id: str,
+    subject_sha: str,
+    observations: Sequence[EvidenceObservation],
+) -> EvidenceBundle:
+    """Public factory to construct a validated EvidenceBundle with deterministic bundle_id."""
+    t_id = _identifier(task_id)
+    i_dgst = _digest(intent_digest)
+    a_id = _digest(analysis_id)
+    s_sha = _sha(subject_sha)
+
+    b_id = compute_bundle_id(
+        task_id=t_id,
+        intent_digest=i_dgst,
+        analysis_id=a_id,
+        subject_sha=s_sha,
+        observations=observations,
+    )
+    bundle = EvidenceBundle(
+        schema_version=EVIDENCE_BUNDLE_SCHEMA_VERSION,
+        bundle_id=b_id,
+        task_id=t_id,
+        intent_digest=i_dgst,
+        analysis_id=a_id,
+        subject_sha=s_sha,
+        observations=tuple(observations),
+    )
+    return validate_evidence_bundle(bundle)
 
 
 def _validate_bundle_from_mapping(payload: Mapping[str, object]) -> EvidenceBundle:
@@ -304,14 +432,14 @@ def _validate_bundle_from_mapping(payload: Mapping[str, object]) -> EvidenceBund
         artifact_ref = _string(obs_payload["artifact_ref"])
         artifact_digest = _digest(obs_payload["artifact_digest"])
 
-        expected_obs_id = _compute_observation_id({
-            "target_kind": target_kind.value,
-            "target_id": target_id,
-            "outcome": outcome.value,
-            "producer_id": producer_id,
-            "artifact_ref": artifact_ref,
-            "artifact_digest": artifact_digest,
-        })
+        expected_obs_id = compute_observation_id(
+            target_kind=target_kind,
+            target_id=target_id,
+            outcome=outcome,
+            producer_id=producer_id,
+            artifact_ref=artifact_ref,
+            artifact_digest=artifact_digest,
+        )
         if expected_obs_id != obs_payload["observation_id"]:
             _fail("TAMPERED_OBSERVATION_ID")
 
@@ -327,13 +455,13 @@ def _validate_bundle_from_mapping(payload: Mapping[str, object]) -> EvidenceBund
             )
         )
 
-    expected_bundle_id = _compute_bundle_id({
-        "task_id": task_id,
-        "intent_digest": intent_dgst,
-        "analysis_id": analysis_id,
-        "subject_sha": subject_sha,
-        "observations": [{"observation_id": o.observation_id} for o in observations],
-    })
+    expected_bundle_id = compute_bundle_id(
+        task_id=task_id,
+        intent_digest=intent_dgst,
+        analysis_id=analysis_id,
+        subject_sha=subject_sha,
+        observations=observations,
+    )
 
     if expected_bundle_id != payload["bundle_id"]:
         _fail("TAMPERED_BUNDLE_ID")
@@ -412,9 +540,26 @@ def validate_evidence_bundle(
     return _validate_bundle_from_mapping(payload)
 
 
-def deserialize_evidence_bundle(value: Mapping[str, object]) -> EvidenceBundle:
-    """Deserialize and validate an EvidenceBundle from a JSON-compatible mapping."""
-    return validate_evidence_bundle(value)
+def deserialize_evidence_bundle(
+    value: Mapping[str, object] | str | bytes,
+) -> EvidenceBundle:
+    """Deserialize and validate an EvidenceBundle from JSON string, bytes, or mapping."""
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConvergenceError("JSON_INVALID") from exc
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except Exception as exc:
+            raise ConvergenceError("JSON_INVALID") from exc
+        if not isinstance(data, Mapping):
+            _fail("REQUIRED_FIELD_MISSING")
+        return validate_evidence_bundle(data)
+    if isinstance(value, Mapping):
+        return validate_evidence_bundle(value)
+    _fail("REQUIRED_FIELD_MISSING")
 
 
 def serialize_evidence_bundle(bundle: EvidenceBundle) -> dict[str, Any]:

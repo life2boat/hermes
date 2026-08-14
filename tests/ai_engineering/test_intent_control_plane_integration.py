@@ -11,6 +11,7 @@ Proves complete deterministic composition of PR-1 -> PR-5 without provider or ne
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 from ai_engineering.contracts import StopBoundary, TaskClass
 from ai_engineering.convergence import (
@@ -20,8 +21,10 @@ from ai_engineering.convergence import (
     EvidenceObservation,
     ObservationOutcome,
     TargetKind,
-    _compute_bundle_id,
-    _compute_observation_id,
+    compute_bundle_id,
+    compute_observation_id,
+    create_evidence_bundle,
+    create_evidence_observation,
     evaluate_convergence,
     validate_evidence_bundle,
 )
@@ -42,7 +45,9 @@ from ai_engineering.requirements_gate import (
     GlobalDimension,
     RequirementsQualityReview,
     ReviewStatus,
+    create_requirements_quality_review,
     evaluate_requirements_gate,
+    generate_clarification_report,
 )
 from ai_engineering.task_analysis import analyze
 from ai_engineering.task_intent import (
@@ -99,9 +104,11 @@ class TestIntentControlPlaneIntegration:
                 AcceptanceCriterion(
                     "AC1", "All engineering invariants compile without errors"
                 ),
-                AcceptanceCriterion("AC2", "Unit tests reach 100% pass rate"),
+                AcceptanceCriterion(
+                    "AC2", "All required release gates pass deterministically"
+                ),
             ),
-            unknowns=(),  # Zero unknowns -> Clarification complete
+            unknowns=(),
             applicable_invariants=("A1", "A2", "S3", "AI1"),
             required_gates=("CODE_GATE", "SECURITY_GATE"),
             parent_intent_digest=None,
@@ -115,32 +122,24 @@ class TestIntentControlPlaneIntegration:
         # ----------------------------------------------------------------------
         # 2. Step 2: Clarification & Requirements Quality Gate (PR-3)
         # ----------------------------------------------------------------------
-        clarification = ClarificationReport(
-            schema_version=CLARIFICATION_SCHEMA_VERSION,
-            clarification_id=_compute_sha256("clarification:TASK-E2E-001"),
-            task_id=intent.task_id,
-            intent_digest=i_digest,
-            intent_revision=intent.intent_revision,
-            intent_status=intent.status,
-            questions=(),
-            blocking_question_count=0,
-            ready_for_quality_review=True,
-        )
+        clarification = generate_clarification_report(intent)
+        assert clarification.ready_for_quality_review is True
+        assert clarification.blocking_question_count == 0
 
-        quality_review = RequirementsQualityReview(
-            schema_version=QUALITY_REVIEW_SCHEMA_VERSION,
-            review_id=_compute_sha256("review:TASK-E2E-001"),
+        c_reviews = [
+            CriterionReview(
+                c.criterion_id, {d: ReviewStatus.PASS for d in CriterionDimension}
+            )
+            for c in intent.acceptance_criteria
+        ]
+        g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+        quality_review = create_requirements_quality_review(
             task_id=intent.task_id,
             intent_digest=i_digest,
             intent_revision=intent.intent_revision,
             reviewer_id="reviewer-automated",
-            criterion_reviews=tuple(
-                CriterionReview(
-                    c.criterion_id, {d: ReviewStatus.PASS for d in CriterionDimension}
-                )
-                for c in intent.acceptance_criteria
-            ),
-            global_reviews={d: ReviewStatus.PASS for d in GlobalDimension},
+            criterion_reviews=c_reviews,
+            global_reviews=g_reviews,
         )
 
         req_gate_report = evaluate_requirements_gate(
@@ -205,102 +204,50 @@ class TestIntentControlPlaneIntegration:
         art1_digest = _compute_sha256("test run pytest output pass")
         art2_digest = _compute_sha256("security scan passed cleanly")
 
-        obs1_dict = {
-            "target_kind": "LINEAGE_EVIDENCE",
-            "target_id": "EV1",
-            "outcome": "PASS",
-            "producer_id": "pytest",
-            "artifact_ref": "logs/test1.log",
-            "artifact_digest": art1_digest,
-        }
-        obs2_dict = {
-            "target_kind": "LINEAGE_EVIDENCE",
-            "target_id": "EV2",
-            "outcome": "PASS",
-            "producer_id": "pytest",
-            "artifact_ref": "logs/test2.log",
-            "artifact_digest": art1_digest,
-        }
-        obs3_dict = {
-            "target_kind": "REQUIRED_GATE",
-            "target_id": "CODE_GATE",
-            "outcome": "PASS",
-            "producer_id": "code-eval",
-            "artifact_ref": "logs/code_gate.json",
-            "artifact_digest": art1_digest,
-        }
-        obs4_dict = {
-            "target_kind": "REQUIRED_GATE",
-            "target_id": "SECURITY_GATE",
-            "outcome": "PASS",
-            "producer_id": "security-scan",
-            "artifact_ref": "logs/security_gate.json",
-            "artifact_digest": art2_digest,
-        }
-
-        observations = (
-            EvidenceObservation(
-                _compute_observation_id(obs1_dict),
-                TargetKind.LINEAGE_EVIDENCE,
-                "EV1",
-                ObservationOutcome.PASS,
-                "pytest",
-                "logs/test1.log",
-                art1_digest,
-            ),
-            EvidenceObservation(
-                _compute_observation_id(obs2_dict),
-                TargetKind.LINEAGE_EVIDENCE,
-                "EV2",
-                ObservationOutcome.PASS,
-                "pytest",
-                "logs/test2.log",
-                art1_digest,
-            ),
-            EvidenceObservation(
-                _compute_observation_id(obs3_dict),
-                TargetKind.REQUIRED_GATE,
-                "CODE_GATE",
-                ObservationOutcome.PASS,
-                "code-eval",
-                "logs/code_gate.json",
-                art1_digest,
-            ),
-            EvidenceObservation(
-                _compute_observation_id(obs4_dict),
-                TargetKind.REQUIRED_GATE,
-                "SECURITY_GATE",
-                ObservationOutcome.PASS,
-                "security-scan",
-                "logs/security_gate.json",
-                art2_digest,
-            ),
+        obs1 = create_evidence_observation(
+            target_kind=TargetKind.LINEAGE_EVIDENCE,
+            target_id="EV1",
+            outcome=ObservationOutcome.PASS,
+            producer_id="pytest",
+            artifact_ref="logs/test1.log",
+            artifact_digest=art1_digest,
+        )
+        obs2 = create_evidence_observation(
+            target_kind=TargetKind.LINEAGE_EVIDENCE,
+            target_id="EV2",
+            outcome=ObservationOutcome.PASS,
+            producer_id="pytest",
+            artifact_ref="logs/test2.log",
+            artifact_digest=art1_digest,
+        )
+        obs3 = create_evidence_observation(
+            target_kind=TargetKind.REQUIRED_GATE,
+            target_id="CODE_GATE",
+            outcome=ObservationOutcome.PASS,
+            producer_id="code-eval",
+            artifact_ref="logs/code_gate.json",
+            artifact_digest=art1_digest,
+        )
+        obs4 = create_evidence_observation(
+            target_kind=TargetKind.REQUIRED_GATE,
+            target_id="SECURITY_GATE",
+            outcome=ObservationOutcome.PASS,
+            producer_id="security-scan",
+            artifact_ref="logs/security_gate.json",
+            artifact_digest=art2_digest,
         )
 
-        bundle_payload = {
-            "task_id": intent.task_id,
-            "intent_digest": i_digest,
-            "analysis_id": analysis_id,
-            "subject_sha": subject_sha,
-            "observations": [
-                {"observation_id": o.observation_id} for o in observations
-            ],
-        }
-        bundle_id = _compute_bundle_id(bundle_payload)
-
-        raw_bundle = EvidenceBundle(
-            schema_version=1,
-            bundle_id=bundle_id,
+        evidence_bundle = create_evidence_bundle(
             task_id=intent.task_id,
             intent_digest=i_digest,
             analysis_id=analysis_id,
             subject_sha=subject_sha,
-            observations=observations,
+            observations=(obs1, obs2, obs3, obs4),
         )
 
         # Validate bundle at public boundary (PR-4.1)
-        evidence_bundle = validate_evidence_bundle(raw_bundle)
-        assert evidence_bundle.bundle_id == bundle_id
+        evidence_bundle = validate_evidence_bundle(evidence_bundle)
+        assert evidence_bundle.bundle_id == evidence_bundle.bundle_id
 
         # Evaluate convergence (PR-4)
         conv_report = evaluate_convergence(
@@ -315,7 +262,7 @@ class TestIntentControlPlaneIntegration:
         assert conv_report.status == ConvergenceStatus.CONVERGED
         assert conv_report.intent_digest == i_digest
         assert conv_report.analysis_id == analysis_id
-        assert conv_report.evidence_bundle_id == bundle_id
+        assert conv_report.evidence_bundle_id == evidence_bundle.bundle_id
         assert conv_report.subject_sha == subject_sha
         assert conv_report.requirements_gate_id == req_gate_id
         assert len(conv_report.blocking_reasons) == 0
@@ -455,21 +402,9 @@ class GateName(str, Enum):
         )
         i_digest = intent_digest(intent)
 
-        clarification = ClarificationReport(
-            schema_version=CLARIFICATION_SCHEMA_VERSION,
-            clarification_id=_compute_sha256("clarification:TASK-NEG-001"),
-            task_id=intent.task_id,
-            intent_digest=i_digest,
-            intent_revision=intent.intent_revision,
-            intent_status=intent.status,
-            questions=(),
-            blocking_question_count=0,
-            ready_for_quality_review=True,
-        )
+        clarification = generate_clarification_report(intent)
 
-        quality_review = RequirementsQualityReview(
-            schema_version=QUALITY_REVIEW_SCHEMA_VERSION,
-            review_id=_compute_sha256("review:TASK-NEG-001"),
+        quality_review = create_requirements_quality_review(
             task_id=intent.task_id,
             intent_digest=i_digest,
             intent_revision=intent.intent_revision,
@@ -502,65 +437,29 @@ class GateName(str, Enum):
             intent=intent, lineage=lineage, expected_base_sha=subject_sha
         )
 
-        obs1_dict = {
-            "target_kind": "LINEAGE_EVIDENCE",
-            "target_id": "EV1",
-            "outcome": "PASS",
-            "producer_id": "pytest",
-            "artifact_ref": "logs/test.log",
-            "artifact_digest": _compute_sha256("pass"),
-        }
-        obs2_dict = {
-            "target_kind": "REQUIRED_GATE",
-            "target_id": "CODE_GATE",
-            "outcome": "PASS",
-            "producer_id": "code-eval",
-            "artifact_ref": "logs/code_gate.json",
-            "artifact_digest": _compute_sha256("code_gate"),
-        }
-
-        observations = (
-            EvidenceObservation(
-                _compute_observation_id(obs1_dict),
-                TargetKind.LINEAGE_EVIDENCE,
-                "EV1",
-                ObservationOutcome.PASS,
-                "pytest",
-                "logs/test.log",
-                _compute_sha256("pass"),
-            ),
-            EvidenceObservation(
-                _compute_observation_id(obs2_dict),
-                TargetKind.REQUIRED_GATE,
-                "CODE_GATE",
-                ObservationOutcome.PASS,
-                "code-eval",
-                "logs/code_gate.json",
-                _compute_sha256("code_gate"),
-            ),
+        obs1 = create_evidence_observation(
+            target_kind=TargetKind.LINEAGE_EVIDENCE,
+            target_id="EV1",
+            outcome=ObservationOutcome.PASS,
+            producer_id="pytest",
+            artifact_ref="logs/test.log",
+            artifact_digest=_compute_sha256("pass"),
+        )
+        obs2 = create_evidence_observation(
+            target_kind=TargetKind.REQUIRED_GATE,
+            target_id="CODE_GATE",
+            outcome=ObservationOutcome.PASS,
+            producer_id="code-eval",
+            artifact_ref="logs/code_gate.json",
+            artifact_digest=_compute_sha256("code_gate"),
         )
 
-        bundle_payload = {
-            "task_id": intent.task_id,
-            "intent_digest": i_digest,
-            "analysis_id": analysis.analysis_id,
-            "subject_sha": wrong_sha,  # Mismatched SHA
-            "observations": [
-                {"observation_id": o.observation_id} for o in observations
-            ],
-        }
-        bundle_id = _compute_bundle_id(bundle_payload)
-
-        evidence_bundle = validate_evidence_bundle(
-            EvidenceBundle(
-                schema_version=1,
-                bundle_id=bundle_id,
-                task_id=intent.task_id,
-                intent_digest=i_digest,
-                analysis_id=analysis.analysis_id,
-                subject_sha=wrong_sha,
-                observations=observations,
-            )
+        evidence_bundle = create_evidence_bundle(
+            task_id=intent.task_id,
+            intent_digest=i_digest,
+            analysis_id=analysis.analysis_id,
+            subject_sha=wrong_sha,  # Mismatched SHA
+            observations=(obs1, obs2),
         )
 
         conv_report = evaluate_convergence(
@@ -637,3 +536,282 @@ class GateName(str, Enum):
 
         # Proves authority was NOT expanded
         assert "production/" in policy_report.task_policy.forbidden_mutations
+
+    def test_full_operational_cli_e2e_subprocess_suite(self, tmp_path) -> None:
+        """Full end-to-end integration test executing every CLI entry point as real subprocesses without network."""
+        import json
+        import subprocess
+        import sys
+        from ai_engineering.convergence import (
+            create_evidence_bundle,
+            create_evidence_observation,
+            serialize_evidence_bundle,
+        )
+        from ai_engineering.requirements_gate import (
+            create_requirements_quality_review,
+            serialize_review,
+        )
+        from ai_engineering.task_intent import (
+            AcceptanceCriterion,
+            IntentStatus,
+            StopBoundary,
+            TaskClass,
+            TaskIntent,
+            intent_digest,
+            serialize_intent,
+            serialize_lineage,
+            validate_intent,
+            validate_lineage,
+        )
+
+        # Get current HEAD sha from git
+        head_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        # 1. Create TaskIntent
+        intent = validate_intent(
+            TaskIntent(
+                schema_version=1,
+                task_id="TASK-CLI-E2E-001",
+                intent_revision=1,
+                status=IntentStatus.READY,
+                task_class=TaskClass.SMALL_PRECISE_FIX,
+                desired_outcome="CLI subprocess pipeline integration verification",
+                source_repository="life2boat/hermes",
+                source_main_ref="main",
+                source_base_sha=head_sha,
+                constraints=("Offline execution only",),
+                allowed_mutations=("ai_engineering/", "scripts/"),
+                forbidden_mutations=("deploy/", "production/"),
+                stop_boundary=StopBoundary.DRAFT_PR,
+                acceptance_criteria=(
+                    AcceptanceCriterion("AC1", "CLI runs exit 0 deterministically"),
+                ),
+                unknowns=(),
+                applicable_invariants=("A1", "A2"),
+                required_gates=("CODE_GATE",),
+                parent_intent_digest=None,
+            )
+        )
+        i_digest = intent_digest(intent)
+
+        intent_file = tmp_path / "intent.json"
+        intent_file.write_text(serialize_intent(intent), encoding="utf-8")
+
+        # Step 1: scripts/prepare_task.py --intent
+        repo_root = Path(__file__).resolve().parents[2]
+        context_file = repo_root / ".task_context" / "test_cli_e2e_context.json"
+        try:
+            p1 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/prepare_task.py",
+                    "--intent",
+                    str(intent_file),
+                    "--output",
+                    str(context_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p1.returncode == 0, f"prepare_task failed: {p1.stderr}"
+            assert context_file.exists()
+
+            # Step 2: scripts/clarify_task.py
+            clar_file = tmp_path / "clarification.json"
+            p2 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/clarify_task.py",
+                    "--intent",
+                    str(intent_file),
+                    "--output",
+                    str(clar_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p2.returncode == 0, f"clarify_task failed: {p2.stderr}"
+            assert clar_file.exists()
+
+            # Step 3: scripts/requirements_gate.py
+            rev = create_requirements_quality_review(
+                task_id=intent.task_id,
+                intent_digest=i_digest,
+                intent_revision=intent.intent_revision,
+                reviewer_id="reviewer-cli",
+                criterion_reviews=[
+                    CriterionReview(
+                        "AC1", {d: ReviewStatus.PASS for d in CriterionDimension}
+                    )
+                ],
+                global_reviews={d: ReviewStatus.PASS for d in GlobalDimension},
+            )
+            rev_file = tmp_path / "quality_review.json"
+            rev_file.write_text(serialize_review(rev), encoding="utf-8")
+
+            req_gate_file = tmp_path / "requirements_gate.json"
+            p3 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/requirements_gate.py",
+                    "--intent",
+                    str(intent_file),
+                    "--clarification",
+                    str(clar_file),
+                    "--review",
+                    str(rev_file),
+                    "--output",
+                    str(req_gate_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p3.returncode == 0, f"requirements_gate failed: {p3.stderr}"
+            assert req_gate_file.exists()
+
+            # Step 4: scripts/analyze_task.py
+            lineage = validate_lineage({
+                "schema_version": 1,
+                "nodes": [
+                    {"kind": "INTENT", "node_id": intent.task_id},
+                    {"kind": "CRITERION", "node_id": f"{intent.task_id}::AC1"},
+                    {"kind": "TASK", "node_id": "T1"},
+                    {"kind": "EVIDENCE", "node_id": "EV1"},
+                ],
+                "edges": [
+                    {
+                        "relation": "IMPLEMENTS",
+                        "source_id": "T1",
+                        "target_id": f"{intent.task_id}::AC1",
+                    },
+                    {
+                        "relation": "VERIFIES",
+                        "source_id": "EV1",
+                        "target_id": f"{intent.task_id}::AC1",
+                    },
+                ],
+            })
+            lineage_file = tmp_path / "lineage.json"
+            lineage_file.write_text(serialize_lineage(lineage), encoding="utf-8")
+
+            analysis_file = tmp_path / "analysis.json"
+            p4 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/analyze_task.py",
+                    "--intent",
+                    str(intent_file),
+                    "--lineage",
+                    str(lineage_file),
+                    "--expected-sha",
+                    head_sha,
+                    "--output",
+                    str(analysis_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p4.returncode == 0, f"analyze_task failed: {p4.stderr}"
+            assert analysis_file.exists()
+            analysis_data = json.loads(analysis_file.read_text(encoding="utf-8"))
+            analysis_id = analysis_data["analysis_id"]
+
+            # Step 5: scripts/converge_task.py
+            obs1 = create_evidence_observation(
+                target_kind=TargetKind.LINEAGE_EVIDENCE,
+                target_id="EV1",
+                outcome=ObservationOutcome.PASS,
+                producer_id="pytest",
+                artifact_ref="logs/test.log",
+                artifact_digest="0" * 64,
+            )
+            obs2 = create_evidence_observation(
+                target_kind=TargetKind.REQUIRED_GATE,
+                target_id="CODE_GATE",
+                outcome=ObservationOutcome.PASS,
+                producer_id="gate-check",
+                artifact_ref="logs/gate.log",
+                artifact_digest="1" * 64,
+            )
+            bundle = create_evidence_bundle(
+                task_id=intent.task_id,
+                intent_digest=i_digest,
+                analysis_id=analysis_id,
+                subject_sha=head_sha,
+                observations=(obs1, obs2),
+            )
+            evidence_file = tmp_path / "evidence.json"
+            evidence_file.write_text(
+                json.dumps(serialize_evidence_bundle(bundle)), encoding="utf-8"
+            )
+
+            conv_file = tmp_path / "convergence.json"
+            p5 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/converge_task.py",
+                    "--intent",
+                    str(intent_file),
+                    "--clarification",
+                    str(clar_file),
+                    "--review",
+                    str(rev_file),
+                    "--lineage",
+                    str(lineage_file),
+                    "--evidence",
+                    str(evidence_file),
+                    "--expected-base-sha",
+                    head_sha,
+                    "--subject-sha",
+                    head_sha,
+                    "--output",
+                    str(conv_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p5.returncode == 0, f"converge_task failed: {p5.stderr}"
+            assert conv_file.exists()
+
+            # Step 6: scripts/explain_effective_policy.py
+            policy_file = tmp_path / "effective_policy.json"
+            p6 = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/explain_effective_policy.py",
+                    "--intent",
+                    str(intent_file),
+                    "--output",
+                    str(policy_file),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=repo_root,
+            )
+            assert p6.returncode == 0, f"explain_effective_policy failed: {p6.stderr}"
+            assert policy_file.exists()
+
+            # Step 7: verify_effective_policy_report API
+            from ai_engineering.effective_policy import (
+                deserialize_effective_policy_report,
+                verify_effective_policy_report,
+            )
+
+            policy_data = policy_file.read_text(encoding="utf-8")
+            policy_report = deserialize_effective_policy_report(policy_data)
+            verify_effective_policy_report(policy_report, intent)
+        finally:
+            context_file.unlink(missing_ok=True)

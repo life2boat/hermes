@@ -23,11 +23,14 @@ def _git(repository: Path, *arguments: str) -> str:
 def test_secret_check_exact_range_scans_candidate_tree_and_blocks_bad_input(
     tmp_path: Path,
 ) -> None:
-    python3_probe = subprocess.run(
-        ["bash", "-lc", "python3 --version"],
-        check=False,
-        capture_output=True,
-    )
+    try:
+        python3_probe = subprocess.run(
+            ["bash", "-lc", "python3 --version"],
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("bash is unavailable on this host")
     if python3_probe.returncode != 0:
         pytest.skip("bash python3 runtime is unavailable")
 

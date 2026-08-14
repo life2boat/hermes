@@ -202,6 +202,36 @@ _CLARIFICATION_FIELDS = frozenset({
 })
 
 
+def compute_clarification_id(
+    intent_digest: str,
+    questions: Sequence[ClarificationQuestion | Mapping[str, Any]],
+    schema_version: int = CLARIFICATION_SCHEMA_VERSION,
+) -> str:
+    """Compute deterministic clarification ID from intent digest and questions."""
+    payload_to_hash = {
+        "intent_digest": intent_digest,
+        "questions": [
+            {
+                "blocking": (
+                    q.blocking if isinstance(q, ClarificationQuestion) else bool(q["blocking"])
+                ),
+                "description": (
+                    q.description if isinstance(q, ClarificationQuestion) else str(q["description"])
+                ),
+                "question_id": (
+                    q.question_id if isinstance(q, ClarificationQuestion) else str(q["question_id"])
+                ),
+                "unknown_id": (
+                    q.unknown_id if isinstance(q, ClarificationQuestion) else str(q["unknown_id"])
+                ),
+            }
+            for q in questions
+        ],
+        "schema_version": schema_version,
+    }
+    return _compute_digest(payload_to_hash)
+
+
 def generate_clarification_report(intent: TaskIntent) -> ClarificationReport:
     """Generate a deterministic clarification report from a validated TaskIntent."""
     validate_intent(intent)
@@ -224,21 +254,7 @@ def generate_clarification_report(intent: TaskIntent) -> ClarificationReport:
     ready_for_qr = intent.status == IntentStatus.READY and blocking_count == 0
 
     intent_dgst = intent_digest(intent)
-
-    payload_to_hash = {
-        "intent_digest": intent_dgst,
-        "questions": [
-            {
-                "blocking": q.blocking,
-                "description": q.description,
-                "question_id": q.question_id,
-                "unknown_id": q.unknown_id,
-            }
-            for q in questions
-        ],
-        "schema_version": CLARIFICATION_SCHEMA_VERSION,
-    }
-    clarification_id = _compute_digest(payload_to_hash)
+    clarification_id = compute_clarification_id(intent_dgst, questions)
 
     return ClarificationReport(
         schema_version=CLARIFICATION_SCHEMA_VERSION,
@@ -320,16 +336,31 @@ def validate_clarification(
     if not isinstance(bcount, int) or bcount < 0 or isinstance(bcount, bool):
         _fail("VALUE_INVALID")
 
+    expected_bcount = sum(1 for q in questions if q.blocking)
+    if bcount != expected_bcount:
+        _fail("VALUE_INVALID")
+
+    intent_status = _enum(payload["intent_status"], IntentStatus, "VALUE_INVALID")
+    ready_for_qr = _boolean(payload["ready_for_quality_review"])
+    expected_ready = (intent_status == IntentStatus.READY and bcount == 0)
+    if ready_for_qr != expected_ready:
+        _fail("VALUE_INVALID")
+
+    intent_dgst = _digest(payload["intent_digest"])
+    expected_clar_id = compute_clarification_id(intent_dgst, questions)
+    if payload["clarification_id"] != expected_clar_id:
+        _fail("TAMPERED_CLARIFICATION_ID")
+
     return ClarificationReport(
         schema_version=CLARIFICATION_SCHEMA_VERSION,
-        clarification_id=_digest(payload["clarification_id"]),
+        clarification_id=expected_clar_id,
         task_id=_identifier(payload["task_id"]),
-        intent_digest=_digest(payload["intent_digest"]),
+        intent_digest=intent_dgst,
         intent_revision=rev,
-        intent_status=_enum(payload["intent_status"], IntentStatus, "VALUE_INVALID"),
+        intent_status=intent_status,
         questions=tuple(questions),
         blocking_question_count=bcount,
-        ready_for_quality_review=_boolean(payload["ready_for_quality_review"]),
+        ready_for_quality_review=ready_for_qr,
     )
 
 
@@ -382,6 +413,86 @@ _REVIEW_FIELDS = frozenset({
     "criterion_reviews",
     "global_reviews",
 })
+
+
+def compute_requirements_review_id(
+    task_id: str,
+    intent_digest: str,
+    intent_revision: int,
+    reviewer_id: str,
+    criterion_reviews: Sequence[CriterionReview | Mapping[str, Any]],
+    global_reviews: Mapping[GlobalDimension | str, ReviewStatus | str],
+    schema_version: int = QUALITY_REVIEW_SCHEMA_VERSION,
+) -> str:
+    """Compute deterministic review ID binding all semantic review content."""
+    normalized_criteria = []
+    for cr in criterion_reviews:
+        if isinstance(cr, CriterionReview):
+            cid = cr.criterion_id
+            dims = {
+                (k.value if isinstance(k, CriterionDimension) else str(k)): (
+                    v.value if isinstance(v, ReviewStatus) else str(v)
+                )
+                for k, v in cr.dimensions.items()
+            }
+        else:
+            cid = str(cr["criterion_id"])
+            raw_dims = _mapping(cr["dimensions"])
+            dims = {str(k): str(v) for k, v in raw_dims.items()}
+        normalized_criteria.append({
+            "criterion_id": cid,
+            "dimensions": dict(sorted(dims.items())),
+        })
+    normalized_criteria.sort(key=lambda x: x["criterion_id"])
+
+    normalized_global = {
+        (k.value if isinstance(k, GlobalDimension) else str(k)): (
+            v.value if isinstance(v, ReviewStatus) else str(v)
+        )
+        for k, v in global_reviews.items()
+    }
+    sorted_global = dict(sorted(normalized_global.items()))
+
+    payload_to_hash = {
+        "criterion_reviews": normalized_criteria,
+        "global_reviews": sorted_global,
+        "intent_digest": intent_digest,
+        "intent_revision": intent_revision,
+        "reviewer_id": reviewer_id,
+        "schema_version": schema_version,
+        "task_id": task_id,
+    }
+    return _compute_digest(payload_to_hash)
+
+
+def create_requirements_quality_review(
+    task_id: str,
+    intent_digest: str,
+    intent_revision: int,
+    reviewer_id: str,
+    criterion_reviews: Sequence[CriterionReview],
+    global_reviews: Mapping[GlobalDimension, ReviewStatus],
+) -> RequirementsQualityReview:
+    """Canonical public factory constructing a validated RequirementsQualityReview with bound review_id."""
+    review_id = compute_requirements_review_id(
+        task_id=task_id,
+        intent_digest=intent_digest,
+        intent_revision=intent_revision,
+        reviewer_id=reviewer_id,
+        criterion_reviews=criterion_reviews,
+        global_reviews=global_reviews,
+    )
+    review = RequirementsQualityReview(
+        schema_version=QUALITY_REVIEW_SCHEMA_VERSION,
+        review_id=review_id,
+        task_id=task_id,
+        intent_digest=intent_digest,
+        intent_revision=intent_revision,
+        reviewer_id=reviewer_id,
+        criterion_reviews=tuple(criterion_reviews),
+        global_reviews=dict(global_reviews),
+    )
+    return validate_review(review)
 
 
 def _review_to_dict(review: RequirementsQualityReview) -> dict[str, object]:
@@ -457,11 +568,25 @@ def validate_review(
         gstat = _enum(gv, ReviewStatus, "VALUE_INVALID")
         g_reviews[gdim] = gstat
 
+    task_id = _identifier(payload["task_id"])
+    intent_dgst = _digest(payload["intent_digest"])
+
+    expected_review_id = compute_requirements_review_id(
+        task_id=task_id,
+        intent_digest=intent_dgst,
+        intent_revision=rev,
+        reviewer_id=r_id,
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
+    )
+    if payload["review_id"] != expected_review_id:
+        _fail("TAMPERED_REVIEW_ID")
+
     return RequirementsQualityReview(
         schema_version=QUALITY_REVIEW_SCHEMA_VERSION,
-        review_id=_digest(payload["review_id"]),
-        task_id=_identifier(payload["task_id"]),
-        intent_digest=_digest(payload["intent_digest"]),
+        review_id=expected_review_id,
+        task_id=task_id,
+        intent_digest=intent_dgst,
         intent_revision=rev,
         reviewer_id=r_id,
         criterion_reviews=tuple(c_reviews),
@@ -622,3 +747,76 @@ def evaluate_requirements_gate(
         status=gate_status,
         blocking_reasons=sorted_reasons,
     )
+
+
+_GATE_FIELDS = frozenset({
+    "schema_version",
+    "gate_id",
+    "task_id",
+    "intent_digest",
+    "clarification_id",
+    "quality_review_id",
+    "status",
+    "blocking_reasons",
+})
+
+
+def validate_gate(
+    value: RequirementsGateReport | Mapping[str, object],
+) -> RequirementsGateReport:
+    if isinstance(value, RequirementsGateReport):
+        value = _gate_to_dict(value)
+
+    payload = _exact_fields(value, _GATE_FIELDS)
+    sv = payload["schema_version"]
+    if sv != REQUIREMENTS_GATE_SCHEMA_VERSION or isinstance(sv, bool):
+        _fail("SCHEMA_VERSION_UNSUPPORTED")
+
+    reasons = []
+    for r in _items(payload["blocking_reasons"]):
+        reasons.append(_enum(r, GateBlockingReason, "VALUE_INVALID"))
+
+    status = _enum(payload["status"], GateStatus, "VALUE_INVALID")
+    task_id = _identifier(payload["task_id"])
+    intent_dgst = _digest(payload["intent_digest"])
+    clar_id = _digest(payload["clarification_id"])
+    qr_id = _digest(payload["quality_review_id"])
+
+    payload_to_hash = {
+        "blocking_reasons": [r.value for r in sorted(reasons, key=lambda x: x.value)],
+        "clarification_id": clar_id,
+        "intent_digest": intent_dgst,
+        "quality_review_id": qr_id,
+        "schema_version": REQUIREMENTS_GATE_SCHEMA_VERSION,
+        "status": status.value,
+        "task_id": task_id,
+    }
+    expected_gate_id = _compute_digest(payload_to_hash)
+    if payload["gate_id"] != expected_gate_id:
+        _fail("TAMPERED_GATE_ID")
+
+    return RequirementsGateReport(
+        schema_version=REQUIREMENTS_GATE_SCHEMA_VERSION,
+        gate_id=expected_gate_id,
+        task_id=task_id,
+        intent_digest=intent_dgst,
+        clarification_id=clar_id,
+        quality_review_id=qr_id,
+        status=status,
+        blocking_reasons=tuple(reasons),
+    )
+
+
+def deserialize_gate(value: str | bytes) -> RequirementsGateReport:
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise RequirementsGateError("JSON_INVALID") from e
+    if not isinstance(value, str):
+        _fail("JSON_INVALID")
+    try:
+        data = json.loads(value)
+    except Exception as e:
+        raise RequirementsGateError("JSON_INVALID") from e
+    return validate_gate(data)

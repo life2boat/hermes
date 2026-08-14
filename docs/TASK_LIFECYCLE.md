@@ -145,6 +145,22 @@ IDEA
 - `INTENT_CONTROL_PLANE=OPTIONAL`: Small precise implementation where lineage adds useful traceability.
 - `INTENT_CONTROL_PLANE=NOT_APPLICABLE`: Trivial passive documentation or typo-only changes with no behavioral contract.
 
+### Lineage and Graph Contract (v1)
+
+- `TaskIntent` directly owns and defines `acceptance_criteria`.
+- `TaskLineage` models traceability across four node kinds: `INTENT`, `CRITERION`, `TASK`, `EVIDENCE`.
+- Valid edge relations:
+  - `TASK -[IMPLEMENTS]-> CRITERION`
+  - `EVIDENCE -[VERIFIES]-> CRITERION`
+  - `EVIDENCE -[VERIFIES]-> TASK`
+- Note on Lineage v1: There is no direct `INTENT -> CRITERION` edge relation in `TaskLineage` because acceptance criteria are intrinsic children of the `TaskIntent` schema.
+
+### Canonical Construction & Identity Binding
+
+- **Clarification**: `clarification_id` is content-addressed via `compute_clarification_id(intent_digest, questions, schema_version)`.
+- **Requirements Quality Review**: `review_id` is content-addressed via `compute_requirements_review_id(task_id, intent_digest, intent_revision, reviewer_id, criterion_reviews, global_reviews, schema_version)`. Reviews MUST be instantiated via `create_requirements_quality_review(...)`.
+- **Evidence Bundle**: Observations and bundles MUST be constructed via public factory helpers `create_evidence_observation(...)` and `create_evidence_bundle(...)` with deterministic content-addressed hashes.
+
 ### Authority semantics
 
 Deterministic evidence and validation gates must never be confused with authority:

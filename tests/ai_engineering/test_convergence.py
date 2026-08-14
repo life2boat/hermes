@@ -107,43 +107,34 @@ def dummy_intent() -> TaskIntent:
 
 @pytest.fixture
 def dummy_clarification(dummy_intent: TaskIntent) -> ClarificationReport:
-    return ClarificationReport(
-        schema_version=CLARIFICATION_SCHEMA_VERSION,
-        clarification_id=DUMMY_DIGEST,
-        task_id=dummy_intent.task_id,
-        intent_digest=intent_digest(dummy_intent),
-        intent_revision=dummy_intent.intent_revision,
-        intent_status=dummy_intent.status,
-        questions=(),
-        blocking_question_count=0,
-        ready_for_quality_review=True,
-    )
+    from ai_engineering.requirements_gate import generate_clarification_report
+
+    return generate_clarification_report(dummy_intent)
 
 
 @pytest.fixture
 def dummy_quality_review(dummy_intent: TaskIntent) -> RequirementsQualityReview:
-    return RequirementsQualityReview(
-        schema_version=QUALITY_REVIEW_SCHEMA_VERSION,
-        review_id=DUMMY_DIGEST,
+    from ai_engineering.requirements_gate import create_requirements_quality_review
+
+    c_reviews = [
+        CriterionReview(
+            c.criterion_id, {d: ReviewStatus.PASS for d in CriterionDimension}
+        )
+        for c in dummy_intent.acceptance_criteria
+    ]
+    g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+    return create_requirements_quality_review(
         task_id=dummy_intent.task_id,
         intent_digest=intent_digest(dummy_intent),
         intent_revision=dummy_intent.intent_revision,
         reviewer_id="reviewer-1",
-        criterion_reviews=tuple(
-            CriterionReview(
-                c.criterion_id, {d: ReviewStatus.PASS for d in CriterionDimension}
-            )
-            for c in dummy_intent.acceptance_criteria
-        ),
-        global_reviews={d: ReviewStatus.PASS for d in GlobalDimension},
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
     )
 
 
 @pytest.fixture
 def dummy_lineage(dummy_intent: TaskIntent) -> TaskLineage:
-    # A valid lineage for dummy_intent
-    # Let's create an EVIDENCE node for AC1 directly and an EVIDENCE node for a TASK implementing AC2
-    # Plus an EVIDENCE node for GATE1 - wait GATE1 is not in lineage, it's evaluated via bundle directly
     payload = {
         "schema_version": 1,
         "nodes": [
@@ -169,88 +160,42 @@ def dummy_lineage(dummy_intent: TaskIntent) -> TaskLineage:
 def dummy_bundle(
     dummy_intent: TaskIntent, dummy_lineage: TaskLineage
 ) -> EvidenceBundle:
-    obs1_payload = {
-        "target_kind": "LINEAGE_EVIDENCE",
-        "target_id": "EV1",
-        "outcome": "PASS",
-        "producer_id": "pytest",
-        "artifact_ref": "log.txt",
-        "artifact_digest": DUMMY_DIGEST,
-    }
-    obs1_id = _compute_observation_id(obs1_payload)
-    obs1 = EvidenceObservation(
-        obs1_id,
-        TargetKind.LINEAGE_EVIDENCE,
-        "EV1",
-        ObservationOutcome.PASS,
-        "pytest",
-        "log.txt",
-        DUMMY_DIGEST,
+    from ai_engineering.convergence import (
+        create_evidence_bundle,
+        create_evidence_observation,
     )
-
-    obs2_payload = {
-        "target_kind": "LINEAGE_EVIDENCE",
-        "target_id": "EV2",
-        "outcome": "PASS",
-        "producer_id": "pytest",
-        "artifact_ref": "log2.txt",
-        "artifact_digest": DUMMY_DIGEST,
-    }
-    obs2_id = _compute_observation_id(obs2_payload)
-    obs2 = EvidenceObservation(
-        obs2_id,
-        TargetKind.LINEAGE_EVIDENCE,
-        "EV2",
-        ObservationOutcome.PASS,
-        "pytest",
-        "log2.txt",
-        DUMMY_DIGEST,
-    )
-
-    obs3_payload = {
-        "target_kind": "REQUIRED_GATE",
-        "target_id": "GATE1",
-        "outcome": "PASS",
-        "producer_id": "pytest",
-        "artifact_ref": "log3.txt",
-        "artifact_digest": DUMMY_DIGEST,
-    }
-    obs3_id = _compute_observation_id(obs3_payload)
-    obs3 = EvidenceObservation(
-        obs3_id,
-        TargetKind.REQUIRED_GATE,
-        "GATE1",
-        ObservationOutcome.PASS,
-        "pytest",
-        "log3.txt",
-        DUMMY_DIGEST,
-    )
-
-    # We need analysis_id from actual analyze() so it matches
     from ai_engineering.task_analysis import analyze
 
+    obs1 = create_evidence_observation(
+        target_kind=TargetKind.LINEAGE_EVIDENCE,
+        target_id="EV1",
+        outcome=ObservationOutcome.PASS,
+        producer_id="pytest",
+        artifact_ref="log.txt",
+        artifact_digest=DUMMY_DIGEST,
+    )
+    obs2 = create_evidence_observation(
+        target_kind=TargetKind.LINEAGE_EVIDENCE,
+        target_id="EV2",
+        outcome=ObservationOutcome.PASS,
+        producer_id="pytest",
+        artifact_ref="log2.txt",
+        artifact_digest=DUMMY_DIGEST,
+    )
+    obs3 = create_evidence_observation(
+        target_kind=TargetKind.REQUIRED_GATE,
+        target_id="GATE1",
+        outcome=ObservationOutcome.PASS,
+        producer_id="pytest",
+        artifact_ref="log3.txt",
+        artifact_digest=DUMMY_DIGEST,
+    )
+
     analysis = analyze(dummy_intent, dummy_lineage, expected_base_sha=DUMMY_SHA)
-    analysis_id = analysis.analysis_id
-
-    bundle_payload = {
-        "task_id": dummy_intent.task_id,
-        "intent_digest": intent_digest(dummy_intent),
-        "analysis_id": analysis_id,
-        "subject_sha": DUMMY_SHA,
-        "observations": [
-            {"observation_id": obs1_id},
-            {"observation_id": obs2_id},
-            {"observation_id": obs3_id},
-        ],
-    }
-    bundle_id = _compute_bundle_id(bundle_payload)
-
-    return EvidenceBundle(
-        schema_version=1,
-        bundle_id=bundle_id,
+    return create_evidence_bundle(
         task_id=dummy_intent.task_id,
         intent_digest=intent_digest(dummy_intent),
-        analysis_id=analysis_id,
+        analysis_id=analysis.analysis_id,
         subject_sha=DUMMY_SHA,
         observations=(obs1, obs2, obs3),
     )
@@ -1081,3 +1026,128 @@ def test_direct_api_valid_wrong_subject_sha_context(
         ConvergenceBlockingReason.EVIDENCE_SUBJECT_SHA_MISMATCH
         in report.blocking_reasons
     )
+
+
+def test_cli_converge_task_subprocess(
+    tmp_path,
+    dummy_intent,
+    dummy_clarification,
+    dummy_quality_review,
+    dummy_lineage,
+    dummy_bundle,
+):
+    import subprocess
+    import sys
+    from ai_engineering.task_intent import serialize_intent, serialize_lineage
+    from ai_engineering.requirements_gate import (
+        serialize_clarification,
+        serialize_review,
+    )
+    from ai_engineering.convergence import serialize_evidence_bundle
+
+    repo_root = Path(__file__).resolve().parents[2]
+
+    intent_f = tmp_path / "intent.json"
+    intent_f.write_text(serialize_intent(dummy_intent), encoding="utf-8")
+
+    clar_f = tmp_path / "clar.json"
+    clar_f.write_text(serialize_clarification(dummy_clarification), encoding="utf-8")
+
+    rev_f = tmp_path / "rev.json"
+    rev_f.write_text(serialize_review(dummy_quality_review), encoding="utf-8")
+
+    lineage_f = tmp_path / "lineage.json"
+    lineage_f.write_text(serialize_lineage(dummy_lineage), encoding="utf-8")
+
+    evidence_f = tmp_path / "evidence.json"
+    evidence_f.write_text(
+        json.dumps(serialize_evidence_bundle(dummy_bundle)), encoding="utf-8"
+    )
+
+    out_f = tmp_path / "report.json"
+
+    # 1. Valid inputs -> exit 0
+    res = subprocess.run(
+        [
+            sys.executable,
+            "scripts/converge_task.py",
+            "--intent",
+            str(intent_f),
+            "--clarification",
+            str(clar_f),
+            "--review",
+            str(rev_f),
+            "--lineage",
+            str(lineage_f),
+            "--evidence",
+            str(evidence_f),
+            "--expected-base-sha",
+            DUMMY_SHA,
+            "--subject-sha",
+            DUMMY_SHA,
+            "--output",
+            str(out_f),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+    )
+    assert res.returncode == 0
+    assert out_f.exists()
+
+    # 2. Output alias protection -> exit 2
+    res2 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/converge_task.py",
+            "--intent",
+            str(intent_f),
+            "--clarification",
+            str(clar_f),
+            "--review",
+            str(rev_f),
+            "--lineage",
+            str(lineage_f),
+            "--evidence",
+            str(evidence_f),
+            "--expected-base-sha",
+            DUMMY_SHA,
+            "--subject-sha",
+            DUMMY_SHA,
+            "--output",
+            str(intent_f),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+    )
+    assert res2.returncode == 2
+
+    # 3. Base SHA mismatch -> exit 1
+    res3 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/converge_task.py",
+            "--intent",
+            str(intent_f),
+            "--clarification",
+            str(clar_f),
+            "--review",
+            str(rev_f),
+            "--lineage",
+            str(lineage_f),
+            "--evidence",
+            str(evidence_f),
+            "--expected-base-sha",
+            "9" * 40,
+            "--subject-sha",
+            DUMMY_SHA,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+    )
+    assert res3.returncode == 1

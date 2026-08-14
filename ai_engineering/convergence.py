@@ -276,12 +276,8 @@ def _compute_bundle_id(payload: dict[str, Any]) -> str:
     })
 
 
-def deserialize_evidence_bundle(value: Mapping[str, object]) -> EvidenceBundle:
-    raw_version = value.get("schema_version")
-    if raw_version != EVIDENCE_BUNDLE_SCHEMA_VERSION or isinstance(raw_version, bool):
-        _fail("UNKNOWN_EVIDENCE_SCHEMA_VERSION")
-
-    payload = _exact_fields(value, _BUNDLE_FIELDS)
+def _validate_bundle_from_mapping(payload: Mapping[str, object]) -> EvidenceBundle:
+    """Single canonical validation path for both dataclass and mapping inputs."""
     task_id = _identifier(payload["task_id"])
     intent_dgst = _digest(payload["intent_digest"])
     analysis_id = _digest(payload["analysis_id"])
@@ -351,6 +347,74 @@ def deserialize_evidence_bundle(value: Mapping[str, object]) -> EvidenceBundle:
         subject_sha=subject_sha,
         observations=tuple(observations),
     )
+
+
+def validate_evidence_bundle(
+    value: "EvidenceBundle | Mapping[str, object]",
+) -> "EvidenceBundle":
+    """Canonical public validator for EvidenceBundle.
+
+    Accepts either a directly constructed EvidenceBundle dataclass or a
+    Mapping (e.g., parsed JSON).  In both cases the same integrity checks
+    are applied: every observation_id is recomputed from its semantic
+    fields and the bundle_id is recomputed from the validated observations.
+
+    Raises ConvergenceError for any integrity violation so that the
+    direct-dataclass construction path cannot bypass tamper detection.
+
+    Note: this validator checks internal self-consistency only.  A bundle
+    that is self-consistent but bound to the wrong task / intent / analysis
+    / subject SHA will pass this validator and be rejected by
+    evaluate_convergence() as NOT_CONVERGED (context mismatch), not as an
+    integrity error.  External authenticity of artifact_ref /
+    artifact_digest / producer_id is not verified here (M-PR4-001).
+    """
+    if isinstance(value, EvidenceBundle):
+        # Convert the dataclass to a canonical mapping so that a directly
+        # constructed instance goes through exactly the same validation path
+        # as a JSON-deserialized mapping.
+        raw_version = value.schema_version
+        if raw_version != EVIDENCE_BUNDLE_SCHEMA_VERSION:
+            _fail("UNKNOWN_EVIDENCE_SCHEMA_VERSION")
+        payload: Mapping[str, object] = {
+            "task_id": value.task_id,
+            "intent_digest": value.intent_digest,
+            "analysis_id": value.analysis_id,
+            "subject_sha": value.subject_sha,
+            "bundle_id": value.bundle_id,
+            "observations": [
+                {
+                    "observation_id": o.observation_id,
+                    "target_kind": o.target_kind.value
+                    if isinstance(o.target_kind, TargetKind)
+                    else o.target_kind,
+                    "target_id": o.target_id,
+                    "outcome": o.outcome.value
+                    if isinstance(o.outcome, ObservationOutcome)
+                    else o.outcome,
+                    "producer_id": o.producer_id,
+                    "artifact_ref": o.artifact_ref,
+                    "artifact_digest": o.artifact_digest,
+                }
+                for o in value.observations
+            ],
+        }
+    else:
+        if not isinstance(value, Mapping) or any(not isinstance(k, str) for k in value):
+            _fail("REQUIRED_FIELD_MISSING")
+        raw_version = value.get("schema_version")
+        if raw_version != EVIDENCE_BUNDLE_SCHEMA_VERSION or isinstance(
+            raw_version, bool
+        ):
+            _fail("UNKNOWN_EVIDENCE_SCHEMA_VERSION")
+        payload = _exact_fields(value, _BUNDLE_FIELDS)
+
+    return _validate_bundle_from_mapping(payload)
+
+
+def deserialize_evidence_bundle(value: Mapping[str, object]) -> EvidenceBundle:
+    """Deserialize and validate an EvidenceBundle from a JSON-compatible mapping."""
+    return validate_evidence_bundle(value)
 
 
 def serialize_evidence_bundle(bundle: EvidenceBundle) -> dict[str, Any]:
@@ -614,9 +678,18 @@ def evaluate_convergence(
     expected_base_sha: str,
     subject_sha: str,
 ) -> ConvergenceReport:
-    """Evaluates evidence-bound convergence of a task."""
+    """Evaluates evidence-bound convergence of a task.
+
+    The bundle argument is validated at the convergence boundary regardless
+    of how it was constructed.  Directly constructed EvidenceBundle dataclasses
+    are subject to exactly the same observation_id and bundle_id integrity
+    checks as JSON-deserialized bundles (H-PR4-001).
+    """
     validate_intent(intent)
     validate_lineage(lineage)
+    # Validate and re-bind the bundle through the canonical validator.
+    # This enforces integrity for directly constructed dataclasses (H-PR4-001).
+    bundle = validate_evidence_bundle(bundle)
     if _sha(expected_base_sha) != expected_base_sha:
         _fail("INVALID_SUBJECT_SHA")
     if _sha(subject_sha) != subject_sha:

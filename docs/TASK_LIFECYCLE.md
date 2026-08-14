@@ -117,6 +117,46 @@ controls. Failure-to-Eval candidates and procedure-maturity receipts are also
 offline evidence only: they require review, eval, PR, CI and merge before a
 separately authorized repository change can promote anything.
 
+## Intent Control Plane path
+
+For tasks where `INTENT_CONTROL_PLANE=REQUIRED` or `OPTIONAL`, the Intent Control Plane integrates deterministic offline intent bounding and evidence convergence:
+
+```text
+IDEA
+→ TASK TEMPLATE
+→ TaskIntent
+→ prepare_task --intent
+→ Clarify
+→ Requirements Quality Gate
+→ Design / TaskLineage
+→ Cross-Artifact Analyze
+→ Implement
+→ EvidenceBundle
+→ Evidence-Bound Convergence
+→ Effective Policy / Source Attribution
+→ AI Review / Agent Release Gate
+→ Merge / Release boundary
+→ Knowledge Update
+```
+
+### Classification guidance
+
+- `INTENT_CONTROL_PLANE=REQUIRED`: Architecture, bounded multi-step implementation, security-sensitive work, production-sensitive engineering preparation, migrations / rollback design, tasks with multiple acceptance criteria or required release gates.
+- `INTENT_CONTROL_PLANE=OPTIONAL`: Small precise implementation where lineage adds useful traceability.
+- `INTENT_CONTROL_PLANE=NOT_APPLICABLE`: Trivial passive documentation or typo-only changes with no behavioral contract.
+
+### Authority semantics
+
+Deterministic evidence and validation gates must never be confused with authority:
+
+- `TaskIntent != production authority` (structured intent bounds execution; it does not grant deployment or runtime mutation rights)
+- `Requirements Gate != implementation proof` (passing requirements gate proves intent readiness, not code correctness)
+- `Cross-Artifact Analysis != implementation proof` (structural lineage consistency does not prove tests pass)
+- `Convergence != production authority` (evidence convergence proves engineering criteria and gates passed; it does not authorize production)
+- `Effective Policy != authorization` (resolving policy sources and attribution provides explainability without expanding authority)
+- `Agent Release Gate != deployment authority` (merge qualification does not authorize production deployment)
+- `Production readiness remains separately required when applicable.`
+
 ## Completion evidence
 
 A task is complete only when its final report distinguishes completed work from

@@ -25,7 +25,7 @@ Git.
   - **CPF-005 (Convergence CLI deserialization)**: Enabled `scripts/converge_task.py` to accept raw str/bytes and execute deterministically in subprocesses (`CPF_005=CLOSED`).
   - **CPF-006 (Lineage contract clarification)**: Documented Lineage v1 graph contract where TaskIntent owns criteria directly and edge relations connect `TASK -> IMPLEMENTS -> CRITERION` and `EVIDENCE -> VERIFIES -> CRITERION` (`CPF_006=CLOSED`).
   - **CPF-007 (Clarification integrity hardening)**: Hardened `ClarificationReport` validation with `compute_clarification_id()` and structural question-count/ready-flag consistency (`CPF_007=CLOSED`).
-  - **CLI Runtime Sys.Path Robustness**: Guaranteed repository root on `sys.path` across all CLI scripts (`prepare_task.py`, `clarify_task.py`, `requirements_gate.py`, `analyze_task.py`, `converge_task.py`, `explain_effective_policy.py`).
+  - **CPF-008 (CLI direct-script repository-root import portability)**: Guaranteed repository root on `sys.path` across all CLI scripts (`prepare_task.py`, `clarify_task.py`, `requirements_gate.py`, `analyze_task.py`, `converge_task.py`, `explain_effective_policy.py`) for deterministic cross-platform direct execution (`CPF_008=CLOSED`).
   - **Full E2E Integration Suite**: Added full offline subprocess integration test suite in `tests/ai_engineering/test_intent_control_plane_integration.py`.
 - **Dogfood Revision-2 Requalification (`HEALBITE-PROD-R02A-ICP-001`)**:
   - Full offline pipeline executed against `60b403723dcdc49261f3ff99ae580d64e747cb00` with parent intent `ad3de22f18e21846c248768ecb35cccaf2570747126324a954ab5882ca29b5a8`.

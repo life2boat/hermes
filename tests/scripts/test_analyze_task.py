@@ -3,10 +3,11 @@
 Covers:
 - Exit code 0 (no errors)
 - Exit code 1 (errors found)
-- Exit code 2 (invalid input, missing file)
+- Exit code 2 (invalid input, missing file, output aliasing)
 - --output flag
 - --expected-sha flag (SOURCE_IDENTITY_MISMATCH)
-- Read-only: input files not mutated
+- Output aliasing protection: --output == --intent or --lineage → FAIL_CLOSED
+- Read-only: input files not mutated after analysis
 """
 
 from __future__ import annotations
@@ -56,12 +57,16 @@ def _write_lineage(path: Path, nodes=None, edges=None) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Exit codes
+# ---------------------------------------------------------------------------
+
+
 class TestCliExitCodes:
     def test_exit_0_no_errors(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
-        result = main(["--intent", str(intent), "--lineage", str(lineage)])
-        assert result == 0
+        assert main(["--intent", str(intent), "--lineage", str(lineage)]) == 0
 
     def test_exit_1_error_findings(self, tmp_path: Path) -> None:
         intent = _write_intent(
@@ -69,8 +74,7 @@ class TestCliExitCodes:
             acceptance_criteria=[{"criterion_id": "AC-1", "statement": "Must pass"}],
         )
         lineage = _write_lineage(tmp_path / "lineage.json")
-        result = main(["--intent", str(intent), "--lineage", str(lineage)])
-        assert result == 1
+        assert main(["--intent", str(intent), "--lineage", str(lineage)]) == 1
 
     def test_exit_2_invalid_intent(self, tmp_path: Path, capsys) -> None:
         intent = tmp_path / "intent.json"
@@ -78,16 +82,14 @@ class TestCliExitCodes:
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main(["--intent", str(intent), "--lineage", str(lineage)])
         assert result == 2
-        captured = capsys.readouterr()
-        assert "analyze_task:" in captured.err
+        assert "analyze_task:" in capsys.readouterr().err
 
     def test_exit_2_missing_file(self, tmp_path: Path, capsys) -> None:
         intent = tmp_path / "nonexistent.json"
         lineage = _write_lineage(tmp_path / "lineage.json")
         result = main(["--intent", str(intent), "--lineage", str(lineage)])
         assert result == 2
-        captured = capsys.readouterr()
-        assert "analyze_task:" in captured.err
+        assert "analyze_task:" in capsys.readouterr().err
 
     def test_exit_2_invalid_expected_sha(self, tmp_path: Path, capsys) -> None:
         intent = _write_intent(tmp_path / "intent.json")
@@ -98,8 +100,71 @@ class TestCliExitCodes:
             "--expected-sha", "not-a-sha",
         ])
         assert result == 2
-        captured = capsys.readouterr()
-        assert "EXPECTED_SHA_INVALID" in captured.err
+        assert "EXPECTED_SHA_INVALID" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Output aliasing protection — OUTPUT_INPUT_ALIASING_FAIL_CLOSED=PASS
+# ---------------------------------------------------------------------------
+
+
+class TestOutputAliasingProtection:
+    def test_output_equals_intent_fail(self, tmp_path: Path, capsys) -> None:
+        """--output == --intent → FAIL_CLOSED (exit 2)."""
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--output", str(intent),
+        ])
+        assert result == 2
+        assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
+
+    def test_output_equals_lineage_fail(self, tmp_path: Path, capsys) -> None:
+        """--output == --lineage → FAIL_CLOSED (exit 2)."""
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--output", str(lineage),
+        ])
+        assert result == 2
+        assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
+
+    def test_relative_alias_to_intent_fail(self, tmp_path: Path, capsys) -> None:
+        """Relative path alias to intent path → FAIL_CLOSED."""
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        # Construct a relative alias via ../subdir/../intent.json pattern
+        # Path.resolve() canonicalises both sides so alias is detected
+        alias = tmp_path / "sub" / ".." / "intent.json"
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--output", str(alias),
+        ])
+        assert result == 2
+        assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
+
+    def test_independent_output_path_pass(self, tmp_path: Path) -> None:
+        """Independent output path → analysis runs normally."""
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        output = tmp_path / "report.json"
+        result = main([
+            "--intent", str(intent),
+            "--lineage", str(lineage),
+            "--output", str(output),
+        ])
+        assert result == 0
+        assert output.exists()
+
+
+# ---------------------------------------------------------------------------
+# --expected-sha
+# ---------------------------------------------------------------------------
 
 
 class TestCliExpectedSha:
@@ -107,46 +172,43 @@ class TestCliExpectedSha:
         sha = "b" * 40
         intent = _write_intent(tmp_path / "intent.json", source_base_sha=sha)
         lineage = _write_lineage(tmp_path / "lineage.json")
-        result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--expected-sha", sha,
-        ])
-        assert result == 0
+        assert main([
+            "--intent", str(intent), "--lineage", str(lineage), "--expected-sha", sha,
+        ]) == 0
 
     def test_mismatched_expected_sha_exit_1(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
         lineage = _write_lineage(tmp_path / "lineage.json")
-        result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--expected-sha", "c" * 40,
-        ])
-        assert result == 1
+        assert main([
+            "--intent", str(intent), "--lineage", str(lineage), "--expected-sha", "c" * 40,
+        ]) == 1
 
     def test_no_expected_sha_no_mismatch(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json", source_base_sha="a" * 40)
         lineage = _write_lineage(tmp_path / "lineage.json")
-        # No --expected-sha: SOURCE_IDENTITY_MISMATCH not checked
-        result = main(["--intent", str(intent), "--lineage", str(lineage)])
-        assert result == 0
+        assert main(["--intent", str(intent), "--lineage", str(lineage)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# --output
+# ---------------------------------------------------------------------------
 
 
 class TestCliOutput:
-    def test_output_flag_writes_json(self, tmp_path: Path) -> None:
+    def test_output_flag_writes_json_with_lineage_digest(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
         report_path = tmp_path / "report.json"
         result = main([
-            "--intent", str(intent),
-            "--lineage", str(lineage),
-            "--output", str(report_path),
+            "--intent", str(intent), "--lineage", str(lineage), "--output", str(report_path),
         ])
         assert result == 0
         assert report_path.exists()
         parsed = json.loads(report_path.read_text(encoding="utf-8"))
         assert parsed["schema_version"] == 1
         assert "analysis_id" in parsed
+        assert "lineage_digest" in parsed
+        assert len(parsed["lineage_digest"]) == 64
 
     def test_output_is_deterministic(self, tmp_path: Path) -> None:
         intent = _write_intent(
@@ -154,21 +216,23 @@ class TestCliOutput:
             acceptance_criteria=[{"criterion_id": "AC-1", "statement": "Must pass"}],
         )
         lineage = _write_lineage(tmp_path / "lineage.json")
-        out1 = tmp_path / "report1.json"
-        out2 = tmp_path / "report2.json"
+        out1, out2 = tmp_path / "r1.json", tmp_path / "r2.json"
         main(["--intent", str(intent), "--lineage", str(lineage), "--output", str(out1)])
         main(["--intent", str(intent), "--lineage", str(lineage), "--output", str(out2)])
         assert out1.read_bytes() == out2.read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Read-only guarantee
+# ---------------------------------------------------------------------------
 
 
 class TestCliReadOnly:
     def test_input_files_not_mutated(self, tmp_path: Path) -> None:
         intent = _write_intent(tmp_path / "intent.json")
         lineage = _write_lineage(tmp_path / "lineage.json")
-        intent_hash_before = hashlib.sha256(intent.read_bytes()).hexdigest()
-        lineage_hash_before = hashlib.sha256(lineage.read_bytes()).hexdigest()
+        h_intent = hashlib.sha256(intent.read_bytes()).hexdigest()
+        h_lineage = hashlib.sha256(lineage.read_bytes()).hexdigest()
         main(["--intent", str(intent), "--lineage", str(lineage)])
-        intent_hash_after = hashlib.sha256(intent.read_bytes()).hexdigest()
-        lineage_hash_after = hashlib.sha256(lineage.read_bytes()).hexdigest()
-        assert intent_hash_before == intent_hash_after
-        assert lineage_hash_before == lineage_hash_after
+        assert hashlib.sha256(intent.read_bytes()).hexdigest() == h_intent
+        assert hashlib.sha256(lineage.read_bytes()).hexdigest() == h_lineage

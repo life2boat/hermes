@@ -17,10 +17,15 @@ Properties:
     Offline    – zero provider calls, zero network calls.
     Deterministic – same inputs produce byte-equivalent JSON output.
 
+Output aliasing protection:
+    --output must not resolve to the same path as --intent or --lineage.
+    Aliasing is detected via Path.resolve() before any write occurs.
+    Violation returns exit code 2 with SAFE_WRITE error.
+
 Deferred rules (not implemented in schema v1):
-    MUTATION_OUTSIDE_ALLOWED_SCOPE   – missing canonical path reference in lineage schema
-    MUTATION_IN_FORBIDDEN_SCOPE      – missing canonical path reference in lineage schema
-    REQUIRED_GATE_COVERAGE           – missing canonical gate-to-lineage mapping
+    MUTATION_OUTSIDE_ALLOWED_SCOPE   DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+    MUTATION_IN_FORBIDDEN_SCOPE      DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+    REQUIRED_GATE_COVERAGE           DEFERRED_DUE_TO_MISSING_CANONICAL_MAPPING
 """
 
 from __future__ import annotations
@@ -65,6 +70,14 @@ def _safe_read(path: Path) -> bytes:
     return raw
 
 
+def _resolve_path(p: Path) -> Path:
+    """Resolve a path for alias comparison (absolute, no symlinks)."""
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Deterministic read-only Cross-Artifact Analyzer.",
@@ -81,10 +94,12 @@ and never makes provider or network calls.
 SOURCE_IDENTITY_MISMATCH is only checked when --expected-sha is supplied.
 Without an independent anchor, source-SHA verification cannot be deterministic.
 
+--output must not alias --intent or --lineage (fail-closed, exit 2).
+
 Deferred rules (not implemented in schema v1):
-  MUTATION_OUTSIDE_ALLOWED_SCOPE   – no canonical path reference in lineage schema
-  MUTATION_IN_FORBIDDEN_SCOPE      – no canonical path reference in lineage schema
-  REQUIRED_GATE_COVERAGE           – no canonical gate-to-lineage mapping
+  MUTATION_OUTSIDE_ALLOWED_SCOPE   DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  MUTATION_IN_FORBIDDEN_SCOPE      DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  REQUIRED_GATE_COVERAGE           DEFERRED_DUE_TO_MISSING_CANONICAL_MAPPING
 """,
     )
     p.add_argument("--intent", type=Path, required=True, help="Path to TaskIntent JSON file.")
@@ -103,7 +118,10 @@ Deferred rules (not implemented in schema v1):
     p.add_argument(
         "--output",
         type=Path,
-        help="Write canonical JSON report to this path. If omitted, prints to stdout.",
+        help=(
+            "Write canonical JSON report to this path. Must not resolve to "
+            "the same file as --intent or --lineage. If omitted, prints to stdout."
+        ),
     )
     p.add_argument(
         "--human",
@@ -116,16 +134,35 @@ Deferred rules (not implemented in schema v1):
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
-    # Validate --expected-sha format before reading files.
+    # Validate --expected-sha format.
     expected_sha: str | None = None
     if args.expected_sha is not None:
         if _SHA_RE.fullmatch(args.expected_sha) is None:
             print(
-                f"analyze_task: EXPECTED_SHA_INVALID: must be 40 lowercase hex chars",
+                "analyze_task: EXPECTED_SHA_INVALID: must be 40 lowercase hex chars",
                 file=sys.stderr,
             )
             return 2
         expected_sha = args.expected_sha
+
+    # Output aliasing protection — resolve before reading input.
+    if args.output is not None:
+        output_resolved = _resolve_path(args.output)
+        intent_resolved = _resolve_path(args.intent)
+        lineage_resolved = _resolve_path(args.lineage)
+
+        if output_resolved == intent_resolved:
+            print(
+                "analyze_task: SAFE_WRITE_VIOLATION: --output resolves to --intent path",
+                file=sys.stderr,
+            )
+            return 2
+        if output_resolved == lineage_resolved:
+            print(
+                "analyze_task: SAFE_WRITE_VIOLATION: --output resolves to --lineage path",
+                file=sys.stderr,
+            )
+            return 2
 
     # Load and validate inputs.
     try:
@@ -148,7 +185,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Run analysis (read-only, offline, deterministic).
-    report = analyze(intent, lineage, expected_base_sha=expected_sha)
+    try:
+        report = analyze(intent, lineage, expected_base_sha=expected_sha)
+    except AnalysisInputError as exc:
+        print(f"analyze_task: {exc.code}", file=sys.stderr)
+        return 2
 
     # Output.
     canonical_json = serialize_report(report)
@@ -167,10 +208,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.human or args.output is None:
         d = report_to_dict(report)
-        print(f"analysis_id : {report.analysis_id}")
-        print(f"intent      : {report.intent_task_id}")
-        print(f"base_sha    : {report.source_base_sha}")
-        print(f"findings    : {d['summary']['total']} total  "
+        print(f"analysis_id  : {report.analysis_id}")
+        print(f"lineage_dgst : {report.lineage_digest}")
+        print(f"intent       : {report.intent_task_id}")
+        print(f"base_sha     : {report.source_base_sha}")
+        print(f"findings     : {d['summary']['total']} total  "
               f"({d['summary']['errors']} errors, "
               f"{d['summary']['warnings']} warnings, "
               f"{d['summary']['infos']} infos)")

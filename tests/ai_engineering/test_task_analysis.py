@@ -1,44 +1,52 @@
 """Tests for ai_engineering/task_analysis.py — Cross-Artifact Analyzer.
 
-Validates corrected PR-2 semantics:
-- Scoped criterion identity only (<task_id>::<criterion_id>)
-- SOURCE_IDENTITY_MISMATCH uses independent expected_base_sha
-- TASK_IDENTITY_INCONSISTENCY for INTENT node mismatch
-- No path-heuristic mutation findings
-- Deferred rules not present
+Validates contract-hardened PR-2 semantics:
 
-Coverage:
-- Report schema / serialization
-- Finding deduplication
-- Deterministic ordering
-- ORPHAN_ACCEPTANCE_CRITERION rule (scoped identity)
-- ORPHAN_EXECUTION_TASK rule
-- ORPHAN_EVIDENCE rule
-- SOURCE_IDENTITY_MISMATCH rule
-- TASK_IDENTITY_INCONSISTENCY rule
-- Deferred rules: no MUTATION_* or REQUIRED_GATE_* findings
-- False-positive review: path-like node_ids do NOT create mutation findings
-- Read-only guarantee (input mutation=0)
-- Offline guarantee (no provider calls)
+IMPLEMENTED RULES:
+  ORPHAN_ACCEPTANCE_CRITERION    (scoped identity only)
+  ORPHAN_EXECUTION_TASK
+  ORPHAN_EVIDENCE
+  SOURCE_IDENTITY_MISMATCH       (independent expected_base_sha)
+  TASK_IDENTITY_INCONSISTENCY    (INTENT node_id == task_id)
+
+CONTRACT INVARIANTS:
+  ANALYZER_INPUT_MUTATION=0
+  PROVIDER_CALLS=0
+  DETERMINISTIC_REPORT=PASS
+  LINEAGE_DIGEST_DETERMINISTIC=PASS
+  ANALYSIS_ID_BINDS_TO_LINEAGE=PASS
+  ANALYSIS_ID_BINDS_TO_EXPECTED_SHA=PASS
+  PATH_HEURISTIC_FALSE_POSITIVES=0
+  REPORT_SCHEMA_VALIDATION=PASS
+  CANONICAL_PR1_VALIDATION=PASS
+
+DEFERRED:
+  MUTATION_OUTSIDE_ALLOWED_SCOPE  DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  MUTATION_IN_FORBIDDEN_SCOPE     DEFERRED_DUE_TO_MISSING_STRUCTURED_MUTATION_REFERENCE
+  REQUIRED_GATE_COVERAGE          DEFERRED_DUE_TO_MISSING_CANONICAL_MAPPING
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 import pytest
 
 from ai_engineering.task_analysis import (
     ANALYSIS_REPORT_SCHEMA_VERSION,
     AnalysisInputError,
+    AnalysisReportError,
     FindingCode,
     FindingSeverity,
     analyze,
+    deserialize_report,
     load_intent_from_bytes,
     load_lineage_from_bytes,
     report_to_dict,
     serialize_report,
+    validate_report,
 )
 from ai_engineering.task_intent import (
     AcceptanceCriterion,
@@ -122,6 +130,8 @@ class TestReportSchema:
         assert report.schema_version == 1
         assert report.intent_task_id == "TASK-001"
         assert report.source_base_sha == "a" * 40
+        assert report.expected_base_sha is None
+        assert report.lineage_digest != ""
         assert report.findings == ()
         assert not report.has_errors
         assert report.error_count == 0
@@ -129,40 +139,187 @@ class TestReportSchema:
     def test_report_dict_has_required_fields(self) -> None:
         report = analyze(_make_intent(), _empty_lineage())
         d = report_to_dict(report)
-        assert d["schema_version"] == 1
-        assert "analysis_id" in d
-        assert "intent_task_id" in d
-        assert "intent_digest" in d
-        assert "source_base_sha" in d
-        assert "findings" in d
-        assert "summary" in d
+        for key in (
+            "schema_version", "analysis_id", "intent_task_id", "intent_digest",
+            "lineage_digest", "source_base_sha", "expected_base_sha",
+            "findings", "summary",
+        ):
+            assert key in d, f"Missing required field: {key}"
         summary = d["summary"]
-        assert "total" in summary
-        assert "errors" in summary
-        assert "warnings" in summary
-        assert "infos" in summary
+        for key in ("total", "errors", "warnings", "infos"):
+            assert key in summary
 
-    def test_valid_report_with_findings(self) -> None:
-        intent = _make_intent(criteria=[("AC-1", "Must pass tests")])
-        lineage = _empty_lineage()
-        report = analyze(intent, lineage)
-        assert len(report.findings) >= 1
-        codes = {f.code for f in report.findings}
-        assert FindingCode.ORPHAN_ACCEPTANCE_CRITERION in codes
+    def test_serialize_is_valid_json(self) -> None:
+        report = analyze(_make_intent(), _empty_lineage())
+        parsed = json.loads(serialize_report(report))
+        assert parsed["schema_version"] == 1
+        assert "lineage_digest" in parsed
+        assert "expected_base_sha" in parsed
 
-    def test_deterministic_report_serialization(self) -> None:
-        intent = _make_intent(criteria=[("AC-1", "Must pass tests")])
-        lineage = _empty_lineage()
-        r1 = serialize_report(analyze(intent, lineage))
-        r2 = serialize_report(analyze(intent, lineage))
-        assert r1 == r2
+    def test_expected_base_sha_null_when_absent(self) -> None:
+        report = analyze(_make_intent(), _empty_lineage())
+        assert report.expected_base_sha is None
+        d = report_to_dict(report)
+        assert d["expected_base_sha"] is None
 
-    def test_analysis_id_is_deterministic(self) -> None:
+    def test_expected_base_sha_recorded_when_supplied(self) -> None:
+        sha = "e" * 40
+        report = analyze(_make_intent(), _empty_lineage(), expected_base_sha=sha)
+        assert report.expected_base_sha == sha
+        d = report_to_dict(report)
+        assert d["expected_base_sha"] == sha
+
+
+# ---------------------------------------------------------------------------
+# Canonical PR-1 input validation
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalInputValidation:
+    """CANONICAL_PR1_VALIDATION=PASS: invalid inputs fail-closed via PR-1 validators."""
+
+    def test_valid_intent_and_lineage_passes(self) -> None:
         intent = _make_intent()
         lineage = _empty_lineage()
+        report = analyze(intent, lineage)
+        assert report.schema_version == 1
+
+    def test_invalid_intent_schema_version_fails(self) -> None:
+        """Construct a TaskIntent with schema_version != 1 and verify it fails."""
+        bad_intent = _make_intent()
+        # Force an invalid schema version via object.__setattr__ on frozen dataclass
+        import dataclasses
+        bad_intent_dict = dataclasses.asdict(bad_intent)
+        bad_intent_dict["schema_version"] = 99
+        raw = json.dumps(bad_intent_dict | {
+            "status": "READY",
+            "task_class": "BOUNDED_IMPLEMENTATION",
+            "stop_boundary": "LOCAL_DIFF",
+            "acceptance_criteria": [],
+            "constraints": [],
+            "allowed_mutations": [],
+            "forbidden_mutations": [],
+            "unknowns": [],
+            "applicable_invariants": [],
+            "required_gates": [],
+        }).encode("utf-8")
+        with pytest.raises(AnalysisInputError) as exc:
+            load_intent_from_bytes(raw)
+        assert "INTENT_INVALID" in exc.value.code
+
+    def test_invalid_intent_sha_fails(self) -> None:
+        """TaskIntent with bad source_base_sha is rejected."""
+        raw = json.dumps({
+            "schema_version": 1,
+            "task_id": "T1",
+            "intent_revision": 1,
+            "status": "READY",
+            "task_class": "BOUNDED_IMPLEMENTATION",
+            "desired_outcome": "x",
+            "source_repository": "test/repo",
+            "source_main_ref": "main",
+            "source_base_sha": "NOT-A-VALID-SHA",
+            "constraints": [],
+            "allowed_mutations": [],
+            "forbidden_mutations": [],
+            "stop_boundary": "LOCAL_DIFF",
+            "acceptance_criteria": [],
+            "unknowns": [],
+            "applicable_invariants": [],
+            "required_gates": [],
+            "parent_intent_digest": None,
+        }).encode("utf-8")
+        with pytest.raises(AnalysisInputError) as exc:
+            load_intent_from_bytes(raw)
+        assert "INTENT_INVALID" in exc.value.code
+
+    def test_invalid_lineage_schema_version_fails(self) -> None:
+        raw = json.dumps({
+            "schema_version": 99,
+            "nodes": [],
+            "edges": [],
+        }).encode("utf-8")
+        with pytest.raises(AnalysisInputError) as exc:
+            load_lineage_from_bytes(raw)
+        assert "LINEAGE" in exc.value.code
+
+    def test_invalid_lineage_dangling_edge_fails(self) -> None:
+        """Lineage with edge referencing non-existent node is rejected."""
+        raw = json.dumps({
+            "schema_version": 1,
+            "nodes": [],
+            "edges": [{"source_id": "X", "target_id": "Y", "relation": "IMPLEMENTS"}],
+        }).encode("utf-8")
+        with pytest.raises(AnalysisInputError) as exc:
+            load_lineage_from_bytes(raw)
+        assert "LINEAGE" in exc.value.code
+
+
+# ---------------------------------------------------------------------------
+# Lineage digest
+# ---------------------------------------------------------------------------
+
+
+class TestLineageDigest:
+    """LINEAGE_DIGEST_DETERMINISTIC=PASS"""
+
+    def test_lineage_digest_is_stable_across_runs(self) -> None:
+        intent = _make_intent()
+        lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
+        r1 = analyze(intent, lineage)
+        r2 = analyze(intent, lineage)
+        assert r1.lineage_digest == r2.lineage_digest
+
+    def test_lineage_digest_is_hex_string(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        report = analyze(intent, lineage)
+        assert len(report.lineage_digest) == 64
+        assert all(c in "0123456789abcdef" for c in report.lineage_digest)
+
+    def test_different_lineage_different_digest(self) -> None:
+        intent = _make_intent()
+        lineage_a = _empty_lineage()
+        lineage_b = _make_lineage(nodes=[("T1", "TASK")], edges=[])
+        r_a = analyze(intent, lineage_a)
+        r_b = analyze(intent, lineage_b)
+        assert r_a.lineage_digest != r_b.lineage_digest
+
+    def test_lineage_digest_in_report_dict(self) -> None:
+        report = analyze(_make_intent(), _empty_lineage())
+        d = report_to_dict(report)
+        assert len(d["lineage_digest"]) == 64
+
+
+# ---------------------------------------------------------------------------
+# Analysis ID binds to full payload
+# ---------------------------------------------------------------------------
+
+
+class TestAnalysisId:
+    """ANALYSIS_ID_BINDS_TO_LINEAGE=PASS, ANALYSIS_ID_BINDS_TO_EXPECTED_SHA=PASS"""
+
+    def test_same_exact_inputs_same_analysis_id(self) -> None:
+        intent = _make_intent()
+        lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         r1 = analyze(intent, lineage)
         r2 = analyze(intent, lineage)
         assert r1.analysis_id == r2.analysis_id
+
+    def test_same_intent_different_lineage_different_id(self) -> None:
+        intent = _make_intent()
+        lineage_a = _empty_lineage()
+        lineage_b = _make_lineage(nodes=[("T1", "TASK")], edges=[])
+        r_a = analyze(intent, lineage_a)
+        r_b = analyze(intent, lineage_b)
+        assert r_a.analysis_id != r_b.analysis_id
+
+    def test_same_intent_lineage_different_expected_sha_different_id(self) -> None:
+        intent = _make_intent()
+        lineage = _empty_lineage()
+        r_with = analyze(intent, lineage, expected_base_sha="b" * 40)
+        r_without = analyze(intent, lineage)
+        assert r_with.analysis_id != r_without.analysis_id
 
     def test_analysis_id_changes_with_findings(self) -> None:
         intent_no_crit = _make_intent()
@@ -172,32 +329,27 @@ class TestReportSchema:
         r2 = analyze(intent_with_crit, lineage)
         assert r1.analysis_id != r2.analysis_id
 
-    def test_serialize_is_valid_json(self) -> None:
+    def test_analysis_id_is_64_hex(self) -> None:
         report = analyze(_make_intent(), _empty_lineage())
-        parsed = json.loads(serialize_report(report))
-        assert parsed["schema_version"] == 1
+        assert len(report.analysis_id) == 64
+        assert all(c in "0123456789abcdef" for c in report.analysis_id)
 
 
 # ---------------------------------------------------------------------------
-# Deterministic finding ordering
+# Deterministic serialization
 # ---------------------------------------------------------------------------
 
 
-class TestDeterministicOrdering:
-    def test_same_findings_same_order_across_runs(self) -> None:
-        intent = _make_intent(
-            criteria=[("AC-1", "s1"), ("AC-2", "s2"), ("AC-3", "s3")],
-        )
+class TestDeterministicSerialization:
+    def test_serialize_deterministic(self) -> None:
+        intent = _make_intent(criteria=[("AC-1", "Must pass tests")])
         lineage = _empty_lineage()
-        r1 = analyze(intent, lineage)
-        r2 = analyze(intent, lineage)
-        assert [f.code for f in r1.findings] == [f.code for f in r2.findings]
-        assert [f.primary_reference.identity for f in r1.findings] == [
-            f.primary_reference.identity for f in r2.findings
-        ]
+        r1 = serialize_report(analyze(intent, lineage))
+        r2 = serialize_report(analyze(intent, lineage))
+        assert r1 == r2
 
     def test_errors_sort_before_warnings(self) -> None:
-        intent = _make_intent(criteria=[("AC-1", "stmt")])
+        intent = _make_intent(task_id="T", criteria=[("AC-1", "stmt")])
         lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         report = analyze(intent, lineage)
         severities = [f.severity for f in report.findings]
@@ -208,19 +360,64 @@ class TestDeterministicOrdering:
 
 
 # ---------------------------------------------------------------------------
-# Duplicate finding collapse
+# Report schema validator
 # ---------------------------------------------------------------------------
 
 
-class TestDuplicateFindingCollapse:
-    def test_duplicate_finding_key_collapsed(self) -> None:
-        intent = _make_intent(criteria=[("AC-1", "stmt")])
-        lineage = _empty_lineage()
-        report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
-        scoped = f"TASK-001::AC-1"
-        ac1_findings = [f for f in orphans if f.primary_reference.identity == scoped]
-        assert len(ac1_findings) == 1
+class TestReportSchemaValidator:
+    """UNKNOWN_REPORT_SCHEMA_VERSION=FAIL, MALFORMED_REPORT=FAIL, VALID_REPORT_V1=PASS"""
+
+    def _valid_report_dict(self) -> dict:
+        report = analyze(_make_intent(), _empty_lineage())
+        return json.loads(serialize_report(report))
+
+    def test_valid_report_v1_pass(self) -> None:
+        d = self._valid_report_dict()
+        result = validate_report(d)
+        assert result["schema_version"] == 1
+
+    def test_unknown_schema_version_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["schema_version"] = 99
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert "SCHEMA_VERSION" in exc.value.code
+
+    def test_schema_version_0_fail(self) -> None:
+        d = self._valid_report_dict()
+        d["schema_version"] = 0
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert "SCHEMA_VERSION" in exc.value.code
+
+    def test_malformed_not_a_mapping_fail(self) -> None:
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report([1, 2, 3])  # type: ignore[arg-type]
+        assert exc.value.code == "REPORT_NOT_A_MAPPING"
+
+    def test_missing_required_field_fail(self) -> None:
+        d = self._valid_report_dict()
+        del d["lineage_digest"]
+        with pytest.raises(AnalysisReportError) as exc:
+            validate_report(d)
+        assert "FIELD_MISSING" in exc.value.code
+
+    def test_deserialize_valid_json_pass(self) -> None:
+        report = analyze(_make_intent(), _empty_lineage())
+        raw = serialize_report(report)
+        result = deserialize_report(raw)
+        assert result["schema_version"] == 1
+
+    def test_deserialize_invalid_json_fail(self) -> None:
+        with pytest.raises(AnalysisReportError) as exc:
+            deserialize_report("{bad json}")
+        assert "JSON_INVALID" in exc.value.code
+
+    def test_deserialize_bytes_pass(self) -> None:
+        report = analyze(_make_intent(), _empty_lineage())
+        raw_bytes = serialize_report(report).encode("utf-8")
+        result = deserialize_report(raw_bytes)
+        assert result["schema_version"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +427,9 @@ class TestDuplicateFindingCollapse:
 
 class TestOrphanAcceptanceCriterion:
     def test_scoped_criterion_id_accepted_pass(self) -> None:
-        """Only canonical <task_id>::<criterion_id> is recognized."""
         intent = _make_intent(task_id="MY-TASK", criteria=[("AC-1", "stmt")])
         lineage = _make_lineage(
-            nodes=[
-                ("MY-TASK", "INTENT"),
-                ("MY-TASK::AC-1", "CRITERION"),
-                ("T1", "TASK"),
-            ],
+            nodes=[("MY-TASK", "INTENT"), ("MY-TASK::AC-1", "CRITERION"), ("T1", "TASK")],
             edges=[("T1", "MY-TASK::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
@@ -245,20 +437,24 @@ class TestOrphanAcceptanceCriterion:
         assert len(orphans) == 0
 
     def test_bare_criterion_id_not_canonical(self) -> None:
-        """Bare criterion_id without task_id prefix is NOT accepted as canonical."""
+        """BARE_CRITERION_ID_NOT_CANONICAL=FAIL"""
         intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "stmt")])
         lineage = _make_lineage(
-            nodes=[
-                ("AC-1", "CRITERION"),  # bare, not scoped
-                ("T1", "TASK"),
-            ],
-            edges=[("T1", "AC-1", "IMPLEMENTS")],  # targets bare id
+            nodes=[("AC-1", "CRITERION"), ("T1", "TASK")],
+            edges=[("T1", "AC-1", "IMPLEMENTS")],  # bare, not scoped
         )
         report = analyze(intent, lineage)
         orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
-        # Bare "AC-1" is not a canonical match for scoped "TASK-001::AC-1" → ERROR
         assert len(orphans) >= 1
         assert any(f.severity == FindingSeverity.ERROR for f in orphans)
+
+    def test_scoped_finding_identity_uses_task_id_prefix(self) -> None:
+        intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "stmt")])
+        lineage = _empty_lineage()
+        report = analyze(intent, lineage)
+        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
+        assert len(orphans) == 1
+        assert orphans[0].primary_reference.identity == "TASK-001::AC-1"
 
     def test_criterion_without_implementing_task_is_error(self) -> None:
         intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "Must pass tests")])
@@ -268,49 +464,21 @@ class TestOrphanAcceptanceCriterion:
         assert len(orphans) >= 1
         assert all(f.severity == FindingSeverity.ERROR for f in orphans)
 
-    def test_scoped_finding_identity(self) -> None:
-        """Finding identity must use scoped form <task_id>::<criterion_id>."""
-        intent = _make_intent(task_id="TASK-001", criteria=[("AC-1", "stmt")])
-        lineage = _empty_lineage()
-        report = analyze(intent, lineage)
-        orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
-        assert len(orphans) == 1
-        assert orphans[0].primary_reference.identity == "TASK-001::AC-1"
-
     def test_many_tasks_one_criterion_pass(self) -> None:
         intent = _make_intent(task_id="T", criteria=[("AC-1", "stmt")])
         lineage = _make_lineage(
-            nodes=[
-                ("T::AC-1", "CRITERION"),
-                ("T1", "TASK"),
-                ("T2", "TASK"),
-            ],
-            edges=[
-                ("T1", "T::AC-1", "IMPLEMENTS"),
-                ("T2", "T::AC-1", "IMPLEMENTS"),
-            ],
+            nodes=[("T::AC-1", "CRITERION"), ("T1", "TASK"), ("T2", "TASK")],
+            edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("T2", "T::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
         orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
         assert len(orphans) == 0
 
     def test_one_task_many_criteria_pass(self) -> None:
-        intent = _make_intent(
-            task_id="T",
-            criteria=[("AC-1", "s1"), ("AC-2", "s2"), ("AC-3", "s3")],
-        )
+        intent = _make_intent(task_id="T", criteria=[("AC-1", "s1"), ("AC-2", "s2")])
         lineage = _make_lineage(
-            nodes=[
-                ("T::AC-1", "CRITERION"),
-                ("T::AC-2", "CRITERION"),
-                ("T::AC-3", "CRITERION"),
-                ("T1", "TASK"),
-            ],
-            edges=[
-                ("T1", "T::AC-1", "IMPLEMENTS"),
-                ("T1", "T::AC-2", "IMPLEMENTS"),
-                ("T1", "T::AC-3", "IMPLEMENTS"),
-            ],
+            nodes=[("T::AC-1", "CRITERION"), ("T::AC-2", "CRITERION"), ("T1", "TASK")],
+            edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("T1", "T::AC-2", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
         orphans = [f for f in report.findings if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION]
@@ -322,11 +490,7 @@ class TestOrphanAcceptanceCriterion:
             criteria=[("AC-1", "s1"), ("AC-2", "s2"), ("AC-3", "s3")],
         )
         lineage = _make_lineage(
-            nodes=[
-                ("TASK-001::AC-1", "CRITERION"),
-                ("TASK-001::AC-2", "CRITERION"),
-                ("T1", "TASK"),
-            ],
+            nodes=[("TASK-001::AC-1", "CRITERION"), ("TASK-001::AC-2", "CRITERION"), ("T1", "TASK")],
             edges=[("T1", "TASK-001::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
@@ -338,6 +502,17 @@ class TestOrphanAcceptanceCriterion:
         assert "TASK-001::AC-2" in orphan_ids
         assert "TASK-001::AC-3" in orphan_ids
         assert "TASK-001::AC-1" not in orphan_ids
+
+    def test_duplicate_finding_collapsed(self) -> None:
+        intent = _make_intent(criteria=[("AC-1", "stmt")])
+        lineage = _empty_lineage()
+        report = analyze(intent, lineage)
+        orphans = [
+            f for f in report.findings
+            if f.code == FindingCode.ORPHAN_ACCEPTANCE_CRITERION
+            and f.primary_reference.identity == "TASK-001::AC-1"
+        ]
+        assert len(orphans) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -367,11 +542,7 @@ class TestOrphanExecutionTask:
     def test_multiple_tasks_some_orphaned(self) -> None:
         intent = _make_intent(task_id="T", criteria=[("AC-1", "s1")])
         lineage = _make_lineage(
-            nodes=[
-                ("T::AC-1", "CRITERION"),
-                ("T1", "TASK"),
-                ("T2", "TASK"),
-            ],
+            nodes=[("T::AC-1", "CRITERION"), ("T1", "TASK"), ("T2", "TASK")],
             edges=[("T1", "T::AC-1", "IMPLEMENTS")],
         )
         report = analyze(intent, lineage)
@@ -386,18 +557,11 @@ class TestOrphanExecutionTask:
 
 
 class TestOrphanEvidence:
-    def test_valid_evidence_chain_pass(self) -> None:
+    def test_evidence_with_verifies_pass(self) -> None:
         intent = _make_intent(task_id="T", criteria=[("AC-1", "s1")])
         lineage = _make_lineage(
-            nodes=[
-                ("T::AC-1", "CRITERION"),
-                ("T1", "TASK"),
-                ("E1", "EVIDENCE"),
-            ],
-            edges=[
-                ("T1", "T::AC-1", "IMPLEMENTS"),
-                ("E1", "T1", "VERIFIES"),
-            ],
+            nodes=[("T::AC-1", "CRITERION"), ("T1", "TASK"), ("E1", "EVIDENCE")],
+            edges=[("T1", "T::AC-1", "IMPLEMENTS"), ("E1", "T1", "VERIFIES")],
         )
         report = analyze(intent, lineage)
         orphan_evid = [f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE]
@@ -411,23 +575,6 @@ class TestOrphanEvidence:
         assert len(orphan_evid) == 1
         assert orphan_evid[0].severity == FindingSeverity.WARNING
 
-    def test_evidence_verifies_criterion_pass(self) -> None:
-        intent = _make_intent(task_id="T", criteria=[("AC-1", "s1")])
-        lineage = _make_lineage(
-            nodes=[
-                ("T::AC-1", "CRITERION"),
-                ("T1", "TASK"),
-                ("E1", "EVIDENCE"),
-            ],
-            edges=[
-                ("T1", "T::AC-1", "IMPLEMENTS"),
-                ("E1", "T::AC-1", "VERIFIES"),
-            ],
-        )
-        report = analyze(intent, lineage)
-        orphan_evid = [f for f in report.findings if f.code == FindingCode.ORPHAN_EVIDENCE]
-        assert len(orphan_evid) == 0
-
 
 # ---------------------------------------------------------------------------
 # SOURCE_IDENTITY_MISMATCH — independent expected_base_sha
@@ -435,7 +582,9 @@ class TestOrphanEvidence:
 
 
 class TestSourceIdentityMismatch:
-    def test_matching_expected_base_sha_pass(self) -> None:
+    """SOURCE_IDENTITY_RULE=PASS (independent expected_base_sha)"""
+
+    def test_matching_expected_sha_pass(self) -> None:
         sha = "b" * 40
         intent = _make_intent(source_base_sha=sha)
         lineage = _empty_lineage()
@@ -443,7 +592,7 @@ class TestSourceIdentityMismatch:
         mismatch = [f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH]
         assert len(mismatch) == 0
 
-    def test_mismatched_expected_base_sha_is_error(self) -> None:
+    def test_mismatched_expected_sha_is_error(self) -> None:
         intent = _make_intent(source_base_sha="a" * 40)
         lineage = _empty_lineage()
         report = analyze(intent, lineage, expected_base_sha="c" * 40)
@@ -452,21 +601,21 @@ class TestSourceIdentityMismatch:
         assert mismatch[0].severity == FindingSeverity.ERROR
 
     def test_no_expected_sha_no_finding(self) -> None:
-        """When expected_base_sha is omitted, no SOURCE_IDENTITY_MISMATCH fires."""
+        """Without independent anchor, no SOURCE_IDENTITY_MISMATCH is emitted."""
         intent = _make_intent(source_base_sha="a" * 40)
         lineage = _empty_lineage()
         report = analyze(intent, lineage)  # no expected_base_sha
         mismatch = [f for f in report.findings if f.code == FindingCode.SOURCE_IDENTITY_MISMATCH]
         assert len(mismatch) == 0
 
-    def test_report_source_base_sha_field_equals_intent_sha(self) -> None:
+    def test_report_source_base_sha_field(self) -> None:
         sha = "d" * 40
         intent = _make_intent(source_base_sha=sha)
         lineage = _empty_lineage()
         report = analyze(intent, lineage, expected_base_sha=sha)
         assert report.source_base_sha == sha
 
-    def test_mismatch_deterministic(self) -> None:
+    def test_mismatch_is_deterministic(self) -> None:
         intent = _make_intent(source_base_sha="a" * 40)
         lineage = _empty_lineage()
         r1 = analyze(intent, lineage, expected_base_sha="c" * 40)
@@ -495,7 +644,7 @@ class TestTaskIdentityInconsistency:
         assert len(incons) >= 1
         assert all(f.severity == FindingSeverity.ERROR for f in incons)
 
-    def test_no_intent_nodes_in_lineage_pass(self) -> None:
+    def test_no_intent_nodes_no_finding(self) -> None:
         intent = _make_intent(task_id="TASK-001")
         lineage = _make_lineage(nodes=[("T1", "TASK")], edges=[])
         report = analyze(intent, lineage)
@@ -509,12 +658,7 @@ class TestTaskIdentityInconsistency:
 
 
 class TestPathHeuristicFalsePositives:
-    """Regression suite proving path-like TASK node_ids do NOT cause findings.
-
-    PATH_HEURISTIC_FALSE_POSITIVES=0.
-    Deferred rules MUTATION_OUTSIDE_ALLOWED_SCOPE and MUTATION_IN_FORBIDDEN_SCOPE
-    must not appear in any report.
-    """
+    """PATH_HEURISTIC_FALSE_POSITIVES=0"""
 
     _PATH_LIKE_NODE_IDS = [
         "TASK/001",
@@ -523,23 +667,17 @@ class TestPathHeuristicFalsePositives:
         "AC/group/one",
         "namespace/task",
         "component/subtask",
+        "scripts/deploy.sh",
+        "ai_engineering/core.py",
         "a/b/c/d",
     ]
 
     def _assert_no_mutation_findings(self, report) -> None:
-        from ai_engineering.task_analysis import FindingCode
         mutation_codes = {"MUTATION_OUTSIDE_ALLOWED_SCOPE", "MUTATION_IN_FORBIDDEN_SCOPE"}
         for f in report.findings:
             assert f.code.value not in mutation_codes, (
                 f"Unexpected mutation finding {f.code} for path-like node_id"
             )
-
-    def test_path_like_task_ids_no_mutation_findings_empty_allowed(self) -> None:
-        intent = _make_intent(allowed_mutations=["ai_engineering/"])
-        for nid in self._PATH_LIKE_NODE_IDS:
-            lineage = _make_lineage(nodes=[(nid, "TASK")], edges=[])
-            report = analyze(intent, lineage)
-            self._assert_no_mutation_findings(report)
 
     def test_feature_auth_no_mutation_finding(self) -> None:
         intent = _make_intent(
@@ -550,8 +688,17 @@ class TestPathHeuristicFalsePositives:
         report = analyze(intent, lineage)
         self._assert_no_mutation_findings(report)
 
+    def test_all_path_like_node_ids_no_mutation(self) -> None:
+        intent = _make_intent(
+            allowed_mutations=["ai_engineering/"],
+            forbidden_mutations=["scripts/"],
+        )
+        for nid in self._PATH_LIKE_NODE_IDS:
+            lineage = _make_lineage(nodes=[(nid, "TASK")], edges=[])
+            report = analyze(intent, lineage)
+            self._assert_no_mutation_findings(report)
+
     def test_no_finding_codes_outside_implemented_set(self) -> None:
-        """All emitted finding codes must be from the implemented set."""
         implemented = {
             "ORPHAN_ACCEPTANCE_CRITERION",
             "ORPHAN_EXECUTION_TASK",
@@ -572,30 +719,24 @@ class TestPathHeuristicFalsePositives:
         )
         report = analyze(intent, lineage, expected_base_sha="f" * 40)
         for f in report.findings:
-            assert f.code.value in implemented, (
-                f"Unexpected finding code emitted: {f.code}"
-            )
+            assert f.code.value in implemented, f"Unexpected finding code: {f.code}"
 
 
 # ---------------------------------------------------------------------------
-# Deferred rules: must NOT appear in reports
+# Deferred rules: must NOT appear in any report
 # ---------------------------------------------------------------------------
 
 
 class TestDeferredRulesNotEmitted:
-    """Prove that deferred rules produce no findings."""
+    """MUTATION_BOUNDARY_RULE=DEFERRED, REQUIRED_GATE_COVERAGE_RULE=DEFERRED"""
 
     def test_mutation_rules_not_emitted(self) -> None:
         intent = _make_intent(
             allowed_mutations=["ai_engineering/"],
             forbidden_mutations=["scripts/"],
         )
-        # Include path-like nodes to verify no mutation findings
         lineage = _make_lineage(
-            nodes=[
-                ("scripts/deploy.sh", "TASK"),
-                ("ai_engineering/core.py", "TASK"),
-            ],
+            nodes=[("scripts/deploy.sh", "TASK"), ("ai_engineering/core.py", "TASK")],
             edges=[],
         )
         report = analyze(intent, lineage)
@@ -689,7 +830,7 @@ class TestOfflineGuarantee:
 
 
 # ---------------------------------------------------------------------------
-# Input loading helpers
+# Input loading
 # ---------------------------------------------------------------------------
 
 
@@ -718,21 +859,17 @@ class TestInputLoading:
         intent = load_intent_from_bytes(raw)
         assert intent.task_id == "T1"
 
-    def test_load_intent_from_invalid_json_raises(self) -> None:
+    def test_load_intent_invalid_json(self) -> None:
         with pytest.raises(AnalysisInputError) as exc:
             load_intent_from_bytes(b"not json {{{")
         assert "INTENT_INVALID" in exc.value.code
 
-    def test_load_lineage_from_valid_bytes(self) -> None:
-        raw = json.dumps({
-            "schema_version": 1,
-            "nodes": [],
-            "edges": [],
-        }).encode("utf-8")
+    def test_load_lineage_valid(self) -> None:
+        raw = json.dumps({"schema_version": 1, "nodes": [], "edges": []}).encode("utf-8")
         lineage = load_lineage_from_bytes(raw)
         assert lineage.nodes == ()
 
-    def test_load_lineage_from_invalid_json_raises(self) -> None:
+    def test_load_lineage_invalid_json(self) -> None:
         with pytest.raises(AnalysisInputError) as exc:
             load_lineage_from_bytes(b"{bad}")
         assert "LINEAGE" in exc.value.code

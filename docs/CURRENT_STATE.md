@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.52
+version: 1.2.53
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: dbebea42967ed0bb2d4f5f95da01fca32c5d0723
+state_verified_against_main_sha: 60b403723dcdc49261f3ff99ae580d64e747cb00
 production_sha: unknown
 ---
 
@@ -13,10 +13,25 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
-## Hermes Intent Control Plane v1 — Final Adoption & Lifecycle Integration
+## Hermes Intent Control Plane — Operational Hardening v1.1
 
-- Hermes Intent Control Plane v1 is COMPLETE_AND_ADOPTED (PR #165, #166, #168, #169, #170, #171, #172, #174, #175, #176).
-- Status: `HERMES_INTENT_CONTROL_PLANE_V1=COMPLETE_AND_ADOPTED`.
+- Hermes Intent Control Plane Operational Hardening v1.1 is COMPLETE_AND_MERGED (PR #177, commit `60b403723dcdc49261f3ff99ae580d64e747cb00`).
+- Status: `HERMES_INTENT_CONTROL_PLANE_V1_1=OPERATIONAL_HARDENED`.
+- All operational dogfood findings (CPF-001 through CPF-007) are resolved, verified, and merged:
+  - **CPF-001 (CLI import defect)**: Fixed `deserialize_intent` imports across `scripts/clarify_task.py` and `scripts/requirements_gate.py` (`CPF_001=CLOSED`).
+  - **CPF-002 (Runtime authority separation)**: Clarified and enforced that TaskIntent does not encode runtime execution authority (`CPF_002=CONFIRMED_BY_DESIGN`).
+  - **CPF-003 (Requirements review identity binding)**: Bound `RequirementsQualityReview.review_id` deterministically via `compute_requirements_review_id()` and public factory `create_requirements_quality_review()` with tamper validation (`CPF_003=CLOSED`).
+  - **CPF-004 (Public Evidence API)**: Exposed public constructors `compute_observation_id()`, `create_evidence_observation()`, `compute_bundle_id()`, `create_evidence_bundle()` in `ai_engineering` with deterministic ID hashing (`CPF_004=CLOSED`).
+  - **CPF-005 (Convergence CLI deserialization)**: Enabled `scripts/converge_task.py` to accept raw str/bytes and execute deterministically in subprocesses (`CPF_005=CLOSED`).
+  - **CPF-006 (Lineage contract clarification)**: Documented Lineage v1 graph contract where TaskIntent owns criteria directly and edge relations connect `TASK -> IMPLEMENTS -> CRITERION` and `EVIDENCE -> VERIFIES -> CRITERION` (`CPF_006=CLOSED`).
+  - **CPF-007 (Clarification integrity hardening)**: Hardened `ClarificationReport` validation with `compute_clarification_id()` and structural question-count/ready-flag consistency (`CPF_007=CLOSED`).
+  - **CLI Runtime Sys.Path Robustness**: Guaranteed repository root on `sys.path` across all CLI scripts (`prepare_task.py`, `clarify_task.py`, `requirements_gate.py`, `analyze_task.py`, `converge_task.py`, `explain_effective_policy.py`).
+  - **Full E2E Integration Suite**: Added full offline subprocess integration test suite in `tests/ai_engineering/test_intent_control_plane_integration.py`.
+- **Dogfood Revision-2 Requalification (`HEALBITE-PROD-R02A-ICP-001`)**:
+  - Full offline pipeline executed against `60b403723dcdc49261f3ff99ae580d64e747cb00` with parent intent `ad3de22f18e21846c248768ecb35cccaf2570747126324a954ab5882ca29b5a8`.
+  - All offline stages (prepare, clarify, requirements gate, lineage analysis, effective policy, semantic verification) passed deterministically (`DOGFOOD_R2_REQUALIFICATION=PASS`).
+  - `RUNTIME_AUTHORIZATION_STATUS=READY_FOR_OPERATOR_AUTHORIZATION` (execution stopped strictly before WSL/production access).
+- Production, database, Qdrant, secrets, and live deployment remain untouched.
 - All planned capabilities are implemented, verified, and adopted into canonical workflow:
   - **TaskIntent / TaskLineage**: Schema version 1, exact base-SHA binding, canonical serialization, and lineage DAG relations.
   - **Cross-Artifact Analyzer**: Deterministic offline semantic and structural consistency verification.

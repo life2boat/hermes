@@ -5,7 +5,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict
-from enum import StrEnum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
+
+
 from typing import TypeVar
 
 from ai_engineering.contracts import (
@@ -63,20 +72,16 @@ _MODEL_RANK = {
     MODEL_SOL: 2,
     MODEL_SOL_ULTRA: 3,
 }
-_ESCALATION_REASONS = frozenset(
-    {
-        "COMPLEXITY_DISCOVERED",
-        "SECURITY_COMPLEXITY",
-        "ARCHITECTURE_COUPLING",
-        "VALIDATION_UNCERTAINTY",
-    }
-)
+_ESCALATION_REASONS = frozenset({
+    "COMPLEXITY_DISCOVERED",
+    "SECURITY_COMPLEXITY",
+    "ARCHITECTURE_COUPLING",
+    "VALIDATION_UNCERTAINTY",
+})
 _FALLBACK_REASONS = frozenset({"MODEL_UNAVAILABLE"})
 _PROVIDER_CHANGE_REASONS = frozenset({"PROVIDER_POLICY_APPROVED"})
 
-_MODEL_MATRIX: dict[
-    TaskClass, tuple[str, tuple[str, ...], ReasoningLevel, str]
-] = {
+_MODEL_MATRIX: dict[TaskClass, tuple[str, tuple[str, ...], ReasoningLevel, str]] = {
     TaskClass.REPOSITORY_SEARCH_LOGS: (
         MODEL_TERRA,
         (),
@@ -159,9 +164,7 @@ def _evidence_refs(values: tuple[str, ...] | list[str]) -> tuple[str, ...]:
 def recommend_model(task_class: TaskClass | str) -> ModelRecommendation:
     """Return the repository matrix result without availability lookup."""
 
-    task = _parse_enum(
-        TaskClass, task_class, MODEL_POLICY_TASK_CLASS_UNKNOWN
-    )
+    task = _parse_enum(TaskClass, task_class, MODEL_POLICY_TASK_CLASS_UNKNOWN)
     model, alternatives, reasoning, reason_code = _MODEL_MATRIX[task]
     return ModelRecommendation(
         policy_version=MODEL_POLICY_VERSION,

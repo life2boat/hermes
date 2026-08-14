@@ -7,12 +7,20 @@ import json
 import sys
 from pathlib import Path
 
-from _cli_utils import (
-    OutputAliasError,
-    SafeReadError,
-    check_output_alias,
-    safe_read,
-)
+try:
+    from scripts._cli_utils import (
+        OutputAliasError,
+        SafeReadError,
+        check_output_alias,
+        safe_read,
+    )
+except ImportError:
+    from _cli_utils import (
+        OutputAliasError,
+        SafeReadError,
+        check_output_alias,
+        safe_read,
+    )
 
 from ai_engineering.task_intent import deserialize_intent, validate_lineage
 from ai_engineering.requirements_gate import (
@@ -84,21 +92,21 @@ def main() -> int:
         raw_review = safe_read(args.review, "converge_task")
         raw_lineage = safe_read(args.lineage, "converge_task")
         raw_evidence = safe_read(args.evidence, "converge_task")
-
-        # requirements_gate.py uses str or bytes for deserialize
-        intent_data = json.loads(raw_intent)
-        lineage_data = json.loads(raw_lineage)
-        evidence_data = json.loads(raw_evidence)
-    except (SafeReadError, json.JSONDecodeError) as exc:
+    except SafeReadError as exc:
         print(f"converge_task: READ_ERROR: {exc}", file=sys.stderr)
         return 2
 
     try:
-        intent = deserialize_intent(intent_data)
+        intent = deserialize_intent(raw_intent)
         clarification = deserialize_clarification(raw_clarification)
         review = deserialize_review(raw_review)
+        try:
+            lineage_data = json.loads(raw_lineage)
+        except Exception:
+            print("converge_task: CONTRACT_ERROR: JSON_INVALID", file=sys.stderr)
+            return 2
         lineage = validate_lineage(lineage_data)
-        bundle = deserialize_evidence_bundle(evidence_data)
+        bundle = deserialize_evidence_bundle(raw_evidence)
 
         report = evaluate_convergence(
             intent=intent,

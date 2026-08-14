@@ -30,7 +30,7 @@ except ImportError:
         safe_read,
     )
 
-from ai_engineering.task_intent import load_intent_from_bytes, TaskIntentValidationError
+from ai_engineering.task_intent import deserialize_intent, TaskIntentValidationError
 from ai_engineering.requirements_gate import (
     generate_clarification_report,
     serialize_clarification,
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        intent = load_intent_from_bytes(intent_raw)
+        intent = deserialize_intent(intent_raw)
     except TaskIntentValidationError as exc:
         print(f"clarify_task: {exc.code}", file=sys.stderr)
         return 2

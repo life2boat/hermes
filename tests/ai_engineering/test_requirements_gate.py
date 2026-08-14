@@ -29,6 +29,9 @@ from ai_engineering.requirements_gate import (
     RequirementsGateReport,
     RequirementsQualityReview,
     ReviewStatus,
+    compute_clarification_id,
+    compute_requirements_review_id,
+    create_requirements_quality_review,
     deserialize_clarification,
     deserialize_review,
     evaluate_requirements_gate,
@@ -79,18 +82,17 @@ def make_valid_intent(
 def make_valid_review(
     intent: TaskIntent, reviewer_id: str = "test-reviewer"
 ) -> RequirementsQualityReview:
-    c_reviews = []
-    for c in intent.acceptance_criteria:
-        c_reviews.append(
-            CriterionReview(
-                criterion_id=c.criterion_id,
-                dimensions={
-                    CriterionDimension.CLEAR: ReviewStatus.PASS,
-                    CriterionDimension.TESTABLE: ReviewStatus.PASS,
-                    CriterionDimension.BOUNDED: ReviewStatus.PASS,
-                },
-            )
+    c_reviews = [
+        CriterionReview(
+            criterion_id=c.criterion_id,
+            dimensions={
+                CriterionDimension.CLEAR: ReviewStatus.PASS,
+                CriterionDimension.TESTABLE: ReviewStatus.PASS,
+                CriterionDimension.BOUNDED: ReviewStatus.PASS,
+            },
         )
+        for c in intent.acceptance_criteria
+    ]
     g_reviews = {
         GlobalDimension.DESIRED_OUTCOME_CLEAR: ReviewStatus.PASS,
         GlobalDimension.SCOPE_BOUNDARIES_CLEAR: ReviewStatus.PASS,
@@ -98,14 +100,12 @@ def make_valid_review(
         GlobalDimension.UNKNOWN_RESOLUTION_REVIEWED: ReviewStatus.PASS,
         GlobalDimension.INTERNAL_CONFLICT_REVIEWED: ReviewStatus.PASS,
     }
-    return RequirementsQualityReview(
-        schema_version=1,
-        review_id="dummy-id-will-be-recalculated",
+    return create_requirements_quality_review(
         task_id=intent.task_id,
         intent_digest=intent_digest(intent),
         intent_revision=intent.intent_revision,
         reviewer_id=reviewer_id,
-        criterion_reviews=tuple(c_reviews),
+        criterion_reviews=c_reviews,
         global_reviews=g_reviews,
     )
 
@@ -200,23 +200,93 @@ def test_clarify_mutates_task_intent():
     assert dgst_before == dgst_after
 
 
+def test_clarification_tampered_id_fails_validation():
+    intent = make_valid_intent(
+        status=IntentStatus.NEEDS_CLARIFICATION,
+        unknowns=(IntentUnknown("unk-1", "desc", blocking=True),),
+    )
+    report = generate_clarification_report(intent)
+    data = json.loads(serialize_clarification(report))
+    data["clarification_id"] = "f" * 64
+
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_clarification(json.dumps(data))
+    assert exc.value.code == "TAMPERED_CLARIFICATION_ID"
+
+
+def test_clarification_inconsistent_blocking_count_fails_validation():
+    intent = make_valid_intent(
+        status=IntentStatus.NEEDS_CLARIFICATION,
+        unknowns=(IntentUnknown("unk-1", "desc", blocking=True),),
+    )
+    report = generate_clarification_report(intent)
+    data = json.loads(serialize_clarification(report))
+    data["blocking_question_count"] = 0
+
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_clarification(json.dumps(data))
+    assert exc.value.code == "VALUE_INVALID"
+
+
+def test_clarification_inconsistent_ready_flag_fails_validation():
+    intent = make_valid_intent(status=IntentStatus.READY)
+    report = generate_clarification_report(intent)
+    data = json.loads(serialize_clarification(report))
+    data["ready_for_quality_review"] = False
+
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_clarification(json.dumps(data))
+    assert exc.value.code == "VALUE_INVALID"
+
+
 # --- Quality Review Tests ---
 
 
 def test_valid_quality_review_v1():
     intent = make_valid_intent()
     review = make_valid_review(intent)
-    # The review returned by make_valid_review has a dummy ID. Let's fix it by validating it.
-    # validate_review computes the ID. Wait, no, validate_review does NOT compute the ID!
-    # I should re-read how I wrote validate_review. I just read it and check digest regex.
-    # Ah! I need a helper to generate a valid review_id or make sure the regex passes.
+    serialized = serialize_review(review)
+    deserialized = deserialize_review(serialized)
+    assert deserialized == review
+    assert deserialized.schema_version == 1
 
-    # I will just create a structurally valid one.
+
+def test_quality_review_deterministic_id():
+    intent = make_valid_intent()
+    r1 = make_valid_review(intent)
+    r2 = make_valid_review(intent)
+    assert r1.review_id == r2.review_id
+
+
+def test_quality_review_tampered_outcome_fails():
+    intent = make_valid_intent()
+    review = make_valid_review(intent)
     data = json.loads(serialize_review(review))
-    data["review_id"] = "a" * 64
+    data["criterion_reviews"][0]["dimensions"]["CLEAR"] = "FAIL"
+    # Keeping stale review_id
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_review(json.dumps(data))
+    assert exc.value.code == "TAMPERED_REVIEW_ID"
 
-    valid_review = deserialize_review(json.dumps(data))
-    assert valid_review.schema_version == 1
+
+def test_quality_review_tampered_reviewer_fails():
+    intent = make_valid_intent()
+    review = make_valid_review(intent)
+    data = json.loads(serialize_review(review))
+    data["reviewer_id"] = "impostor"
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_review(json.dumps(data))
+    assert exc.value.code == "TAMPERED_REVIEW_ID"
+
+
+def test_quality_review_arbitrary_64hex_id_fails():
+    intent = make_valid_intent()
+    review = make_valid_review(intent)
+    data = json.loads(serialize_review(review))
+    data["review_id"] = "e" * 64
+    with pytest.raises(RequirementsGateError) as exc:
+        deserialize_review(json.dumps(data))
+    assert exc.value.code == "TAMPERED_REVIEW_ID"
 
 
 def test_unknown_quality_review_schema_version():
@@ -224,7 +294,6 @@ def test_unknown_quality_review_schema_version():
     review = make_valid_review(intent)
     data = json.loads(serialize_review(review))
     data["schema_version"] = 2
-    data["review_id"] = "a" * 64
 
     with pytest.raises(RequirementsGateError) as exc:
         deserialize_review(json.dumps(data))
@@ -235,8 +304,6 @@ def test_duplicate_criterion_review():
     intent = make_valid_intent()
     review = make_valid_review(intent)
     data = json.loads(serialize_review(review))
-    data["review_id"] = "a" * 64
-    # Duplicate AC-001
     data["criterion_reviews"].append(data["criterion_reviews"][0])
 
     with pytest.raises(RequirementsGateError) as exc:
@@ -250,12 +317,7 @@ def test_duplicate_criterion_review():
 def _prepare_gate_inputs(status=IntentStatus.READY, unknowns=()):
     intent = make_valid_intent(status=status, unknowns=unknowns)
     clarification = generate_clarification_report(intent)
-
-    review = make_valid_review(intent)
-    data = json.loads(serialize_review(review))
-    data["review_id"] = "a" * 64
-    valid_review = deserialize_review(json.dumps(data))
-
+    valid_review = make_valid_review(intent)
     return intent, clarification, valid_review
 
 
@@ -308,13 +370,23 @@ def test_stale_clarification_gate():
 
 
 def test_missing_criterion_review():
-    intent, clar, rev = _prepare_gate_inputs()
-    data = json.loads(serialize_review(rev))
-    # Remove AC-001
-    data["criterion_reviews"] = [
-        c for c in data["criterion_reviews"] if c["criterion_id"] != "AC-001"
+    intent, clar, _ = _prepare_gate_inputs()
+    # Build review with only AC-002
+    c_reviews = [
+        CriterionReview(
+            criterion_id="AC-002",
+            dimensions={d: ReviewStatus.PASS for d in CriterionDimension},
+        )
     ]
-    rev = deserialize_review(json.dumps(data))
+    g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+    rev = create_requirements_quality_review(
+        task_id=intent.task_id,
+        intent_digest=intent_digest(intent),
+        intent_revision=intent.intent_revision,
+        reviewer_id="test-reviewer",
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
+    )
 
     gate = evaluate_requirements_gate(intent, clar, rev)
     assert gate.status == GateStatus.FAIL
@@ -322,14 +394,29 @@ def test_missing_criterion_review():
 
 
 def test_unknown_criterion_review():
-    intent, clar, rev = _prepare_gate_inputs()
-    data = json.loads(serialize_review(rev))
-    # Add fake AC
-    data["criterion_reviews"].append({
-        "criterion_id": "AC-999",
-        "dimensions": {"CLEAR": "PASS", "TESTABLE": "PASS", "BOUNDED": "PASS"},
-    })
-    rev = deserialize_review(json.dumps(data))
+    intent, clar, _ = _prepare_gate_inputs()
+    c_reviews = [
+        CriterionReview(
+            criterion_id=c.criterion_id,
+            dimensions={d: ReviewStatus.PASS for d in CriterionDimension},
+        )
+        for c in intent.acceptance_criteria
+    ]
+    c_reviews.append(
+        CriterionReview(
+            criterion_id="AC-999",
+            dimensions={d: ReviewStatus.PASS for d in CriterionDimension},
+        )
+    )
+    g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+    rev = create_requirements_quality_review(
+        task_id=intent.task_id,
+        intent_digest=intent_digest(intent),
+        intent_revision=intent.intent_revision,
+        reviewer_id="test-reviewer",
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
+    )
 
     gate = evaluate_requirements_gate(intent, clar, rev)
     assert gate.status == GateStatus.FAIL
@@ -337,10 +424,24 @@ def test_unknown_criterion_review():
 
 
 def test_failed_required_dimension():
-    intent, clar, rev = _prepare_gate_inputs()
-    data = json.loads(serialize_review(rev))
-    data["global_reviews"]["DESIRED_OUTCOME_CLEAR"] = "FAIL"
-    rev = deserialize_review(json.dumps(data))
+    intent, clar, _ = _prepare_gate_inputs()
+    c_reviews = [
+        CriterionReview(
+            criterion_id=c.criterion_id,
+            dimensions={d: ReviewStatus.PASS for d in CriterionDimension},
+        )
+        for c in intent.acceptance_criteria
+    ]
+    g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+    g_reviews[GlobalDimension.DESIRED_OUTCOME_CLEAR] = ReviewStatus.FAIL
+    rev = create_requirements_quality_review(
+        task_id=intent.task_id,
+        intent_digest=intent_digest(intent),
+        intent_revision=intent.intent_revision,
+        reviewer_id="test-reviewer",
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
+    )
 
     gate = evaluate_requirements_gate(intent, clar, rev)
     assert gate.status == GateStatus.FAIL
@@ -348,10 +449,24 @@ def test_failed_required_dimension():
 
 
 def test_not_reviewed_required_dimension():
-    intent, clar, rev = _prepare_gate_inputs()
-    data = json.loads(serialize_review(rev))
-    data["global_reviews"]["DESIRED_OUTCOME_CLEAR"] = "NOT_REVIEWED"
-    rev = deserialize_review(json.dumps(data))
+    intent, clar, _ = _prepare_gate_inputs()
+    c_reviews = [
+        CriterionReview(
+            criterion_id=c.criterion_id,
+            dimensions={d: ReviewStatus.PASS for d in CriterionDimension},
+        )
+        for c in intent.acceptance_criteria
+    ]
+    g_reviews = {d: ReviewStatus.PASS for d in GlobalDimension}
+    g_reviews[GlobalDimension.DESIRED_OUTCOME_CLEAR] = ReviewStatus.NOT_REVIEWED
+    rev = create_requirements_quality_review(
+        task_id=intent.task_id,
+        intent_digest=intent_digest(intent),
+        intent_revision=intent.intent_revision,
+        reviewer_id="test-reviewer",
+        criterion_reviews=c_reviews,
+        global_reviews=g_reviews,
+    )
 
     gate = evaluate_requirements_gate(intent, clar, rev)
     assert gate.status == GateStatus.FAIL
@@ -436,3 +551,153 @@ def test_input_hash_unchanged(tmp_path):
     # Now create it and test
     f2.write_text("{}")
     check_output_alias(f2, {"--intent": f1}, "test")
+
+
+# --- CLI Subprocess Integration Tests ---
+
+
+def test_cli_clarify_task_subprocess(tmp_path):
+    import subprocess
+    import sys
+    from ai_engineering.task_intent import serialize_intent
+
+    # 1. Valid READY intent -> Exit 0
+    intent_ready = make_valid_intent(status=IntentStatus.READY)
+    intent_file = tmp_path / "intent_ready.json"
+    intent_file.write_text(serialize_intent(intent_ready), encoding="utf-8")
+    out_file = tmp_path / "clar_out.json"
+
+    res = subprocess.run(
+        [sys.executable, "scripts/clarify_task.py", "--intent", str(intent_file), "--output", str(out_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert out_file.exists()
+
+    # 2. NEEDS_CLARIFICATION with blocking unknown -> Exit 1
+    intent_needs = make_valid_intent(
+        status=IntentStatus.NEEDS_CLARIFICATION,
+        unknowns=(IntentUnknown("u1", "desc", blocking=True),),
+    )
+    intent_needs_file = tmp_path / "intent_needs.json"
+    intent_needs_file.write_text(serialize_intent(intent_needs), encoding="utf-8")
+    out_needs = tmp_path / "clar_needs_out.json"
+
+    res2 = subprocess.run(
+        [sys.executable, "scripts/clarify_task.py", "--intent", str(intent_needs_file), "--output", str(out_needs)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res2.returncode == 1
+
+    # 3. Malformed JSON -> Exit 2
+    bad_file = tmp_path / "bad.json"
+    bad_file.write_text("not json", encoding="utf-8")
+    res3 = subprocess.run(
+        [sys.executable, "scripts/clarify_task.py", "--intent", str(bad_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res3.returncode == 2
+
+    # 4. Output alias -> Exit 2
+    res4 = subprocess.run(
+        [sys.executable, "scripts/clarify_task.py", "--intent", str(intent_file), "--output", str(intent_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res4.returncode == 2
+
+
+def test_cli_requirements_gate_subprocess(tmp_path):
+    import subprocess
+    import sys
+    from ai_engineering.task_intent import serialize_intent
+
+    intent = make_valid_intent(status=IntentStatus.READY)
+    intent_file = tmp_path / "intent.json"
+    intent_file.write_text(serialize_intent(intent), encoding="utf-8")
+
+    clar = generate_clarification_report(intent)
+    clar_file = tmp_path / "clar.json"
+    clar_file.write_text(serialize_clarification(clar), encoding="utf-8")
+
+    rev = make_valid_review(intent)
+    rev_file = tmp_path / "rev.json"
+    rev_file.write_text(serialize_review(rev), encoding="utf-8")
+
+    out_file = tmp_path / "gate.json"
+
+    # 1. Valid inputs -> Exit 0
+    res = subprocess.run(
+        [
+            sys.executable,
+            "scripts/requirements_gate.py",
+            "--intent",
+            str(intent_file),
+            "--clarification",
+            str(clar_file),
+            "--review",
+            str(rev_file),
+            "--output",
+            str(out_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0
+    assert out_file.exists()
+
+    # 2. Gate fail (e.g. DRAFT intent) -> Exit 1
+    intent_draft = make_valid_intent(status=IntentStatus.DRAFT)
+    draft_file = tmp_path / "draft.json"
+    draft_file.write_text(serialize_intent(intent_draft), encoding="utf-8")
+    clar_draft = generate_clarification_report(intent_draft)
+    clar_draft_file = tmp_path / "clar_draft.json"
+    clar_draft_file.write_text(serialize_clarification(clar_draft), encoding="utf-8")
+    rev_draft = make_valid_review(intent_draft)
+    rev_draft_file = tmp_path / "rev_draft.json"
+    rev_draft_file.write_text(serialize_review(rev_draft), encoding="utf-8")
+
+    res2 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/requirements_gate.py",
+            "--intent",
+            str(draft_file),
+            "--clarification",
+            str(clar_draft_file),
+            "--review",
+            str(rev_draft_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res2.returncode == 1
+
+    # 3. Output alias -> Exit 2
+    res3 = subprocess.run(
+        [
+            sys.executable,
+            "scripts/requirements_gate.py",
+            "--intent",
+            str(intent_file),
+            "--clarification",
+            str(clar_file),
+            "--review",
+            str(rev_file),
+            "--output",
+            str(intent_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res3.returncode == 2

@@ -179,8 +179,12 @@ def main(argv: list[str] | None = None) -> int:
                             file=sys.stderr,
                         )
                         return 2
-                except OSError:
-                    pass
+                except OSError as exc:
+                    print(
+                        f"analyze_task: SAFE_WRITE_CHECK_FAILED: could not check --intent alias: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
             if lineage_resolved.exists():
                 try:
                     if os.path.samefile(output_resolved, lineage_resolved):
@@ -189,8 +193,12 @@ def main(argv: list[str] | None = None) -> int:
                             file=sys.stderr,
                         )
                         return 2
-                except OSError:
-                    pass
+                except OSError as exc:
+                    print(
+                        f"analyze_task: SAFE_WRITE_CHECK_FAILED: could not check --lineage alias: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
 
     # Load and validate inputs.
     try:

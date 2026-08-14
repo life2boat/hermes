@@ -234,6 +234,40 @@ class TestOutputAliasingProtection:
         assert result == 2
         assert "SAFE_WRITE_VIOLATION" in capsys.readouterr().err
 
+    def test_output_hardlink_check_oserror_fails_closed(
+        self, tmp_path: Path, capsys, monkeypatch
+    ) -> None:
+        """SAMEFILE_CHECK_ERROR=FAIL_CLOSED (exit 2)."""
+        import os
+
+        intent = _write_intent(tmp_path / "intent.json")
+        lineage = _write_lineage(tmp_path / "lineage.json")
+        output = tmp_path / "output.json"
+        output.write_text("dummy", encoding="utf-8")
+
+        def _mock_samefile(*args, **kwargs):
+            raise OSError("Mock samefile failure")
+
+        monkeypatch.setattr(os.path, "samefile", _mock_samefile)
+
+        h_intent_before = hashlib.sha256(intent.read_bytes()).hexdigest()
+
+        result = main([
+            "--intent",
+            str(intent),
+            "--lineage",
+            str(lineage),
+            "--output",
+            str(output),
+        ])
+
+        h_intent_after = hashlib.sha256(intent.read_bytes()).hexdigest()
+        assert h_intent_before == h_intent_after
+
+        assert result == 2
+        assert "SAFE_WRITE_CHECK_FAILED" in capsys.readouterr().err
+        assert output.read_text(encoding="utf-8") == "dummy"
+
 
 # ---------------------------------------------------------------------------
 # --expected-sha

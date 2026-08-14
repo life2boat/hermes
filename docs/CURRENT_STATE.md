@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.50
+version: 1.2.51
 updated_at: 2026-08-14
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 432aacfd0fd30e65fd788bec8d8f8ec934a8e1ef
+state_verified_against_main_sha: 112b865f7a2906bdf33e302d7a7a1d2118db1826
 production_sha: unknown
 ---
 
@@ -13,19 +13,30 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
-## Hermes Intent Control Plane PR-5 — Effective Policy / Source Attribution
+## Hermes Intent Control Plane v1 — Final Adoption & Lifecycle Integration
 
-- PR-5 Effective Policy / Source Attribution is IMPLEMENTED (PR #174).
-- `EffectivePolicyReport` schema v1 is implemented in `ai_engineering/effective_policy.py`.
-- Resolves task-level policy, invariants, and required gates against exact Git-committed repository revisions (`subject_sha`).
-- Exact `TaskIntent` source attribution binds constraints, allowed/forbidden mutations, and stop boundary to the TaskIntent digest.
-- Invariant resolution resolves canonical engineering invariants from `docs/HERMES_INVARIANTS.md` (e.g. `R1`, `AI1`, `INV-AI-V2-001`).
-- Required-gate resolution resolves canonical release gates from `ai_engineering.release_gate.GateName` and `docs/AGENT_RELEASE_GATES.md`.
-- Unresolved references remain explicit (`resolution_status=UNRESOLVED`, report `status=INCOMPLETE`).
-- Public dataclass and deserialization validation boundaries enforce fail-closed integrity defense against tampered IDs and broken bindings (H-PR4-001 defense).
-- CLI `scripts/explain_effective_policy.py` provides offline explainability with safe path and output alias protections.
-- `PROVIDER_CALLS=0`, `NETWORK_REQUIRED=false`, `LLM_AS_POLICY_RESOLVER=false`, `POLICY_AUTO_INFERENCE=false`, `EFFECTIVE_POLICY_EXPANDS_AUTHORITY=false`.
-- `EXTERNAL_EVIDENCE_AUTHENTICITY_VERIFIED=false`: M-PR4-001 external evidence authenticity remains a known non-blocking residual limitation.
+- Hermes Intent Control Plane v1 is COMPLETE_AND_ADOPTED (PR #165, #166, #168, #169, #170, #171, #172, #174, #175).
+- Status: `STATUS=COMPLETE_AND_ADOPTED`.
+- All planned capabilities are implemented, verified, and adopted into canonical workflow:
+  - **TaskIntent / TaskLineage**: Schema version 1, exact base-SHA binding, canonical serialization, and lineage DAG relations.
+  - **Cross-Artifact Analyzer**: Deterministic offline semantic and structural consistency verification.
+  - **Clarify & Requirements Quality Gate**: Non-mutating clarification and formal criteria gating (`RequirementsGateReport`).
+  - **Evidence-Bound Convergence**: Deterministic evaluation of acceptance criteria and release gate evidence against exact TaskIntent and subject SHA (`ConvergenceReport`).
+  - **EvidenceBundle Public Integrity (PR-4.1)**: Fail-closed tampering defense on public API boundary (`H_PR4_001=CLOSED`).
+  - **Effective Policy / Source Attribution (PR-5)**: Deterministic resolution of applicable invariants and required release gates to exact Git blobs (`EffectivePolicyReport`).
+  - **Lifecycle & Template Adoption**: Fully integrated into `docs/TASK_LIFECYCLE.md`, `docs/TASK_TEMPLATE.md`, `AGENTS.md`, and `docs/HERMES_SOURCE_MAP.md`.
+- Residual limitation: `M_PR4_001=KNOWN_NON_BLOCKING_EXTERNAL_AUTHENTICITY_LIMITATION` (external authenticity of artifact refs/digests is bounded to Git-committed objects and local execution).
+- Non-negotiable architectural boundaries:
+  - `PROVIDER_CALLS=0`
+  - `NETWORK_REQUIRED_FOR_CORE=false`
+  - `LLM_AS_JUDGE=false`
+  - `LLM_AS_POLICY_RESOLVER=false`
+  - `EFFECTIVE_POLICY_EXPANDS_AUTHORITY=false`
+- The Intent Control Plane explicitly does NOT:
+  - Grant production authority or bypass release gates.
+  - Authenticate remote CI artifacts or external providers.
+  - Authenticate human reviewers.
+  - Replace Agent Release Gate or production readiness verification.
 - Production, database, Qdrant, secrets, and deployment remain unchanged.
 
 ## Hermes Intent Control Plane PR-1
@@ -50,7 +61,7 @@ Git.
 - NETWORK_REQUIRED=false.
 - CONVERGENCE_MUTATES_INPUTS=false.
 - Convergence does NOT authorize production or deployment.
-- PR-5 Effective Policy / Source Attribution is now READY (not yet implemented).
+- PR-5 Effective Policy / Source Attribution is IMPLEMENTED (PR #174).
 
 ## Hermes Intent Control Plane PR-4.1
 

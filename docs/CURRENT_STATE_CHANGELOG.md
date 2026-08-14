@@ -1,5 +1,38 @@
 # CURRENT_STATE changelog
 
+## 1.2.51 - 2026-08-14
+
+Changed:
+- closed the post-merge source-of-truth state after PR #175 finalized canonical
+  adoption and lifecycle integration of Hermes Intent Control Plane v1 at
+  canonical main `112b865f7a2906bdf33e302d7a7a1d2118db1826`.
+
+Safety:
+- the closure is repository documentation and offline contract integration only;
+  no production, database, Qdrant, secrets, deployment, or live runtime changed.
+
+## 1.2.50 - 2026-08-14
+
+Changed:
+- closed the post-merge source-of-truth state after PR #174 merged Effective Policy
+  and Source Attribution (PR-5) at canonical main
+  `432aacfd0fd30e65fd788bec8d8f8ec934a8e1ef`.
+
+Safety:
+- the closure is repository documentation only; no production, database,
+  Qdrant, secrets, deployment, or runtime changed.
+
+## 1.2.49 - 2026-08-14
+
+Changed:
+- closed the post-merge source-of-truth state after PR #171 (PR-4 Evidence-Bound
+  Convergence) and PR #172 (PR-4.1 H-PR4-001 public boundary integrity) merged
+  at canonical main `a99663f6e6bdf5bde7c738ff844c1fa7f09c0f32`.
+
+Safety:
+- the closure is repository documentation only; no production, database,
+  Qdrant, secrets, deployment, or runtime changed.
+
 ## 1.2.48 - 2026-08-13
 
 Changed:

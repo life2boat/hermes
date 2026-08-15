@@ -54,8 +54,9 @@ def _find_env_file_span(lines: list[str]) -> tuple[int, int]:
 
         if in_env_file:
             # Collect list items
-            if stripped.startswith("-"):
-                entry_value = stripped.lstrip("- ").strip()
+            item_stripped = stripped.lstrip()
+            if item_stripped.startswith("-"):
+                entry_value = item_stripped.lstrip("- ").strip()
                 env_file_entries.append(entry_value)
                 entry_lines.append(i)
             elif stripped and not stripped.startswith("#"):

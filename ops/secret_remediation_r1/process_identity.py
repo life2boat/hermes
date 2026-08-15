@@ -174,8 +174,6 @@ def resolve_poller_pid(
         running=True,
     )
 
-    init_ns = _get_pid_namespace(init_pid)
-
     # 2. Find exactly one poller process
     poller_pids = _find_poller_processes()
     if len(poller_pids) == 0:
@@ -185,6 +183,7 @@ def resolve_poller_pid(
 
     pid = poller_pids[0]
 
+    init_ns = _get_pid_namespace(init_pid)
     # 3. Bind via PID namespace
     pid_ns = _get_pid_namespace(pid)
     if pid_ns != init_ns:

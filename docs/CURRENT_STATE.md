@@ -13,6 +13,21 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## Hermes Intent Control Plane v1.2 — Evidence Semantics Hardening
+
+- Hermes Intent Control Plane v1.2 Evidence Semantics Hardening is COMPLETE.
+- Status: `HERMES_INTENT_CONTROL_PLANE_V1_2=EVIDENCE_SEMANTICS_HARDENED`.
+- All requirements from HEALBITE-PROD-R02A-ICP-001 are fulfilled:
+  - **Artifact Byte Verifier**: Implemented `ai_engineering/evidence_verifier.py` providing fail-closed byte-binding for artifacts (`ArtifactVerificationError`).
+  - **Evidence Sufficiency Review**: Implemented `ai_engineering/sufficiency_review.py` for semantic adjudication, ensuring `INDEPENDENT_AGENT` is distinct from `HUMAN` and cannot authorize critical production behavior alone (AI6 compliance).
+  - **Receipt Schemas**: Implemented `ExecutionAuthorityReceipt` and `EvidenceCollectionReceipt` with deterministic content hashing.
+  - **Convergence v2**: Implemented `ai_engineering/convergence_v2.py`. `HIGH_RISK_PRODUCTION_DEPLOYMENT_OR_MIGRATION` tasks with `PASS` evidence but no sufficiency review evaluate to `EVIDENCED_UNREVIEWED` and do not converge. V1 backwards compatibility maintained.
+- **Dogfood #1 Replay (Offline)**:
+  - Adjudication and offline replay docs successfully completed and checked into `docs/dogfood`.
+  - Replay confirmed that missing sufficiency review on Dogfood #1 (AC4/AC9 gaps) causes fail-closed `NOT_CONVERGED` via Convergence v2.
+  - No new runtime evidence was collected, and no production/WSL systems were accessed.
+- Validated via 100% green test suite (466 tests passed).
+
 ## Hermes Intent Control Plane — Operational Hardening v1.1
 
 - Hermes Intent Control Plane Operational Hardening v1.1 is COMPLETE_AND_MERGED (PR #177, commit `60b403723dcdc49261f3ff99ae580d64e747cb00`).

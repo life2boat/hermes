@@ -41,6 +41,9 @@ def ensure_parent_directory(parent_path: str = "/etc/hermes") -> None:
             if exc.errno != errno.EEXIST:
                 raise ParentDirError(f"mkdir failed: {exc}")
 
+        if stat.S_ISLNK(os.lstat(parent_path).st_mode):
+            raise ParentDirError("Target is a symlink")
+
         # Open child to verify identity
         child_flags = os.O_RDONLY
         if _IS_LINUX:
@@ -56,8 +59,6 @@ def ensure_parent_directory(parent_path: str = "/etc/hermes") -> None:
         finally:
             os.close(child_fd)
 
-        if stat.S_ISLNK(os.lstat(parent_path).st_mode):
-            raise ParentDirError("Target is a symlink")
         if not stat.S_ISDIR(child_st.st_mode):
             raise ParentDirError("Target is not a directory")
         if child_st.st_uid != PARENT_REQUIRED_UID:

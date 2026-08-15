@@ -123,7 +123,7 @@ def _get_pid_namespace(pid: int) -> int:
 
 def _read_pid_cgroup(pid: int) -> str:
     try:
-        with open(f"/proc/{pid}/cgroup", "r") as f:
+        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
             return f.read()
     except OSError as exc:
         raise ProcessIdentityError(f"Cannot read cgroup for {pid}: {exc}")

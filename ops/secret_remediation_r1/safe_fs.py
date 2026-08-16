@@ -590,7 +590,7 @@ def replace_existing_file(
                 if rm_exc.errno != errno.ENOENT:
                     cleanup_incomplete = True
 
-        if _IS_LINUX:
+        if _IS_LINUX and dirfd != -1:
             try:
                 os.fsync(dirfd)
             except OSError as sync_exc:

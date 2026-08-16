@@ -343,8 +343,8 @@ def publish_file(
         if _IS_LINUX:
             try:
                 os.fsync(dirfd)
-            except OSError:
-                pass # Sync failure on cleanup isn't itself an incomplete state if unlink succeeded
+            except OSError as sync_exc:
+                cleanup_incomplete = True
 
         if cleanup_incomplete and not getattr(exc, 'cleanup_incomplete', False):
             raise SafeFsError(f"{exc} | CLEANUP_INCOMPLETE=true", cleanup_incomplete=True) from exc

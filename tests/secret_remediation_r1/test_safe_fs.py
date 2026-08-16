@@ -387,3 +387,33 @@ def test_safe_fs_metadata_verification_failure_cleans_publication(tmp_path, monk
         publish_file(str(dest), b"content")
 
     assert not dest.exists()
+
+@pytest.mark.skipif(not _IS_LINUX, reason="Linux only test")
+def test_safe_fs_cleanup_fsync_failure_propagates(tmp_path, monkeypatch):
+    dest = tmp_path / "dest.txt"
+
+    # Force an earlier controlled failure to enter cleanup
+    def mock_write(*args):
+        raise OSError("Controlled write failure")
+    monkeypatch.setattr(os, "write", mock_write)
+
+    # Allow required cleanup unlink(s)
+    orig_unlink = os.unlink
+    def mock_unlink(path, *args, **kwargs):
+        return orig_unlink(path, *args, **kwargs)
+    monkeypatch.setattr(os, "unlink", mock_unlink)
+
+    # Force parent-directory fsync to raise OSError
+    orig_fsync = os.fsync
+    def mock_fsync(fd):
+        # We only want to fail during the cleanup fsync, but since write fails,
+        # the normal tmp_fd fsync is never reached anyway.
+        # We fail all fsyncs to ensure the directory fsync fails.
+        raise OSError("Fsync failed during cleanup")
+    monkeypatch.setattr(os, "fsync", mock_fsync)
+
+    with pytest.raises(SafeFsError) as excinfo:
+        publish_file(str(dest), b"content")
+
+    assert excinfo.value.cleanup_incomplete is True
+    assert "CLEANUP_INCOMPLETE" in str(excinfo.value)

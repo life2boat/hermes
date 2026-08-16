@@ -81,8 +81,12 @@ def transform_override(
     if non_protected_orig != new_lines:
         raise OverrideTransformError("Unrelated byte mutation detected")
 
+    from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
     try:
-        publish_file(destination_path, new_bytes, mode=0o644)
+        if source_path == destination_path:
+            replace_existing_file(destination_path, new_bytes)
+        else:
+            publish_file(destination_path, new_bytes, mode=0o644)
     except SafeFsError as exc:
         raise OverrideTransformError(f"Publication failed: {exc}") from exc
 

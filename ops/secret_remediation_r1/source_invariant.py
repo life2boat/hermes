@@ -88,3 +88,67 @@ def verify_source_invariant(
             raise SourceInvariantError(
                 f"Secret file mode={oct(secret_st.st_mode & 0o777)}, expected 0600"
             )
+
+    # Enforce no keys dropped or added during split
+    def _parse_bytes_keys(b: bytes) -> set[str]:
+        keys = set()
+        for line in b.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(b"#"):
+                continue
+            if b"=" in stripped:
+                keys.add(stripped.split(b"=", 1)[0].strip().decode("utf-8", errors="ignore"))
+        return keys
+
+    legacy_keys = _parse_bytes_keys(prestate.legacy_env_bytes)
+    dashscope_before = "DASHSCOPE_API_KEY" in legacy_keys
+    
+    secret_keys = _read_env_keys(secret_file_path)
+    combined_keys = runtime_keys | secret_keys
+    
+    if legacy_keys != combined_keys:
+        missing = legacy_keys - combined_keys
+        added = combined_keys - legacy_keys
+        raise SourceInvariantError(f"Keys mismatch after split. Missing: {missing}, Added: {added}")
+        
+    dashscope_after = "DASHSCOPE_API_KEY" in combined_keys
+    if prestate.dashscope_present_before != dashscope_after:
+        raise SourceInvariantError("dashscope_present_before != dashscope_after")
+        
+    # Wait, secret_keys_before == secret_keys_after
+    secret_keys_before = legacy_keys & PROTECTED_NAMES
+    secret_keys_after = secret_keys & PROTECTED_NAMES
+    if secret_keys_before != secret_keys_after:
+        raise SourceInvariantError(f"Secret keys changed: {secret_keys_before} != {secret_keys_after}")
+
+    # Enforce no keys dropped or added during split
+    def _parse_bytes_keys(b: bytes) -> set[str]:
+        keys = set()
+        for line in b.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(b"#"):
+                continue
+            if b"=" in stripped:
+                keys.add(stripped.split(b"=", 1)[0].strip().decode("utf-8", errors="ignore"))
+        return keys
+
+    legacy_keys = _parse_bytes_keys(prestate.legacy_env_bytes)
+    dashscope_before = "DASHSCOPE_API_KEY" in legacy_keys
+    
+    secret_keys = _read_env_keys(secret_file_path)
+    combined_keys = runtime_keys | secret_keys
+    
+    if legacy_keys != combined_keys:
+        missing = legacy_keys - combined_keys
+        added = combined_keys - legacy_keys
+        raise SourceInvariantError(f"Keys mismatch after split. Missing: {missing}, Added: {added}")
+        
+    dashscope_after = "DASHSCOPE_API_KEY" in combined_keys
+    if prestate.dashscope_present_before != dashscope_after:
+        raise SourceInvariantError("dashscope_present_before != dashscope_after")
+        
+    # Wait, secret_keys_before == secret_keys_after
+    secret_keys_before = legacy_keys & PROTECTED_NAMES
+    secret_keys_after = secret_keys & PROTECTED_NAMES
+    if secret_keys_before != secret_keys_after:
+        raise SourceInvariantError(f"Secret keys changed: {secret_keys_before} != {secret_keys_after}")

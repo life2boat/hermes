@@ -31,3 +31,12 @@ def test_secret_lf_reject():
 def test_secret_execute_required():
     res = parse_protected_env(b"TELEGRAM_BOT_TOKEN=123\x00GEMINI_API_KEY=abc\x00")
     assert set(res) == {b"TELEGRAM_BOT_TOKEN=123\n", b"GEMINI_API_KEY=abc\n"}
+
+
+import pytest
+from ops.secret_remediation_r1.secret_transfer import parse_protected_env, SecretTransferError
+
+def test_secret_empty_value_reject():
+    env_bytes = b"TELEGRAM_BOT_TOKEN=\x00"
+    with pytest.raises(SecretTransferError, match="Empty value for protected secret: TELEGRAM_BOT_TOKEN"):
+        parse_protected_env(env_bytes)

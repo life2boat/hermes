@@ -2,7 +2,7 @@ import os
 import pytest
 from ops.secret_remediation_r1.rollback import capture_prestate, _restore_file, RollbackError
 
-def test_rollback_restore_base_exact_bytes(tmp_path):
+def test_rollback_restore_base_exact_bytes(tmp_path, monkeypatch):
     base = tmp_path / "base.yml"
     base.write_bytes(b"base")
     override = tmp_path / "override.yml"
@@ -10,6 +10,14 @@ def test_rollback_restore_base_exact_bytes(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
     
+    legacy = tmp_path / "legacy.env"
+    legacy.write_bytes(b"legacy")
+    import ops.secret_remediation_r1.constants as constants
+    monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
+    legacy = tmp_path / "legacy.env"
+    legacy.write_bytes(b"legacy")
+    import ops.secret_remediation_r1.constants as constants
+    monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
     prestate = capture_prestate(str(base), str(override), str(parent))
     
     base.write_bytes(b"mutated")
@@ -17,7 +25,7 @@ def test_rollback_restore_base_exact_bytes(tmp_path):
     
     assert base.read_bytes() == b"base"
 
-def test_rollback_restore_override_exact_bytes(tmp_path):
+def test_rollback_restore_override_exact_bytes(tmp_path, monkeypatch):
     base = tmp_path / "base.yml"
     base.write_bytes(b"base")
     override = tmp_path / "override.yml"
@@ -25,6 +33,14 @@ def test_rollback_restore_override_exact_bytes(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
     
+    legacy = tmp_path / "legacy.env"
+    legacy.write_bytes(b"legacy")
+    import ops.secret_remediation_r1.constants as constants
+    monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
+    legacy = tmp_path / "legacy.env"
+    legacy.write_bytes(b"legacy")
+    import ops.secret_remediation_r1.constants as constants
+    monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
     prestate = capture_prestate(str(base), str(override), str(parent))
     
     override.write_bytes(b"mutated")
@@ -64,6 +80,7 @@ def test_rollback_remove_new_runtime_file(tmp_path, monkeypatch):
     # Mock open and other things to avoid test fail
     
     prestate = RemediationPrestate(
+        legacy_env_bytes=b"legacy",
         base_compose_bytes=b"base",
         base_compose_path=str(base),
         override_bytes=b"override",
@@ -101,6 +118,7 @@ def test_rollback_parent_not_empty_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "PROD_PARENT_DIR_PATH", str(parent))
     
     prestate = RemediationPrestate(
+        legacy_env_bytes=b"legacy",
         base_compose_bytes=b"base",
         base_compose_path=str(base),
         override_bytes=b"override",
@@ -156,6 +174,7 @@ def test_rollback_legacy_env_untouched(tmp_path, monkeypatch):
     monkeypatch.setattr(ops.secret_remediation_r1.health, "check_health", lambda docker=None: None)
     
     prestate = RemediationPrestate(
+        legacy_env_bytes=b"legacy",
         base_compose_bytes=b"base",
         base_compose_path=str(base),
         override_bytes=b"override",

@@ -120,9 +120,12 @@ def transform_base_compose(
     if after_orig != after_new:
         raise ComposeTransformError("Bytes after transform span were mutated")
 
-    from ops.secret_remediation_r1.safe_fs import publish_file
+    from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
     try:
-        publish_file(destination_path, new_bytes, mode=0o644)
+        if source_path == destination_path:
+            replace_existing_file(destination_path, new_bytes)
+        else:
+            publish_file(destination_path, new_bytes, mode=0o644)
     except SafeFsError as exc:
         raise ComposeTransformError(f"Publication failed: {exc}") from exc
 

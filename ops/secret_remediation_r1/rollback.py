@@ -22,6 +22,7 @@ class RemediationPrestate:
     base_compose_path: str
     override_bytes: bytes
     override_path: str
+    legacy_env_bytes: bytes
     base_compose_mode: int
     override_mode: int
     created_parent_dir: bool  # True if /etc/hermes was newly created
@@ -37,12 +38,19 @@ def capture_prestate(
     Fails if any expected artifact is missing or if new artifacts already exist.
     """
     from ops.secret_remediation_r1.safe_fs import safe_open_source
-    from ops.secret_remediation_r1.constants import PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH
+    from ops.secret_remediation_r1.constants import PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH, PROD_LEGACY_ENV_PATH
 
     # Verify expected-absent files are indeed absent
     for path in [PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH]:
         if os.path.exists(path):
             raise RollbackError(f"Expected-absent file already exists: {path}")
+
+    # Capture legacy env
+    try:
+        with open(PROD_LEGACY_ENV_PATH, "rb") as f:
+            legacy_env_bytes = f.read()
+    except Exception as exc:
+        raise RollbackError(f"Failed to capture legacy env: {exc}")
 
     # Capture base compose
     try:
@@ -69,6 +77,7 @@ def capture_prestate(
         base_compose_path=base_compose_path,
         override_bytes=override_bytes,
         override_path=override_path,
+        legacy_env_bytes=legacy_env_bytes,
         base_compose_mode=base_mode,
         override_mode=override_mode,
         created_parent_dir=parent_created,
@@ -155,13 +164,10 @@ def execute_rollback(
         )
 
 
+from ops.secret_remediation_r1.safe_fs import replace_existing_file
+
 def _restore_file(path: str, content: bytes, mode: int) -> None:
-    tmp = path + ".rollback_tmp"
-    with open(tmp, "wb") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    replace_existing_file(path, content, override_mode=mode)
     try:
         os.chmod(path, mode)
     except OSError:

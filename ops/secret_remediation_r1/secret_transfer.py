@@ -42,6 +42,10 @@ def parse_protected_env(env_bytes: bytes) -> list[bytes]:
             raise SecretTransferError(f"Duplicate protected name: {key}")
         seen_protected[key] = True
 
+        # Reject empty values
+        if not value_bytes:
+            raise SecretTransferError(f"Empty value for protected secret: {key}")
+
         # Reject unsafe byte sequences
         for unsafe in _UNSAFE_BYTES:
             if unsafe in value_bytes:
@@ -77,9 +81,7 @@ def transfer_secrets(
             content,
             mode=0o600,
             uid=0,
-            gid=0,
             require_uid=0,
-            require_gid=0,
             require_mode=0o600,
         )
     except SafeFsError as exc:

@@ -29,9 +29,8 @@ def verify_runtime_invariants(docker: DockerBackend | None = None) -> None:
     # Image
     labels = data.get("Config", {}).get("Labels", {})
     image_ref = labels.get("com.docker.compose.image", "") or data.get("Config", {}).get("Image", "")
-    if not image_ref:
-        # Try from Name pattern
-        pass
+    if image_ref != LEGACY_IMAGE_REF:
+        raise RuntimeInvariantError(f"Image ref mismatch: {image_ref!r} != {LEGACY_IMAGE_REF!r}")
 
     actual_image_id = data.get("Image", "")
     if actual_image_id != LEGACY_IMAGE_ID:
@@ -59,3 +58,35 @@ def verify_runtime_invariants(docker: DockerBackend | None = None) -> None:
             db_mount_found = True
     if not db_mount_found:
         raise RuntimeInvariantError(f"DB mount not found: {DB_MOUNT_SOURCE!r}")
+
+    # Environment checks
+    env = data.get("Config", {}).get("Env", [])
+    env_dict = {}
+    for entry in env:
+        if "=" in entry:
+            k, v = entry.split("=", 1)
+            env_dict[k] = v
+
+    # Qdrant endpoint/collection and MEMORY_VECTOR_ENABLED
+    if env_dict.get("MEMORY_VECTOR_ENABLED") != "true":
+        raise RuntimeInvariantError(f"MEMORY_VECTOR_ENABLED mismatch: {env_dict.get('MEMORY_VECTOR_ENABLED')}")
+    if "QDRANT_ENDPOINT" not in env_dict or not env_dict["QDRANT_ENDPOINT"]:
+        raise RuntimeInvariantError(f"QDRANT_ENDPOINT missing or empty")
+    if env_dict.get("QDRANT_COLLECTION") != QDRANT_COLLECTION:
+        raise RuntimeInvariantError(f"QDRANT_COLLECTION mismatch: {env_dict.get('QDRANT_COLLECTION')!r} != {QDRANT_COLLECTION!r}")
+
+    # Environment checks
+    env = data.get("Config", {}).get("Env", [])
+    env_dict = {}
+    for entry in env:
+        if "=" in entry:
+            k, v = entry.split("=", 1)
+            env_dict[k] = v
+
+    # Qdrant endpoint/collection and MEMORY_VECTOR_ENABLED
+    if env_dict.get("MEMORY_VECTOR_ENABLED") != "true":
+        raise RuntimeInvariantError(f"MEMORY_VECTOR_ENABLED mismatch: {env_dict.get('MEMORY_VECTOR_ENABLED')}")
+    if "QDRANT_ENDPOINT" not in env_dict or not env_dict["QDRANT_ENDPOINT"]:
+        raise RuntimeInvariantError(f"QDRANT_ENDPOINT missing or empty")
+    if env_dict.get("QDRANT_COLLECTION") != QDRANT_COLLECTION:
+        raise RuntimeInvariantError(f"QDRANT_COLLECTION mismatch: {env_dict.get('QDRANT_COLLECTION')!r} != {QDRANT_COLLECTION!r}")

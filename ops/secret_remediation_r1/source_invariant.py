@@ -85,16 +85,74 @@ class SourceState:
             )
 
 
+
+def _verify_effective_compose(base_path: str, override_path: str) -> None:
+    import subprocess
+    import json
+    r = subprocess.run(
+        ["docker", "compose", "-f", base_path, "-f", override_path, "config", "--format", "json"],
+        capture_output=True, text=True, timeout=10
+    )
+    if r.returncode != 0:
+        raise SourceInvariantError(f"Failed to compile effective compose: {r.stderr}")
+    try:
+        data = json.loads(r.stdout)
+    except Exception as exc:
+        raise SourceInvariantError(f"Failed to parse effective compose JSON: {exc}")
+
+    services = data.get("services", {})
+    bot = services.get("hermes-bot")
+    if not bot:
+        raise SourceInvariantError("hermes-bot service missing in effective compose")
+
+    env_files = bot.get("env_file", [])
+    env_file_paths = []
+    for ef in env_files:
+        if isinstance(ef, str):
+            env_file_paths.append(ef)
+        elif isinstance(ef, dict) and "path" in ef:
+            env_file_paths.append(ef["path"])
+
+    if "/home/hermes/.hermes/.env" in env_file_paths:
+        raise SourceInvariantError("Legacy .env is still active in env_file")
+    if "/etc/hermes/hermes-runtime.env" not in env_file_paths:
+        raise SourceInvariantError("runtime env missing in env_file")
+    if "/etc/hermes/hermes-production.env" not in env_file_paths:
+        raise SourceInvariantError("production secret env missing in env_file")
+
+    env_vars = bot.get("environment", {})
+    if isinstance(env_vars, list):
+        keys = set()
+        for v in env_vars:
+            if "=" in v:
+                keys.add(v.split("=", 1)[0])
+            else:
+                keys.add(v)
+    elif isinstance(env_vars, dict):
+        keys = set(env_vars.keys())
+    else:
+        keys = set()
+
+    protected_inline = keys & PROTECTED_NAMES
+    if protected_inline:
+        raise SourceInvariantError(f"Protected inline environment bindings present: {protected_inline}")
+
+
 def verify_source_invariant(
     prestate: SourceState,
     legacy_env_path: str,
     runtime_env_path: str,
     secret_file_path: str,
+    base_compose_path: str | None = None,
+    override_compose_path: str | None = None,
 ) -> None:
     """Verify all post-remediation source invariants.
 
     Raises SourceInvariantError on any violation.
     """
+    if base_compose_path and override_compose_path:
+        _verify_effective_compose(base_compose_path, override_compose_path)
+
     # A. Legacy .env bytes must be unchanged.
     try:
         fd, _ = safe_open_source(legacy_env_path)

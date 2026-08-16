@@ -56,7 +56,8 @@ def test_read_poller_environ_ordering(monkeypatch):
         def inspect(self, name):
             self.calls += 1
             if self.calls == 1:
-                return [{"Id": "cid", "State": {"Running": True}}]
+                from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+                return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
             elif self.calls == 2:
                 # second call fails (e.g. stopped)
                 return [{"Id": "cid", "State": {"Running": False}}]
@@ -65,10 +66,14 @@ def test_read_poller_environ_ordering(monkeypatch):
         def container_pids(self, name): return []
         
     docker = TrackBackend()
-    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id="img", running=True)
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
     
     # mock os.read etc
     import os
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
     monkeypatch.setattr(os, "lstat", lambda p: None)
     monkeypatch.setattr(os, "open", lambda p, f: 99)
     monkeypatch.setattr(os, "close", lambda fd: None)
@@ -92,3 +97,175 @@ def test_read_poller_environ_ordering(monkeypatch):
     # ensure _revalidate was called AFTER read as well
     assert docker.calls == 2
     assert mock_read.calls == 2
+
+
+
+def test_revalidate_container_id_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+            else:
+                return [{"Id": "NEW_cid", "State": {"Running": True}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="Container ID changed"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+
+def test_revalidate_project_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+            else:
+                return [{"Id": "cid", "State": {"Running": True}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": "MUTATED", "com.docker.compose.service": COMPOSE_SERVICE}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="Wrong compose project"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+
+def test_revalidate_service_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+            else:
+                return [{"Id": "cid", "State": {"Running": True}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": "MUTATED"}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="Wrong compose service"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+
+def test_revalidate_image_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+            else:
+                return [{"Id": "cid", "State": {"Running": True}, "Image": "MUTATED", "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="Wrong image ID"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+
+def test_revalidate_pid_namespace_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    def mock_get_ns(p):
+        if docker.calls == 1: return 100
+        return 100 if p == 1 else 999
+    monkeypatch.setattr(pi, "_get_pid_namespace", mock_get_ns)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="PID namespace mismatch"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+
+def test_revalidate_cgroup_mutation(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    from ops.secret_remediation_r1.constants import COMPOSE_PROJECT, COMPOSE_SERVICE, LEGACY_IMAGE_ID
+    import os
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+        def inspect(self, name):
+            self.calls += 1
+            return [{"Id": "cid", "State": {"Running": True, "Pid": 1}, "Image": LEGACY_IMAGE_ID, "Config": {"Labels": {"com.docker.compose.project": COMPOSE_PROJECT, "com.docker.compose.service": COMPOSE_SERVICE}}}]
+        def container_pids(self, name): return []
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id=LEGACY_IMAGE_ID, running=True)
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(os, "read", lambda fd, n: b"" if hasattr(os, "_read_done") else (setattr(os, "_read_done", True) or b"data"))
+    import ops.secret_remediation_r1.process_identity as pi
+    monkeypatch.setattr(pi, "_get_container_init_pid", lambda d: 1)
+    monkeypatch.setattr(pi, "_get_pid_namespace", lambda p: 100)
+    monkeypatch.setattr(pi, "_read_pid_cgroup", lambda p: "cid" if docker.calls == 1 else "MUTATED")
+    monkeypatch.setattr(pi, "_find_poller_processes", lambda: [123])
+    with pytest.raises(ProcessIdentityError, match="cgroup mismatch"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)

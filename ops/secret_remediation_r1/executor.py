@@ -101,7 +101,14 @@ def run_remediation(
             legacy_env_bytes=prestate.legacy_env_bytes,
             dashscope_present_before="DASHSCOPE_API_KEY" in _legacy_keys,
         )
-        verify_source_invariant(source_state, PROD_LEGACY_ENV_PATH, PROD_RUNTIME_ENV_PATH, PROD_SECRET_FILE_PATH)
+        verify_source_invariant(
+            source_state,
+            PROD_LEGACY_ENV_PATH,
+            PROD_RUNTIME_ENV_PATH,
+            PROD_SECRET_FILE_PATH,
+            base_compose_path,
+            override_path,
+        )
         verify_runtime_invariants(docker=docker)
         check_exactly_one_poller(docker=docker)
         check_health(docker=docker)

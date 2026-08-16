@@ -211,6 +211,7 @@ def read_poller_environ(
     if docker is None:
         docker = RealDockerBackend()
 
+
     def _revalidate() -> None:
         if not _pid_exists(pid):
             raise ProcessIdentityError(f"PID {pid} no longer exists")
@@ -218,12 +219,34 @@ def read_poller_environ(
             containers = docker.inspect(CONTAINER_NAME)
         except Exception as exc:
             raise ProcessIdentityError(f"Re-inspection failed: {exc}")
-        data = containers[0] if containers else {}
+        if not containers:
+            raise ProcessIdentityError(f"Container {CONTAINER_NAME!r} no longer exists")
+        
+        data = containers[0]
         if data.get("Id") != identity.container_id:
             raise ProcessIdentityError("Container ID changed during operation")
         if not data.get("State", {}).get("Running"):
             raise ProcessIdentityError("Container stopped during operation")
-
+            
+        _verify_compose_labels(data.get("Config", {}).get("Labels", {}))
+        _verify_image(data)
+        
+        init_pid = _get_container_init_pid(data)
+        if init_pid != identity.init_pid:
+            raise ProcessIdentityError("Container init PID changed")
+            
+        init_ns = _get_pid_namespace(init_pid)
+        pid_ns = _get_pid_namespace(pid)
+        if pid_ns != init_ns:
+            raise ProcessIdentityError("PID namespace mismatch during revalidation")
+            
+        cgroup = _read_pid_cgroup(pid)
+        if identity.container_id not in cgroup and identity.container_id[:12] not in cgroup:
+            raise ProcessIdentityError("cgroup mismatch during revalidation")
+            
+        poller_pids = _find_poller_processes()
+        if pid not in poller_pids:
+            raise ProcessIdentityError("PID is no longer a valid poller process")
     # Validate before
     _revalidate()
 

@@ -22,14 +22,14 @@ from ops.secret_remediation_r1.source_invariant import (
 )
 
 
-def _real_stat_with_overrides(path: str, *, st_mode: int, st_uid: int) -> os.stat_result:
+def _real_stat_with_overrides(path: str, original_lstat, *, st_mode: int, st_uid: int) -> os.stat_result:
     """Return a real os.stat_result with st_mode and st_uid replaced.
 
     All other fields (st_ino, st_dev, st_size, st_atime, st_mtime, st_ctime,
     st_nlink, st_gid) come from the real lstat, so that safe_open_source()'s
     lstat/fstat identity check (st_ino + st_dev) sees consistent values on Linux.
     """
-    real = os.lstat(path)
+    real = original_lstat(path)
     return os.stat_result((
         st_mode,
         real.st_ino,
@@ -69,7 +69,7 @@ def _patch_lstat(monkeypatch, secret_path, mode, uid):
 
     def mock_lstat(path, *, dir_fd=None, follow_symlinks=True):
         if str(path) == str(secret_path):
-            return _real_stat_with_overrides(str(secret_path), st_mode=mode, st_uid=uid)
+            return _real_stat_with_overrides(str(secret_path), original_lstat, st_mode=mode, st_uid=uid)
         # Delegate everything else to the real lstat.
         return original_lstat(path)
 
@@ -227,3 +227,99 @@ def test_dashscope_preserved_when_present(tmp_path, monkeypatch):
 
     # Should not raise
     verify_source_invariant(prestate, str(legacy), str(runtime), str(secret))
+
+
+
+def test_verify_effective_compose_success(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import _verify_effective_compose
+
+    class MockRun:
+        def __init__(self, stdout, returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = ""
+    
+    config = {
+        "services": {
+            "hermes-bot": {
+                "env_file": [
+                    "/etc/hermes/hermes-runtime.env",
+                    "/etc/hermes/hermes-production.env"
+                ],
+                "environment": {
+                    "NORMAL_VAR": "val"
+                }
+            }
+        }
+    }
+
+    def mock_run(*args, **kwargs):
+        return MockRun(json.dumps(config))
+    
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    _verify_effective_compose("base.yml", "override.yml") # Should not raise
+
+def test_verify_effective_compose_legacy_env_file(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import _verify_effective_compose, SourceInvariantError
+
+    class MockRun:
+        def __init__(self, stdout, returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = ""
+    
+    config = {
+        "services": {
+            "hermes-bot": {
+                "env_file": [
+                    "/home/hermes/.hermes/.env",
+                    "/etc/hermes/hermes-runtime.env",
+                    "/etc/hermes/hermes-production.env"
+                ],
+            }
+        }
+    }
+
+    def mock_run(*args, **kwargs):
+        return MockRun(json.dumps(config))
+    
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(SourceInvariantError, match="Legacy .env is still active"):
+        _verify_effective_compose("base.yml", "override.yml")
+
+def test_verify_effective_compose_protected_inline(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import _verify_effective_compose, SourceInvariantError
+
+    class MockRun:
+        def __init__(self, stdout, returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = ""
+    
+    config = {
+        "services": {
+            "hermes-bot": {
+                "env_file": [
+                    "/etc/hermes/hermes-runtime.env",
+                    "/etc/hermes/hermes-production.env"
+                ],
+                "environment": {
+                    "TELEGRAM_BOT_TOKEN": "leak"
+                }
+            }
+        }
+    }
+
+    def mock_run(*args, **kwargs):
+        return MockRun(json.dumps(config))
+    
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(SourceInvariantError, match="Protected inline environment bindings present"):
+        _verify_effective_compose("base.yml", "override.yml")
+

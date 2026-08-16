@@ -256,7 +256,7 @@ def publish_file(
                             os.unlink(tmp_path)
                     except OSError as exc:
                         if exc.errno != errno.ENOENT:
-                            raise SafeFsError("Failed to unlink temp file", cleanup_incomplete=True) from exc
+                            raise SafeFsError("CLEANUP_INCOMPLETE: Failed to unlink temp file", cleanup_incomplete=True) from exc
                 tmp_basename = None
 
             except FileExistsError:

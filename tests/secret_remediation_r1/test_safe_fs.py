@@ -170,14 +170,9 @@ def test_safe_fs_temp_substitution_fails(tmp_path, monkeypatch):
         res = orig_stat(path, *args, **kwargs)
         if str(path).startswith(".tmp_") and kwargs.get("follow_symlinks") is False:
             # modify stat result to simulate substitution
-            class FakeStat(os.stat_result):
-                def __init__(self, orig):
-                    self.orig = orig
-                def __getattr__(self, name):
-                    if name == "st_ino":
-                        return self.orig.st_ino + 1
-                    return getattr(self.orig, name)
-            return FakeStat(res)
+            res_list = list(res)
+            res_list[1] += 1 # st_ino is index 1
+            return os.stat_result(res_list)
         return res
     monkeypatch.setattr(os, "stat", mock_stat)
 
@@ -210,14 +205,9 @@ def test_safe_fs_final_inode_identity(tmp_path, monkeypatch):
         res = orig_fstat(fd)
         call_count += 1
         if call_count == 3: # The final fstat
-            class FakeStat(os.stat_result):
-                def __init__(self, orig):
-                    self.orig = orig
-                def __getattr__(self, name):
-                    if name == "st_ino":
-                        return self.orig.st_ino + 1
-                    return getattr(self.orig, name)
-            return FakeStat(res)
+            res_list = list(res)
+            res_list[1] += 1 # st_ino is index 1
+            return os.stat_result(res_list)
         return res
     monkeypatch.setattr(os, "fstat", mock_fstat)
 
@@ -256,14 +246,9 @@ def test_safe_fs_destination_cleanup_failure_propagates(tmp_path, monkeypatch):
         res = orig_fstat(fd)
         call_count += 1
         if call_count == 3: # fail final verification to trigger cleanup
-            class FakeStat(os.stat_result):
-                def __init__(self, orig):
-                    self.orig = orig
-                def __getattr__(self, name):
-                    if name == "st_ino":
-                        return self.orig.st_ino + 1
-                    return getattr(self.orig, name)
-            return FakeStat(res)
+            res_list = list(res)
+            res_list[1] += 1 # st_ino
+            return os.stat_result(res_list)
         return res
 
     monkeypatch.setattr(os, "unlink", mock_unlink)
@@ -392,14 +377,9 @@ def test_safe_fs_metadata_verification_failure_cleans_publication(tmp_path, monk
         res = orig_fstat(fd)
         call_count += 1
         if call_count == 3: # final verification
-            class FakeStat(os.stat_result):
-                def __init__(self, orig):
-                    self.orig = orig
-                def __getattr__(self, name):
-                    if name == "st_mode":
-                        return stat.S_IFDIR | 0o755 # force non-regular
-                    return getattr(self.orig, name)
-            return FakeStat(res)
+            res_list = list(res)
+            res_list[0] = stat.S_IFDIR | 0o755 # force non-regular (st_mode is index 0)
+            return os.stat_result(res_list)
         return res
     monkeypatch.setattr(os, "fstat", mock_fstat)
 

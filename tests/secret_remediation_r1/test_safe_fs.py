@@ -316,9 +316,9 @@ def test_safe_fs_parent_fsync_after_cleanup(tmp_path, monkeypatch):
 @pytest.mark.skipif(not _IS_LINUX, reason="Linux only test")
 def test_safe_fs_fd_cleanup_success(tmp_path, monkeypatch):
     orig_close = os.close
-    closes = set()
+    closes = list()
     def mock_close(fd):
-        closes.add(fd)
+        closes.append(fd)
         return orig_close(fd)
     monkeypatch.setattr(os, "close", mock_close)
 
@@ -331,9 +331,9 @@ def test_safe_fs_fd_cleanup_success(tmp_path, monkeypatch):
 @pytest.mark.skipif(not _IS_LINUX, reason="Linux only test")
 def test_safe_fs_fd_cleanup_failure_path(tmp_path, monkeypatch):
     orig_close = os.close
-    closes = set()
+    closes = list()
     def mock_close(fd):
-        closes.add(fd)
+        closes.append(fd)
         return orig_close(fd)
 
     def mock_write(*args):

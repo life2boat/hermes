@@ -1,5 +1,6 @@
 """Fail-closed Linux-safe filesystem publication primitive."""
 from __future__ import annotations
+
 import errno
 import os
 import secrets
@@ -13,6 +14,7 @@ _IS_LINUX = os.name == "posix" and hasattr(os, "O_NOFOLLOW")
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_PATH = getattr(os, "O_PATH", 0)  # Linux-only
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 
 class SafeFsError(Exception):
@@ -48,7 +50,7 @@ def safe_open_source(path: str) -> tuple[int, os.stat_result]:
     if not stat.S_ISREG(st_lstat.st_mode):
         raise SafeFsError(f"Source is not a regular file: {path}")
 
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | _O_BINARY
     if _IS_LINUX:
         flags |= _O_NOFOLLOW
     try:
@@ -86,10 +88,10 @@ def _open_parent_dirfd(parent: str) -> tuple[int, os.stat_result]:
     if not stat.S_ISDIR(parent_lstat.st_mode):
         raise SafeFsError(f"Parent is not a directory: {parent}")
 
-    if _IS_LINUX:
-        flags = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
-    else:
-        flags = os.O_RDONLY
+    if not _IS_LINUX:
+        return -1, parent_lstat
+
+    flags = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW
 
     try:
         dirfd = os.open(parent, flags)
@@ -102,13 +104,12 @@ def _open_parent_dirfd(parent: str) -> tuple[int, os.stat_result]:
         os.close(dirfd)
         raise SafeFsError(f"fstat parent failed: {exc}")
 
-    if _IS_LINUX:
-        if parent_lstat.st_ino != dirfd_fstat.st_ino or parent_lstat.st_dev != dirfd_fstat.st_dev:
-            os.close(dirfd)
-            raise SafeFsError("Parent lstat/fstat identity mismatch")
-        if not stat.S_ISDIR(dirfd_fstat.st_mode):
-            os.close(dirfd)
-            raise SafeFsError("Parent fstat shows non-directory")
+    if parent_lstat.st_ino != dirfd_fstat.st_ino or parent_lstat.st_dev != dirfd_fstat.st_dev:
+        os.close(dirfd)
+        raise SafeFsError("Parent lstat/fstat identity mismatch")
+    if not stat.S_ISDIR(dirfd_fstat.st_mode):
+        os.close(dirfd)
+        raise SafeFsError("Parent fstat shows non-directory")
 
     return dirfd, dirfd_fstat
 
@@ -135,7 +136,7 @@ def publish_file(
     - Cleanup failure propagates CLEANUP_INCOMPLETE.
     """
     basename = os.path.basename(destination)
-    if not basename or os.sep in basename or (os.altsep and os.altsep in basename):
+    if not basename or basename in (".", "..") or os.sep in basename or (os.altsep and os.altsep in basename):
         raise SafeFsError(f"Invalid destination basename: {destination!r}")
 
     parent = os.path.dirname(destination)
@@ -144,38 +145,54 @@ def publish_file(
 
     dirfd, _dir_fstat = _open_parent_dirfd(parent)
 
-    tmp_path: Optional[str] = None
+    tmp_basename: Optional[str] = None
     fd: int = -1
     dest_published: bool = False
 
+    # Store inode of the created temp file to verify no substitution occurs
+    temp_inode: Optional[int] = None
+    temp_dev: Optional[int] = None
+
     try:
-        # Verify destination does not already exist
+        # Verify destination does not already exist via dirfd
         try:
-            os.lstat(destination)
-            raise SafeFsError(f"Destination already exists: {destination}")
+            if _IS_LINUX:
+                os.stat(basename, dir_fd=dirfd, follow_symlinks=False)
+            else:
+                os.lstat(destination)
+            raise SafeFsError(f"Destination already exists: {basename}")
         except OSError as exc:
             if exc.errno != errno.ENOENT:
                 raise SafeFsError(f"Unexpected error checking destination: {exc}")
 
         # Generate random temp name
         rand_suffix = secrets.token_hex(16)
-        tmp_path = os.path.join(parent, f".tmp_{rand_suffix}")
+        tmp_basename = f".tmp_{rand_suffix}"
+        tmp_path = os.path.join(parent, tmp_basename)
 
-        # Create temp with O_CREAT|O_EXCL
-        creat_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        # Create temp with O_CREAT|O_EXCL via dirfd
+        creat_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY
         if _IS_LINUX:
             creat_flags |= _O_NOFOLLOW
 
         try:
-            fd = os.open(tmp_path, creat_flags, mode)
+            if _IS_LINUX:
+                fd = os.open(tmp_basename, creat_flags, mode, dir_fd=dirfd)
+            else:
+                fd = os.open(tmp_path, creat_flags, mode)
         except FileExistsError:
             raise SafeFsError("Temp file collision (concurrent creation)")
         except OSError as exc:
             raise SafeFsError(f"Failed to create temp file: {exc}")
 
         try:
-            # Write content
-            os.write(fd, content)
+            # Complete write loop
+            bytes_written = 0
+            while bytes_written < len(content):
+                written = os.write(fd, content[bytes_written:])
+                if written == 0:
+                    raise SafeFsError("Zero bytes written (no progress)")
+                bytes_written += written
 
             # fchmod
             if hasattr(os, "fchmod"):
@@ -193,15 +210,30 @@ def publish_file(
             if not stat.S_ISREG(tmp_fstat.st_mode):
                 raise SafeFsError("Temp file is not regular after write")
 
+            temp_inode = tmp_fstat.st_ino
+            temp_dev = tmp_fstat.st_dev
+
             os.close(fd)
             fd = -1
+
+            # Verify temp file identity hasn't been substituted
+            try:
+                if _IS_LINUX:
+                    tmp_lstat = os.stat(tmp_basename, dir_fd=dirfd, follow_symlinks=False)
+                else:
+                    tmp_lstat = os.lstat(tmp_path)
+            except OSError as exc:
+                raise SafeFsError(f"Failed to stat temp file before publish: {exc}")
+
+            if tmp_lstat.st_ino != temp_inode or tmp_lstat.st_dev != temp_dev:
+                raise SafeFsError("Temp file identity substituted before publication")
 
             # Exclusive publication via hard link
             try:
                 if _IS_LINUX and hasattr(os, "link"):
                     os.link(
-                        tmp_path,
-                        destination,
+                        tmp_basename,
+                        basename,
                         src_dir_fd=dirfd,
                         dst_dir_fd=dirfd,
                         follow_symlinks=False,
@@ -211,17 +243,21 @@ def publish_file(
                     if os.path.exists(destination):
                         raise SafeFsError(f"Destination appeared concurrently: {destination}")
                     os.replace(tmp_path, destination)
-                    tmp_path = None  # replaced, no longer at tmp_path
+                    tmp_basename = None  # replaced, no longer at tmp_basename
 
                 dest_published = True
 
                 # Unlink temp (after link it's a separate inode)
-                if tmp_path and os.path.exists(tmp_path):
+                if tmp_basename:
                     try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass  # temp cleanup failure is not critical
-                tmp_path = None
+                        if _IS_LINUX:
+                            os.unlink(tmp_basename, dir_fd=dirfd)
+                        else:
+                            os.unlink(tmp_path)
+                    except OSError as exc:
+                        if exc.errno != errno.ENOENT:
+                            raise SafeFsError("Failed to unlink temp file", cleanup_incomplete=True) from exc
+                tmp_basename = None
 
             except FileExistsError:
                 raise SafeFsError("Concurrent destination creation detected")
@@ -230,23 +266,16 @@ def publish_file(
             if _IS_LINUX:
                 os.fsync(dirfd)
 
-            # Final verification: lstat destination
-            try:
-                dest_lstat = os.lstat(destination)
-            except OSError as exc:
-                raise SafeFsError(f"Destination lstat after publish failed: {exc}")
-
-            if stat.S_ISLNK(dest_lstat.st_mode):
-                raise SafeFsError("Published destination is a symlink")
-            if not stat.S_ISREG(dest_lstat.st_mode):
-                raise SafeFsError("Published destination is not a regular file")
-
-            # Open destination for fstat verification
-            verify_flags = os.O_RDONLY
+            # Final verification
+            # Open destination for fstat verification via dirfd
+            verify_flags = os.O_RDONLY | _O_BINARY
             if _IS_LINUX:
                 verify_flags |= _O_NOFOLLOW
             try:
-                verify_fd = os.open(destination, verify_flags)
+                if _IS_LINUX:
+                    verify_fd = os.open(basename, verify_flags, dir_fd=dirfd)
+                else:
+                    verify_fd = os.open(destination, verify_flags)
             except OSError as exc:
                 raise SafeFsError(f"Failed to open destination for verification: {exc}")
             try:
@@ -256,6 +285,9 @@ def publish_file(
 
             if not stat.S_ISREG(verify_fstat.st_mode):
                 raise SafeFsError("Destination verify fstat: not regular")
+
+            if temp_inode is not None and (verify_fstat.st_ino != temp_inode or verify_fstat.st_dev != temp_dev):
+                raise SafeFsError("Final verification inode identity mismatch")
 
             if require_uid is not None and verify_fstat.st_uid != require_uid:
                 raise SafeFsError(f"Destination uid {verify_fstat.st_uid} != required {require_uid}")
@@ -274,20 +306,49 @@ def publish_file(
             )
 
         except SafeFsError:
+            if fd != -1:
+                try: os.close(fd); fd = -1
+                except OSError: pass
             raise
         except Exception as exc:
+            if fd != -1:
+                try: os.close(fd); fd = -1
+                except OSError: pass
             raise SafeFsError(str(exc)) from exc
 
     except SafeFsError as exc:
         # Cleanup: if destination was published, try to unlink it
-        if dest_published and os.path.exists(destination):
+        cleanup_incomplete = getattr(exc, 'cleanup_incomplete', False)
+
+        if dest_published:
             try:
-                os.unlink(destination)
+                if _IS_LINUX:
+                    os.unlink(basename, dir_fd=dirfd)
+                else:
+                    os.unlink(destination)
+            except OSError as rm_exc:
+                if rm_exc.errno != errno.ENOENT:
+                    cleanup_incomplete = True
+
+        if tmp_basename is not None:
+            try:
+                if _IS_LINUX:
+                    os.unlink(tmp_basename, dir_fd=dirfd)
+                else:
+                    os.unlink(os.path.join(parent, tmp_basename))
+            except OSError as rm_exc:
+                if rm_exc.errno != errno.ENOENT:
+                    cleanup_incomplete = True
+
+        if _IS_LINUX:
+            try:
+                os.fsync(dirfd)
             except OSError:
-                raise SafeFsError(
-                    f"{exc} | CLEANUP_INCOMPLETE=true",
-                    cleanup_incomplete=True,
-                ) from exc
+                pass # Sync failure on cleanup isn't itself an incomplete state if unlink succeeded
+
+        if cleanup_incomplete and not getattr(exc, 'cleanup_incomplete', False):
+            raise SafeFsError(f"{exc} | CLEANUP_INCOMPLETE=true", cleanup_incomplete=True) from exc
+
         raise
     finally:
         if fd != -1:
@@ -295,10 +356,8 @@ def publish_file(
                 os.close(fd)
             except OSError:
                 pass
-        if tmp_path is not None:
+        if dirfd != -1:
             try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+                os.close(dirfd)
             except OSError:
                 pass
-        os.close(dirfd)

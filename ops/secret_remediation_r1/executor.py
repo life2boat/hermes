@@ -49,6 +49,7 @@ def run_remediation(
     base_compose_path: str = COMPOSE_FILES[0],
     override_path: str = COMPOSE_FILES[3],
     docker=None,
+    image_backend=None,
 ) -> None:
     """
     Execute the full remediation sequence with rollback on any failure.
@@ -86,7 +87,7 @@ def run_remediation(
         eff_image = labels.get("com.docker.compose.image", "") or cdata[0].get(
             "Config", {}
         ).get("Image", "")
-        verify_legacy_image(eff_image)
+        verify_legacy_image(eff_image, backend=image_backend)
 
         transform_base_compose(base_compose_path, base_compose_path)
         transform_override(override_path, override_path)
@@ -99,7 +100,7 @@ def run_remediation(
         eff_image_post = labels_post.get("com.docker.compose.image", "") or cdata_post[
             0
         ].get("Config", {}).get("Image", "")
-        verify_legacy_image(eff_image_post)
+        verify_legacy_image(eff_image_post, backend=image_backend)
 
         # Build SourceState from captured prestate bytes.
         # SourceState.__post_init__ auto-derives legacy_env_name_set and

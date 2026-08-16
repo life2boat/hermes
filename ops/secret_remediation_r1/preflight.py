@@ -12,40 +12,35 @@ class PreflightError(Exception):
 def run_compose_preflight() -> None:
     """
     Synthetically verify that the target environment's docker-compose binary
-    parses .env files in the expected way (e.g., stripping quotes properly)
-    before running the remediation. Fails if the behavior is incompatible.
+    parses env_file values in the exact literal way required for secret transfer.
     """
-    # Create a temporary directory for the preflight
     preflight_dir = tempfile.mkdtemp(prefix="hermes_preflight_")
     try:
-        env_path = os.path.join(preflight_dir, ".env")
+        env_file_test_path = os.path.join(preflight_dir, "my_env_file.env")
         compose_path = os.path.join(preflight_dir, "docker-compose.yml")
 
-        # Test case: variables with and without quotes
-        with open(env_path, "wb") as f:
-            f.write(b'RAW_VAR=val1\nQUOTED_VAR="val2"\n')
-
-        env_file_test_path = os.path.join(preflight_dir, "my_env_file.env")
+        # Our serialization writes EXACT raw bytes, e.g., KEY=VALUE\n
         with open(env_file_test_path, "wb") as f:
-            f.write(b"FILE_VAR=file_val\n")
+            f.write(
+                b"EMBEDDED_EQUALS=a=b=c\n"
+                b"DOLLAR=value$with$dollars\n"
+                b"BACKSLASH=value\\with\\slashes\n"
+                b'QUOTED_OR_SPACE_CASE="quoted string"\n'
+            )
 
         with open(compose_path, "w", encoding="utf-8") as f:
             f.write(
                 "services:\n"
                 "  test:\n"
-                "    image: alpine\n"
+                "    image: healbite-hermes:pr99-main-273b0a6cccaf\n"
                 "    command: echo hello\n"
                 "    env_file:\n"
                 f"      - {os.path.basename(env_file_test_path)}\n"
-                "    environment:\n"
-                "      - RAW_VAR=${RAW_VAR}\n"
-                "      - QUOTED_VAR=${QUOTED_VAR}\n"
             )
 
-        # Run docker-compose config to dump the resolved environment
         try:
-            result = subprocess.run(
-                ["docker", "compose", "config"],
+            subprocess.run(
+                ["docker", "compose", "create", "test"],
                 cwd=preflight_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -53,38 +48,70 @@ def run_compose_preflight() -> None:
                 check=True,
             )
         except subprocess.CalledProcessError as exc:
-            raise PreflightError(f"Compose preflight config failed: {exc.stderr}")
+            # Fallback to alpine if the legacy image isn't local on the tester's machine.
+            # But the constraint says to use a deterministic mechanism supported by CI.
+            raise PreflightError(f"Compose preflight create failed: {exc.stderr}")
         except FileNotFoundError:
             raise PreflightError("docker compose command not found")
 
-        output = result.stdout
+        result = subprocess.run(
+            ["docker", "compose", "ps", "-q", "test"],
+            cwd=preflight_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        container_id = result.stdout.strip()
+        if not container_id:
+            raise PreflightError("Could not get container ID from compose ps")
 
-        # Verify parsing behavior
-        # Expectation: QUOTED_VAR should not include the literal quotes if Compose behaves correctly
-        # Wait, docker-compose v2 strips quotes from .env files for variable substitution.
+        inspect_res = subprocess.run(
+            ["docker", "inspect", container_id],
+            cwd=preflight_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        import json
 
-        # We look for the resolved environment block.
-        if "RAW_VAR: val1" not in output:
+        inspect_data = json.loads(inspect_res.stdout)
+        env_list = inspect_data[0].get("Config", {}).get("Env", [])
+
+        env_dict = {}
+        for e in env_list:
+            if "=" in e:
+                k, v = e.split("=", 1)
+                env_dict[k] = v
+
+        if env_dict.get("EMBEDDED_EQUALS") != "a=b=c":
             raise PreflightError(
-                "Compose preflight failed: RAW_VAR not resolved correctly"
+                "Compose preflight failed: EMBEDDED_EQUALS semantics mismatch"
             )
-        if "QUOTED_VAR: val2" not in output:
-            if (
-                "QUOTED_VAR: '\"val2\"'" in output
-                or 'QUOTED_VAR: "\\"val2\\""' in output
-            ):
-                raise PreflightError(
-                    "Compose preflight failed: Quotes were not stripped from QUOTED_VAR"
-                )
+        if env_dict.get("DOLLAR") != "value$with$dollars":
+            raise PreflightError("Compose preflight failed: DOLLAR semantics mismatch")
+        if env_dict.get("BACKSLASH") != r"value\with\slashes":
             raise PreflightError(
-                "Compose preflight failed: QUOTED_VAR not resolved correctly"
+                "Compose preflight failed: BACKSLASH semantics mismatch"
             )
 
-        # Verify env_file presence in output
-        if "my_env_file.env" not in output:
+        # In our serialization, quotes are literal. If docker-compose strips them, it breaks!
+        # (Actually, standard docker run --env-file treats quotes literally. Compose v2 might strip them
+        # if format is missing, but if it strips them, we fail closed.)
+        if env_dict.get("QUOTED_OR_SPACE_CASE") != '"quoted string"':
             raise PreflightError(
-                "Compose preflight failed: env_file capability not supported or file dropped"
+                "Compose preflight failed: QUOTED_OR_SPACE_CASE semantics mismatch (quotes stripped or space broken)"
             )
+
+        # Cleanup the container
+        subprocess.run(
+            ["docker", "compose", "rm", "-f", "test"],
+            cwd=preflight_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
 
     finally:
         shutil.rmtree(preflight_dir, ignore_errors=True)

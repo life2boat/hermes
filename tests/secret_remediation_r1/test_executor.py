@@ -20,6 +20,22 @@ class MockDockerBackend:
         ]
 
 
+class MockImageBackend:
+    def __init__(self, should_fail=False):
+        self.should_fail = should_fail
+        self.inspected_refs = []
+
+    def inspect_image(self, ref: str) -> dict:
+        self.inspected_refs.append(ref)
+        if self.should_fail:
+            from ops.secret_remediation_r1.candidate_image_guard import (
+                CandidateImageGuardError,
+            )
+
+            raise CandidateImageGuardError("Mock failure")
+        return {"Id": constants.LEGACY_IMAGE_ID}
+
+
 def test_executor_success(tmp_path, monkeypatch):
     base = tmp_path / "base.yml"
     base.write_bytes(
@@ -115,10 +131,6 @@ def test_executor_success(tmp_path, monkeypatch):
 
     import ops.secret_remediation_r1.candidate_image_guard as candidate_image_guard
 
-    monkeypatch.setattr(
-        candidate_image_guard, "verify_legacy_image", lambda *args, **kwargs: None
-    )
-
     monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
 
     def mock_publish(
@@ -160,8 +172,14 @@ def test_executor_success(tmp_path, monkeypatch):
         ),
     )
 
-    run_remediation(str(base), str(override), docker=MockDockerBackend())
-    # Should complete without error
+    mock_image_backend = MockImageBackend()
+    run_remediation(
+        str(base),
+        str(override),
+        docker=MockDockerBackend(),
+        image_backend=mock_image_backend,
+    )
+    assert len(mock_image_backend.inspected_refs) == 2
 
 
 def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
@@ -262,10 +280,6 @@ def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
 
     import ops.secret_remediation_r1.candidate_image_guard as candidate_image_guard
 
-    monkeypatch.setattr(
-        candidate_image_guard, "verify_legacy_image", lambda *args, **kwargs: None
-    )
-
     def mock_publish(
         dest, content, mode=None, uid=None, gid=None, override_mode=None, **kwargs
     ):
@@ -287,7 +301,12 @@ def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(secret_transfer, "publish_file", mock_publish)
 
     with pytest.raises(ExecutorError, match="Health failed"):
-        run_remediation(str(base), str(override), docker=MockDockerBackend())
+        run_remediation(
+            str(base),
+            str(override),
+            docker=MockDockerBackend(),
+            image_backend=MockImageBackend(),
+        )
 
     assert (
         base.read_bytes()
@@ -373,10 +392,6 @@ def test_executor_post_runtime_nameset_missing(tmp_path, monkeypatch):
         "ops.secret_remediation_r1.executor.check_health",
         lambda expected=None, docker=None: None,
     )
-    monkeypatch.setattr(
-        "ops.secret_remediation_r1.candidate_image_guard.verify_legacy_image",
-        lambda *args, **kwargs: None,
-    )
     monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
 
     def mock_publish(
@@ -416,7 +431,12 @@ def test_executor_post_runtime_nameset_missing(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorError, match="Post-recreate protected NAME set mismatch"
     ):
-        run_remediation(str(base), str(override), docker=MockDockerBackend())
+        run_remediation(
+            str(base),
+            str(override),
+            docker=MockDockerBackend(),
+            image_backend=MockImageBackend(),
+        )
 
     # Verify rollback happened (base is restored)
     assert (
@@ -503,10 +523,6 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
         "ops.secret_remediation_r1.executor.check_health",
         lambda expected=None, docker=None: None,
     )
-    monkeypatch.setattr(
-        "ops.secret_remediation_r1.candidate_image_guard.verify_legacy_image",
-        lambda *args, **kwargs: None,
-    )
     monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
 
     def mock_publish(
@@ -548,7 +564,12 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
     with pytest.raises(
         ExecutorError, match="Post-recreate protected NAME set mismatch"
     ):
-        run_remediation(str(base), str(override), docker=MockDockerBackend())
+        run_remediation(
+            str(base),
+            str(override),
+            docker=MockDockerBackend(),
+            image_backend=MockImageBackend(),
+        )
 
     assert (
         base.read_bytes()
@@ -689,7 +710,7 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
     # Guard logic to simulate pre/post check properly
     guard_calls = []
 
-    def mock_verify_legacy(ref):
+    def mock_verify_legacy(ref, backend=None):
         guard_calls.append(ref)
         if failure_stage == "pre_image_guard" and len(guard_calls) == 1:
             raise RuntimeError("pre_image_guard failure")
@@ -797,7 +818,12 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
         )
 
     with pytest.raises(ExecutorError):
-        run_remediation(str(base), str(override), docker=MatrixDockerBackend())
+        run_remediation(
+            str(base),
+            str(override),
+            docker=MatrixDockerBackend(),
+            image_backend=MockImageBackend(),
+        )
 
     # Assert rollback happened (base is restored)
     assert (

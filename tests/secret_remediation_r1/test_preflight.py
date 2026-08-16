@@ -1,72 +1,84 @@
 import pytest
+import json
+import subprocess
 from ops.secret_remediation_r1.preflight import run_compose_preflight, PreflightError
 
 
+def make_mock_run(env_list):
+    def mock_run(cmd, *args, **kwargs):
+        class DummyResult:
+            def __init__(self, stdout=""):
+                self.stdout = stdout
+
+        if cmd == ["docker", "compose", "create", "test"]:
+            return DummyResult()
+        elif cmd == ["docker", "compose", "ps", "-q", "test"]:
+            return DummyResult("mock_id\n")
+        elif cmd == ["docker", "inspect", "mock_id"]:
+            data = [{"Config": {"Env": env_list}}]
+            return DummyResult(json.dumps(data))
+        elif cmd == ["docker", "compose", "rm", "-f", "test"]:
+            return DummyResult()
+        raise RuntimeError(f"Unexpected command: {cmd}")
+
+    return mock_run
+
+
 def test_preflight_success(monkeypatch):
-    import subprocess
-
-    class DummyResult:
-        stdout = "services:\n  test:\n    environment:\n      RAW_VAR: val1\n      QUOTED_VAR: val2\n      my_env_file.env\n"
-
-    def mock_run(*args, **kwargs):
-        return DummyResult()
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
+    env_list = [
+        "EMBEDDED_EQUALS=a=b=c",
+        "DOLLAR=value$with$dollars",
+        "BACKSLASH=value\\with\\slashes",
+        'QUOTED_OR_SPACE_CASE="quoted string"',
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
     run_compose_preflight()
 
 
+def test_preflight_fail_embedded_equals(monkeypatch):
+    env_list = [
+        "EMBEDDED_EQUALS=a",  # Broken semantics
+        "DOLLAR=value$with$dollars",
+        "BACKSLASH=value\\with\\slashes",
+        'QUOTED_OR_SPACE_CASE="quoted string"',
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
+    with pytest.raises(PreflightError, match="EMBEDDED_EQUALS semantics mismatch"):
+        run_compose_preflight()
+
+
+def test_preflight_fail_dollar(monkeypatch):
+    env_list = [
+        "EMBEDDED_EQUALS=a=b=c",
+        "DOLLAR=valuewithdollars",  # Broken semantics (expanded)
+        "BACKSLASH=value\\with\\slashes",
+        'QUOTED_OR_SPACE_CASE="quoted string"',
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
+    with pytest.raises(PreflightError, match="DOLLAR semantics mismatch"):
+        run_compose_preflight()
+
+
 def test_preflight_fail_quoted(monkeypatch):
-    import subprocess
-
-    class DummyResult:
-        stdout = "services:\n  test:\n    environment:\n      RAW_VAR: val1\n      QUOTED_VAR: '\"val2\"'\n      my_env_file.env\n"
-
-    def mock_run(*args, **kwargs):
-        return DummyResult()
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(PreflightError, match="Quotes were not stripped"):
+    env_list = [
+        "EMBEDDED_EQUALS=a=b=c",
+        "DOLLAR=value$with$dollars",
+        "BACKSLASH=value\\with\\slashes",
+        "QUOTED_OR_SPACE_CASE=quoted string",  # Broken semantics (quotes stripped)
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
+    with pytest.raises(PreflightError, match="QUOTED_OR_SPACE_CASE semantics mismatch"):
         run_compose_preflight()
 
 
-def test_preflight_fail_raw(monkeypatch):
-    import subprocess
-
-    class DummyResult:
-        stdout = "services:\n  test:\n    environment:\n      QUOTED_VAR: val2\n      my_env_file.env\n"
-
-    def mock_run(*args, **kwargs):
-        return DummyResult()
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(PreflightError, match="RAW_VAR not resolved"):
-        run_compose_preflight()
-
-
-def test_preflight_command_fail(monkeypatch):
-    import subprocess
-
-    def mock_run(*args, **kwargs):
-        raise subprocess.CalledProcessError(
-            1, "docker compose config", stderr="config error"
-        )
+def test_preflight_command_fail_create(monkeypatch):
+    def mock_run(cmd, *args, **kwargs):
+        if cmd == ["docker", "compose", "create", "test"]:
+            raise subprocess.CalledProcessError(
+                1, "docker compose create test", stderr="create error"
+            )
+        raise RuntimeError("Unexpected command")
 
     monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(PreflightError, match="config error"):
-        run_compose_preflight()
-
-
-def test_preflight_fail_env_file(monkeypatch):
-    import subprocess
-
-    class DummyResult:
-        stdout = "services:\n  test:\n    environment:\n      RAW_VAR: val1\n      QUOTED_VAR: val2\n"
-
-    def mock_run(*args, **kwargs):
-        return DummyResult()
-
-    monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(
-        PreflightError, match="env_file capability not supported or file dropped"
-    ):
+    with pytest.raises(PreflightError, match="create error"):
         run_compose_preflight()

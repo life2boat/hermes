@@ -28,8 +28,7 @@ class RuntimePrestate:
     db_mount_source: str
     db_mount_destination: str
     memory_vector_enabled: str | None
-    qdrant_endpoint: str | None
-    qdrant_collection: str | None
+    qdrant_config: dict[str, str]
 
 
 def _parse_env_list(env_list: list) -> dict[str, str]:
@@ -74,6 +73,14 @@ def capture_runtime_prestate(docker: DockerBackend | None = None) -> RuntimePres
 
     env_dict = _parse_env_list(data.get("Config", {}).get("Env", []))
 
+    from ops.secret_remediation_r1.constants import PROTECTED_NAMES
+
+    qdrant_config = {
+        k: v
+        for k, v in env_dict.items()
+        if k.startswith("QDRANT_") and k not in PROTECTED_NAMES
+    }
+
     return RuntimePrestate(
         container_id=container_id,
         compose_project=compose_project,
@@ -83,8 +90,7 @@ def capture_runtime_prestate(docker: DockerBackend | None = None) -> RuntimePres
         db_mount_source=db_mount_src,
         db_mount_destination=db_mount_dst,
         memory_vector_enabled=env_dict.get("MEMORY_VECTOR_ENABLED"),
-        qdrant_endpoint=env_dict.get("QDRANT_ENDPOINT"),
-        qdrant_collection=env_dict.get("QDRANT_COLLECTION"),
+        qdrant_config=qdrant_config,
     )
 
 
@@ -154,14 +160,15 @@ def verify_runtime_invariants(
             f"MEMORY_VECTOR_ENABLED mismatch: {env_dict.get('MEMORY_VECTOR_ENABLED')!r}"
         )
 
-    # For QDRANT_ENDPOINT, we only check presence and structure if it was present before,
-    # but the instructions say "actual canonical Qdrant runtime configuration field(s)".
-    # If it changed, that's a violation.
-    if env_dict.get("QDRANT_ENDPOINT") != expected.qdrant_endpoint:
-        raise RuntimeInvariantError("QDRANT_ENDPOINT mismatch")
+    from ops.secret_remediation_r1.constants import PROTECTED_NAMES
 
-    if (
-        env_dict.get("QDRANT_COLLECTION") != expected.qdrant_collection
-        or env_dict.get("QDRANT_COLLECTION") != QDRANT_COLLECTION
-    ):
-        raise RuntimeInvariantError(f"QDRANT_COLLECTION mismatch")
+    actual_qdrant_config = {
+        k: v
+        for k, v in env_dict.items()
+        if k.startswith("QDRANT_") and k not in PROTECTED_NAMES
+    }
+
+    if actual_qdrant_config != expected.qdrant_config:
+        raise RuntimeInvariantError(
+            f"Qdrant config mismatch: expected={expected.qdrant_config!r}, actual={actual_qdrant_config!r}"
+        )

@@ -108,7 +108,7 @@ def test_runtime_invariant_memory_vector_missing():
         verify_runtime_invariants(expected=prestate, docker=backend_post)
 
 
-def test_runtime_invariant_qdrant_endpoint_missing():
+def test_runtime_invariant_qdrant_missing():
     backend_pre = MockBackend(get_base_data())
     prestate = capture_runtime_prestate(backend_pre)
     data = get_base_data()
@@ -117,7 +117,7 @@ def test_runtime_invariant_qdrant_endpoint_missing():
         "QDRANT_COLLECTION=healbite_memory_os",
     ]
     backend_post = MockBackend(data)
-    with pytest.raises(RuntimeInvariantError, match="QDRANT_ENDPOINT mismatch"):
+    with pytest.raises(RuntimeInvariantError, match="Qdrant config mismatch"):
         verify_runtime_invariants(expected=prestate, docker=backend_post)
 
 
@@ -128,8 +128,10 @@ def test_runtime_prestate_capture():
     assert prestate.compose_project == COMPOSE_PROJECT
     assert prestate.compose_service == COMPOSE_SERVICE
     assert prestate.memory_vector_enabled == "true"
-    assert prestate.qdrant_endpoint == "http"
-    assert prestate.qdrant_collection == "healbite_memory_os"
+    assert prestate.qdrant_config == {
+        "QDRANT_ENDPOINT": "http",
+        "QDRANT_COLLECTION": "healbite_memory_os",
+    }
 
 
 def test_runtime_vector_changed_rejected():
@@ -156,7 +158,7 @@ def test_runtime_qdrant_changed_rejected():
         "QDRANT_COLLECTION=healbite_memory_os",
     ]
     backend_post = MockBackend(data)
-    with pytest.raises(RuntimeInvariantError, match="QDRANT_ENDPOINT mismatch"):
+    with pytest.raises(RuntimeInvariantError, match="Qdrant config mismatch"):
         verify_runtime_invariants(expected=prestate, docker=backend_post)
 
 

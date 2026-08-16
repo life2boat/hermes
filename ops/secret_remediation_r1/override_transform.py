@@ -13,13 +13,15 @@ class OverrideTransformError(Exception):
 def _find_environment_block(lines: list[str]) -> tuple[int, int]:
     """
     Find services.hermes-bot.environment list items for canonical protected names.
-    Returns (first_protected_line, last_protected_line) indices.
+    Returns list of indices to remove.
     Raises OverrideTransformError if structure not recognized.
     """
     in_services = False
     in_hermes_bot = False
     in_environment = False
     protected_line_indices: list[int] = []
+    found_keys = set()
+    env_block_found = False
 
     for i, line in enumerate(lines):
         stripped = line.rstrip()
@@ -36,22 +38,36 @@ def _find_environment_block(lines: list[str]) -> tuple[int, int]:
         if in_hermes_bot and not in_environment:
             if stripped.strip() == "environment:":
                 in_environment = True
+                env_block_found = True
                 continue
             if stripped and not stripped.startswith("  "):
                 break
 
         if in_environment:
             item_stripped = stripped.lstrip("- ").strip()
-            if stripped.startswith("      -") or stripped.startswith("    -"):
-                # Could be KEY=value or KEY:
+            if stripped.lstrip().startswith("-"):
+                indent = len(line) - len(line.lstrip())
+                if indent not in (4, 6):
+                    raise OverrideTransformError("Ambiguous indentation")
+                
                 key = item_stripped.split("=", 1)[0].split(":", 1)[0].strip()
+                if " " in key:
+                    raise OverrideTransformError("Malformed environment entry")
                 if key in PROTECTED_NAMES:
+                    if key in found_keys:
+                        raise OverrideTransformError("Duplicate protected key found")
+                    found_keys.add(key)
                     protected_line_indices.append(i)
             elif stripped:
                 indent = len(line) - len(line.lstrip())
-                if indent <= 4 and not stripped.lstrip().startswith("-"):
+                if indent > 4:
+                    raise OverrideTransformError("Mapping form environment block not supported")
+                if indent <= 4:
                     break
 
+    if not env_block_found:
+        raise OverrideTransformError("environment block not found")
+        
     return protected_line_indices
 
 

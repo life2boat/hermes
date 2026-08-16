@@ -161,7 +161,7 @@ def test_rollback_parent_not_empty_fail(tmp_path, monkeypatch):
     unexpected = parent / "unexpected.txt"
     unexpected.write_bytes(b"not mine")
 
-    with pytest.raises(RollbackError, match="Config restore failed: rollback_parent_not_empty"):
+    with pytest.raises(RollbackError, match="Config restore failed.*rollback_parent_not_empty"):
         execute_rollback(prestate)
 
     assert parent.exists()

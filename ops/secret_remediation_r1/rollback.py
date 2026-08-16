@@ -5,6 +5,7 @@ TOCTOU races and pathname-based attacks.  No ``os.path.exists``, ``os.unlink``,
 ``os.listdir``, or ``os.rmdir`` on security-sensitive paths; all such operations
 are performed relative to a bound parent ``dirfd``.
 """
+
 from __future__ import annotations
 
 import errno
@@ -130,9 +131,7 @@ def _dirfd_unlink(parent_dirfd: int, basename: str, parent_path: str) -> None:
                 f"dirfd stat of {basename!r} before unlink failed: {exc}"
             )
         if not stat.S_ISREG(child_st.st_mode):
-            raise RollbackError(
-                f"Refusing to unlink non-regular file: {basename!r}"
-            )
+            raise RollbackError(f"Refusing to unlink non-regular file: {basename!r}")
         try:
             os.unlink(basename, dir_fd=parent_dirfd)
         except OSError as exc:
@@ -169,7 +168,9 @@ def _dirfd_rmdir_if_empty(
         try:
             st = os.stat(dir_basename, dir_fd=parent_dirfd, follow_symlinks=False)
             if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-                raise RollbackError(f"Failed to open {dir_basename!r} for empty-check: not a directory or is a symlink")
+                raise RollbackError(
+                    f"Failed to open {dir_basename!r} for empty-check: not a directory or is a symlink"
+                )
             flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -181,7 +182,9 @@ def _dirfd_rmdir_if_empty(
             fst = os.fstat(dir_fd)
             if st.st_ino != fst.st_ino or st.st_dev != fst.st_dev:
                 os.close(dir_fd)
-                raise RollbackError(f"Failed to open {dir_basename!r} for empty-check: identity mismatch")
+                raise RollbackError(
+                    f"Failed to open {dir_basename!r} for empty-check: identity mismatch"
+                )
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 return
@@ -197,18 +200,14 @@ def _dirfd_rmdir_if_empty(
                     f"Failed to list {dir_basename!r} for empty-check: {exc}"
                 )
             if children:
-                raise RollbackError(
-                    f"rollback_parent_not_empty: {children!r}"
-                )
+                raise RollbackError(f"rollback_parent_not_empty: {children!r}")
         finally:
             os.close(dir_fd)
 
         try:
             os.rmdir(dir_basename, dir_fd=parent_dirfd)
         except OSError as exc:
-            raise RollbackError(
-                f"dirfd rmdir of {dir_basename!r} failed: {exc}"
-            )
+            raise RollbackError(f"dirfd rmdir of {dir_basename!r} failed: {exc}")
         try:
             os.fsync(parent_dirfd)
         except OSError as exc:
@@ -251,7 +250,11 @@ def execute_rollback(
     )
     from ops.secret_remediation_r1.health import check_health
     from ops.secret_remediation_r1.poller_checker import check_exactly_one_poller
-    from ops.secret_remediation_r1.runtime_invariant import verify_runtime_invariants, RuntimePrestate, RuntimePrestate
+    from ops.secret_remediation_r1.runtime_invariant import (
+        verify_runtime_invariants,
+        RuntimePrestate,
+        RuntimePrestate,
+    )
 
     errors: list[str] = []
 
@@ -262,18 +265,24 @@ def execute_rollback(
             errors.append(f"{desc}: {exc}")
 
     # 1. Restore base compose (atomic replacement via replace_existing_file).
-    _try("restore_base_compose", lambda: replace_existing_file(
-        prestate.base_compose_path,
-        prestate.base_compose_bytes,
-        override_mode=prestate.base_compose_mode,
-    ))
+    _try(
+        "restore_base_compose",
+        lambda: replace_existing_file(
+            prestate.base_compose_path,
+            prestate.base_compose_bytes,
+            override_mode=prestate.base_compose_mode,
+        ),
+    )
 
     # 2. Restore override.
-    _try("restore_override", lambda: replace_existing_file(
-        prestate.override_path,
-        prestate.override_bytes,
-        override_mode=prestate.override_mode,
-    ))
+    _try(
+        "restore_override",
+        lambda: replace_existing_file(
+            prestate.override_path,
+            prestate.override_bytes,
+            override_mode=prestate.override_mode,
+        ),
+    )
 
     # 3. Remove newly created env files using dirfd-relative operations.
     parent_path = PROD_PARENT_DIR_PATH
@@ -284,7 +293,9 @@ def execute_rollback(
         try:
             st = os.lstat(parent_path)
             if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-                errors.append("open_parent_dirfd: parent path is not a directory or is a symlink")
+                errors.append(
+                    "open_parent_dirfd: parent path is not a directory or is a symlink"
+                )
             else:
                 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                 if hasattr(os, "O_NOFOLLOW"):
@@ -323,7 +334,9 @@ def execute_rollback(
             try:
                 st = os.lstat(etc_path)
                 if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-                    errors.append("open_etc_dirfd: etc path is not a directory or is a symlink")
+                    errors.append(
+                        "open_etc_dirfd: etc path is not a directory or is a symlink"
+                    )
                 else:
                     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                     if hasattr(os, "O_NOFOLLOW"):
@@ -361,7 +374,10 @@ def execute_rollback(
     _try("compose_recreate", lambda: run_recreate())
 
     # 6. Post-rollback invariants.
-    _try("runtime_invariant", lambda: verify_runtime_invariants(expected=runtime_prestate, docker=docker))
+    _try(
+        "runtime_invariant",
+        lambda: verify_runtime_invariants(expected=runtime_prestate, docker=docker),
+    )
     _try("poller_checker", lambda: check_exactly_one_poller(docker=docker))
     _try("health", lambda: check_health(docker=docker))
 

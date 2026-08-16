@@ -1,10 +1,14 @@
 """Secure secret extraction from live container environment to /etc/hermes/hermes-production.env."""
+
 from __future__ import annotations
 from typing import Protocol
 from ops.secret_remediation_r1.constants import PROTECTED_NAMES, REQUIRED_SECRET_NAMES
 from ops.secret_remediation_r1.safe_fs import publish_file, SafeFsError
 from ops.secret_remediation_r1.process_identity import (
-    DockerBackend, resolve_poller_pid, read_poller_environ, ProcessIdentityError
+    DockerBackend,
+    resolve_poller_pid,
+    read_poller_environ,
+    ProcessIdentityError,
 )
 
 

@@ -1,7 +1,10 @@
 """Verify exactly one hermes gateway poller is active and container-bound."""
+
 from __future__ import annotations
 from ops.secret_remediation_r1.process_identity import (
-    resolve_poller_pid, DockerBackend, ProcessIdentityError
+    resolve_poller_pid,
+    DockerBackend,
+    ProcessIdentityError,
 )
 
 

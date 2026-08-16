@@ -24,7 +24,9 @@ CONTAINER_NAME = "hermes-bot"
 COMPOSE_PROJECT = "healbite-s72-family-invite-main"
 COMPOSE_SERVICE = "hermes-bot"
 LEGACY_IMAGE_REF = "healbite-hermes:pr99-main-273b0a6cccaf"
-LEGACY_IMAGE_ID = "sha256:635efcd80ac8326848ed3620d5d9878971b224076c4f8694d5c22d1edfe1ed08"
+LEGACY_IMAGE_ID = (
+    "sha256:635efcd80ac8326848ed3620d5d9878971b224076c4f8694d5c22d1edfe1ed08"
+)
 
 # Canonical Compose working dir
 COMPOSE_WORKDIR = "/home/hermes/.hermes/worktrees/healbite-s72-family-invite-main"

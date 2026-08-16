@@ -8,29 +8,42 @@ import pytest
 import ops.secret_remediation_r1.parent_dir as parent_dir
 from ops.secret_remediation_r1.parent_dir import ParentDirError, ensure_parent_directory
 
+
 @pytest.mark.skipif(os.name == "nt", reason="Linux-only permissions")
 def test_parent_atomic_create_success(tmp_path, monkeypatch):
     import ops.secret_remediation_r1.parent_dir
-    monkeypatch.setattr(ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_UID", os.getuid())
-    monkeypatch.setattr(ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_GID", os.getgid())
-    
+
+    monkeypatch.setattr(
+        ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_UID", os.getuid()
+    )
+    monkeypatch.setattr(
+        ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_GID", os.getgid()
+    )
+
     target = tmp_path / "hermes"
     ensure_parent_directory(str(target))
-    
+
     st = os.stat(target)
     assert st.st_mode & 0o777 == 0o700
+
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux-only permissions")
 def test_parent_existing_wrong_metadata_reject(tmp_path, monkeypatch):
     import ops.secret_remediation_r1.parent_dir
-    monkeypatch.setattr(ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_UID", os.getuid())
-    monkeypatch.setattr(ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_GID", os.getgid())
-    
+
+    monkeypatch.setattr(
+        ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_UID", os.getuid()
+    )
+    monkeypatch.setattr(
+        ops.secret_remediation_r1.parent_dir, "PARENT_REQUIRED_GID", os.getgid()
+    )
+
     target = tmp_path / "hermes"
     target.mkdir(mode=0o755)
-    
+
     with pytest.raises(ParentDirError, match="Existing dir has wrong mode"):
         ensure_parent_directory(str(target))
+
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux-only")
 def test_parent_existing_symlink_reject(tmp_path):
@@ -38,7 +51,7 @@ def test_parent_existing_symlink_reject(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     os.symlink(real, target)
-    
+
     with pytest.raises(ParentDirError, match="Target is a symlink"):
         ensure_parent_directory(str(target))
 
@@ -121,9 +134,7 @@ def test_parent_creation_uses_dirfd(monkeypatch):
     ensure_parent_directory("/etc/hermes")
 
     assert calls["mkdir"] == [(("hermes", 0o700), {"dir_fd": 101})]
-    assert calls["stat"] == [
-        (("hermes",), {"dir_fd": 101, "follow_symlinks": False})
-    ]
+    assert calls["stat"] == [(("hermes",), {"dir_fd": 101, "follow_symlinks": False})]
     assert calls["open"][1][0][0] == "hermes"
     assert calls["open"][1][1]["dir_fd"] == 101
 
@@ -136,9 +147,7 @@ def test_parent_existing_child_open_uses_same_dirfd(monkeypatch):
 
     ensure_parent_directory("/etc/hermes")
 
-    assert calls["stat"] == [
-        (("hermes",), {"dir_fd": 101, "follow_symlinks": False})
-    ]
+    assert calls["stat"] == [(("hermes",), {"dir_fd": 101, "follow_symlinks": False})]
     assert calls["open"][1][0][0] == "hermes"
     assert calls["open"][1][1]["dir_fd"] == 101
     assert calls["fsync"] == []
@@ -167,7 +176,9 @@ def test_parent_symlink_substitution_fails_closed(monkeypatch):
 
 
 def test_parent_race_replace_between_stat_and_open_fails_closed(monkeypatch):
-    _install_dirfd_mocks(monkeypatch, mkdir_error=FileExistsError(errno.EEXIST, "exists"))
+    _install_dirfd_mocks(
+        monkeypatch, mkdir_error=FileExistsError(errno.EEXIST, "exists")
+    )
     monkeypatch.setattr(parent_dir.os, "fstat", lambda _fd: _directory_stat(ino=2))
 
     with pytest.raises(ParentDirError, match="identity changed"):

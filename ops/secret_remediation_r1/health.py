@@ -1,7 +1,11 @@
 """Bounded health check for HealBite hermes-bot post-remediation."""
+
 from __future__ import annotations
 import subprocess
-from ops.secret_remediation_r1.poller_checker import check_exactly_one_poller, PollerCheckerError
+from ops.secret_remediation_r1.poller_checker import (
+    check_exactly_one_poller,
+    PollerCheckerError,
+)
 from ops.secret_remediation_r1.process_identity import DockerBackend
 
 
@@ -18,9 +22,7 @@ class HealthCheckError(Exception):
 #
 # This is sufficient to verify secret source remediation did not break the
 # runtime; full application health requires separate smoke testing.
-HEALTH_CHECK_LIMITATION = (
-    "bounded_to_process_presence_and_gateway_runtime_state"
-)
+HEALTH_CHECK_LIMITATION = "bounded_to_process_presence_and_gateway_runtime_state"
 HEALTH_CHECK_METHOD = "hermes_gateway_status + poller_count"
 
 
@@ -41,7 +43,9 @@ def check_health(docker: DockerBackend | None = None) -> None:
     try:
         r = subprocess.run(
             ["hermes", "gateway", "status"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except FileNotFoundError:
         raise HealthCheckError("hermes command not found in PATH")

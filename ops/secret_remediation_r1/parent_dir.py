@@ -1,4 +1,5 @@
 """Race-safe /etc/hermes creation via /etc dirfd."""
+
 from __future__ import annotations
 import errno
 import os

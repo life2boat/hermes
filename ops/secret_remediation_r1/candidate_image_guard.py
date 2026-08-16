@@ -1,4 +1,5 @@
 """Verify the effective hermes-bot image matches the legacy reference before recreate."""
+
 from __future__ import annotations
 import json
 import subprocess
@@ -13,7 +14,9 @@ class DockerImageBackend:
     def inspect_image(self, ref: str) -> dict:
         r = subprocess.run(
             ["docker", "image", "inspect", ref],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if r.returncode != 0:
             raise CandidateImageGuardError(f"docker image inspect failed: {r.stderr}")

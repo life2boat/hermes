@@ -12,6 +12,7 @@ NOTE: We do NOT assert ``legacy_env_keys == runtime_keys | secret_keys``
 because the legacy mixed .env is not necessarily the only historical source
 of protected names in the production environment.
 """
+
 from __future__ import annotations
 
 import os
@@ -68,10 +69,13 @@ class SourceState:
             assignments that were present before remediation. Derived from
             ``legacy_env_bytes`` if not supplied.
     """
+
     legacy_env_bytes: bytes
     dashscope_present_before: bool
     legacy_env_name_set: frozenset[str] = field(default_factory=frozenset)
-    pre_remediation_effective_protected_name_set: frozenset[str] = field(default_factory=frozenset)
+    pre_remediation_effective_protected_name_set: frozenset[str] = field(
+        default_factory=frozenset
+    )
 
     def __post_init__(self) -> None:
         parsed = _parse_env_keys(self.legacy_env_bytes)
@@ -85,13 +89,23 @@ class SourceState:
             )
 
 
-
-def _verify_effective_compose(base_path: str, override_path: str) -> None:
+def _verify_effective_compose(compose_files: list[str], workdir: str) -> None:
     import subprocess
     import json
+    import os
+    from ops.secret_remediation_r1.constants import PROTECTED_NAMES
+
+    cmd = ["docker", "compose"]
+    for f in compose_files:
+        cmd.extend(["-f", f])
+    cmd.extend(["config", "--format", "json"])
+
+    env = os.environ.copy()
+    for name in PROTECTED_NAMES:
+        env.pop(name, None)
+
     r = subprocess.run(
-        ["docker", "compose", "-f", base_path, "-f", override_path, "config", "--format", "json"],
-        capture_output=True, text=True, timeout=10
+        cmd, cwd=workdir, env=env, capture_output=True, text=True, timeout=10
     )
     if r.returncode != 0:
         raise SourceInvariantError(f"Failed to compile effective compose: {r.stderr}")
@@ -135,7 +149,9 @@ def _verify_effective_compose(base_path: str, override_path: str) -> None:
 
     protected_inline = keys & PROTECTED_NAMES
     if protected_inline:
-        raise SourceInvariantError(f"Protected inline environment bindings present: {protected_inline}")
+        raise SourceInvariantError(
+            f"Protected inline environment bindings present: {protected_inline}"
+        )
 
 
 def verify_source_invariant(
@@ -143,15 +159,15 @@ def verify_source_invariant(
     legacy_env_path: str,
     runtime_env_path: str,
     secret_file_path: str,
-    base_compose_path: str | None = None,
-    override_compose_path: str | None = None,
+    compose_files: list[str] | None = None,
+    compose_workdir: str | None = None,
 ) -> None:
     """Verify all post-remediation source invariants.
 
     Raises SourceInvariantError on any violation.
     """
-    if base_compose_path and override_compose_path:
-        _verify_effective_compose(base_compose_path, override_compose_path)
+    if compose_files and compose_workdir:
+        _verify_effective_compose(compose_files, compose_workdir)
 
     # A. Legacy .env bytes must be unchanged.
     try:

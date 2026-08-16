@@ -1,9 +1,12 @@
 """Byte-preserving structural transformer for docker-compose.yml env_file node."""
+
 from __future__ import annotations
 import io
 import os
 from ops.secret_remediation_r1.constants import (
-    PROD_LEGACY_ENV_PATH, PROD_RUNTIME_ENV_PATH, PROD_SECRET_FILE_PATH
+    PROD_LEGACY_ENV_PATH,
+    PROD_RUNTIME_ENV_PATH,
+    PROD_SECRET_FILE_PATH,
 )
 from ops.secret_remediation_r1.safe_fs import safe_open_source, SafeFsError
 
@@ -64,9 +67,7 @@ def _find_env_file_span(lines: list[str]) -> tuple[int, int]:
                 break
 
     if env_file_start == -1:
-        raise ComposeTransformError(
-            "services.hermes-bot.env_file block not found"
-        )
+        raise ComposeTransformError("services.hermes-bot.env_file block not found")
     if not entry_lines:
         raise ComposeTransformError("env_file block has no entries")
     if env_file_entries != [_EXPECTED_OLD_ENTRY]:
@@ -106,14 +107,14 @@ def transform_base_compose(
         f"{list_indent}- {PROD_SECRET_FILE_PATH}\n",
     ]
 
-    new_lines = lines[:start_idx] + replacement_lines + lines[end_idx + 1:]
+    new_lines = lines[:start_idx] + replacement_lines + lines[end_idx + 1 :]
     new_bytes = "".join(new_lines).encode("utf-8")
 
     # Verify unrelated bytes: everything before start and after end must be identical
     before_orig = "".join(lines[:start_idx])
-    after_orig = "".join(lines[end_idx + 1:])
+    after_orig = "".join(lines[end_idx + 1 :])
     before_new = "".join(new_lines[:start_idx])
-    after_new = "".join(new_lines[start_idx + 2:])
+    after_new = "".join(new_lines[start_idx + 2 :])
 
     if before_orig != before_new:
         raise ComposeTransformError("Bytes before transform span were mutated")
@@ -121,6 +122,7 @@ def transform_base_compose(
         raise ComposeTransformError("Bytes after transform span were mutated")
 
     from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
+
     try:
         if source_path == destination_path:
             replace_existing_file(destination_path, new_bytes)

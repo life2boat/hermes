@@ -4,8 +4,10 @@ import tempfile
 import subprocess
 import shutil
 
+
 class PreflightError(Exception):
     pass
+
 
 def run_compose_preflight() -> None:
     """
@@ -21,7 +23,7 @@ def run_compose_preflight() -> None:
 
         # Test case: variables with and without quotes
         with open(env_path, "wb") as f:
-            f.write(b"RAW_VAR=val1\nQUOTED_VAR=\"val2\"\n")
+            f.write(b'RAW_VAR=val1\nQUOTED_VAR="val2"\n')
 
         env_file_test_path = os.path.join(preflight_dir, "my_env_file.env")
         with open(env_file_test_path, "wb") as f:
@@ -48,7 +50,7 @@ def run_compose_preflight() -> None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                check=True
+                check=True,
             )
         except subprocess.CalledProcessError as exc:
             raise PreflightError(f"Compose preflight config failed: {exc.stderr}")
@@ -60,18 +62,29 @@ def run_compose_preflight() -> None:
         # Verify parsing behavior
         # Expectation: QUOTED_VAR should not include the literal quotes if Compose behaves correctly
         # Wait, docker-compose v2 strips quotes from .env files for variable substitution.
-        
+
         # We look for the resolved environment block.
         if "RAW_VAR: val1" not in output:
-            raise PreflightError("Compose preflight failed: RAW_VAR not resolved correctly")
+            raise PreflightError(
+                "Compose preflight failed: RAW_VAR not resolved correctly"
+            )
         if "QUOTED_VAR: val2" not in output:
-            if "QUOTED_VAR: '\"val2\"'" in output or 'QUOTED_VAR: "\\"val2\\""' in output:
-                 raise PreflightError("Compose preflight failed: Quotes were not stripped from QUOTED_VAR")
-            raise PreflightError("Compose preflight failed: QUOTED_VAR not resolved correctly")
+            if (
+                "QUOTED_VAR: '\"val2\"'" in output
+                or 'QUOTED_VAR: "\\"val2\\""' in output
+            ):
+                raise PreflightError(
+                    "Compose preflight failed: Quotes were not stripped from QUOTED_VAR"
+                )
+            raise PreflightError(
+                "Compose preflight failed: QUOTED_VAR not resolved correctly"
+            )
 
         # Verify env_file presence in output
         if "my_env_file.env" not in output:
-            raise PreflightError("Compose preflight failed: env_file capability not supported or file dropped")
+            raise PreflightError(
+                "Compose preflight failed: env_file capability not supported or file dropped"
+            )
 
     finally:
         shutil.rmtree(preflight_dir, ignore_errors=True)

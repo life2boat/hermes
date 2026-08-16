@@ -1,4 +1,5 @@
 """End-to-end remediation executor."""
+
 from __future__ import annotations
 
 from ops.secret_remediation_r1.compose_command import run_recreate
@@ -63,7 +64,9 @@ def run_remediation(
     # Capture prestate
     try:
         runtime_prestate = capture_runtime_prestate(docker=docker)
-        prestate = capture_prestate(base_compose_path, override_path, PROD_PARENT_DIR_PATH)
+        prestate = capture_prestate(
+            base_compose_path, override_path, PROD_PARENT_DIR_PATH
+        )
     except Exception as exc:
         raise ExecutorError(f"Prestate capture failed: {exc}")
 
@@ -80,7 +83,9 @@ def run_remediation(
         if not cdata:
             raise ExecutorError(f"Pre-recreate: Container {CONTAINER_NAME} not found")
         labels = cdata[0].get("Config", {}).get("Labels", {})
-        eff_image = labels.get("com.docker.compose.image", "") or cdata[0].get("Config", {}).get("Image", "")
+        eff_image = labels.get("com.docker.compose.image", "") or cdata[0].get(
+            "Config", {}
+        ).get("Image", "")
         verify_legacy_image(eff_image)
 
         transform_base_compose(base_compose_path, base_compose_path)
@@ -91,13 +96,16 @@ def run_remediation(
         if not cdata_post:
             raise ExecutorError(f"Post-recreate: Container {CONTAINER_NAME} not found")
         labels_post = cdata_post[0].get("Config", {}).get("Labels", {})
-        eff_image_post = labels_post.get("com.docker.compose.image", "") or cdata_post[0].get("Config", {}).get("Image", "")
+        eff_image_post = labels_post.get("com.docker.compose.image", "") or cdata_post[
+            0
+        ].get("Config", {}).get("Image", "")
         verify_legacy_image(eff_image_post)
 
         # Build SourceState from captured prestate bytes.
         # SourceState.__post_init__ auto-derives legacy_env_name_set and
         # pre_remediation_effective_protected_name_set from legacy_env_bytes.
         from ops.secret_remediation_r1.source_invariant import _parse_env_keys
+
         _legacy_keys = _parse_env_keys(prestate.legacy_env_bytes)
         source_state = SourceState(
             legacy_env_bytes=prestate.legacy_env_bytes,
@@ -108,8 +116,8 @@ def run_remediation(
             PROD_LEGACY_ENV_PATH,
             PROD_RUNTIME_ENV_PATH,
             PROD_SECRET_FILE_PATH,
-            base_compose_path,
-            override_path,
+            COMPOSE_FILES,
+            COMPOSE_WORKDIR,
         )
         verify_runtime_invariants(expected=runtime_prestate, docker=docker)
         check_exactly_one_poller(docker=docker)
@@ -124,6 +132,7 @@ def run_remediation(
             read_poller_environ,
             resolve_poller_pid,
         )
+
         post_pid, post_identity = resolve_poller_pid(docker=docker)
         post_env_bytes = read_poller_environ(post_pid, post_identity, docker=docker)
 

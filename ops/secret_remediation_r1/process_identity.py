@@ -1,4 +1,5 @@
 """Container and process identity binding for HealBite secret remediation."""
+
 from __future__ import annotations
 import json
 import os
@@ -8,8 +9,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ops.secret_remediation_r1.constants import (
-    CONTAINER_NAME, COMPOSE_PROJECT, COMPOSE_SERVICE,
-    LEGACY_IMAGE_REF, LEGACY_IMAGE_ID,
+    CONTAINER_NAME,
+    COMPOSE_PROJECT,
+    COMPOSE_SERVICE,
+    LEGACY_IMAGE_REF,
+    LEGACY_IMAGE_ID,
 )
 
 
@@ -34,7 +38,9 @@ class RealDockerBackend:
     def inspect(self, container_name: str) -> list[dict]:
         r = subprocess.run(
             ["docker", "inspect", container_name],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if r.returncode != 0:
             raise ProcessIdentityError(f"docker inspect failed: {r.stderr}")
@@ -43,7 +49,9 @@ class RealDockerBackend:
     def container_pids(self, container_id: str) -> list[int]:
         r = subprocess.run(
             ["docker", "top", container_id, "-eo", "pid"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if r.returncode != 0:
             raise ProcessIdentityError(f"docker top failed: {r.stderr}")
@@ -89,7 +97,9 @@ def _find_poller_processes() -> list[int]:
     try:
         r = subprocess.run(
             ["pgrep", "-a", "-f", "hermes"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except FileNotFoundError:
         raise ProcessIdentityError("pgrep not found")
@@ -194,7 +204,9 @@ def resolve_poller_pid(
     # 4. Bind via cgroup
     cgroup = _read_pid_cgroup(pid)
     if container_id not in cgroup and container_id[:12] not in cgroup:
-        raise ProcessIdentityError(f"PID {pid} cgroup does not match container {container_id[:12]}")
+        raise ProcessIdentityError(
+            f"PID {pid} cgroup does not match container {container_id[:12]}"
+        )
 
     return pid, identity
 
@@ -211,7 +223,6 @@ def read_poller_environ(
     if docker is None:
         docker = RealDockerBackend()
 
-
     def _revalidate() -> None:
         if not _pid_exists(pid):
             raise ProcessIdentityError(f"PID {pid} no longer exists")
@@ -221,36 +232,42 @@ def read_poller_environ(
             raise ProcessIdentityError(f"Re-inspection failed: {exc}")
         if not containers:
             raise ProcessIdentityError(f"Container {CONTAINER_NAME!r} no longer exists")
-        
+
         data = containers[0]
         if data.get("Id") != identity.container_id:
             raise ProcessIdentityError("Container ID changed during operation")
         if not data.get("State", {}).get("Running"):
             raise ProcessIdentityError("Container stopped during operation")
-            
+
         _verify_compose_labels(data.get("Config", {}).get("Labels", {}))
         _verify_image(data)
-        
+
         init_pid = _get_container_init_pid(data)
         if init_pid != identity.init_pid:
             raise ProcessIdentityError("Container init PID changed")
-            
+
         init_ns = _get_pid_namespace(init_pid)
         pid_ns = _get_pid_namespace(pid)
         if pid_ns != init_ns:
             raise ProcessIdentityError("PID namespace mismatch during revalidation")
-            
+
         cgroup = _read_pid_cgroup(pid)
-        if identity.container_id not in cgroup and identity.container_id[:12] not in cgroup:
+        if (
+            identity.container_id not in cgroup
+            and identity.container_id[:12] not in cgroup
+        ):
             raise ProcessIdentityError("cgroup mismatch during revalidation")
-            
+
         poller_pids = _find_poller_processes()
         if len(poller_pids) == 0:
             raise ProcessIdentityError("No hermes gateway poller found")
         if len(poller_pids) > 1:
-            raise ProcessIdentityError(f"Multiple pollers found during revalidation: {poller_pids}")
+            raise ProcessIdentityError(
+                f"Multiple pollers found during revalidation: {poller_pids}"
+            )
         if poller_pids[0] != pid:
             raise ProcessIdentityError("PID is no longer a valid poller process")
+
     # Validate before
     _revalidate()
 

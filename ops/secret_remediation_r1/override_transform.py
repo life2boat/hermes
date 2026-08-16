@@ -1,9 +1,14 @@
 """Byte-span transformer for hermes-secrets-override.yml environment section."""
+
 from __future__ import annotations
 import os
 import re
 from ops.secret_remediation_r1.constants import PROTECTED_NAMES
-from ops.secret_remediation_r1.safe_fs import safe_open_source, publish_file, SafeFsError
+from ops.secret_remediation_r1.safe_fs import (
+    safe_open_source,
+    publish_file,
+    SafeFsError,
+)
 
 
 class OverrideTransformError(Exception):
@@ -49,7 +54,7 @@ def _find_environment_block(lines: list[str]) -> tuple[int, int]:
                 indent = len(line) - len(line.lstrip())
                 if indent not in (4, 6):
                     raise OverrideTransformError("Ambiguous indentation")
-                
+
                 key = item_stripped.split("=", 1)[0].split(":", 1)[0].strip()
                 if " " in key:
                     raise OverrideTransformError("Malformed environment entry")
@@ -61,13 +66,15 @@ def _find_environment_block(lines: list[str]) -> tuple[int, int]:
             elif stripped:
                 indent = len(line) - len(line.lstrip())
                 if indent > 4:
-                    raise OverrideTransformError("Mapping form environment block not supported")
+                    raise OverrideTransformError(
+                        "Mapping form environment block not supported"
+                    )
                 if indent <= 4:
                     break
 
     if not env_block_found:
         raise OverrideTransformError("environment block not found")
-        
+
     return protected_line_indices
 
 
@@ -98,6 +105,7 @@ def transform_override(
         raise OverrideTransformError("Unrelated byte mutation detected")
 
     from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
+
     try:
         if source_path == destination_path:
             replace_existing_file(destination_path, new_bytes)

@@ -1,8 +1,13 @@
 """Split legacy .env into non-secret runtime artifact."""
+
 from __future__ import annotations
 import os
 from ops.secret_remediation_r1.constants import PROTECTED_NAMES
-from ops.secret_remediation_r1.safe_fs import safe_open_source, publish_file, SafeFsError
+from ops.secret_remediation_r1.safe_fs import (
+    safe_open_source,
+    publish_file,
+    SafeFsError,
+)
 
 
 class EnvSplitError(Exception):

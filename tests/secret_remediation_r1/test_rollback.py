@@ -7,6 +7,7 @@ Verifies:
   - execute_rollback does NOT mutate the legacy .env.
   - Restoring base and override writes the captured bytes.
 """
+
 import os
 import pytest
 from ops.secret_remediation_r1.rollback import (
@@ -42,7 +43,9 @@ def _mock_rollback_side_effects(monkeypatch, parent, runtime_env, secret_file):
         lambda expected=None, docker=None: None,
     )
     monkeypatch.setattr(
-        ops.secret_remediation_r1.health, "check_health", lambda expected=None, docker=None: None
+        ops.secret_remediation_r1.health,
+        "check_health",
+        lambda expected=None, docker=None: None,
     )
 
 
@@ -56,6 +59,7 @@ def test_rollback_restore_base_exact_bytes(tmp_path, monkeypatch):
     parent.mkdir()
 
     import ops.secret_remediation_r1.constants as constants
+
     legacy = tmp_path / "legacy.env"
     legacy.write_bytes(b"legacy")
     monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
@@ -83,6 +87,7 @@ def test_rollback_restore_override_exact_bytes(tmp_path, monkeypatch):
     parent.mkdir()
 
     import ops.secret_remediation_r1.constants as constants
+
     legacy = tmp_path / "legacy.env"
     legacy.write_bytes(b"legacy")
     monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy))
@@ -161,7 +166,9 @@ def test_rollback_parent_not_empty_fail(tmp_path, monkeypatch):
     unexpected = parent / "unexpected.txt"
     unexpected.write_bytes(b"not mine")
 
-    with pytest.raises(RollbackError, match="Config restore failed.*rollback_parent_not_empty"):
+    with pytest.raises(
+        RollbackError, match="Config restore failed.*rollback_parent_not_empty"
+    ):
         execute_rollback(prestate, prestate)
 
     assert parent.exists()
@@ -183,6 +190,7 @@ def test_rollback_legacy_env_untouched(tmp_path, monkeypatch):
     legacy_env.write_bytes(legacy_content)
 
     import ops.secret_remediation_r1.constants as constants
+
     runtime_env = parent / "runtime.env"
     secret_file = parent / "secret.env"
     monkeypatch.setattr(constants, "PROD_LEGACY_ENV_PATH", str(legacy_env))
@@ -208,144 +216,160 @@ import os
 import stat
 import errno
 import pytest
-from ops.secret_remediation_r1.rollback import execute_rollback, RemediationPrestate, RollbackError
+from ops.secret_remediation_r1.rollback import (
+    execute_rollback,
+    RemediationPrestate,
+    RollbackError,
+)
 from ops.secret_remediation_r1 import rollback as rb_module
 from ops.secret_remediation_r1.constants import PROD_PARENT_DIR_PATH
 
+
 def test_rollback_linux_parent_symlink(monkeypatch):
     monkeypatch.setattr(rb_module, "_IS_LINUX", True)
-    
+
     class DummyStat:
         def __init__(self, mode, ino, dev):
             self.st_mode = mode
             self.st_ino = ino
             self.st_dev = dev
-            
+
     def mock_lstat(path):
         return DummyStat(stat.S_IFLNK | 0o777, 1, 1)
-        
+
     monkeypatch.setattr(os, "lstat", mock_lstat)
-    
+
     prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, False)
-    
-    with pytest.raises(RollbackError, match="open_parent_dirfd: parent path is not a directory or is a symlink"):
+
+    with pytest.raises(
+        RollbackError,
+        match="open_parent_dirfd: parent path is not a directory or is a symlink",
+    ):
         execute_rollback(prestate, prestate)
+
 
 def test_rollback_linux_parent_inode_mismatch(monkeypatch):
     monkeypatch.setattr(rb_module, "_IS_LINUX", True)
-    
+
     class DummyStat:
         def __init__(self, mode, ino, dev):
             self.st_mode = mode
             self.st_ino = ino
             self.st_dev = dev
-            
+
     def mock_lstat(path):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-    
+
     def mock_fstat(fd):
         return DummyStat(stat.S_IFDIR | 0o777, 2, 1)
-        
+
     monkeypatch.setattr(os, "lstat", mock_lstat)
     monkeypatch.setattr(os, "open", lambda p, f: 99)
     monkeypatch.setattr(os, "fstat", mock_fstat)
     monkeypatch.setattr(os, "close", lambda fd: None)
-    
+
     prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, False)
-    
-    with pytest.raises(RollbackError, match="open_parent_dirfd: parent identity mismatch"):
+
+    with pytest.raises(
+        RollbackError, match="open_parent_dirfd: parent identity mismatch"
+    ):
         execute_rollback(prestate, prestate)
+
 
 def test_rollback_linux_fsync_failure(monkeypatch):
     monkeypatch.setattr(rb_module, "_IS_LINUX", True)
-    
+
     class DummyStat:
         def __init__(self, mode, ino, dev):
             self.st_mode = mode
             self.st_ino = ino
             self.st_dev = dev
-            
+
     def mock_lstat(path):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-    
+
     def mock_fstat(fd):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-        
+
     def mock_stat(path, dir_fd, follow_symlinks):
         return DummyStat(stat.S_IFREG | 0o777, 3, 1)
-        
+
     monkeypatch.setattr(os, "lstat", mock_lstat)
     monkeypatch.setattr(os, "open", lambda p, f: 99)
     monkeypatch.setattr(os, "fstat", mock_fstat)
     monkeypatch.setattr(os, "stat", mock_stat)
     monkeypatch.setattr(os, "unlink", lambda p, dir_fd: None)
-    
+
     def mock_fsync(fd):
         raise OSError(errno.EIO, "I/O error")
-        
+
     monkeypatch.setattr(os, "fsync", mock_fsync)
     monkeypatch.setattr(os, "close", lambda fd: None)
-    
+
     prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, False)
-    
+
     with pytest.raises(RollbackError, match="fsync parent after unlink"):
         execute_rollback(prestate, prestate)
 
+
 def test_rollback_linux_close_error_propagation(monkeypatch):
     monkeypatch.setattr(rb_module, "_IS_LINUX", True)
-    
+
     class DummyStat:
         def __init__(self, mode, ino, dev):
             self.st_mode = mode
             self.st_ino = ino
             self.st_dev = dev
-            
+
     def mock_lstat(path):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-    
+
     def mock_fstat(fd):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-        
+
     def mock_stat(path, dir_fd, follow_symlinks):
         return DummyStat(stat.S_IFREG | 0o777, 3, 1)
-        
+
     monkeypatch.setattr(os, "lstat", mock_lstat)
     monkeypatch.setattr(os, "open", lambda p, f: 99)
     monkeypatch.setattr(os, "fstat", mock_fstat)
     monkeypatch.setattr(os, "stat", mock_stat)
     monkeypatch.setattr(os, "unlink", lambda p, dir_fd: None)
     monkeypatch.setattr(os, "fsync", lambda fd: None)
-    
+
     def mock_close(fd):
         raise OSError(errno.EBADF, "Bad file descriptor")
-        
+
     monkeypatch.setattr(os, "close", mock_close)
-    
+
     prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, False)
-    
-    with pytest.raises(RollbackError, match="close_parent_dirfd: .*Bad file descriptor"):
+
+    with pytest.raises(
+        RollbackError, match="close_parent_dirfd: .*Bad file descriptor"
+    ):
         execute_rollback(prestate, prestate)
+
 
 def test_rollback_linux_child_directory_symlink_fails(monkeypatch):
     monkeypatch.setattr(rb_module, "_IS_LINUX", True)
-    
+
     class DummyStat:
         def __init__(self, mode, ino, dev):
             self.st_mode = mode
             self.st_ino = ino
             self.st_dev = dev
-            
+
     def mock_lstat(path):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-    
+
     def mock_fstat(fd):
         return DummyStat(stat.S_IFDIR | 0o777, 1, 1)
-        
+
     def mock_stat(path, dir_fd=None, follow_symlinks=True):
         if path == "hermes":
             return DummyStat(stat.S_IFLNK | 0o777, 3, 1)
         return DummyStat(stat.S_IFREG | 0o777, 3, 1)
-        
+
     monkeypatch.setattr(os, "lstat", mock_lstat)
     monkeypatch.setattr(os, "open", lambda p, f, dir_fd=None: 99)
     monkeypatch.setattr(os, "fstat", mock_fstat)
@@ -353,9 +377,10 @@ def test_rollback_linux_child_directory_symlink_fails(monkeypatch):
     monkeypatch.setattr(os, "unlink", lambda p, dir_fd: None)
     monkeypatch.setattr(os, "fsync", lambda fd: None)
     monkeypatch.setattr(os, "close", lambda fd: None)
-    
-    prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, True)
-    
-    with pytest.raises(RollbackError, match="empty-check: not a directory or is a symlink"):
-        execute_rollback(prestate, prestate)
 
+    prestate = RemediationPrestate(b"", "", b"", "", b"", 0o644, 0o644, True)
+
+    with pytest.raises(
+        RollbackError, match="empty-check: not a directory or is a symlink"
+    ):
+        execute_rollback(prestate, prestate)

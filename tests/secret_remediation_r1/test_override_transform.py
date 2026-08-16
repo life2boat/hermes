@@ -1,4 +1,5 @@
 """Tests for override_transform module — positive and negative cases."""
+
 import pytest
 from ops.secret_remediation_r1.override_transform import (
     _find_environment_block,
@@ -9,6 +10,7 @@ from ops.secret_remediation_r1.override_transform import (
 
 # ─── Positive cases ────────────────────────────────────────────────────────
 
+
 def test_override_find_block_success():
     lines = [
         "services:\n",
@@ -16,7 +18,7 @@ def test_override_find_block_success():
         "    environment:\n",
         "      - NORMAL_VAR=1\n",
         "      - TELEGRAM_BOT_TOKEN=secret\n",
-        "      - ANOTHER=2\n"
+        "      - ANOTHER=2\n",
     ]
     indices = _find_environment_block(lines)
     assert indices == [4]
@@ -77,6 +79,7 @@ def test_override_transform_preserves_unrelated(tmp_path):
 
 # ─── Negative cases (moved from append_override.py) ────────────────────────
 
+
 def test_override_transform_missing_environment():
     """hermes-bot without environment block → OverrideTransformError."""
     lines = ["services:\n", "  hermes-bot:\n", "    image: x\n"]
@@ -92,7 +95,9 @@ def test_override_transform_mapping_form():
         "    environment:\n",
         "      TELEGRAM_BOT_TOKEN: val\n",
     ]
-    with pytest.raises(OverrideTransformError, match="Mapping form environment block not supported"):
+    with pytest.raises(
+        OverrideTransformError, match="Mapping form environment block not supported"
+    ):
         _find_environment_block(lines)
 
 

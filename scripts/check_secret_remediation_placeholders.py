@@ -114,13 +114,25 @@ def main() -> int:
 
     findings.extend(check_empty_tests(root))
 
+    pass_only = sum(1 for f in findings if "(pass)" in f)
+    ellipsis_only = sum(1 for f in findings if "(ellipsis)" in f)
+    assert_true_only = sum(1 for f in findings if "(assert True)" in f)
+
     if findings:
         print(f"PLACEHOLDER_FINDINGS={len(findings)}")
         for f in findings:
             print(f"  FINDING: {f}")
+        print(f"PASS_ONLY_TEST_COUNT={pass_only}")
+        print(f"ELLIPSIS_ONLY_TEST_COUNT={ellipsis_only}")
+        print(f"ASSERT_TRUE_ONLY_TEST_COUNT={assert_true_only}")
+        print("PLACEHOLDER_GATE=FAIL")
         return 1
 
     print(f"PLACEHOLDER_FINDINGS=0")
+    print(f"PASS_ONLY_TEST_COUNT={pass_only}")
+    print(f"ELLIPSIS_ONLY_TEST_COUNT={ellipsis_only}")
+    print(f"ASSERT_TRUE_ONLY_TEST_COUNT={assert_true_only}")
+    print("PLACEHOLDER_GATE=PASS")
     return 0
 
 

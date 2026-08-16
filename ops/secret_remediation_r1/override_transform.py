@@ -47,8 +47,10 @@ def _find_environment_block(lines: list[str]) -> tuple[int, int]:
                 key = item_stripped.split("=", 1)[0].split(":", 1)[0].strip()
                 if key in PROTECTED_NAMES:
                     protected_line_indices.append(i)
-            elif stripped and not stripped.startswith("  "):
-                break
+            elif stripped:
+                indent = len(line) - len(line.lstrip())
+                if indent <= 4 and not stripped.lstrip().startswith("-"):
+                    break
 
     return protected_line_indices
 

@@ -13,10 +13,12 @@ def test_secret_duplicate_protected_reject():
     with pytest.raises(SecretTransferError, match="Duplicate protected name"):
         parse_protected_env(b"TELEGRAM_BOT_TOKEN=1\x00TELEGRAM_BOT_TOKEN=2\x00")
 
-def test_secret_nul_reject():
-    # NUL in value is technically split by \x00, so it becomes part of the parsing logic
-    # But let's test safety checking if possible.
-    pass
+def test_secret_ambiguous_nul_causes_missing_token_reject():
+    # If a NUL character is inappropriately embedded within a key,
+    # the parser splits it, rendering the required token malformed and thus missing.
+    with pytest.raises(SecretTransferError, match="TELEGRAM_BOT_TOKEN not found"):
+        parse_protected_env(b"TELEGRAM_BOT_TO\x00KEN=123\x00")
+
 
 def test_secret_cr_reject():
     with pytest.raises(SecretTransferError, match="Unsafe bytes"):

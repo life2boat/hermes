@@ -44,3 +44,51 @@ def test_pid_multi_poller_reject(monkeypatch):
     monkeypatch.setattr(ops.secret_remediation_r1.process_identity, "_find_poller_processes", lambda: [100, 101])
     with pytest.raises(ProcessIdentityError, match="Multiple pollers found"):
         resolve_poller_pid(docker=backend)
+
+
+def test_read_poller_environ_ordering(monkeypatch):
+    from ops.secret_remediation_r1.process_identity import read_poller_environ, ContainerIdentity, ProcessIdentityError
+    
+    class TrackBackend:
+        def __init__(self):
+            self.calls = 0
+            
+        def inspect(self, name):
+            self.calls += 1
+            if self.calls == 1:
+                return [{"Id": "cid", "State": {"Running": True}}]
+            elif self.calls == 2:
+                # second call fails (e.g. stopped)
+                return [{"Id": "cid", "State": {"Running": False}}]
+            return []
+            
+        def container_pids(self, name): return []
+        
+    docker = TrackBackend()
+    identity = ContainerIdentity(container_id="cid", init_pid=1, image_id="img", running=True)
+    
+    # mock os.read etc
+    import os
+    monkeypatch.setattr(os, "lstat", lambda p: None)
+    monkeypatch.setattr(os, "open", lambda p, f: 99)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None) # _pid_exists passes
+    
+    # Track reads
+    def mock_read(fd, n):
+        if not hasattr(mock_read, "calls"):
+            mock_read.calls = 0
+        mock_read.calls += 1
+        if mock_read.calls == 1:
+            # ensure _revalidate was called BEFORE read
+            assert docker.calls == 1
+            return b"data"
+        return b""
+    monkeypatch.setattr(os, "read", mock_read)
+    
+    with pytest.raises(ProcessIdentityError, match="Container stopped during operation"):
+        read_poller_environ(pid=123, identity=identity, docker=docker)
+        
+    # ensure _revalidate was called AFTER read as well
+    assert docker.calls == 2
+    assert mock_read.calls == 2

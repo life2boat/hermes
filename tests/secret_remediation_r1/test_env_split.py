@@ -68,8 +68,30 @@ def test_mixed_source_unchanged(tmp_path):
     assert src.read_bytes() == orig
 
 def test_mixed_postwrite_comparison_success(tmp_path, monkeypatch):
-    # This is implicitly tested by normal execution, but we can mock safe_open_source
-    pass
+    src = tmp_path / "src.env"
+    src.write_bytes(b"NORMAL_VAR=value\n")
+    dest = tmp_path / "dest.env"
+    
+    # First verify normal success
+    split_env(str(src), str(dest))
+    assert dest.read_bytes() == b"NORMAL_VAR=value\n"
+    
+    dest.unlink()
+    
+    # Now mock safe_open_source to return different bytes for destination
+    import ops.secret_remediation_r1.env_split
+    orig_safe_open = ops.secret_remediation_r1.env_split.safe_open_source
+    
+    def mock_safe_open(path):
+        if str(path) == str(dest):
+            # Write corrupted bytes so it reads them
+            dest.write_bytes(b"CORRUPTED")
+        return orig_safe_open(path)
+        
+    monkeypatch.setattr(ops.secret_remediation_r1.env_split, "safe_open_source", mock_safe_open)
+    
+    with pytest.raises(EnvSplitError, match="Destination byte verification failed"):
+        split_env(str(src), str(dest))
 
 import os
 @pytest.mark.skipif(os.name == "nt", reason="Linux-only")

@@ -62,6 +62,35 @@ def check_unconditional_pass(source: str, path: str) -> list[str]:
     return findings
 
 
+def check_empty_tests(root) -> list[str]:
+    import ast
+    findings = []
+    for fpath in root.glob('tests/secret_remediation_r1/**/*.py'):
+        try:
+            source = fpath.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith('test_'):
+                    body = node.body
+                    # filter out docstrings
+                    statements = [s for s in body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))]
+                    if not statements:
+                        findings.append(f"{fpath.relative_to(root)}:{node.lineno}: Empty test (only docstring)")
+                        continue
+                    if len(statements) == 1:
+                        stmt = statements[0]
+                        if isinstance(stmt, ast.Pass):
+                            findings.append(f"{fpath.relative_to(root)}:{node.lineno}: Empty test (pass)")
+                        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis:
+                            findings.append(f"{fpath.relative_to(root)}:{node.lineno}: Empty test (ellipsis)")
+                        elif isinstance(stmt, ast.Assert) and isinstance(stmt.test, ast.Constant) and stmt.test.value is True:
+                            findings.append(f"{fpath.relative_to(root)}:{node.lineno}: Empty test (assert True)")
+                        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call) and isinstance(stmt.value.func, ast.Attribute) and stmt.value.func.attr == 'skip' and isinstance(stmt.value.func.value, ast.Name) and stmt.value.func.value.id == 'pytest':
+                            findings.append(f"{fpath.relative_to(root)}:{node.lineno}: Empty test (only pytest.skip)")
+        except Exception as e:
+            findings.append(f"{fpath}: Error parsing AST: {e}")
+    return findings
+
 def main() -> int:
     root = Path(__file__).parent.parent
     findings: list[str] = []
@@ -82,6 +111,8 @@ def main() -> int:
                     findings.append(f"{rel_path}:{i}: {label}: {line.strip()!r}")
 
         findings.extend(check_unconditional_pass(source, rel_path))
+
+    findings.extend(check_empty_tests(root))
 
     if findings:
         print(f"PLACEHOLDER_FINDINGS={len(findings)}")

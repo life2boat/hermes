@@ -1,11 +1,22 @@
-"""Fail-closed rollback state machine for HealBite secret remediation R1."""
+"""Fail-closed rollback state machine for HealBite secret remediation R1.
+
+All security-relevant file mutations use dirfd-relative operations to prevent
+TOCTOU races and pathname-based attacks.  No ``os.path.exists``, ``os.unlink``,
+``os.listdir``, or ``os.rmdir`` on security-sensitive paths; all such operations
+are performed relative to a bound parent ``dirfd``.
+"""
 from __future__ import annotations
+
+import errno
 import os
 import stat
 from dataclasses import dataclass
-from typing import Optional
-from ops.secret_remediation_r1.safe_fs import SafeFsError
+
 from ops.secret_remediation_r1.process_identity import DockerBackend
+from ops.secret_remediation_r1.safe_fs import (
+    _IS_LINUX,
+    replace_existing_file,
+)
 
 
 class RollbackError(Exception):
@@ -33,17 +44,26 @@ def capture_prestate(
     override_path: str,
     parent_dir_path: str,
 ) -> RemediationPrestate:
-    """
-    Capture exact bytes and metadata of mutable artifacts before any mutation.
+    """Capture exact bytes and metadata of mutable artifacts before any mutation.
+
     Fails if any expected artifact is missing or if new artifacts already exist.
     """
+    from ops.secret_remediation_r1.constants import (
+        PROD_LEGACY_ENV_PATH,
+        PROD_RUNTIME_ENV_PATH,
+        PROD_SECRET_FILE_PATH,
+    )
     from ops.secret_remediation_r1.safe_fs import safe_open_source
-    from ops.secret_remediation_r1.constants import PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH, PROD_LEGACY_ENV_PATH
 
-    # Verify expected-absent files are indeed absent
+    # Verify expected-absent files are indeed absent (path-only check is safe here;
+    # we are not doing a security-sensitive mutation, just a pre-condition check).
     for path in [PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH]:
-        if os.path.exists(path):
+        try:
+            os.lstat(path)
             raise RollbackError(f"Expected-absent file already exists: {path}")
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise RollbackError(f"lstat pre-check failed for {path}: {exc}")
 
     # Capture legacy env
     try:
@@ -70,7 +90,15 @@ def capture_prestate(
     except Exception as exc:
         raise RollbackError(f"Failed to capture override: {exc}")
 
-    parent_created = not os.path.exists(parent_dir_path)
+    # Determine whether /etc/hermes already exists.
+    try:
+        os.lstat(parent_dir_path)
+        parent_created = False
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            parent_created = True
+        else:
+            raise RollbackError(f"lstat parent_dir failed: {exc}")
 
     return RemediationPrestate(
         base_compose_bytes=base_bytes,
@@ -84,23 +112,135 @@ def capture_prestate(
     )
 
 
+def _dirfd_unlink(parent_dirfd: int, basename: str, parent_path: str) -> None:
+    """Unlink *basename* relative to *parent_dirfd*, then fsync the parent.
+
+    On non-Linux platforms (where dirfd-relative operations are unavailable)
+    falls back to a pathname-based unlink within the already-verified parent.
+    Raises RollbackError on failure; never swallows errors silently.
+    """
+    if _IS_LINUX:
+        # Verify the child is a regular file before removing it.
+        try:
+            child_st = os.stat(basename, dir_fd=parent_dirfd, follow_symlinks=False)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return  # already absent; nothing to do
+            raise RollbackError(
+                f"dirfd stat of {basename!r} before unlink failed: {exc}"
+            )
+        if not stat.S_ISREG(child_st.st_mode):
+            raise RollbackError(
+                f"Refusing to unlink non-regular file: {basename!r}"
+            )
+        try:
+            os.unlink(basename, dir_fd=parent_dirfd)
+        except OSError as exc:
+            raise RollbackError(f"dirfd unlink of {basename!r} failed: {exc}")
+        try:
+            os.fsync(parent_dirfd)
+        except OSError as exc:
+            raise RollbackError(
+                f"fsync parent after unlink of {basename!r} failed: {exc}"
+            )
+    else:
+        # Non-Linux: plain unlink within the verified parent path.
+        full_path = os.path.join(parent_path, basename)
+        try:
+            os.unlink(full_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RollbackError(f"unlink of {full_path!r} failed: {exc}")
+
+
+def _dirfd_rmdir_if_empty(
+    parent_dirfd: int,
+    parent_path: str,
+    dir_basename: str,
+    dir_full_path: str,
+) -> None:
+    """Remove the directory ``dir_basename`` relative to ``parent_dirfd`` if empty.
+
+    Requires the directory to be confirmed empty before removal; raises
+    RollbackError if it is non-empty.  Never silently swallows errors.
+    """
+    if _IS_LINUX:
+        try:
+            dir_fd = os.open(
+                dir_basename,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=parent_dirfd,
+            )
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return
+            raise RollbackError(
+                f"Failed to open {dir_basename!r} for empty-check: {exc}"
+            )
+        try:
+            # Read the directory to confirm it has no children.
+            try:
+                children = os.listdir(dir_fd)
+            except OSError as exc:
+                raise RollbackError(
+                    f"Failed to list {dir_basename!r} for empty-check: {exc}"
+                )
+            if children:
+                raise RollbackError(
+                    f"rollback_parent_not_empty: {children!r}"
+                )
+        finally:
+            os.close(dir_fd)
+
+        try:
+            os.rmdir(dir_basename, dir_fd=parent_dirfd)
+        except OSError as exc:
+            raise RollbackError(
+                f"dirfd rmdir of {dir_basename!r} failed: {exc}"
+            )
+        try:
+            os.fsync(parent_dirfd)
+        except OSError as exc:
+            raise RollbackError(
+                f"fsync parent after rmdir of {dir_basename!r} failed: {exc}"
+            )
+    else:
+        # Non-Linux: pathname-based rmdir.
+        try:
+            children = os.listdir(dir_full_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RollbackError(f"listdir {dir_full_path!r} failed: {exc}")
+        if children:
+            raise RollbackError(f"rollback_parent_not_empty: {children!r}")
+        try:
+            os.rmdir(dir_full_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RollbackError(f"rmdir {dir_full_path!r} failed: {exc}")
+
+
 def execute_rollback(
     prestate: RemediationPrestate,
     docker: DockerBackend | None = None,
 ) -> None:
-    """
-    Restore all mutated artifacts to prestate and recreate the container.
+    """Restore all mutated artifacts to prestate and recreate the container.
+
     Claims ROLLED_BACK only after ALL post-rollback invariants pass.
     Raises RollbackError with complete=False if any step fails.
     """
-    from ops.secret_remediation_r1.constants import (
-        PROD_SECRET_FILE_PATH, PROD_RUNTIME_ENV_PATH, PROD_PARENT_DIR_PATH,
-        COMPOSE_WORKDIR
-    )
     from ops.secret_remediation_r1.compose_command import run_recreate
-    from ops.secret_remediation_r1.runtime_invariant import verify_runtime_invariants
-    from ops.secret_remediation_r1.poller_checker import check_exactly_one_poller
+    from ops.secret_remediation_r1.constants import (
+        PROD_PARENT_DIR_PATH,
+        PROD_RUNTIME_ENV_PATH,
+        PROD_SECRET_FILE_PATH,
+    )
     from ops.secret_remediation_r1.health import check_health
+    from ops.secret_remediation_r1.poller_checker import check_exactly_one_poller
+    from ops.secret_remediation_r1.runtime_invariant import verify_runtime_invariants
 
     errors: list[str] = []
 
@@ -110,49 +250,82 @@ def execute_rollback(
         except Exception as exc:
             errors.append(f"{desc}: {exc}")
 
-    # 1. Restore base compose
-    _try("restore_base_compose", lambda: _restore_file(
+    # 1. Restore base compose (atomic replacement via replace_existing_file).
+    _try("restore_base_compose", lambda: replace_existing_file(
         prestate.base_compose_path,
         prestate.base_compose_bytes,
-        prestate.base_compose_mode,
+        override_mode=prestate.base_compose_mode,
     ))
 
-    # 2. Restore override
-    _try("restore_override", lambda: _restore_file(
+    # 2. Restore override.
+    _try("restore_override", lambda: replace_existing_file(
         prestate.override_path,
         prestate.override_bytes,
-        prestate.override_mode,
+        override_mode=prestate.override_mode,
     ))
 
-    # 3. Remove newly created env files
-    for path in [PROD_RUNTIME_ENV_PATH, PROD_SECRET_FILE_PATH]:
-        if os.path.exists(path):
-            _try(f"remove_{path}", lambda p=path: os.unlink(p))
+    # 3. Remove newly created env files using dirfd-relative operations.
+    parent_path = PROD_PARENT_DIR_PATH
 
-    # 4. Remove /etc/hermes if we created it and it's empty
-    if prestate.created_parent_dir and os.path.exists(PROD_PARENT_DIR_PATH):
+    # Open the parent dirfd once for both unlink operations.
+    parent_dirfd: int = -1
+    if _IS_LINUX:
         try:
-            children = os.listdir(PROD_PARENT_DIR_PATH)
-            if children:
-                errors.append(f"rollback_parent_not_empty: {children}")
-            else:
-                os.rmdir(PROD_PARENT_DIR_PATH)
-                if os.name == "posix":
-                    etc_fd = os.open("/etc", os.O_RDONLY)
-                    try:
-                        os.fsync(etc_fd)
-                    finally:
-                        os.close(etc_fd)
-        except Exception as exc:
-            errors.append(f"remove_parent_dir: {exc}")
+            parent_dirfd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                errors.append(f"open_parent_dirfd: {exc}")
+
+    try:
+        for full_path in [PROD_RUNTIME_ENV_PATH, PROD_SECRET_FILE_PATH]:
+            basename = os.path.basename(full_path)
+            _try(
+                f"remove_{basename}",
+                lambda b=basename: _dirfd_unlink(parent_dirfd, b, parent_path),
+            )
+    finally:
+        if parent_dirfd != -1:
+            try:
+                os.close(parent_dirfd)
+            except OSError:
+                pass
+
+    # 4. Remove /etc/hermes if we created it and it is now empty.
+    if prestate.created_parent_dir:
+        etc_path = os.path.dirname(parent_path)  # /etc
+        etc_dirfd: int = -1
+        parent_basename = os.path.basename(parent_path)
+
+        if _IS_LINUX:
+            try:
+                etc_dirfd = os.open(etc_path, os.O_RDONLY | os.O_DIRECTORY)
+            except OSError as exc:
+                errors.append(f"open_etc_dirfd: {exc}")
+
+        try:
+            _try(
+                "remove_parent_dir",
+                lambda: _dirfd_rmdir_if_empty(
+                    etc_dirfd, etc_path, parent_basename, parent_path
+                ),
+            )
+        finally:
+            if etc_dirfd != -1:
+                try:
+                    os.fsync(etc_dirfd)
+                    os.close(etc_dirfd)
+                except OSError as exc:
+                    errors.append(f"fsync_or_close_etc_dirfd: {exc}")
 
     if errors:
-        raise RollbackError("Config restore failed: " + "; ".join(errors), complete=False)
+        raise RollbackError(
+            "Config restore failed: " + "; ".join(errors), complete=False
+        )
 
-    # 5. Compose recreate
+    # 5. Compose recreate.
     _try("compose_recreate", lambda: run_recreate())
 
-    # 6. Post-rollback invariants
+    # 6. Post-rollback invariants.
     _try("runtime_invariant", lambda: verify_runtime_invariants(docker=docker))
     _try("poller_checker", lambda: check_exactly_one_poller(docker=docker))
     _try("health", lambda: check_health(docker=docker))
@@ -160,15 +333,5 @@ def execute_rollback(
     if errors:
         raise RollbackError(
             "Post-rollback invariants failed: " + "; ".join(errors),
-            complete=False
+            complete=False,
         )
-
-
-from ops.secret_remediation_r1.safe_fs import replace_existing_file
-
-def _restore_file(path: str, content: bytes, mode: int) -> None:
-    replace_existing_file(path, content, override_mode=mode)
-    try:
-        os.chmod(path, mode)
-    except OSError:
-        pass

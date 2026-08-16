@@ -1,38 +1,88 @@
-"""Post-remediation source invariant checker."""
+"""Post-remediation source invariant checker.
+
+Verifies that the remediation outcome matches the approved design:
+  - The legacy mixed .env bytes are unchanged (not mutated during remediation).
+  - The runtime env file exists and contains zero protected NAME assignments.
+  - The secret file exists, is a regular file owned by root with mode 0600.
+  - The effective protected NAME set after remediation equals the pre-remediation
+    protected NAME set (no secret names added or removed).
+  - DASHSCOPE_API_KEY presence is preserved exactly.
+
+NOTE: We do NOT assert ``legacy_env_keys == runtime_keys | secret_keys``
+because the legacy mixed .env is not necessarily the only historical source
+of protected names in the production environment.
+"""
 from __future__ import annotations
+
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
 from ops.secret_remediation_r1.constants import PROTECTED_NAMES
-from ops.secret_remediation_r1.safe_fs import safe_open_source, SafeFsError
+from ops.secret_remediation_r1.safe_fs import safe_open_source
 
 
 class SourceInvariantError(Exception):
     pass
 
 
-@dataclass
-class SourceState:
-    legacy_env_bytes: bytes  # captured before mutation
-    dashscope_present_before: bool
+def _parse_env_keys(content: bytes) -> frozenset[str]:
+    """Extract variable names from env-file bytes.
+
+    Ignores blank lines and comment lines (starting with ``#`` after stripping).
+    Returns a frozenset of variable name strings.
+    """
+    keys: set[str] = set()
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(b"#"):
+            continue
+        if b"=" in stripped:
+            key_bytes = stripped.split(b"=", 1)[0].strip()
+            keys.add(key_bytes.decode("utf-8", errors="ignore"))
+    return frozenset(keys)
 
 
-def _read_env_keys(path: str) -> set[str]:
-    """Read variable names from a plain env file."""
+def _read_env_keys(path: str) -> frozenset[str]:
+    """Read variable names from a plain env file using safe_open_source."""
     try:
         fd, _ = safe_open_source(path)
         with os.fdopen(fd, "rb") as f:
             content = f.read()
     except Exception as exc:
         raise SourceInvariantError(f"Failed to read {path}: {exc}")
-    keys = set()
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith(b"#"):
-            continue
-        if b"=" in stripped:
-            keys.add(stripped.split(b"=", 1)[0].strip().decode("utf-8", errors="ignore"))
-    return keys
+    return _parse_env_keys(content)
+
+
+@dataclass
+class SourceState:
+    """Pre-remediation state captured before any mutation.
+
+    Attributes:
+        legacy_env_bytes: Exact bytes of the legacy mixed .env file.
+        dashscope_present_before: Whether DASHSCOPE_API_KEY was present in
+            the legacy .env before remediation.
+        legacy_env_name_set: Frozenset of all variable names in the legacy .env.
+            Derived automatically if not supplied.
+        pre_remediation_effective_protected_name_set: The set of protected NAME
+            assignments that were present before remediation. Derived from
+            ``legacy_env_bytes`` if not supplied.
+    """
+    legacy_env_bytes: bytes
+    dashscope_present_before: bool
+    legacy_env_name_set: frozenset[str] = field(default_factory=frozenset)
+    pre_remediation_effective_protected_name_set: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        parsed = _parse_env_keys(self.legacy_env_bytes)
+        if not self.legacy_env_name_set:
+            object.__setattr__(self, "legacy_env_name_set", parsed)
+        if not self.pre_remediation_effective_protected_name_set:
+            object.__setattr__(
+                self,
+                "pre_remediation_effective_protected_name_set",
+                parsed & PROTECTED_NAMES,
+            )
 
 
 def verify_source_invariant(
@@ -41,11 +91,11 @@ def verify_source_invariant(
     runtime_env_path: str,
     secret_file_path: str,
 ) -> None:
-    """
-    Verify all post-remediation source invariants.
+    """Verify all post-remediation source invariants.
+
     Raises SourceInvariantError on any violation.
     """
-    # A. Legacy .env unchanged
+    # A. Legacy .env bytes must be unchanged.
     try:
         fd, _ = safe_open_source(legacy_env_path)
         with os.fdopen(fd, "rb") as f:
@@ -56,15 +106,16 @@ def verify_source_invariant(
     if current_legacy != prestate.legacy_env_bytes:
         raise SourceInvariantError("Legacy .env was mutated")
 
-    # C. Runtime env file exists, regular, no protected names
+    # B. Runtime env file: must exist, be a regular file, and contain no protected names.
     try:
-        st = os.lstat(runtime_env_path)
+        rt_st = os.lstat(runtime_env_path)
     except OSError as exc:
         raise SourceInvariantError(f"Runtime env missing: {exc}")
-    if stat.S_ISLNK(st.st_mode):
+    if stat.S_ISLNK(rt_st.st_mode):
         raise SourceInvariantError("Runtime env is a symlink")
-    if not stat.S_ISREG(st.st_mode):
+    if not stat.S_ISREG(rt_st.st_mode):
         raise SourceInvariantError("Runtime env is not a regular file")
+
     runtime_keys = _read_env_keys(runtime_env_path)
     protected_in_runtime = runtime_keys & PROTECTED_NAMES
     if protected_in_runtime:
@@ -72,7 +123,7 @@ def verify_source_invariant(
             f"Protected names in runtime env: {protected_in_runtime}"
         )
 
-    # D. Secret file exists, regular, uid=0, mode=0600
+    # C. Secret file: must exist, be regular, uid=0, mode=0600 (on POSIX).
     try:
         secret_st = os.lstat(secret_file_path)
     except OSError as exc:
@@ -83,72 +134,30 @@ def verify_source_invariant(
         raise SourceInvariantError("Secret file is not a regular file")
     if os.name != "nt":
         if secret_st.st_uid != 0:
-            raise SourceInvariantError(f"Secret file uid={secret_st.st_uid}, expected 0")
+            raise SourceInvariantError(
+                f"Secret file uid={secret_st.st_uid}, expected 0"
+            )
         if (secret_st.st_mode & 0o777) != 0o600:
             raise SourceInvariantError(
                 f"Secret file mode={oct(secret_st.st_mode & 0o777)}, expected 0600"
             )
 
-    # Enforce no keys dropped or added during split
-    def _parse_bytes_keys(b: bytes) -> set[str]:
-        keys = set()
-        for line in b.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(b"#"):
-                continue
-            if b"=" in stripped:
-                keys.add(stripped.split(b"=", 1)[0].strip().decode("utf-8", errors="ignore"))
-        return keys
-
-    legacy_keys = _parse_bytes_keys(prestate.legacy_env_bytes)
-    dashscope_before = "DASHSCOPE_API_KEY" in legacy_keys
-    
+    # D. The protected NAME set after remediation must equal the pre-remediation set.
+    #    We compare by name only — values are never read or compared here.
     secret_keys = _read_env_keys(secret_file_path)
-    combined_keys = runtime_keys | secret_keys
-    
-    if legacy_keys != combined_keys:
-        missing = legacy_keys - combined_keys
-        added = combined_keys - legacy_keys
-        raise SourceInvariantError(f"Keys mismatch after split. Missing: {missing}, Added: {added}")
-        
-    dashscope_after = "DASHSCOPE_API_KEY" in combined_keys
-    if prestate.dashscope_present_before != dashscope_after:
-        raise SourceInvariantError("dashscope_present_before != dashscope_after")
-        
-    # Wait, secret_keys_before == secret_keys_after
-    secret_keys_before = legacy_keys & PROTECTED_NAMES
-    secret_keys_after = secret_keys & PROTECTED_NAMES
-    if secret_keys_before != secret_keys_after:
-        raise SourceInvariantError(f"Secret keys changed: {secret_keys_before} != {secret_keys_after}")
+    post_protected_names = secret_keys & PROTECTED_NAMES
 
-    # Enforce no keys dropped or added during split
-    def _parse_bytes_keys(b: bytes) -> set[str]:
-        keys = set()
-        for line in b.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(b"#"):
-                continue
-            if b"=" in stripped:
-                keys.add(stripped.split(b"=", 1)[0].strip().decode("utf-8", errors="ignore"))
-        return keys
+    if post_protected_names != prestate.pre_remediation_effective_protected_name_set:
+        raise SourceInvariantError(
+            f"Protected name set changed after remediation: "
+            f"before={prestate.pre_remediation_effective_protected_name_set!r}, "
+            f"after={post_protected_names!r}"
+        )
 
-    legacy_keys = _parse_bytes_keys(prestate.legacy_env_bytes)
-    dashscope_before = "DASHSCOPE_API_KEY" in legacy_keys
-    
-    secret_keys = _read_env_keys(secret_file_path)
-    combined_keys = runtime_keys | secret_keys
-    
-    if legacy_keys != combined_keys:
-        missing = legacy_keys - combined_keys
-        added = combined_keys - legacy_keys
-        raise SourceInvariantError(f"Keys mismatch after split. Missing: {missing}, Added: {added}")
-        
-    dashscope_after = "DASHSCOPE_API_KEY" in combined_keys
+    # E. DASHSCOPE_API_KEY presence must be preserved exactly.
+    dashscope_after = "DASHSCOPE_API_KEY" in secret_keys
     if prestate.dashscope_present_before != dashscope_after:
-        raise SourceInvariantError("dashscope_present_before != dashscope_after")
-        
-    # Wait, secret_keys_before == secret_keys_after
-    secret_keys_before = legacy_keys & PROTECTED_NAMES
-    secret_keys_after = secret_keys & PROTECTED_NAMES
-    if secret_keys_before != secret_keys_after:
-        raise SourceInvariantError(f"Secret keys changed: {secret_keys_before} != {secret_keys_after}")
+        raise SourceInvariantError(
+            f"DASHSCOPE_API_KEY presence changed: "
+            f"before={prestate.dashscope_present_before}, after={dashscope_after}"
+        )

@@ -56,16 +56,16 @@ def test_executor_success(tmp_path, monkeypatch):
     monkeypatch.setattr(executor_module, "verify_source_invariant", lambda *args, **kwargs: None)
     
     import ops.secret_remediation_r1.runtime_invariant as runtime_invariant
-    monkeypatch.setattr(runtime_invariant, "verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr(executor_module, "verify_runtime_invariants", lambda docker=None: None)
+    monkeypatch.setattr(runtime_invariant, "verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr(executor_module, "verify_runtime_invariants", lambda expected=None, docker=None: None)
     
     import ops.secret_remediation_r1.poller_checker as poller_checker
-    monkeypatch.setattr(poller_checker, "check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr(executor_module, "check_exactly_one_poller", lambda docker=None: None)
+    monkeypatch.setattr(poller_checker, "check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr(executor_module, "check_exactly_one_poller", lambda expected=None, docker=None: None)
     
     import ops.secret_remediation_r1.health as health
-    monkeypatch.setattr(health, "check_health", lambda docker=None: None)
-    monkeypatch.setattr(executor_module, "check_health", lambda docker=None: None)
+    monkeypatch.setattr(health, "check_health", lambda expected=None, docker=None: None)
+    monkeypatch.setattr(executor_module, "check_health", lambda expected=None, docker=None: None)
     
     import ops.secret_remediation_r1.candidate_image_guard as candidate_image_guard
     monkeypatch.setattr(candidate_image_guard, "verify_legacy_image", lambda *args, **kwargs: None)
@@ -136,12 +136,12 @@ def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(executor_module, "verify_source_invariant", lambda *args, **kwargs: None)
     
     import ops.secret_remediation_r1.runtime_invariant as runtime_invariant
-    monkeypatch.setattr(runtime_invariant, "verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr(executor_module, "verify_runtime_invariants", lambda docker=None: None)
+    monkeypatch.setattr(runtime_invariant, "verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr(executor_module, "verify_runtime_invariants", lambda expected=None, docker=None: None)
     
     import ops.secret_remediation_r1.poller_checker as poller_checker
-    monkeypatch.setattr(poller_checker, "check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr(executor_module, "check_exactly_one_poller", lambda docker=None: None)
+    monkeypatch.setattr(poller_checker, "check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr(executor_module, "check_exactly_one_poller", lambda expected=None, docker=None: None)
     
     import ops.secret_remediation_r1.health as health
     def fail_health(*args, **kwargs):
@@ -202,12 +202,12 @@ def test_executor_post_runtime_nameset_missing(tmp_path, monkeypatch):
     monkeypatch.setattr("ops.secret_remediation_r1.executor.run_recreate", lambda *args, **kwargs: None)
     monkeypatch.setattr("ops.secret_remediation_r1.source_invariant.verify_source_invariant", lambda *args, **kwargs: None)
     monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_source_invariant", lambda *args, **kwargs: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.runtime_invariant.verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.poller_checker.check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.health.check_health", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_health", lambda docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.runtime_invariant.verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.poller_checker.check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.health.check_health", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_health", lambda expected=None, docker=None: None)
     monkeypatch.setattr("ops.secret_remediation_r1.candidate_image_guard.verify_legacy_image", lambda *args, **kwargs: None)
     monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
     def mock_publish(dest, content, mode=None, uid=None, gid=None, override_mode=None, **kwargs):
@@ -261,12 +261,12 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
     monkeypatch.setattr("ops.secret_remediation_r1.executor.run_recreate", lambda *args, **kwargs: None)
     monkeypatch.setattr("ops.secret_remediation_r1.source_invariant.verify_source_invariant", lambda *args, **kwargs: None)
     monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_source_invariant", lambda *args, **kwargs: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.runtime_invariant.verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_runtime_invariants", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.poller_checker.check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_exactly_one_poller", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.health.check_health", lambda docker=None: None)
-    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_health", lambda docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.runtime_invariant.verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.verify_runtime_invariants", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.poller_checker.check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_exactly_one_poller", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.health.check_health", lambda expected=None, docker=None: None)
+    monkeypatch.setattr("ops.secret_remediation_r1.executor.check_health", lambda expected=None, docker=None: None)
     monkeypatch.setattr("ops.secret_remediation_r1.candidate_image_guard.verify_legacy_image", lambda *args, **kwargs: None)
     monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
     def mock_publish(dest, content, mode=None, uid=None, gid=None, override_mode=None, **kwargs):

@@ -23,12 +23,18 @@ def run_compose_preflight() -> None:
         with open(env_path, "wb") as f:
             f.write(b"RAW_VAR=val1\nQUOTED_VAR=\"val2\"\n")
 
+        env_file_test_path = os.path.join(preflight_dir, "my_env_file.env")
+        with open(env_file_test_path, "wb") as f:
+            f.write(b"FILE_VAR=file_val\n")
+
         with open(compose_path, "w", encoding="utf-8") as f:
             f.write(
                 "services:\n"
                 "  test:\n"
                 "    image: alpine\n"
                 "    command: echo hello\n"
+                "    env_file:\n"
+                f"      - {os.path.basename(env_file_test_path)}\n"
                 "    environment:\n"
                 "      - RAW_VAR=${RAW_VAR}\n"
                 "      - QUOTED_VAR=${QUOTED_VAR}\n"
@@ -62,6 +68,10 @@ def run_compose_preflight() -> None:
             if "QUOTED_VAR: '\"val2\"'" in output or 'QUOTED_VAR: "\\"val2\\""' in output:
                  raise PreflightError("Compose preflight failed: Quotes were not stripped from QUOTED_VAR")
             raise PreflightError("Compose preflight failed: QUOTED_VAR not resolved correctly")
+
+        # Verify env_file presence in output
+        if "my_env_file.env" not in output:
+            raise PreflightError("Compose preflight failed: env_file capability not supported or file dropped")
 
     finally:
         shutil.rmtree(preflight_dir, ignore_errors=True)

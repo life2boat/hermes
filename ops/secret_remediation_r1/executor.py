@@ -29,6 +29,7 @@ from ops.secret_remediation_r1.rollback import (
 )
 from ops.secret_remediation_r1.runtime_invariant import (
     verify_runtime_invariants,
+    capture_runtime_prestate,
 )
 from ops.secret_remediation_r1.secret_transfer import (
     transfer_secrets,
@@ -61,6 +62,7 @@ def run_remediation(
 
     # Capture prestate
     try:
+        runtime_prestate = capture_runtime_prestate(docker=docker)
         prestate = capture_prestate(base_compose_path, override_path, PROD_PARENT_DIR_PATH)
     except Exception as exc:
         raise ExecutorError(f"Prestate capture failed: {exc}")
@@ -109,7 +111,7 @@ def run_remediation(
             base_compose_path,
             override_path,
         )
-        verify_runtime_invariants(docker=docker)
+        verify_runtime_invariants(expected=runtime_prestate, docker=docker)
         check_exactly_one_poller(docker=docker)
         check_health(docker=docker)
 
@@ -143,7 +145,7 @@ def run_remediation(
 
     except Exception as exc:
         try:
-            execute_rollback(prestate, docker=docker)
+            execute_rollback(prestate, runtime_prestate=runtime_prestate, docker=docker)
         except RollbackError as rb_exc:
             raise ExecutorError(
                 f"Remediation failed: {exc} | Rollback: FAILED: {rb_exc}"

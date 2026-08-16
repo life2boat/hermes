@@ -245,7 +245,11 @@ def read_poller_environ(
             raise ProcessIdentityError("cgroup mismatch during revalidation")
             
         poller_pids = _find_poller_processes()
-        if pid not in poller_pids:
+        if len(poller_pids) == 0:
+            raise ProcessIdentityError("No hermes gateway poller found")
+        if len(poller_pids) > 1:
+            raise ProcessIdentityError(f"Multiple pollers found during revalidation: {poller_pids}")
+        if poller_pids[0] != pid:
             raise ProcessIdentityError("PID is no longer a valid poller process")
     # Validate before
     _revalidate()

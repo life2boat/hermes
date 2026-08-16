@@ -167,11 +167,21 @@ def _dirfd_rmdir_if_empty(
     """
     if _IS_LINUX:
         try:
+            st = os.stat(dir_basename, dir_fd=parent_dirfd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                raise RollbackError(f"Failed to open {dir_basename!r} for empty-check: not a directory or is a symlink")
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
             dir_fd = os.open(
                 dir_basename,
-                os.O_RDONLY | os.O_DIRECTORY,
+                flags,
                 dir_fd=parent_dirfd,
             )
+            fst = os.fstat(dir_fd)
+            if st.st_ino != fst.st_ino or st.st_dev != fst.st_dev:
+                os.close(dir_fd)
+                raise RollbackError(f"Failed to open {dir_basename!r} for empty-check: identity mismatch")
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 return
@@ -225,6 +235,7 @@ def _dirfd_rmdir_if_empty(
 
 def execute_rollback(
     prestate: RemediationPrestate,
+    runtime_prestate: "RuntimePrestate",
     docker: DockerBackend | None = None,
 ) -> None:
     """Restore all mutated artifacts to prestate and recreate the container.
@@ -240,7 +251,7 @@ def execute_rollback(
     )
     from ops.secret_remediation_r1.health import check_health
     from ops.secret_remediation_r1.poller_checker import check_exactly_one_poller
-    from ops.secret_remediation_r1.runtime_invariant import verify_runtime_invariants
+    from ops.secret_remediation_r1.runtime_invariant import verify_runtime_invariants, RuntimePrestate, RuntimePrestate
 
     errors: list[str] = []
 
@@ -271,7 +282,19 @@ def execute_rollback(
     parent_dirfd: int = -1
     if _IS_LINUX:
         try:
-            parent_dirfd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY)
+            st = os.lstat(parent_path)
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                errors.append("open_parent_dirfd: parent path is not a directory or is a symlink")
+            else:
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                parent_dirfd = os.open(parent_path, flags)
+                fst = os.fstat(parent_dirfd)
+                if st.st_ino != fst.st_ino or st.st_dev != fst.st_dev:
+                    errors.append("open_parent_dirfd: parent identity mismatch")
+                    os.close(parent_dirfd)
+                    parent_dirfd = -1
         except OSError as exc:
             if exc.errno != errno.ENOENT:
                 errors.append(f"open_parent_dirfd: {exc}")
@@ -287,8 +310,8 @@ def execute_rollback(
         if parent_dirfd != -1:
             try:
                 os.close(parent_dirfd)
-            except OSError:
-                pass
+            except OSError as exc:
+                errors.append(f"close_parent_dirfd: {exc}")
 
     # 4. Remove /etc/hermes if we created it and it is now empty.
     if prestate.created_parent_dir:
@@ -298,7 +321,19 @@ def execute_rollback(
 
         if _IS_LINUX:
             try:
-                etc_dirfd = os.open(etc_path, os.O_RDONLY | os.O_DIRECTORY)
+                st = os.lstat(etc_path)
+                if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                    errors.append("open_etc_dirfd: etc path is not a directory or is a symlink")
+                else:
+                    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+                    etc_dirfd = os.open(etc_path, flags)
+                    fst = os.fstat(etc_dirfd)
+                    if st.st_ino != fst.st_ino or st.st_dev != fst.st_dev:
+                        errors.append("open_etc_dirfd: etc identity mismatch")
+                        os.close(etc_dirfd)
+                        etc_dirfd = -1
             except OSError as exc:
                 errors.append(f"open_etc_dirfd: {exc}")
 
@@ -326,7 +361,7 @@ def execute_rollback(
     _try("compose_recreate", lambda: run_recreate())
 
     # 6. Post-rollback invariants.
-    _try("runtime_invariant", lambda: verify_runtime_invariants(docker=docker))
+    _try("runtime_invariant", lambda: verify_runtime_invariants(expected=runtime_prestate, docker=docker))
     _try("poller_checker", lambda: check_exactly_one_poller(docker=docker))
     _try("health", lambda: check_health(docker=docker))
 

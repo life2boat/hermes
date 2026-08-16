@@ -69,3 +69,61 @@ def test_replace_existing_file_cleanup_on_write_fail(tmp_path, monkeypatch):
 
     assert dest.read_text() == "old content"
     assert not any(p.name.startswith(".tmp_") for p in tmp_path.iterdir())
+
+
+@pytest.mark.skipif(not _IS_LINUX, reason="Linux-only parent binding")
+def test_replace_existing_parent_symlink_rejected(tmp_path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    (real_parent / "target.txt").write_text("old content")
+    linked_parent = tmp_path / "linked"
+    os.symlink(real_parent, linked_parent)
+
+    with pytest.raises(SafeFsError, match="Parent directory is a symlink"):
+        replace_existing_file(str(linked_parent / "target.txt"), b"new content")
+
+
+@pytest.mark.skipif(not _IS_LINUX, reason="Linux-only parent binding")
+def test_replace_existing_parent_identity_mismatch_rejected(tmp_path, monkeypatch):
+    dest = tmp_path / "target.txt"
+    dest.write_text("old content")
+    original_fstat = os.fstat
+    parent_fd = None
+
+    def mismatched_parent_fstat(fd):
+        nonlocal parent_fd
+        result = original_fstat(fd)
+        if parent_fd is None and stat.S_ISDIR(result.st_mode):
+            parent_fd = fd
+        if fd == parent_fd:
+            values = list(result)
+            values[1] += 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(os, "fstat", mismatched_parent_fstat)
+
+    with pytest.raises(SafeFsError, match="Parent lstat/fstat identity mismatch"):
+        replace_existing_file(str(dest), b"new content")
+
+    assert dest.read_text() == "old content"
+
+
+@pytest.mark.skipif(not _IS_LINUX, reason="Linux-only parent binding")
+def test_replace_existing_uses_nofollow_parent_binding(tmp_path, monkeypatch):
+    dest = tmp_path / "target.txt"
+    dest.write_text("old content")
+    original_open = os.open
+    parent_open_flags = []
+
+    def recording_open(path, flags, *args, **kwargs):
+        if path == str(tmp_path) and "dir_fd" not in kwargs:
+            parent_open_flags.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    replace_existing_file(str(dest), b"new content")
+
+    assert len(parent_open_flags) == 1
+    assert parent_open_flags[0] & os.O_DIRECTORY
+    assert parent_open_flags[0] & os.O_NOFOLLOW

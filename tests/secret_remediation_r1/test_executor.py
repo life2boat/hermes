@@ -179,7 +179,10 @@ def test_executor_success(tmp_path, monkeypatch):
         docker=MockDockerBackend(),
         image_backend=mock_image_backend,
     )
-    assert len(mock_image_backend.inspected_refs) == 2
+    assert mock_image_backend.inspected_refs == [
+        constants.LEGACY_IMAGE_REF,
+        constants.LEGACY_IMAGE_REF,
+    ]
 
 
 def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
@@ -710,12 +713,13 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
     # Guard logic to simulate pre/post check properly
     guard_calls = []
 
+    from ops.secret_remediation_r1.candidate_image_guard import (
+        verify_legacy_image as real_verify_legacy_image,
+    )
+
     def mock_verify_legacy(ref, backend=None):
         guard_calls.append(ref)
-        if failure_stage == "pre_image_guard" and len(guard_calls) == 1:
-            raise RuntimeError("pre_image_guard failure")
-        if failure_stage == "post_image_guard" and len(guard_calls) == 2:
-            raise RuntimeError("post_image_guard failure")
+        real_verify_legacy_image(ref, backend=backend)
 
     monkeypatch.setattr(
         "ops.secret_remediation_r1.candidate_image_guard.verify_legacy_image",

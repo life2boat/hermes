@@ -428,10 +428,7 @@ def replace_existing_file(
 
     try:
         if _IS_LINUX:
-            try:
-                dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-            except OSError as exc:
-                raise SafeFsError(f"Failed to open parent directory: {exc}")
+            dirfd, _ = _open_parent_dirfd(parent)
 
         # Verify destination exists and is regular, and capture its metadata
         try:

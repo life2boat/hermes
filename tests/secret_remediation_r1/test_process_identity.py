@@ -160,7 +160,7 @@ def test_pid_multi_poller_reject(monkeypatch):
         resolve_poller_pid(docker=backend)
 
 
-def test_read_poller_environ_ordering(monkeypatch):
+def test_revalidate_running_state_mutation(monkeypatch):
     from ops.secret_remediation_r1.process_identity import (
         read_poller_environ,
         ContainerIdentity,

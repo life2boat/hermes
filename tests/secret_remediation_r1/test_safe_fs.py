@@ -368,6 +368,25 @@ def test_safe_fs_parent_fsync_after_cleanup(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not _IS_LINUX, reason="Linux only test")
+def test_safe_fs_cleanup_fsync_failure_propagates(tmp_path, monkeypatch):
+    def fail_write(*args):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fail_fsync(fd):
+        raise OSError(errno.EIO, "Directory fsync failed")
+
+    monkeypatch.setattr(os, "write", fail_write)
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+
+    dest = tmp_path / "dest.txt"
+    with pytest.raises(SafeFsError) as excinfo:
+        publish_file(str(dest), b"content")
+
+    assert excinfo.value.cleanup_incomplete is True
+    assert "CLEANUP_INCOMPLETE" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _IS_LINUX, reason="Linux only test")
 def test_safe_fs_fd_cleanup_success(tmp_path, monkeypatch):
     orig_close = os.close
     closes = list()

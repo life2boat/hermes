@@ -152,11 +152,7 @@ def test_safe_fs_concurrent_destination_creation_fails(tmp_path, monkeypatch):
         return orig_stat(path, *args, **kwargs)
     monkeypatch.setattr(os, "stat", mock_stat)
 
-    with pytest.raises(SafeFsError, match="already exists"):
-        # Wait, if stat is mocked, it will raise FileExistsError later or we can mock os.link.
-        pass
-
-    # Better way: mock link to raise FileExistsError
+    # Mock link to raise FileExistsError to simulate race after precheck
     if _IS_LINUX:
         orig_link = os.link
         def mock_link(*args, **kwargs):

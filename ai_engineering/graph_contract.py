@@ -333,8 +333,16 @@ def serialize_graph_snapshot(snapshot: GraphSnapshot) -> str:
 
 
 def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
+    def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                raise GraphVerificationError(f"Duplicate JSON key rejected: {k}")
+            d[k] = v
+        return d
+
     try:
-        data = json.loads(json_str)
+        data = json.loads(json_str, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError:
         raise GraphVerificationError("Invalid JSON")
     

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/life2boat/hermes/schemas/production-runtime-attestation-v1.schema.json",
+  "title": "ProductionRuntimeAttestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "attestation_id",
+    "target",
+    "collected_at_utc",
+    "collectors"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "attestation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "target": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "collected_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "collectors": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/collector"}
+    }
+  },
+  "$defs": {
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collector_id", "status", "observations"],
+      "properties": {
+        "collector_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "observations": {"type": "object"}
+      }
+    }
+  }
+}

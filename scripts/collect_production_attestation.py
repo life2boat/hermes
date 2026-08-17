@@ -163,9 +163,9 @@ def main():
 
     # Validate critical structural facts haven't drifted because of collection
     # e.g., restart count shouldn't increase, running must be true.
-    docker_pre = attestation.collectors[0].observations
-    docker_post = post_attestation.collectors[0].observations
-    sqlite_post = post_attestation.collectors[1].observations
+    docker_pre = next(c.observations for c in attestation.collectors if c.collector_id == "docker_runtime")
+    docker_post = next(c.observations for c in post_attestation.collectors if c.collector_id == "docker_runtime")
+    sqlite_post = next(c.observations for c in post_attestation.collectors if c.collector_id == "sqlite_read_only")
 
     if docker_post.get("restart_count") != docker_pre.get("restart_count"):
         print("POST-HEALTH FAIL: Restart count increased!")

@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.life2boat.com/schemas/memory-graph-contract-v1.schema.json",
+  "title": "Hermes Memory Graph Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "snapshot_id",
+    "nodes",
+    "edges"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^gs_[a-f0-9]{64}$"
+    },
+    "nodes": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/GraphNode"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "$ref": "#/$defs/GraphEdge"
+      }
+    },
+    "authoritative_source": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["facts", "is_complete"],
+      "properties": {
+        "facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuthoritativeFactState"
+          }
+        },
+        "is_complete": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "GraphProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_system", "fact_id", "revision"],
+      "properties": {
+        "source_system": {
+          "type": "string",
+          "const": "sqlite_memory_os_facts"
+        },
+        "fact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S+$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Properties": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          { "type": "string", "maxLength": 4096 },
+          { "type": "integer" },
+          { "type": "number" },
+          { "type": "boolean" }
+        ]
+      },
+      "maxProperties": 100,
+      "propertyNames": {
+        "maxLength": 100
+      }
+    },
+    "GraphNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "node_type", "properties", "provenance"],
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "pattern": "^gn_[a-f0-9]{64}$"
+        },
+        "node_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+:[a-z0-9_]+$"
+        },
+        "properties": {
+          "$ref": "#/$defs/Properties"
+        },
+        "provenance": {
+          "$ref": "#/$defs/GraphProvenance"
+        }
+      }
+    },
+    "GraphEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edge_id", "source_node_id", "target_node_id", "relation_type", "properties", "provenance"],
+      "properties": {
+        "edge_id": {
+          "type": "string",
+          "pattern": "^ge_[a-f0-9]{64}$"
+        },
+        "source_node_id": {
+          "type": "string",
+          "pattern": "^gn_[a-f0-9]{64}$"
+        },
+        "target_node_id": {
+          "type": "string",
+          "pattern": "^gn_[a-f0-9]{64}$"
+        },
+        "relation_type": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+:[a-z0-9_]+$"
+        },
+        "properties": {
+          "$ref": "#/$defs/Properties"
+        },
+        "provenance": {
+          "$ref": "#/$defs/GraphProvenance"
+        }
+      }
+    },
+    "AuthoritativeFactState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_id", "current_revision", "status"],
+      "properties": {
+        "fact_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S+$"
+        },
+        "current_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVE", "DELETED"]
+        }
+      }
+    }
+  }
+}

@@ -19,25 +19,33 @@ We will introduce a Graph Memory Layer (v3) built upon strict deterministic cont
 1. **Authority**:
    - SQLite `memory_os_facts` remains AUTHORITATIVE.
    - The graph layer is strictly DERIVED_REBUILDABLE.
-   - No LLM-proposed relation is trusted until explicitly bound to an authoritative SQLite source fact via `GraphProvenance`.
+   - `LLM_AS_AUTHORITY=false`: No LLM-proposed relation is trusted until explicitly bound to an authoritative SQLite source fact via `GraphProvenance`.
 
-2. **Graph Contracts**:
+2. **Graph Contracts & Identity**:
    - We define `GraphNode` and `GraphEdge` with a versioned schema (`GRAPH_SCHEMA_VERSION = 1`).
-   - Each entity possesses a **deterministic, content-bound identity** computed from its type, canonical properties (sorted JSON), and provenance.
-   - Identity guarantees that identical inputs always yield the same hash ID, implicitly handling deduplication and idempotency.
+   - We establish `GRAPH_NODE_IDENTITY_SEMANTICS=ENTITY`: semantic entity identity is separate from provenance. The `node_id` hashes only `node_type` and canonical `properties`, independent of supporting provenance.
+   - Edge identity hashes `source_id`, `target_id`, `relation_type`, and canonical `properties`.
+   - Each entity possesses a **deterministic, content-bound identity**. Identity guarantees that identical inputs always yield the same hash ID, implicitly handling deduplication and idempotency.
+   - We establish `REJECT_CONFLICT` as the conflict policy: contradictory assertions within the same logical relation fail closed.
 
-3. **Provenance**:
+3. **Provenance & Source-State Evidence**:
    - Every graph assertion is bound via `GraphProvenance` (e.g., `source_system`, `fact_id`, `revision`).
-   - If an authoritative fact is deleted or superseded (revision bumped), all derived graph entities tied to that exact `fact_id` and `revision` are deterministically orphaned and can be safely purged.
+   - Provenance does not itself prove currentness.
+   - Currentness requires explicit authoritative source-state evidence provided at evaluation time.
+   - We define explicit invalidation semantics:
+     - `CURRENT`: matching active revision.
+     - `STALE`: older revision than active source-state.
+     - `DELETED_SOURCE`: explicitly deleted authoritative fact.
+     - `UNKNOWN_SOURCE`: missing source in an explicitly complete source-state snapshot.
 
 4. **Validation and Security**:
    - Tamper detection: Entities can re-compute their IDs and fail closed if mutated.
    - Secret-like material (e.g., tokens, API keys) in graph properties is explicitly rejected to prevent leakage into the derived search space.
    - Self-edges are explicitly forbidden.
 
-5. **Rebuildability**:
-   - The entire graph state can be dropped and deterministically re-projected from the SQLite facts.
-   - A reconciliation loop (similar to the Qdrant outbox) will eventually manage the projection of SQLite facts into the derived graph store.
+5. **Rebuildability & Backends**:
+   - The entire graph state can be dropped and deterministically re-projected from the SQLite facts (deterministic rebuild).
+   - Backend choice remains deferred to a future PR. A reconciliation loop will eventually manage the projection of SQLite facts into the chosen derived graph store.
 
 ## Consequences
 

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.53
-updated_at: 2026-08-14
+version: 1.2.54
+updated_at: 2026-08-17
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 60b403723dcdc49261f3ff99ae580d64e747cb00
+state_verified_against_main_sha: e85ca7dbee2025320c5daf61181a6c1142f18a9b
 production_sha: unknown
 ---
 
@@ -12,6 +12,17 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## HealBite Secret Remediation R1 — Clean Forward Source Closure
+
+- Repository closure base: `e85ca7dbee2025320c5daf61181a6c1142f18a9b`.
+- Forensic reference: `f438671ee445ae5a73a2aad235298fe5f1439536`.
+- `PRODUCTION_FORENSIC_RUNTIME_STATE=PASS`.
+- `HISTORICAL_EXECUTION_PROVENANCE=UNPROVEN`.
+- `PRODUCTION_REPAIR_REQUIRED=false`.
+- Independently hardened: child-only Compose interpolation, verified-process protected-name capture, bounded poller convergence, container-scoped health, configured image-reference authority, `--no-interpolate` source validation, and strict JSON byte-span removal.
+- Whole-document JSON reserialization and forensic-branch provenance claims are rejected.
+- Repository-only change: production, database, Qdrant, secrets, containers, and deployment remain unchanged.
 
 ## Hermes Intent Control Plane v1.2 — Evidence Semantics Hardening
 

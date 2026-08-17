@@ -31,6 +31,7 @@ def get_base_data():
             "State": {"Running": True},
             "Image": LEGACY_IMAGE_ID,
             "Config": {
+                "Image": LEGACY_IMAGE_REF,
                 "Labels": {
                     "com.docker.compose.image": LEGACY_IMAGE_REF,
                     "com.docker.compose.project": COMPOSE_PROJECT,
@@ -89,7 +90,7 @@ def test_runtime_invariant_legacy_image_ref_mismatch():
     backend_pre = MockBackend(get_base_data())
     prestate = capture_runtime_prestate(backend_pre)
     data = get_base_data()
-    data[0]["Config"]["Labels"]["com.docker.compose.image"] = "wrong:ref"
+    data[0]["Config"]["Image"] = "wrong:ref"
     backend_post = MockBackend(data)
     with pytest.raises(RuntimeInvariantError, match="Image ref mismatch"):
         verify_runtime_invariants(expected=prestate, docker=backend_post)
@@ -127,6 +128,7 @@ def test_runtime_prestate_capture():
     assert prestate.container_id == "cid"
     assert prestate.compose_project == COMPOSE_PROJECT
     assert prestate.compose_service == COMPOSE_SERVICE
+    assert prestate.image_ref == LEGACY_IMAGE_REF
     assert prestate.memory_vector_enabled == "true"
     assert prestate.qdrant_config == {
         "QDRANT_ENDPOINT": "http",
@@ -190,3 +192,12 @@ def test_runtime_project_changed_rejected():
     backend_post = MockBackend(data)
     with pytest.raises(RuntimeInvariantError, match="Wrong project"):
         verify_runtime_invariants(expected=prestate, docker=backend_post)
+
+
+def test_runtime_config_image_wins_over_stale_compose_label():
+    data = get_base_data()
+    data[0]["Config"]["Labels"]["com.docker.compose.image"] = "stale:label"
+    backend = MockBackend(data)
+    prestate = capture_runtime_prestate(backend)
+    assert prestate.image_ref == LEGACY_IMAGE_REF
+    verify_runtime_invariants(expected=prestate, docker=backend)

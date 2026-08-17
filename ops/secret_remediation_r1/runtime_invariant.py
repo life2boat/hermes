@@ -56,9 +56,7 @@ def capture_runtime_prestate(docker: DockerBackend | None = None) -> RuntimePres
 
     container_id = data.get("Id", "")
     labels = data.get("Config", {}).get("Labels", {})
-    image_ref = labels.get("com.docker.compose.image", "") or data.get(
-        "Config", {}
-    ).get("Image", "")
+    image_ref = data.get("Config", {}).get("Image", "")
     image_id = data.get("Image", "")
     compose_project = labels.get("com.docker.compose.project", "")
     compose_service = labels.get("com.docker.compose.service", "")
@@ -113,9 +111,7 @@ def verify_runtime_invariants(
 
     # Image identity
     labels = data.get("Config", {}).get("Labels", {})
-    image_ref = labels.get("com.docker.compose.image", "") or data.get(
-        "Config", {}
-    ).get("Image", "")
+    image_ref = data.get("Config", {}).get("Image", "")
 
     # Must match prestate and constants
     if image_ref != expected.image_ref or image_ref != LEGACY_IMAGE_REF:

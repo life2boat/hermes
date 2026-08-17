@@ -73,15 +73,13 @@ class SourceState:
     legacy_env_bytes: bytes
     dashscope_present_before: bool
     legacy_env_name_set: frozenset[str] = field(default_factory=frozenset)
-    pre_remediation_effective_protected_name_set: frozenset[str] = field(
-        default_factory=frozenset
-    )
+    pre_remediation_effective_protected_name_set: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         parsed = _parse_env_keys(self.legacy_env_bytes)
         if not self.legacy_env_name_set:
             object.__setattr__(self, "legacy_env_name_set", parsed)
-        if not self.pre_remediation_effective_protected_name_set:
+        if self.pre_remediation_effective_protected_name_set is None:
             object.__setattr__(
                 self,
                 "pre_remediation_effective_protected_name_set",
@@ -98,7 +96,7 @@ def _verify_effective_compose(compose_files: list[str], workdir: str) -> None:
     cmd = ["docker", "compose"]
     for f in compose_files:
         cmd.extend(["-f", f])
-    cmd.extend(["config", "--format", "json"])
+    cmd.extend(["config", "--no-interpolate", "--format", "json"])
 
     env = os.environ.copy()
     for name in PROTECTED_NAMES:

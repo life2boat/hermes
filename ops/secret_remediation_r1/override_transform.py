@@ -4,6 +4,10 @@ from __future__ import annotations
 import os
 import re
 from ops.secret_remediation_r1.constants import PROTECTED_NAMES
+from ops.secret_remediation_r1.json_override import (
+    JsonOverrideError,
+    transform_json_override,
+)
 from ops.secret_remediation_r1.safe_fs import (
     safe_open_source,
     publish_file,
@@ -93,16 +97,24 @@ def transform_override(
     except Exception as exc:
         raise OverrideTransformError(f"Failed to read source: {exc}")
 
-    lines = original_bytes.decode("utf-8").splitlines(keepends=True)
-    protected_indices = set(_find_environment_block(lines))
-
-    new_lines = [line for i, line in enumerate(lines) if i not in protected_indices]
-    new_bytes = "".join(new_lines).encode("utf-8")
-
-    # Verify unrelated bytes are identical
-    non_protected_orig = [l for i, l in enumerate(lines) if i not in protected_indices]
-    if non_protected_orig != new_lines:
-        raise OverrideTransformError("Unrelated byte mutation detected")
+    if original_bytes.lstrip().startswith((b"{", b"[")):
+        try:
+            new_bytes = transform_json_override(original_bytes)
+        except JsonOverrideError as exc:
+            raise OverrideTransformError(str(exc)) from exc
+    else:
+        try:
+            lines = original_bytes.decode("utf-8").splitlines(keepends=True)
+        except UnicodeDecodeError as exc:
+            raise OverrideTransformError("Override is not valid UTF-8") from exc
+        protected_indices = set(_find_environment_block(lines))
+        new_lines = [line for i, line in enumerate(lines) if i not in protected_indices]
+        new_bytes = "".join(new_lines).encode("utf-8")
+        non_protected_orig = [
+            line for i, line in enumerate(lines) if i not in protected_indices
+        ]
+        if non_protected_orig != new_lines:
+            raise OverrideTransformError("Unrelated byte mutation detected")
 
     from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
 

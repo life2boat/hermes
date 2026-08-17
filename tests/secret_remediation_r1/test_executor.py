@@ -13,7 +13,9 @@ class MockDockerBackend:
                 "Config": {
                     "Image": constants.LEGACY_IMAGE_REF,
                     "Labels": {
-                        "com.docker.compose.image": constants.LEGACY_IMAGE_REF,
+                        "com.docker.compose.image": "stale:compose-label",
+                        "com.docker.compose.project": constants.COMPOSE_PROJECT,
+                        "com.docker.compose.service": constants.COMPOSE_SERVICE,
                     },
                 },
             }
@@ -49,7 +51,8 @@ def test_executor_success(tmp_path, monkeypatch):
     parent.mkdir(parents=True, exist_ok=True)
 
     legacy_env = tmp_path / "legacy.env"
-    legacy_env.write_bytes(b"TELEGRAM_BOT_TOKEN=secret\nNORMAL=val\n")
+    # The effective token exists only in the verified running process.
+    legacy_env.write_bytes(b"NORMAL=val\n")
 
     runtime_env = parent / "runtime.env"
     secret_file = parent / "secret.env"
@@ -131,7 +134,12 @@ def test_executor_success(tmp_path, monkeypatch):
 
     import ops.secret_remediation_r1.candidate_image_guard as candidate_image_guard
 
-    monkeypatch.setattr(executor_module, "ensure_parent_directory", lambda path: None)
+    events = []
+    monkeypatch.setattr(
+        executor_module,
+        "ensure_parent_directory",
+        lambda path: events.append("mutation"),
+    )
 
     def mock_publish(
         dest, content, mode=None, uid=None, gid=None, override_mode=None, **kwargs
@@ -164,12 +172,15 @@ def test_executor_success(tmp_path, monkeypatch):
         "resolve_poller_pid",
         lambda docker=None: (123, type("ID", (), {"container_id": "123"})),
     )
+
+    def read_effective_names(pid, identity, docker=None):
+        events.append("process-environ-read")
+        return b"TELEGRAM_BOT_TOKEN=synthetic-value\x00NORMAL=val\x00"
+
     monkeypatch.setattr(
         process_identity,
         "read_poller_environ",
-        lambda pid, identity, docker=None: (
-            b"TELEGRAM_BOT_TOKEN=synthetic_post_recreate_val\x00NORMAL=val\x00"
-        ),
+        read_effective_names,
     )
 
     mock_image_backend = MockImageBackend()
@@ -183,6 +194,8 @@ def test_executor_success(tmp_path, monkeypatch):
         constants.LEGACY_IMAGE_REF,
         constants.LEGACY_IMAGE_REF,
     ]
+    assert events[0] == "process-environ-read"
+    assert events.index("process-environ-read") < events.index("mutation")
 
 
 def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
@@ -229,6 +242,14 @@ def test_executor_rollback_on_health_failure(tmp_path, monkeypatch):
         secret_transfer,
         "read_poller_environ",
         lambda pid, identity, docker=None: b"TELEGRAM_BOT_TOKEN=secret\x00",
+    )
+    monkeypatch.setattr(
+        "ops.secret_remediation_r1.process_identity.resolve_poller_pid",
+        lambda docker=None: (123, type("ID", (), {"container_id": "123"})),
+    )
+    monkeypatch.setattr(
+        "ops.secret_remediation_r1.process_identity.read_poller_environ",
+        lambda pid, identity, docker=None: b"TELEGRAM_BOT_TOKEN=synthetic\x00",
     )
 
     import ops.secret_remediation_r1.compose_command as compose_command
@@ -426,9 +447,10 @@ def test_executor_post_runtime_nameset_missing(tmp_path, monkeypatch):
     )
 
     # Missing TELEGRAM_BOT_TOKEN
+    environ_reads = iter([b"TELEGRAM_BOT_TOKEN=synthetic\x00", b"NORMAL=val\x00"])
     monkeypatch.setattr(
         "ops.secret_remediation_r1.process_identity.read_poller_environ",
-        lambda pid, identity, docker=None: b"NORMAL=val\x00",
+        lambda pid, identity, docker=None: next(environ_reads),
     )
 
     with pytest.raises(
@@ -557,16 +579,18 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
     )
 
     # ADDED DASHSCOPE_API_KEY unexpectedly
+    environ_reads = iter([
+        b"TELEGRAM_BOT_TOKEN=synthetic\x00",
+        (b"TELEGRAM_BOT_TOKEN=synthetic\x00DASHSCOPE_API_KEY=synthetic-two\x00"),
+    ])
     monkeypatch.setattr(
         "ops.secret_remediation_r1.process_identity.read_poller_environ",
-        lambda pid, identity, docker=None: (
-            b"TELEGRAM_BOT_TOKEN=synthetic\x00DASHSCOPE_API_KEY=synthetic2\x00"
-        ),
+        lambda pid, identity, docker=None: next(environ_reads),
     )
 
     with pytest.raises(
         ExecutorError, match="Post-recreate protected NAME set mismatch"
-    ):
+    ) as caught:
         run_remediation(
             str(base),
             str(override),
@@ -578,6 +602,8 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
         base.read_bytes()
         == b"services:\n  hermes-bot:\n    env_file:\n      - /home/hermes/.hermes/.env\n"
     )
+    assert "synthetic-two" not in str(caught.value)
+    assert "synthetic\x00" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -733,7 +759,7 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
                 return [
                     {
                         "Config": {
-                            "Labels": {"com.docker.compose.image": "wrong_image_pre"}
+                            "Image": "wrong_image_pre",
                         }
                     }
                 ]
@@ -741,16 +767,14 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
                 return [
                     {
                         "Config": {
-                            "Labels": {"com.docker.compose.image": "wrong_image_post"}
+                            "Image": "wrong_image_post",
                         }
                     }
                 ]
             return [
                 {
                     "Config": {
-                        "Labels": {
-                            "com.docker.compose.image": "healbite-hermes:pr99-main-273b0a6cccaf"
-                        }
+                        "Image": constants.LEGACY_IMAGE_REF,
                     }
                 }
             ]
@@ -816,9 +840,10 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
         monkeypatch.setattr("ops.secret_remediation_r1.executor.check_health", fail)
     elif failure_stage == "post_runtime_name_set":
         # Simulating missing token in environment
+        environ_reads = iter([b"TELEGRAM_BOT_TOKEN=synthetic\x00", b"NORMAL=val\x00"])
         monkeypatch.setattr(
             "ops.secret_remediation_r1.process_identity.read_poller_environ",
-            lambda pid, identity, docker=None: b"NORMAL=val\x00",
+            lambda pid, identity, docker=None: next(environ_reads),
         )
 
     with pytest.raises(ExecutorError):

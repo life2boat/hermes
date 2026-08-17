@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.54 - 2026-08-17
+
+Changed:
+- added the clean-forward HealBite Secret Remediation R1 source closure from canonical base `e85ca7dbee2025320c5daf61181a6c1142f18a9b`;
+- retained `f438671ee445ae5a73a2aad235298fe5f1439536` only as forensic reference while keeping `HISTORICAL_EXECUTION_PROVENANCE=UNPROVEN`;
+- added strict JSON byte-span removal, child-only Compose interpolation, verified-process protected-name capture, bounded poller convergence, container-scoped health, and exact source/runtime authority contracts.
+
+Safety:
+- `PRODUCTION_FORENSIC_RUNTIME_STATE=PASS` and `PRODUCTION_REPAIR_REQUIRED=false`;
+- repository source closure only; no production, database, Qdrant, secrets, containers, deployment, rollback, or live runtime changed.
+
 ## 1.2.52 - 2026-08-14
 
 Changed:

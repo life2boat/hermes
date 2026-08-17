@@ -11,6 +11,7 @@ from ops.secret_remediation_r1.constants import (
     COMPOSE_WORKDIR,
     PROD_LEGACY_ENV_PATH,
     PROD_PARENT_DIR_PATH,
+    PROTECTED_NAMES,
     PROD_RUNTIME_ENV_PATH,
     PROD_SECRET_FILE_PATH,
 )
@@ -41,6 +42,22 @@ from ops.secret_remediation_r1.source_invariant import (
 )
 
 
+def _protected_names_from_environ(environ_bytes: bytes) -> frozenset[str]:
+    """Extract protected names only; values are never decoded or retained."""
+    names: set[str] = set()
+    for assignment in environ_bytes.split(b"\x00"):
+        if b"=" not in assignment:
+            continue
+        key_bytes = assignment.split(b"=", 1)[0]
+        try:
+            key = key_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if key in PROTECTED_NAMES:
+            names.add(key)
+    return frozenset(names)
+
+
 class ExecutorError(Exception):
     pass
 
@@ -64,9 +81,22 @@ def run_remediation(
 
     # Capture prestate
     try:
+        from ops.secret_remediation_r1.process_identity import (
+            read_poller_environ,
+            resolve_poller_pid,
+        )
+
         runtime_prestate = capture_runtime_prestate(docker=docker)
         prestate = capture_prestate(
             base_compose_path, override_path, PROD_PARENT_DIR_PATH
+        )
+        pre_pid, pre_identity = resolve_poller_pid(docker=docker)
+        pre_env_bytes = read_poller_environ(pre_pid, pre_identity, docker=docker)
+        pre_protected_names = _protected_names_from_environ(pre_env_bytes)
+        source_state = SourceState(
+            legacy_env_bytes=prestate.legacy_env_bytes,
+            dashscope_present_before="DASHSCOPE_API_KEY" in pre_protected_names,
+            pre_remediation_effective_protected_name_set=pre_protected_names,
         )
     except Exception as exc:
         raise ExecutorError(f"Prestate capture failed: {exc}")
@@ -83,10 +113,7 @@ def run_remediation(
         cdata = backend.inspect(CONTAINER_NAME)
         if not cdata:
             raise ExecutorError(f"Pre-recreate: Container {CONTAINER_NAME} not found")
-        labels = cdata[0].get("Config", {}).get("Labels", {})
-        eff_image = labels.get("com.docker.compose.image", "") or cdata[0].get(
-            "Config", {}
-        ).get("Image", "")
+        eff_image = cdata[0].get("Config", {}).get("Image", "")
         verify_legacy_image(eff_image, backend=image_backend)
 
         transform_base_compose(base_compose_path, base_compose_path)
@@ -96,22 +123,9 @@ def run_remediation(
         cdata_post = backend.inspect(CONTAINER_NAME)
         if not cdata_post:
             raise ExecutorError(f"Post-recreate: Container {CONTAINER_NAME} not found")
-        labels_post = cdata_post[0].get("Config", {}).get("Labels", {})
-        eff_image_post = labels_post.get("com.docker.compose.image", "") or cdata_post[
-            0
-        ].get("Config", {}).get("Image", "")
+        eff_image_post = cdata_post[0].get("Config", {}).get("Image", "")
         verify_legacy_image(eff_image_post, backend=image_backend)
 
-        # Build SourceState from captured prestate bytes.
-        # SourceState.__post_init__ auto-derives legacy_env_name_set and
-        # pre_remediation_effective_protected_name_set from legacy_env_bytes.
-        from ops.secret_remediation_r1.source_invariant import _parse_env_keys
-
-        _legacy_keys = _parse_env_keys(prestate.legacy_env_bytes)
-        source_state = SourceState(
-            legacy_env_bytes=prestate.legacy_env_bytes,
-            dashscope_present_before="DASHSCOPE_API_KEY" in _legacy_keys,
-        )
         verify_source_invariant(
             source_state,
             PROD_LEGACY_ENV_PATH,

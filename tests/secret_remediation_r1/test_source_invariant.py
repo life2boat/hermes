@@ -289,7 +289,7 @@ def test_effective_compose_uses_all_eight_files_exact_order(monkeypatch):
     expected = ["docker", "compose"]
     for f in files:
         expected.extend(["-f", f])
-    expected.extend(["config", "--format", "json"])
+    expected.extend(["config", "--no-interpolate", "--format", "json"])
 
     assert captured_cmd == expected
 
@@ -554,3 +554,13 @@ def test_effective_compose_valid_full_stack(monkeypatch):
     monkeypatch.setattr(subprocess, "run", mock_run)
     # Should not raise any error
     _verify_effective_compose(["1", "2", "3", "4", "5", "6", "7", "8"], "/workdir")
+
+
+def test_source_state_preserves_explicit_empty_effective_name_set():
+    state = SourceState(
+        legacy_env_bytes=b"TELEGRAM_BOT_TOKEN=synthetic\n",
+        dashscope_present_before=False,
+        pre_remediation_effective_protected_name_set=frozenset(),
+    )
+
+    assert state.pre_remediation_effective_protected_name_set == frozenset()

@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.55
+version: 1.2.56
 updated_at: 2026-08-17
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 2c60edcd691a161387b2ef11479cec43cd20520d
+state_verified_against_main_sha: 410424ee6f992dc2c0fea045cb8018246ce73b95
 production_sha: unknown
 ---
 
@@ -12,6 +12,19 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## ProductionRuntimeAttestation C1 — Production Readiness Evidence Bridge v1
+
+- C1 is COMPLETE.
+- `ai_engineering/production_readiness_evidence.py`: deterministic offline verifier.
+- `schemas/production-readiness-evidence-v1.schema.json`: versioned JSON schema.
+- `scripts/check_production_readiness_evidence.py`: offline CLI.
+- `tests/test_production_readiness_evidence.py`: 27/27 mandatory tests passing.
+- evidence pipeline: Attestation → Comparison → EvidenceReceipt → GateEvidence(PRODUCTION_READINESS_GATE).
+- MATCH alone is not sufficient; post-health PASS + freshness + identity are required.
+- Historical B2 synthetic regression confirmed: MATCH + INSUFFICIENT_EVIDENCE → BLOCKED.
+- `EVIDENCE_EXPANDS_AUTHORITY=false`.
+- no production access; no live collection; repository-only.
 
 ## ProductionRuntimeAttestation v1 — B1+B2 Source-of-Truth Closure
 

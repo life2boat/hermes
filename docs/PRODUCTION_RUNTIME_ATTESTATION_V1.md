@@ -70,3 +70,31 @@ Live collection enforces the following safety invariants:
 - **Clean-tree guard**: execution is blocked if the repository worktree is dirty.
 - **Create-only evidence**: output paths refuse to overwrite existing artifacts.
 - **Post-health check**: a structural health verification runs after evidence generation.
+
+## C1: Production Readiness Evidence Bridge
+
+Sprint C1 extends the pipeline downstream from B2:
+
+```text
+ProductionRuntimeAttestation (B1/B2)
+        ↓
+ProductionRuntimeComparison (B1/B2)
+        ↓
+ProductionReadinessEvidenceReceipt (C1)
+        ↓
+GateEvidence(PRODUCTION_READINESS_GATE) (C1)
+        ↓
+ReleaseGateReceipt
+```
+
+Implementation: `ai_engineering/production_readiness_evidence.py`.
+
+A `comparison=MATCH` result alone is NOT sufficient for production readiness
+PASS. The `ProductionReadinessEvidenceReceipt` additionally requires:
+evidence freshness, post-collection health PASS, and exact candidate identity.
+
+Historical B2 fact: `comparison=MATCH + post_health=INSUFFICIENT_EVIDENCE`
+correctly produces `PRODUCTION_READINESS_GATE=BLOCKED`.
+
+`EVIDENCE_EXPANDS_AUTHORITY=false`: production readiness PASS proves evidence
+quality only; it does not authorize production execution.

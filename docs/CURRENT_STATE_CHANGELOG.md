@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.56 - 2026-08-17
+
+Changed:
+- closed the post-merge source-of-truth state for PR #189 (forward recovery of PR #188) and PR-1.3 (contract parity closure).
+- verified exact-main test suites, JSON Schema Draft202012 parity tests, and independent module guards all pass.
+
+Safety & Provenance:
+- PR #188 accidentally truncated graph module/test files; PR #189 restored them from pre-corruption blobs and added zero-test guards.
+- PR-1.3 implemented strict schema parity closure and robust production module guards without any production mutations.
+- no production, database, Qdrant, secrets, deployment, or live runtime changed.
+
 ## 1.2.55 - 2026-08-17
 
 Changed:

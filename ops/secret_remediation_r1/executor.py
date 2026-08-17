@@ -84,10 +84,26 @@ def run_remediation(
         if not cdata:
             raise ExecutorError(f"Pre-recreate: Container {CONTAINER_NAME} not found")
         labels = cdata[0].get("Config", {}).get("Labels", {})
-        eff_image = labels.get("com.docker.compose.image", "") or cdata[0].get(
-            "Config", {}
-        ).get("Image", "")
+        eff_image = cdata[0].get("Config", {}).get("Image", "")
         verify_legacy_image(eff_image, backend=image_backend)
+
+        import os
+        from ops.secret_remediation_r1.constants import LEGACY_IMAGE_REF, PROTECTED_NAMES
+        os.environ["HERMES_GIT_SHA"] = "0" * 40
+        os.environ["HERMES_IMAGE"] = LEGACY_IMAGE_REF
+
+        from ops.secret_remediation_r1.process_identity import (
+            read_poller_environ,
+            resolve_poller_pid,
+        )
+        pre_pid, pre_identity = resolve_poller_pid(docker=docker)
+        pre_env_bytes = read_poller_environ(pre_pid, pre_identity, docker=docker)
+        pre_env_names = set()
+        for line in pre_env_bytes.split(b"\x00"):
+            if b"=" in line:
+                k = line.split(b"=", 1)[0].decode("utf-8", errors="ignore")
+                if k in PROTECTED_NAMES:
+                    pre_env_names.add(k)
 
         transform_base_compose(base_compose_path, base_compose_path)
         transform_override(override_path, override_path)
@@ -96,10 +112,7 @@ def run_remediation(
         cdata_post = backend.inspect(CONTAINER_NAME)
         if not cdata_post:
             raise ExecutorError(f"Post-recreate: Container {CONTAINER_NAME} not found")
-        labels_post = cdata_post[0].get("Config", {}).get("Labels", {})
-        eff_image_post = labels_post.get("com.docker.compose.image", "") or cdata_post[
-            0
-        ].get("Config", {}).get("Image", "")
+        eff_image_post = cdata_post[0].get("Config", {}).get("Image", "")
         verify_legacy_image(eff_image_post, backend=image_backend)
 
         # Build SourceState from captured prestate bytes.
@@ -111,6 +124,7 @@ def run_remediation(
         source_state = SourceState(
             legacy_env_bytes=prestate.legacy_env_bytes,
             dashscope_present_before="DASHSCOPE_API_KEY" in _legacy_keys,
+            pre_remediation_effective_protected_name_set=frozenset(pre_env_names)
         )
         verify_source_invariant(
             source_state,

@@ -98,7 +98,7 @@ def _verify_effective_compose(compose_files: list[str], workdir: str) -> None:
     cmd = ["docker", "compose"]
     for f in compose_files:
         cmd.extend(["-f", f])
-    cmd.extend(["config", "--format", "json"])
+    cmd.extend(["config", "--no-interpolate", "--format", "json"])
 
     env = os.environ.copy()
     for name in PROTECTED_NAMES:

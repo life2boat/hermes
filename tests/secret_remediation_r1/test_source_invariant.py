@@ -289,7 +289,7 @@ def test_effective_compose_uses_all_eight_files_exact_order(monkeypatch):
     expected = ["docker", "compose"]
     for f in files:
         expected.extend(["-f", f])
-    expected.extend(["config", "--format", "json"])
+    expected.extend(["config", "--no-interpolate", "--format", "json"])
 
     assert captured_cmd == expected
 

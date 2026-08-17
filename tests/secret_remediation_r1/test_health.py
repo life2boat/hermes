@@ -68,5 +68,5 @@ def test_check_health_gateway_status_not_found(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", mock_run)
 
-    with pytest.raises(HealthCheckError, match="hermes command not found"):
+    with pytest.raises(HealthCheckError, match="docker command not found"):
         check_health()

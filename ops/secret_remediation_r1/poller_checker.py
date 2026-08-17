@@ -17,8 +17,13 @@ def check_exactly_one_poller(docker: DockerBackend | None = None) -> int:
     Returns host PID of the single container-bound poller.
     Raises PollerCheckerError on zero or multiple pollers, or identity mismatch.
     """
-    try:
-        pid, identity = resolve_poller_pid(docker=docker)
-    except ProcessIdentityError as exc:
-        raise PollerCheckerError(str(exc)) from exc
-    return pid
+    import time
+    last_exc = None
+    for _ in range(10):
+        try:
+            pid, identity = resolve_poller_pid(docker=docker)
+            return pid
+        except ProcessIdentityError as exc:
+            last_exc = exc
+            time.sleep(1)
+    raise PollerCheckerError(str(last_exc)) from last_exc

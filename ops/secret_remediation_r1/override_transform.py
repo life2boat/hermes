@@ -93,16 +93,40 @@ def transform_override(
     except Exception as exc:
         raise OverrideTransformError(f"Failed to read source: {exc}")
 
-    lines = original_bytes.decode("utf-8").splitlines(keepends=True)
-    protected_indices = set(_find_environment_block(lines))
+    import json
+    try:
+        data = json.loads(original_bytes.decode("utf-8"))
+        is_json = True
+    except json.JSONDecodeError:
+        is_json = False
 
-    new_lines = [line for i, line in enumerate(lines) if i not in protected_indices]
-    new_bytes = "".join(new_lines).encode("utf-8")
+    if is_json:
+        try:
+            env = data.get("services", {}).get("hermes-bot", {}).get("environment", {})
+            if isinstance(env, dict):
+                for k in PROTECTED_NAMES:
+                    env.pop(k, None)
+            elif isinstance(env, list):
+                new_env = []
+                for item in env:
+                    k = item.split("=")[0]
+                    if k not in PROTECTED_NAMES:
+                        new_env.append(item)
+                data["services"]["hermes-bot"]["environment"] = new_env
+            new_bytes = json.dumps(data, indent=2).encode("utf-8") + b"\n"
+        except Exception as e:
+            raise OverrideTransformError(f"JSON transformation failed: {e}")
+    else:
+        lines = original_bytes.decode("utf-8").splitlines(keepends=True)
+        protected_indices = set(_find_environment_block(lines))
 
-    # Verify unrelated bytes are identical
-    non_protected_orig = [l for i, l in enumerate(lines) if i not in protected_indices]
-    if non_protected_orig != new_lines:
-        raise OverrideTransformError("Unrelated byte mutation detected")
+        new_lines = [line for i, line in enumerate(lines) if i not in protected_indices]
+        new_bytes = "".join(new_lines).encode("utf-8")
+
+        # Verify unrelated bytes are identical
+        non_protected_orig = [l for i, l in enumerate(lines) if i not in protected_indices]
+        if non_protected_orig != new_lines:
+            raise OverrideTransformError("Unrelated byte mutation detected")
 
     from ops.secret_remediation_r1.safe_fs import publish_file, replace_existing_file
 

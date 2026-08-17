@@ -557,11 +557,16 @@ def test_executor_post_runtime_nameset_added(tmp_path, monkeypatch):
     )
 
     # ADDED DASHSCOPE_API_KEY unexpectedly
+    call_count = [0]
+    def mock_read_environ(pid, identity, docker=None):
+        if call_count[0] == 0:
+            call_count[0] += 1
+            return b"TELEGRAM_BOT_TOKEN=synthetic\x00"
+        return b"TELEGRAM_BOT_TOKEN=synthetic\x00DASHSCOPE_API_KEY=synthetic2\x00"
+
     monkeypatch.setattr(
         "ops.secret_remediation_r1.process_identity.read_poller_environ",
-        lambda pid, identity, docker=None: (
-            b"TELEGRAM_BOT_TOKEN=synthetic\x00DASHSCOPE_API_KEY=synthetic2\x00"
-        ),
+        mock_read_environ,
     )
 
     with pytest.raises(
@@ -733,7 +738,7 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
                 return [
                     {
                         "Config": {
-                            "Labels": {"com.docker.compose.image": "wrong_image_pre"}
+                            "Image": "wrong_image_pre"
                         }
                     }
                 ]
@@ -741,16 +746,14 @@ def test_executor_failure_matrix_rollback(tmp_path, monkeypatch, failure_stage):
                 return [
                     {
                         "Config": {
-                            "Labels": {"com.docker.compose.image": "wrong_image_post"}
+                            "Image": "wrong_image_post"
                         }
                     }
                 ]
             return [
                 {
                     "Config": {
-                        "Labels": {
-                            "com.docker.compose.image": "healbite-hermes:pr99-main-273b0a6cccaf"
-                        }
+                        "Image": "healbite-hermes:pr99-main-273b0a6cccaf"
                     }
                 }
             ]

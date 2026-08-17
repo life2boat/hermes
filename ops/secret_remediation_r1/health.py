@@ -42,13 +42,13 @@ def check_health(docker: DockerBackend | None = None) -> None:
     # 2. Gateway status
     try:
         r = subprocess.run(
-            ["hermes", "gateway", "status"],
+            ["docker", "exec", "hermes-bot", "hermes", "gateway", "status"],
             capture_output=True,
             text=True,
             timeout=30,
         )
     except FileNotFoundError:
-        raise HealthCheckError("hermes command not found in PATH")
+        raise HealthCheckError("docker command not found in PATH")
     except subprocess.TimeoutExpired:
         raise HealthCheckError("hermes gateway status timed out")
 

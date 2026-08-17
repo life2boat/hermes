@@ -8,7 +8,8 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import timezone, datetime
+UTC = timezone.utc
 from enum import Enum
 from typing import Any, NoReturn, Protocol
 

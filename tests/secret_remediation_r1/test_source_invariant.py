@@ -271,7 +271,7 @@ def test_effective_compose_uses_all_eight_files_exact_order(monkeypatch):
                 "hermes-bot": {
                     "env_file": [
                         "/etc/hermes/hermes-runtime.env",
-                        "/etc/hermes/hermes-production.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
                     ]
                 }
             }
@@ -310,7 +310,7 @@ def test_effective_compose_scrubs_ambient_protected_names(monkeypatch):
                 "hermes-bot": {
                     "env_file": [
                         "/etc/hermes/hermes-runtime.env",
-                        "/etc/hermes/hermes-production.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
                     ]
                 }
             }
@@ -349,7 +349,7 @@ def test_effective_compose_legacy_source_rejected(monkeypatch):
                     "env_file": [
                         "/home/hermes/.hermes/.env",
                         "/etc/hermes/hermes-runtime.env",
-                        "/etc/hermes/hermes-production.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
                     ]
                 }
             }
@@ -374,7 +374,11 @@ def test_effective_compose_runtime_source_missing_rejected(monkeypatch):
     def mock_run(*args, **kwargs):
         config = {
             "services": {
-                "hermes-bot": {"env_file": ["/etc/hermes/hermes-production.env"]}
+                "hermes-bot": {
+                    "env_file": [
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"}
+                    ]
+                }
             }
         }
         return type(
@@ -409,7 +413,31 @@ def test_effective_compose_secret_source_missing_rejected(monkeypatch):
         _verify_effective_compose(["1", "2", "3", "4", "5", "6", "7", "8"], "/workdir")
 
 
-def test_effective_compose_protected_inline_rejected(monkeypatch):
+def test_effective_compose_secret_env_requires_raw_format(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import _verify_effective_compose
+
+    def mock_run(*args, **kwargs):
+        config = {
+            "services": {
+                "hermes-bot": {
+                    "env_file": [
+                        "/etc/hermes/hermes-runtime.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
+                    ]
+                }
+            }
+        }
+        return type(
+            "Mock", (), {"returncode": 0, "stdout": json.dumps(config), "stderr": ""}
+        )()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    _verify_effective_compose(["1", "2", "3", "4", "5", "6", "7", "8"], "/workdir")
+
+
+def test_effective_compose_secret_env_scalar_rejected(monkeypatch):
     import subprocess
     import json
     from ops.secret_remediation_r1.source_invariant import (
@@ -424,6 +452,68 @@ def test_effective_compose_protected_inline_rejected(monkeypatch):
                     "env_file": [
                         "/etc/hermes/hermes-runtime.env",
                         "/etc/hermes/hermes-production.env",
+                    ]
+                }
+            }
+        }
+        return type(
+            "Mock", (), {"returncode": 0, "stdout": json.dumps(config), "stderr": ""}
+        )()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(
+        SourceInvariantError,
+        match="production secret env must be a mapping with format: raw",
+    ):
+        _verify_effective_compose(["1", "2", "3", "4", "5", "6", "7", "8"], "/workdir")
+
+
+def test_effective_compose_secret_env_missing_raw_rejected(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import (
+        _verify_effective_compose,
+        SourceInvariantError,
+    )
+
+    def mock_run(*args, **kwargs):
+        config = {
+            "services": {
+                "hermes-bot": {
+                    "env_file": [
+                        "/etc/hermes/hermes-runtime.env",
+                        {"path": "/etc/hermes/hermes-production.env"},
+                    ]
+                }
+            }
+        }
+        return type(
+            "Mock", (), {"returncode": 0, "stdout": json.dumps(config), "stderr": ""}
+        )()
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(
+        SourceInvariantError,
+        match="production secret env must be a mapping with format: raw",
+    ):
+        _verify_effective_compose(["1", "2", "3", "4", "5", "6", "7", "8"], "/workdir")
+
+
+def test_effective_compose_protected_inline_rejected(monkeypatch):
+    import subprocess
+    import json
+    from ops.secret_remediation_r1.source_invariant import (
+        _verify_effective_compose,
+        SourceInvariantError,
+    )
+
+    def mock_run(*args, **kwargs):
+        config = {
+            "services": {
+                "hermes-bot": {
+                    "env_file": [
+                        "/etc/hermes/hermes-runtime.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
                     ],
                     "environment": {"TELEGRAM_BOT_TOKEN": "leak"},
                 }
@@ -451,7 +541,7 @@ def test_effective_compose_valid_full_stack(monkeypatch):
                 "hermes-bot": {
                     "env_file": [
                         "/etc/hermes/hermes-runtime.env",
-                        "/etc/hermes/hermes-production.env",
+                        {"path": "/etc/hermes/hermes-production.env", "format": "raw"},
                     ],
                     "environment": {"SAFE_VAR": "val"},
                 }

@@ -51,6 +51,28 @@ def test_preflight_uses_all_for_created_container(monkeypatch):
     run_compose_preflight()
 
 
+def test_preflight_real_raw_dollar_preserved(monkeypatch):
+    env_list = [
+        "EMBEDDED_EQUALS=a=b=c",
+        "DOLLAR=value$with$dollars",
+        "BACKSLASH=value\\with\\slashes",
+        'QUOTED_OR_SPACE_CASE="quoted string"',
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
+    run_compose_preflight()
+
+
+def test_preflight_real_raw_quotes_preserved(monkeypatch):
+    env_list = [
+        "EMBEDDED_EQUALS=a=b=c",
+        "DOLLAR=value$with$dollars",
+        "BACKSLASH=value\\with\\slashes",
+        'QUOTED_OR_SPACE_CASE="quoted string"',
+    ]
+    monkeypatch.setattr(subprocess, "run", make_mock_run(env_list))
+    run_compose_preflight()
+
+
 def test_preflight_empty_created_container_lookup_fails(monkeypatch):
     env_list = []
     # If ps_id is empty, it should raise error
@@ -129,6 +151,34 @@ def test_preflight_fail_quoted(monkeypatch):
         run_compose_preflight()
 
 
+def test_preflight_cleanup_after_create_command_failure(monkeypatch):
+    down_called = []
+
+    def mock_run(cmd, *args, **kwargs):
+        class DummyResult:
+            def __init__(self, stdout="", stderr=""):
+                self.stdout = stdout
+                self.stderr = stderr
+
+        if len(cmd) >= 4 and cmd[0:2] == ["docker", "compose"] and cmd[2] == "-p":
+            cmd_type = cmd[4]
+            if cmd_type == "create":
+                raise subprocess.CalledProcessError(
+                    1, cmd, stderr="create failed early"
+                )
+            elif cmd_type == "down":
+                down_called.append(cmd)
+                return DummyResult()
+            elif cmd_type == "ps" and cmd[5:] == ["--all", "--quiet"]:
+                return DummyResult("")
+        raise RuntimeError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    with pytest.raises(PreflightError, match="create failed early"):
+        run_compose_preflight()
+    assert len(down_called) == 1
+
+
 def test_preflight_cleanup_failure_propagates(monkeypatch):
     env_list = [
         "EMBEDDED_EQUALS=a=b=c",
@@ -139,7 +189,7 @@ def test_preflight_cleanup_failure_propagates(monkeypatch):
     mock_run = make_mock_run(env_list)
     mock_run.down_fail = True
     monkeypatch.setattr(subprocess, "run", mock_run)
-    with pytest.raises(PreflightError, match="Preflight cleanup failed: down error"):
+    with pytest.raises(PreflightError, match="Preflight cleanup failed.*down error"):
         run_compose_preflight()
 
 
@@ -171,7 +221,7 @@ def test_preflight_primary_and_cleanup_failure_propagates(monkeypatch):
     monkeypatch.setattr(subprocess, "run", mock_run)
     with pytest.raises(
         PreflightError,
-        match="EMBEDDED_EQUALS semantics mismatch AND Preflight cleanup failed: down error",
+        match="EMBEDDED_EQUALS semantics mismatch AND Preflight cleanup failed.*down error",
     ):
         run_compose_preflight()
 

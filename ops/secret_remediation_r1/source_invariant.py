@@ -121,11 +121,21 @@ def _verify_effective_compose(compose_files: list[str], workdir: str) -> None:
 
     env_files = bot.get("env_file", [])
     env_file_paths = []
+    secret_entry_valid = False
+
     for ef in env_files:
         if isinstance(ef, str):
             env_file_paths.append(ef)
+            if ef == "/etc/hermes/hermes-production.env":
+                secret_entry_valid = False
         elif isinstance(ef, dict) and "path" in ef:
-            env_file_paths.append(ef["path"])
+            p = ef["path"]
+            env_file_paths.append(p)
+            if p == "/etc/hermes/hermes-production.env":
+                if ef.get("format") == "raw":
+                    secret_entry_valid = True
+                else:
+                    secret_entry_valid = False
 
     if "/home/hermes/.hermes/.env" in env_file_paths:
         raise SourceInvariantError("Legacy .env is still active in env_file")
@@ -133,6 +143,10 @@ def _verify_effective_compose(compose_files: list[str], workdir: str) -> None:
         raise SourceInvariantError("runtime env missing in env_file")
     if "/etc/hermes/hermes-production.env" not in env_file_paths:
         raise SourceInvariantError("production secret env missing in env_file")
+    if not secret_entry_valid:
+        raise SourceInvariantError(
+            "production secret env must be a mapping with format: raw"
+        )
 
     env_vars = bot.get("environment", {})
     if isinstance(env_vars, list):

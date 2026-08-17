@@ -17,8 +17,43 @@ services:
     dest = tmp_path / "dest.yml"
     transform_base_compose(str(src), str(dest))
     dest_str = dest.read_text()
-    assert "- /etc/hermes/hermes-runtime.env" in dest_str
-    assert "- /etc/hermes/hermes-production.env" in dest_str
+    assert "- /etc/hermes/hermes-runtime.env\n" in dest_str
+    assert "- path: /etc/hermes/hermes-production.env\n" in dest_str
+    assert "  format: raw\n" in dest_str
+    assert "/home/hermes/.hermes/.env" not in dest_str
+
+
+def test_base_transform_secret_env_uses_raw_format(tmp_path):
+    src = tmp_path / "docker-compose.yml"
+    src.write_bytes(b"""services:
+  hermes-bot:
+    env_file:
+      - /home/hermes/.hermes/.env
+    image: foo
+""")
+    dest = tmp_path / "dest.yml"
+    transform_base_compose(str(src), str(dest))
+    dest_str = dest.read_text()
+    assert "- /etc/hermes/hermes-runtime.env\n" in dest_str
+    assert "- path: /etc/hermes/hermes-production.env\n" in dest_str
+    assert "  format: raw\n" in dest_str
+    assert "/home/hermes/.hermes/.env" not in dest_str
+
+
+def test_base_transform_source_destination_same(tmp_path):
+    src = tmp_path / "docker-compose.yml"
+    src.write_bytes(b"""services:
+  hermes-bot:
+    env_file:
+      - /home/hermes/.hermes/.env
+    image: foo
+""")
+    orig_bytes = transform_base_compose(str(src), str(src))
+    assert b"/home/hermes/.hermes/.env" in orig_bytes
+    dest_str = src.read_text()
+    assert "- /etc/hermes/hermes-runtime.env\n" in dest_str
+    assert "- path: /etc/hermes/hermes-production.env\n" in dest_str
+    assert "  format: raw\n" in dest_str
     assert "/home/hermes/.hermes/.env" not in dest_str
 
 

@@ -37,13 +37,15 @@ def run_compose_preflight() -> None:
                 "    image: healbite-hermes:pr99-main-273b0a6cccaf\n"
                 "    command: echo hello\n"
                 "    env_file:\n"
-                f"      - {os.path.basename(env_file_test_path)}\n"
+                f"      - path: {os.path.basename(env_file_test_path)}\n"
+                "        format: raw\n"
             )
 
         create_attempted = False
         primary_exc = None
         try:
             try:
+                create_attempted = True
                 subprocess.run(
                     ["docker", "compose", "-p", project_name, "create", "test"],
                     cwd=preflight_dir,
@@ -52,12 +54,12 @@ def run_compose_preflight() -> None:
                     text=True,
                     check=True,
                 )
-                create_attempted = True
             except subprocess.CalledProcessError as exc:
                 # Fallback to alpine if the legacy image isn't local on the tester's machine.
                 # But the constraint says to use a deterministic mechanism supported by CI.
                 raise PreflightError(f"Compose preflight create failed: {exc.stderr}")
             except FileNotFoundError:
+                create_attempted = False
                 raise PreflightError("docker compose command not found")
 
             result = subprocess.run(
@@ -150,12 +152,16 @@ def run_compose_preflight() -> None:
                 )
                 if ps_res.stdout.strip():
                     raise PreflightError(
-                        "Preflight cleanup failed: residual containers found"
+                        "Preflight cleanup failed: residual containers found (PREFLIGHT_CLEANUP_INCOMPLETE=true)"
                     )
             except subprocess.CalledProcessError as exc:
-                cleanup_exc = PreflightError(f"Preflight cleanup failed: {exc.stderr}")
+                cleanup_exc = PreflightError(
+                    f"Preflight cleanup failed (PREFLIGHT_CLEANUP_INCOMPLETE=true): {exc.stderr}"
+                )
             except Exception as exc:
-                cleanup_exc = PreflightError(f"Preflight cleanup failed: {str(exc)}")
+                cleanup_exc = PreflightError(
+                    f"Preflight cleanup failed (PREFLIGHT_CLEANUP_INCOMPLETE=true): {str(exc)}"
+                )
 
         if primary_exc and cleanup_exc:
             raise PreflightError(f"{str(primary_exc)} AND {str(cleanup_exc)}")

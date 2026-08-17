@@ -104,7 +104,8 @@ def transform_base_compose(
 
     replacement_lines = [
         f"{list_indent}- {PROD_RUNTIME_ENV_PATH}\n",
-        f"{list_indent}- {PROD_SECRET_FILE_PATH}\n",
+        f"{list_indent}- path: {PROD_SECRET_FILE_PATH}\n",
+        f"{list_indent}  format: raw\n",
     ]
 
     new_lines = lines[:start_idx] + replacement_lines + lines[end_idx + 1 :]
@@ -114,7 +115,7 @@ def transform_base_compose(
     before_orig = "".join(lines[:start_idx])
     after_orig = "".join(lines[end_idx + 1 :])
     before_new = "".join(new_lines[:start_idx])
-    after_new = "".join(new_lines[start_idx + 2 :])
+    after_new = "".join(new_lines[start_idx + len(replacement_lines) :])
 
     if before_orig != before_new:
         raise ComposeTransformError("Bytes before transform span were mutated")

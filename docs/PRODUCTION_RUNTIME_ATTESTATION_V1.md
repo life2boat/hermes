@@ -53,9 +53,20 @@ python scripts/production_runtime_attestation.py sanitize --input raw.json --out
 `INSUFFICIENT_EVIDENCE`, and 1 for malformed, tampered, or otherwise invalid
 contracts. Output paths are create-only to avoid silent evidence replacement.
 
-## Boundary
+## B1: Offline Contracts
 
-The checked-in fixtures are synthetic. This sprint performs no production
-collection, build, deployment, restart, database access, vector-store access,
-or Telegram action. Live collection and Sprint B2 require new task-specific
-authorization.
+The core B1 contracts and CLI operate offline. They do not invoke Docker, databases, Qdrant, Telegram, WSL, networks, or production systems.
+
+## B2: Read-Only Production Collectors
+
+Sprint B2 implements read-only production collection for WSL2 Ubuntu:
+- **Docker**: read-only container state inspection.
+- **SQLite**: explicitly restricted to `mode=ro` URI connections.
+- **Qdrant**: hardcoded localhost-only network boundary and read operations only.
+- **Secret Source Structural**: structural presence and file mode checks with strict value isolation.
+
+Live collection enforces the following safety invariants:
+- **Exact-source guard**: execution requires an explicit `--expected-source-sha` matching a verified `HEAD`.
+- **Clean-tree guard**: execution is blocked if the repository worktree is dirty.
+- **Create-only evidence**: output paths refuse to overwrite existing artifacts.
+- **Post-health check**: a structural health verification runs after evidence generation.

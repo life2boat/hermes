@@ -1,5 +1,19 @@
 # CURRENT_STATE changelog
 
+## 1.2.55 - 2026-08-17
+
+Changed:
+- closed ProductionRuntimeAttestation v1 source of truth across B1 (PR #181) and B2 (PR #182).
+- documented B2 read-only collectors (Docker, SQLite, Qdrant, Secret Source Structural).
+- recorded PR #183 post-health lookup correction (repository fix, not a production repair).
+- recorded authoritative exact-main ProductionRuntimeAttestation with comparison MATCH.
+
+Safety & Provenance:
+- PR #182 merged via squash; PR head is not ancestor due to squash merge. Correct proof established: `PR_HEAD_TREE_SHA == MERGED_TREE_SHA`.
+- historical post-collection health proof remains `INSUFFICIENT_EVIDENCE` (PR #183 corrects future runs).
+- no production mutation, new live collection, deployment, or DB write occurred.
+- `production_sha` remains unknown and execution provenance remains UNPROVEN.
+
 ## 1.2.54 - 2026-08-17
 
 Changed:

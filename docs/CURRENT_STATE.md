@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.54
+version: 1.2.55
 updated_at: 2026-08-17
 status: active
 source_of_truth: true
-state_verified_against_main_sha: e85ca7dbee2025320c5daf61181a6c1142f18a9b
+state_verified_against_main_sha: 2c60edcd691a161387b2ef11479cec43cd20520d
 production_sha: unknown
 ---
 
@@ -12,6 +12,22 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## ProductionRuntimeAttestation v1 — B1+B2 Source-of-Truth Closure
+
+- B1 is complete.
+- B2 is complete.
+- PR #183 is merged.
+- canonical repository main at task start was `2c60edcd691a161387b2ef11479cec43cd20520d`.
+- ProductionRuntimeAttestation v1 is available.
+- read-only live collectors are available.
+- authoritative attestation exists.
+- production structural comparison was MATCH.
+- post-collection historical health proof is INSUFFICIENT_EVIDENCE.
+- no production mutation occurred.
+- production_sha remains unknown.
+- historical execution provenance remains UNPROVEN.
+- no B3 remediation is required by the MATCH result.
 
 ## HealBite Secret Remediation R1 — Clean Forward Source Closure
 

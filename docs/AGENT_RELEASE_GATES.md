@@ -133,3 +133,71 @@ separately supplied live/cost/readiness evidence. Failure-to-Eval candidates
 and procedure-maturity receipts are offline repository evidence; neither can
 grant merge, production-release, deployment, runtime, data, vector, or secret
 mutation authority.
+
+## Production Readiness Evidence Bridge (C1)
+
+Sprint C1 implements a deterministic, offline evidence bridge that binds a
+verified `ProductionRuntimeAttestation` + `ProductionRuntimeComparison` pair
+to the `PRODUCTION_READINESS_GATE`.
+
+### Evidence pipeline
+
+```text
+ProductionRuntimeAttestation
+        ↓ (canonical validator)
+ProductionRuntimeComparison
+        ↓ (binding + freshness + post-health checks)
+ProductionReadinessEvidenceReceipt
+        ↓ (deterministic adapter)
+GateEvidence(PRODUCTION_READINESS_GATE)
+        ↓
+ReleaseGateReceipt
+```
+
+### MATCH alone is not enough
+
+`comparison=MATCH` alone does NOT produce `PRODUCTION_READINESS_PASS`.
+
+A production readiness PASS additionally requires all of:
+
+- valid canonical attestation (from `validate_attestation`);
+- valid canonical comparison (from `validate_comparison`);
+- attestation/comparison ID binding;
+- expected target binding;
+- `candidate_sha == observed_head_sha` (exact-SHA semantics);
+- valid `runtime_evidence_source_sha` (not necessarily == production_sha);
+- evidence freshness (`age <= max_age_seconds`; no `datetime.now()` in core);
+- `post_collection_health_status == PASS`.
+
+### Fail-closed semantics
+
+| Condition | Status |
+|---|---|
+| `comparison=MATCH` + `post_health=PASS` + all identity checks valid + fresh | `PASS` |
+| `comparison=DRIFT` | `FAIL` (reason: `PRODUCTION_RUNTIME_DRIFT`) |
+| `comparison=INSUFFICIENT_EVIDENCE` | `BLOCKED` (reason: `PRODUCTION_RUNTIME_EVIDENCE_INSUFFICIENT`) |
+| `post_health=FAIL` | `FAIL` (reason: `POST_COLLECTION_HEALTH_FAIL`) |
+| `post_health=INSUFFICIENT_EVIDENCE` | `BLOCKED` (reason: `POST_COLLECTION_HEALTH_INSUFFICIENT_EVIDENCE`) |
+| stale evidence | `BLOCKED` (reason: `PRODUCTION_RUNTIME_EVIDENCE_STALE`) |
+| candidate/head mismatch | `FAIL` (reason: `EXACT_SHA_MISMATCH`) |
+
+Historical B2 regression: `MATCH + INSUFFICIENT_EVIDENCE → BLOCKED`. This
+cannot be retroactively upgraded.
+
+### Authority boundary
+
+```text
+PRODUCTION_READINESS_PASS != PRODUCTION_EXECUTION_AUTHORIZED
+EVIDENCE_EXPANDS_AUTHORITY = false
+```
+
+The bridge proves evidence quality and readiness only. It does not deploy,
+restart containers, access production, read secrets, or grant execution authority.
+
+### Implementation
+
+- `ai_engineering/production_readiness_evidence.py` — offline verifier, receipt
+  contract, and `GateEvidence` adapter.
+- `schemas/production-readiness-evidence-v1.schema.json` — structural JSON Schema.
+- `scripts/check_production_readiness_evidence.py` — offline CLI; file-in/file-out only.
+- `tests/test_production_readiness_evidence.py` — 27-case mandatory test suite.

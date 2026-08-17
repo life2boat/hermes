@@ -95,7 +95,8 @@ def test_empty_relation_type():
 def test_unknown_source_target_node_reference():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
-    e1 = GraphEdge.create(n1.node_id, "gn_missing", "rel:a", {}, prov)
+    missing_gn = "gn_" + "f" * 64
+    e1 = GraphEdge.create(n1.node_id, missing_gn, "rel:a", {}, prov)
     with pytest.raises(GraphVerificationError, match="Dangling edge reference"):
         GraphSnapshot.create([n1], [e1])
 
@@ -124,17 +125,18 @@ def test_negative_bool_revision():
 def test_tampered_identities():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
-    tampered_node = GraphNode("gn_bad", n1.node_type, n1.properties, n1.provenance)
+    tampered_node = GraphNode("gn_" + "f" * 64, n1.node_type, n1.properties, n1.provenance)
     with pytest.raises(GraphVerificationError):
         tampered_node.verify_identity()
 
-    e1 = GraphEdge.create(n1.node_id, "gn_other", "rel:a", {}, prov)
-    tampered_edge = GraphEdge("ge_bad", e1.source_node_id, e1.target_node_id, e1.relation_type, e1.properties, e1.provenance)
+    other_gn = "gn_" + "e" * 64
+    e1 = GraphEdge.create(n1.node_id, other_gn, "rel:a", {}, prov)
+    tampered_edge = GraphEdge("ge_" + "f" * 64, e1.source_node_id, e1.target_node_id, e1.relation_type, e1.properties, e1.provenance)
     with pytest.raises(GraphVerificationError):
         tampered_edge.verify_identity()
 
     s1 = GraphSnapshot.create([n1], [])
-    tampered_snapshot = GraphSnapshot(s1.schema_version, "gs_bad", s1.nodes, s1.edges, None)
+    tampered_snapshot = GraphSnapshot(s1.schema_version, "gs_" + "f" * 64, s1.nodes, s1.edges, None)
     with pytest.raises(GraphVerificationError):
         tampered_snapshot.verify_identity()
 
@@ -283,8 +285,8 @@ def test_authoritative_fact_state_invalid_status():
 
 def test_classify_provenance_future_revision():
     auth = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("f1", 1, "ACTIVE"),), is_complete=False)
-    # The current code returns UNKNOWN_SOURCE for future revisions. So let's test that!
-    assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth) == "UNKNOWN_SOURCE"
+    with pytest.raises(GraphVerificationError):
+        classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth)
 
 def test_graph_snapshot_max_nodes():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)

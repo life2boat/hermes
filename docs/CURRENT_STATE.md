@@ -4,7 +4,7 @@ version: 1.2.56
 updated_at: 2026-08-17
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 96611e1d7fa980e12f86f1ffcb1e56989c14aa18
+state_verified_against_main_sha: 9fd83477e53fd6416d64aa6d5d5f8d11c61706cb
 production_sha: unknown
 ---
 
@@ -12,6 +12,29 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.3
+
+- PR-1.3 is COMPLETE.
+- Strict contract/schema parity closure implemented in `ai_engineering/graph_contract.py`.
+- Independent module presence guard added to `tests/ai_engineering/test_contracts.py`.
+- Final verified state: exact-main test suites, JSON Schema Draft202012 parity tests, and independent module guards all pass.
+
+## Hermes / HealBite — Memory & Graph Engineering v3 PR #189 (PR-1.2)
+
+- Forward recovery of PR #188 completed.
+- Graph module and graph test suite restored from pre-corruption blobs.
+- Zero-test truncation guard added.
+- All exact-head CI workflows eventually PASS.
+- Squash merged into main.
+- Merge occurred before final Nix terminal state.
+
+## Hermes / HealBite — Memory & Graph Engineering v3 PR #188
+
+- Intended graph-contract closure.
+- Accidental truncation of graph implementation (`ai_engineering/graph_contract.py`) and test file (`tests/ai_engineering/test_graph_contract.py`) occurred during packaging.
+- Exact-head Tests workflow failed due to syntax and import errors.
+- Admin merge bypass occurred, merging the corrupted files into canonical main.
 
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.1
 

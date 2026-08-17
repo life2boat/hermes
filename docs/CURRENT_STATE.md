@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.56
-updated_at: 2026-08-17
+version: 1.2.57
+updated_at: 2026-08-18
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 9fd83477e53fd6416d64aa6d5d5f8d11c61706cb
+state_verified_against_main_sha: 1afb2a788ae8bb071c47d5c70829f29e7e53106a
 production_sha: unknown
 ---
 
@@ -12,6 +12,13 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.4
+
+- PR-1.4 duplicate-key fail-closed parser and final truth closure implemented.
+- `json.loads` object_pairs_hook used to reject duplicate JSON keys fail-closed.
+- PR #190 early-merge sequencing truth recorded.
+- PR #188 historical description corrected in SOT.
 
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.3
 
@@ -33,8 +40,10 @@ Git.
 
 - Intended graph-contract closure.
 - Accidental truncation of graph implementation (`ai_engineering/graph_contract.py`) and test file (`tests/ai_engineering/test_graph_contract.py`) occurred during packaging.
-- Exact-head Tests workflow failed due to syntax and import errors.
-- Admin merge bypass occurred, merging the corrupted files into canonical main.
+- Dedicated graph test file consequently collected zero graph tests and failed to protect the change.
+- Exact-head Tests workflow remained FAIL because the TUI notification poller test failed (`3 != 2`).
+- PR #188 was nevertheless merged using admin bypass.
+- PR #189 restored the graph implementation/tests and introduced the independent non-truncation guard.
 
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.1
 

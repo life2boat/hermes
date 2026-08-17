@@ -1,6 +1,18 @@
 # CURRENT_STATE changelog
 
-## 1.2.56 - 2026-08-17
+## 1.2.57 - 2026-08-18
+
+Changed:
+- recorded PR #190 early-merge sequencing truth: merged before all CI terminal.
+- implemented duplicate JSON key rejection fail-closed in graph contract deserialization.
+
+Safety & Provenance:
+- PR #190 (PR-1.3 closure) was merged at `2026-08-17T23:12:05Z` (merge commit `1afb2a788ae8bb071c47d5c70829f29e7e53106a`, head `25a0b6e29ecde3832272344ddc645cdb16c8cf7e`).
+- PR #190 Nix workflow reached terminal state at `2026-08-17T23:15:23Z` (PASS).
+- `PR190_MERGED_BEFORE_ALL_CI_TERMINAL=true`
+- `PR190_MERGED_ONLY_AFTER_ALL_TECHNICAL_CI_TERMINAL=false`
+- no rollback required from this sequencing defect.
+
 
 Changed:
 - closed the post-merge source-of-truth state for PR #189 (forward recovery of PR #188) and PR-1.3 (contract parity closure).

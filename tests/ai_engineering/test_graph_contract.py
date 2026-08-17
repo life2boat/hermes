@@ -313,3 +313,33 @@ def test_deserialize_snapshot_root_not_object():
 def test_deserialize_snapshot_missing_schema_version():
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot('{"snapshot_id": "gs_123"}')
+
+def test_deserialize_duplicate_keys_top_level():
+    s_json = '{"schema_version": 1, "schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": []}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)
+
+def test_deserialize_duplicate_keys_node():
+    s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_id": "gn_00", "node_type": "core:a", "properties": {}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "revision": 1}}], "edges": []}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)
+
+def test_deserialize_duplicate_keys_provenance():
+    s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_type": "core:a", "properties": {}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "fact_id": "f2", "revision": 1}}], "edges": []}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)
+
+def test_deserialize_duplicate_keys_properties():
+    s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_type": "core:a", "properties": {"a": 1, "a": 2}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "revision": 1}}], "edges": []}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)
+
+def test_deserialize_duplicate_keys_authoritative_source():
+    s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": [], "authoritative_source": {"is_complete": true, "is_complete": false, "facts": []}}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)
+
+def test_deserialize_duplicate_keys_authoritative_fact():
+    s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": [], "authoritative_source": {"is_complete": true, "facts": [{"fact_id": "f1", "fact_id": "f1", "current_revision": 1, "status": "ACTIVE"}]}}'
+    with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
+        deserialize_graph_snapshot(s_json)

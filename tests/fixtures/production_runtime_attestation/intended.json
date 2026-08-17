@@ -1,0 +1,1 @@
+{"expected_collectors":[{"collector_id":"runtime","observations":{"image_revision":"abc123","running":true}},{"collector_id":"storage","observations":{"integrity":"ok"}}],"schema_version":1,"target":"synthetic-prod"}

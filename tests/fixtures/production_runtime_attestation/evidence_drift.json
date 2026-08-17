@@ -1,0 +1,1 @@
+{"attestation_id":"0b4040571d482df55d08c721cb6192e41595e715120d83b65bbc21f8874e6e04","collected_at_utc":"2026-01-02T03:04:05Z","collectors":[{"collector_id":"runtime","observations":{"image_revision":"def456","running":true},"status":"AVAILABLE"},{"collector_id":"storage","observations":{},"status":"UNAVAILABLE"}],"schema_version":1,"target":"synthetic-prod"}

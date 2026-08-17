@@ -13,6 +13,20 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.1
+
+- PR-1.1 is COMPLETE.
+- Hardened Graph Contracts implemented in `ai_engineering/graph_contract.py`.
+- Established `GRAPH_NODE_IDENTITY_SEMANTICS=ENTITY` where GraphNode represents a semantic entity.
+- Established `REJECT_CONFLICT` assertion behavior for duplicate logical relations.
+- Enforced boundaries: max 1000 nodes, 5000 edges, secret rejection, and length bounds.
+- Established explicit invalidation and classification (`CURRENT`, `STALE`, `DELETED_SOURCE`, `UNKNOWN_SOURCE`).
+- Wrote JSON Schema for offline verification: `schemas/memory-graph-contract-v1.schema.json`.
+- Implemented and passed all adversarial graph contract tests.
+- Removed accidental artifact `architecture.json`.
+- Confirmed PR #187 exact-head workflows successfully completed.
+- No production execution or mutation occurred.
+
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1
 
 - PR-1 is COMPLETE.

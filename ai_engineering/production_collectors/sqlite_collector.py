@@ -21,7 +21,7 @@ class SqliteReadOnlyCollector:
     def collect(self) -> CollectorResult:
         try:
             db_path = Path(self.canonical_path).resolve()
-            
+
             # 1. Structural file check
             if not db_path.exists():
                 return create_collector_result(
@@ -30,6 +30,19 @@ class SqliteReadOnlyCollector:
                     {},
                 )
             if not db_path.is_file():
+                return create_collector_result(
+                    self.collector_id,
+                    CollectorStatus.UNAVAILABLE,
+                    {},
+                )
+            if db_path.is_symlink():
+                return create_collector_result(
+                    self.collector_id,
+                    CollectorStatus.UNAVAILABLE,
+                    {},
+                )
+            # Ensure the resolved path exactly matches the canonical path string, prohibiting unexpected redirects
+            if str(db_path) != str(Path(self.canonical_path)):
                 return create_collector_result(
                     self.collector_id,
                     CollectorStatus.UNAVAILABLE,
@@ -53,7 +66,7 @@ class SqliteReadOnlyCollector:
                     # Test we can actually read
                     conn.execute("SELECT 1").fetchall()
                     observations["sqlite_open_read_only"] = True
-                    
+
                     # Run PRAGMA quick_check
                     try:
                         cursor = conn.execute("PRAGMA quick_check")
@@ -62,15 +75,19 @@ class SqliteReadOnlyCollector:
                             observations["integrity"] = result[0].lower()
                     except sqlite3.Error:
                         observations["integrity"] = "error"
-                        
+
                     # Run PRAGMA foreign_key_check
                     try:
                         cursor = conn.execute("PRAGMA foreign_key_check")
-                        violations = cursor.fetchall()
-                        observations["foreign_key_violations"] = len(violations)
+                        # Bounded retrieval: check if at least one violation exists
+                        violation = cursor.fetchone()
+                        if violation:
+                            observations["foreign_key_violations"] = 1
+                        else:
+                            observations["foreign_key_violations"] = 0
                     except sqlite3.Error:
                         observations["foreign_key_violations"] = -1
-                        
+
             except sqlite3.OperationalError:
                 # E.g. permissions error, lock, or can't open
                 return create_collector_result(

@@ -4,7 +4,7 @@ version: 1.2.56
 updated_at: 2026-08-17
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 410424ee6f992dc2c0fea045cb8018246ce73b95
+state_verified_against_main_sha: 96611e1d7fa980e12f86f1ffcb1e56989c14aa18
 production_sha: unknown
 ---
 
@@ -12,6 +12,23 @@ This file is the single short operational source of truth for the current
 Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
+
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-1
+
+- PR-1 is COMPLETE.
+- Established `ai_engineering/graph_contract.py` containing deterministic graph node/edge definitions.
+- Defined `GraphProvenance` to enforce authoritative binding to SQLite `memory_os_facts`.
+- Wrote ADR 0081 defining strict boundaries: SQLite is AUTHORITATIVE, Graph is DERIVED_REBUILDABLE.
+- No LLM provider is trusted to generate graph edges without provenance.
+- Deterministic IDs and tamper detection implemented and tested against adversarial conditions.
+- No production database mutations or Qdrant changes occurred.
+
+## Hermes C1.1 — Nix CI Truthfulness & Merge-Sequencing Hardening
+
+- C1.1 is COMPLETE.
+- Hardened `.github/workflows/nix.yml` so that non-technical PR sticky-comment cleanup failures do not cause a workflow FAIL.
+- Real Nix failures and hash diagnostics remain hard failures.
+- No production execution or mutation occurred.
 
 ## ProductionRuntimeAttestation C1 — Production Readiness Evidence Bridge v1
 

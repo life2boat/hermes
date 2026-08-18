@@ -388,52 +388,52 @@ def test_foreign_keys_off():
     conn.execute("PRAGMA foreign_keys=OFF")
     with pytest.raises(GraphStoreError, match="foreign_keys=ON is required"):
         publish_graph_projection(conn, projection)
-    
+
     assert load_graph_projection(conn, 1) is None
 
 @pytest.mark.parametrize("tamper_col", ["input_fact_count", "projected_fact_count", "excluded_fact_count", "graph_schema_version", "projection_version"])
 def test_count_and_version_tamper(tamper_col):
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     conn.execute(f"UPDATE memory_graph_user_state SET {tamper_col} = 999 WHERE user_id = 1")
-    
+
     with pytest.raises(GraphStoreError):
         load_graph_projection(conn, 1)
 
 def test_noncanonical_json():
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     cur = conn.cursor()
     cur.execute("SELECT canonical_snapshot_json FROM memory_graph_user_state WHERE user_id = 1")
     js = cur.fetchone()[0]
-    
+
     obj = json.loads(js)
     noncanonical_js = json.dumps(obj, indent=2)
-    
+
     cur.execute("UPDATE memory_graph_user_state SET canonical_snapshot_json = ? WHERE user_id = 1", (noncanonical_js,))
     with pytest.raises(GraphStoreError, match="Noncanonical JSON stored"):
         load_graph_projection(conn, 1)
 
 @pytest.mark.parametrize("hook_point", [
-    "after_delete", "after_user_state", "after_nodes", "after_edges", 
+    "after_delete", "after_user_state", "after_nodes", "after_edges",
     "after_node_supports", "after_edge_supports", "after_exclusions", "before_release"
 ])
 def test_failure_injection_rollback(hook_point):
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     loaded = load_graph_projection(conn, 1)
     assert loaded is not None
-    
+
     gs._FAILURE_INJECTION_HOOK = hook_point
     try:
         with pytest.raises(Exception, match=hook_point):
             publish_graph_projection(conn, projection)
     finally:
         gs._FAILURE_INJECTION_HOOK = None
-        
+
     loaded2 = load_graph_projection(conn, 1)
     assert loaded2 is not None
     assert loaded2.projection_id == loaded.projection_id
@@ -441,29 +441,29 @@ def test_failure_injection_rollback(hook_point):
 def test_extra_node_rejection():
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     conn.execute("INSERT INTO memory_graph_nodes (user_id, node_id, node_type, properties_json, primary_provenance_fact_id, primary_provenance_revision) VALUES (1, 'fake_node', 'T', '{}', '1', 1)")
-    
+
     with pytest.raises(GraphStoreError, match="Node count mismatch"):
         load_graph_projection(conn, 1)
 
 def test_extra_edge_rejection():
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     real_node = list(projection.node_supports.keys())[0]
     conn.execute("INSERT INTO memory_graph_edges (user_id, edge_id, source_node_id, target_node_id, relation_type, properties_json, primary_provenance_fact_id, primary_provenance_revision) VALUES (1, 'fake_edge', ?, ?, 'R', '{}', '1', 1)", (real_node, real_node))
-    
+
     with pytest.raises(GraphStoreError, match="Edge count mismatch"):
         load_graph_projection(conn, 1)
 
 def test_extra_support_rejection():
     conn, projection = _get_populated_conn_and_proj()
     publish_graph_projection(conn, projection)
-    
+
     real_node = list(projection.node_supports.keys())[0]
     conn.execute("INSERT INTO memory_graph_node_supports (user_id, node_id, fact_id, revision) VALUES (1, ?, '999', 1)", (real_node,))
-    
+
     with pytest.raises(GraphStoreError, match="Validation of reconstructed projection failed"):
         load_graph_projection(conn, 1)
 
@@ -475,7 +475,7 @@ def test_savepoint_cleanup():
             publish_graph_projection(conn, projection)
     finally:
         gs._FAILURE_INJECTION_HOOK = None
-    
+
     conn.execute("SAVEPOINT publish_graph")
     conn.execute("RELEASE SAVEPOINT publish_graph")
 
@@ -484,18 +484,18 @@ def test_outer_transaction_preservation():
     conn.commit() # End implicit transaction
     conn.isolation_level = None # Autocommit mode, we manage transactions
     conn.execute("CREATE TABLE dummy (id INT)")
-    
+
     conn.execute("BEGIN TRANSACTION")
     conn.execute("INSERT INTO dummy VALUES (1)")
-    
+
     gs._FAILURE_INJECTION_HOOK = "after_delete"
     try:
         with pytest.raises(Exception):
             publish_graph_projection(conn, projection)
     finally:
         gs._FAILURE_INJECTION_HOOK = None
-        
+
     conn.execute("COMMIT")
-    
+
     count = conn.execute("SELECT COUNT(*) FROM dummy").fetchone()[0]
     assert count == 1

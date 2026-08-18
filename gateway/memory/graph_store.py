@@ -291,15 +291,29 @@ def classify_memory_graph_store_schema(
         if not existing_tables.issubset(set(expected_tables.keys())):
             return GraphStoreSchemaClassification.INCOMPATIBLE
 
+        # Ensure no non-table objects (like VIEWs) share expected table names
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type != 'table' AND type != 'index'"
+        )
+        non_tables = {row[0] for row in cur.fetchall()}
+        if any(t in non_tables for t in expected_tables):
+            return GraphStoreSchemaClassification.INCOMPATIBLE
+
         for table in existing_tables:
             schema = expected_tables[table]
-            cur.execute(f"PRAGMA table_info({table})")
+            cur.execute(f"PRAGMA table_xinfo({table})")
             columns_info = cur.fetchall()
             if not columns_info:
                 return GraphStoreSchemaClassification.INCOMPATIBLE
 
             columns = {
-                row[1]: {"type": row[2], "notnull": row[3], "pk": row[5]}
+                row[1]: {
+                    "type": row[2],
+                    "notnull": row[3],
+                    "dflt_value": row[4],
+                    "pk": row[5],
+                    "hidden": row[6],
+                }
                 for row in columns_info
             }
             if set(columns.keys()) != set(schema["columns"].keys()):
@@ -312,6 +326,12 @@ def classify_memory_graph_store_schema(
                 if columns[col]["notnull"] != cinfo["notnull"]:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
                 if columns[col]["pk"] != cinfo["pk"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                # Enforce no default value
+                if columns[col]["dflt_value"] is not None:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                # Enforce no hidden/generated column
+                if columns[col]["hidden"] != 0:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
 
             if "sql_like" in schema:

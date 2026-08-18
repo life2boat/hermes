@@ -1,5 +1,10 @@
 # CURRENT_STATE changelog
 
+## 1.2.62 - 2026-08-18 (PR-3.3 Candidate)
+Changed:
+- PR #197: head 7a644ec8771ffef83bddd8b9a84d900833585902, merge 185030b05033ee3779ce8f0e74f9572aa24a0640, CI sequencing PASS.
+- PR-3.3: table_xinfo exact-column closure candidate.
+
 ## 1.2.61 - 2026-08-18 (PR-3.2 Candidate)
 Changed:
 - Exact schema verification and partial schema semantics implemented.

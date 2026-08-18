@@ -302,9 +302,16 @@ class GraphSnapshot:
         hasher.update(canonical_nodes.encode("utf-8"))
         hasher.update(b":")
         hasher.update(canonical_edges.encode("utf-8"))
+        if authoritative_source:
+            hasher.update(b":auth:")
+            hasher.update(str(authoritative_source.is_complete).encode("utf-8"))
+            for f in authoritative_source.facts:
+                hasher.update(f":{f.fact_id}_{f.current_revision}_{f.status}".encode("utf-8"))
         snapshot_id = f"gs_{hasher.hexdigest()}"
 
-        return cls(GRAPH_SCHEMA_VERSION, snapshot_id, tuple(nodes), tuple(edges), authoritative_source)
+        sorted_nodes = tuple(sorted(nodes, key=lambda n: n.node_id))
+        sorted_edges = tuple(sorted(edges, key=lambda e: e.edge_id))
+        return cls(GRAPH_SCHEMA_VERSION, snapshot_id, sorted_nodes, sorted_edges, authoritative_source)
 
     def verify_identity(self) -> None:
         expected = self.create(list(self.nodes), list(self.edges), self.authoritative_source)

@@ -136,24 +136,236 @@ def classify_memory_graph_store_schema(
     conn: sqlite3.Connection,
 ) -> GraphStoreSchemaClassification:
     cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_graph_store_meta'"
-    )
-    if not cur.fetchone():
-        return GraphStoreSchemaClassification.ABSENT
+
+    expected_tables = {
+        "memory_graph_store_meta": {
+            "columns": {
+                "singleton_id": {"type": "INTEGER", "notnull": 0, "pk": 1},
+                "schema_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+            },
+            "fks": [],
+            "sql_like": "CHECK(singleton_id = 1)",
+        },
+        "memory_graph_user_state": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 0, "pk": 1},
+                "graph_schema_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "projection_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "snapshot_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "projection_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "canonical_snapshot_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "input_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "projected_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "excluded_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+            },
+            "fks": [],
+        },
+        "memory_graph_nodes": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "node_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "node_type": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "properties_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_fact_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_revision": {
+                    "type": "INTEGER",
+                    "notnull": 1,
+                    "pk": 0,
+                },
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
+        },
+        "memory_graph_edges": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "edge_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "source_node_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "target_node_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "relation_type": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "properties_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_fact_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_revision": {
+                    "type": "INTEGER",
+                    "notnull": 1,
+                    "pk": 0,
+                },
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "source_node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "target_node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
+        },
+        "memory_graph_node_supports": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "node_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 3},
+                "revision": {"type": "INTEGER", "notnull": 1, "pk": 4},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
+        },
+        "memory_graph_edge_supports": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "edge_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 3},
+                "revision": {"type": "INTEGER", "notnull": 1, "pk": 4},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "edge_id"],
+                    "table": "memory_graph_edges",
+                    "to": ["user_id", "edge_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
+        },
+        "memory_graph_exclusions": {
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "reason": {"type": "TEXT", "notnull": 1, "pk": 3},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
+        },
+    }
 
     try:
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'memory_graph_%'"
+        )
+        existing_tables = {row[0] for row in cur.fetchall()}
+
+        if not existing_tables:
+            return GraphStoreSchemaClassification.ABSENT
+
+        if existing_tables != set(expected_tables.keys()):
+            return GraphStoreSchemaClassification.INCOMPATIBLE
+
+        for table, schema in expected_tables.items():
+            cur.execute(f"PRAGMA table_info({table})")
+            columns_info = cur.fetchall()
+            if not columns_info:
+                return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            columns = {
+                row[1]: {"type": row[2], "notnull": row[3], "pk": row[5]}
+                for row in columns_info
+            }
+            for col, cinfo in schema["columns"].items():
+                if col not in columns:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                if columns[col]["type"] != cinfo["type"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                if columns[col]["notnull"] != cinfo["notnull"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                if columns[col]["pk"] != cinfo["pk"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            if "sql_like" in schema:
+                cur.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                )
+                sql = cur.fetchone()[0]
+                if schema["sql_like"].lower() not in sql.lower().replace(" ", ""):
+                    # check canonical schema identity
+                    if "singleton_id = 1" not in sql:
+                        return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            cur.execute(f"PRAGMA foreign_key_list({table})")
+            fks_info = cur.fetchall()
+
+            # map fk info by id
+            actual_fks = {}
+            for row in fks_info:
+                fk_id = row[0]
+                if fk_id not in actual_fks:
+                    actual_fks[fk_id] = {
+                        "table": row[2],
+                        "from": [],
+                        "to": [],
+                        "on_delete": row[6],
+                    }
+                actual_fks[fk_id]["from"].append(row[3])
+                actual_fks[fk_id]["to"].append(row[4])
+
+            expected_fks = schema.get("fks", [])
+            if len(actual_fks) != len(expected_fks):
+                print("fk length mismatch:", table, len(actual_fks), len(expected_fks))
+                return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            for expected_fk in expected_fks:
+                matched = False
+                for actual_fk in actual_fks.values():
+                    if (
+                        actual_fk["table"] == expected_fk["table"]
+                        and actual_fk["from"] == expected_fk["from"]
+                        and actual_fk["to"] == expected_fk["to"]
+                        and actual_fk["on_delete"] == expected_fk["on_delete"]
+                    ):
+                        matched = True
+                        break
+                if not matched:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+
         cur.execute(
             "SELECT schema_version FROM memory_graph_store_meta WHERE singleton_id = 1"
         )
         row = cur.fetchone()
-        if not row:
+        if not row or row[0] != MEMORY_GRAPH_STORE_SCHEMA_VERSION:
             return GraphStoreSchemaClassification.INCOMPATIBLE
-        version = row[0]
-        if version == MEMORY_GRAPH_STORE_SCHEMA_VERSION:
-            return GraphStoreSchemaClassification.CURRENT
-        else:
-            return GraphStoreSchemaClassification.INCOMPATIBLE
+
+        return GraphStoreSchemaClassification.CURRENT
     except sqlite3.Error:
         return GraphStoreSchemaClassification.INCOMPATIBLE
 
@@ -186,40 +398,76 @@ def migrate_memory_graph_store_schema(conn: sqlite3.Connection) -> None:
             "INSERT INTO memory_graph_store_meta (singleton_id, schema_version) VALUES (1, ?)",
             (MEMORY_GRAPH_STORE_SCHEMA_VERSION,),
         )
+
+        if (
+            classify_memory_graph_store_schema(conn)
+            != GraphStoreSchemaClassification.CURRENT
+        ):
+            raise GraphStoreError("Schema classification failed after migration")
+
         cur.execute("RELEASE SAVEPOINT migrate_graph_store")
     except Exception:
         cur.execute("ROLLBACK TO migrate_graph_store")
+        cur.execute("RELEASE SAVEPOINT migrate_graph_store")
         raise
+
+
+def _enforce_foreign_keys(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA foreign_keys")
+    row = cur.fetchone()
+    if not row or row[0] == 0:
+        raise GraphStoreError(
+            "PRAGMA foreign_keys=ON is required for memory graph operations"
+        )
 
 
 def clear_user_graph_projection(conn: sqlite3.Connection, user_id: int) -> None:
     validate_memory_graph_store_schema(conn)
+    _enforce_foreign_keys(conn)
     cur = conn.cursor()
-    cur.execute("SAVEPOINT clear_user_graph")
+    cur.execute("SAVEPOINT clear_graph_projection")
     try:
         cur.execute("DELETE FROM memory_graph_user_state WHERE user_id = ?", (user_id,))
-        cur.execute("RELEASE SAVEPOINT clear_user_graph")
+        cur.execute("RELEASE SAVEPOINT clear_graph_projection")
     except Exception:
-        cur.execute("ROLLBACK TO clear_user_graph")
+        cur.execute("ROLLBACK TO clear_graph_projection")
+        cur.execute("RELEASE SAVEPOINT clear_graph_projection")
         raise
+
+
+# Only for tests!
+_FAILURE_INJECTION_HOOK = None
 
 
 def publish_graph_projection(
     conn: sqlite3.Connection, projection: GraphProjectionResult
 ) -> None:
-    validate_memory_graph_store_schema(conn)
     verify_graph_projection_result(projection)
+    validate_memory_graph_store_schema(conn)
+    _enforce_foreign_keys(conn)
 
-    user_id = projection.user_id
+    if projection.snapshot.schema_version != GRAPH_SCHEMA_VERSION:
+        raise GraphStoreError(
+            f"Snapshot schema version {projection.snapshot.schema_version} != {GRAPH_SCHEMA_VERSION}"
+        )
+
     cur = conn.cursor()
     cur.execute("SAVEPOINT publish_graph")
     try:
+        user_id = projection.user_id
+
+        # Active state committed only at savepoint release.
         cur.execute("DELETE FROM memory_graph_user_state WHERE user_id = ?", (user_id,))
 
-        canonical_snapshot_json = serialize_graph_snapshot(projection.snapshot)
+        if _FAILURE_INJECTION_HOOK == "after_delete":
+            raise Exception("injected failure after_delete")
+
+        canonical_json = serialize_graph_snapshot(projection.snapshot)
         cur.execute(
             """INSERT INTO memory_graph_user_state
-               (user_id, graph_schema_version, projection_version, snapshot_id, projection_id, canonical_snapshot_json, input_fact_count, projected_fact_count, excluded_fact_count)
+               (user_id, graph_schema_version, projection_version, snapshot_id, projection_id,
+                canonical_snapshot_json, input_fact_count, projected_fact_count, excluded_fact_count)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user_id,
@@ -227,12 +475,15 @@ def publish_graph_projection(
                 projection.projection_version,
                 projection.snapshot.snapshot_id,
                 projection.projection_id,
-                canonical_snapshot_json,
+                canonical_json,
                 projection.input_fact_count,
                 projection.projected_fact_count,
                 projection.excluded_fact_count,
             ),
         )
+
+        if _FAILURE_INJECTION_HOOK == "after_user_state":
+            raise Exception("injected failure after_user_state")
 
         for node in projection.snapshot.nodes:
             cur.execute(
@@ -253,6 +504,9 @@ def publish_graph_projection(
                     node.provenance.revision,
                 ),
             )
+
+        if _FAILURE_INJECTION_HOOK == "after_nodes":
+            raise Exception("injected failure after_nodes")
 
         for edge in projection.snapshot.edges:
             cur.execute(
@@ -276,6 +530,9 @@ def publish_graph_projection(
                 ),
             )
 
+        if _FAILURE_INJECTION_HOOK == "after_edges":
+            raise Exception("injected failure after_edges")
+
         for nid, supports in projection.node_supports.items():
             for supp in supports:
                 cur.execute(
@@ -284,6 +541,9 @@ def publish_graph_projection(
                        VALUES (?, ?, ?, ?)""",
                     (user_id, nid, supp.fact_id, supp.revision),
                 )
+
+        if _FAILURE_INJECTION_HOOK == "after_node_supports":
+            raise Exception("injected failure after_node_supports")
 
         for eid, supports in projection.edge_supports.items():
             for supp in supports:
@@ -294,6 +554,9 @@ def publish_graph_projection(
                     (user_id, eid, supp.fact_id, supp.revision),
                 )
 
+        if _FAILURE_INJECTION_HOOK == "after_edge_supports":
+            raise Exception("injected failure after_edge_supports")
+
         for ex in projection.exclusions:
             cur.execute(
                 """INSERT INTO memory_graph_exclusions
@@ -302,9 +565,16 @@ def publish_graph_projection(
                 (user_id, str(ex.fact_id), ex.reason),
             )
 
+        if _FAILURE_INJECTION_HOOK == "after_exclusions":
+            raise Exception("injected failure after_exclusions")
+
+        if _FAILURE_INJECTION_HOOK == "before_release":
+            raise Exception("injected failure before_release")
+
         cur.execute("RELEASE SAVEPOINT publish_graph")
     except Exception:
         cur.execute("ROLLBACK TO publish_graph")
+        cur.execute("RELEASE SAVEPOINT publish_graph")
         raise
 
 
@@ -315,7 +585,7 @@ def load_graph_projection(
     cur = conn.cursor()
 
     cur.execute(
-        """SELECT projection_version, snapshot_id, projection_id, canonical_snapshot_json, input_fact_count, projected_fact_count, excluded_fact_count
+        """SELECT projection_version, snapshot_id, projection_id, canonical_snapshot_json, input_fact_count, projected_fact_count, excluded_fact_count, graph_schema_version
            FROM memory_graph_user_state WHERE user_id = ?""",
         (user_id,),
     )
@@ -331,7 +601,14 @@ def load_graph_projection(
         in_count,
         proj_count,
         exc_count,
+        graph_schema_version,
     ) = row
+
+    if graph_schema_version != GRAPH_SCHEMA_VERSION:
+        raise GraphStoreError("Tampered graph_schema_version")
+
+    if proj_version != MEMORY_GRAPH_PROJECTION_VERSION:
+        raise GraphStoreError("Tampered projection_version")
 
     cur.execute("SELECT COUNT(*) FROM memory_graph_nodes WHERE user_id = ?", (user_id,))
     node_count = cur.fetchone()[0]
@@ -343,6 +620,11 @@ def load_graph_projection(
         snapshot = deserialize_graph_snapshot(canonical_snapshot_json)
     except Exception as e:
         raise GraphStoreError(f"Corrupted snapshot JSON: {e}")
+
+    # Canonical snapshot JSON byte equality check
+    re_serialized = serialize_graph_snapshot(snapshot)
+    if re_serialized != canonical_snapshot_json:
+        raise GraphStoreError("Noncanonical JSON stored")
 
     if snapshot.snapshot_id != db_snapshot_id:
         raise GraphStoreError("Corrupted snapshot identity in user state")
@@ -429,6 +711,24 @@ def load_graph_projection(
             GraphProvenance("sqlite_memory_os_facts", fid, rev)
         )
 
+    # verify exact normalized sizes for supports
+    if (
+        sum(len(v) for v in node_supports_dict.values())
+        != cur.execute(
+            "SELECT COUNT(*) FROM memory_graph_node_supports WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+    ):
+        raise GraphStoreError("Node support count mismatch")
+    if (
+        sum(len(v) for v in edge_supports_dict.values())
+        != cur.execute(
+            "SELECT COUNT(*) FROM memory_graph_edge_supports WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()[0]
+    ):
+        raise GraphStoreError("Edge support count mismatch")
+
     for sn_node in snapshot.nodes:
         if sn_node.node_id not in node_supports_dict:
             raise GraphStoreError(f"Node {sn_node.node_id} missing supports")
@@ -442,6 +742,9 @@ def load_graph_projection(
         (user_id,),
     )
     excl = [ProjectionExclusion(int(er[0]), er[1]) for er in cur.fetchall()]
+
+    if len(excl) != exc_count:
+        raise GraphStoreError("Tampered excluded_fact_count")
 
     try:
         result = GraphProjectionResult(

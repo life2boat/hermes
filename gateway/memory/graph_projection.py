@@ -5,6 +5,8 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
+from types import MappingProxyType
+import math
 
 from ai_engineering.graph_contract import (
     GraphNode, GraphEdge, GraphProvenance, GraphSnapshot,
@@ -12,7 +14,7 @@ from ai_engineering.graph_contract import (
     MAX_GRAPH_NODES, MAX_GRAPH_EDGES, MAX_PROPERTIES_PER_ENTITY,
     MAX_PROPERTY_KEY_LENGTH, MAX_STRING_PROPERTY_LENGTH, GraphVerificationError
 )
-from gateway.memory.schema import FACTS_TABLE
+from gateway.memory.schema import FACTS_TABLE, validate_memory_convergence_schema
 
 MEMORY_GRAPH_PROJECTION_VERSION = 1
 MAX_PROJECTION_FACTS = 499
@@ -44,6 +46,12 @@ class AuthoritativeMemoryFact:
         if type(self.value) is not str: raise ValueError("value must be str")
         if type(self.vector_revision) is not int or isinstance(self.vector_revision, bool) or self.vector_revision < 1:
             raise ValueError("vector_revision must be int >= 1")
+        if self.source is not None and type(self.source) is not str:
+            raise ValueError("source must be None or str")
+        if type(self.trust_score) not in (float, int) or isinstance(self.trust_score, bool) or not math.isfinite(self.trust_score):
+            raise ValueError("trust_score must be a finite real number")
+        if type(self.created_at) is not str: raise ValueError("created_at must be str")
+        if type(self.updated_at) is not str: raise ValueError("updated_at must be str")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +69,8 @@ class GraphProjectionResult:
     input_fact_count: int
     projected_fact_count: int
     excluded_fact_count: int
-    node_supports: dict[str, tuple[GraphProvenance, ...]]
-    edge_supports: dict[str, tuple[GraphProvenance, ...]]
+    node_supports: MappingProxyType[str, tuple[GraphProvenance, ...]]
+    edge_supports: MappingProxyType[str, tuple[GraphProvenance, ...]]
     exclusions: tuple[ProjectionExclusion, ...]
 
 
@@ -73,6 +81,8 @@ def read_authoritative_memory_facts(
 ) -> tuple[AuthoritativeMemoryFact, ...]:
     if type(user_id) is not int or isinstance(user_id, bool):
         raise ValueError("user_id must be int")
+
+    validate_memory_convergence_schema(conn)
 
     rows = conn.execute(
         f"SELECT id, user_id, entity, key, value, vector_revision, source, trust_score, created_at, updated_at "
@@ -153,13 +163,13 @@ def project_authoritative_memory_facts(
     # Build structural graph
     for f in sorted_facts:
         k_lower = f.key.lower()
-        if any(b in k_lower for b in prohibited_keys):
+        if k_lower in prohibited_keys:
             exclusions.append(ProjectionExclusion(f.sqlite_id, "PROHIBITED_FIELD"))
             excluded_fact_count += 1
             continue
 
         # Check property constraints
-        if len(f.key) > MAX_PROPERTY_KEY_LENGTH:
+        if len(f.key) > MAX_STRING_PROPERTY_LENGTH:
             exclusions.append(ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED"))
             excluded_fact_count += 1
             continue
@@ -229,6 +239,10 @@ def project_authoritative_memory_facts(
     hasher = hashlib.sha256()
     hasher.update(f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{user_id}:snapshot:{snapshot.snapshot_id}:".encode("utf-8"))
 
+    hasher.update(f"auth_complete:{auth_source.is_complete}:".encode("utf-8"))
+    for f_state in auth_source.facts:
+        hasher.update(f"auth_fact:{f_state.fact_id}:{f_state.current_revision}:{f_state.status}:".encode("utf-8"))
+
     # Bind canonical evidence to projection_id
     # Sort nodes and edges for evidence binding
     ordered_node_ids = sorted(node_supports.keys())
@@ -256,7 +270,7 @@ def project_authoritative_memory_facts(
         input_fact_count=len(facts),
         projected_fact_count=projected_fact_count,
         excluded_fact_count=excluded_fact_count,
-        node_supports={k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in node_supports.items()},
-        edge_supports={k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in edge_supports.items()},
+        node_supports=MappingProxyType({k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in node_supports.items()}),
+        edge_supports=MappingProxyType({k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in edge_supports.items()}),
         exclusions=tuple(sorted(exclusions, key=lambda x: x.fact_id))
     )

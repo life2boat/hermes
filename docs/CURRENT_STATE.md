@@ -13,6 +13,21 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-2.1
+
+- PR-2.1 is COMPLETE.
+- Forward-fixed deterministic/integrity contract gaps from PR-2.
+- Added strict Read-Only SQLite Schema Validation using `validate_memory_convergence_schema` to `read_authoritative_memory_facts`.
+- Hardened `AuthoritativeMemoryFact` types and constraints, failing closed on malformed source rows.
+- Corrected graph memory fact key bounds to `MAX_STRING_PROPERTY_LENGTH`.
+- Implemented explicit exact boundary semantics for Privacy Key Classifier.
+- Forced Graph Snapshot Source-State Canonical Ordering and Immutability via `MappingProxyType`.
+- Graph projection `projection_id` now explicitly binds the complete user-scoped authoritative state (version, user, snapshot_id, completeness, facts).
+- Expanded adversarial test matrix to 60 parameterized test cases proving integrity.
+- Verified exact-main verification and regressions against Memory OS and Graph Contracts.
+- No LLMs were allowed; projection strictly mirrors facts.
+- No production execution or mutation occurred.
+
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-2
 
 - PR-2 is COMPLETE.

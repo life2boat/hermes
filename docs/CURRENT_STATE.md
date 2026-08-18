@@ -943,3 +943,10 @@ Before any production deployment decision, re-confirm: production source SHA, im
 - Never store secrets, credentials, private identifiers or raw provider responses
   in this file.
 - Mark unverifiable facts as `UNKNOWN` or `NOT CONFIRMED`.
+
+
+## 10. Memory Graph V3 (PR-3)
+- Persistent Derived Graph Storage is implemented and tested.
+- Deterministic snapshot hashing bug in GraphSnapshot.create was fixed.
+- Atomic publish semantics with cryptographic read-back verification are active.
+- The capability operates offline and does not mutate authoritative facts.

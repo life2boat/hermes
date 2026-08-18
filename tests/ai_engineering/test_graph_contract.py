@@ -1,10 +1,19 @@
 import pytest
 import json
 from ai_engineering.graph_contract import (
-    GraphNode, GraphEdge, GraphProvenance, GraphSnapshot, GraphVerificationError,
-    AuthoritativeFactState, AuthoritativeSourceSnapshot, classify_provenance,
-    deserialize_graph_snapshot, serialize_graph_snapshot, GRAPH_SCHEMA_VERSION
+    GraphNode,
+    GraphEdge,
+    GraphProvenance,
+    GraphSnapshot,
+    GraphVerificationError,
+    AuthoritativeFactState,
+    AuthoritativeSourceSnapshot,
+    classify_provenance,
+    deserialize_graph_snapshot,
+    serialize_graph_snapshot,
+    GRAPH_SCHEMA_VERSION,
 )
+
 
 def test_canonical_node_determinism():
     prov = GraphProvenance("sqlite_memory_os_facts", "fact1", 1)
@@ -13,14 +22,20 @@ def test_canonical_node_determinism():
     assert n1.node_id == n2.node_id
     n1.verify_identity()
 
+
 def test_canonical_edge_determinism():
     prov = GraphProvenance("sqlite_memory_os_facts", "fact1", 1)
     n1 = GraphNode.create("core:person", {"name": "Alice"}, prov)
     n2 = GraphNode.create("core:person", {"name": "Bob"}, prov)
-    e1 = GraphEdge.create(n1.node_id, n2.node_id, "relation:knows", {"since": 2020}, prov)
-    e2 = GraphEdge.create(n1.node_id, n2.node_id, "relation:knows", {"since": 2020}, prov)
+    e1 = GraphEdge.create(
+        n1.node_id, n2.node_id, "relation:knows", {"since": 2020}, prov
+    )
+    e2 = GraphEdge.create(
+        n1.node_id, n2.node_id, "relation:knows", {"since": 2020}, prov
+    )
     assert e1.edge_id == e2.edge_id
     e1.verify_identity()
+
 
 def test_canonical_snapshot_determinism():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -30,11 +45,13 @@ def test_canonical_snapshot_determinism():
     assert s1.snapshot_id == s2.snapshot_id
     s1.verify_identity()
 
+
 def test_mapping_insertion_order_independence():
     prov = GraphProvenance("sqlite_memory_os_facts", "fact1", 1)
     n1 = GraphNode.create("core:person", {"a": 1, "b": 2}, prov)
     n2 = GraphNode.create("core:person", {"b": 2, "a": 1}, prov)
     assert n1.node_id == n2.node_id
+
 
 def test_node_ordering_independence_in_snapshot():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -43,6 +60,7 @@ def test_node_ordering_independence_in_snapshot():
     s1 = GraphSnapshot.create([n1, n2], [])
     s2 = GraphSnapshot.create([n2, n1], [])
     assert s1.snapshot_id == s2.snapshot_id
+
 
 def test_edge_ordering_independence_in_snapshot():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -54,11 +72,13 @@ def test_edge_ordering_independence_in_snapshot():
     s2 = GraphSnapshot.create([n1, n2], [e2, e1])
     assert s1.snapshot_id == s2.snapshot_id
 
+
 def test_duplicate_node_rejection():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {"v": 1}, prov)
     with pytest.raises(GraphVerificationError, match="Duplicate node_id rejected"):
         GraphSnapshot.create([n1, n1], [])
+
 
 def test_duplicate_edge_rejection():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -68,10 +88,12 @@ def test_duplicate_edge_rejection():
     with pytest.raises(GraphVerificationError, match="Duplicate edge_id rejected"):
         GraphSnapshot.create([n1, n2], [e1, e1])
 
+
 def test_malformed_node_type():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("invalid-type", {}, prov)
+
 
 def test_malformed_relation_type():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -80,10 +102,12 @@ def test_malformed_relation_type():
     with pytest.raises(GraphVerificationError):
         GraphEdge.create(n1.node_id, n2.node_id, "BAD TYPE", {}, prov)
 
+
 def test_empty_node_type():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("", {}, prov)
+
 
 def test_empty_relation_type():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -91,6 +115,7 @@ def test_empty_relation_type():
     n2 = GraphNode.create("core:b", {}, prov)
     with pytest.raises(GraphVerificationError):
         GraphEdge.create(n1.node_id, n2.node_id, "", {}, prov)
+
 
 def test_unknown_source_target_node_reference():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -100,15 +125,18 @@ def test_unknown_source_target_node_reference():
     with pytest.raises(GraphVerificationError, match="Dangling edge reference"):
         GraphSnapshot.create([n1], [e1])
 
+
 def test_self_edge_policy():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
     with pytest.raises(GraphVerificationError, match="Self-edges are not permitted"):
         GraphEdge.create(n1.node_id, n1.node_id, "rel:a", {}, prov)
 
+
 def test_unsupported_provenance_source():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("unsupported", "f1", 1)
+
 
 def test_malformed_empty_fact_id():
     with pytest.raises(GraphVerificationError):
@@ -116,49 +144,80 @@ def test_malformed_empty_fact_id():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", "  ", 1)
 
+
 def test_negative_bool_revision():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", "f1", -1)
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", "f1", True)  # type: ignore
 
+
 def test_tampered_identities():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
-    tampered_node = GraphNode("gn_" + "f" * 64, n1.node_type, n1.properties, n1.provenance)
+    tampered_node = GraphNode(
+        "gn_" + "f" * 64, n1.node_type, n1.properties, n1.provenance
+    )
     with pytest.raises(GraphVerificationError):
         tampered_node.verify_identity()
 
     other_gn = "gn_" + "e" * 64
     e1 = GraphEdge.create(n1.node_id, other_gn, "rel:a", {}, prov)
-    tampered_edge = GraphEdge("ge_" + "f" * 64, e1.source_node_id, e1.target_node_id, e1.relation_type, e1.properties, e1.provenance)
+    tampered_edge = GraphEdge(
+        "ge_" + "f" * 64,
+        e1.source_node_id,
+        e1.target_node_id,
+        e1.relation_type,
+        e1.properties,
+        e1.provenance,
+    )
     with pytest.raises(GraphVerificationError):
         tampered_edge.verify_identity()
 
     s1 = GraphSnapshot.create([n1], [])
-    tampered_snapshot = GraphSnapshot(s1.schema_version, "gs_" + "f" * 64, s1.nodes, s1.edges, None)
+    tampered_snapshot = GraphSnapshot(
+        s1.schema_version, "gs_" + "f" * 64, s1.nodes, s1.edges, None
+    )
     with pytest.raises(GraphVerificationError):
         tampered_snapshot.verify_identity()
 
+
 def test_provenance_classification():
     auth = AuthoritativeSourceSnapshot(
-        facts=(AuthoritativeFactState("f1", 2, "ACTIVE"), AuthoritativeFactState("f2", 1, "DELETED")),
-        is_complete=True
+        facts=(
+            AuthoritativeFactState("f1", 2, "ACTIVE"),
+            AuthoritativeFactState("f2", 1, "DELETED"),
+        ),
+        is_complete=True,
     )
 
     # Current
-    assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth) == "CURRENT"
+    assert (
+        classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth)
+        == "CURRENT"
+    )
     # Stale
-    assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 1), auth) == "STALE"
+    assert (
+        classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 1), auth)
+        == "STALE"
+    )
     # Deleted
-    assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f2", 1), auth) == "DELETED_SOURCE"
+    assert (
+        classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f2", 1), auth)
+        == "DELETED_SOURCE"
+    )
     # Unknown (complete snapshot without f3)
-    assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f3", 1), auth) == "UNKNOWN_SOURCE"
+    assert (
+        classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f3", 1), auth)
+        == "UNKNOWN_SOURCE"
+    )
+
 
 def test_partial_source_state_ambiguity():
     auth = AuthoritativeSourceSnapshot(facts=(), is_complete=False)
     with pytest.raises(GraphVerificationError, match="ambiguous"):
         classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 1), auth)
+
 
 def test_conflicting_assertion():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -169,17 +228,20 @@ def test_conflicting_assertion():
     with pytest.raises(GraphVerificationError, match="Conflict detected"):
         GraphSnapshot.create([n1, n2], [e1, e2])
 
+
 def test_non_finite_numeric_property():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
-        GraphNode.create("core:a", {"v": float('inf')}, prov)
+        GraphNode.create("core:a", {"v": float("inf")}, prov)
     with pytest.raises(GraphVerificationError):
-        GraphNode.create("core:a", {"v": float('nan')}, prov)
+        GraphNode.create("core:a", {"v": float("nan")}, prov)
+
 
 def test_unsupported_schema_version():
     s_json = '{"schema_version": 999, "snapshot_id": "gs_00", "nodes": [], "edges": []}'
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot(s_json)
+
 
 def test_duplicate_json_key_unexpected_field_missing():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_bad", "nodes": [], "edges": [], "extra": 1}'
@@ -187,6 +249,7 @@ def test_duplicate_json_key_unexpected_field_missing():
     # But missing schema_version fails, tampered ID fails.
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot(s_json)
+
 
 def test_excessive_bounds():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -202,6 +265,7 @@ def test_excessive_bounds():
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", many_props, prov)
 
+
 def test_mutable_caller_input_aliasing():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     props = {"v": 1}
@@ -209,12 +273,14 @@ def test_mutable_caller_input_aliasing():
     props["v"] = 2  # Mutate original dict
     assert n1.properties["v"] == 1  # Node should be unaffected
 
+
 def test_prohibited_secrets():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {"raw_prompt": "secret"}, prov)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {"my_password": "123"}, prov)
+
 
 def test_deterministic_rebuild_equivalence():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -226,10 +292,12 @@ def test_deterministic_rebuild_equivalence():
     assert s1.snapshot_id == s2.snapshot_id
     assert s1.nodes[0].node_id == s2.nodes[0].node_id
 
+
 def test_properties_must_be_mapping():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", "not-a-mapping", prov)
+
 
 def test_max_properties_exceeded():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -237,37 +305,45 @@ def test_max_properties_exceeded():
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", props, prov)
 
+
 def test_property_key_must_be_string():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {1: "val"}, prov)
+
 
 def test_property_value_must_be_scalar():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {"k": {"nested": 1}}, prov)
 
+
 def test_graph_provenance_fact_id_not_string():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", 123, 1)
+
 
 def test_graph_provenance_fact_id_whitespace():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", "f 1", 1)
 
+
 def test_graph_provenance_revision_not_int():
     with pytest.raises(GraphVerificationError):
         GraphProvenance("sqlite_memory_os_facts", "f1", "1")
+
 
 def test_graph_edge_source_node_format_invalid():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphEdge.create("invalid_id", "gn_123", "rel:a", {}, prov)
 
+
 def test_graph_edge_target_node_format_invalid():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     with pytest.raises(GraphVerificationError):
         GraphEdge.create("gn_123", "invalid_id", "rel:a", {}, prov)
+
 
 def test_authoritative_fact_state_invalid_fact_id():
     with pytest.raises(GraphVerificationError):
@@ -275,18 +351,24 @@ def test_authoritative_fact_state_invalid_fact_id():
     with pytest.raises(GraphVerificationError):
         AuthoritativeFactState("f 1", 1, "ACTIVE")
 
+
 def test_authoritative_fact_state_negative_revision():
     with pytest.raises(GraphVerificationError):
         AuthoritativeFactState("f1", -1, "ACTIVE")
+
 
 def test_authoritative_fact_state_invalid_status():
     with pytest.raises(GraphVerificationError):
         AuthoritativeFactState("f1", 1, "INVALID_STATUS")
 
+
 def test_classify_provenance_future_revision():
-    auth = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("f1", 1, "ACTIVE"),), is_complete=False)
+    auth = AuthoritativeSourceSnapshot(
+        facts=(AuthoritativeFactState("f1", 1, "ACTIVE"),), is_complete=False
+    )
     with pytest.raises(GraphVerificationError):
         classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth)
+
 
 def test_graph_snapshot_max_nodes():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
@@ -294,88 +376,171 @@ def test_graph_snapshot_max_nodes():
     with pytest.raises(GraphVerificationError):
         GraphSnapshot.create(nodes, [])
 
+
 def test_graph_snapshot_max_edges():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
     n2 = GraphNode.create("core:b", {}, prov)
-    edges = [GraphEdge.create(n1.node_id, n2.node_id, "rel:a", {"i": i}, prov) for i in range(5001)]
+    edges = [
+        GraphEdge.create(n1.node_id, n2.node_id, "rel:a", {"i": i}, prov)
+        for i in range(5001)
+    ]
     with pytest.raises(GraphVerificationError):
         GraphSnapshot.create([n1, n2], edges)
+
 
 def test_deserialize_snapshot_invalid_json():
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot("{invalid json}")
 
+
 def test_deserialize_snapshot_root_not_object():
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot("[]")
 
+
 def test_deserialize_snapshot_missing_schema_version():
     with pytest.raises(GraphVerificationError):
         deserialize_graph_snapshot('{"snapshot_id": "gs_123"}')
+
 
 def test_deserialize_duplicate_keys_top_level():
     s_json = '{"schema_version": 1, "schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": []}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
 
+
 def test_deserialize_duplicate_keys_node():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_id": "gn_00", "node_type": "core:a", "properties": {}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "revision": 1}}], "edges": []}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
+
 
 def test_deserialize_duplicate_keys_provenance():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_type": "core:a", "properties": {}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "fact_id": "f2", "revision": 1}}], "edges": []}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
 
+
 def test_deserialize_duplicate_keys_properties():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [{"node_id": "gn_00", "node_type": "core:a", "properties": {"a": 1, "a": 2}, "provenance": {"source_system": "sqlite_memory_os_facts", "fact_id": "f1", "revision": 1}}], "edges": []}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
+
 
 def test_deserialize_duplicate_keys_authoritative_source():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": [], "authoritative_source": {"is_complete": true, "is_complete": false, "facts": []}}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
 
+
 def test_deserialize_duplicate_keys_authoritative_fact():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": [], "authoritative_source": {"is_complete": true, "facts": [{"fact_id": "f1", "fact_id": "f1", "current_revision": 1, "status": "ACTIVE"}]}}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
 
+
 def test_canonical_source_ordering_independence():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {"v": 1}, prov)
-    auth1 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"), AuthoritativeFactState("2", 1, "ACTIVE")), is_complete=True)
-    auth2 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("2", 1, "ACTIVE"), AuthoritativeFactState("1", 1, "ACTIVE")), is_complete=True)
+    auth1 = AuthoritativeSourceSnapshot(
+        facts=(
+            AuthoritativeFactState("1", 1, "ACTIVE"),
+            AuthoritativeFactState("2", 1, "ACTIVE"),
+        ),
+        is_complete=True,
+    )
+    auth2 = AuthoritativeSourceSnapshot(
+        facts=(
+            AuthoritativeFactState("2", 1, "ACTIVE"),
+            AuthoritativeFactState("1", 1, "ACTIVE"),
+        ),
+        is_complete=True,
+    )
 
     s1 = GraphSnapshot.create([n1], [], auth1)
     s2 = GraphSnapshot.create([n1], [], auth2)
     assert s1.snapshot_id == s2.snapshot_id
     assert serialize_graph_snapshot(s1) == serialize_graph_snapshot(s2)
 
+
 def test_source_tamper():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {"v": 1}, prov)
-    auth1 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=True)
+    auth1 = AuthoritativeSourceSnapshot(
+        facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=True
+    )
 
     s1 = GraphSnapshot.create([n1], [], auth1)
 
     # Tamper with authoritative source (e.g., change revision)
-    auth2 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 2, "ACTIVE"),), is_complete=True)
-    tampered_snapshot = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth2)
+    auth2 = AuthoritativeSourceSnapshot(
+        facts=(AuthoritativeFactState("1", 2, "ACTIVE"),), is_complete=True
+    )
+    tampered_snapshot = GraphSnapshot(
+        s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth2
+    )
     with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
         tampered_snapshot.verify_identity()
 
     # Tamper with is_complete
-    auth3 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=False)
-    tampered_snapshot2 = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth3)
+    auth3 = AuthoritativeSourceSnapshot(
+        facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=False
+    )
+    tampered_snapshot2 = GraphSnapshot(
+        s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth3
+    )
     with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
         tampered_snapshot2.verify_identity()
 
     # Active -> Deleted
-    auth4 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "DELETED"),), is_complete=True)
-    tampered_snapshot3 = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth4)
+    auth4 = AuthoritativeSourceSnapshot(
+        facts=(AuthoritativeFactState("1", 1, "DELETED"),), is_complete=True
+    )
+    tampered_snapshot3 = GraphSnapshot(
+        s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth4
+    )
     with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
         tampered_snapshot3.verify_identity()
+
+
+def test_snapshot_hashing_determinism_fix_pr3():
+    from ai_engineering.graph_contract import (
+        GraphNode,
+        GraphEdge,
+        GraphProvenance,
+        GraphSnapshot,
+        serialize_graph_snapshot,
+        deserialize_graph_snapshot,
+    )
+    import json
+
+    prov = GraphProvenance("sqlite_memory_os_facts", "1", 1)
+
+    # We will create nodes where the underlying dictionary insertion order differs,
+    # but the canonical content is identical.
+    n1_dict = {"a": 1, "b": 2, "c": 3}
+    n2_dict = {"c": 3, "b": 2, "a": 1}
+
+    node1 = GraphNode.create("memory:test", n1_dict, prov)
+    node2 = GraphNode.create("memory:test", n2_dict, prov)
+
+    # Prove same node identity
+    assert node1.node_id == node2.node_id
+
+    # Create two snapshots
+    snap1 = GraphSnapshot.create([node1], [])
+    snap2 = GraphSnapshot.create([node2], [])
+
+    # Same canonical content -> same snapshot_id
+    assert snap1.snapshot_id == snap2.snapshot_id
+
+    # Same graph content -> byte-identical serialization
+    s1 = serialize_graph_snapshot(snap1)
+    s2 = serialize_graph_snapshot(snap2)
+    assert s1 == s2
+
+    # serialize -> deserialize -> serialize -> identical bytes
+    deserialized = deserialize_graph_snapshot(s1)
+    s3 = serialize_graph_snapshot(deserialized)
+    assert s1 == s3

@@ -9,15 +9,24 @@ from types import MappingProxyType
 import math
 
 from ai_engineering.graph_contract import (
-    GraphNode, GraphEdge, GraphProvenance, GraphSnapshot,
-    AuthoritativeSourceSnapshot, AuthoritativeFactState,
-    MAX_GRAPH_NODES, MAX_GRAPH_EDGES, MAX_PROPERTIES_PER_ENTITY,
-    MAX_PROPERTY_KEY_LENGTH, MAX_STRING_PROPERTY_LENGTH, GraphVerificationError
+    GraphNode,
+    GraphEdge,
+    GraphProvenance,
+    GraphSnapshot,
+    AuthoritativeSourceSnapshot,
+    AuthoritativeFactState,
+    MAX_GRAPH_NODES,
+    MAX_GRAPH_EDGES,
+    MAX_PROPERTIES_PER_ENTITY,
+    MAX_PROPERTY_KEY_LENGTH,
+    MAX_STRING_PROPERTY_LENGTH,
+    GraphVerificationError,
 )
 from gateway.memory.schema import FACTS_TABLE, validate_memory_convergence_schema
 
 MEMORY_GRAPH_PROJECTION_VERSION = 1
 MAX_PROJECTION_FACTS = 499
+
 
 class ProjectionError(ValueError):
     pass
@@ -37,21 +46,38 @@ class AuthoritativeMemoryFact:
     updated_at: str
 
     def __post_init__(self) -> None:
-        if type(self.sqlite_id) is not int or isinstance(self.sqlite_id, bool) or self.sqlite_id <= 0:
+        if (
+            type(self.sqlite_id) is not int
+            or isinstance(self.sqlite_id, bool)
+            or self.sqlite_id <= 0
+        ):
             raise ValueError("sqlite_id must be a positive int")
         if type(self.user_id) is not int or isinstance(self.user_id, bool):
             raise ValueError("user_id must be int")
-        if type(self.entity) is not str: raise ValueError("entity must be str")
-        if type(self.key) is not str: raise ValueError("key must be str")
-        if type(self.value) is not str: raise ValueError("value must be str")
-        if type(self.vector_revision) is not int or isinstance(self.vector_revision, bool) or self.vector_revision < 1:
+        if type(self.entity) is not str:
+            raise ValueError("entity must be str")
+        if type(self.key) is not str:
+            raise ValueError("key must be str")
+        if type(self.value) is not str:
+            raise ValueError("value must be str")
+        if (
+            type(self.vector_revision) is not int
+            or isinstance(self.vector_revision, bool)
+            or self.vector_revision < 1
+        ):
             raise ValueError("vector_revision must be int >= 1")
         if self.source is not None and type(self.source) is not str:
             raise ValueError("source must be None or str")
-        if type(self.trust_score) not in (float, int) or isinstance(self.trust_score, bool) or not math.isfinite(self.trust_score):
+        if (
+            type(self.trust_score) not in (float, int)
+            or isinstance(self.trust_score, bool)
+            or not math.isfinite(self.trust_score)
+        ):
             raise ValueError("trust_score must be a finite real number")
-        if type(self.created_at) is not str: raise ValueError("created_at must be str")
-        if type(self.updated_at) is not str: raise ValueError("updated_at must be str")
+        if type(self.created_at) is not str:
+            raise ValueError("created_at must be str")
+        if type(self.updated_at) is not str:
+            raise ValueError("updated_at must be str")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,23 +113,25 @@ def read_authoritative_memory_facts(
     rows = conn.execute(
         f"SELECT id, user_id, entity, key, value, vector_revision, source, trust_score, created_at, updated_at "
         f"FROM {FACTS_TABLE} WHERE user_id = ? ORDER BY id ASC",
-        (user_id,)
+        (user_id,),
     ).fetchall()
 
     facts = []
     for row in rows:
-        facts.append(AuthoritativeMemoryFact(
-            sqlite_id=row[0],
-            user_id=row[1],
-            entity=row[2],
-            key=row[3],
-            value=row[4],
-            vector_revision=row[5],
-            source=row[6],
-            trust_score=row[7],
-            created_at=row[8],
-            updated_at=row[9],
-        ))
+        facts.append(
+            AuthoritativeMemoryFact(
+                sqlite_id=row[0],
+                user_id=row[1],
+                entity=row[2],
+                key=row[3],
+                value=row[4],
+                vector_revision=row[5],
+                source=row[6],
+                trust_score=row[7],
+                created_at=row[8],
+                updated_at=row[9],
+            )
+        )
     return tuple(facts)
 
 
@@ -115,14 +143,18 @@ def project_authoritative_memory_facts(
     if type(user_id) is not int or isinstance(user_id, bool):
         raise ProjectionError("user_id must be int")
     if len(facts) > MAX_PROJECTION_FACTS:
-        raise ProjectionError(f"PROJECTION_LIMIT_EXCEEDED: facts count {len(facts)} > {MAX_PROJECTION_FACTS}")
+        raise ProjectionError(
+            f"PROJECTION_LIMIT_EXCEEDED: facts count {len(facts)} > {MAX_PROJECTION_FACTS}"
+        )
 
     sqlite_ids = set()
     for f in facts:
         if type(f) is not AuthoritativeMemoryFact:
             raise ProjectionError("fact must be AuthoritativeMemoryFact")
         if f.user_id != user_id:
-            raise ProjectionError(f"CROSS_USER_INPUT_REJECTION: expected user {user_id}, got {f.user_id}")
+            raise ProjectionError(
+                f"CROSS_USER_INPUT_REJECTION: expected user {user_id}, got {f.user_id}"
+            )
         if f.sqlite_id in sqlite_ids:
             raise ProjectionError(f"Duplicate sqlite_id {f.sqlite_id}")
         sqlite_ids.add(f.sqlite_id)
@@ -144,17 +176,30 @@ def project_authoritative_memory_facts(
     semantic_has_entity: dict[str, GraphEdge] = {}
     semantic_has_fact: dict[tuple[str, str, str], GraphEdge] = {}
 
-    prohibited_keys = {"raw_prompt", "compiled_prompt", "chain_of_thought", "cot", "credential",
-                       "password", "api_key", "secret", "access_token", "refresh_token", "provider_raw_response"}
+    prohibited_keys = {
+        "raw_prompt",
+        "compiled_prompt",
+        "chain_of_thought",
+        "cot",
+        "credential",
+        "password",
+        "api_key",
+        "secret",
+        "access_token",
+        "refresh_token",
+        "provider_raw_response",
+    }
 
     # Authoritative source snapshot
     auth_fact_states = []
     for f in sorted_facts:
-        auth_fact_states.append(AuthoritativeFactState(
-            fact_id=str(f.sqlite_id),
-            current_revision=f.vector_revision,
-            status="ACTIVE"
-        ))
+        auth_fact_states.append(
+            AuthoritativeFactState(
+                fact_id=str(f.sqlite_id),
+                current_revision=f.vector_revision,
+                status="ACTIVE",
+            )
+        )
     auth_source = AuthoritativeSourceSnapshot(tuple(auth_fact_states), is_complete=True)
 
     projected_fact_count = 0
@@ -170,33 +215,51 @@ def project_authoritative_memory_facts(
 
         # Check property constraints
         if len(f.key) > MAX_STRING_PROPERTY_LENGTH:
-            exclusions.append(ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED"))
+            exclusions.append(
+                ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED")
+            )
             excluded_fact_count += 1
             continue
         if len(f.value) > MAX_STRING_PROPERTY_LENGTH:
-            exclusions.append(ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED"))
+            exclusions.append(
+                ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED")
+            )
             excluded_fact_count += 1
             continue
         if len(f.entity) > MAX_STRING_PROPERTY_LENGTH:
-            exclusions.append(ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED"))
+            exclusions.append(
+                ProjectionExclusion(f.sqlite_id, "GRAPH_STRING_BOUND_EXCEEDED")
+            )
             excluded_fact_count += 1
             continue
 
-        prov = GraphProvenance("sqlite_memory_os_facts", str(f.sqlite_id), f.vector_revision)
+        prov = GraphProvenance(
+            "sqlite_memory_os_facts", str(f.sqlite_id), f.vector_revision
+        )
 
         # User node
         if semantic_user_node is None:
-            semantic_user_node = GraphNode.create("memory:user", {"user_id": user_id}, prov)
+            semantic_user_node = GraphNode.create(
+                "memory:user", {"user_id": user_id}, prov
+            )
             node_supports[semantic_user_node.node_id] = []
         node_supports[semantic_user_node.node_id].append(prov)
 
         # Entity node
         if f.entity not in semantic_entities:
-            ent_node = GraphNode.create("memory:entity", {"user_id": user_id, "entity": f.entity}, prov)
+            ent_node = GraphNode.create(
+                "memory:entity", {"user_id": user_id, "entity": f.entity}, prov
+            )
             semantic_entities[f.entity] = ent_node
             node_supports[ent_node.node_id] = []
 
-            ent_edge = GraphEdge.create(semantic_user_node.node_id, ent_node.node_id, "memory:has_entity", {}, prov)
+            ent_edge = GraphEdge.create(
+                semantic_user_node.node_id,
+                ent_node.node_id,
+                "memory:has_entity",
+                {},
+                prov,
+            )
             semantic_has_entity[f.entity] = ent_edge
             edge_supports[ent_edge.edge_id] = []
 
@@ -208,11 +271,22 @@ def project_authoritative_memory_facts(
         # Fact node
         fact_key = (f.entity, f.key, f.value)
         if fact_key not in semantic_facts:
-            fact_node = GraphNode.create("memory:fact", {"user_id": user_id, "entity": f.entity, "key": f.key, "value": f.value}, prov)
+            fact_node = GraphNode.create(
+                "memory:fact",
+                {
+                    "user_id": user_id,
+                    "entity": f.entity,
+                    "key": f.key,
+                    "value": f.value,
+                },
+                prov,
+            )
             semantic_facts[fact_key] = fact_node
             node_supports[fact_node.node_id] = []
 
-            fact_edge = GraphEdge.create(ent_node.node_id, fact_node.node_id, "memory:has_fact", {}, prov)
+            fact_edge = GraphEdge.create(
+                ent_node.node_id, fact_node.node_id, "memory:has_fact", {}, prov
+            )
             semantic_has_fact[fact_key] = fact_edge
             edge_supports[fact_edge.edge_id] = []
 
@@ -237,15 +311,27 @@ def project_authoritative_memory_facts(
 
     # Compute deterministic projection_id
     hasher = hashlib.sha256()
-    hasher.update(f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{user_id}:snapshot:{snapshot.snapshot_id}:".encode("utf-8"))
+    hasher.update(
+        f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{user_id}:snapshot:{snapshot.snapshot_id}:".encode(
+            "utf-8"
+        )
+    )
 
     hasher.update(b"auth:")
     auth_dict = {
-        "facts": [{"fact_id": f.fact_id, "current_revision": f.current_revision, "status": f.status}
-                  for f in auth_source.facts],
-        "is_complete": auth_source.is_complete
+        "facts": [
+            {
+                "fact_id": f.fact_id,
+                "current_revision": f.current_revision,
+                "status": f.status,
+            }
+            for f in auth_source.facts
+        ],
+        "is_complete": auth_source.is_complete,
     }
-    canonical_auth = json.dumps(auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    canonical_auth = json.dumps(
+        auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
     hasher.update(canonical_auth.encode("utf-8"))
 
     # Bind canonical evidence to projection_id
@@ -275,7 +361,75 @@ def project_authoritative_memory_facts(
         input_fact_count=len(facts),
         projected_fact_count=projected_fact_count,
         excluded_fact_count=excluded_fact_count,
-        node_supports=MappingProxyType({k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in node_supports.items()}),
-        edge_supports=MappingProxyType({k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision))) for k, v in edge_supports.items()}),
-        exclusions=tuple(sorted(exclusions, key=lambda x: x.fact_id))
+        node_supports=MappingProxyType({
+            k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision)))
+            for k, v in node_supports.items()
+        }),
+        edge_supports=MappingProxyType({
+            k: tuple(sorted(v, key=lambda x: (int(x.fact_id), x.revision)))
+            for k, v in edge_supports.items()
+        }),
+        exclusions=tuple(sorted(exclusions, key=lambda x: x.fact_id)),
     )
+
+
+def verify_graph_projection_result(result: GraphProjectionResult) -> None:
+    if result.projection_version != MEMORY_GRAPH_PROJECTION_VERSION:
+        raise ProjectionError("Projection version mismatch")
+
+    result.snapshot.verify_identity()
+
+    hasher = hashlib.sha256()
+    hasher.update(
+        f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{result.user_id}:snapshot:{result.snapshot.snapshot_id}:".encode(
+            "utf-8"
+        )
+    )
+
+    hasher.update(b"auth:")
+    auth_dict = {
+        "facts": [
+            {
+                "fact_id": f.fact_id,
+                "current_revision": f.current_revision,
+                "status": f.status,
+            }
+            for f in (
+                result.snapshot.authoritative_source.facts
+                if result.snapshot.authoritative_source
+                else []
+            )
+        ],
+        "is_complete": (
+            result.snapshot.authoritative_source.is_complete
+            if result.snapshot.authoritative_source
+            else False
+        ),
+    }
+    canonical_auth = json.dumps(
+        auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    hasher.update(canonical_auth.encode("utf-8"))
+
+    ordered_node_ids = sorted(result.node_supports.keys())
+    for nid in ordered_node_ids:
+        hasher.update(f"n:{nid}:".encode("utf-8"))
+        for p in sorted(
+            result.node_supports[nid], key=lambda x: (int(x.fact_id), x.revision)
+        ):
+            hasher.update(f"{p.fact_id}_{p.revision}:".encode("utf-8"))
+
+    ordered_edge_ids = sorted(result.edge_supports.keys())
+    for eid in ordered_edge_ids:
+        hasher.update(f"e:{eid}:".encode("utf-8"))
+        for p in sorted(
+            result.edge_supports[eid], key=lambda x: (int(x.fact_id), x.revision)
+        ):
+            hasher.update(f"{p.fact_id}_{p.revision}:".encode("utf-8"))
+
+    for ex in sorted(result.exclusions, key=lambda x: x.fact_id):
+        hasher.update(f"ex:{ex.fact_id}:{ex.reason}:".encode("utf-8"))
+
+    expected_projection_id = f"gp_{hasher.hexdigest()}"
+    if result.projection_id != expected_projection_id:
+        raise ProjectionError("Tampered projection identity")

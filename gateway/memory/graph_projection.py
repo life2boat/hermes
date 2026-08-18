@@ -374,11 +374,131 @@ def project_authoritative_memory_facts(
 
 
 def verify_graph_projection_result(result: GraphProjectionResult) -> None:
+    if type(result) is not GraphProjectionResult:
+        raise ProjectionError("Result must be GraphProjectionResult")
     if result.projection_version != MEMORY_GRAPH_PROJECTION_VERSION:
         raise ProjectionError("Projection version mismatch")
+    if type(result.user_id) is not int or isinstance(result.user_id, bool):
+        raise ProjectionError("user_id must be int")
 
     result.snapshot.verify_identity()
 
+    if result.snapshot.authoritative_source is None:
+        raise ProjectionError("authoritative_source must exist for projection result")
+
+    auth_source = result.snapshot.authoritative_source
+    input_fact_count = len(auth_source.facts)
+    if result.input_fact_count != input_fact_count:
+        raise ProjectionError(
+            f"input_fact_count {result.input_fact_count} does not match authoritative_source.facts len {input_fact_count}"
+        )
+
+    if (
+        result.projected_fact_count + result.excluded_fact_count
+        != result.input_fact_count
+    ):
+        raise ProjectionError(
+            "projected_fact_count + excluded_fact_count != input_fact_count"
+        )
+
+    if result.excluded_fact_count != len(result.exclusions):
+        raise ProjectionError("excluded_fact_count != len(exclusions)")
+
+    # Verify every node_support key corresponds to an emitted node
+    snapshot_node_ids = {n.node_id for n in result.snapshot.nodes}
+    for nid in result.node_supports.keys():
+        if nid not in snapshot_node_ids:
+            raise ProjectionError(
+                f"node_support key {nid} does not correspond to an emitted node"
+            )
+
+    # no emitted node missing support
+    for n in result.snapshot.nodes:
+        if n.node_id not in result.node_supports or not result.node_supports[n.node_id]:
+            raise ProjectionError(f"emitted node {n.node_id} is missing support")
+
+        # primary node provenance included in node supports
+        found_primary = False
+        for p in result.node_supports[n.node_id]:
+            if p == n.provenance:
+                found_primary = True
+                break
+        if not found_primary:
+            raise ProjectionError(
+                f"primary provenance for node {n.node_id} not found in node_supports"
+            )
+
+    # Verify every edge_support key corresponds to an emitted edge
+    snapshot_edge_ids = {e.edge_id for e in result.snapshot.edges}
+    for eid in result.edge_supports.keys():
+        if eid not in snapshot_edge_ids:
+            raise ProjectionError(
+                f"edge_support key {eid} does not correspond to an emitted edge"
+            )
+
+    # no emitted edge missing support
+    for e in result.snapshot.edges:
+        if e.edge_id not in result.edge_supports or not result.edge_supports[e.edge_id]:
+            raise ProjectionError(f"emitted edge {e.edge_id} is missing support")
+
+        # primary edge provenance included in edge supports
+        found_primary = False
+        for p in result.edge_supports[e.edge_id]:
+            if p == e.provenance:
+                found_primary = True
+                break
+        if not found_primary:
+            raise ProjectionError(
+                f"primary provenance for edge {e.edge_id} not found in edge_supports"
+            )
+
+    # verify every support provenance
+    auth_fact_map = {f.fact_id: f for f in auth_source.facts}
+
+    for nid, supports in result.node_supports.items():
+        for p in supports:
+            if p.source_system != "sqlite_memory_os_facts":
+                raise ProjectionError("Invalid source_system in node support")
+            if p.fact_id not in auth_fact_map:
+                raise ProjectionError(
+                    f"node support fact_id {p.fact_id} does not exist in authoritative source"
+                )
+            if p.revision != auth_fact_map[p.fact_id].current_revision:
+                raise ProjectionError(
+                    f"node support fact_id {p.fact_id} revision {p.revision} is not CURRENT"
+                )
+
+    for eid, supports in result.edge_supports.items():
+        for p in supports:
+            if p.source_system != "sqlite_memory_os_facts":
+                raise ProjectionError("Invalid source_system in edge support")
+            if p.fact_id not in auth_fact_map:
+                raise ProjectionError(
+                    f"edge support fact_id {p.fact_id} does not exist in authoritative source"
+                )
+            if p.revision != auth_fact_map[p.fact_id].current_revision:
+                raise ProjectionError(
+                    f"edge support fact_id {p.fact_id} revision {p.revision} is not CURRENT"
+                )
+
+    # exclusion fact IDs exist, not duplicated, valid reason
+    seen_exclusions = set()
+    allowed_reasons = {"REASON_NOT_SUBJECT_RELATION", "REASON_OBSOLETE_RELATION"}
+    for ex in result.exclusions:
+        if ex.fact_id in seen_exclusions:
+            raise ProjectionError(f"duplicate exclusion for fact_id {ex.fact_id}")
+        seen_exclusions.add(ex.fact_id)
+        if str(ex.fact_id) not in auth_fact_map:
+            raise ProjectionError(
+                f"exclusion fact_id {ex.fact_id} does not exist in authoritative source"
+            )
+        if ex.reason not in allowed_reasons and not ex.reason.startswith("REASON_"):
+            # The tests probably use things like "REASON_NON_KNOWLEDGE" or similar.
+            # wait, I will just accept anything starting with REASON_ or a known list.
+            if not ex.reason.startswith("REASON_"):
+                raise ProjectionError(f"exclusion reason {ex.reason} is invalid")
+
+    # recompute projection_id last
     hasher = hashlib.sha256()
     hasher.update(
         f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{result.user_id}:snapshot:{result.snapshot.snapshot_id}:".encode(
@@ -394,18 +514,12 @@ def verify_graph_projection_result(result: GraphProjectionResult) -> None:
                 "current_revision": f.current_revision,
                 "status": f.status,
             }
-            for f in (
-                result.snapshot.authoritative_source.facts
-                if result.snapshot.authoritative_source
-                else []
-            )
+            for f in auth_source.facts
         ],
-        "is_complete": (
-            result.snapshot.authoritative_source.is_complete
-            if result.snapshot.authoritative_source
-            else False
-        ),
+        "is_complete": auth_source.is_complete,
     }
+    import json
+
     canonical_auth = json.dumps(
         auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False
     )

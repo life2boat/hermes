@@ -13,6 +13,18 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-2
+
+- PR-2 is COMPLETE.
+- Established `gateway/memory/graph_projection.py` for Deterministic Graph Projection Engine.
+- Engine uses a two-layer design: pure facts retrieval (Layer A) and strict projection (Layer B).
+- Projection binds graph nodes/edges structurally and enforces length/size/semantic bounds on facts.
+- Fail-closed constraints implemented: cross-user data rejected, > 499 facts limit enforced.
+- Created ADR 0082 documenting the deterministic memory projection engine design.
+- Implemented adversarial deterministic regression tests in `tests/gateway/memory/test_graph_projection.py`.
+- No LLM calls used; projection is purely structural.
+- No production execution or mutation occurred.
+
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.4
 
 - PR-1.4 duplicate-key fail-closed parser and final truth closure implemented.

@@ -1,5 +1,18 @@
 # CURRENT_STATE changelog
 
+## 1.2.58 - 2026-08-18
+
+Changed:
+- recorded PR-2 completion: Authoritative SQLite -> Deterministic Graph Projection Engine.
+- established `gateway/memory/graph_projection.py` generating bounded deterministic snapshots.
+- implemented `PROJECTION_LIMIT_EXCEEDED` and `CROSS_USER_INPUT_REJECTION` bounds checking.
+- created ADR 0082 for graph projection engineering design.
+
+Safety & Provenance:
+- the projection is purely structural, provider-free, and contains no LLM invocation.
+- full adversarial test suite covers bounds, privacy, and identity generation.
+- no production mutation or database schema changes occurred.
+
 ## 1.2.57 - 2026-08-18
 
 Changed:

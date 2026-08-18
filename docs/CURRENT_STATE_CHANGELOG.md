@@ -1,5 +1,13 @@
 # CURRENT_STATE changelog
 
+## 1.2.61 - 2026-08-18 (PR-3.2 Candidate)
+Changed:
+- Exact schema verification and partial schema semantics implemented.
+- Removed ad-hoc print statements from classifier.
+- PR #195 (PR-3): persistent store foundation.
+- PR #196 (PR-3.1): integrity/transaction closure, final head 3b32c5952a06a8b21aae5c3be4a5258c68c2a1ae, merge 47ddc93d8727b67f272e7e6d70b25d92711fc350, CI sequencing PASS.
+- PR-3.2: exact-schema/SOT closure candidate.
+
 ## 1.2.60 - 2026-08-18 (PR-3.1 Candidate)
 Changed:
 - Hardened persistence layer with exact schema classification (\classify_memory_graph_store_schema\), rigorous transaction boundary handling (\SAVEPOINT\ cleanup), test-only failure injection hooks, exact JSON byte serialization, count validations, and \PRAGMA foreign_keys = ON\ enforcement.

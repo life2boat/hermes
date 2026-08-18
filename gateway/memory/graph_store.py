@@ -288,10 +288,11 @@ def classify_memory_graph_store_schema(
         if not existing_tables:
             return GraphStoreSchemaClassification.ABSENT
 
-        if existing_tables != set(expected_tables.keys()):
+        if not existing_tables.issubset(set(expected_tables.keys())):
             return GraphStoreSchemaClassification.INCOMPATIBLE
 
-        for table, schema in expected_tables.items():
+        for table in existing_tables:
+            schema = expected_tables[table]
             cur.execute(f"PRAGMA table_info({table})")
             columns_info = cur.fetchall()
             if not columns_info:
@@ -301,6 +302,8 @@ def classify_memory_graph_store_schema(
                 row[1]: {"type": row[2], "notnull": row[3], "pk": row[5]}
                 for row in columns_info
             }
+            if set(columns.keys()) != set(schema["columns"].keys()):
+                return GraphStoreSchemaClassification.INCOMPATIBLE
             for col, cinfo in schema["columns"].items():
                 if col not in columns:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
@@ -341,7 +344,6 @@ def classify_memory_graph_store_schema(
 
             expected_fks = schema.get("fks", [])
             if len(actual_fks) != len(expected_fks):
-                print("fk length mismatch:", table, len(actual_fks), len(expected_fks))
                 return GraphStoreSchemaClassification.INCOMPATIBLE
 
             for expected_fk in expected_fks:
@@ -358,12 +360,16 @@ def classify_memory_graph_store_schema(
                 if not matched:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
 
-        cur.execute(
-            "SELECT schema_version FROM memory_graph_store_meta WHERE singleton_id = 1"
-        )
-        row = cur.fetchone()
-        if not row or row[0] != MEMORY_GRAPH_STORE_SCHEMA_VERSION:
-            return GraphStoreSchemaClassification.INCOMPATIBLE
+        if "memory_graph_store_meta" in existing_tables:
+            cur.execute(
+                "SELECT schema_version FROM memory_graph_store_meta WHERE singleton_id = 1"
+            )
+            row = cur.fetchone()
+            if not row or row[0] != MEMORY_GRAPH_STORE_SCHEMA_VERSION:
+                return GraphStoreSchemaClassification.INCOMPATIBLE
+
+        if existing_tables != set(expected_tables.keys()):
+            return GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL
 
         return GraphStoreSchemaClassification.CURRENT
     except sqlite3.Error:
@@ -380,8 +386,11 @@ def migrate_memory_graph_store_schema(conn: sqlite3.Connection) -> None:
     classification = classify_memory_graph_store_schema(conn)
     if classification == GraphStoreSchemaClassification.CURRENT:
         return
-    if classification == GraphStoreSchemaClassification.INCOMPATIBLE:
-        raise GraphStoreError("Cannot migrate from INCOMPATIBLE schema")
+    if classification in (
+        GraphStoreSchemaClassification.INCOMPATIBLE,
+        GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL,
+    ):
+        raise GraphStoreError(f"Cannot migrate from {classification.name} schema")
 
     cur = conn.cursor()
     cur.execute("SAVEPOINT migrate_graph_store")

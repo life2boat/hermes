@@ -1,10 +1,10 @@
 ---
 title: Hermes / HealBite — Current State
-version: 1.2.57
+version: 1.2.61
 updated_at: 2026-08-18
 status: active
 source_of_truth: true
-state_verified_against_main_sha: c9b5a6417d2f5b8b178cb12644ccaa3c8fe7522f
+state_verified_against_main_sha: 47ddc93d8727b67f272e7e6d70b25d92711fc350
 production_sha: unknown
 ---
 
@@ -27,7 +27,6 @@ Git.
   - Immutable canonical source-state identity encoding via deterministic canonical JSON guarantees robust hash binding.
   - Projection ID derives consistently from this single source-state canonicalization rule.
   - The test suite (`tests/gateway/memory/test_graph_projection.py`) was expanded to >60 parameterized, meaningful test cases covering schema validation, sentinel-driven privacy leakage checks, and static independence.
-- No persistence logic implemented.
 - No graph runtime activation or mutation to production occurred.
 
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.4
@@ -952,11 +951,20 @@ Before any production deployment decision, re-confirm: production source SHA, im
 - The capability operates offline and does not mutate authoritative facts.
 
 
+Persistent derived graph storage implemented offline.
+SQLite Memory OS remains authoritative.
+Graph store remains DERIVED_REBUILDABLE.
+No runtime activation.
+No production graph migration.
+
 PR-3:
-FOUNDATION_MERGED
+COMPLETE
 
 PR-3.1:
-IMPLEMENTED_CANDIDATE
+COMPLETE
+
+PR-3.2:
+FINAL_CLOSURE_CANDIDATE
 
 PR-4:
-PENDING_PR3_1_CLOSURE
+PENDING_FINAL_PR3_CLOSURE

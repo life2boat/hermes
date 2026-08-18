@@ -367,7 +367,7 @@ def test_classify_partial_schema():
         "INSERT INTO memory_graph_store_meta (singleton_id, schema_version) VALUES (1, 1)"
     )
     cls = classify_memory_graph_store_schema(conn)
-    assert cls == GraphStoreSchemaClassification.INCOMPATIBLE
+    assert cls == GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL
 
 
 def test_classify_wrong_columns():
@@ -606,7 +606,7 @@ def test_schema_classification_adversarial():
     conn = build_schema({"edges": None})
     assert (
         classify_memory_graph_store_schema(conn)
-        == GraphStoreSchemaClassification.INCOMPATIBLE
+        == GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL
     )
     conn.close()
 
@@ -822,3 +822,82 @@ def test_exclusions_through_store():
         for row in rows:
             row_str = str(row)
             assert "VERY_SECRET_PR31_SENTINEL_73921" not in row_str
+
+
+def test_schema_exact_column_set_adversarial():
+    from gateway.memory.graph_store import (
+        classify_memory_graph_store_schema,
+        GraphStoreSchemaClassification,
+    )
+    from gateway.memory.graph_store import _CREATE_USER_STATE, _CREATE_META
+    import sqlite3
+
+    # 1. canonical table + extra nullable column
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_USER_STATE.replace(")", ", extra_col TEXT)"))
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+    # 2. canonical table + extra NOT NULL column
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        _CREATE_USER_STATE.replace(")", ", extra_col TEXT NOT NULL DEFAULT 'a')")
+    )
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+
+def test_schema_partial_semantics():
+    from gateway.memory.graph_store import (
+        classify_memory_graph_store_schema,
+        GraphStoreSchemaClassification,
+    )
+    from gateway.memory.graph_store import _CREATE_USER_STATE, _CREATE_META
+    import sqlite3
+
+    # 1. one canonical table only
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_USER_STATE)
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL
+    )
+
+    # 2. several canonical tables only
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_USER_STATE)
+    conn.execute(_CREATE_META)
+    conn.execute(
+        "INSERT INTO memory_graph_store_meta (singleton_id, schema_version) VALUES (1, 1)"
+    )
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.KNOWN_COMPATIBLE_PARTIAL
+    )
+
+    # 3. partial + malformed table
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_USER_STATE.replace(")", ", extra_col TEXT)"))
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+    # 4. partial + unknown memory_graph_* table
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_USER_STATE)
+    conn.execute("CREATE TABLE memory_graph_unknown (id INTEGER PRIMARY KEY)")
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )

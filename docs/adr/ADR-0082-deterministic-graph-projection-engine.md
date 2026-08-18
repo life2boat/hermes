@@ -23,7 +23,7 @@ We implemented a pure deterministic graph projection engine in `gateway/memory/g
    - Edge relationships linking `memory:user` -> `memory:has_entity` -> `memory:entity` -> `memory:has_fact` -> `memory:fact`.
 4. **Privacy & Exclusions**:
    - Any property violating key or string value length bounds (100 and 4096 Python string characters respectively) is excluded.
-   - Any key bearing secret semantics ("password", "credential", etc.) is excluded.
+   - Privacy exclusion is based on exact structured sensitive field keys. Arbitrary secret-looking values in ordinary user prose are not universally detected or rejected.
    - Exclusions are deterministically bound to the final `projection_id`.
 5. **Limits Check**: If facts > 499 (which prevents structural size explosion beyond `MAX_GRAPH_NODES`), we fail closed with `PROJECTION_LIMIT_EXCEEDED` and expect future PRs to define explicit sharding.
 

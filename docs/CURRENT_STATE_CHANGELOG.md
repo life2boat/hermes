@@ -934,3 +934,9 @@ Safety:
 ## 1.0.0 — 2026-07-08
 
 - initial source-of-truth file created.
+
+## v1.2.59
+- Implemented Persistent Derived Graph Storage (PR-3).
+- Fixed GraphSnapshot.create determinism bug.
+- Corrected CURRENT_STATE header version.
+- Added ADR-0083.

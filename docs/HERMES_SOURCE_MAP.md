@@ -137,3 +137,5 @@ controls; they cannot mutate the Golden corpus or grant authority.
   `skills/deploy/SKILL.md`; do not infer permission from a runbook command.
 - Diagnosing production: perform fresh sanitized read-only discovery first;
   do not treat local files, old evidence or container tags as current truth.
+
+- `gateway/memory/graph_store.py`: Persistent derived graph storage engine.

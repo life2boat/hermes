@@ -1,5 +1,16 @@
 # CURRENT_STATE changelog
 
+## 1.2.64 - 2026-08-18 (PR-4 Complete)
+Changed:
+- PR-4 Deterministic Graph Read Path implemented and verified against all exact-schema/adversarial test matrices.
+- Graph query layer established in `gateway/memory/graph_query.py`.
+- No runtime activation; `GRAPH_QUERY_RUNTIME_ACTIVATED` remains `false`.
+
+## 1.2.63 - 2026-08-18 (PR-4 Candidate)
+Changed:
+- PR-3.3 confirmed as COMPLETE.
+- PR-4 Deterministic Graph Read Path implemented as candidate.
+
 ## 1.2.62 - 2026-08-18 (PR-3.3 Candidate)
 Changed:
 - PR #197: head 7a644ec8771ffef83bddd8b9a84d900833585902, merge 185030b05033ee3779ce8f0e74f9572aa24a0640, CI sequencing PASS.

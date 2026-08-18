@@ -139,54 +139,143 @@ def classify_memory_graph_store_schema(
 
     expected_tables = {
         "memory_graph_store_meta": {
-            "singleton_id": "INTEGER",
-            "schema_version": "INTEGER",
+            "columns": {
+                "singleton_id": {"type": "INTEGER", "notnull": 0, "pk": 1},
+                "schema_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+            },
+            "fks": [],
+            "sql_like": "CHECK(singleton_id = 1)",
         },
         "memory_graph_user_state": {
-            "user_id": "INTEGER",
-            "graph_schema_version": "INTEGER",
-            "projection_version": "INTEGER",
-            "snapshot_id": "TEXT",
-            "projection_id": "TEXT",
-            "canonical_snapshot_json": "TEXT",
-            "input_fact_count": "INTEGER",
-            "projected_fact_count": "INTEGER",
-            "excluded_fact_count": "INTEGER",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 0, "pk": 1},
+                "graph_schema_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "projection_version": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "snapshot_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "projection_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "canonical_snapshot_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "input_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "projected_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+                "excluded_fact_count": {"type": "INTEGER", "notnull": 1, "pk": 0},
+            },
+            "fks": [],
         },
         "memory_graph_nodes": {
-            "user_id": "INTEGER",
-            "node_id": "TEXT",
-            "node_type": "TEXT",
-            "properties_json": "TEXT",
-            "primary_provenance_fact_id": "TEXT",
-            "primary_provenance_revision": "INTEGER",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "node_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "node_type": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "properties_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_fact_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_revision": {
+                    "type": "INTEGER",
+                    "notnull": 1,
+                    "pk": 0,
+                },
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
         },
         "memory_graph_edges": {
-            "user_id": "INTEGER",
-            "edge_id": "TEXT",
-            "source_node_id": "TEXT",
-            "target_node_id": "TEXT",
-            "relation_type": "TEXT",
-            "properties_json": "TEXT",
-            "primary_provenance_fact_id": "TEXT",
-            "primary_provenance_revision": "INTEGER",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "edge_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "source_node_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "target_node_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "relation_type": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "properties_json": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_fact_id": {"type": "TEXT", "notnull": 1, "pk": 0},
+                "primary_provenance_revision": {
+                    "type": "INTEGER",
+                    "notnull": 1,
+                    "pk": 0,
+                },
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "source_node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "target_node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
         },
         "memory_graph_node_supports": {
-            "user_id": "INTEGER",
-            "node_id": "TEXT",
-            "fact_id": "TEXT",
-            "revision": "INTEGER",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "node_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 3},
+                "revision": {"type": "INTEGER", "notnull": 1, "pk": 4},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "node_id"],
+                    "table": "memory_graph_nodes",
+                    "to": ["user_id", "node_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
         },
         "memory_graph_edge_supports": {
-            "user_id": "INTEGER",
-            "edge_id": "TEXT",
-            "fact_id": "TEXT",
-            "revision": "INTEGER",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "edge_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 3},
+                "revision": {"type": "INTEGER", "notnull": 1, "pk": 4},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+                {
+                    "from": ["user_id", "edge_id"],
+                    "table": "memory_graph_edges",
+                    "to": ["user_id", "edge_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
         },
         "memory_graph_exclusions": {
-            "user_id": "INTEGER",
-            "fact_id": "TEXT",
-            "reason": "TEXT",
+            "columns": {
+                "user_id": {"type": "INTEGER", "notnull": 1, "pk": 1},
+                "fact_id": {"type": "TEXT", "notnull": 1, "pk": 2},
+                "reason": {"type": "TEXT", "notnull": 1, "pk": 3},
+            },
+            "fks": [
+                {
+                    "from": ["user_id"],
+                    "table": "memory_graph_user_state",
+                    "to": ["user_id"],
+                    "on_delete": "CASCADE",
+                },
+            ],
         },
     }
 
@@ -200,19 +289,73 @@ def classify_memory_graph_store_schema(
             return GraphStoreSchemaClassification.ABSENT
 
         if existing_tables != set(expected_tables.keys()):
-            if "memory_graph_store_meta" not in existing_tables:
-                return GraphStoreSchemaClassification.INCOMPATIBLE
             return GraphStoreSchemaClassification.INCOMPATIBLE
 
-        for table, cols in expected_tables.items():
+        for table, schema in expected_tables.items():
             cur.execute(f"PRAGMA table_info({table})")
-            columns = {row[1]: row[2] for row in cur.fetchall()}
-            for col, ctype in cols.items():
+            columns_info = cur.fetchall()
+            if not columns_info:
+                return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            columns = {
+                row[1]: {"type": row[2], "notnull": row[3], "pk": row[5]}
+                for row in columns_info
+            }
+            for col, cinfo in schema["columns"].items():
                 if col not in columns:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
-                # SQLite sometimes returns type with size like VARCHAR(255) instead of TEXT.
-                # In our schema it's strictly TEXT or INTEGER.
-                if columns[col] != ctype:
+                if columns[col]["type"] != cinfo["type"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                if columns[col]["notnull"] != cinfo["notnull"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+                if columns[col]["pk"] != cinfo["pk"]:
+                    return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            if "sql_like" in schema:
+                cur.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                )
+                sql = cur.fetchone()[0]
+                if schema["sql_like"].lower() not in sql.lower().replace(" ", ""):
+                    # check canonical schema identity
+                    if "singleton_id = 1" not in sql:
+                        return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            cur.execute(f"PRAGMA foreign_key_list({table})")
+            fks_info = cur.fetchall()
+
+            # map fk info by id
+            actual_fks = {}
+            for row in fks_info:
+                fk_id = row[0]
+                if fk_id not in actual_fks:
+                    actual_fks[fk_id] = {
+                        "table": row[2],
+                        "from": [],
+                        "to": [],
+                        "on_delete": row[6],
+                    }
+                actual_fks[fk_id]["from"].append(row[3])
+                actual_fks[fk_id]["to"].append(row[4])
+
+            expected_fks = schema.get("fks", [])
+            if len(actual_fks) != len(expected_fks):
+                print("fk length mismatch:", table, len(actual_fks), len(expected_fks))
+                return GraphStoreSchemaClassification.INCOMPATIBLE
+
+            for expected_fk in expected_fks:
+                matched = False
+                for actual_fk in actual_fks.values():
+                    if (
+                        actual_fk["table"] == expected_fk["table"]
+                        and actual_fk["from"] == expected_fk["from"]
+                        and actual_fk["to"] == expected_fk["to"]
+                        and actual_fk["on_delete"] == expected_fk["on_delete"]
+                    ):
+                        matched = True
+                        break
+                if not matched:
                     return GraphStoreSchemaClassification.INCOMPATIBLE
 
         cur.execute(
@@ -304,6 +447,11 @@ def publish_graph_projection(
     validate_memory_graph_store_schema(conn)
     _enforce_foreign_keys(conn)
 
+    if projection.snapshot.schema_version != GRAPH_SCHEMA_VERSION:
+        raise GraphStoreError(
+            f"Snapshot schema version {projection.snapshot.schema_version} != {GRAPH_SCHEMA_VERSION}"
+        )
+
     cur = conn.cursor()
     cur.execute("SAVEPOINT publish_graph")
     try:
@@ -323,7 +471,7 @@ def publish_graph_projection(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 user_id,
-                MEMORY_GRAPH_STORE_SCHEMA_VERSION,
+                projection.snapshot.schema_version,
                 projection.projection_version,
                 projection.snapshot.snapshot_id,
                 projection.projection_id,
@@ -456,7 +604,7 @@ def load_graph_projection(
         graph_schema_version,
     ) = row
 
-    if graph_schema_version != MEMORY_GRAPH_STORE_SCHEMA_VERSION:
+    if graph_schema_version != GRAPH_SCHEMA_VERSION:
         raise GraphStoreError("Tampered graph_schema_version")
 
     if proj_version != MEMORY_GRAPH_PROJECTION_VERSION:

@@ -20,6 +20,7 @@ from ai_engineering.graph_contract import (
     MAX_PROPERTIES_PER_ENTITY,
     MAX_PROPERTY_KEY_LENGTH,
     MAX_STRING_PROPERTY_LENGTH,
+    PROJECTION_EXCLUSION_REASONS,
     GraphVerificationError,
 )
 from gateway.memory.schema import FACTS_TABLE, validate_memory_convergence_schema
@@ -417,6 +418,12 @@ def verify_graph_projection_result(result: GraphProjectionResult) -> None:
         if n.node_id not in result.node_supports or not result.node_supports[n.node_id]:
             raise ProjectionError(f"emitted node {n.node_id} is missing support")
 
+        if n.node_type in ("memory:user", "memory:entity", "memory:fact"):
+            if "user_id" in n.properties and n.properties["user_id"] != result.user_id:
+                raise ProjectionError(
+                    f"node {n.node_id} contains semantic graph content for another user"
+                )
+
         # primary node provenance included in node supports
         found_primary = False
         for p in result.node_supports[n.node_id]:
@@ -483,7 +490,6 @@ def verify_graph_projection_result(result: GraphProjectionResult) -> None:
 
     # exclusion fact IDs exist, not duplicated, valid reason
     seen_exclusions = set()
-    allowed_reasons = {"REASON_NOT_SUBJECT_RELATION", "REASON_OBSOLETE_RELATION"}
     for ex in result.exclusions:
         if ex.fact_id in seen_exclusions:
             raise ProjectionError(f"duplicate exclusion for fact_id {ex.fact_id}")
@@ -492,11 +498,8 @@ def verify_graph_projection_result(result: GraphProjectionResult) -> None:
             raise ProjectionError(
                 f"exclusion fact_id {ex.fact_id} does not exist in authoritative source"
             )
-        if ex.reason not in allowed_reasons and not ex.reason.startswith("REASON_"):
-            # The tests probably use things like "REASON_NON_KNOWLEDGE" or similar.
-            # wait, I will just accept anything starting with REASON_ or a known list.
-            if not ex.reason.startswith("REASON_"):
-                raise ProjectionError(f"exclusion reason {ex.reason} is invalid")
+        if type(ex.reason) is not str or ex.reason not in PROJECTION_EXCLUSION_REASONS:
+            raise ProjectionError(f"exclusion reason {ex.reason} is invalid")
 
     # recompute projection_id last
     hasher = hashlib.sha256()

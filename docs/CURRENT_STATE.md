@@ -4,7 +4,7 @@ version: 1.2.57
 updated_at: 2026-08-18
 status: active
 source_of_truth: true
-state_verified_against_main_sha: 1afb2a788ae8bb071c47d5c70829f29e7e53106a
+state_verified_against_main_sha: c9b5a6417d2f5b8b178cb12644ccaa3c8fe7522f
 production_sha: unknown
 ---
 
@@ -13,32 +13,22 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
-## Hermes / HealBite — Memory & Graph Engineering v3 PR-2.1
+## Hermes / HealBite — Memory & Graph Engineering v3 PR-2 (Structural) & PR-2.1 (Integrity) & PR-2.2 (Closure)
 
-- PR-2.1 is COMPLETE.
-- Forward-fixed deterministic/integrity contract gaps from PR-2.
-- Added strict Read-Only SQLite Schema Validation using `validate_memory_convergence_schema` to `read_authoritative_memory_facts`.
-- Hardened `AuthoritativeMemoryFact` types and constraints, failing closed on malformed source rows.
-- Corrected graph memory fact key bounds to `MAX_STRING_PROPERTY_LENGTH`.
-- Implemented explicit exact boundary semantics for Privacy Key Classifier.
-- Forced Graph Snapshot Source-State Canonical Ordering and Immutability via `MappingProxyType`.
-- Graph projection `projection_id` now explicitly binds the complete user-scoped authoritative state (version, user, snapshot_id, completeness, facts).
-- Expanded adversarial test matrix to 60 parameterized test cases proving integrity.
-- Verified exact-main verification and regressions against Memory OS and Graph Contracts.
-- No LLMs were allowed; projection strictly mirrors facts.
-- No production execution or mutation occurred.
-
-## Hermes / HealBite — Memory & Graph Engineering v3 PR-2
-
-- PR-2 is COMPLETE.
-- Established `gateway/memory/graph_projection.py` for Deterministic Graph Projection Engine.
-- Engine uses a two-layer design: pure facts retrieval (Layer A) and strict projection (Layer B).
-- Projection binds graph nodes/edges structurally and enforces length/size/semantic bounds on facts.
-- Fail-closed constraints implemented: cross-user data rejected, > 499 facts limit enforced.
-- Created ADR 0082 documenting the deterministic memory projection engine design.
-- Implemented adversarial deterministic regression tests in `tests/gateway/memory/test_graph_projection.py`.
-- No LLM calls used; projection is purely structural.
-- No production execution or mutation occurred.
+- PR-2 foundation is COMPLETE.
+- PR #192 provided the structural foundation for deterministic graph projection.
+- PR #193 (PR-2.1) implemented strict read-only schema validation, exact privacy boundary checks, and projection result immutability.
+- **Historical Sequencing Record for PR #193**: The pull request was merged using `--admin` before `Tests` and `Nix` workflows reached terminal state.
+  - Eventual exact-head CI was PASS.
+  - Reported 60 test cases was inaccurate (only ~50 were collected).
+  - Canonical authoritative-source ordering and deterministic canonical source-state serialization remained incomplete.
+- PR-2.2 closed the remaining pre-persistence defects:
+  - Canonical authoritative-source ordering now unambiguously sorts facts by `fact_id` ASC, `current_revision` ASC, `status` ASC.
+  - Immutable canonical source-state identity encoding via deterministic canonical JSON guarantees robust hash binding.
+  - Projection ID derives consistently from this single source-state canonicalization rule.
+  - The test suite (`tests/gateway/memory/test_graph_projection.py`) was expanded to >60 parameterized, meaningful test cases covering schema validation, sentinel-driven privacy leakage checks, and static independence.
+- No persistence logic implemented.
+- No graph runtime activation or mutation to production occurred.
 
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-1.4
 

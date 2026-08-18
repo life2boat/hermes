@@ -1,5 +1,26 @@
 # CURRENT_STATE changelog
 
+## 1.2.65 - 2026-08-18 (PR-4.1 integrity closure candidate)
+Corrected:
+- PR #199 provided the deterministic graph read-path foundation at head
+  `6a322c8ad2170b4e5a659fc6de2c7966ef4878d8`, squash-merged as
+  `2ab4daed932e0f7b4b088afcfc4e79f635fa830e`; its pre-merge CI sequencing
+  passed.
+- an independent exact-main audit found that lexical canonical fact-ID order
+  was compared positionally with numeric SQLite row order, producing false
+  `STALE_GRAPH` results at the 9/10 boundary;
+- the audit also found placeholder adversarial tests and that the documented
+  pure Layer A remained mixed into the database coordinator.
+
+Changed:
+- PR-4.1 implements canonical complete source-state equality, a genuinely pure
+  structural query layer, fail-closed structural validation and authoritative
+  hydration, and real adversarial/read-only evidence.
+- full-source freshness comparison is truthfully `O(n)` in authoritative fact
+  count and is bounded by existing Memory graph fact limits.
+- PR-4.1 remains `INTEGRITY_CLOSURE_IMPLEMENTED_CANDIDATE`; PR-5 remains
+  `BLOCKED_PENDING_PR4_1_EXACT_MAIN`.
+
 ## 1.2.64 - 2026-08-18 (PR-4 Complete)
 Changed:
 - PR-4 Deterministic Graph Read Path implemented and verified against all exact-schema/adversarial test matrices.

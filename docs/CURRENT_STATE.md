@@ -944,7 +944,7 @@ Before any production deployment decision, re-confirm: production source SHA, im
 - Mark unverifiable facts as `UNKNOWN` or `NOT CONFIRMED`.
 
 
-## 10. Memory Graph V3 (PR-3)
+## 10. Memory Graph V3 (PR-3 through PR-4.1)
 - Persistent Derived Graph Storage is implemented and tested.
 - Deterministic snapshot hashing bug in GraphSnapshot.create was fixed.
 - Atomic publish semantics with cryptographic read-back verification are active.
@@ -972,7 +972,21 @@ COMPLETE
 PERSISTENT_DERIVED_GRAPH_STORAGE=COMPLETE_OFFLINE
 
 PR-4=
-COMPLETE
+FOUNDATION_MERGED
+
+PR-4_FOUNDATION_PR=199
+PR-4_FOUNDATION_HEAD=6a322c8ad2170b4e5a659fc6de2c7966ef4878d8
+PR-4_FOUNDATION_MERGE=2ab4daed932e0f7b4b088afcfc4e79f635fa830e
+PR-4_FOUNDATION_CI_SEQUENCE=PASS
+
+POST_MERGE_FINDINGS=
+- lexical/numeric authoritative source-state ordering produced false stale reads;
+- placeholder tests overstated adversarial evidence;
+- the claimed pure Layer A remained mixed into the coordinator.
+
+PR-4.1=INTEGRITY_CLOSURE_IMPLEMENTED_CANDIDATE
+FULL_SOURCE_FRESHNESS_COMPLEXITY=O(n)
+PR-5=BLOCKED_PENDING_PR4_1_EXACT_MAIN
 
 GRAPH_QUERY_RUNTIME_ACTIVATED=false
 PRODUCTION_GRAPH_QUERY_ENABLED=false

@@ -239,9 +239,14 @@ def project_authoritative_memory_facts(
     hasher = hashlib.sha256()
     hasher.update(f"v{MEMORY_GRAPH_PROJECTION_VERSION}:user:{user_id}:snapshot:{snapshot.snapshot_id}:".encode("utf-8"))
 
-    hasher.update(f"auth_complete:{auth_source.is_complete}:".encode("utf-8"))
-    for f_state in auth_source.facts:
-        hasher.update(f"auth_fact:{f_state.fact_id}:{f_state.current_revision}:{f_state.status}:".encode("utf-8"))
+    hasher.update(b"auth:")
+    auth_dict = {
+        "facts": [{"fact_id": f.fact_id, "current_revision": f.current_revision, "status": f.status}
+                  for f in auth_source.facts],
+        "is_complete": auth_source.is_complete
+    }
+    canonical_auth = json.dumps(auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    hasher.update(canonical_auth.encode("utf-8"))
 
     # Bind canonical evidence to projection_id
     # Sort nodes and edges for evidence binding

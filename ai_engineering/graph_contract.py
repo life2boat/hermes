@@ -42,28 +42,28 @@ def _reject_secrets_and_validate_properties(properties: Any) -> MappingProxyType
     if len(properties) > MAX_PROPERTIES_PER_ENTITY:
         raise GraphVerificationError(f"properties exceed MAX_PROPERTIES_PER_ENTITY")
 
-    blocked_fragments = {"raw_prompt", "compiled_prompt", "chain_of_thought", "cot", "credential", 
+    blocked_fragments = {"raw_prompt", "compiled_prompt", "chain_of_thought", "cot", "credential",
                          "password", "api_key", "secret", "access_token", "refresh_token", "provider_raw_response"}
-    
+
     clean_props = {}
     for key, val in properties.items():
         if type(key) is not str:
             raise GraphVerificationError("Property keys must be strings")
         if len(key) > MAX_PROPERTY_KEY_LENGTH:
             raise GraphVerificationError(f"Property key length exceeds MAX_PROPERTY_KEY_LENGTH")
-        
+
         k_lower = key.lower()
         if any(b in k_lower for b in blocked_fragments):
             raise GraphVerificationError(f"Prohibited/secret material rejected")
 
         if type(val) not in (str, int, float, bool):
             raise GraphVerificationError(f"Property value must be str, int, float, or bool.")
-        
+
         if type(val) is str and len(val) > MAX_STRING_PROPERTY_LENGTH:
             raise GraphVerificationError(f"String property value exceeds MAX_STRING_PROPERTY_LENGTH")
-            
+
         clean_props[key] = val
-        
+
     return MappingProxyType(clean_props)
 
 
@@ -211,7 +211,7 @@ class AuthoritativeFactState:
 class AuthoritativeSourceSnapshot:
     facts: tuple[AuthoritativeFactState, ...]
     is_complete: bool
-    
+
     def __post_init__(self) -> None:
         if type(self.facts) is not tuple:
             raise GraphVerificationError("facts must be tuple")
@@ -224,6 +224,9 @@ class AuthoritativeSourceSnapshot:
             if f.fact_id in fact_ids:
                 raise GraphVerificationError(f"Duplicate fact_id {f.fact_id}")
             fact_ids.add(f.fact_id)
+
+        sorted_facts = tuple(sorted(self.facts, key=lambda f: (f.fact_id, f.current_revision, f.status)))
+        object.__setattr__(self, 'facts', sorted_facts)
 
 
 def classify_provenance(prov: GraphProvenance, source: AuthoritativeSourceSnapshot) -> str:
@@ -282,7 +285,7 @@ class GraphSnapshot:
                 raise GraphVerificationError(f"Duplicate edge_id rejected: {e.edge_id}")
             if e.source_node_id not in node_ids or e.target_node_id not in node_ids:
                 raise GraphVerificationError(f"Dangling edge reference in edge {e.edge_id}")
-            
+
             logical_key = (e.source_node_id, e.target_node_id, e.relation_type)
             if logical_key in logical_edges:
                 raise GraphVerificationError(f"Conflict detected for logical edge {logical_key}")
@@ -293,10 +296,10 @@ class GraphSnapshot:
 
         node_dicts.sort(key=lambda x: x["node_id"])
         edge_dicts.sort(key=lambda x: x["edge_id"])
-        
+
         canonical_nodes = json.dumps(node_dicts, separators=(",", ":"))
         canonical_edges = json.dumps(edge_dicts, separators=(",", ":"))
-        
+
         hasher = hashlib.sha256()
         hasher.update(f"v{GRAPH_SCHEMA_VERSION}:snapshot:".encode("utf-8"))
         hasher.update(canonical_nodes.encode("utf-8"))
@@ -304,9 +307,13 @@ class GraphSnapshot:
         hasher.update(canonical_edges.encode("utf-8"))
         if authoritative_source:
             hasher.update(b":auth:")
-            hasher.update(str(authoritative_source.is_complete).encode("utf-8"))
-            for f in authoritative_source.facts:
-                hasher.update(f":{f.fact_id}_{f.current_revision}_{f.status}".encode("utf-8"))
+            auth_dict = {
+                "facts": [{"fact_id": f.fact_id, "current_revision": f.current_revision, "status": f.status}
+                          for f in authoritative_source.facts],
+                "is_complete": authoritative_source.is_complete
+            }
+            canonical_auth = json.dumps(auth_dict, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            hasher.update(canonical_auth.encode("utf-8"))
         snapshot_id = f"gs_{hasher.hexdigest()}"
 
         sorted_nodes = tuple(sorted(nodes, key=lambda n: n.node_id))
@@ -327,7 +334,7 @@ class GraphSnapshot:
         }
         if self.authoritative_source:
             d["authoritative_source"] = {
-                "facts": [{"fact_id": f.fact_id, "current_revision": f.current_revision, "status": f.status} 
+                "facts": [{"fact_id": f.fact_id, "current_revision": f.current_revision, "status": f.status}
                           for f in self.authoritative_source.facts],
                 "is_complete": self.authoritative_source.is_complete
             }
@@ -352,7 +359,7 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
         data = json.loads(json_str, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError:
         raise GraphVerificationError("Invalid JSON")
-    
+
     if type(data) is not dict:
         raise GraphVerificationError("Root must be object")
 
@@ -362,7 +369,7 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
 
     if not set(data.keys()).issubset(allowed_top_keys):
         raise GraphVerificationError(f"Unknown top-level fields: {set(data.keys()) - allowed_top_keys}")
-        
+
     for k in ("schema_version", "snapshot_id", "nodes", "edges"):
         if k not in data:
             raise GraphVerificationError(f"Missing required top-level field: {k}")
@@ -379,12 +386,12 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
         for k in allowed:
             if k not in p: raise GraphVerificationError(f"Missing provenance field: {k}")
         return GraphProvenance(p["source_system"], p["fact_id"], p["revision"])
-        
+
     if type(data["nodes"]) is not list:
         raise GraphVerificationError("nodes must be array")
     if len(data["nodes"]) > MAX_GRAPH_NODES:
         raise GraphVerificationError("Node count exceeds MAX_GRAPH_NODES")
-        
+
     nodes = []
     for n in data["nodes"]:
         if type(n) is not dict:
@@ -394,16 +401,16 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
             raise GraphVerificationError("Unknown node fields")
         for k in allowed_n:
             if k not in n: raise GraphVerificationError(f"Missing node field: {k}")
-            
-        nodes.append(GraphNode(n["node_id"], n["node_type"], 
-                               _reject_secrets_and_validate_properties(n["properties"]), 
+
+        nodes.append(GraphNode(n["node_id"], n["node_type"],
+                               _reject_secrets_and_validate_properties(n["properties"]),
                                _parse_prov(n["provenance"])))
 
     if type(data["edges"]) is not list:
         raise GraphVerificationError("edges must be array")
     if len(data["edges"]) > MAX_GRAPH_EDGES:
         raise GraphVerificationError("Edge count exceeds MAX_GRAPH_EDGES")
-        
+
     edges = []
     for e in data["edges"]:
         if type(e) is not dict:
@@ -413,10 +420,10 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
             raise GraphVerificationError("Unknown edge fields")
         for k in allowed_e:
             if k not in e: raise GraphVerificationError(f"Missing edge field: {k}")
-            
-        edges.append(GraphEdge(e["edge_id"], e["source_node_id"], e["target_node_id"], 
-                               e["relation_type"], 
-                               _reject_secrets_and_validate_properties(e["properties"]), 
+
+        edges.append(GraphEdge(e["edge_id"], e["source_node_id"], e["target_node_id"],
+                               e["relation_type"],
+                               _reject_secrets_and_validate_properties(e["properties"]),
                                _parse_prov(e["provenance"])))
 
     auth = None
@@ -424,16 +431,16 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
         ad = data["authoritative_source"]
         if type(ad) is not dict:
             raise GraphVerificationError("authoritative_source must be object")
-        
+
         allowed_a = {"facts", "is_complete"}
         if not set(ad.keys()).issubset(allowed_a):
             raise GraphVerificationError("Unknown authoritative_source fields")
         for k in allowed_a:
             if k not in ad: raise GraphVerificationError(f"Missing authoritative_source field: {k}")
-            
+
         if type(ad["facts"]) is not list:
             raise GraphVerificationError("facts must be array")
-            
+
         facts_list = []
         for f in ad["facts"]:
             if type(f) is not dict:
@@ -444,14 +451,14 @@ def deserialize_graph_snapshot(json_str: str) -> GraphSnapshot:
             for k in allowed_f:
                 if k not in f: raise GraphVerificationError(f"Missing fact field: {k}")
             facts_list.append(AuthoritativeFactState(f["fact_id"], f["current_revision"], f["status"]))
-            
+
         auth = AuthoritativeSourceSnapshot(tuple(facts_list), ad["is_complete"])
 
     snap = GraphSnapshot(data["schema_version"], data["snapshot_id"], tuple(nodes), tuple(edges), auth)
     # The __post_init__ will validate snap properties. But to check duplicates and identities we run verify_identity:
     snap.verify_identity()
-    
+
     # We must also enforce that no dangling edges exist since GraphSnapshot.__post_init__ doesn't do deep edge logic.
     # verify_identity calls create() which checks duplicate IDs and dangling edges, so we are safe!
-    
+
     return snap

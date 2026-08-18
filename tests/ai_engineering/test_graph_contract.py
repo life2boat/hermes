@@ -145,7 +145,7 @@ def test_provenance_classification():
         facts=(AuthoritativeFactState("f1", 2, "ACTIVE"), AuthoritativeFactState("f2", 1, "DELETED")),
         is_complete=True
     )
-    
+
     # Current
     assert classify_provenance(GraphProvenance("sqlite_memory_os_facts", "f1", 2), auth) == "CURRENT"
     # Stale
@@ -193,7 +193,7 @@ def test_excessive_bounds():
     long_key = "k" * 101
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {long_key: 1}, prov)
-    
+
     long_val = "v" * 4097
     with pytest.raises(GraphVerificationError):
         GraphNode.create("core:a", {"k": long_val}, prov)
@@ -220,7 +220,7 @@ def test_deterministic_rebuild_equivalence():
     prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
     n1 = GraphNode.create("core:a", {}, prov)
     s1 = GraphSnapshot.create([n1], [])
-    
+
     json_str = serialize_graph_snapshot(s1)
     s2 = deserialize_graph_snapshot(json_str)
     assert s1.snapshot_id == s2.snapshot_id
@@ -343,3 +343,39 @@ def test_deserialize_duplicate_keys_authoritative_fact():
     s_json = '{"schema_version": 1, "snapshot_id": "gs_00", "nodes": [], "edges": [], "authoritative_source": {"is_complete": true, "facts": [{"fact_id": "f1", "fact_id": "f1", "current_revision": 1, "status": "ACTIVE"}]}}'
     with pytest.raises(GraphVerificationError, match="Duplicate JSON key"):
         deserialize_graph_snapshot(s_json)
+
+def test_canonical_source_ordering_independence():
+    prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
+    n1 = GraphNode.create("core:a", {"v": 1}, prov)
+    auth1 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"), AuthoritativeFactState("2", 1, "ACTIVE")), is_complete=True)
+    auth2 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("2", 1, "ACTIVE"), AuthoritativeFactState("1", 1, "ACTIVE")), is_complete=True)
+
+    s1 = GraphSnapshot.create([n1], [], auth1)
+    s2 = GraphSnapshot.create([n1], [], auth2)
+    assert s1.snapshot_id == s2.snapshot_id
+    assert serialize_graph_snapshot(s1) == serialize_graph_snapshot(s2)
+
+def test_source_tamper():
+    prov = GraphProvenance("sqlite_memory_os_facts", "f1", 1)
+    n1 = GraphNode.create("core:a", {"v": 1}, prov)
+    auth1 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=True)
+
+    s1 = GraphSnapshot.create([n1], [], auth1)
+
+    # Tamper with authoritative source (e.g., change revision)
+    auth2 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 2, "ACTIVE"),), is_complete=True)
+    tampered_snapshot = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth2)
+    with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
+        tampered_snapshot.verify_identity()
+
+    # Tamper with is_complete
+    auth3 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "ACTIVE"),), is_complete=False)
+    tampered_snapshot2 = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth3)
+    with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
+        tampered_snapshot2.verify_identity()
+
+    # Active -> Deleted
+    auth4 = AuthoritativeSourceSnapshot(facts=(AuthoritativeFactState("1", 1, "DELETED"),), is_complete=True)
+    tampered_snapshot3 = GraphSnapshot(s1.schema_version, s1.snapshot_id, s1.nodes, s1.edges, auth4)
+    with pytest.raises(GraphVerificationError, match="Tampered snapshot identity"):
+        tampered_snapshot3.verify_identity()

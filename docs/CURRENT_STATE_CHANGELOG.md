@@ -1,5 +1,19 @@
 # CURRENT_STATE changelog
 
+## 1.2.59 - 2026-08-18
+
+Changed:
+- Updated CURRENT_STATE.md to mark PR-2 foundation COMPLETE.
+- Recorded implementation of PR-2.2 Canonical Source-State & Evidence Closure.
+- Documented canonical authoritative-source ordering and source-state JSON identity binding.
+- Truthfully recorded PR #193 historical record: PR #193 was merged via `--admin` before Tests/Nix CI terminal state. Eventual exact-head CI did PASS, but reported test cases were inaccurate and source ordering remained incomplete until PR-2.2.
+- Updated ADR-0082 to reflect python string bounds, exact boundary privacy semantics, projection result immutability, and 499 worst-case derivations.
+
+Safety & Provenance:
+- the projection is purely structural, provider-free, and contains no LLM invocation.
+- full adversarial test suite covers bounds, privacy, and identity generation.
+- no production mutation or database schema changes occurred.
+
 ## 1.2.58 - 2026-08-18
 
 Changed:

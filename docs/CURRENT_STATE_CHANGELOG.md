@@ -1,5 +1,12 @@
 # CURRENT_STATE changelog
 
+## 1.2.60 - 2026-08-18 (PR-3.1 Closure)
+Changed:
+- Hardened persistence layer with exact schema classification (\classify_memory_graph_store_schema\), rigorous transaction boundary handling (\SAVEPOINT\ cleanup), test-only failure injection hooks, exact JSON byte serialization, count validations, and \PRAGMA foreign_keys = ON\ enforcement.
+- Updated CURRENT_STATE.md to reflect PR-3 FOUNDATION_MERGED, PR-3.1 IMPLEMENTED_CANDIDATE, and PR-4 PENDING_PR3_1_CLOSURE.
+- Rationale: Resolve PR-3 integrity defects before moving to PR-4 read path.
+
+
 ## 1.2.59 - 2026-08-18
 
 Changed:

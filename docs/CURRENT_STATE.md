@@ -950,3 +950,13 @@ Before any production deployment decision, re-confirm: production source SHA, im
 - Deterministic snapshot hashing bug in GraphSnapshot.create was fixed.
 - Atomic publish semantics with cryptographic read-back verification are active.
 - The capability operates offline and does not mutate authoritative facts.
+
+
+PR-3:
+FOUNDATION_MERGED
+
+PR-3.1:
+IMPLEMENTED_CANDIDATE
+
+PR-4:
+PENDING_PR3_1_CLOSURE

@@ -901,3 +901,171 @@ def test_schema_partial_semantics():
         classify_memory_graph_store_schema(conn)
         == GraphStoreSchemaClassification.INCOMPATIBLE
     )
+
+
+from gateway.memory.graph_store import (
+    _CREATE_META,
+    _CREATE_USER_STATE,
+    _CREATE_EDGES,
+    _CREATE_NODE_SUPPORTS,
+    _CREATE_EDGE_SUPPORTS,
+    _CREATE_EXCLUSIONS,
+)
+
+
+def test_schema_extra_normal_column_adversarial():
+    # canonical + extra normal nullable column -> INCOMPATIBLE
+    # canonical + extra NOT NULL column -> INCOMPATIBLE
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_META)
+    conn.execute(_CREATE_USER_STATE)
+
+    # extra nullable
+    conn.execute("""
+    CREATE TABLE memory_graph_nodes (
+        user_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        properties_json TEXT NOT NULL,
+        primary_provenance_fact_id TEXT NOT NULL,
+        primary_provenance_revision INTEGER NOT NULL,
+        extra_col TEXT,
+        PRIMARY KEY (user_id, node_id),
+        FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
+    )""")
+    conn.execute(_CREATE_EDGES)
+    conn.execute(_CREATE_NODE_SUPPORTS)
+    conn.execute(_CREATE_EDGE_SUPPORTS)
+    conn.execute(_CREATE_EXCLUSIONS)
+    conn.execute(
+        "INSERT INTO memory_graph_store_meta VALUES (1, ?)",
+        (MEMORY_GRAPH_STORE_SCHEMA_VERSION,),
+    )
+
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+    # extra not null
+    conn.execute("DROP TABLE memory_graph_nodes")
+    conn.execute("""
+    CREATE TABLE memory_graph_nodes (
+        user_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        properties_json TEXT NOT NULL,
+        primary_provenance_fact_id TEXT NOT NULL,
+        primary_provenance_revision INTEGER NOT NULL,
+        extra_col TEXT NOT NULL,
+        PRIMARY KEY (user_id, node_id),
+        FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
+    )""")
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+
+def test_schema_generated_column_adversarial():
+    # canonical + extra VIRTUAL generated column -> INCOMPATIBLE
+    # canonical + extra STORED generated column -> INCOMPATIBLE
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_META)
+    conn.execute(_CREATE_USER_STATE)
+
+    # extra VIRTUAL
+    conn.execute("""
+    CREATE TABLE memory_graph_nodes (
+        user_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        properties_json TEXT NOT NULL,
+        primary_provenance_fact_id TEXT NOT NULL,
+        primary_provenance_revision INTEGER NOT NULL,
+        extra_col TEXT GENERATED ALWAYS AS ('x') VIRTUAL,
+        PRIMARY KEY (user_id, node_id),
+        FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
+    )""")
+    conn.execute(_CREATE_EDGES)
+    conn.execute(_CREATE_NODE_SUPPORTS)
+    conn.execute(_CREATE_EDGE_SUPPORTS)
+    conn.execute(_CREATE_EXCLUSIONS)
+    conn.execute(
+        "INSERT INTO memory_graph_store_meta VALUES (1, ?)",
+        (MEMORY_GRAPH_STORE_SCHEMA_VERSION,),
+    )
+
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+    # extra STORED
+    conn.execute("DROP TABLE memory_graph_nodes")
+    try:
+        conn.execute("""
+        CREATE TABLE memory_graph_nodes (
+            user_id INTEGER NOT NULL,
+            node_id TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            properties_json TEXT NOT NULL,
+            primary_provenance_fact_id TEXT NOT NULL,
+            primary_provenance_revision INTEGER NOT NULL,
+            extra_col TEXT GENERATED ALWAYS AS ('x') STORED,
+            PRIMARY KEY (user_id, node_id),
+            FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
+        )""")
+        assert (
+            classify_memory_graph_store_schema(conn)
+            == GraphStoreSchemaClassification.INCOMPATIBLE
+        )
+    except sqlite3.OperationalError:
+        # Some SQLite versions might not support STORED, that's fine
+        pass
+
+    # canonical transformed into generated
+    conn.execute("DROP TABLE memory_graph_nodes")
+    conn.execute("""
+    CREATE TABLE memory_graph_nodes (
+        user_id INTEGER NOT NULL,
+        node_id TEXT NOT NULL,
+        node_type TEXT NOT NULL,
+        properties_json TEXT NOT NULL,
+        primary_provenance_fact_id TEXT GENERATED ALWAYS AS ('x') VIRTUAL,
+        primary_provenance_revision INTEGER NOT NULL,
+        PRIMARY KEY (user_id, node_id),
+        FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
+    )""")
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )
+
+
+def test_schema_view_instead_of_table_adversarial():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(_CREATE_META)
+    conn.execute(_CREATE_USER_STATE)
+
+    # Provide the rest as correct tables except nodes is a VIEW
+    conn.execute("""
+    CREATE VIEW memory_graph_nodes AS
+    SELECT 1 as user_id, 'n1' as node_id, 'type' as node_type, '{}' as properties_json, 'f1' as primary_provenance_fact_id, 1 as primary_provenance_revision
+    """)
+    conn.execute(_CREATE_EDGES)
+    conn.execute(_CREATE_NODE_SUPPORTS)
+    conn.execute(_CREATE_EDGE_SUPPORTS)
+    conn.execute(_CREATE_EXCLUSIONS)
+    conn.execute(
+        "INSERT INTO memory_graph_store_meta VALUES (1, ?)",
+        (MEMORY_GRAPH_STORE_SCHEMA_VERSION,),
+    )
+
+    assert (
+        classify_memory_graph_store_schema(conn)
+        == GraphStoreSchemaClassification.INCOMPATIBLE
+    )

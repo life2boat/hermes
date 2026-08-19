@@ -349,11 +349,3 @@ def test_deterministic_result_ids():
     res2 = converge_user_graph(conn, user_id=1)
     assert res1.projection_id == res2.projection_id
     assert res1.snapshot_id == res2.snapshot_id
-
-# Parametrized cases for combinations to reach >=45
-@pytest.mark.parametrize("scenario", range(30))
-def test_meaningful_collected_cases_filler(scenario):
-    conn = setup_db()
-    insert_mock_fact(conn, 1, scenario + 10, f"e{scenario}", "k", "v", 1)
-    res = converge_user_graph(conn, user_id=1)
-    assert res.status == GraphConvergenceStatus.REBUILT_MISSING

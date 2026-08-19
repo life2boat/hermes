@@ -992,3 +992,9 @@ Safety:
 - Fixed GraphSnapshot.create determinism bug.
 - Corrected CURRENT_STATE header version.
 - Added ADR-0083.
+ 
+ # #   2 0 2 6 - 0 8 - 1 9  
+ M o v e d   P R - 5   f o u n d a t i o n   m e r g e d   s t a t e   f r o m   C U R R E N T _ S T A T E . m d   t o   c h a n g e l o g .  
+ P R   # 2 0 1 :   F O U N D A T I O N _ M E R G E D ,   E X A C T _ H E A D _ T E S T S = F A I L  
+ P R   # 2 0 2 :   P A R T I A L _ C L O S U R E _ M E R G E D ,   E X A C T _ H E A D _ T E S T S = F A I L ,   A D M I N _ M E R G E _ U S E D = t r u e  
+ 

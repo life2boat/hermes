@@ -218,3 +218,55 @@ def test_authoritative_memory_rows_unchanged():
 
     after = conn.execute("SELECT * FROM memory_os_facts").fetchall()
     assert before == after
+
+
+def test_lexical_numeric_defect():
+    conn = setup_db()
+    # Insert IDs 10 and 2. Numerically: 2, 10. Lexically: "10", "2"
+    insert_mock_fact(conn, 1, 10, "e1", "k1", "v1", 1)
+    insert_mock_fact(conn, 1, 2, "e2", "k2", "v2", 1)
+
+    res = converge_user_graph(conn, 1)
+    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
+
+    # Check NOOP
+    res2 = converge_user_graph(conn, 1)
+    assert res2.status == GraphConvergenceStatus.CURRENT_NOOP
+
+
+def test_pre_publish_race_writes(monkeypatch):
+    import gateway.memory.graph_convergence
+
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 10, "e1", "k1", "v1", 1)
+
+    original_read = gateway.memory.graph_convergence.read_authoritative_memory_facts
+    read_calls = 0
+
+    def fake_read(conn_arg, user_id):
+        nonlocal read_calls
+        read_calls += 1
+        # On the pre-publish revalidation read (2nd call), simulate another connection wrote a fact
+        if read_calls == 3:
+            insert_mock_fact(conn_arg, user_id, 11, "e2", "k2", "v2", 1)
+        return original_read(conn_arg, user_id=user_id)
+
+    monkeypatch.setattr(
+        gateway.memory.graph_convergence, "read_authoritative_memory_facts", fake_read
+    )
+
+    res = converge_user_graph(conn, 1)
+
+    # It should have caught the race on the 2nd read, continued loop,
+    # and eventually succeeded on the next attempt with 2 facts.
+    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
+    assert res.matched_auth_facts_count == 2
+    # read_calls:
+    # attempt 0:
+    # 1: rebuild_facts
+    # 2: pre_publish_facts (injects 11). Mismatch! continue.
+    # attempt 1:
+    # 3: rebuild_facts (sees 10, 11)
+    # 4: pre_publish_facts (sees 10, 11). Matches!
+    # 5: post_publish_facts (sees 10, 11). Matches!
+    assert read_calls == 6

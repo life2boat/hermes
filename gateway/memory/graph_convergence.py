@@ -39,7 +39,11 @@ def _is_stale(current_facts, projection) -> bool:
     auth_source = projection.snapshot.authoritative_source
     if len(current_facts) != len(auth_source.facts):
         return True
-    for c_fact, a_fact in zip(current_facts, auth_source.facts):
+
+    # Sort current_facts lexically by string ID to match GraphSnapshot's internal string sort
+    sorted_current_facts = sorted(current_facts, key=lambda f: str(f.sqlite_id))
+
+    for c_fact, a_fact in zip(sorted_current_facts, auth_source.facts):
         if (
             str(c_fact.sqlite_id) != a_fact.fact_id
             or c_fact.vector_revision != a_fact.current_revision

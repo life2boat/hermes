@@ -165,6 +165,7 @@ class MemoryVectorConvergence:
         selected_states = _READY_STATES
         placeholders = ", ".join("?" for _ in selected_states)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 f"UPDATE {META_TABLE} SET last_reconciliation_at = ? WHERE singleton_id = 1",
                 (now,),
@@ -203,7 +204,9 @@ class MemoryVectorConvergence:
             retried=retried,
             blocked=blocked,
             superseded=superseded,
-            remaining=status.pending_count + status.retryable_count + status.blocked_count,
+            remaining=status.pending_count
+            + status.retryable_count
+            + status.blocked_count,
         )
 
     def repair_blocked_operations(
@@ -230,11 +233,14 @@ class MemoryVectorConvergence:
                 retried=0,
                 blocked=0,
                 superseded=0,
-                remaining=status.pending_count + status.retryable_count + status.blocked_count,
+                remaining=status.pending_count
+                + status.retryable_count
+                + status.blocked_count,
             )
 
         placeholders = ", ".join("?" for _ in normalized_ids)
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 f"""
                 SELECT * FROM {OUTBOX_TABLE}
@@ -268,13 +274,17 @@ class MemoryVectorConvergence:
             retried=retried,
             blocked=blocked,
             superseded=superseded,
-            remaining=status.pending_count + status.retryable_count + status.blocked_count,
+            remaining=status.pending_count
+            + status.retryable_count
+            + status.blocked_count,
         )
 
     def _process_operation(self, operation: dict[str, Any], *, now: float) -> str:
         validated = self._validate_operation(operation)
         if validated is not None:
-            self._record_failure(operation, error_class=validated, now=now, terminal=True)
+            self._record_failure(
+                operation, error_class=validated, now=now, terminal=True
+            )
             return "BLOCKED"
 
         operation_id = int(operation["id"])
@@ -283,11 +293,14 @@ class MemoryVectorConvergence:
         revision = int(operation["fact_revision"])
         operation_type = str(operation["operation"])
 
-        reset_connection = getattr(self.qdrant_adapter, "reset_connection_for_retry", None)
+        reset_connection = getattr(
+            self.qdrant_adapter, "reset_connection_for_retry", None
+        )
         if callable(reset_connection):
             reset_connection()
 
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"SELECT * FROM {FACTS_TABLE} WHERE id = ?",
                 (fact_id,),
@@ -365,6 +378,7 @@ class MemoryVectorConvergence:
         revision = int(operation["fact_revision"])
         operation_type = str(operation["operation"])
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"SELECT user_id, vector_revision FROM {FACTS_TABLE} WHERE id = ?",
                 (fact_id,),
@@ -416,7 +430,11 @@ class MemoryVectorConvergence:
             value = operation.get(field)
             if type(value) is not int:
                 return "MALFORMED_OPERATION"
-        if operation["id"] <= 0 or operation["user_id"] <= 0 or operation["fact_id"] <= 0:
+        if (
+            operation["id"] <= 0
+            or operation["user_id"] <= 0
+            or operation["fact_id"] <= 0
+        ):
             return "MALFORMED_OPERATION"
         if operation["fact_revision"] <= 0 or operation["attempt_count"] < 0:
             return "MALFORMED_OPERATION"
@@ -446,10 +464,15 @@ class MemoryVectorConvergence:
         operation_id = operation.get("id")
         if not isinstance(operation_id, int):
             return
-        attempts = int(operation.get("attempt_count") or 0) + 1 if attempts is None else attempts
+        attempts = (
+            int(operation.get("attempt_count") or 0) + 1
+            if attempts is None
+            else attempts
+        )
         state = "BLOCKED" if terminal else "RETRY"
         backoff = min(_MAX_BACKOFF_SECONDS, float(2 ** min(attempts, 8)))
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 f"""
                 UPDATE {OUTBOX_TABLE}
@@ -473,6 +496,7 @@ class MemoryVectorConvergence:
 
     def _ack(self, operation_id: int, *, now: float, superseded: bool) -> None:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(
                 f"DELETE FROM {OUTBOX_TABLE} WHERE id = ? AND state IN ('PENDING', 'RETRY', 'BLOCKED')",
                 (operation_id,),
@@ -494,6 +518,7 @@ class MemoryVectorConvergence:
     def get_status(self) -> VectorSyncStatus:
         now = float(self.clock())
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             counts = {
                 str(row["state"]): int(row["count"])
                 for row in conn.execute(
@@ -555,7 +580,11 @@ class MemoryVectorConvergence:
             retryable_count=retryable,
             blocked_count=blocked,
             oldest_pending_age_seconds=oldest_age,
-            last_success_at=(None if meta["last_success_at"] is None else float(meta["last_success_at"])),
+            last_success_at=(
+                None
+                if meta["last_success_at"] is None
+                else float(meta["last_success_at"])
+            ),
             last_reconciliation_at=last_reconciliation,
             last_error_class=(
                 unresolved_error["last_error_class"]

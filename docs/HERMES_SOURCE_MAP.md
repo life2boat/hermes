@@ -139,3 +139,8 @@ controls; they cannot mutate the Golden corpus or grant authority.
   do not treat local files, old evidence or container tags as current truth.
 
 - `gateway/memory/graph_store.py`: Persistent derived graph storage engine.
+
+- gateway/memory/graph_convergence.py: Graph convergence implementation
+- gateway/memory/graph_projection.py: Canonical source builder
+- 	ests/gateway/memory/test_graph_convergence.py: Graph convergence test matrix
+- docs/adr/ADR-0085-deterministic-graph-convergence.md: Graph convergence ADR

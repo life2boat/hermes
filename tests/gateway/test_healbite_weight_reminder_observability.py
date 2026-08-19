@@ -1,8 +1,8 @@
-
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -289,7 +289,11 @@ def _read_file_logs(tmp_path: Path) -> str:
     for name in ("agent.log", "gateway.log", "errors.log"):
         path = tmp_path / "logs" / name
         if path.exists():
-            chunks.append(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            # Strip the log formatter metadata to only check application payload for privacy
+            # Format is usually '2026-08-19 09:37:50,013 INFO logger_name: Application payload'
+            cleaned = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \w+ [\w\.]+:\s+", "", text, flags=re.MULTILINE)
+            chunks.append(cleaned)
     return "\n".join(chunks)
 
 
@@ -413,3 +417,16 @@ async def test_gateway_lifecycle_no_telegram_adapter_uses_config_marker(monkeypa
     assert "[HealBite][weight_reminder_config]" in text
     assert "outcome=no_telegram_adapter" in text
     assert "[HealBite][weight_reminder_scheduler]" not in text
+
+def test_privacy_canary_detected_in_application_payload():
+    # Prove that stripping the logger prefix doesn't blind us to actual canaries
+    # Simulate a log line where the payload contains a canary
+    raw_log = "2026-08-19 09:37:50,013 INFO my_logger: User input was 09:37"
+    cleaned = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \w+ [\w\.]+:\s+", "", raw_log, flags=re.MULTILINE)
+    
+    assert cleaned == "User input was 09:37"
+    
+    # Assert _assert_private_values_absent will raise AssertionError on this cleaned string
+    import pytest
+    with pytest.raises(AssertionError):
+        _assert_private_values_absent(cleaned)

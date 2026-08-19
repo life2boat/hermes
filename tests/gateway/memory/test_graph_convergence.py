@@ -1,272 +1,351 @@
 import sqlite3
 import pytest
-import time
+from dataclasses import dataclass
 
+from ai_engineering.graph_contract import GraphSnapshot, AuthoritativeSourceSnapshot
+from gateway.memory.graph_store import (
+    publish_graph_projection,
+    load_graph_projection,
+    GraphStoreError,
+    validate_memory_graph_store_schema,
+)
+from gateway.memory.graph_projection import (
+    read_authoritative_memory_facts,
+    project_authoritative_memory_facts,
+    GraphProjectionResult,
+)
 from gateway.memory.graph_convergence import (
     converge_user_graph,
+    inspect_graph_convergence,
+    GraphConvergenceState,
     GraphConvergenceStatus,
+    GraphConvergenceAssessment,
+    GraphConvergenceResult,
+    GraphConvergenceIntegrityError,
     GraphConvergenceError,
 )
-from gateway.memory.graph_store import (
-    classify_memory_graph_store_schema,
-    validate_memory_graph_store_schema,
-    _CREATE_META,
-    _CREATE_USER_STATE,
-    _CREATE_EDGES,
-    _CREATE_NODE_SUPPORTS,
-    _CREATE_EDGE_SUPPORTS,
-    _CREATE_EXCLUSIONS,
-    MEMORY_GRAPH_STORE_SCHEMA_VERSION,
-    load_graph_projection,
-    GraphStoreSchemaClassification,
-)
-from gateway.memory.schema import migrate_memory_convergence_schema
 
-
-def insert_mock_fact(conn, user_id, sqlite_id, entity, key, value, revision):
-    conn.execute(
-        """
-        INSERT INTO memory_os_facts (
-            id, user_id,
-            vector_revision,
-            entity, key, value
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (sqlite_id, user_id, revision, entity, key, value),
-    )
-
-
-def setup_db():
+def setup_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    conn.execute("PRAGMA foreign_keys = ON")
-    migrate_memory_convergence_schema(conn, now=time.time())
-
-    # Setup graph store tables
-    conn.execute(_CREATE_META)
-    conn.execute(_CREATE_USER_STATE)
-    conn.execute("""
-    CREATE TABLE memory_graph_nodes (
-        user_id INTEGER NOT NULL,
-        node_id TEXT NOT NULL,
-        node_type TEXT NOT NULL,
-        properties_json TEXT NOT NULL,
-        primary_provenance_fact_id TEXT NOT NULL,
-        primary_provenance_revision INTEGER NOT NULL,
-        PRIMARY KEY (user_id, node_id),
-        FOREIGN KEY (user_id) REFERENCES memory_graph_user_state(user_id) ON DELETE CASCADE
-    )""")
-    conn.execute(_CREATE_EDGES)
-    conn.execute(_CREATE_NODE_SUPPORTS)
-    conn.execute(_CREATE_EDGE_SUPPORTS)
-    conn.execute(_CREATE_EXCLUSIONS)
-    conn.execute(
-        "INSERT INTO memory_graph_store_meta VALUES (1, ?)",
-        (MEMORY_GRAPH_STORE_SCHEMA_VERSION,),
-    )
-
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    # Memory OS tables needed
+    # (they will be created by migrate_memory_convergence_schema)
+    # Graph Store tables
+    from gateway.memory.graph_store import migrate_memory_graph_store_schema
+    from gateway.memory.schema import migrate_memory_convergence_schema
+    migrate_memory_convergence_schema(conn, now=0.0)
+    migrate_memory_graph_store_schema(conn)
+    validate_memory_graph_store_schema(conn)
     return conn
 
+def insert_mock_fact(conn, user_id, sqlite_id, entity, key, value, vector_revision):
+    conn.execute(
+        "INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)",
+        (sqlite_id, user_id, entity, key, value, vector_revision)
+    )
 
-def test_missing_rebuild():
+def test_contract_validation():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "k1", "v1", 1)
+    with pytest.raises(ValueError):
+        converge_user_graph(conn, user_id=True)
+    with pytest.raises(ValueError):
+        converge_user_graph(conn, user_id="1")
+    with pytest.raises(ValueError):
+        converge_user_graph(conn, user_id=1, max_attempts=True)
+    with pytest.raises(ValueError):
+        converge_user_graph(conn, user_id=1, max_attempts=0)
+    with pytest.raises(ValueError):
+        converge_user_graph(conn, user_id=1, max_attempts=6)
+    with pytest.raises(ValueError):
+        inspect_graph_convergence(conn, user_id=True)
 
-    res = converge_user_graph(conn, 1)
-    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
-    assert res.matched_auth_facts_count == 1
-
-    # verify graph exists now
-    proj = load_graph_projection(conn, 1)
-    assert proj is not None
-    assert len(proj.snapshot.nodes) > 0
-
-
-def test_current_noop():
+def test_inspect_missing():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    assessment = inspect_graph_convergence(conn, user_id=1)
+    assert assessment.state == GraphConvergenceState.MISSING
+    assert assessment.matched_auth_facts_count == 1
 
-    converge_user_graph(conn, 1)  # First time is MISSING_REBUILD
-
-    total_changes = conn.total_changes
-    res = converge_user_graph(conn, 1)  # Second time is CURRENT_NOOP
-    assert res.status == GraphConvergenceStatus.CURRENT_NOOP
-
-    # second convergence writes 0
-    assert conn.total_changes == total_changes
-
-
-def test_stale_rebuild():
+def test_inspect_current_and_stale():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
-
-    converge_user_graph(conn, 1)
-
-    # add fact
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    
+    assessment = inspect_graph_convergence(conn, user_id=1)
+    assert assessment.state == GraphConvergenceState.CURRENT
+    
     insert_mock_fact(conn, 1, 2, "e2", "k2", "v2", 1)
-
-    res = converge_user_graph(conn, 1)
-    assert res.status == GraphConvergenceStatus.STALE_REBUILD
-    assert res.matched_auth_facts_count == 2
-
-    proj = load_graph_projection(conn, 1)
-    assert len(proj.snapshot.authoritative_source.facts) == 2
-
-
-def test_empty_authoritative_scope():
-    conn = setup_db()
-
-    res = converge_user_graph(conn, 1)
-    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
-    assert res.matched_auth_facts_count == 0
-
-    proj = load_graph_projection(conn, 1)
-    assert len(proj.snapshot.nodes) == 0
-
-
-def test_all_excluded_scope():
-    conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
-
-    res = converge_user_graph(conn, 1)
-    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
-
-    proj = load_graph_projection(conn, 1)
-    assert len(proj.snapshot.nodes) == 0
-
-    # Check NOOP next
-    res2 = converge_user_graph(conn, 1)
-    assert res2.status == GraphConvergenceStatus.CURRENT_NOOP
-
+    assessment2 = inspect_graph_convergence(conn, user_id=1)
+    assert assessment2.state == GraphConvergenceState.STALE
 
 def test_corruption_hard_fail():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
-    converge_user_graph(conn, 1)
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    # Corrupt the JSON
+    conn.execute("UPDATE memory_graph_user_state SET canonical_snapshot_json = '{bad json}'")
+    with pytest.raises(GraphConvergenceIntegrityError):
+        inspect_graph_convergence(conn, user_id=1)
+    with pytest.raises(GraphConvergenceIntegrityError):
+        converge_user_graph(conn, user_id=1)
 
-    # Corrupt graph store
-    conn.execute(
-        "UPDATE memory_graph_user_state SET canonical_snapshot_json = 'INVALID JSON'"
-    )
+def test_incomplete_source():
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    
+    # Tamper the persisted json to make it incomplete
+    json_str = conn.execute("SELECT canonical_snapshot_json FROM memory_graph_user_state WHERE user_id = 1").fetchone()[0]
+    json_str = json_str.replace('"is_complete":true', '"is_complete":false')
+    conn.execute("UPDATE memory_graph_user_state SET canonical_snapshot_json = ?", (json_str,))
+    
+    with pytest.raises(GraphConvergenceIntegrityError):
+        inspect_graph_convergence(conn, user_id=1)
 
-    with pytest.raises(GraphConvergenceError) as exc_info:
-        converge_user_graph(conn, 1)
+@pytest.mark.parametrize("sqlite_ids", [
+    list(range(1, 13)), # 1..12
+    [2, 10, 11] # sparse
+])
+def test_ids_combinations(sqlite_ids):
+    conn = setup_db()
+    for sid in sqlite_ids:
+        insert_mock_fact(conn, 1, sid, f"e{sid}", "k", "v", 1)
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_MISSING
+    assert res.final_state == GraphConvergenceState.CURRENT
+    
+    # zero-write second convergence
+    initial_changes = conn.total_changes
+    res2 = converge_user_graph(conn, user_id=1)
+    assert res2.status == GraphConvergenceStatus.NOOP_CURRENT
+    assert res2.publish_count == 0
+    assert conn.total_changes == initial_changes
 
-    assert "Corrupted persisted graph:" in str(exc_info.value)
+def test_stale_rebuild():
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    
+    insert_mock_fact(conn, 1, 2, "e2", "k2", "v2", 1)
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_STALE
+    assert res.initial_state == GraphConvergenceState.STALE
+    assert res.final_state == GraphConvergenceState.CURRENT
 
+def test_empty_scope():
+    conn = setup_db()
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_MISSING
+    assessment = inspect_graph_convergence(conn, user_id=1)
+    assert assessment.state == GraphConvergenceState.CURRENT
+
+def test_all_excluded_scope():
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "api_key", "v", 1)
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_MISSING
+    assessment = inspect_graph_convergence(conn, user_id=1)
+    assert assessment.state == GraphConvergenceState.CURRENT
+
+def test_pre_publish_race_writes(monkeypatch):
+    # Mock project_authoritative_memory_facts to simulate a write DURING projection
+    # so that source_b != source_a, causing a retry.
+    import gateway.memory.graph_convergence
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    
+    original_project = gateway.memory.graph_convergence.project_authoritative_memory_facts
+    race_injected = False
+    
+    def fake_project(facts, user_id):
+        nonlocal race_injected
+        if not race_injected:
+            insert_mock_fact(conn, user_id, 2, "e", "k", "v", 1)
+            race_injected = True
+        return original_project(facts, user_id=user_id)
+        
+    monkeypatch.setattr(gateway.memory.graph_convergence, "project_authoritative_memory_facts", fake_project)
+    
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_MISSING
+    assert res.attempts == 2
+    assert res.publish_count == 1
+    assert race_injected
+
+def test_source_change_during_projection_publishes_zero(monkeypatch):
+    import gateway.memory.graph_convergence
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    original_project = gateway.memory.graph_convergence.project_authoritative_memory_facts
+    
+    def fake_project(facts, user_id):
+        insert_mock_fact(conn, user_id, 2, "e", "k", "v", 1)
+        return original_project(facts, user_id=user_id)
+        
+    monkeypatch.setattr(gateway.memory.graph_convergence, "project_authoritative_memory_facts", fake_project)
+    
+    res = converge_user_graph(conn, user_id=1, max_attempts=1)
+    assert res.status == GraphConvergenceStatus.SOURCE_CHURN_RETRY_EXHAUSTED
+    assert res.attempts == 1
+    assert res.publish_count == 0
+
+def test_post_publish_race(monkeypatch):
+    # Simulate a write after publish but before load
+    import gateway.memory.graph_convergence
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    
+    original_publish = gateway.memory.graph_convergence.publish_graph_projection
+    race_injected = False
+    
+    def fake_publish(c, candidate):
+        original_publish(c, candidate)
+        nonlocal race_injected
+        if not race_injected:
+            insert_mock_fact(conn, 1, 2, "e", "k", "v", 1)
+            race_injected = True
+            
+    monkeypatch.setattr(gateway.memory.graph_convergence, "publish_graph_projection", fake_publish)
+    
+    res = converge_user_graph(conn, user_id=1)
+    assert res.status == GraphConvergenceStatus.REBUILT_MISSING
+    assert res.attempts == 2
+    assert res.publish_count == 2
+    assert race_injected
+
+def test_repeated_post_publish_race(monkeypatch):
+    import gateway.memory.graph_convergence
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    
+    original_publish = gateway.memory.graph_convergence.publish_graph_projection
+    call_count = 0
+    def fake_publish(c, candidate):
+        original_publish(c, candidate)
+        nonlocal call_count
+        call_count += 1
+        insert_mock_fact(conn, 1, 100 + call_count, "e", "k", "v", 1)
+            
+    monkeypatch.setattr(gateway.memory.graph_convergence, "publish_graph_projection", fake_publish)
+    
+    res = converge_user_graph(conn, user_id=1, max_attempts=3)
+    assert res.status == GraphConvergenceStatus.SOURCE_CHURN_RETRY_EXHAUSTED
+    assert res.attempts == 3
+    assert res.publish_count == 3
+    assert res.final_state == GraphConvergenceState.STALE
+
+def test_max_attempts_limits(monkeypatch):
+    # Test max_attempts=1 and max_attempts=5
+    import gateway.memory.graph_convergence
+    conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    
+    def fake_project(facts, user_id):
+        insert_mock_fact(conn, user_id, facts[-1].sqlite_id + 1, "e", "k", "v", 1)
+        return gateway.memory.graph_projection.project_authoritative_memory_facts(facts, user_id=user_id)
+        
+    monkeypatch.setattr(gateway.memory.graph_convergence, "project_authoritative_memory_facts", fake_project)
+    
+    res1 = converge_user_graph(conn, user_id=1, max_attempts=1)
+    assert res1.attempts == 1
+    
+    res5 = converge_user_graph(conn, user_id=1, max_attempts=5)
+    assert res5.attempts == 5
+
+def test_caller_transaction_rollback():
+    conn = setup_db()
+    conn.commit()
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    conn.rollback()
+    
+    assessment = inspect_graph_convergence(conn, user_id=1)
+    assert assessment.state == GraphConvergenceState.MISSING
+    assert assessment.matched_auth_facts_count == 0
 
 def test_cross_user_isolation():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
-    insert_mock_fact(conn, 2, 2, "e2", "k2", "v2", 1)
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    insert_mock_fact(conn, 2, 2, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    converge_user_graph(conn, user_id=2)
+    
+    # Snapshot user2
+    u2_proj1 = load_graph_projection(conn, user_id=2)
+    
+    # Change user2
+    insert_mock_fact(conn, 2, 3, "e", "k", "v", 1)
+    
+    # user1 must remain CURRENT
+    assert inspect_graph_convergence(conn, user_id=1).state == GraphConvergenceState.CURRENT
+    
+    # user2 must be STALE
+    assert inspect_graph_convergence(conn, user_id=2).state == GraphConvergenceState.STALE
+    
+    # Snapshot unchanged
+    u2_proj2 = load_graph_projection(conn, user_id=2)
+    assert u2_proj1 == u2_proj2
 
-    res1 = converge_user_graph(conn, 1)
-    assert res1.matched_auth_facts_count == 1
-
-    # user 2 is still missing
-    res2 = converge_user_graph(conn, 2)
-    assert res2.status == GraphConvergenceStatus.MISSING_REBUILD
-    assert res2.matched_auth_facts_count == 1
-
-
-def test_caller_transaction_ownership_preserved():
+def test_authoritative_immutability():
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    conn.execute("INSERT INTO memory_os_vector_sync_outbox (user_id, fact_id, operation, fact_revision, state, next_attempt_at, created_at, updated_at) VALUES (1, 1, 'UPSERT', 1, 'PENDING', 0, 0, 0)")
+    
+    def count(table):
+        return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        
+    facts_count = count("memory_os_facts")
+    outbox_count = count("memory_os_vector_sync_outbox")
+    meta_count = count("memory_os_vector_sync_meta")
+    
+    converge_user_graph(conn, user_id=1)
+    
+    assert count("memory_os_facts") == facts_count
+    assert count("memory_os_vector_sync_outbox") == outbox_count
+    assert count("memory_os_vector_sync_meta") == meta_count
 
-    # Start a transaction manually
-    conn.execute("SAVEPOINT my_savepoint")
-    converge_user_graph(conn, 1)
-    # Rollback
-    conn.execute("ROLLBACK TO my_savepoint")
-
-    # The graph should not be there because we rolled back caller transaction
-    proj = load_graph_projection(conn, 1)
-    assert proj is None
-
-
-def test_source_churn_exhaustion(monkeypatch):
-    import gateway.memory.graph_convergence
-
-    call_count = 0
-    original_read = gateway.memory.graph_convergence.read_authoritative_memory_facts
-
-    def fake_read(conn, user_id):
-        nonlocal call_count
-        call_count += 1
-        insert_mock_fact(conn, user_id, 100 + call_count, f"e{call_count}", "k", "v", 1)
-        return original_read(conn, user_id=user_id)
-
-    monkeypatch.setattr(
-        gateway.memory.graph_convergence, "read_authoritative_memory_facts", fake_read
-    )
-
+def test_secret_sanitization():
     conn = setup_db()
+    insert_mock_fact(conn, 1, 1, "e", "api_key", "PR52_SECRET_SENTINEL_314159", 1)
+    res = converge_user_graph(conn, user_id=1)
+    
+    # Ensure secret is NOT in result repr
+    assert "PR52_SECRET_SENTINEL_314159" not in repr(res)
+    assert "PR52_SECRET_SENTINEL_314159" not in str(res)
+    
+    # Check projection exclusions
+    proj = load_graph_projection(conn, user_id=1)
+    assert len(proj.exclusions) == 1
 
-    with pytest.raises(GraphConvergenceError) as exc_info:
-        converge_user_graph(conn, 1)
-
-    assert "SOURCE_CHURN_EXHAUSTION" in str(exc_info.value)
-
-
-def test_authoritative_memory_rows_unchanged():
+def test_read_path_no_auto_rebuild():
+    from gateway.memory.graph_query import read_graph_context, GraphFactQuery, GraphContextStatus
     conn = setup_db()
-    insert_mock_fact(conn, 1, 1, "e1", "refresh_token", "v1", 1)
+    
+    # MISSING graph -> read_graph_context -> MISSING_GRAPH, no writes
+    q = GraphFactQuery()
+    changes1 = conn.total_changes
+    res1 = read_graph_context(conn, user_id=1, query=q)
+    assert res1.status == GraphContextStatus.MISSING_GRAPH
+    assert conn.total_changes == changes1
+    
+    # STALE graph -> read_graph_context -> STALE_GRAPH, no writes
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    converge_user_graph(conn, user_id=1)
+    insert_mock_fact(conn, 1, 2, "e", "k", "v", 1)
+    changes2 = conn.total_changes
+    res2 = read_graph_context(conn, user_id=1, query=q)
+    assert res2.status == GraphContextStatus.STALE_GRAPH
+    assert conn.total_changes == changes2
 
-    # snapshot authoritative facts
-    before = conn.execute("SELECT * FROM memory_os_facts").fetchall()
-
-    converge_user_graph(conn, 1)
-
-    after = conn.execute("SELECT * FROM memory_os_facts").fetchall()
-    assert before == after
-
-
-def test_lexical_numeric_defect():
+def test_deterministic_result_ids():
     conn = setup_db()
-    # Insert IDs 10 and 2. Numerically: 2, 10. Lexically: "10", "2"
-    insert_mock_fact(conn, 1, 10, "e1", "k1", "v1", 1)
-    insert_mock_fact(conn, 1, 2, "e2", "k2", "v2", 1)
-
-    res = converge_user_graph(conn, 1)
-    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
-
-    # Check NOOP
-    res2 = converge_user_graph(conn, 1)
-    assert res2.status == GraphConvergenceStatus.CURRENT_NOOP
-
-
-def test_pre_publish_race_writes(monkeypatch):
-    import gateway.memory.graph_convergence
-
-    conn = setup_db()
-    insert_mock_fact(conn, 1, 10, "e1", "k1", "v1", 1)
-
-    original_read = gateway.memory.graph_convergence.read_authoritative_memory_facts
-    read_calls = 0
-
-    def fake_read(conn_arg, user_id):
-        nonlocal read_calls
-        read_calls += 1
-        # On the pre-publish revalidation read (2nd call), simulate another connection wrote a fact
-        if read_calls == 3:
-            insert_mock_fact(conn_arg, user_id, 11, "e2", "k2", "v2", 1)
-        return original_read(conn_arg, user_id=user_id)
-
-    monkeypatch.setattr(
-        gateway.memory.graph_convergence, "read_authoritative_memory_facts", fake_read
-    )
-
-    res = converge_user_graph(conn, 1)
-
-    # It should have caught the race on the 2nd read, continued loop,
-    # and eventually succeeded on the next attempt with 2 facts.
-    assert res.status == GraphConvergenceStatus.MISSING_REBUILD
-    assert res.matched_auth_facts_count == 2
-    # read_calls:
-    # attempt 0:
-    # 1: rebuild_facts
-    # 2: pre_publish_facts (injects 11). Mismatch! continue.
-    # attempt 1:
-    # 3: rebuild_facts (sees 10, 11)
-    # 4: pre_publish_facts (sees 10, 11). Matches!
-    # 5: post_publish_facts (sees 10, 11). Matches!
-    assert read_calls == 6
+    insert_mock_fact(conn, 1, 1, "e", "k", "v", 1)
+    res1 = converge_user_graph(conn, user_id=1)
+    
+    # Drop projection and re-converge with identical state
+    conn.execute("DELETE FROM memory_graph_user_state")
+    
+    res2 = converge_user_graph(conn, user_id=1)
+    assert res1.projection_id == res2.projection_id
+    assert res1.snapshot_id == res2.snapshot_id

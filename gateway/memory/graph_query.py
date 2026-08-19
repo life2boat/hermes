@@ -14,6 +14,7 @@ from ai_engineering.graph_contract import (
     GraphVerificationError,
 )
 from gateway.memory.graph_projection import (
+    build_authoritative_source_snapshot,
     AuthoritativeMemoryFact,
     GraphProjectionResult,
     ProjectionError,
@@ -91,20 +92,6 @@ def _integrity(code: str, cause: Exception | None = None) -> GraphReadIntegrityE
     return error
 
 
-def _authoritative_source_snapshot(
-    facts: tuple[AuthoritativeMemoryFact, ...],
-) -> AuthoritativeSourceSnapshot:
-    return AuthoritativeSourceSnapshot(
-        tuple(
-            AuthoritativeFactState(
-                fact_id=str(fact.sqlite_id),
-                current_revision=fact.vector_revision,
-                status="ACTIVE",
-            )
-            for fact in facts
-        ),
-        is_complete=True,
-    )
 
 
 def _exact_properties(
@@ -392,7 +379,7 @@ def read_graph_context(
     if persisted_source is None or not persisted_source.is_complete:
         raise _integrity("AUTHORITATIVE_SOURCE_INCOMPLETE")
     try:
-        current_source = _authoritative_source_snapshot(current_facts)
+        current_source = build_authoritative_source_snapshot(current_facts)
     except (GraphVerificationError, ValueError, TypeError) as exc:
         raise _integrity("CURRENT_SOURCE_STATE_INVALID", exc)
     if current_source != persisted_source:

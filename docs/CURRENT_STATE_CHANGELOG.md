@@ -992,3 +992,8 @@ Safety:
 - Fixed GraphSnapshot.create determinism bug.
 - Corrected CURRENT_STATE header version.
 - Added ADR-0083.
+
+## 2026-08-19
+Moved PR-5 foundation merged state from CURRENT_STATE.md to changelog.
+PR #201: FOUNDATION_MERGED, EXACT_HEAD_TESTS=FAIL
+PR #202: PARTIAL_CLOSURE_MERGED, EXACT_HEAD_TESTS=FAIL, ADMIN_MERGE_USED=true

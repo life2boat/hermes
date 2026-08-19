@@ -1005,3 +1005,5 @@ EXACT_HEAD_TECHNICAL_CI=PASS
 ADMIN_MERGE_USED=false
 AUTO_MERGE_USED=false
 MERGE_SHA=575a0bb854c46c0425db4d864b55f9539899679a
+
+PR-6: Deterministic Memory Graph Retrieval & Convergence Evals implementation candidate.

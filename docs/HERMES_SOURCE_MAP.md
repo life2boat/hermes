@@ -144,3 +144,6 @@ controls; they cannot mutate the Golden corpus or grant authority.
 - gateway/memory/graph_projection.py: Canonical source builder
 - tests/gateway/memory/test_graph_convergence.py: Graph convergence test matrix
 - docs/adr/ADR-0085-deterministic-graph-convergence.md: Graph convergence ADR
+- evals/memory_graph/: Deterministic static corpus for graph behavior
+- ai_engineering/memory_graph_eval.py: Memory Graph eval runner
+- scripts/run_memory_graph_evals.py: CLI entrypoint for Memory Graph evals

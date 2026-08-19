@@ -192,16 +192,7 @@ def project_authoritative_memory_facts(
     }
 
     # Authoritative source snapshot
-    auth_fact_states = []
-    for f in sorted_facts:
-        auth_fact_states.append(
-            AuthoritativeFactState(
-                fact_id=str(f.sqlite_id),
-                current_revision=f.vector_revision,
-                status="ACTIVE",
-            )
-        )
-    auth_source = AuthoritativeSourceSnapshot(tuple(auth_fact_states), is_complete=True)
+    auth_source = build_authoritative_source_snapshot(sorted_facts)
 
     projected_fact_count = 0
     excluded_fact_count = 0
@@ -550,3 +541,17 @@ def verify_graph_projection_result(result: GraphProjectionResult) -> None:
     expected_projection_id = f"gp_{hasher.hexdigest()}"
     if result.projection_id != expected_projection_id:
         raise ProjectionError("Tampered projection identity")
+
+
+def build_authoritative_source_snapshot(facts: tuple[AuthoritativeMemoryFact, ...]) -> AuthoritativeSourceSnapshot:
+    return AuthoritativeSourceSnapshot(
+        tuple(
+            AuthoritativeFactState(
+                fact_id=str(f.sqlite_id),
+                current_revision=f.vector_revision,
+                status='ACTIVE'
+            )
+            for f in facts
+        ),
+        is_complete=True,
+    )

@@ -142,5 +142,5 @@ controls; they cannot mutate the Golden corpus or grant authority.
 
 - gateway/memory/graph_convergence.py: Graph convergence implementation
 - gateway/memory/graph_projection.py: Canonical source builder
-- 	ests/gateway/memory/test_graph_convergence.py: Graph convergence test matrix
+- tests/gateway/memory/test_graph_convergence.py: Graph convergence test matrix
 - docs/adr/ADR-0085-deterministic-graph-convergence.md: Graph convergence ADR

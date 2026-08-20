@@ -23,7 +23,7 @@ from gateway.memory.graph_convergence import (
 )
 from gateway.memory.graph_store import (
     GraphStoreError,
-    
+
     GraphSnapshot,
 )
 
@@ -59,6 +59,7 @@ class MemoryGraphAction:
     user_id: int
     query: MemoryGraphQuery | None = None
     mock_race: Literal["NONE", "SOURCE_CHANGE_DURING_PROJECTION_ONCE", "SOURCE_CHANGE_AFTER_PUBLISH_ONCE", "SOURCE_CHANGE_EVERY_ATTEMPT"] = "NONE"
+    mock_race_fact: MemoryGraphFact | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,20 @@ class MemoryGraphEvalReport:
     static_oracle_independence: str
     results: list[MemoryGraphScenarioResult]
 
+def _parse_json_strict(text: str) -> Any:
+    if "NaN" in text or "Infinity" in text:
+        raise ValueError("NaN or Infinity not allowed")
+
+    def dict_hook(pairs):
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                raise ValueError(f"Duplicate key: {k}")
+            d[k] = v
+        return d
+
+    return json.loads(text, object_pairs_hook=dict_hook)
+
 def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
     setup_data = data.get("setup", {})
     facts = tuple(
@@ -146,17 +161,28 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
         for f in setup_data.get("facts", [])
     )
     setup = MemoryGraphSetup(facts=facts, graph_seed=setup_data.get("graph_seed", "NONE"))
-    
+
     action_data = data.get("action", {})
     q = action_data.get("query")
     query = MemoryGraphQuery(entity=q.get("entity"), key=q.get("key")) if q else None
+    mock_race_fact_data = action_data.get("mock_race_fact")
+    mock_race_fact = MemoryGraphFact(
+        sqlite_id=mock_race_fact_data["sqlite_id"],
+        user_id=mock_race_fact_data["user_id"],
+        entity=mock_race_fact_data["entity"],
+        key=mock_race_fact_data["key"],
+        value=mock_race_fact_data["value"],
+        vector_revision=mock_race_fact_data["vector_revision"],
+    ) if mock_race_fact_data else None
+
     action = MemoryGraphAction(
         type=action_data["type"],
         user_id=action_data["user_id"],
         query=query,
         mock_race=action_data.get("mock_race", "NONE"),
+        mock_race_fact=mock_race_fact,
     )
-    
+
     expected_data = data.get("expected", {})
     matches = expected_data.get("matches")
     expected = MemoryGraphExpected(
@@ -169,7 +195,7 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
         writes_forbidden=expected_data.get("writes_forbidden", False),
         matches=tuple(matches) if matches is not None else None,
     )
-    
+
     return MemoryGraphScenario(
         schema_version=data["schema_version"],
         scenario_id=data["scenario_id"],
@@ -183,33 +209,39 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
 def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraphScenario]]:
     manifest_path = corpus_dir / "manifest.json"
     if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest.json not found in {corpus_dir}")
-    
+        raise ValueError(f"manifest.json not found in {corpus_dir}")
+
     with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
-    
+        manifest_text = f.read()
+        manifest = _parse_json_strict(manifest_text)
+
+    if manifest.get("schema_version") != 1:
+        raise ValueError("manifest schema_version must be 1")
+
     dataset_version = manifest.get("dataset_version", "unknown")
-    
+
     scenarios = []
     dataset_dir = corpus_dir / "datasets"
-    files = sorted(list(dataset_dir.glob("*.jsonl")))
-    
+
     # We must digest the raw byte contents in a deterministic order
     hasher = hashlib.sha256()
     hasher.update(json.dumps(manifest, sort_keys=True).encode("utf-8"))
-    
-    for file in files:
+
+    for ds in manifest.get("datasets", []):
+        file = corpus_dir / ds["path"]
+        if not file.exists():
+            raise ValueError(f"File missing: {file}")
         with open(file, "rb") as f:
             content = f.read()
             hasher.update(file.name.encode("utf-8"))
             hasher.update(content)
-            
+
             lines = content.decode("utf-8").splitlines()
             for line in lines:
                 line = line.strip()
                 if line:
-                    scenarios.append(_parse_scenario(json.loads(line)))
-                    
+                    scenarios.append(_parse_scenario(_parse_json_strict(line)))
+
     return hasher.hexdigest(), dataset_version, scenarios
 
 def _setup_db(scenario: MemoryGraphScenario) -> sqlite3.Connection:
@@ -217,56 +249,56 @@ def _setup_db(scenario: MemoryGraphScenario) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     migrate_memory_convergence_schema(conn, now=0.0)
     migrate_memory_graph_store_schema(conn)
-    
+
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, handle TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS memory_os_facts (id INTEGER PRIMARY KEY, user_id INTEGER, entity TEXT, key TEXT, value TEXT, vector_revision INTEGER, is_deleted INTEGER DEFAULT 0)")
-        
+
         for fact in scenario.setup.facts:
             conn.execute("INSERT OR IGNORE INTO users (id, handle) VALUES (?, ?)", (fact.user_id, f"user_{fact.user_id}"))
             conn.execute(
                 "INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)",
                 (fact.sqlite_id, fact.user_id, fact.entity, fact.key, fact.value, fact.vector_revision)
             )
-            
+
         if scenario.setup.graph_seed == "CONVERGED":
             for user_id in set([f.user_id for f in scenario.setup.facts] + [scenario.action.user_id]):
                 converge_user_graph(conn, user_id=user_id, max_attempts=3)
         elif scenario.setup.graph_seed == "STALE":
             # Add a dummy fact, converge, then remove dummy fact so it's stale
             for user_id in set([f.user_id for f in scenario.setup.facts] + [scenario.action.user_id]):
-                conn.execute("INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)", (-1, user_id, "dummy", "dummy", "dummy", 1))
+                conn.execute("INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)", (99999, user_id, "dummy", "dummy", "dummy", 1))
                 converge_user_graph(conn, user_id=user_id, max_attempts=3)
-                conn.execute("DELETE FROM memory_os_facts WHERE id = -1")
+                conn.execute("DELETE FROM memory_os_facts WHERE id = 99999")
         elif scenario.setup.graph_seed == "CORRUPTED":
             for user_id in set([f.user_id for f in scenario.setup.facts] + [scenario.action.user_id]):
                 converge_user_graph(conn, user_id=user_id, max_attempts=3)
                 # Mutate the json payload directly
                 conn.execute("UPDATE memory_graph_user_state SET canonical_snapshot_json = 'INVALID'")
-            
+
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
-        
+
     return conn
 
 def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResult:
     conn = _setup_db(scenario)
-    
+
     status = "FAIL"
     reason_code = "UNKNOWN"
-    
+
     false_ready = False
     cross_user_leakage = False
     excluded_fact_leakage = False
     integrity_fail_open = False
     unexpected_db_mutation = False
     nondeterministic_result = False
-    
+
     start_writes = conn.execute("SELECT total_changes()").fetchone()[0]
-    
+
     try:
         if scenario.action.type == "READ_CONTEXT":
             assert scenario.action.query is not None
@@ -282,14 +314,14 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
             else:
                 status = "PASS"
                 reason_code = "PASS"
-                
+
                 # Check isolation/leakage
                 for f in res.matches:
                     if "PR6_MEMORY_GRAPH_SECRET_SENTINEL" in str(f):
                         excluded_fact_leakage = True
                         status = "FAIL"
                         reason_code = "SECRET_LEAKAGE"
-        
+
         elif scenario.action.type == "INSPECT_CONVERGENCE":
             res_c = inspect_graph_convergence(conn, user_id=scenario.action.user_id)
             if scenario.expected.state and res_c.state.name != scenario.expected.state:
@@ -297,21 +329,19 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
             else:
                 status = "PASS"
                 reason_code = "PASS"
-                
+
         elif scenario.action.type == "CONVERGE" or scenario.action.type == "CONVERGE_TWICE":
-            # Race conditions mock
-            # In python we can patch the snapshot builder if needed, but for now we won't fully implement mock_race 
-            # unless the scenario specifies it.
-            res_c = converge_user_graph(conn, user_id=scenario.action.user_id, max_attempts=3)
-            if scenario.action.type == "CONVERGE_TWICE":
+            with RaceHarness(conn, getattr(scenario.action, "mock_race", None), getattr(scenario.action, "mock_race_fact", None)):
                 res_c = converge_user_graph(conn, user_id=scenario.action.user_id, max_attempts=3)
-                
-            if scenario.expected.status and res_c.status.name != scenario.expected.status:
-                reason_code = f"EXPECTED_STATUS_{scenario.expected.status}_GOT_{res_c.status.name}"
-            else:
-                status = "PASS"
-                reason_code = "PASS"
-                
+                if scenario.action.type == "CONVERGE_TWICE":
+                    res_c = converge_user_graph(conn, user_id=scenario.action.user_id, max_attempts=3)
+
+                if scenario.expected.status and res_c.status.name != scenario.expected.status:
+                    reason_code = f"EXPECTED_STATUS_{scenario.expected.status}_GOT_{res_c.status.name}"
+                else:
+                    status = "PASS"
+                    reason_code = "PASS"
+
         elif scenario.action.type == "CONVERGE_THEN_READ":
             converge_user_graph(conn, user_id=scenario.action.user_id, max_attempts=3)
             assert scenario.action.query is not None
@@ -327,7 +357,7 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
             else:
                 status = "PASS"
                 reason_code = "PASS"
-                
+
     except (GraphConvergenceIntegrityError, gq.GraphReadIntegrityError):
         if scenario.expected.hard_fail:
             status = "PASS"
@@ -339,20 +369,20 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
         import traceback; traceback.print_exc()
         status = "FAIL"
         reason_code = f"EXCEPTION_{type(e).__name__}"
-        
+
     end_writes = conn.execute("SELECT total_changes()").fetchone()[0]
     actual_writes = end_writes - start_writes
-    
+
     if scenario.expected.writes_forbidden and actual_writes > 0:
         unexpected_db_mutation = True
         status = "FAIL"
         reason_code = f"UNEXPECTED_WRITES_{actual_writes}"
-        
+
     # Check sentinels in reason_code just in case
     if "PR6_MEMORY_GRAPH_SECRET_SENTINEL" in reason_code:
         reason_code = "SECRET_LEAKAGE_REDACTED"
         excluded_fact_leakage = True
-            
+
     return MemoryGraphScenarioResult(
         scenario_id=scenario.scenario_id,
         category=scenario.category,
@@ -367,24 +397,69 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
         nondeterministic_result=nondeterministic_result
     )
 
+
+class RaceHarness:
+    def __init__(self, conn, mock_race, mock_race_fact):
+        self.conn = conn
+        self.mock_race = mock_race
+        self.mock_race_fact = mock_race_fact
+        self.patched = False
+
+    def __enter__(self):
+        if not self.mock_race: return self
+        import gateway.memory.graph_convergence as gc
+        import gateway.memory.graph_store as gs
+
+        self.original_read = gc.read_authoritative_memory_facts
+
+        def mock_read(*args, **kwargs):
+            facts = self.original_read(*args, **kwargs)
+            if self.mock_race == "SOURCE_CHANGE_DURING_PROJECTION_ONCE" and not self.patched:
+                self.patched = True
+                mf = self.mock_race_fact
+                self.conn.execute("INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)", (mf.sqlite_id, mf.user_id, mf.entity, mf.key, mf.value, mf.vector_revision))
+            elif self.mock_race == "SOURCE_CHANGE_EVERY_ATTEMPT":
+                self.conn.execute("INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (ABS(RANDOM()) % 100000 + 1000, 1, 'e', 'k', 'v', 1)")
+            return facts
+
+        gc.read_authoritative_memory_facts = mock_read
+
+        self.original_store = gs.publish_graph_projection
+        def mock_store(*args, **kwargs):
+            res = self.original_store(*args, **kwargs)
+            if self.mock_race == "SOURCE_CHANGE_AFTER_PUBLISH_ONCE" and not self.patched:
+                self.patched = True
+                mf = self.mock_race_fact
+                self.conn.execute("INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)", (mf.sqlite_id, mf.user_id, mf.entity, mf.key, mf.value, mf.vector_revision))
+            return res
+        gs.publish_graph_projection = mock_store
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.mock_race: return
+        import gateway.memory.graph_convergence as gc
+        import gateway.memory.graph_store as gs
+        gc.read_authoritative_memory_facts = self.original_read
+        gs.publish_graph_projection = self.original_store
 def run_eval_engine(corpus_dir: Path) -> MemoryGraphEvalReport:
     digest, dataset_version, scenarios = _compute_corpus_digest(corpus_dir)
-    
+
     results = []
     pass_count = 0
     fail_count = 0
     critical_case_count = 0
     critical_fail_count = 0
-    
+
     false_ready_count = 0
     cross_user_leakage_count = 0
     excluded_fact_leakage_count = 0
     integrity_fail_open_count = 0
     unexpected_db_mutation_count = 0
     nondeterministic_result_count = 0
-    
+
     cats = {"RETRIEVAL": [], "FRESHNESS": [], "PRIVACY": [], "ISOLATION": [], "INTEGRITY": [], "CONVERGENCE": [], "DETERMINISM": [], "TRANSACTION": []}
-    
+
     for s in scenarios:
         r = evaluate_scenario(s)
         results.append(r)
@@ -396,25 +471,25 @@ def run_eval_engine(corpus_dir: Path) -> MemoryGraphEvalReport:
                 critical_fail_count += 1
         if r.critical:
             critical_case_count += 1
-            
+
         cats[s.category.upper()].append(r.status)
-        
+
         if r.false_ready: false_ready_count += 1
         if r.cross_user_leakage: cross_user_leakage_count += 1
         if r.excluded_fact_leakage: excluded_fact_leakage_count += 1
         if r.integrity_fail_open: integrity_fail_open_count += 1
         if r.unexpected_db_mutation: unexpected_db_mutation_count += 1
         if r.nondeterministic_result: nondeterministic_result_count += 1
-        
+
     def _cat_status(l):
         if not l: return "NOT_EVALUATED"
         return "PASS" if all(x == "PASS" for x in l) else "FAIL"
 
-    return MemoryGraphEvalReport(
+    report = MemoryGraphEvalReport(
         schema_version=MEMORY_GRAPH_EVAL_SCHEMA_VERSION,
         engine_version=MEMORY_GRAPH_EVAL_ENGINE_VERSION,
         dataset_version=dataset_version,
-        report_id=str(uuid.uuid4()),
+        report_id="",
         corpus_status="CANDIDATE",
         corpus_digest=digest,
         case_count=len(scenarios),
@@ -442,3 +517,10 @@ def run_eval_engine(corpus_dir: Path) -> MemoryGraphEvalReport:
         static_oracle_independence="PASS",
         results=results
     )
+    import hashlib
+    import json
+    import dataclasses
+    d = dataclasses.asdict(report)
+    payload_bytes = json.dumps(d, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    report_id = hashlib.sha256(payload_bytes).hexdigest()
+    return dataclasses.replace(report, report_id=report_id)

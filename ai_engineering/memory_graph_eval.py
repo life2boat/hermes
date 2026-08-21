@@ -45,6 +45,8 @@ class MemoryGraphFact:
 class MemoryGraphSetup:
     facts: tuple[MemoryGraphFact, ...]
     graph_seed: Literal["NONE", "CONVERGED", "STALE", "CORRUPTED"]
+    mutation: str | None = None
+    mutation_fact: MemoryGraphFact | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +165,26 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
         )
         for f in setup_data.get("facts", [])
     )
-    setup = MemoryGraphSetup(facts=facts, graph_seed=setup_data.get("graph_seed", "NONE"))
+    
+    mutation = setup_data.get("mutation")
+    mutation_fact_data = setup_data.get("mutation_fact")
+    mutation_fact = None
+    if mutation_fact_data:
+        mutation_fact = MemoryGraphFact(
+            sqlite_id=mutation_fact_data["sqlite_id"],
+            user_id=mutation_fact_data["user_id"],
+            entity=mutation_fact_data["entity"],
+            key=mutation_fact_data["key"],
+            value=mutation_fact_data["value"],
+            vector_revision=mutation_fact_data["vector_revision"],
+        )
+
+    setup = MemoryGraphSetup(
+        facts=facts, 
+        graph_seed=setup_data.get("graph_seed", "NONE"),
+        mutation=mutation,
+        mutation_fact=mutation_fact,
+    )
 
     action_data = data.get("action", {})
     q = action_data.get("query")
@@ -344,6 +365,21 @@ def _setup_db(scenario: MemoryGraphScenario) -> sqlite3.Connection:
                 # Mutate the json payload directly
                 conn.execute("UPDATE memory_graph_user_state SET canonical_snapshot_json = 'INVALID'")
 
+        if scenario.setup.mutation and scenario.setup.mutation_fact:
+            mf = scenario.setup.mutation_fact
+            conn.execute("INSERT OR IGNORE INTO users (id, handle) VALUES (?, ?)", (mf.user_id, f"user_{mf.user_id}"))
+            if scenario.setup.mutation == "ADD_FACT":
+                conn.execute(
+                    "INSERT INTO memory_os_facts (id, user_id, entity, key, value, vector_revision) VALUES (?, ?, ?, ?, ?, ?)",
+                    (mf.sqlite_id, mf.user_id, mf.entity, mf.key, mf.value, mf.vector_revision)
+                )
+            elif scenario.setup.mutation == "DELETE_FACT":
+                conn.execute("DELETE FROM memory_os_facts WHERE id = ?", (mf.sqlite_id,))
+            elif scenario.setup.mutation == "UPDATE_REVISION":
+                conn.execute("UPDATE memory_os_facts SET value = ?, vector_revision = ? WHERE id = ?", (mf.value, mf.vector_revision, mf.sqlite_id))
+            elif scenario.setup.mutation == "UPDATE_VALUE_SAME_REVISION":
+                conn.execute("UPDATE memory_os_facts SET value = ? WHERE id = ?", (mf.value, mf.sqlite_id))
+
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -375,9 +411,9 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
             )
             res = read_graph_context(conn, user_id=scenario.action.user_id, query=q)
             if scenario.expected.read_status and res.status.name != scenario.expected.read_status:
-                reason_code = f"EXPECTED_STATUS_{scenario.expected.read_status}_GOT_{res.status.name}"
+                reason_code = "READ_STATUS_MISMATCH"
             elif scenario.expected.match_count is not None and res.matched_count != scenario.expected.match_count:
-                reason_code = f"EXPECTED_MATCHES_{scenario.expected.match_count}_GOT_{res.matched_count}"
+                reason_code = "MATCH_COUNT_MISMATCH"
             else:
                 status = "PASS"
                 reason_code = "PASS"
@@ -387,12 +423,12 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
                     if "PR6_MEMORY_GRAPH_SECRET_SENTINEL" in str(f):
                         excluded_fact_leakage = True
                         status = "FAIL"
-                        reason_code = "SECRET_LEAKAGE"
+                        reason_code = "EXCLUDED_FACT_LEAKAGE"
 
         elif scenario.action.type == "INSPECT_CONVERGENCE":
             res_c = inspect_graph_convergence(conn, user_id=scenario.action.user_id)
             if scenario.expected.state and res_c.state.name != scenario.expected.state:
-                reason_code = f"EXPECTED_STATE_{scenario.expected.state}_GOT_{res_c.state.name}"
+                reason_code = "CONVERGENCE_STATE_MISMATCH"
             else:
                 status = "PASS"
                 reason_code = "PASS"
@@ -404,7 +440,7 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
                     res_c = converge_user_graph(conn, user_id=scenario.action.user_id, max_attempts=3)
 
                 if scenario.expected.status and res_c.status.name != scenario.expected.status:
-                    reason_code = f"EXPECTED_STATUS_{scenario.expected.status}_GOT_{res_c.status.name}"
+                    reason_code = "CONVERGENCE_STATUS_MISMATCH"
                 else:
                     status = "PASS"
                     reason_code = "PASS"
@@ -418,24 +454,27 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
             )
             res = read_graph_context(conn, user_id=scenario.action.user_id, query=q)
             if scenario.expected.read_status and res.status.name != scenario.expected.read_status:
-                reason_code = f"EXPECTED_STATUS_{scenario.expected.read_status}_GOT_{res.status.name}"
+                reason_code = "READ_STATUS_MISMATCH"
             elif scenario.expected.match_count is not None and res.matched_count != scenario.expected.match_count:
-                reason_code = f"EXPECTED_MATCHES_{scenario.expected.match_count}_GOT_{res.matched_count}"
+                reason_code = "MATCH_COUNT_MISMATCH"
             else:
                 status = "PASS"
                 reason_code = "PASS"
 
+        if status == "PASS" and scenario.expected.hard_fail:
+            status = "FAIL"
+            reason_code = "EXPECTED_INTEGRITY_ERROR_NOT_RAISED"
+
     except (GraphConvergenceIntegrityError, gq.GraphReadIntegrityError):
         if scenario.expected.hard_fail:
             status = "PASS"
-            reason_code = "HARD_FAIL_MATCH"
+            reason_code = "PASS"
         else:
             status = "FAIL"
-            reason_code = "UNEXPECTED_HARD_FAIL"
-    except Exception as e:
-        import traceback; traceback.print_exc()
+            reason_code = "UNEXPECTED_INTEGRITY_ERROR"
+    except Exception:
         status = "FAIL"
-        reason_code = f"EXCEPTION_{type(e).__name__}"
+        reason_code = "INTERNAL_EVAL_ERROR"
 
     end_writes = conn.execute("SELECT total_changes()").fetchone()[0]
     actual_writes = end_writes - start_writes
@@ -443,12 +482,7 @@ def evaluate_scenario(scenario: MemoryGraphScenario) -> MemoryGraphScenarioResul
     if scenario.expected.writes_forbidden and actual_writes > 0:
         unexpected_db_mutation = True
         status = "FAIL"
-        reason_code = f"UNEXPECTED_WRITES_{actual_writes}"
-
-    # Check sentinels in reason_code just in case
-    if "PR6_MEMORY_GRAPH_SECRET_SENTINEL" in reason_code:
-        reason_code = "SECRET_LEAKAGE_REDACTED"
-        excluded_fact_leakage = True
+        reason_code = "UNEXPECTED_DB_MUTATION"
 
     return MemoryGraphScenarioResult(
         scenario_id=scenario.scenario_id,

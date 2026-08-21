@@ -58,15 +58,30 @@ def test_compute_corpus_digest_missing_dataset(tmp_path):
     with pytest.raises(ValueError, match="File missing"):
         _compute_corpus_digest(tmp_path)
 
-def test_report_id_tampering_changes_id():
+def test_report_id_semantic_binding():
+    import dataclasses
+    from ai_engineering.memory_graph_eval import run_eval_engine
+    import hashlib
+    import json
+    
     corpus_dir = Path("evals/memory_graph")
     r1 = run_eval_engine(corpus_dir)
     r2 = run_eval_engine(corpus_dir)
     assert r1.report_id == r2.report_id
 
-    # Tamper with internal dict before generating id is what the engine prevents.
-    # We can just verify report_id is deterministic.
-    assert r1.report_id != ""
+    assert len(r1.report_id) == 64
+    assert all(c in "0123456789abcdef" for c in r1.report_id)
+
+    def compute_id(report):
+        d = dataclasses.asdict(report)
+        d["report_id"] = ""
+        payload = json.dumps(d, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+        
+    assert compute_id(r1) == r1.report_id
+    
+    r3 = dataclasses.replace(r1, fail_count=r1.fail_count + 1)
+    assert compute_id(r3) != r1.report_id
 
 def test_report_deterministic():
     corpus_dir = Path("evals/memory_graph")
@@ -75,16 +90,60 @@ def test_report_deterministic():
     import dataclasses
     assert dataclasses.asdict(r1) == dataclasses.asdict(r2)
 
-def test_CLI_exit_codes():
+def test_CLI_exit_codes(tmp_path, monkeypatch):
     import subprocess
     import os
-    # Run CLI
+    import json
+    
+    # Run CLI on valid passing corpus (default evals/memory_graph)
     env = os.environ.copy()
     env["PYTHONPATH"] = "."
     res = subprocess.run(["python", "scripts/run_memory_graph_evals.py"], capture_output=True, text=True, env=env)
     assert res.returncode == 0
     assert "VERDICT=PASS" in res.stdout
-    assert "REPORT_BYTES_EQUAL=true" in res.stdout
+
+    # Create invalid corpus for BLOCKED
+    invalid_dir = tmp_path / "invalid"
+    invalid_dir.mkdir()
+    (invalid_dir / "manifest.json").write_text('{"schema_version": 2}')
+    res2 = subprocess.run(["python", "scripts/run_memory_graph_evals.py", "--root", str(invalid_dir)], capture_output=True, text=True, env=env)
+    assert res2.returncode == 2
+    assert "STATUS=BLOCKED" in res2.stdout
+    assert "Traceback" not in res2.stdout
+    assert "Traceback" not in res2.stderr
+
+    # Create valid corpus with failure for FAIL
+    fail_dir = tmp_path / "fail"
+    fail_dir.mkdir()
+    fail_dir.joinpath("datasets").mkdir()
+    (fail_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 1, "engine_version": 1, "dataset_version": "memory-graph-v1", "corpus_status": "CANDIDATE",
+        "datasets": [
+            {"category": "RETRIEVAL", "path": "datasets/r.jsonl", "critical": True},
+            {"category": "FRESHNESS", "path": "datasets/f.jsonl", "critical": True},
+            {"category": "PRIVACY", "path": "datasets/p.jsonl", "critical": True},
+            {"category": "ISOLATION", "path": "datasets/i.jsonl", "critical": True},
+            {"category": "INTEGRITY", "path": "datasets/in.jsonl", "critical": True},
+            {"category": "CONVERGENCE", "path": "datasets/c.jsonl", "critical": True},
+            {"category": "DETERMINISM", "path": "datasets/d.jsonl", "critical": True},
+            {"category": "TRANSACTION", "path": "datasets/t.jsonl", "critical": True}
+        ]
+    }))
+    for n in ["f", "p", "i", "in", "c", "d", "t"]:
+        (fail_dir / "datasets" / f"{n}.jsonl").write_text("")
+        
+    (fail_dir / "datasets" / "r.jsonl").write_text(json.dumps({
+        "schema_version": 1, "scenario_id": "r1", "category": "RETRIEVAL", "critical": True,
+        "setup": {"users": []}, "action": {"type": "READ_CONTEXT", "user_id": 1, "query": {"entity": "e", "key": "k"}},
+        "expected": {"read_status": "MATCH", "match_count": 1}
+    }) + "\n")
+
+    res3 = subprocess.run(["python", "scripts/run_memory_graph_evals.py", "--root", str(fail_dir)], capture_output=True, text=True, env=env)
+    assert res3.returncode == 1
+    assert "VERDICT=FAIL" in res3.stdout
+    assert "Traceback" not in res3.stdout
+    assert "Traceback" not in res3.stderr
+
 
 def test_safety_counters(tmp_path, monkeypatch):
     import json
@@ -154,3 +213,4 @@ def test_safety_counters(tmp_path, monkeypatch):
     assert report.unexpected_db_mutation_count == 1
     assert report.nondeterministic_result_count == 1
     assert report.false_ready_count == 1
+

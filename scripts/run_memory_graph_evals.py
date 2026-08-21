@@ -15,8 +15,13 @@ def main():
 
     corpus_dir = Path(args.root)
 
-    report1 = run_eval_engine(corpus_dir)
-    report2 = run_eval_engine(corpus_dir)
+    try:
+        report1 = run_eval_engine(corpus_dir)
+        report2 = run_eval_engine(corpus_dir)
+    except Exception as e:
+        print("STATUS=BLOCKED")
+        print(f"Error: {e}")
+        sys.exit(2)
 
     # Save a json dump in .task_context
     Path(".task_context").mkdir(exist_ok=True)

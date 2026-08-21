@@ -134,8 +134,8 @@ class MemoryGraphEvalReport:
     results: list[MemoryGraphScenarioResult]
 
 def _parse_json_strict(text: str) -> Any:
-    if "NaN" in text or "Infinity" in text:
-        raise ValueError("NaN or Infinity not allowed")
+    def reject_constant(c):
+        raise ValueError(f"{c} not allowed")
 
     def dict_hook(pairs):
         d = {}
@@ -145,7 +145,10 @@ def _parse_json_strict(text: str) -> Any:
             d[k] = v
         return d
 
-    return json.loads(text, object_pairs_hook=dict_hook)
+    try:
+        return json.loads(text, object_pairs_hook=dict_hook, parse_constant=reject_constant)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON: {e}")
 
 def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
     setup_data = data.get("setup", {})
@@ -210,37 +213,101 @@ def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraph
     manifest_path = corpus_dir / "manifest.json"
     if not manifest_path.exists():
         raise ValueError(f"manifest.json not found in {corpus_dir}")
-
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest_text = f.read()
+    
+    with open(manifest_path, "rb") as f:
+        manifest_bytes = f.read()
+        try:
+            manifest_text = manifest_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("manifest.json must be valid UTF-8")
         manifest = _parse_json_strict(manifest_text)
-
-    if manifest.get("schema_version") != 1:
+        
+    expected_keys = {"schema_version", "engine_version", "dataset_version", "corpus_status", "datasets"}
+    if set(manifest.keys()) != expected_keys:
+        raise ValueError("manifest.json has missing or unknown fields")
+        
+    if manifest["schema_version"] != 1:
         raise ValueError("manifest schema_version must be 1")
-
-    dataset_version = manifest.get("dataset_version", "unknown")
-
-    scenarios = []
-    dataset_dir = corpus_dir / "datasets"
-
-    # We must digest the raw byte contents in a deterministic order
-    hasher = hashlib.sha256()
-    hasher.update(json.dumps(manifest, sort_keys=True).encode("utf-8"))
-
-    for ds in manifest.get("datasets", []):
-        file = corpus_dir / ds["path"]
+    if manifest["engine_version"] != 1:
+        raise ValueError("manifest engine_version must be 1")
+    if manifest["dataset_version"] != "memory-graph-v1":
+        raise ValueError("manifest dataset_version must be memory-graph-v1")
+        
+    datasets = manifest["datasets"]
+    if not isinstance(datasets, list) or len(datasets) != 8:
+        raise ValueError("manifest datasets must be a list of exactly 8 categories")
+        
+    dataset_expected_keys = {"category", "path", "critical"}
+    seen_categories = set()
+    seen_paths = set()
+    files_to_hash = []
+    
+    expected_categories = {"RETRIEVAL", "FRESHNESS", "PRIVACY", "ISOLATION", "INTEGRITY", "CONVERGENCE", "DETERMINISM", "TRANSACTION"}
+    
+    for ds in datasets:
+        if set(ds.keys()) != dataset_expected_keys:
+            raise ValueError("dataset has missing or unknown fields")
+            
+        cat = ds["category"]
+        if cat not in expected_categories:
+            raise ValueError(f"Unknown category: {cat}")
+        if cat in seen_categories:
+            raise ValueError(f"Duplicate category: {cat}")
+        seen_categories.add(cat)
+            
+        path = ds["path"]
+        if not path.endswith(".jsonl"):
+            raise ValueError("wrong extension")
+        if ".." in path or path.startswith("/") or path.startswith("\\"):
+            raise ValueError("invalid path (traversal or absolute)")
+            
+        if path in seen_paths:
+            raise ValueError(f"Duplicate path: {path}")
+        seen_paths.add(path)
+        
+        file = corpus_dir / path
         if not file.exists():
             raise ValueError(f"File missing: {file}")
+            
+        files_to_hash.append((cat, file))
+        
+    dataset_version = manifest["dataset_version"]
+    hasher = hashlib.sha256()
+    scenarios = []
+
+    # Deterministic order by category name
+    files_to_hash.sort(key=lambda x: x[0])
+    for cat, file in files_to_hash:
         with open(file, "rb") as f:
             content = f.read()
+            try:
+                content_text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError("dataset must be valid UTF-8")
+                
             hasher.update(file.name.encode("utf-8"))
-            hasher.update(content)
-
-            lines = content.decode("utf-8").splitlines()
+            
+            lines = content_text.splitlines()
             for line in lines:
                 line = line.strip()
                 if line:
                     scenarios.append(_parse_scenario(_parse_json_strict(line)))
+
+    # Digest should be of the canonical JSON format of the scenario models, so that:
+    # whitespace change -> same digest
+    # JSON key reorder -> same digest
+    # dataset declaration reorder -> same digest
+    
+    # We serialize all scenarios in deterministic order to the hasher
+    scenarios.sort(key=lambda x: x.scenario_id)
+    import dataclasses
+    import json
+    for sc in scenarios:
+        canonical_sc_bytes = json.dumps(
+            dataclasses.asdict(sc),
+            ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        hasher.update(canonical_sc_bytes)
 
     return hasher.hexdigest(), dataset_version, scenarios
 

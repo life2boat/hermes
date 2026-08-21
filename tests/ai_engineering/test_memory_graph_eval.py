@@ -19,11 +19,11 @@ def test_parse_json_strict_rejects_duplicates():
         _parse_json_strict('{"a": 1, "a": 2}')
 
 def test_parse_json_strict_rejects_nan():
-    with pytest.raises(ValueError, match="NaN or Infinity"):
+    with pytest.raises(ValueError, match="not allowed"):
         _parse_json_strict('{"a": NaN}')
 
 def test_parse_json_strict_rejects_infinity():
-    with pytest.raises(ValueError, match="NaN or Infinity"):
+    with pytest.raises(ValueError, match="not allowed"):
         _parse_json_strict('{"a": Infinity}')
 
 def test_compute_corpus_digest_missing_manifest(tmp_path):
@@ -32,7 +32,7 @@ def test_compute_corpus_digest_missing_manifest(tmp_path):
 
 def test_compute_corpus_digest_invalid_manifest(tmp_path):
     (tmp_path / "manifest.json").write_text('{"schema_version": 2}')
-    with pytest.raises(ValueError, match="manifest schema_version must be 1"):
+    with pytest.raises(ValueError, match="missing or unknown fields"):
         _compute_corpus_digest(tmp_path)
 
 def test_compute_corpus_digest_missing_dataset(tmp_path):
@@ -85,3 +85,72 @@ def test_CLI_exit_codes():
     assert res.returncode == 0
     assert "VERDICT=PASS" in res.stdout
     assert "REPORT_BYTES_EQUAL=true" in res.stdout
+
+def test_safety_counters(tmp_path, monkeypatch):
+    import json
+    import ai_engineering.memory_graph_eval as eval_mod
+
+    (tmp_path / 'manifest.json').write_text(json.dumps({
+        'schema_version': 1, 'engine_version': 1, 'dataset_version': 'memory-graph-v1',
+        'corpus_status': 'CANDIDATE', 'datasets': [
+            {'category': cat, 'path': f'{cat}.jsonl', 'critical': True}
+            for cat in ['RETRIEVAL', 'FRESHNESS', 'PRIVACY', 'ISOLATION', 'INTEGRITY', 'CONVERGENCE', 'DETERMINISM', 'TRANSACTION']
+        ]
+    }))
+
+    for cat in ['RETRIEVAL', 'FRESHNESS', 'PRIVACY', 'ISOLATION', 'INTEGRITY', 'CONVERGENCE', 'DETERMINISM', 'TRANSACTION']:
+        (tmp_path / f'{cat}.jsonl').write_text(json.dumps({
+            'schema_version': 1,
+            'scenario_id': f'{cat}1',
+            'category': cat,
+            'critical': True,
+            'setup': {'users': []},
+            'action': {'type': 'QUERY', 'user_id': 1},
+            'expected': {},
+            'steps': []
+        }) + '\n')
+
+    def mock_eval(scenario):
+        kwargs = {
+            'scenario_id': scenario.scenario_id,
+            'category': scenario.category,
+            'status': 'PASS',
+            'reason_code': 'PASS',
+            'critical': True,
+            'false_ready': False,
+            'cross_user_leakage': False,
+            'excluded_fact_leakage': False,
+            'integrity_fail_open': False,
+            'unexpected_db_mutation': False,
+            'nondeterministic_result': False,
+        }
+        if scenario.category == 'PRIVACY':
+            kwargs['cross_user_leakage'] = True
+            kwargs['status'] = 'FAIL'
+        elif scenario.category == 'ISOLATION':
+            kwargs['excluded_fact_leakage'] = True
+            kwargs['status'] = 'FAIL'
+        elif scenario.category == 'INTEGRITY':
+            kwargs['integrity_fail_open'] = True
+            kwargs['status'] = 'FAIL'
+        elif scenario.category == 'FRESHNESS':
+            kwargs['unexpected_db_mutation'] = True
+            kwargs['status'] = 'FAIL'
+        elif scenario.category == 'DETERMINISM':
+            kwargs['nondeterministic_result'] = True
+            kwargs['status'] = 'FAIL'
+        elif scenario.category == 'TRANSACTION':
+            kwargs['false_ready'] = True
+            kwargs['status'] = 'FAIL'
+        return eval_mod.MemoryGraphScenarioResult(**kwargs)
+
+    monkeypatch.setattr(eval_mod, 'evaluate_scenario', mock_eval)
+
+    report = eval_mod.run_eval_engine(tmp_path)
+    
+    assert report.cross_user_leakage_count == 1
+    assert report.excluded_fact_leakage_count == 1
+    assert report.integrity_fail_open_count == 1
+    assert report.unexpected_db_mutation_count == 1
+    assert report.nondeterministic_result_count == 1
+    assert report.false_ready_count == 1

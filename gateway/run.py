@@ -5736,6 +5736,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._wire_teams_pipeline_runtime()
 
         self._running = True
+        await self._start_memory_graph_runtime_if_configured()
         await self._start_memory_vector_runtime_if_configured()
         self._update_runtime_status("running")
         
@@ -5904,11 +5905,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         runtime = MemoryVectorRuntime.from_environment()
         self._memory_vector_runtime = runtime
+        if getattr(self, "_memory_graph_runtime", None):
+            runtime.graph_runtime = self._memory_graph_runtime
         await runtime.start()
 
     async def _stop_memory_vector_runtime(self) -> None:
         runtime = getattr(self, "_memory_vector_runtime", None)
         self._memory_vector_runtime = None
+        if runtime is not None:
+            await runtime.stop()
+
+    async def _start_memory_graph_runtime_if_configured(self) -> None:
+        from gateway.memory.graph_runtime import MemoryGraphRuntime
+        from gateway.memory.analytics import resolve_analytics_db_path
+        
+        db_path = resolve_analytics_db_path()
+        runtime = MemoryGraphRuntime.from_environment(db_path)
+        self._memory_graph_runtime = runtime
+        await runtime.start()
+
+    async def _stop_memory_graph_runtime(self) -> None:
+        runtime = getattr(self, "_memory_graph_runtime", None)
+        self._memory_graph_runtime = None
         if runtime is not None:
             await runtime.stop()
 
@@ -6577,6 +6595,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._running = False
             self._draining = True
             await GatewayRunner._stop_memory_vector_runtime(self)
+            await GatewayRunner._stop_memory_graph_runtime(self)
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.

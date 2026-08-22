@@ -86,9 +86,11 @@ class HealBiteMemoryBridge:
         background_write: bool = True,
         min_trust_score: float = 0.0,
         ensure_schema_on_init: bool = True,
+        graph_runtime: Any | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.embedding_adapter = embedding_adapter or EmbeddingAdapter()
+        self.graph_runtime = graph_runtime
         self.qdrant_adapter = qdrant_adapter
         self._owns_analytics_logger = analytics_logger is None
         self.analytics_logger = analytics_logger or MemoryAnalyticsLogger(
@@ -274,6 +276,22 @@ class HealBiteMemoryBridge:
         started_at = time.perf_counter()
         analytics_source = "like"
         results: list[dict[str, Any]] = []
+
+        if self.graph_runtime is not None:
+            try:
+                from gateway.memory.graph_runtime import resolve_graph_context
+                from gateway.memory.graph_query import GraphFactQuery
+                
+                with sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True) as conn:
+                    # SHADOW OBSERVATION ONLY - we do NOT use the graph results for product behavior
+                    _graph_res = resolve_graph_context(
+                        conn,
+                        runtime=self.graph_runtime,
+                        user_id=user_id,
+                        query=GraphFactQuery(limit=limit)
+                    )
+            except Exception:
+                pass
 
         if self._vector_enabled and self.qdrant_adapter is not None:
             qdrant_hits = self.qdrant_adapter.search(

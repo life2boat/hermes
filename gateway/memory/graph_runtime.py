@@ -17,7 +17,7 @@ from gateway.memory.graph_convergence import (
 )
 from gateway.memory.graph_query import (
     GraphFactQuery,
-    GraphStructuralMatch,
+    GraphQueryMatch,
     GraphReadIntegrityError,
     read_graph_context,
 )
@@ -63,7 +63,7 @@ class GraphRuntimeContextResult:
     status: str
     user_id: int
     query: GraphFactQuery
-    matches: tuple[GraphStructuralMatch, ...]
+    matches: tuple[GraphQueryMatch, ...]
     matched_count: int
     convergence_scheduled: bool
     safe_reason_code: str | None
@@ -76,6 +76,17 @@ def resolve_graph_context(
     user_id: int,
     query: GraphFactQuery,
 ) -> GraphRuntimeContextResult:
+    if getattr(runtime, "_unsupported_mode", False):
+        return GraphRuntimeContextResult(
+            status="BLOCKED_CONFIGURATION",
+            user_id=user_id,
+            query=query,
+            matches=(),
+            matched_count=0,
+            convergence_scheduled=False,
+            safe_reason_code="UNSUPPORTED_GRAPH_RUNTIME_MODE",
+        )
+
     if runtime.mode == GraphRuntimeMode.DISABLED or runtime.status != GraphRuntimeStatus.RUNNING:
         return GraphRuntimeContextResult(
             status="DISABLED",
@@ -167,8 +178,7 @@ class MemoryGraphRuntime:
         elif raw_mode == "shadow":
             mode = GraphRuntimeMode.SHADOW
         else:
-            # We will start in NOT_STARTED but immediately go to BLOCKED in start()
-            mode = GraphRuntimeMode.SHADOW # Temp fallback, will be blocked
+            mode = GraphRuntimeMode.DISABLED
         
         queue_capacity = env_int("MEMORY_GRAPH_QUEUE_CAPACITY", 128, min_val=1, max_val=1024)
         max_attempts = env_int("MEMORY_GRAPH_CONVERGENCE_MAX_ATTEMPTS", 3, min_val=1, max_val=5)
@@ -184,6 +194,12 @@ class MemoryGraphRuntime:
         return runtime
 
     def schedule_convergence(self, user_id: int) -> bool:
+        if type(user_id) is not int or isinstance(user_id, bool) or user_id < 0:
+            return False
+            
+        if getattr(self, "_stop_event", None) and self._stop_event.is_set():
+            return False
+
         with self._queue_lock:
             if user_id in self._pending_users:
                 return True
@@ -246,9 +262,17 @@ class MemoryGraphRuntime:
         return True
 
     async def stop(self) -> None:
+        if self._stop_event.is_set():
+            return
+            
         task = self._task
         self._task = None
         self._stop_event.set()
+        
+        with self._queue_lock:
+            self._queue.clear()
+            self._pending_users.clear()
+            self._counters["pending_users"] = 0
         
         async with self._condition:
             self._condition.notify_all()
@@ -258,6 +282,10 @@ class MemoryGraphRuntime:
                 await asyncio.wait_for(task, timeout=5.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
+                
+        if self.status == GraphRuntimeStatus.RUNNING:
+            self.status = GraphRuntimeStatus.NOT_STARTED
+            
         self._publish()
 
     async def _run(self) -> None:
@@ -287,28 +315,26 @@ class MemoryGraphRuntime:
             with sqlite3.connect(self.db_path, isolation_level=None) as conn:
                 conn.execute("PRAGMA foreign_keys=ON")
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    res = converge_user_graph(conn, user_id=user_id, max_attempts=self.max_attempts)
-                    conn.execute("COMMIT")
-                    
-                    if res.status.name == "NOOP_CURRENT":
-                        self._counters["current_noop_count"] += 1
-                    elif res.status.name == "REBUILT_MISSING":
-                        self._counters["rebuilt_missing_count"] += 1
-                    elif res.status.name == "REBUILT_STALE":
-                        self._counters["rebuilt_stale_count"] += 1
-                    elif res.status.name == "SOURCE_CHURN_RETRY_EXHAUSTED":
-                        self._counters["churn_exhausted_count"] += 1
-                        
-                except Exception as e:
-                    conn.execute("ROLLBACK")
-                    raise e
+                res = converge_user_graph(conn, user_id=user_id, max_attempts=self.max_attempts)
+                
+                if res.status.name == "NOOP_CURRENT":
+                    self._counters["current_noop_count"] += 1
+                elif res.status.name == "REBUILT_MISSING":
+                    self._counters["rebuilt_missing_count"] += 1
+                elif res.status.name == "REBUILT_STALE":
+                    self._counters["rebuilt_stale_count"] += 1
+                elif res.status.name == "SOURCE_CHURN_RETRY_EXHAUSTED":
+                    self._counters["churn_exhausted_count"] += 1
                     
         except GraphConvergenceIntegrityError:
             self._counters["integrity_block_count"] += 1
+            self.status = GraphRuntimeStatus.DEGRADED
+            self._publish(GraphRuntimeReasonCode.CONVERGENCE_INTEGRITY_FAILURE)
         except Exception as exc:
-            logger.error(f"Worker exception: {exc}")
+            logger.error(
+                "[MemoryGraphRuntime] worker failed: error_type=%s",
+                exc.__class__.__name__,
+            )
             self.status = GraphRuntimeStatus.DEGRADED
             self._publish(GraphRuntimeReasonCode.WORKER_EXCEPTION)
 

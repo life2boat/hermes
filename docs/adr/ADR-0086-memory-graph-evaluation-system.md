@@ -19,3 +19,6 @@ The evaluation system relies on the following design decisions:
 
 ## Status
 Accepted
+
+## PR-6.1 verification
+PR #204 was squash-merged as `db9620284cac8e1fe6af6c8420a1dfbf8194a557`. On that exact canonical main tree, the candidate corpus digest was `6c5df3e4f152cbc48d3b674a37ed5935a62bd327ca1eda2790d9770d9ad92bda`; two runs passed with byte-identical reports and report IDs. Same-revision support-value tamper is verified through the real graph-read hydration path as a hard integrity failure. This does not activate graph runtime, providers, Qdrant, or production access.

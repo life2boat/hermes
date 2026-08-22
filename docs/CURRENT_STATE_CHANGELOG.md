@@ -1010,3 +1010,8 @@ PR-6: Deterministic Memory Graph Retrieval & Convergence Evals implementation ca
 
 ## Memory Graph V3 (PR-6.1)
 - Added PR-6.1 candidate status to CURRENT_STATE.md.
+
+## 2026-08-22 — Memory Graph V3 PR-6.1 closure
+- PR #204 merged by ordinary squash commit `db9620284cac8e1fe6af6c8420a1dfbf8194a557` after exact-head CI passed.
+- Exact-main deterministic corpus validation passed twice: candidate digest `6c5df3e4f152cbc48d3b674a37ed5935a62bd327ca1eda2790d9770d9ad92bda`; reports and report IDs were byte-identical.
+- Same-revision F5 semantic tamper is closed as a hard graph-read integrity failure; graph runtime and production remain inactive and unchanged.

@@ -1,4 +1,48 @@
 {
+  "schema_version": 1,
+  "engine_version": 1,
   "dataset_version": "memory-graph-v1",
-  "description": "Deterministic Memory Graph Retrieval & Convergence Evals"
+  "corpus_status": "CANDIDATE",
+  "datasets": [
+    {
+      "category": "RETRIEVAL",
+      "path": "datasets/retrieval.jsonl",
+      "critical": true
+    },
+    {
+      "category": "FRESHNESS",
+      "path": "datasets/freshness.jsonl",
+      "critical": true
+    },
+    {
+      "category": "PRIVACY",
+      "path": "datasets/privacy.jsonl",
+      "critical": true
+    },
+    {
+      "category": "ISOLATION",
+      "path": "datasets/isolation.jsonl",
+      "critical": true
+    },
+    {
+      "category": "INTEGRITY",
+      "path": "datasets/integrity.jsonl",
+      "critical": true
+    },
+    {
+      "category": "CONVERGENCE",
+      "path": "datasets/convergence.jsonl",
+      "critical": true
+    },
+    {
+      "category": "DETERMINISM",
+      "path": "datasets/determinism.jsonl",
+      "critical": true
+    },
+    {
+      "category": "TRANSACTION",
+      "path": "datasets/transaction.jsonl",
+      "critical": true
+    }
+  ]
 }

@@ -45,6 +45,7 @@ class MemoryVectorRuntime:
             _MAX_INTERVAL_SECONDS,
             max(_MIN_INTERVAL_SECONDS, float(interval_seconds)),
         )
+        self.graph_runtime = None
         self._bridge_factory = bridge_factory or self._default_bridge_factory
         self._bridge: HealBiteMemoryBridge | None = None
         self._task: asyncio.Task[None] | None = None
@@ -64,14 +65,14 @@ class MemoryVectorRuntime:
             ),
         )
 
-    @staticmethod
-    def _default_bridge_factory(db_path: Path) -> HealBiteMemoryBridge:
+    def _default_bridge_factory(self, db_path: Path) -> HealBiteMemoryBridge:
         adapter = QdrantMemoryAdapter(enabled=True)
         return HealBiteMemoryBridge(
             db_path,
             qdrant_adapter=adapter,
             background_write=False,
             ensure_schema_on_init=False,
+            graph_runtime=self.graph_runtime,
         )
 
     @property

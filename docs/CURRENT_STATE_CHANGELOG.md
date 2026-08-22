@@ -1015,3 +1015,13 @@ PR-6: Deterministic Memory Graph Retrieval & Convergence Evals implementation ca
 - PR #204 merged by ordinary squash commit `db9620284cac8e1fe6af6c8420a1dfbf8194a557` after exact-head CI passed.
 - Exact-main deterministic corpus validation passed twice: candidate digest `6c5df3e4f152cbc48d3b674a37ed5935a62bd327ca1eda2790d9770d9ad92bda`; reports and report IDs were byte-identical.
 - Same-revision F5 semantic tamper is closed as a hard graph-read integrity failure; graph runtime and production remain inactive and unchanged.
+
+## 2026-08-22 - Memory Graph V3 PR-7 closure
+- PR #206 exact-head CI PASS;
+- squash merge SHA e60b2af92226eae0d14c79ca382629613a387e39;
+- exact-main validation PASS;
+- runtime integration repository-only;
+- default mode disabled;
+- shadow capability available but inactive;
+- serve unavailable;
+- no production/runtime activation.

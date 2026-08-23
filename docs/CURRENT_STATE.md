@@ -1040,3 +1040,26 @@ PRODUCTION_EXECUTION=false
 PRODUCTION_CHANGED=false
 QDRANT_MUTATION=false
 PROVIDER_CALLS=0
+
+## Hermes / HealBite - Memory & Graph Engineering v3 PR-8 (Shadow Activation Readiness)
+
+- PR-8 Shadow Activation Readiness is COMPLETE.
+- PR-8 implemented fail-closed production readiness, canary health receipts, and a staged migration rehearsal contract.
+- Verified against canonical exact-main SHA 3ae741f92dcbeef81500595dac317c616369dec7.
+
+**Final Truth Values**:
+PR8_SHADOW_ACTIVATION_READINESS_COMPLETE=true
+GRAPH_RUNTIME_MODE_DEFAULT=disabled
+GRAPH_SHADOW_RUNTIME_AVAILABLE=true
+GRAPH_SHADOW_PRODUCTION_ACTIVATED=false
+GRAPH_SERVE_MODE_AVAILABLE=false
+GRAPH_RUNTIME_ACTIVATED=false
+GRAPH_CONTEXT_SERVED_TO_USERS=false
+PRODUCTION_ACTIVATION_READINESS=PASS
+PRODUCTION_ACTIVATION_AUTHORIZED=false
+PRODUCTION_EXECUTION=false
+PRODUCTION_CHANGED=false
+QDRANT_READ=false
+QDRANT_MUTATION=false
+PROVIDER_CALLS=0
+DEPLOYMENT_PERFORMED=false

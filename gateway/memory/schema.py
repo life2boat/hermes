@@ -152,6 +152,10 @@ _EXPECTED_COLUMNS: dict[str, tuple[tuple[str, str, int, str | None, int], ...]] 
 _LEGACY_FACTS_COLUMNS = tuple(
     column for column in _EXPECTED_COLUMNS[FACTS_TABLE] if column[0] != "vector_revision"
 )
+_LEGACY_FACTS_COLUMNS_NOT_NULL = tuple(
+    ("source", "TEXT", 1, "'unknown'", 0) if c[0] == "source" else c
+    for c in _LEGACY_FACTS_COLUMNS
+)
 _VECTOR_REVISION_COLUMN = next(
     column for column in _EXPECTED_COLUMNS[FACTS_TABLE] if column[0] == "vector_revision"
 )
@@ -159,6 +163,7 @@ _VECTOR_REVISION_COLUMN = next(
 # fresh databases use target CREATE order, while legacy upgrades preserve every
 # pre-existing column position and append vector_revision.
 _MIGRATED_LEGACY_FACTS_COLUMNS = (*_LEGACY_FACTS_COLUMNS, _VECTOR_REVISION_COLUMN)
+_MIGRATED_LEGACY_FACTS_COLUMNS_NOT_NULL = (*_LEGACY_FACTS_COLUMNS_NOT_NULL, _VECTOR_REVISION_COLUMN)
 
 _EXPECTED_INDEX_COLUMNS = {
     f"idx_{FACTS_TABLE}_user_id": ("user_id",),
@@ -226,6 +231,8 @@ def classify_memory_convergence_schema(
         _EXPECTED_COLUMNS[FACTS_TABLE],
         _LEGACY_FACTS_COLUMNS,
         _MIGRATED_LEGACY_FACTS_COLUMNS,
+        _LEGACY_FACTS_COLUMNS_NOT_NULL,
+        _MIGRATED_LEGACY_FACTS_COLUMNS_NOT_NULL,
     }:
         return MemorySchemaClassification.INCOMPATIBLE
 
@@ -246,7 +253,7 @@ def classify_memory_convergence_schema(
             return MemorySchemaClassification.INCOMPATIBLE
 
     expected_names = set(_EXPECTED_COLUMNS) | set(_EXPECTED_INDEX_COLUMNS)
-    if set(objects) != expected_names or facts_columns == _LEGACY_FACTS_COLUMNS:
+    if set(objects) != expected_names or facts_columns in (_LEGACY_FACTS_COLUMNS, _LEGACY_FACTS_COLUMNS_NOT_NULL):
         return MemorySchemaClassification.KNOWN_COMPATIBLE_PARTIAL
 
     meta = conn.execute(
@@ -275,7 +282,7 @@ def migrate_memory_convergence_schema(
 
     if classification is MemorySchemaClassification.ABSENT:
         conn.execute(FACTS_CREATE_SQL)
-    elif _columns(conn, FACTS_TABLE) == _LEGACY_FACTS_COLUMNS:
+    elif _columns(conn, FACTS_TABLE) in (_LEGACY_FACTS_COLUMNS, _LEGACY_FACTS_COLUMNS_NOT_NULL):
         conn.execute(
             f"ALTER TABLE {FACTS_TABLE} "
             "ADD COLUMN vector_revision INTEGER NOT NULL DEFAULT 1"

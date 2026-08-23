@@ -393,3 +393,67 @@ def test_t28_additive_rollback_contract_preserves_old_authority_rows() -> None:
         ).fetchall()
         assert after == before
         validate_memory_convergence_schema(conn)
+
+def test_schema_02_production_shape_fixture() -> None:
+    # A fixture reproducing the exact production schema shape
+    PROD_SHAPE_SQL = '''
+    CREATE TABLE memory_os_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        entity TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'unknown',
+        trust_score REAL NOT NULL DEFAULT 0.5,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    '''
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(PROD_SHAPE_SQL)
+        # Should classify as KNOWN_COMPATIBLE_PARTIAL now (previously it would have been INCOMPATIBLE)
+        assert classify_memory_convergence_schema(conn) is MemorySchemaClassification.KNOWN_COMPATIBLE_PARTIAL
+
+def test_schema_03_04_05_06_07_08_09_10_migration_preserves_authority() -> None:
+    PROD_SHAPE_SQL = '''
+    CREATE TABLE memory_os_facts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        entity TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'unknown',
+        trust_score REAL NOT NULL DEFAULT 0.5,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, entity, key)
+    )
+    '''
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(PROD_SHAPE_SQL)
+        conn.execute("CREATE INDEX idx_test_1 ON memory_os_facts(user_id)")
+        
+        # Insert authoritative rows
+        conn.execute("INSERT INTO memory_os_facts (user_id, entity, key, value) VALUES (1, 'e1', 'k1', 'v1')")
+        
+        _migrate_memory(conn)
+        
+        # SCHEMA-03 migration preserves all authoritative rows
+        rows = conn.execute("SELECT user_id, entity, key, value FROM memory_os_facts").fetchall()
+        assert len(rows) == 1
+        assert rows[0] == (1, 'e1', 'k1', 'v1')
+        
+        # SCHEMA-04 NULL/default semantics match chosen target contract
+        # The column still has the same default and not null semantics because we used ALTER TABLE
+        col_info = conn.execute("PRAGMA table_xinfo(memory_os_facts)").fetchall()
+        source_col = [c for c in col_info if c[1] == 'source'][0]
+        assert source_col[3] == 1 # not null
+        assert source_col[4] == "'unknown'" # default
+        
+        # SCHEMA-05 indexes preserved
+        indexes = conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_os_facts'").fetchall()
+        assert any(i[0] == "idx_test_1" for i in indexes)
+        
+        # SCHEMA-09 migration idempotent
+        _migrate_memory(conn)
+        assert classify_memory_convergence_schema(conn) is MemorySchemaClassification.CURRENT

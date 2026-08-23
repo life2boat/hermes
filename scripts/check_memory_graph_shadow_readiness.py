@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""Offline CLI for MemoryGraphShadowActivationPreflight verification.
-
-Usage:
-    python scripts/check_memory_graph_shadow_readiness.py \
-        --subject-main-sha <sha> \
-        --expected-subject-main-sha <sha> \
-        --candidate-image-revision <rev> \
-        --db-path-safe <true|false> \
-        --db-integrity <ok|...> \
-        --foreign-key-violations <N> \
-        --graph-schema-classification <ABSENT|CURRENT|KNOWN_COMPATIBLE_PARTIAL|INCOMPATIBLE> \
-        --backup-required <true|false> \
-        --backup-valid <true|false> \
-        --rollback-proven <true|false> \
-        --shadow-mode-available <true|false> \
-        --serve-mode-available <true|false> \
-        --graph-context-served-to-users <true|false> \
-        --production-activation-authorized <true|false> \
-        [--output <file>]
-
-All inputs/outputs are offline. No production or network access.
-"""
+"""Offline CLI for MemoryGraphShadowActivationPreflight verification."""
 
 from __future__ import annotations
 
@@ -34,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 from ai_engineering.memory_graph_activation_readiness import (
     check_activation_readiness,
     serialize_preflight,
+    MemoryGraphActivationError,
 )
 
 def _parse_bool(val: str) -> bool:
@@ -41,7 +21,7 @@ def _parse_bool(val: str) -> bool:
         return True
     if val.lower() == "false":
         return False
-    raise ValueError(f"Invalid boolean string: {val}")
+    raise MemoryGraphActivationError("INVALID_CLI_BOOLEAN")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -51,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--subject-main-sha", required=True)
     parser.add_argument("--expected-subject-main-sha", required=True)
     parser.add_argument("--candidate-image-revision", required=True)
+    parser.add_argument("--expected-candidate-image-revision", required=True)
     parser.add_argument("--db-path-safe", required=True, type=_parse_bool)
     parser.add_argument("--db-integrity", required=True)
     parser.add_argument("--foreign-key-violations", required=True, type=int)
@@ -64,50 +45,51 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--production-activation-authorized", required=True, type=_parse_bool)
     parser.add_argument("--output", default=None)
 
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code
 
-    preflight = check_activation_readiness(
-        subject_main_sha=args.subject_main_sha,
-        candidate_image_revision=args.candidate_image_revision,
-        db_path_safe=args.db_path_safe,
-        db_integrity=args.db_integrity,
-        foreign_key_violations=args.foreign_key_violations,
-        graph_schema_classification=args.graph_schema_classification,
-        backup_required=args.backup_required,
-        rollback_proven=args.rollback_proven,
-        shadow_mode_available=args.shadow_mode_available,
-        serve_mode_available=args.serve_mode_available,
-        graph_context_served_to_users=args.graph_context_served_to_users,
-        production_activation_authorized=args.production_activation_authorized,
-        expected_subject_main_sha=args.expected_subject_main_sha,
-    )
+    try:
+        preflight = check_activation_readiness(
+            subject_main_sha=args.subject_main_sha,
+            expected_subject_main_sha=args.expected_subject_main_sha,
+            candidate_image_revision=args.candidate_image_revision,
+            expected_candidate_image_revision=args.expected_candidate_image_revision,
+            db_path_safe=args.db_path_safe,
+            db_integrity=args.db_integrity,
+            foreign_key_violations=args.foreign_key_violations,
+            graph_schema_classification=args.graph_schema_classification,
+            backup_required=args.backup_required,
+            backup_valid=args.backup_valid,
+            rollback_proven=args.rollback_proven,
+            shadow_mode_available=args.shadow_mode_available,
+            serve_mode_available=args.serve_mode_available,
+            graph_context_served_to_users=args.graph_context_served_to_users,
+            production_activation_authorized=args.production_activation_authorized,
+        )
+    except MemoryGraphActivationError as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        return 1
+    except ValueError:
+        print("ERROR: INVALID_CLI_INPUT", file=sys.stderr)
+        return 1
 
-    reason_codes = list(preflight.reason_codes)
-    if preflight.backup_required and not args.backup_valid:
-        reason_codes.append("BACKUP_INVALID")
-        
-    verdict = "PASS" if not reason_codes else "BLOCKED"
-    
     preflight_json = serialize_preflight(preflight)
-    import json
-    preflight_dict = json.loads(preflight_json)
-    preflight_dict["reason_codes"] = sorted(set(reason_codes))
-    preflight_dict["verdict"] = verdict
-    preflight_json = json.dumps(preflight_dict, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     if args.output:
         out_path = Path(args.output)
         if out_path.exists():
-            print(f"ERROR: output file already exists (create-only): {out_path}", file=sys.stderr)
+            print("ERROR: OUTPUT_FILE_EXISTS", file=sys.stderr)
             return 1
         out_path.write_bytes(preflight_json)
     else:
         sys.stdout.buffer.write(preflight_json)
         sys.stdout.buffer.write(b"\n")
 
-    if verdict == "PASS":
+    if preflight.verdict == "PASS":
         return 0
-    elif verdict == "BLOCKED":
+    elif preflight.verdict == "BLOCKED":
         return 2
     return 1
 

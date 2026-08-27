@@ -103,7 +103,7 @@ class ExceptionPolicy:
 @dataclass
 class ScanResult:
     image_id: str
-    oci_revision: str
+    oci_revision: str | None
     config_digest: str
     layer_digests: tuple[str, ...]
     stored_layer_identities: tuple[str, ...]
@@ -112,6 +112,11 @@ class ScanResult:
     layer_findings: int = 0
     final_filesystem_findings: int = 0
     layers_scanned: int = 0
+    oci_index_digest: str | None = None
+    platform_manifest_digest: str | None = None
+    archive_config_identity: str | None = None
+    compressed_blob_digests: tuple[str, ...] = ()
+    uncompressed_diff_ids: tuple[str, ...] = ()
     files_scanned: int = 0
     bytes_scanned: int = 0
     evidence: list[FindingEvidence] = field(default_factory=list)
@@ -573,14 +578,25 @@ def _oci_layout(
         if digest in identities:
             raise ImageScanError("IMAGE_ARCHIVE_LAYER_DUPLICATE")
         identities.append(digest)
-        if media_type.endswith("+gzip"):
-            expanded = staging / f"layer-{len(layers):08d}.tar"
+        if media_type.endswith("+gzip") or media_type.endswith("+zstd"):
+            # containerd docker save writes uncompressed tarballs but keeps the original media_type!
+            # so we check if it is really compressed
+            import gzip
             try:
-                with gzip.open(path, "rb") as source:
-                    _copy_stream(source, expanded)
-            except (EOFError, OSError) as exc:
-                raise ImageScanError("IMAGE_LAYER_COMPRESSION_INVALID") from exc
-            path = expanded
+                with gzip.open(path, "rb") as test_gz:
+                    test_gz.read(1)
+                is_gzip = True
+            except OSError:
+                is_gzip = False
+            
+            if is_gzip:
+                expanded = staging / f"layer-{len(layers):08d}.tar"
+                try:
+                    with gzip.open(path, "rb") as source:
+                        _copy_stream(source, expanded)
+                except (EOFError, OSError) as exc:
+                    raise ImageScanError("IMAGE_LAYER_COMPRESSION_INVALID") from exc
+                path = expanded
         elif media_type not in (
             "application/vnd.oci.image.layer.v1.tar",
             "application/vnd.oci.image.layer.nondistributable.v1.tar",
@@ -595,8 +611,8 @@ def _layout(
 ) -> tuple[bytes, tuple[Path, ...], tuple[str, ...]]:
     return (
         _docker_layout(members)
-        if "manifest.json" in members
-        else _oci_layout(members, staging)
+        if "oci-layout" in members and "index.json" in members
+        else _docker_layout(members)
     )
 
 
@@ -773,6 +789,9 @@ def _scan_layer(
                 if member.isdir():
                     tree[member_path] = (0, 0)
                     continue
+                if member.ischr() or member.isblk() or member.isfifo():
+                    tree[member_path] = (0, 0)
+                    continue
                 if not member.isfile():
                     raise ImageScanError("IMAGE_LAYER_MEMBER_TYPE_UNSUPPORTED")
                 source = layer.extractfile(member)
@@ -821,13 +840,55 @@ def _analyze_image_archive_staged(
     protected_names: Iterable[str] = (),
     exact_secret_values: Iterable[bytes] = (),
 ) -> ScanResult:
-    config_bytes, layers, stored_ids = _layout(
-        _outer_members(archive, staging), staging
-    )
+    members = _outer_members(archive, staging)
+    is_oci = "oci-layout" in members and "index.json" in members
+    config_bytes, layers, stored_ids = _layout(members, staging)
+    
     config = _json_object(config_bytes, "IMAGE_CONFIG_INVALID")
-    image_id, diff_ids, revision = _config_identity(
-        config, config_bytes, expected_image_id, expected_revision
-    )
+    # expected_image_id is NOT passed to _config_identity anymore, we check it explicitly
+    # if it doesn't match the OCI_INDEX_DIGEST or CONFIG_IMAGE_ID
+    image_id = "sha256:" + _sha256(config_bytes)
+    
+    diff_ids_raw = config.get("rootfs", {}).get("diff_ids", [])
+    if not isinstance(diff_ids_raw, list) or not all(isinstance(item, str) for item in diff_ids_raw):
+        raise ImageScanError("IMAGE_CONFIG_INVALID")
+    diff_ids = tuple(diff_ids_raw)
+    
+    labels = config.get("config", {}).get("Labels", {})
+    revision = labels.get("org.opencontainers.image.revision") if isinstance(labels, dict) else None
+    
+    if expected_revision is not None and revision != expected_revision:
+        raise ImageScanError("IMAGE_OCI_REVISION_MISMATCH")
+        
+    if IMAGE_ID_RE.fullmatch(expected_image_id) is None:
+        raise ImageScanError("IMAGE_IDENTITY_MISMATCH")
+        
+    oci_index_digest = None
+    platform_manifest_digest = None
+    archive_config_identity = None
+    compressed_blob_digests = ()
+    uncompressed_diff_ids = diff_ids
+    
+    if is_oci:
+        oci_index_digest = "sha256:" + _hash_file(members["index.json"])
+        index = _json_object(_read_limited(members["index.json"], "OCI_INDEX_INVALID"), "OCI_INDEX_INVALID")
+        manifests = index.get("manifests", [])
+        if len(manifests) == 1:
+            platform_manifest_digest = manifests[0].get("digest")
+            manifest_path = staging / platform_manifest_digest.replace(":", "_")
+            if manifest_path.exists():
+                manifest = _json_object(_read_limited(manifest_path, "OCI_MANIFEST_INVALID"), "OCI_MANIFEST_INVALID")
+                archive_config_identity = manifest.get("config", {}).get("digest")
+        compressed_blob_digests = stored_ids
+        
+        # Check expected image ID against ANY of these valid identities, avoiding conflation
+        if expected_image_id not in (image_id, archive_config_identity, oci_index_digest):
+            raise ImageScanError("IMAGE_IDENTITY_MISMATCH")
+    else:
+        archive_config_identity = image_id
+        if image_id != expected_image_id:
+            raise ImageScanError("IMAGE_IDENTITY_MISMATCH")
+
     if len(diff_ids) != len(layers):
         raise ImageScanError("IMAGE_LAYER_COUNT_MISMATCH")
     for layer_path, diff_id in zip(layers, diff_ids, strict=True):
@@ -843,6 +904,11 @@ def _analyze_image_archive_staged(
         diff_ids,
         stored_ids,
         _policy_sha(repository_root, names),
+        oci_index_digest=oci_index_digest,
+        platform_manifest_digest=platform_manifest_digest,
+        archive_config_identity=archive_config_identity,
+        compressed_blob_digests=compressed_blob_digests,
+        uncompressed_diff_ids=uncompressed_diff_ids,
     )
     metadata = _scan_bytes(config_bytes, protected_names=names, exact_values=values)
     result.metadata_findings = len(metadata)

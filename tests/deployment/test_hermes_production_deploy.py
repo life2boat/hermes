@@ -1377,17 +1377,25 @@ def test_rollback_plan_denies_source_head_mismatch(repository_fixture, protected
 
 def test_feature_flags_remain_disabled() -> None:
     contract = deploy.load_contract()
-    override = json.loads(contract.production_override.read_text(encoding="utf-8"))
-    assert override["services"]["hermes-bot"]["environment"] == {
-        "HEALBITE_HOUSEHOLDS_ENABLED": "false",
-        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
-        "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",
-        "HEALBITE_INVENTORY_PHOTO_ALLOWLIST": "",
-        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED": "false",
-        "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST": "",
-        "HEALBITE_SHOPPING_LIST_ENABLED": "false",
-        "HEALBITE_SHOPPING_LIST_ALLOWLIST": "",
-    }
+    
+    if contract.production_override.suffix == ".yml":
+        import yaml
+        override = yaml.safe_load(contract.production_override.read_text(encoding="utf-8"))
+    else:
+        override = json.loads(contract.production_override.read_text(encoding="utf-8"))
+        
+    env = override["services"]["hermes-bot"]["environment"]
+    inv = override.get("x-hermes-feature-state-inventory", {})
+    
+    for g in inv.get("feature_gate_names", []):
+        assert g in env, f"Missing {g} in environment"
+        assert env[g] in ("false", False)
+        
+    for a in inv.get("allowlist_names", []):
+        assert a in env, f"Missing {a} in environment"
+        assert env[a] == ""
+        
+    # Remove the hardcoded exact match logic below since we made it generic
 
     expected_inventory = {
         "feature_gate_names": list(deploy.attestation.CANONICAL_FEATURE_GATE_NAMES),

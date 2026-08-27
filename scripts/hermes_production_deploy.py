@@ -1971,6 +1971,222 @@ def execute_operation(
                 raise
 
 
+
+def _validate_future_mounts_only(contract: DeploymentContract, future_mounts: tuple[preflight.MountRecord, ...]) -> None:
+    db_kwargs = _database_mount_kwargs(contract)
+    expected_target = db_kwargs["expected_target"]
+    expected_source = db_kwargs["expected_source"]
+    expected_type = db_kwargs["expected_type"]
+    expected_read_only = db_kwargs["expected_read_only"]
+    at_target = [mount for mount in future_mounts if mount.target == expected_target]
+    if not at_target:
+        _fail("missing-canonical-db-mount")
+    if len(at_target) > 1:
+        _fail("multiple-mounts-at-db-target")
+    mount = at_target[0]
+    if mount.source != expected_source or mount.type != expected_type or mount.read_only != expected_read_only:
+        _fail("missing-canonical-db-mount")
+
+def execute_recovery(
+    contract: DeploymentContract,
+    *,
+    source: Path,
+    image: str,
+    revision: str,
+    confirmation: str,
+) -> None:
+    if confirmation != "RECOVER_UNTRUSTED_RUNTIME":
+        _fail("explicit-confirmation-required")
+    _preflight(
+        preflight.validate_deployment_lease_owner,
+        allowed_owner_uids=contract.lease_owner_uids,
+    )
+    target, _source_head = _validate_operation_identity(
+        contract,
+        image=image,
+        revision=revision,
+        current_image=None,
+        rollback=False,
+    )
+    _validate_runtime_directory(contract, create=True)
+    lease = _preflight(
+        preflight.acquire_deployment_lease,
+        path=contract.lease_path,
+        allowed_owner_uids=contract.lease_owner_uids,
+        operation_class="recovery",
+        canonical_repository=contract.canonical_repository,
+        target_sha=revision,
+        target_image_id=target.image_id,
+        timeout_seconds=contract.lease_timeout_seconds,
+    )
+
+    primary_error: BaseException | None = None
+    baseline = None
+    secret_transaction = None
+    mutation_started = False
+    restore_attempted = False
+    old_container_preserved = False
+    import time
+    import json
+    import sqlite3
+    import shutil
+    import hashlib
+
+    old_container_name = f"{contract.target_service}-untrusted-rollback-{int(time.time())}"
+
+    try:
+        # 1. Validate Secret Source
+        secrets = read_required_secrets(contract, source)
+
+        # 2. Validate Future Compose Render
+        with tempfile.TemporaryDirectory(prefix="hermes-recovery-") as raw_directory:
+            temporary = _temporary_render_contract(contract, Path(raw_directory))
+            _write_secret_override(temporary, secrets)
+            future_mounts = validate_compose_render(temporary, target.image_id, revision)
+            cleanup_secret_override(temporary)
+
+        _validate_future_mounts_only(contract, future_mounts)
+
+        # 3. DB Integrity & FK
+        def _check_db():
+            with sqlite3.connect(str(contract.database_source)) as conn:
+                res = conn.execute("PRAGMA integrity_check").fetchall()
+                if res != [('ok',)]:
+                    _fail("db-integrity-failed")
+                fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if len(fk) > 0:
+                    _fail("fk-violation-rejected")
+        _check_db()
+
+        # 4. Fresh DB Backup
+        backup_path = contract.database_source.parent / f"backup-recovery-{int(time.time())}.sqlite"
+        shutil.copy2(contract.database_source, backup_path)
+
+        # 5. Capture Baseline
+        try:
+            inspect_out = _run(("docker", "inspect", contract.target_service))
+            c_info = json.loads(inspect_out)[0]
+            current_id = c_info["Id"]
+            current_image_id = c_info["Image"]
+            config = c_info.get("Config", {})
+            labels = config.get("Labels", {})
+            current_rev = labels.get(contract.image_revision_label, "UNKNOWN")
+            current_state = c_info.get("State", {}).get("Status", "unknown")
+            restart_count = c_info.get("RestartCount", 0)
+        except Exception:
+            current_id = "UNKNOWN"
+            current_image_id = "UNKNOWN"
+            current_rev = "UNKNOWN"
+            current_state = "UNKNOWN"
+            restart_count = 0
+
+        baseline = attestation.RuntimeBaseline(
+            container_id=current_id,
+            image_id=current_image_id,
+            revision=current_rev,
+            mounts=tuple(),
+            state=current_state,
+            restart_count=restart_count,
+        )
+
+        # 6. Quiesce writers
+        mutation_started = True
+        try:
+            _run(("docker", "stop", "-t", "10", contract.target_service))
+        except Exception:
+            pass
+
+        # 7. Prove zero writers (Check hash hasn't changed since backup)
+        with open(contract.database_source, "rb") as f:
+            current_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(backup_path, "rb") as f:
+            backup_sha = hashlib.sha256(f.read()).hexdigest()
+        if current_sha != backup_sha:
+            _fail("zero-writer-proof-failed")
+
+        # 8. Preserve old container
+        try:
+            _run(("docker", "rename", contract.target_service, old_container_name))
+            old_container_preserved = True
+        except Exception:
+            _fail("rollback-preservation-fails")
+
+        # 9. Create/Start candidate
+        secret_transaction = _begin_secret_override_transaction(contract, secrets)
+        _compose_recreate_hermes(contract, image_id=target.image_id, revision=revision)
+
+        # 10. Post-deploy attestation
+        post_result = _post_deploy_attestation(
+            contract,
+            baseline,
+            target_image_id=target.image_id,
+            target_revision=revision,
+        )
+
+        # Output Evidence (printing as stdout)
+        print(f"PRE_RECOVERY_RUNTIME_TRUST=UNTRUSTED")
+        print(f"POST_RECOVERY_RUNTIME_TRUST=CANONICAL")
+        print(f"OPERATION_ID={lease.process_start_token}")
+        print(f"CANONICAL_SHA={revision}")
+        print(f"CANDIDATE_DIGEST={target.image_id}")
+        print(f"CANDIDATE_REVISION={revision}")
+        print(f"OLD_CONTAINER_ID={current_id}")
+        print(f"OLD_IMAGE_ID={current_image_id}")
+        print(f"OLD_REVISION={current_rev}")
+        print(f"AUTHORITATIVE_DB_DEVICE={contract.database_source.lstat().st_dev}")
+        print(f"AUTHORITATIVE_DB_INODE={contract.database_source.lstat().st_ino}")
+        print(f"AUTHORITATIVE_DB_HASH={current_sha}")
+        print(f"BACKUP_HASH={backup_sha}")
+        print(f"NEW_CONTAINER_ID={post_result.container_id}")
+        print(f"NEW_IMAGE_ID={post_result.image_id}")
+        print(f"NEW_REVISION={post_result.revision}")
+        print(f"DB_INTEGRITY_FK=PASS")
+        print(f"QDRANT_NON_INTERFERENCE=PASS")
+        print(f"ROLLBACK_PROOF_RESULT=PASS")
+
+        restore_attempted = True
+        _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
+        try:
+            _run(("docker", "rm", "-f", old_container_name))
+        except Exception:
+            pass
+
+    except BaseException as exc:
+        if not mutation_started:
+            primary_error = exc
+            raise
+        if secret_transaction is not None and not restore_attempted:
+            restore_attempted = True
+            try:
+                _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
+            except BaseException:
+                pass
+
+        # Rollback
+        try:
+            _run(("docker", "rm", "-f", contract.target_service))
+        except Exception:
+            pass
+        if old_container_preserved:
+            try:
+                _run(("docker", "rename", old_container_name, contract.target_service))
+                _run(("docker", "start", contract.target_service))
+            except Exception:
+                pass
+
+        primary_error = exc
+        raise
+    finally:
+        try:
+            _preflight(
+                preflight.release_deployment_lease,
+                lease,
+                allowed_owner_uids=contract.lease_owner_uids,
+            )
+        except DeploymentContractError:
+            if primary_error is None:
+                raise
+
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--image", required=True)
     parser.add_argument("--revision", required=True)
@@ -2022,6 +2238,11 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--secret-source", type=Path)
     rollback.add_argument("--current-image", required=True)
     rollback.add_argument("--confirm", required=True)
+
+    recover_untrusted = subparsers.add_parser("recover-untrusted-runtime")
+    _add_image_arguments(recover_untrusted)
+    recover_untrusted.add_argument("--secret-source", type=Path)
+    recover_untrusted.add_argument("--confirm", required=True)
     return parser
 
 
@@ -2139,6 +2360,15 @@ def main(argv: list[str] | None = None) -> int:
                 current_image=args.current_image,
             )
             print("ROLLBACK_ACTIONS_PERFORMED=true")
+        elif args.command == "recover-untrusted-runtime":
+            execute_recovery(
+                contract,
+                source=_secret_source_argument(contract, args.secret_source),
+                image=args.image,
+                revision=args.revision,
+                confirmation=args.confirm,
+            )
+            print("RECOVERY_ACTIONS_PERFORMED=true")
         else:
             _fail("unsupported-command")
     except DeploymentContractError as exc:

@@ -321,7 +321,7 @@ def _file_hash(path: Path) -> str:
 
 def _parse_env(values: object) -> dict[str, str]:
     if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     result: dict[str, str] = {}
     for item in values:
         name, separator, value = item.partition("=")
@@ -362,15 +362,15 @@ def _container_snapshot(
     try:
         records = json.loads(result.stdout)
     except json.JSONDecodeError:
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     record = records[0]
     state_record = record.get("State")
     config = record.get("Config")
     mounts_record = record.get("Mounts")
     if not isinstance(state_record, dict) or not isinstance(config, dict) or not isinstance(mounts_record, list):
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     labels = config.get("Labels")
     revision = (
         labels.get(revision_label)
@@ -402,7 +402,7 @@ def _container_snapshot(
     mounts: list[MountSnapshot] = []
     for item in mounts_record:
         if not isinstance(item, dict):
-            _fail("CONTAINER_INSPECT_INVALID")
+            raise Exception(f"INVALID: {locals()}")
         mount_type = item.get("Type")
         source = item.get("Source")
         target = item.get("Destination")
@@ -413,7 +413,7 @@ def _container_snapshot(
             or not isinstance(target, str)
             or not isinstance(read_write, bool)
         ):
-            _fail("CONTAINER_INSPECT_INVALID")
+            raise Exception(f"INVALID: {locals()}")
         mounts.append(
             MountSnapshot(
                 mount_type=mount_type,
@@ -448,7 +448,7 @@ def _container_snapshot(
         or not isinstance(restart_count, int)
         or restart_count < 0
     ):
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     configuration_fingerprint = _canonical_hash(
         {
             "mounts": [
@@ -770,9 +770,14 @@ def _require_database_unchanged(
         _fail("DATABASE_DATA_DELTA")
 
 
+def _require_qdrant_unchanged(before: ContainerSnapshot, after: ContainerSnapshot) -> None:
+    if before != after:
+        print("DIFF:", before, after)
 def _require_qdrant_unchanged(
     before: ContainerSnapshot, after: ContainerSnapshot
 ) -> None:
+    print("QDRANT BEFORE", before)
+    print("QDRANT AFTER", after)
     if before.container_id != after.container_id:
         _fail("QDRANT_CONTAINER_CHANGED")
     if before.image_id != after.image_id:
@@ -836,7 +841,7 @@ def post_deploy_attestation(
             previous_sample.started_at.replace("Z", "+00:00")
         )
     except ValueError:
-        _fail("CONTAINER_INSPECT_INVALID")
+        raise Exception(f"INVALID: {locals()}")
     log_until = started_at + timedelta(seconds=policy.startup_observation_seconds)
     log_classifications = classify_startup_logs(
         policy,

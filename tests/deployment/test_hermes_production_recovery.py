@@ -1,45 +1,212 @@
-from __future__ import annotations
+import pytest
+import sys
+import os
 import json
 import subprocess
-import pytest
 from pathlib import Path
+from dataclasses import replace
 
-# Note: this is a placeholder test suite that verifies the CLI wiring and fail-closed behaviors
-# of the new recover-untrusted-runtime command, ensuring it does not bypass the core requirements.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO_ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
-def run_cli(*args: str, **kwargs):
-    return subprocess.run(
-        ["python3", "scripts/hermes_production_deploy.py", *args],
-        capture_output=True,
-        text=True,
-        **kwargs,
+import hermes_production_deploy as deploy
+import hermes_post_deploy_attestation as attestation
+import hermes_deploy_preflight as preflight
+
+FAKE_SECRET = "placeholder-telegram-token"
+IMAGE = "ghcr.io/life2boat/hermes@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+REVISION = "c" * 40
+
+@pytest.fixture
+def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]:
+    source = tmp_path / "host-secrets.env"
+    source.write_text(f"TELEGRAM_BOT_TOKEN={FAKE_SECRET}\n", encoding="utf-8")
+    source.chmod(0o600)
+    runtime = tmp_path / "run" / "hermes"
+    runtime.parent.mkdir(mode=0o700, parents=True)
+    database_source = tmp_path / "production-db" / "healbite.db"
+    database_source.parent.mkdir(mode=0o700, parents=True)
+    database_source.write_bytes(b"synthetic-db")
+    database_source.chmod(0o600)
+    contract = replace(
+        deploy.load_contract(),
+        runtime_directory=runtime,
+        secret_override=runtime / "hermes-secrets-override.yml",
+        lease_path=runtime / "hermes-deployment-operation.json",
+        lease_owner_uids=frozenset({deploy._effective_uid()}),
+        approved_secret_source=source,
+        approved_source_owner_uids=frozenset({deploy._effective_uid()}),
+        database_source=database_source,
+        capacity_filesystem=tmp_path,
     )
+    return contract, source
 
-def test_recovery_requires_explicit_confirmation():
-    res = run_cli(
-        "recover-untrusted-runtime",
-        "--image", "fake",
-        "--revision", "fake",
-        "--confirm", "WRONG"
-    )
-    assert res.returncode != 0
-    assert "explicit-confirmation-required" in res.stdout
+class FakeProcessResult:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.returncode = returncode
 
-def test_ordinary_deploy_still_rejects_missing_mount():
-    # Ordinary deploy should still have the exact same logic and fail if not recovered.
-    # By ensuring we did not modify `execute-deploy` or `_ordinary_deploy_pre_mutation_barrier`,
-    # this constraint is preserved.
-    res = run_cli("execute-deploy", "--image", "fake", "--revision", "fake", "--confirm", "DEPLOY_HERMES_BOT")
-    # Will fail early with invalid image/repo checks, but it proves the path is unmodified.
-    assert res.returncode != 0
+@pytest.fixture
+def fake_docker(monkeypatch):
+    calls = []
+    responses = {}
 
-def test_ordinary_rollback_still_rejects_missing_revision():
-    # Similarly, execute-rollback is unmodified.
-    res = run_cli(
-        "execute-rollback",
-        "--image", "fake",
-        "--revision", "fake",
-        "--current-image", "fake",
-        "--confirm", "ROLLBACK_HERMES_BOT"
-    )
-    assert res.returncode != 0
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        cmd_str = " ".join(command)
+        if command[:2] == ("docker", "inspect"):
+            if "hermes-bot" in command:
+                res = responses.get("inspect_hermes", '[{"Id": "old_id", "Image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Config": {"Labels": {"org.opencontainers.image.revision": "0000000000000000000000000000000000000000"}}, "State": {"Status": "running", "RestartCount": 0}}]')
+            else:
+                res = responses.get("inspect_qdrant", '[{"Id": "q_id", "Image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "Created": "2024-01-01T00:00:00Z", "State": {"StartedAt": "2024-01-01T00:00:00Z", "Status": "running"}, "RestartCount": 0, "Mounts": [], "Config": {"Labels": {}, "Env": []}}]')
+            if isinstance(res, Exception):
+                raise res
+            return FakeProcessResult(stdout=res)
+        if "stop" in command:
+            err = responses.get("stop")
+            if callable(err): err = err()
+            if err: raise err
+            return FakeProcessResult()
+        if "rename" in command:
+            err = responses.get("rename")
+            if callable(err): err = err()
+            if err: raise err
+            return FakeProcessResult()
+        if "start" in command:
+            err = responses.get("start")
+            if callable(err): err = err()
+            if err: raise err
+            return FakeProcessResult()
+        if "rm" in command:
+            err = responses.get("rm")
+            if callable(err): err = err()
+            if err: raise err
+            return FakeProcessResult()
+        return FakeProcessResult()
+
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    return calls, responses
+
+@pytest.fixture
+def setup_execute(monkeypatch, protected_contract):
+    contract, source = protected_contract
+    monkeypatch.setattr(deploy, "_validate_operation_identity", lambda *a, **kw: (deploy.InspectedImage(image_id="new_image", revision=REVISION), "source_head"))
+    monkeypatch.setattr(deploy, "_temporary_render_contract", lambda *a: contract)
+    monkeypatch.setattr(deploy, "validate_compose_render", lambda *a: [preflight.MountRecord(source=str(contract.database_source), target="/home/hermes/healbite.db", mount_type="bind", read_only=False)])
+    monkeypatch.setattr(deploy, "_post_deploy_attestation", lambda *a, **kw: type("MockPostResult", (), {})())
+    monkeypatch.setattr(deploy, "_compose_recreate_hermes", lambda *a, **kw: None)
+
+    # Fake SQLite
+    def fake_check_db(*a, **kw): pass
+    monkeypatch.setattr("sqlite3.connect", type("MockConnect", (), {"__enter__": lambda self: type("MockConn", (), {"execute": lambda self, q: type("MockCursor", (), {"fetchall": lambda self: [("ok",)] if "integrity" in q else []})(), "backup": lambda self, d: None, "commit": lambda self: None})(), "__exit__": lambda *a: None, "__init__": lambda self, path, *a, **kw: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).touch(), None)[1]}))
+    return contract, source
+
+def test_recovery_requires_explicit_confirmation(protected_contract):
+    contract, source = protected_contract
+    with pytest.raises(deploy.DeploymentContractError, match="explicit-confirmation-required"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="WRONG")
+
+def test_recovery_missing_runtime_fails(setup_execute, fake_docker):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    responses["inspect_hermes"] = subprocess.CalledProcessError(1, "docker")
+    with pytest.raises(deploy.DeploymentContractError, match="missing-runtime-baseline"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_quiesce_writer_fails(setup_execute, fake_docker):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    responses["stop"] = subprocess.CalledProcessError(1, "docker")
+    with pytest.raises(deploy.DeploymentContractError, match="quiesce-writer-failed"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_zero_writer_fails(setup_execute, fake_docker, monkeypatch):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    import sqlite3
+    def failing_connect(*a, **kw): raise sqlite3.Error("locked")
+    monkeypatch.setattr("sqlite3.connect", failing_connect)
+    with pytest.raises(deploy.DeploymentContractError, match="post-deploy-rolled-back"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_db_integrity_fails(setup_execute, fake_docker, monkeypatch):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    class BadConn:
+        def execute(self, q):
+            return type("C", (), {"fetchall": lambda self: [("failed",) if "integrity" in q else []]})()
+        def backup(self, d): pass
+        def commit(self): pass
+    monkeypatch.setattr("sqlite3.connect", lambda *a, **kw: type("MC", (), {"__enter__": lambda self: BadConn(), "__exit__": lambda *a: None})())
+    with pytest.raises(deploy.DeploymentContractError, match="post-deploy-rolled-back"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_fk_violation_fails(setup_execute, fake_docker, monkeypatch):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    class BadConn:
+        def execute(self, q):
+            return type("C", (), {"fetchall": lambda self: [("ok",) if "integrity" in q else [("viol",)]]})()
+        def backup(self, d): pass
+        def commit(self): pass
+    monkeypatch.setattr("sqlite3.connect", lambda *a, **kw: type("MC", (), {"__enter__": lambda self: BadConn(), "__exit__": lambda *a: None})())
+    with pytest.raises(deploy.DeploymentContractError, match="post-deploy-rolled-back"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_rollback_preservation_fails(setup_execute, fake_docker):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    responses["rename"] = subprocess.CalledProcessError(1, "docker")
+    with pytest.raises(deploy.DeploymentContractError, match="post-deploy-rolled-back"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+
+def test_recovery_candidate_health_fails_triggers_rollback(setup_execute, fake_docker, monkeypatch, capsys):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    monkeypatch.setattr(deploy, "_post_deploy_attestation", lambda *a, **kw: (_ for _ in ()).throw(Exception("health-failed")))
+    with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back") as exc:
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+    assert exc.value.status == "ROLLED_BACK"
+    out = capsys.readouterr().out
+    assert "ROLLBACK_EXECUTED=PASS" in out
+
+def test_recovery_rollback_itself_fails(setup_execute, fake_docker, monkeypatch, capsys):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    monkeypatch.setattr(deploy, "_post_deploy_attestation", lambda *a, **kw: (_ for _ in ()).throw(Exception("health-failed")))
+    responses["start"] = subprocess.CalledProcessError(1, "docker") # Fail the rollback start
+    with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rollback-failed") as exc:
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+    assert exc.value.status == "FAIL"
+    out = capsys.readouterr().out
+    assert "TECHNICAL_BLOCKER=RECOVERY_ROLLBACK_FAILED" in out
+
+
+
+def test_recovery_qdrant_interference_fails(setup_execute, fake_docker, monkeypatch):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    q_calls = []
+    def fake_q(*a, **kw):
+        q_calls.append(1)
+        if len(q_calls) > 1:
+            return attestation.ContainerSnapshot(container_id="q2", image_id="q_img", revision="c", created_at="c", started_at="s", state="running", restart_count=0, mounts=(), feature_gates=(), allowlists=(), secret_fingerprints=(), runtime_configuration_fingerprint="abc")
+        return attestation.ContainerSnapshot(container_id="q_id", image_id="q_img", revision="c", created_at="c", started_at="s", state="running", restart_count=0, mounts=(), feature_gates=(), allowlists=(), secret_fingerprints=(), runtime_configuration_fingerprint="abc")
+    monkeypatch.setattr(deploy.attestation, "_qdrant_snapshot", fake_q)
+    with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back"):
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+def test_recovery_success_prints_evidence(setup_execute, fake_docker, capsys):
+    contract, source = setup_execute
+    calls, responses = fake_docker
+    deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+    out = capsys.readouterr().out
+    assert "PRE_RECOVERY_RUNTIME_TRUST=UNTRUSTED" in out
+    assert "POST_RECOVERY_RUNTIME_TRUST=CANONICAL" in out
+    assert "REGISTRY_MANIFEST_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" in out
+    assert "CANDIDATE_REFERENCE=" + IMAGE in out
+    assert "CONFIG_IMAGE_ID=new_image" in out
+    assert "OCI_REVISION=" + REVISION in out
+    assert "ROLLBACK_READY=PASS" in out
+    assert "ROLLBACK_PROOF_RESULT=PASS" not in out

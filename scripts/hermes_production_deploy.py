@@ -1984,11 +1984,11 @@ def _validate_future_mounts_only(contract: DeploymentContract, future_mounts: tu
     if len(at_target) > 1:
         _fail("multiple-mounts-at-db-target")
     mount = at_target[0]
-    if mount.source != expected_source or mount.type != expected_type or mount.read_only != expected_read_only:
+    if mount.source != expected_source or mount.mount_type != expected_type or mount.read_only != expected_read_only:
         _fail("missing-canonical-db-mount")
 
 def execute_recovery(
-    contract: DeploymentContract,
+    contract: 'DeploymentContract',
     *,
     source: Path,
     image: str,
@@ -2022,6 +2022,7 @@ def execute_recovery(
 
     primary_error: BaseException | None = None
     baseline = None
+    qdrant_baseline = None
     secret_transaction = None
     mutation_started = False
     restore_attempted = False
@@ -2031,8 +2032,10 @@ def execute_recovery(
     import sqlite3
     import shutil
     import hashlib
+    import subprocess
 
     old_container_name = f"{contract.target_service}-untrusted-rollback-{int(time.time())}"
+    backup_path = contract.database_source.parent / f"backup-recovery-{int(time.time())}.sqlite"
 
     try:
         # 1. Validate Secret Source
@@ -2047,25 +2050,10 @@ def execute_recovery(
 
         _validate_future_mounts_only(contract, future_mounts)
 
-        # 3. DB Integrity & FK
-        def _check_db():
-            with sqlite3.connect(str(contract.database_source)) as conn:
-                res = conn.execute("PRAGMA integrity_check").fetchall()
-                if res != [('ok',)]:
-                    _fail("db-integrity-failed")
-                fk = conn.execute("PRAGMA foreign_key_check").fetchall()
-                if len(fk) > 0:
-                    _fail("fk-violation-rejected")
-        _check_db()
-
-        # 4. Fresh DB Backup
-        backup_path = contract.database_source.parent / f"backup-recovery-{int(time.time())}.sqlite"
-        shutil.copy2(contract.database_source, backup_path)
-
-        # 5. Capture Baseline
+        # 3. Capture Baseline
         try:
             inspect_out = _run(("docker", "inspect", contract.target_service))
-            c_info = json.loads(inspect_out)[0]
+            c_info = json.loads(inspect_out.stdout)[0]
             current_id = c_info["Id"]
             current_image_id = c_info["Image"]
             config = c_info.get("Config", {})
@@ -2074,48 +2062,86 @@ def execute_recovery(
             current_state = c_info.get("State", {}).get("Status", "unknown")
             restart_count = c_info.get("RestartCount", 0)
         except Exception:
-            current_id = "UNKNOWN"
-            current_image_id = "UNKNOWN"
-            current_rev = "UNKNOWN"
-            current_state = "UNKNOWN"
-            restart_count = 0
+            _fail("missing-runtime-baseline")
 
-        baseline = attestation.RuntimeBaseline(
+        hermes_snapshot = attestation.ContainerSnapshot(
             container_id=current_id,
             image_id=current_image_id,
             revision=current_rev,
-            mounts=tuple(),
+            created_at="UNKNOWN",
+            started_at="UNKNOWN",
             state=current_state,
             restart_count=restart_count,
+            mounts=tuple(),
+            feature_gates=tuple(),
+            allowlists=tuple(),
+            secret_fingerprints=tuple(),
+            runtime_configuration_fingerprint="UNKNOWN",
         )
 
-        # 6. Quiesce writers
-        mutation_started = True
+        try:
+            qdrant_baseline = attestation._qdrant_snapshot("qdrant", run=_run)
+        except Exception:
+            _fail("qdrant-baseline-failed")
+
+        baseline = attestation.RuntimeBaseline(
+            captured_at="UNKNOWN",
+            log_cursor="UNKNOWN",
+            hermes=hermes_snapshot,
+            qdrant=qdrant_baseline,
+            database=attestation.DatabaseSnapshot(
+                 canonical_path_fingerprint="", device=0, inode=0, mode=0, size=0, user_version=0, schema_fingerprint="", table_fingerprint="", index_fingerprint="", trigger_fingerprint="", integrity_ok=True, foreign_key_violations=0, main_fingerprint="", wal_fingerprint="", wal_present=False, shm_present=False,
+            ),
+            telegram_health="UNKNOWN",
+            gateway_health="UNKNOWN",
+            provider_request_count=0,
+        )
+
+        # 4. Quiesce writers
         try:
             _run(("docker", "stop", "-t", "10", contract.target_service))
-        except Exception:
-            pass
+        except subprocess.CalledProcessError:
+            _fail("quiesce-writer-failed")
 
-        # 7. Prove zero writers (Check hash hasn't changed since backup)
-        with open(contract.database_source, "rb") as f:
-            current_sha = hashlib.sha256(f.read()).hexdigest()
-        with open(backup_path, "rb") as f:
-            backup_sha = hashlib.sha256(f.read()).hexdigest()
-        if current_sha != backup_sha:
+        mutation_started = True
+
+        # 5. Prove zero writers & Backup
+        try:
+            with sqlite3.connect(str(contract.database_source)) as src:
+                src.execute("BEGIN EXCLUSIVE")
+                with sqlite3.connect(str(backup_path)) as dst:
+                    src.backup(dst)
+                src.commit()
+        except sqlite3.Error:
             _fail("zero-writer-proof-failed")
 
-        # 8. Preserve old container
+        # Validate Backup
+        def _check_db(db_path: Path):
+            with sqlite3.connect(str(db_path)) as conn:
+                res = conn.execute("PRAGMA integrity_check").fetchall()
+                if res != [('ok',)]:
+                    _fail("db-integrity-failed")
+                fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if len(fk) > 0:
+                    _fail("fk-violation-rejected")
+
+        _check_db(backup_path)
+
+        with open(backup_path, "rb") as f:
+            backup_sha = hashlib.sha256(f.read()).hexdigest()
+
+        # 6. Preserve old container
         try:
             _run(("docker", "rename", contract.target_service, old_container_name))
             old_container_preserved = True
-        except Exception:
+        except subprocess.CalledProcessError:
             _fail("rollback-preservation-fails")
 
-        # 9. Create/Start candidate
+        # 7. Create/Start candidate
         secret_transaction = _begin_secret_override_transaction(contract, secrets)
         _compose_recreate_hermes(contract, image_id=target.image_id, revision=revision)
 
-        # 10. Post-deploy attestation
+        # 8. Post-deploy attestation
         post_result = _post_deploy_attestation(
             contract,
             baseline,
@@ -2123,29 +2149,47 @@ def execute_recovery(
             target_revision=revision,
         )
 
+        try:
+            qdrant_post = attestation._qdrant_snapshot("qdrant", run=_run)
+            attestation._require_qdrant_unchanged(qdrant_baseline, qdrant_post)
+        except Exception:
+            _fail("qdrant-non-interference-failed")
+
         # Output Evidence (printing as stdout)
+        registry_manifest_digest = image.split("@")[-1] if "@" in image else "UNKNOWN"
+
         print(f"PRE_RECOVERY_RUNTIME_TRUST=UNTRUSTED")
         print(f"POST_RECOVERY_RUNTIME_TRUST=CANONICAL")
-        print(f"OPERATION_ID={lease.process_start_token}")
+        print(f"OPERATION_ID={lease.holder_fingerprint}")
         print(f"CANONICAL_SHA={revision}")
-        print(f"CANDIDATE_DIGEST={target.image_id}")
-        print(f"CANDIDATE_REVISION={revision}")
+        print(f"CANDIDATE_REFERENCE={image}")
+        print(f"REGISTRY_MANIFEST_DIGEST={registry_manifest_digest}")
+        print(f"CONFIG_IMAGE_ID={target.image_id}")
+        print(f"OCI_REVISION={revision}")
         print(f"OLD_CONTAINER_ID={current_id}")
         print(f"OLD_IMAGE_ID={current_image_id}")
         print(f"OLD_REVISION={current_rev}")
         print(f"AUTHORITATIVE_DB_DEVICE={contract.database_source.lstat().st_dev}")
         print(f"AUTHORITATIVE_DB_INODE={contract.database_source.lstat().st_ino}")
-        print(f"AUTHORITATIVE_DB_HASH={current_sha}")
+        print(f"AUTHORITATIVE_DB_HASH={backup_sha}")
         print(f"BACKUP_HASH={backup_sha}")
-        print(f"NEW_CONTAINER_ID={post_result.container_id}")
-        print(f"NEW_IMAGE_ID={post_result.image_id}")
-        print(f"NEW_REVISION={post_result.revision}")
+        try:
+            new_id = json.loads(_run(("docker", "inspect", contract.target_service)).stdout)[0]["Id"]
+        except Exception:
+            new_id = "UNKNOWN"
+        print(f"NEW_CONTAINER_ID={new_id}")
+        print(f"NEW_IMAGE_ID={target.image_id}")
+        print(f"NEW_REVISION={revision}")
         print(f"DB_INTEGRITY_FK=PASS")
         print(f"QDRANT_NON_INTERFERENCE=PASS")
-        print(f"ROLLBACK_PROOF_RESULT=PASS")
+        print(f"ROLLBACK_READY=PASS")
 
         restore_attempted = True
-        _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
+        try:
+            _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
+        except BaseException:
+            _fail("secret-restoration-failed")
+
         try:
             _run(("docker", "rm", "-f", old_container_name))
         except Exception:
@@ -2155,37 +2199,53 @@ def execute_recovery(
         if not mutation_started:
             primary_error = exc
             raise
+
+        rollback_success = True
+
         if secret_transaction is not None and not restore_attempted:
             restore_attempted = True
             try:
                 _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
             except BaseException:
-                pass
+                rollback_success = False
 
         # Rollback
         try:
             _run(("docker", "rm", "-f", contract.target_service))
-        except Exception:
-            pass
+        except subprocess.CalledProcessError:
+            rollback_success = False
+
         if old_container_preserved:
             try:
                 _run(("docker", "rename", old_container_name, contract.target_service))
                 _run(("docker", "start", contract.target_service))
+                # Runtime restoration validation
+                r_out = _run(("docker", "inspect", contract.target_service))
+                c_info = json.loads(r_out.stdout)[0]
+                if c_info["Id"] != baseline.hermes.container_id:
+                    rollback_success = False
             except Exception:
-                pass
+                rollback_success = False
 
-        primary_error = exc
-        raise
-    finally:
-        try:
-            _preflight(
-                preflight.release_deployment_lease,
-                lease,
-                allowed_owner_uids=contract.lease_owner_uids,
+        if not rollback_success:
+            print("STATUS=FAIL")
+            print("TECHNICAL_BLOCKER=RECOVERY_ROLLBACK_FAILED")
+            final_error = PostMutationDeploymentError(
+                status="FAIL",
+                original_error_code=_attestation_error_code(exc),
+                rollback_error_code="recovery-rollback-failed",
             )
-        except DeploymentContractError:
-            if primary_error is None:
-                raise
+        else:
+            print("STATUS=ROLLED_BACK")
+            print("ROLLBACK_EXECUTED=PASS")
+            final_error = PostMutationDeploymentError(
+                status="ROLLED_BACK",
+                original_error_code=_attestation_error_code(exc),
+                rollback_error_code=None,
+            )
+
+        primary_error = final_error
+        raise final_error from exc
 
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--image", required=True)

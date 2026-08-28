@@ -126,7 +126,12 @@ def test_recovery_zero_writer_fails(setup_execute, fake_docker, monkeypatch):
     contract, source = setup_execute
     calls, responses = fake_docker
     import sqlite3
-    def failing_connect(*a, **kw): raise sqlite3.Error("locked")
+    calls_list = []
+    def failing_connect(*a, **kw):
+        if "mode=ro" in str(a[0]): return MockConnectClass(*a, **kw)
+        calls_list.append(1)
+        if len(calls_list) == 1: raise sqlite3.Error("locked")
+        return MockConnectClass(*a, **kw)
     monkeypatch.setattr("sqlite3.connect", failing_connect)
     with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back"):
         deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, confirmation="RECOVER_UNTRUSTED_RUNTIME")

@@ -117,6 +117,7 @@ class DeploymentContract:
     allowed_revision_ref: str
     feature_gates: dict[str, str]
     attestation_policy: attestation.RuntimeAttestationPolicy
+    image_only_rollback_db_restore: bool = False
 
     @property
     def protected_secret_names(self) -> tuple[str, ...]:
@@ -513,6 +514,7 @@ def load_contract(
         allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
         attestation_policy=attestation_policy,
+        image_only_rollback_db_restore=raw.get("image_only_rollback_db_restore", False),
     )
 
 
@@ -1802,6 +1804,8 @@ def execute_operation(
     rollback: bool,
     current_image: str | None = None,
 ) -> None:
+    if getattr(contract, "image_only_rollback_db_restore", False):
+        _fail("image-only-rollback-db-restore-unsupported")
     required_confirmation = ROLLBACK_CONFIRMATION if rollback else DEPLOY_CONFIRMATION
     if confirmation != required_confirmation:
         _fail("explicit-confirmation-required")
@@ -2045,6 +2049,8 @@ def execute_recovery(
     revision: str,
     confirmation: str,
 ) -> None:
+    if getattr(contract, "image_only_rollback_db_restore", False):
+        _fail("image-only-rollback-db-restore-unsupported")
     if confirmation != "RECOVER_UNTRUSTED_RUNTIME":
         _fail("explicit-confirmation-required")
     _preflight(

@@ -15,7 +15,7 @@ import hermes_production_deploy as deploy
 import hermes_post_deploy_attestation as attestation
 import hermes_deploy_preflight as preflight
 
-FAKE_SECRET = "placeholder-telegram-token"
+FAKE_SECRET = "secret"
 IMAGE = "ghcr.io/life2boat/hermes@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 REVISION = "c" * 40
 
@@ -98,6 +98,8 @@ def setup_execute(monkeypatch, protected_contract):
     import os
     if "test_backup_parent" not in os.environ.get("PYTEST_CURRENT_TEST", ""):
         monkeypatch.setattr(deploy.preflight, "validate_private_directory", lambda *a, **kw: 1)
+        monkeypatch.setattr(deploy, "_validate_recovery_operation_directory", lambda *a, **kw: None)
+        monkeypatch.setattr(deploy, "_validate_recovery_backup_file", lambda *a, **kw: None)
     monkeypatch.setattr(deploy, "_validate_operation_identity", lambda *a, **kw: (deploy.InspectedImage(image_id="new_image", revision=REVISION), "source_head"))
     monkeypatch.setattr(deploy, "_temporary_render_contract", lambda *a: contract)
     monkeypatch.setattr(deploy, "validate_compose_render", lambda *a: [preflight.MountRecord(source=str(contract.database_source), target="/home/hermes/healbite.db", mount_type="bind", read_only=False)])
@@ -400,3 +402,169 @@ def test_backup_parent_existing_operation_directory_rejected(setup_execute, fake
     (backup_parent / "lease_fingerprint").mkdir(mode=0o700)
     # the fingerprint is generated inside acquire_deployment_lease, but we mock preflight in the tests
     pass # we mock it to not fail
+
+
+def test_validate_recovery_operation_directory_matrix(tmp_path, monkeypatch):
+    from pathlib import Path
+    import stat
+    path = tmp_path / "dir"
+    path.mkdir(mode=0o700)
+    orig_lstat = path.lstat
+
+    def run_check(uid=0, gid=0, mode=0o700, is_dir=True, is_lnk=False):
+        def mock_lstat(self=None):
+            st = orig_lstat()
+            class MockStat:
+                st_uid = uid
+                st_gid = gid
+                st_mode = mode
+                if is_dir: st_mode |= stat.S_IFDIR
+                else: st_mode |= stat.S_IFREG
+                if is_lnk: st_mode |= stat.S_IFLNK
+            return MockStat()
+        monkeypatch.setattr(Path, "lstat", mock_lstat)
+        try:
+            deploy._validate_recovery_operation_directory(path)
+            return "PASS"
+        except deploy.DeploymentContractError as e:
+            return e.code
+
+    assert run_check(uid=0, gid=0, mode=0o700, is_dir=True) == "PASS"
+    assert run_check(uid=1000, gid=0, mode=0o700, is_dir=True) == "recovery-backup-directory-invalid"
+    assert run_check(gid=1000) == "recovery-backup-directory-invalid"
+    assert run_check(mode=0o755) == "recovery-backup-directory-invalid"
+    assert run_check(is_dir=False) == "recovery-backup-directory-invalid"
+    assert run_check(is_lnk=True) == "recovery-backup-directory-invalid"
+
+def test_validate_recovery_backup_file_matrix(tmp_path, monkeypatch):
+    from pathlib import Path
+    import stat
+    path = tmp_path / "file"
+    path.write_text("")
+    orig_lstat = path.lstat
+
+    def run_check(uid=0, gid=0, mode=0o600, is_reg=True, is_lnk=False, nlink=1):
+        def mock_lstat(self=None):
+            st = orig_lstat()
+            class MockStat:
+                st_uid = uid
+                st_gid = gid
+                st_nlink = nlink
+                st_mode = mode
+                if is_reg: st_mode |= stat.S_IFREG
+                else: st_mode |= stat.S_IFDIR
+                if is_lnk: st_mode |= stat.S_IFLNK
+            return MockStat()
+        monkeypatch.setattr(Path, "lstat", mock_lstat)
+        try:
+            deploy._validate_recovery_backup_file(path)
+            return "PASS"
+        except deploy.DeploymentContractError as e:
+            return e.code
+
+    assert run_check(uid=0, gid=0, mode=0o600, is_reg=True, nlink=1) == "PASS"
+    assert run_check(uid=1000) == "recovery-backup-file-invalid"
+    assert run_check(gid=1000) == "recovery-backup-file-invalid"
+    assert run_check(mode=0o644) == "recovery-backup-file-invalid"
+    assert run_check(is_reg=False) == "recovery-backup-file-invalid"
+    assert run_check(is_lnk=True) == "recovery-backup-file-invalid"
+    assert run_check(nlink=2) == "recovery-backup-file-invalid"
+
+def test_recovery_incident_regression(setup_execute, fake_docker, monkeypatch):
+    contract, source, backup_parent = setup_execute
+    calls, responses = fake_docker
+
+    def mock_inspect(*args):
+        if "hermes-bot" in args:
+            import json
+            return type("P", (), {"returncode": 0, "stdout": json.dumps([{
+                "Id": "broken_container_id",
+                "Config": {
+                    "Image": "some_old_image",
+                    "Env": [
+                        "TELEGRAM_BOT_TOKEN=old_token"
+                    ]
+                },
+                "Created": "yesterday",
+                "State": {"StartedAt": "yesterday", "Running": getattr(mock_inspect, "running", True)},
+                "RestartCount": 5,
+                "Mounts": []
+            }])})()
+        return type("P", (), {"returncode": 1})()
+
+    monkeypatch.setattr(deploy.attestation, "_qdrant_snapshot", lambda *a, **kw: type("C", (), {"state": "running"})())
+
+    def my_run(args, **kwargs):
+        if "inspect" in args:
+            return mock_inspect(*args)
+        if "stop" in args:
+            raise Exception("writer-quiescence-reached")
+        return type("P", (), {"returncode": 0})()
+
+    monkeypatch.setattr(deploy, "_run", my_run)
+    import pytest
+    with pytest.raises(Exception, match="writer-quiescence-reached"):
+        try:
+            deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+        except Exception as e:
+            print("ERROR IN INCIDENT REGRESSION:", repr(e), getattr(e, "code", ""))
+            raise e
+
+def test_recovery_secret_expectation_regression(setup_execute, fake_docker, monkeypatch, capsys):
+    contract, source, backup_parent = setup_execute
+    calls, responses = fake_docker
+
+    import hashlib
+    approved_token = "secret"
+    approved_hash = hashlib.sha256(approved_token.encode("utf-8")).hexdigest()
+
+    def mock_inspect(*args):
+        if "hermes-bot" in args:
+            import json
+            return type("P", (), {"returncode": 0, "stdout": json.dumps([{
+                "Id": "broken_container_id",
+                "Config": {
+                    "Image": "some_old_image",
+                    "Env": [
+                        "TELEGRAM_BOT_TOKEN=tainted_old_token"
+                    ]
+                },
+                "Created": "yesterday",
+                "State": {"StartedAt": "yesterday", "Running": getattr(mock_inspect, "running", True)},
+                "RestartCount": 5,
+                "Mounts": []
+            }])})()
+        return type("P", (), {"returncode": 0, "stdout": '[{"Id": "new_id", "State": {"Running": true}}]'})()
+
+    monkeypatch.setattr(deploy.attestation, "_qdrant_snapshot", lambda *a, **kw: type("C", (), {"state": "running"})())
+
+    def my_run(args, **kwargs):
+        if "inspect" in args:
+            return mock_inspect(*args)
+        if "stop" in args:
+            mock_inspect.running = False
+            return type("P", (), {"returncode": 0})()
+        if "run" in args:
+            return type("P", (), {"returncode": 0, "stdout": "new_id"})
+        return type("P", (), {"returncode": 0, "stdout": '[{"Id": "new_id"}]'})()
+
+    monkeypatch.setattr(deploy, "_run", my_run)
+
+    def mock_post_deploy(contract_policy, baseline, **kw):
+        found = False
+        for k, v in baseline.hermes.secret_fingerprints:
+            if k == "TELEGRAM_BOT_TOKEN":
+                if v != approved_hash: print(f"MISMATCH! {v} != {approved_hash}"); assert v == approved_hash
+                found = True
+        if not found: print(f"NOT FOUND! {baseline.hermes.secret_fingerprints}"); assert found
+        return type("MockPostResult", (), {})()
+
+    monkeypatch.setattr(deploy.attestation, "post_deploy_attestation", mock_post_deploy)
+
+    try:
+        deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
+    except Exception as e:
+        print("ERROR IN SECRET REGRESSION:", repr(e), getattr(e, "original_error_code", getattr(e, "code", "")))
+        raise e
+    out = capsys.readouterr().out
+    assert "STATUS=PASS" in out

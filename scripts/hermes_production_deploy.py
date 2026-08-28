@@ -1957,7 +1957,7 @@ def execute_operation(
                 original_error_code=original_error_code,
                 rollback_error_code=None,
             )
-        import traceback; traceback.print_exception(type(exc), exc, exc.__traceback__); primary_error = final_error
+        primary_error = final_error
         raise final_error from exc
     finally:
         try:
@@ -2019,7 +2019,105 @@ def _post_recovery_attestation(
         run=_run,
     )
 
+def _recovery_container_snapshot(target_service: str, protected_secret_names: tuple[str, ...], run) -> attestation.ContainerSnapshot:
+    r_out = run(("docker", "inspect", target_service))
+    if r_out.returncode != 0:
+        _fail("CONTAINER_INSPECT_INVALID")
+    import json
+    import hashlib
+    try:
+        data = json.loads(r_out.stdout)
+        if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+            _fail("CONTAINER_INSPECT_INVALID")
+        info = data[0]
+        container_id = info.get("Id")
+        if not container_id: _fail("CONTAINER_INSPECT_INVALID")
+        image_id = info.get("Config", {}).get("Image", "")
+        created_at = info.get("Created", "")
+        started_at = info.get("State", {}).get("StartedAt", "")
+        state = "running" if info.get("State", {}).get("Running", False) else "exited"
+        restart_count = info.get("RestartCount", 0)
+
+        env_list = info.get("Config", {}).get("Env", [])
+        env = {}
+        for e in env_list:
+            if "=" in e:
+                k, v = e.split("=", 1)
+                env[k] = v
+
+        pre_revision = env.get("HERMES_REVISION", "")
+        import re as regex
+        if regex.match(r"^[0-9a-f]{40}$", pre_revision):
+            pass
+        else:
+            pre_revision = "UNKNOWN"
+
+        mounts_record = info.get("Mounts", [])
+        mounts = []
+        for item in mounts_record:
+            mounts.append(attestation.MountSnapshot(
+                mount_type=item.get("Type", ""),
+                source=item.get("Source", ""),
+                target=item.get("Destination", ""),
+                read_only=item.get("RW") is False
+            ))
+
+        feature_gates = ()
+        allowlists = ()
+        secret_fingerprints = tuple(
+            (name, hashlib.sha256(env[name].encode("utf-8")).hexdigest())
+            for name in protected_secret_names
+            if name in env and env[name]
+        )
+        return attestation.ContainerSnapshot(
+            container_id=str(container_id),
+            image_id=str(image_id),
+            revision=pre_revision,
+            created_at=str(created_at),
+            started_at=str(started_at),
+            state=state,
+            restart_count=int(restart_count),
+            mounts=tuple(mounts),
+            feature_gates=feature_gates,
+            allowlists=allowlists,
+            secret_fingerprints=secret_fingerprints,
+            runtime_configuration_fingerprint="UNKNOWN"
+        )
+    except Exception:
+        _fail("CONTAINER_INSPECT_INVALID")
+
+def _validate_recovery_operation_directory(backup_dir: Path) -> None:
+    import stat
+    try:
+        bd_stat = backup_dir.lstat()
+        if not stat.S_ISDIR(bd_stat.st_mode) or stat.S_ISLNK(bd_stat.st_mode):
+            _fail("recovery-backup-directory-invalid")
+        if bd_stat.st_uid != 0 or bd_stat.st_gid != 0:
+            _fail("recovery-backup-directory-invalid")
+        if stat.S_IMODE(bd_stat.st_mode) != 0o700:
+            _fail("recovery-backup-directory-invalid")
+    except OSError:
+        _fail("recovery-backup-directory-invalid")
+
+
+def _validate_recovery_backup_file(backup_path: Path) -> None:
+    import stat
+    try:
+        bf_stat = backup_path.lstat()
+        if not stat.S_ISREG(bf_stat.st_mode) or stat.S_ISLNK(bf_stat.st_mode):
+            _fail("recovery-backup-file-invalid")
+        if bf_stat.st_uid != 0 or bf_stat.st_gid != 0:
+            _fail("recovery-backup-file-invalid")
+        if stat.S_IMODE(bf_stat.st_mode) != 0o600:
+            _fail("recovery-backup-file-invalid")
+        if getattr(bf_stat, 'st_nlink', 1) != 1:
+            _fail("recovery-backup-file-invalid")
+    except OSError:
+        _fail("recovery-backup-file-invalid")
+
+
 def execute_recovery(
+
     contract: 'DeploymentContract',
     *,
     source: Path,
@@ -2114,11 +2212,8 @@ def execute_recovery(
         try:
             from datetime import datetime, timezone
             log_cursor = datetime.now(timezone.utc).isoformat()
-            hermes = attestation._container_snapshot(
+            hermes = _recovery_container_snapshot(
                 contract.target_service,
-                revision_label=contract.image_revision_label,
-                feature_gate_names=contract.attestation_policy.feature_gate_names,
-                allowlist_names=contract.attestation_policy.allowlist_names,
                 protected_secret_names=contract.protected_secret_names,
                 run=_run,
             )
@@ -2133,7 +2228,7 @@ def execute_recovery(
                 log_cursor=log_cursor,
                 hermes=hermes,
                 qdrant=qdrant,
-                database=database, telegram_health="PASS", gateway_health="PASS", provider_request_count=0)
+                database=database, telegram_health="UNVERIFIED_RECOVERY_PRE", gateway_health="UNVERIFIED_RECOVERY_PRE", provider_request_count=0)
         except Exception as exc:
             _fail("missing-runtime-baseline")
 
@@ -2169,11 +2264,18 @@ def execute_recovery(
             (name, *attestation._allowlist_state(contract.feature_gates[name]))
             for name in contract.attestation_policy.allowlist_names
         )
+        import hashlib
+        canonical_secret_fingerprints = tuple(
+            (name, hashlib.sha256(secrets[name].encode("utf-8")).hexdigest())
+            for name in contract.protected_secret_names
+            if name in secrets and secrets[name]
+        )
         candidate_hermes = replace(
             baseline.hermes,
             mounts=canonical_mounts,
             feature_gates=canonical_feature_gates,
             allowlists=canonical_allowlists,
+            secret_fingerprints=canonical_secret_fingerprints,
         )
         candidate_expected_baseline = replace(
             baseline,
@@ -2191,7 +2293,6 @@ def execute_recovery(
             if c_info.get("State", {}).get("Running", True):
                 _fail("zero-writer-proof-failed")
         except Exception as _e:
-            print("ZERO_WRITER_EXCEPTION:", repr(_e), getattr(r_out, "stdout", "NO STDOUT"))
             _fail("zero-writer-proof-failed")
 
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -2201,27 +2302,7 @@ def execute_recovery(
         except OSError:
             _fail("recovery-backup-file-create")
 
-        try:
-            with sqlite3.connect(str(contract.database_source)) as src:
-                src.execute("BEGIN EXCLUSIVE")
-                with sqlite3.connect(str(backup_path)) as dst:
-                    src.backup(dst)
-                src.commit()
-        except sqlite3.Error:
-            _fail("recovery-backup-failed")
-
-        try:
-            bp_stat = backup_path.lstat()
-            if not stat.S_ISREG(bp_stat.st_mode) or stat.S_ISLNK(bp_stat.st_mode):
-                _fail("recovery-backup-file-invalid")
-            if bp_stat.st_uid != 0 or bp_stat.st_gid != 0:
-                _fail("recovery-backup-file-invalid")
-            if stat.S_IMODE(bp_stat.st_mode) != 0o600:
-                _fail("recovery-backup-file-invalid")
-            if bp_stat.st_nlink != 1:
-                _fail("recovery-backup-file-invalid")
-        except OSError:
-            _fail("recovery-backup-file-invalid")
+        _validate_recovery_backup_file(backup_path)
 
         _check_db(backup_path)
 
@@ -2417,7 +2498,7 @@ def execute_recovery(
                 rollback_error_code=None,
             )
 
-        import traceback; traceback.print_exception(type(exc), exc, exc.__traceback__); primary_error = final_error
+        primary_error = final_error
         raise final_error from exc
     finally:
         try:
@@ -2427,7 +2508,7 @@ def execute_recovery(
                 allowed_owner_uids=contract.lease_owner_uids,
             )
         except DeploymentContractError:
-            if 'primary_error' not in locals() or primary_error is None:
+            if primary_error is None:
                 raise
 
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:

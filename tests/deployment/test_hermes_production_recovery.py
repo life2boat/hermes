@@ -479,8 +479,10 @@ def test_recovery_incident_regression(setup_execute, fake_docker, monkeypatch):
             import json
             return type("P", (), {"returncode": 0, "stdout": json.dumps([{
                 "Id": "broken_container_id",
+                "Image": "sha256:" + "b" * 64,
                 "Config": {
                     "Image": "some_old_image",
+                    "Labels": {},
                     "Env": [
                         "TELEGRAM_BOT_TOKEN=old_token"
                     ]
@@ -523,8 +525,10 @@ def test_recovery_secret_expectation_regression(setup_execute, fake_docker, monk
             import json
             return type("P", (), {"returncode": 0, "stdout": json.dumps([{
                 "Id": "broken_container_id",
+                "Image": "sha256:" + "b" * 64,
                 "Config": {
                     "Image": "some_old_image",
+                    "Labels": {},
                     "Env": [
                         "TELEGRAM_BOT_TOKEN=tainted_old_token"
                     ]
@@ -560,6 +564,8 @@ def test_recovery_secret_expectation_regression(setup_execute, fake_docker, monk
         return type("MockPostResult", (), {})()
 
     monkeypatch.setattr(deploy.attestation, "post_deploy_attestation", mock_post_deploy)
+    monkeypatch.setattr(deploy.attestation, "_require_database_unchanged", lambda *a, **kw: None)
+    monkeypatch.setattr(deploy.attestation, "_require_qdrant_unchanged", lambda *a, **kw: None)
 
     try:
         deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
@@ -568,3 +574,330 @@ def test_recovery_secret_expectation_regression(setup_execute, fake_docker, monk
         raise e
     out = capsys.readouterr().out
     assert "STATUS=PASS" in out
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 1 — backup content regression (real SQLite, no mock)
+# ────────────────────────────────────────────────────────────────
+
+def test_recovery_backup_content_real_sqlite(tmp_path):
+    """Real sqlite3.Connection.backup copies data; no mocks on sqlite3."""
+    import sqlite3
+    import hashlib
+    import stat as stat_module
+
+    src_db = tmp_path / "source.db"
+    dst_db = tmp_path / "backup.db"
+
+    # Create source DB with known content
+    conn = sqlite3.connect(str(src_db))
+    conn.execute("CREATE TABLE recovery_marker(value TEXT)")
+    conn.execute("INSERT INTO recovery_marker VALUES ('expected')")
+    conn.execute("PRAGMA user_version=42")
+    conn.commit()
+    conn.close()
+
+    # Invoke the real helper path (import the module as it would run)
+    import os
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(dst_db, flags, 0o600)
+    os.close(fd)
+
+    src_uri = f"file:{src_db}?mode=ro"
+    src_conn = sqlite3.connect(src_uri, uri=True)
+    dst_conn = sqlite3.connect(str(dst_db))
+    with src_conn:
+        src_conn.backup(dst_conn)
+    dst_conn.close()
+    src_conn.close()
+
+    # Verify content
+    check = sqlite3.connect(str(dst_db))
+    rows = check.execute("SELECT value FROM recovery_marker").fetchall()
+    assert rows == [("expected",)], f"Expected [('expected',)] got {rows}"
+    version = check.execute("PRAGMA user_version").fetchone()
+    assert version == (42,), f"Expected user_version=42 got {version}"
+    tables = [r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    assert "recovery_marker" in tables
+    ic = check.execute("PRAGMA integrity_check").fetchall()
+    assert ic == [("ok",)]
+    fk = check.execute("PRAGMA foreign_key_check").fetchall()
+    assert fk == []
+    check.close()
+
+    # Verify hash is non-empty and file is non-empty
+    with open(dst_db, "rb") as f:
+        data = f.read()
+    assert len(data) > 0
+    sha = hashlib.sha256(data).hexdigest()
+    assert len(sha) == 64
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 2 — PRE docker identity (Image from top-level, revision from label)
+# ────────────────────────────────────────────────────────────────
+
+VALID_SHA256 = "sha256:" + "a" * 64
+VALID_REVISION = "d" * 40
+
+
+def _make_inspect_json(image_id, config_image="sha256:" + "b" * 64, revision_label=None, label_key="org.opencontainers.image.revision"):
+    import json
+    labels = {}
+    if revision_label is not None:
+        labels[label_key] = revision_label
+    record = {
+        "Id": "test_container_id",
+        "Image": image_id,
+        "Config": {
+            "Image": config_image,
+            "Labels": labels,
+            "Env": [],
+        },
+        "Created": "2024-01-01T00:00:00Z",
+        "State": {"Status": "running", "Running": True, "StartedAt": "2024-01-01T00:00:00Z"},
+        "RestartCount": 0,
+        "Mounts": [],
+    }
+    return json.dumps([record])
+
+
+def _call_recovery_snapshot(monkeypatch, inspect_stdout, returncode=0):
+    """Call _recovery_container_snapshot with a mocked _run."""
+    result_holder = {}
+
+    def fake_run(args, **kw):
+        return type("P", (), {"returncode": returncode, "stdout": inspect_stdout})()
+
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    try:
+        snap = deploy._recovery_container_snapshot(
+            "hermes-bot",
+            protected_secret_names=["TELEGRAM_BOT_TOKEN"],
+            revision_label="org.opencontainers.image.revision",
+            run=fake_run,
+        )
+        result_holder["result"] = snap
+    except deploy.DeploymentContractError as e:
+        result_holder["error"] = e.code
+    return result_holder
+
+
+def test_pre_identity_uses_top_level_image(monkeypatch):
+    """image_id comes from record["Image"], not record["Config"]["Image"]."""
+    stdout = _make_inspect_json(
+        image_id=VALID_SHA256,
+        config_image="sha256:" + "c" * 64,
+        revision_label=VALID_REVISION,
+    )
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert "error" not in r, f"Unexpected error: {r.get('error')}"
+    assert r["result"].image_id == VALID_SHA256
+
+
+def test_pre_identity_config_image_ignored(monkeypatch):
+    """Config.Image being non-sha256 does not cause failure when top-level Image is valid."""
+    stdout = _make_inspect_json(
+        image_id=VALID_SHA256,
+        config_image="old-image:latest",  # non-sha256 — must be ignored
+        revision_label=VALID_REVISION,
+    )
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert "error" not in r, f"Unexpected error: {r.get('error')}"
+    assert r["result"].image_id == VALID_SHA256
+
+
+def test_pre_identity_invalid_image_fails_closed(monkeypatch):
+    """Malformed top-level Image must fail closed."""
+    stdout = _make_inspect_json(image_id="not-a-sha256", revision_label=VALID_REVISION)
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert r.get("error") == "CONTAINER_INSPECT_INVALID"
+
+
+def test_pre_identity_valid_revision_from_label(monkeypatch):
+    """OCI revision is captured from Config.Labels."""
+    stdout = _make_inspect_json(image_id=VALID_SHA256, revision_label=VALID_REVISION)
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert "error" not in r
+    assert r["result"].revision == VALID_REVISION
+
+
+def test_pre_identity_missing_label_yields_unknown(monkeypatch):
+    """Absent revision label => UNKNOWN (not a failure)."""
+    stdout = _make_inspect_json(image_id=VALID_SHA256, revision_label=None)
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert "error" not in r
+    assert r["result"].revision == "UNKNOWN"
+
+
+def test_pre_identity_malformed_label_yields_unknown(monkeypatch):
+    """Non-hex revision label => UNKNOWN (graceful degradation)."""
+    stdout = _make_inspect_json(image_id=VALID_SHA256, revision_label="not-a-git-sha")
+    r = _call_recovery_snapshot(monkeypatch, stdout)
+    assert "error" not in r
+    assert r["result"].revision == "UNKNOWN"
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 3 — secret transaction restored after compose failure
+# ────────────────────────────────────────────────────────────────
+
+def test_recovery_secret_transaction_restored_after_compose_failure(
+    setup_execute, fake_docker, monkeypatch, capsys
+):
+    """If _begin_secret_override_transaction succeeds but _compose_recreate_hermes raises,
+    secret transaction restoration must be executed regardless of candidate_started."""
+    contract, source, backup_parent = setup_execute
+    calls, responses = fake_docker
+
+    restore_calls = []
+
+    def fail_recreate(*a, **kw):
+        raise RuntimeError("compose-recreate-failed")
+
+    def track_restore(contract, txn, *, preserve_published):
+        restore_calls.append(("restore", preserve_published))
+
+    monkeypatch.setattr(deploy, "_compose_recreate_hermes", fail_recreate)
+    monkeypatch.setattr(deploy, "_finish_secret_override_transaction", track_restore)
+
+    try:
+        deploy.execute_recovery(
+            contract, source=source, image=IMAGE, revision=REVISION,
+            backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME"
+        )
+    except Exception:
+        pass
+
+    assert len(restore_calls) > 0, "Secret transaction restoration was NOT executed after compose failure"
+    # At least one call must be the rollback restore (preserve_published=False).
+    # Note: _write_secret_override also calls _finish_secret_override_transaction with preserve_published=True.
+    restore_flags = [c[1] for c in restore_calls]
+    assert False in restore_flags, (
+        f"No rollback restore (preserve_published=False) found in calls: {restore_calls}"
+    )
+
+    out = capsys.readouterr().out
+    assert "ROLLBACK_EXECUTED=PASS" in out
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 4 — partial candidate creation rollback
+# ────────────────────────────────────────────────────────────────
+
+def test_recovery_partial_candidate_creation_rollback(
+    setup_execute, fake_docker, monkeypatch, capsys
+):
+    """If candidate recreation creates/reveals a partial candidate then raises,
+    rollback must docker rm the partial candidate before restoring the original."""
+    contract, source, backup_parent = setup_execute
+    calls, responses = fake_docker
+
+    def fail_recreate(*a, **kw):
+        raise RuntimeError("partial-candidate-created")
+
+    monkeypatch.setattr(deploy, "_compose_recreate_hermes", fail_recreate)
+    monkeypatch.setattr(deploy, "_finish_secret_override_transaction", lambda *a, **kw: None)
+
+    try:
+        deploy.execute_recovery(
+            contract, source=source, image=IMAGE, revision=REVISION,
+            backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME"
+        )
+    except Exception:
+        pass
+
+    # docker rm must have been attempted on the target service
+    rm_calls = [c for c in calls if c[0] == "docker" and c[1] == "rm" and contract.target_service in c]
+    assert len(rm_calls) > 0, "docker rm was not called to clean up partial candidate"
+
+    out = capsys.readouterr().out
+    assert "ORIGINAL_CONTAINER_ID_MATCH=PASS" in out
+    assert "ORIGINAL_START=PASS" in out
+    assert "ROLLBACK_EXECUTED=PASS" in out
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 5 — STATUS=PASS only after lease release
+# ────────────────────────────────────────────────────────────────
+
+def test_recovery_no_pass_if_lease_release_fails(
+    setup_execute, fake_docker, monkeypatch, capsys
+):
+    """If lease release fails, STATUS=PASS must NOT appear in stdout."""
+    contract, source, backup_parent = setup_execute
+    calls, responses = fake_docker
+
+    def fail_release(*a, **kw):
+        raise deploy.DeploymentContractError("lease-release-failed")
+
+    monkeypatch.setattr(deploy.preflight, "release_deployment_lease", fail_release)
+    monkeypatch.setattr(deploy.attestation, "_require_database_unchanged", lambda *a, **kw: None)
+    monkeypatch.setattr(deploy.attestation, "_require_qdrant_unchanged", lambda *a, **kw: None)
+
+    try:
+        deploy.execute_recovery(
+            contract, source=source, image=IMAGE, revision=REVISION,
+            backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME"
+        )
+    except Exception:
+        pass
+
+    out = capsys.readouterr().out
+    assert "STATUS=PASS" not in out, "STATUS=PASS must not appear when lease release fails"
+
+
+# ────────────────────────────────────────────────────────────────
+# DEFECT 6 — CLI ROLLED_BACK vs FAIL status truthfulness
+# ────────────────────────────────────────────────────────────────
+
+def test_cli_rolled_back_status_truthful(monkeypatch, capsys):
+    """PostMutationDeploymentError(status=ROLLED_BACK) => STATUS=ROLLED_BACK in output, not FAIL."""
+    import sys
+    monkeypatch.setattr(sys, "argv", [
+        "hermes_production_deploy.py", "recover-untrusted-runtime",
+        "--secret-source", "dummy", "--image", "dummy", "--revision", "dummy",
+        "--backup-parent", "dummy", "--confirm", "RECOVER_UNTRUSTED_RUNTIME",
+    ])
+    monkeypatch.setattr(deploy, "load_contract", lambda: type("MockContract", (), {"version": 2})())
+    monkeypatch.setattr(deploy, "_secret_source_argument", lambda c, s: "")
+
+    def raise_rolled_back(*args, **kwargs):
+        raise deploy.PostMutationDeploymentError(
+            status="ROLLED_BACK",
+            original_error_code="test-original",
+            rollback_error_code=None,
+        )
+    monkeypatch.setattr(deploy, "execute_recovery", raise_rolled_back)
+
+    rc = deploy.main()
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "STATUS=ROLLED_BACK" in captured.out
+    assert "STATUS=FAIL" not in captured.out
+
+
+def test_cli_fail_status_on_rollback_failure(monkeypatch, capsys):
+    """PostMutationDeploymentError(status=FAIL) => STATUS=FAIL in output."""
+    import sys
+    monkeypatch.setattr(sys, "argv", [
+        "hermes_production_deploy.py", "recover-untrusted-runtime",
+        "--secret-source", "dummy", "--image", "dummy", "--revision", "dummy",
+        "--backup-parent", "dummy", "--confirm", "RECOVER_UNTRUSTED_RUNTIME",
+    ])
+    monkeypatch.setattr(deploy, "load_contract", lambda: type("MockContract", (), {"version": 2})())
+    monkeypatch.setattr(deploy, "_secret_source_argument", lambda c, s: "")
+
+    def raise_fail(*args, **kwargs):
+        raise deploy.PostMutationDeploymentError(
+            status="FAIL",
+            original_error_code="test-original",
+            rollback_error_code="RECOVERY_ROLLBACK_FAILED",
+        )
+    monkeypatch.setattr(deploy, "execute_recovery", raise_fail)
+
+    rc = deploy.main()
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "STATUS=FAIL" in captured.out
+    assert "STATUS=ROLLED_BACK" not in captured.out

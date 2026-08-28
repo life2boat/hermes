@@ -2019,12 +2019,13 @@ def _post_recovery_attestation(
         run=_run,
     )
 
-def _recovery_container_snapshot(target_service: str, protected_secret_names: tuple[str, ...], run) -> attestation.ContainerSnapshot:
+def _recovery_container_snapshot(target_service: str, protected_secret_names: tuple[str, ...], revision_label: str, run) -> attestation.ContainerSnapshot:
     r_out = run(("docker", "inspect", target_service))
     if r_out.returncode != 0:
         _fail("CONTAINER_INSPECT_INVALID")
     import json
     import hashlib
+    import re as regex
     try:
         data = json.loads(r_out.stdout)
         if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
@@ -2032,7 +2033,10 @@ def _recovery_container_snapshot(target_service: str, protected_secret_names: tu
         info = data[0]
         container_id = info.get("Id")
         if not container_id: _fail("CONTAINER_INSPECT_INVALID")
-        image_id = info.get("Config", {}).get("Image", "")
+        # image_id from top-level Image field (sha256-validated), NOT Config.Image
+        image_id = info.get("Image", "")
+        if not regex.match(r"^sha256:[a-f0-9]{64}$", image_id):
+            _fail("CONTAINER_INSPECT_INVALID")
         created_at = info.get("Created", "")
         started_at = info.get("State", {}).get("StartedAt", "")
         state = "running" if info.get("State", {}).get("Running", False) else "exited"
@@ -2045,10 +2049,14 @@ def _recovery_container_snapshot(target_service: str, protected_secret_names: tu
                 k, v = e.split("=", 1)
                 env[k] = v
 
-        pre_revision = env.get("HERMES_REVISION", "")
-        import re as regex
-        if regex.match(r"^[0-9a-f]{40}$", pre_revision):
-            pass
+        # OCI revision from Config.Labels[revision_label]; missing => UNKNOWN, malformed => UNKNOWN
+        raw_label = info.get("Config", {}).get("Labels", {}).get(revision_label)
+        if raw_label is None:
+            pre_revision = "UNKNOWN"
+        elif not isinstance(raw_label, str):
+            _fail("CONTAINER_INSPECT_INVALID")
+        elif regex.match(r"^[0-9a-f]{40}$", raw_label):
+            pre_revision = raw_label
         else:
             pre_revision = "UNKNOWN"
 
@@ -2183,6 +2191,7 @@ def execute_recovery(
     writer_stopped = False
     backup_verified = False
     candidate_started = False
+    candidate_creation_attempted = False
     secret_transaction_started = False
     backup_sha = "UNKNOWN"
 
@@ -2206,6 +2215,7 @@ def execute_recovery(
             hermes = _recovery_container_snapshot(
                 contract.target_service,
                 protected_secret_names=contract.protected_secret_names,
+                revision_label=contract.image_revision_label,
                 run=_run,
             )
             qdrant = attestation._qdrant_snapshot("qdrant", run=_run)
@@ -2220,7 +2230,7 @@ def execute_recovery(
                 hermes=hermes,
                 qdrant=qdrant,
                 database=database, telegram_health="UNVERIFIED_RECOVERY_PRE", gateway_health="UNVERIFIED_RECOVERY_PRE", provider_request_count=0)
-        except Exception as exc:
+        except Exception:
             _fail("missing-runtime-baseline")
 
         secrets = read_required_secrets(contract, source)
@@ -2314,6 +2324,7 @@ def execute_recovery(
         secret_transaction = _begin_secret_override_transaction(contract, secrets)
         secret_transaction_started = True
 
+        candidate_creation_attempted = True
         _compose_recreate_hermes(
             contract,
             image=image,
@@ -2345,6 +2356,10 @@ def execute_recovery(
             _fail("secret-restoration-failed")
 
         post_database = attestation.capture_database(contract.database_source)
+        attestation._require_database_unchanged(baseline.database, post_database)
+
+        final_qdrant = attestation._qdrant_snapshot("qdrant", run=_run)
+        attestation._require_qdrant_unchanged(baseline.qdrant, final_qdrant)
 
         print(f"PRE_AUTHORITATIVE_DB_DEVICE={baseline.database.device}")
         print(f"PRE_AUTHORITATIVE_DB_INODE={baseline.database.inode}")
@@ -2369,8 +2384,6 @@ def execute_recovery(
         print(f"CONFIG_IMAGE_ID={target.image_id}")
         print(f"OCI_REVISION={revision}")
 
-        print("STATUS=PASS")
-
         try:
             rm_res = _run(("docker", "rm", "-f", old_container_name))
             if rm_res.returncode == 0:
@@ -2385,9 +2398,9 @@ def execute_recovery(
             primary_error = exc
             raise
         rollback_success = True
-        if candidate_started:
+        if candidate_creation_attempted or old_container_preserved:
             rm_res = _run(("docker", "rm", "-f", contract.target_service))
-            if rm_res.returncode != 0:
+            if rm_res.returncode != 0 and candidate_started:
                 rollback_success = False
 
         qdrant_rollback_failed = False
@@ -2461,7 +2474,7 @@ def execute_recovery(
                         rollback_success = False
                         qdrant_rollback_failed = True
 
-        if candidate_started and secret_transaction_started and not restore_attempted:
+        if secret_transaction_started and not restore_attempted:
             try:
                 _finish_secret_override_transaction(contract, secret_transaction, preserve_published=False)
             except BaseException:
@@ -2501,6 +2514,8 @@ def execute_recovery(
         except DeploymentContractError:
             if primary_error is None:
                 raise
+        if primary_error is None:
+            print("STATUS=PASS")
 
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--image", required=True)
@@ -2688,6 +2703,9 @@ def main(argv: list[str] | None = None) -> int:
             print("RECOVERY_ACTIONS_PERFORMED=true")
         else:
             _fail("unsupported-command")
+    except PostMutationDeploymentError as exc:
+        print(f"STATUS={exc.status} CODE={exc.code}")
+        return 1
     except DeploymentContractError as exc:
         print(f"STATUS=FAIL CODE={exc.code}")
         return 1

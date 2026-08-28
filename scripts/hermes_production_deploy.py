@@ -117,7 +117,6 @@ class DeploymentContract:
     allowed_revision_ref: str
     feature_gates: dict[str, str]
     attestation_policy: attestation.RuntimeAttestationPolicy
-    image_only_rollback_db_restore: bool = False
 
     @property
     def protected_secret_names(self) -> tuple[str, ...]:
@@ -514,7 +513,6 @@ def load_contract(
         allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
         attestation_policy=attestation_policy,
-        image_only_rollback_db_restore=raw.get("image_only_rollback_db_restore", False),
     )
 
 
@@ -1804,8 +1802,6 @@ def execute_operation(
     rollback: bool,
     current_image: str | None = None,
 ) -> None:
-    if getattr(contract, "image_only_rollback_db_restore", False):
-        _fail("image-only-rollback-db-restore-unsupported")
     required_confirmation = ROLLBACK_CONFIRMATION if rollback else DEPLOY_CONFIRMATION
     if confirmation != required_confirmation:
         _fail("explicit-confirmation-required")
@@ -2047,12 +2043,16 @@ def execute_recovery(
     source: Path,
     image: str,
     revision: str,
+    backup_parent: Path,
     confirmation: str,
 ) -> None:
-    if getattr(contract, "image_only_rollback_db_restore", False):
-        _fail("image-only-rollback-db-restore-unsupported")
     if confirmation != "RECOVER_UNTRUSTED_RUNTIME":
         _fail("explicit-confirmation-required")
+    _preflight(
+        preflight.validate_private_directory,
+        backup_parent,
+        repository_root=contract.root,
+    )
     _preflight(
         preflight.validate_deployment_lease_owner,
         allowed_owner_uids=contract.lease_owner_uids,
@@ -2091,7 +2091,19 @@ def execute_recovery(
     import subprocess
 
     old_container_name = f"{contract.target_service}-untrusted-rollback-{int(time.time())}"
-    backup_path = contract.database_source.with_suffix(".sqlite3.recovery.bak")
+    backup_dir = backup_parent / lease.holder_fingerprint
+    try:
+        backup_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        _fail("recovery-backup-directory-exists")
+    except OSError:
+        _fail("recovery-backup-directory-create")
+    try:
+        if backup_dir.lstat().st_uid != 0:
+            _fail("recovery-backup-directory-invalid")
+    except OSError:
+        _fail("recovery-backup-directory-invalid")
+    backup_path = backup_dir / "healbite-recovery.db"
 
     try:
         inspect_out = _run(("docker", "inspect", contract.target_service))
@@ -2138,12 +2150,30 @@ def execute_recovery(
             future_mounts = validate_compose_render(temporary, target.image_id, revision)
             cleanup_secret_override(temporary)
 
+        _validate_future_mounts_only(contract, future_mounts)
+
         # 4. Quiesce writers
         stop_res = _run(("docker", "stop", "-t", "10", contract.target_service))
         _require_command_success(stop_res, "quiesce-writer-failed")
         writer_stopped = True
 
+        try:
+            r_out = _run(("docker", "inspect", contract.target_service))
+            _require_command_success(r_out, "zero-writer-proof-failed")
+            c_info = json.loads(r_out.stdout)[0]
+            if c_info.get("State", {}).get("Running", True):
+                _fail("zero-writer-proof-failed")
+        except Exception:
+            _fail("zero-writer-proof-failed")
+
         # 5. Backup & Verify
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(backup_path, flags, 0o600)
+            os.close(fd)
+        except OSError:
+            _fail("recovery-backup-file-create")
+
         try:
             with sqlite3.connect(str(contract.database_source)) as src:
                 src.execute("BEGIN EXCLUSIVE")
@@ -2151,7 +2181,7 @@ def execute_recovery(
                     src.backup(dst)
                 src.commit()
         except sqlite3.Error:
-            _fail("zero-writer-proof-failed")
+            _fail("recovery-backup-failed")
 
         def _check_db(db_path: Path):
             with sqlite3.connect(str(db_path)) as conn:
@@ -2165,6 +2195,8 @@ def execute_recovery(
         _check_db(backup_path)
         backup_verified = True
 
+        with open(contract.database_source, "rb") as f:
+            authoritative_sha = hashlib.sha256(f.read()).hexdigest()
         with open(backup_path, "rb") as f:
             backup_sha = hashlib.sha256(f.read()).hexdigest()
 
@@ -2204,7 +2236,7 @@ def execute_recovery(
         print(f"OLD_REVISION={current_rev}")
         print(f"AUTHORITATIVE_DB_DEVICE={contract.database_source.lstat().st_dev}")
         print(f"AUTHORITATIVE_DB_INODE={contract.database_source.lstat().st_ino}")
-        print(f"AUTHORITATIVE_DB_HASH={backup_sha}")
+        print(f"AUTHORITATIVE_DB_HASH={authoritative_sha}")
         print(f"BACKUP_HASH={backup_sha}")
         try:
             new_id = json.loads(_run(("docker", "inspect", contract.target_service)).stdout)[0]["Id"]
@@ -2250,6 +2282,7 @@ def execute_recovery(
             if rm_res.returncode != 0:
                 rollback_success = False
 
+        qdrant_rollback_failed = False
         if old_container_preserved:
             rename_res = _run(("docker", "rename", old_container_name, contract.target_service))
             start_res = _run(("docker", "start", contract.target_service))
@@ -2264,8 +2297,30 @@ def execute_recovery(
                         c_info = json.loads(r_out.stdout)[0]
                         if c_info["Id"] != baseline.hermes_container_id:
                             rollback_success = False
+                        else:
+                            print("ORIGINAL_CONTAINER_ID_MATCH=PASS")
+                            print("ORIGINAL_START=PASS")
                 except Exception:
                     rollback_success = False
+
+                if rollback_success:
+                    try:
+                        _check_db(contract.database_source)
+                        print("POST_ROLLBACK_DB_INTEGRITY=PASS")
+                        print("POST_ROLLBACK_FK=PASS")
+                    except BaseException:
+                        rollback_success = False
+
+                    try:
+                        qdrant_now = attestation._qdrant_snapshot("qdrant", run=_run)
+                        if qdrant_now != baseline.qdrant:
+                            rollback_success = False
+                            qdrant_rollback_failed = True
+                        else:
+                            print("POST_ROLLBACK_QDRANT_NON_INTERFERENCE=PASS")
+                    except BaseException:
+                        rollback_success = False
+                        qdrant_rollback_failed = True
         elif writer_stopped and not old_container_preserved:
             start_res = _run(("docker", "start", contract.target_service))
             if start_res.returncode != 0:
@@ -2279,7 +2334,10 @@ def execute_recovery(
 
         if not rollback_success:
             print("STATUS=FAIL")
-            print("TECHNICAL_BLOCKER=RECOVERY_ROLLBACK_FAILED")
+            if qdrant_rollback_failed:
+                print("TECHNICAL_BLOCKER=QDRANT_NON_INTERFERENCE_FAILED")
+            else:
+                print("TECHNICAL_BLOCKER=RECOVERY_ROLLBACK_FAILED")
             final_error = PostMutationDeploymentError(
                 status="FAIL",
                 original_error_code=_attestation_error_code(exc),
@@ -2294,7 +2352,18 @@ def execute_recovery(
                 rollback_error_code=None,
             )
 
+        primary_error = final_error
         raise final_error from exc
+    finally:
+        try:
+            _preflight(
+                preflight.release_deployment_lease,
+                lease,
+                allowed_owner_uids=contract.lease_owner_uids,
+            )
+        except DeploymentContractError:
+            if 'primary_error' not in locals() or primary_error is None:
+                raise
 
 
 def _add_image_arguments(parser: argparse.ArgumentParser) -> None:
@@ -2352,6 +2421,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_untrusted = subparsers.add_parser("recover-untrusted-runtime")
     _add_image_arguments(recover_untrusted)
     recover_untrusted.add_argument("--secret-source", type=Path)
+    recover_untrusted.add_argument("--backup-parent", type=Path, required=True)
     recover_untrusted.add_argument("--confirm", required=True)
     return parser
 
@@ -2476,6 +2546,7 @@ def main(argv: list[str] | None = None) -> int:
                 source=_secret_source_argument(contract, args.secret_source),
                 image=args.image,
                 revision=args.revision,
+                backup_parent=args.backup_parent,
                 confirmation=args.confirm,
             )
             print("RECOVERY_ACTIONS_PERFORMED=true")

@@ -723,6 +723,8 @@ def validate_private_directory(
     while True:
         try:
             st = current.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                _fail("recovery-backup-parent-invalid")
             if stat.S_IMODE(st.st_mode) & 0o022:
                 _fail("recovery-backup-parent-invalid")
         except OSError:
@@ -747,9 +749,16 @@ def validate_private_directory(
         _fail("recovery-backup-parent-invalid")
 
     try:
-        if path.resolve().is_relative_to(repository_root.resolve()):
-            _fail("recovery-backup-parent-invalid")
-    except Exception:
+        resolved_path = path.resolve(strict=True)
+        resolved_repo = repository_root.resolve(strict=True)
+    except OSError:
+        _fail("recovery-backup-parent-invalid")
+
+    try:
+        resolved_path.relative_to(resolved_repo)
+    except ValueError:
         pass
+    else:
+        _fail("recovery-backup-parent-invalid")
 
     return st.st_ino

@@ -64,9 +64,11 @@ def fake_docker(monkeypatch):
 
         if command[:2] == ("docker", "inspect"):
             if "hermes-bot" in command:
-                res.stdout = '[{"Id": "old_id", "Image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Config": {"Labels": {"org.opencontainers.image.revision": "0000000000000000000000000000000000000000"}}, "State": {"Status": "exited", "Running": false}, "RestartCount": 0}]'
+                running_state = "false" if any(c[:2] == ("docker", "stop") for c in calls[:-1]) else "true"
+                status_val = "exited" if running_state == "false" else "running"
+                res.stdout = '[{"Id": "old_id", "Created": "2024-01-01T00:00:00Z", "Image": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Config": {"Labels": {"org.opencontainers.image.revision": "0000000000000000000000000000000000000000"}, "Env": ["HEALBITE_HOUSEHOLDS_ENABLED=false", "HEALBITE_HOUSEHOLDS_ALLOWLIST=", "HEALBITE_INVENTORY_PHOTO_ENABLED=false", "HEALBITE_INVENTORY_PHOTO_ALLOWLIST=", "HEALBITE_INVENTORY_PHOTO_UI_ENABLED=false", "HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST=", "HEALBITE_INVENTORY_TEXT_ENABLED=false", "HEALBITE_INVENTORY_TEXT_ALLOWLIST=", "HEALBITE_INVENTORY_TEXT_UI_ENABLED=false", "HEALBITE_INVENTORY_TEXT_UI_ALLOWLIST=", "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED=false", "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST=", "HEALBITE_SHOPPING_LIST_ENABLED=false", "HEALBITE_SHOPPING_LIST_ALLOWLIST=", "HEALBITE_WEEKLY_MENU_ENABLED=false", "HEALBITE_WEEKLY_MENU_ALLOWLIST=", "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED=false", "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST="]}, "State": {"Status": "' + status_val + '", "Running": ' + running_state + ', "StartedAt": "2024-01-01T00:00:00Z"}, "RestartCount": 0, "Mounts": []}]'
             else:
-                res.stdout = '[{"Id": "q_id", "Image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "Created": "2024-01-01T00:00:00Z", "State": {"StartedAt": "2024-01-01T00:00:00Z", "Status": "running", "Running": true}, "RestartCount": 0, "Mounts": [], "Config": {"Labels": {}, "Env": []}}]'
+                res.stdout = '[{"Id": "q_id", "Created": "2024-01-01T00:00:00Z", "Image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "State": {"StartedAt": "2024-01-01T00:00:00Z", "Status": "running", "Running": true}, "RestartCount": 0, "Mounts": [], "Config": {"Labels": {}, "Env": []}}]'
 
             if "inspect_hermes" in responses and "hermes-bot" in command:
                 res = responses["inspect_hermes"]
@@ -103,8 +105,46 @@ def setup_execute(monkeypatch, protected_contract):
     monkeypatch.setattr(deploy, "_compose_recreate_hermes", lambda *a, **kw: None)
 
     # Fake SQLite
+    class MockCursor:
+        def __init__(self, q, p=None):
+            self.q = q
+        def fetchall(self):
+            if "integrity" in self.q:
+                return [("ok",)]
+            return []
+        def fetchone(self):
+            return (1,)
+        def __iter__(self):
+            if "integrity" in self.q:
+                yield ("ok",)
+            elif "foreign_key" in self.q:
+                pass
+            else:
+                yield ("mock_table",)
+
+    class MockConnection:
+        def execute(self, q, p=None):
+            return MockCursor(q, p)
+        def backup(self, d):
+            pass
+        def commit(self):
+            pass
+        def close(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    def mock_connect(path, *args, **kwargs):
+        from pathlib import Path
+        p = Path(path.replace("file:", "").split("?")[0])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.touch()
+        return MockConnection()
+
     def fake_check_db(*a, **kw): pass
-    monkeypatch.setattr("sqlite3.connect", type("MockConnect", (), {"__enter__": lambda self: type("MockConn", (), {"execute": lambda self, q: type("MockCursor", (), {"fetchall": lambda self: [("ok",)] if "integrity" in q else []})(), "backup": lambda self, d: None, "commit": lambda self: None})(), "__exit__": lambda *a: None, "__init__": lambda self, path, *a, **kw: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).touch(), None)[1]}))
+    monkeypatch.setattr("sqlite3.connect", mock_connect)
     return contract, source, backup_parent
 
 
@@ -130,8 +170,37 @@ def test_recovery_quiesce_writer_fails(setup_execute, fake_docker):
 def test_recovery_zero_writer_fails(setup_execute, fake_docker, monkeypatch):
     contract, source, backup_parent = setup_execute
     calls, responses = fake_docker
+    connect_count = [0]
     import sqlite3
-    def failing_connect(*a, **kw): raise sqlite3.Error("locked")
+
+    class FakeCursor:
+        def __init__(self, q):
+            self.q = q
+        def fetchall(self):
+            if "integrity" in self.q: return [("ok",)]
+            if "foreign_key" in self.q: return []
+            return []
+        def fetchone(self): return (1,)
+        def __iter__(self):
+            if "integrity" in self.q: yield ("ok",)
+            elif "foreign_key" in self.q: pass
+            else: yield ("mock",)
+
+    class FakeConn:
+        def execute(self, q, *a, **kw):
+            return FakeCursor(q)
+        def backup(self, d): pass
+        def commit(self): pass
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+
+    def failing_connect(*a, **kw):
+        connect_count[0] += 1
+        if connect_count[0] == 2:
+            raise sqlite3.Error("locked")
+        return FakeConn()
+
     monkeypatch.setattr("sqlite3.connect", failing_connect)
     with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back"):
         deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
@@ -139,24 +208,82 @@ def test_recovery_zero_writer_fails(setup_execute, fake_docker, monkeypatch):
 def test_recovery_db_integrity_fails(setup_execute, fake_docker, monkeypatch):
     contract, source, backup_parent = setup_execute
     calls, responses = fake_docker
-    class BadConn:
-        def execute(self, q):
-            return type("C", (), {"fetchall": lambda self: [("failed",) if "integrity" in q else []]})()
+    connect_count = [0]
+
+    class FakeCursor:
+        def __init__(self, q, fail):
+            self.q = q
+            self.fail = fail
+        def fetchall(self):
+            if "integrity" in self.q:
+                return [("failed",)] if self.fail else [("ok",)]
+            if "foreign_key" in self.q: return []
+            return []
+        def fetchone(self): return (1,)
+        def __iter__(self):
+            if "integrity" in self.q:
+                yield ("failed",) if self.fail else ("ok",)
+            elif "foreign_key" in self.q:
+                pass
+            else:
+                yield ("mock",)
+
+    class FakeConn:
+        def __init__(self, fail):
+            self.fail = fail
+        def execute(self, q, *a, **kw):
+            return FakeCursor(q, self.fail)
         def backup(self, d): pass
         def commit(self): pass
-    monkeypatch.setattr("sqlite3.connect", lambda *a, **kw: type("MC", (), {"__enter__": lambda self: BadConn(), "__exit__": lambda *a: None})())
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+
+    def mock_connect(*a, **kw):
+        connect_count[0] += 1
+        return FakeConn(fail=(connect_count[0] == 2))
+
+    monkeypatch.setattr("sqlite3.connect", mock_connect)
     with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back"):
         deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
 
 def test_recovery_fk_violation_fails(setup_execute, fake_docker, monkeypatch):
     contract, source, backup_parent = setup_execute
     calls, responses = fake_docker
-    class BadConn:
-        def execute(self, q):
-            return type("C", (), {"fetchall": lambda self: [("ok",) if "integrity" in q else [("viol",)]]})()
+    connect_count = [0]
+
+    class FakeCursor:
+        def __init__(self, q, fail):
+            self.q = q
+            self.fail = fail
+        def fetchall(self):
+            if "integrity" in self.q: return [("ok",)]
+            if "foreign_key" in self.q:
+                return [("viol",)] if self.fail else []
+            return []
+        def fetchone(self): return (1,)
+        def __iter__(self):
+            if "integrity" in self.q: yield ("ok",)
+            elif "foreign_key" in self.q:
+                if self.fail: yield ("viol",)
+            else: yield ("mock",)
+
+    class FakeConn:
+        def __init__(self, fail):
+            self.fail = fail
+        def execute(self, q, *a, **kw):
+            return FakeCursor(q, self.fail)
         def backup(self, d): pass
         def commit(self): pass
-    monkeypatch.setattr("sqlite3.connect", lambda *a, **kw: type("MC", (), {"__enter__": lambda self: BadConn(), "__exit__": lambda *a: None})())
+        def close(self): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+
+    def mock_connect(*a, **kw):
+        connect_count[0] += 1
+        return FakeConn(fail=(connect_count[0] == 2))
+
+    monkeypatch.setattr("sqlite3.connect", mock_connect)
     with pytest.raises(deploy.PostMutationDeploymentError, match="post-deploy-rolled-back"):
         deploy.execute_recovery(contract, source=source, image=IMAGE, revision=REVISION, backup_parent=backup_parent, confirmation="RECOVER_UNTRUSTED_RUNTIME")
 

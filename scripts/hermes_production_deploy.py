@@ -2196,16 +2196,7 @@ def execute_recovery(
         except OSError:
             _fail("recovery-backup-directory-create")
 
-        try:
-            bd_stat = backup_dir.lstat()
-            if not stat.S_ISDIR(bd_stat.st_mode) or stat.S_ISLNK(bd_stat.st_mode):
-                _fail("recovery-backup-directory-invalid")
-            if bd_stat.st_uid != 0 or bd_stat.st_gid != 0:
-                _fail("recovery-backup-directory-invalid")
-            if stat.S_IMODE(bd_stat.st_mode) != 0o700:
-                _fail("recovery-backup-directory-invalid")
-        except OSError:
-            _fail("recovery-backup-directory-invalid")
+        _validate_recovery_operation_directory(backup_dir)
 
         backup_path = backup_dir / "healbite-recovery.db"
 

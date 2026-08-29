@@ -711,3 +711,54 @@ def recover_expired_lease(
         raise
     except OSError:
         _fail("deployment-lease-recovery")
+def validate_private_directory(
+    path: Path,
+    *,
+    repository_root: Path,
+) -> int:
+    if not path.is_absolute():
+        _fail("recovery-backup-parent-invalid")
+
+    current = path
+    while True:
+        try:
+            st = current.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                _fail("recovery-backup-parent-invalid")
+            if stat.S_IMODE(st.st_mode) & 0o022:
+                _fail("recovery-backup-parent-invalid")
+        except OSError:
+            _fail("recovery-backup-parent-invalid")
+        if current.parent == current:
+            break
+        current = current.parent
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        st = os.fstat(fd)
+        os.close(fd)
+    except OSError:
+        _fail("recovery-backup-parent-invalid")
+
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        _fail("recovery-backup-parent-invalid")
+    if st.st_uid != 0 or st.st_gid != 0:
+        _fail("recovery-backup-parent-invalid")
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        _fail("recovery-backup-parent-invalid")
+
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_repo = repository_root.resolve(strict=True)
+    except OSError:
+        _fail("recovery-backup-parent-invalid")
+
+    try:
+        resolved_path.relative_to(resolved_repo)
+    except ValueError:
+        pass
+    else:
+        _fail("recovery-backup-parent-invalid")
+
+    return st.st_ino

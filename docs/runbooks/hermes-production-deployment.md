@@ -522,3 +522,37 @@ sources:
 Do not delete or modify those host resources before a successful controlled
 rollout. The canonical wrapper has no dependency on either path. Migration,
 snapshot inventory, and snapshot backfill remain separately approved tasks.
+
+
+## Untrusted Runtime Recovery
+
+Recovery replaces an untrusted or damaged runtime while extracting a fresh, safe SQLite backup and proving no interference with Qdrant. It is explicitly invoked with:
+
+```bash
+python3 scripts/hermes_production_deploy.py recover-untrusted-runtime \
+  --image sha256:<64-hex-image-id> \
+  --revision <exact-40-character-source-sha> \
+  --secret-source /etc/hermes/hermes-production.env \
+  --backup-parent <existing-root-owned-0700-directory-outside-git> \
+  --confirm RECOVER_UNTRUSTED_RUNTIME
+```
+
+`--backup-parent` must point to an:
+* existing
+* root-owned
+* 0700
+* directory
+* outside Git/repository
+
+Do NOT canonically hard-code `/home/hermes/private_backups/hermes-agent`.
+
+The recovery process will:
+1. Validate the backup parent against all security constraints.
+2. Acquire the deployment lease.
+3. Validate future Compose render.
+4. Stop the untrusted Hermes container and prove zero writers.
+5. Extract a fresh SQLite backup into an isolated operation directory (`<backup-parent>/<operation-id>/`).
+6. Verify backup DB integrity (`PRAGMA integrity_check == ok`) and foreign-key violations (`[]`).
+7. Start the candidate container.
+8. Perform post-deploy attestation.
+9. If candidate fails, rollback preserves the old DB, requires Qdrant non-interference, and restores the original container.

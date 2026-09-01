@@ -82,8 +82,8 @@ def test_inv03_invalid_execution_mode():
     """3. invalid execution mode rejected"""
     with pytest.raises(ExecutionHostError):
         ExecutionHostIdentity(
-            execution_host_id="host-ssh-1",
-            mode="SSH",  # Not supported in PR-9
+            execution_host_id="host-inv-1",
+            mode="INVALID_MODE",
             controller_platform=HostPlatform.WINDOWS,
             host_platform=HostPlatform.LINUX,
             hostname="host",

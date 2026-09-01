@@ -30,6 +30,7 @@ class ExecutionMode(StrEnum):
 
     LOCAL = "LOCAL"
     WSL = "WSL"
+    SSH = "SSH"
     ISOLATED = "ISOLATED"
     CONTAINER = "CONTAINER"
     REMOTE = "REMOTE"

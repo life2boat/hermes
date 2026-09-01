@@ -1,4 +1,4 @@
-"""Hermes Agent Run Identity, Execution Host Abstraction & Execution Plane package."""
+"""Hermes Agent Run Identity, Execution Host Abstraction, Remote Contracts & Execution Plane package."""
 
 from ai_engineering.execution.execution_host import ExecutionHost
 from ai_engineering.execution.execution_registry import ExecutionRegistry
@@ -21,6 +21,29 @@ from ai_engineering.execution.local_host import (
     LocalExecutionHost,
     detect_current_platform,
 )
+from ai_engineering.execution.remote_contracts import (
+    REMOTE_CONTRACT_VERSION,
+    ReconciliationOutcome,
+    RemoteBlockingReason,
+    RemoteEventType,
+    RemoteExecutionError,
+    RemoteExecutionHostIdentity,
+    RemoteExecutionState,
+    RemoteHostPlatform,
+    RemoteHostState,
+    RemoteOutputChunk,
+    RemoteProcessIdentity,
+    RemoteReconciliationRequest,
+    RemoteReconciliationResult,
+    RemoteSessionIdentity,
+    SshExecutionConfig,
+)
+from ai_engineering.execution.remote_registry import RemoteExecutionRegistry
+from ai_engineering.execution.remote_state import RemoteExecutionLifecycle
+from ai_engineering.execution.remote_transport import (
+    ContractOnlyRemoteTransport,
+    RemoteExecutionTransport,
+)
 from ai_engineering.execution.run_contracts import (
     AGENT_RUN_CONTRACT_VERSION,
     RUN_EVENT_SCHEMA_VERSION,
@@ -40,11 +63,12 @@ from ai_engineering.execution.wsl_host import WslExecutionHost
 
 __all__ = [
     "AGENT_RUN_CONTRACT_VERSION",
-    "DEFAULT_MAX_OUTPUT_BYTES",
-    "EXECUTION_HOST_CONTRACT_VERSION",
     "ActiveRunRegistry",
     "AgentRunIdentity",
     "AgentRunRecord",
+    "ContractOnlyRemoteTransport",
+    "DEFAULT_MAX_OUTPUT_BYTES",
+    "EXECUTION_HOST_CONTRACT_VERSION",
     "ExecutionHost",
     "ExecutionHostError",
     "ExecutionHostIdentity",
@@ -58,7 +82,24 @@ __all__ = [
     "HostPlatform",
     "HostStatus",
     "LocalExecutionHost",
+    "REMOTE_CONTRACT_VERSION",
     "RUN_EVENT_SCHEMA_VERSION",
+    "ReconciliationOutcome",
+    "RemoteBlockingReason",
+    "RemoteEventType",
+    "RemoteExecutionError",
+    "RemoteExecutionHostIdentity",
+    "RemoteExecutionLifecycle",
+    "RemoteExecutionRegistry",
+    "RemoteExecutionState",
+    "RemoteExecutionTransport",
+    "RemoteHostPlatform",
+    "RemoteHostState",
+    "RemoteOutputChunk",
+    "RemoteProcessIdentity",
+    "RemoteReconciliationRequest",
+    "RemoteReconciliationResult",
+    "RemoteSessionIdentity",
     "RunBlockingReason",
     "RunEventEnvelope",
     "RunEventType",
@@ -66,6 +107,7 @@ __all__ = [
     "RunState",
     "RunStateError",
     "SpawnStatus",
+    "SshExecutionConfig",
     "StaleEventError",
     "WslExecutionConfig",
     "WslExecutionHost",

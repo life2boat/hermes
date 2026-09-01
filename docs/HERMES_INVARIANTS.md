@@ -1144,6 +1144,119 @@ in durable snapshot telemetry or diff artifacts (`RAW_PROMPT_STORAGE=FORBIDDEN`)
 
 **Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
 
+## Candidate requalification & main drift invariants (v4.1 PR-8)
+
+### R1 (INV-REQUAL-V4-001). Candidate evidence binds exact base SHA
+
+**Invariant:** All candidate validation results, snapshot digests, and evaluations bind to an exact `candidate_base_sha`.
+No implicit freshness is inferred across changes to canonical main.
+
+**Why:** Prevents stale evidence reuse when underlying repository state evolves.
+
+**Evidence:** `CandidateRequalificationRequest` and `CandidateRequalificationResult` dataclasses.
+
+**Authority:** `ai_engineering/requalification/requalification_contracts.py`.
+
+### R2 (INV-REQUAL-V4-002). Main advancement invalidates implicit candidate freshness
+
+**Invariant:** When canonical main advances beyond `candidate_base_sha`, candidate evidence cannot be merged or selected
+without explicit deterministic drift evaluation.
+
+**Why:** Guarantees that upstream changes are verified for interference before candidate acceptance.
+
+**Evidence:** `BaseRelationship` and `RequalificationDecisionState` state machines.
+
+**Authority:** `ai_engineering/requalification/requalification_contracts.py`.
+
+### R3 (INV-REQUAL-V4-003). Requalification is strictly evidence-only
+
+**Invariant:** `CandidateRequalificationResult` represents analytical evidence of compatibility.
+It does not authorize automatic merge, cherry-pick, TaskGraph transition, or production deployment.
+
+**Why:** Maintains clear separation between evidence generation and execution authority.
+
+**Evidence:** `CandidateRequalificationResult.eligible` schema contract.
+
+**Authority:** `ai_engineering/requalification/requalification_contracts.py`.
+
+### R4 (INV-REQUAL-V4-004). Requalification is not rebase
+
+**Invariant:** Requalification evaluates drift purely via read-only inspection.
+It must never execute `git rebase`, `git merge`, or mutate candidate worktrees.
+
+**Why:** Preserves the provenance and immutability of candidate implementation artifacts.
+
+**Evidence:** `CandidateRequalificationEngine` read-only operations.
+
+**Authority:** `ai_engineering/requalification/requalification_engine.py`.
+
+### R5 (INV-REQUAL-V4-005). Path overlap fails closed
+
+**Invariant:** If candidate changed paths intersect with main drift changed paths,
+requalification returns `NEW_CANDIDATE_REQUIRED` with `CANDIDATE_DRIFT_OVERLAP`.
+No speculative merge resolution or LLM arbitration is attempted in PR-8.
+
+**Why:** Eliminates silent merge conflicts and behavioral regression risks.
+
+**Evidence:** Overlap detection in `CandidateRequalificationEngine.evaluate`.
+
+**Authority:** `ai_engineering/requalification/requalification_engine.py`.
+
+### R6 (INV-REQUAL-V4-006). Old judgement freshness expires on base drift
+
+**Invariant:** `CandidateJudgeResult` freshness is classified as `STALE_BASE` when `base_sha != current_main_sha`.
+A stale judgement cannot serve as current winner evidence without requalification.
+
+**Why:** Ensures that ranking remains aligned with current canonical repository state.
+
+**Evidence:** `classify_judgement_freshness` in `CandidateRequalificationEngine`.
+
+**Authority:** `ai_engineering/requalification/requalification_engine.py`.
+
+### R7 (INV-REQUAL-V4-007). current_main_sha is part of authority boundary
+
+**Invariant:** Requalification results bind to a specific `current_main_sha`.
+If main advances again, previously computed requalification evidence expires.
+
+**Why:** Enforces cryptographic lineage between base evidence and target main.
+
+**Evidence:** `CandidateRequalificationResult.current_main_sha` field binding.
+
+**Authority:** `ai_engineering/requalification/requalification_contracts.py`.
+
+### R8 (INV-REQUAL-V4-008). Requalification never mutates candidate workspace or canonical checkout
+
+**Invariant:** Requalification executes only read-only Git commands (`diff`, `cat-file`, `merge-base`, `rev-list`).
+It never alters files in candidate worktrees or the canonical checkout.
+
+**Why:** Prevents corruption of active workspaces and canonical branches.
+
+**Evidence:** `CandidateRequalificationEngine` read-only implementation.
+
+**Authority:** `ai_engineering/requalification/requalification_engine.py`.
+
+### R9 (INV-REQUAL-V4-009). No automatic replacement candidate creation
+
+**Invariant:** When drift analysis requires a new candidate (`NEW_CANDIDATE_REQUIRED`),
+PR-8 outputs the machine-readable decision without spawning processes, creating worktrees, or modifying TaskGraph.
+
+**Why:** Keeps evolutionary and execution layers decoupled.
+
+**Evidence:** Requalification engine design.
+
+**Authority:** `ai_engineering/requalification/requalification_engine.py`.
+
+### R10 (INV-REQUAL-V4-010). PR-9 owns execution host abstraction
+
+**Invariant:** PR-8 operates over workspace and repository identities.
+Execution host management, remote provisioning, and container lifecycle belong to PR-9.
+
+**Why:** Enforces bounded scope and clean architecture across PRs.
+
+**Evidence:** Requalification package boundaries.
+
+**Authority:** `ai_engineering/requalification/__init__.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

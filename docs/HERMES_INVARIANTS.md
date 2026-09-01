@@ -1596,6 +1596,113 @@ Process crashes require state reconstruction from external immutable event logs.
 
 **Authority:** `ai_engineering/control_plane/registry.py`.
 
+### CP11 (INV-CP-V4-011). Terminal States Cannot Be Left (No Resurrection)
+
+**Invariant:** Once a cycle reaches `COMPLETED`, `CANCELLED`, or `FAILED`, no
+public mutator, helper, or event can move it to any other phase. The guard is
+central (`_transition` plus `_ensure_active`), so every entry point inherits it.
+
+**Why:** PR-11 exposed unguarded mutators that resurrected terminal cycles.
+Source-of-truth pattern matches `RunState.EXITED/FAILED`, `LeaseState.QUARANTINED`,
+and `SnapshotPhase.FINAL`.
+
+**Evidence:** `EngineeringCycleOrchestrator._ensure_active`, `_transition`; tests
+`test_d1_*`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP12 (INV-CP-V4-012). One Ordered Phase Transition Authority
+
+**Invariant:** All phase changes -- direct helper or event-driven -- pass through
+the single validated `_transition` mechanism backed by an explicit
+`_ALLOWED_TRANSITIONS` table. Illegal jumps (e.g. `CREATED -> READY_FOR_HANDOFF`,
+`PREPARING -> JUDGING`) are structurally impossible, and control state is
+deterministically projected from validated events rather than no-op records.
+
+**Why:** PR-11 allowed phase skips and recorded most non-blocker events as
+no-ops while advancing phase through unfenced direct calls, creating a second
+mutable state source.
+
+**Evidence:** `_ALLOWED_TRANSITIONS`; `_dispatch_event`; tests `test_ordered_*`,
+`test_d4_*`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP13 (INV-CP-V4-013). Canonical TaskIntent / TaskLineage / Repository Binding
+
+**Invariant:** A cycle binds to a validated canonical `TaskIntent`
+(`intent_digest`, `intent_revision`, `repository_id`, `source_base_sha`) and a
+`TASK`-kind `TaskLineage` node. Fake digests, digest/revision/base/repository
+mismatches, orphan node ids, and cross-task candidates/evidence fail closed.
+Child authority boundaries must be subsets of intent authority (effect classes,
+stop-boundary rank, no production/secret/data-store derivation).
+
+**Why:** PR-11 accepted arbitrary regex-valid intent identifiers with no
+authority linkage.
+
+**Evidence:** `EngineeringCycleState.from_task_intent`; orchestrator
+constructor binding; `check_authority_monotonicity`; tests `test_d6_*`,
+`test_authority_*`, `test_lineage_*`.
+
+**Authority:** `ai_engineering/control_plane/cycle_state.py`,
+`ai_engineering/control_plane/orchestrator.py`.
+
+### CP14 (INV-CP-V4-014). Judgement and Validation Require Bound Evidence
+
+**Invariant:** Judge selection requires a registered, identity-bound,
+completion-proven candidate. Validation reaching `READY_FOR_HANDOFF` requires a
+`ValidationEvidence` record bound to the cycle, task, node, judged candidate,
+base SHA, and execution epoch. Bare booleans, ghost candidates, foreign
+evidence, and stale epochs are rejected. `requalification_required` gates both
+validation and handoff until fresh requalification evidence is recorded; no
+auto-rebase exists.
+
+**Why:** PR-11 allowed `record_judgement("ghost")` and bare-boolean validation
+to reach `READY_FOR_HANDOFF` without evidence.
+
+**Evidence:** `_verify_judgeable_candidate`, `_verify_validation_evidence`,
+`_apply_validation`, `_verify_readiness_gate`; tests `test_d3_*`, `test_d5_*`,
+`test_gate_*`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`,
+`ai_engineering/control_plane/contracts.py`.
+
+### CP15 (INV-CP-V4-015). Handoff Evidence References Are Repository-Relative Only
+
+**Invariant:** `NodeHandoff.evidence_refs` accept only pure evidence identifiers
+or strictly repository-relative paths validated by the canonical snapshot
+contract. POSIX-absolute, Windows drive (`C:/`, `C:\`), UNC
+(`\\server\share`, `//server/share`), and traversal (`..`) references are
+rejected. Registry recording of handoffs and events is idempotent for exact
+duplicates and fails closed on identity collision; last-writer-wins is
+impossible.
+
+**Why:** PR-11's two-pattern path heuristic accepted `C:/...`, UNC, and
+traversal paths, and the registry silently overwrote handoffs.
+
+**Evidence:** `ai_engineering/control_plane/_evidence_refs.py`;
+`EngineeringCycleRegistry.record_handoff` / `record_event`; tests `test_d2_*`,
+`test_d8_*`.
+
+**Authority:** `ai_engineering/control_plane/_evidence_refs.py`,
+`ai_engineering/control_plane/handoff.py`,
+`ai_engineering/control_plane/registry.py`.
+
+### CP16 (INV-CP-V4-016). Cancellation Is Reachable and Two-Staged
+
+**Invariant:** Any active phase can enter `CANCEL_REQUESTED`; only proven
+terminal execution evidence (`RUN_CANCELLED` with concrete evidence references)
+confirms `CANCELLED`. Bare cancellation acknowledgements and remote
+`UNVERIFIABLE` evidence cannot confirm terminality.
+
+**Why:** PR-11 declared cancellation terminal states that no code path could
+reach.
+
+**Evidence:** `request_cancel`, `_apply_cancel_confirmation`; tests
+`test_d7_*`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

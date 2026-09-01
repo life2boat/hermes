@@ -1,10 +1,8 @@
-"""Control plane contracts, enums, error types, and reason codes."""
+"""Control plane contracts, enums, error types, and reason codes (PR-11.1 hardened)."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-import json
+from dataclasses import dataclass
 import re
 from typing import Any
 
@@ -16,15 +14,38 @@ except ImportError:
     class StrEnum(str, Enum):
         pass
 
-from ai_engineering.execution.host_contracts import ExecutionHostIdentity, ExecutionMode
-from ai_engineering.execution.remote_contracts import RemoteBlockingReason
-from ai_engineering.execution.run_contracts import AgentRunIdentity, RunBlockingReason
-from ai_engineering.parallel.parallel_contracts import ParallelizationStrategy
-from ai_engineering.workspaces.workspace_contracts import WorkspaceIdentity
+from ai_engineering.control_plane._evidence_refs import validate_evidence_ref
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", re.IGNORECASE)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
-CONTROL_PLANE_CONTRACT_VERSION = "4.1.0"
+
+def _secure_identifier(value: str) -> bool:
+    """Identifiers must not embed traversal components or drive letters."""
+    return ":" not in value and ".." not in value
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ControlPlaneError(
+            ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+            f"{label} must be a lowercase 64-hex SHA-256 digest, got {value!r}",
+        )
+    return value
+
+
+def _require_commit_sha(value: object, label: str) -> str:
+    """Git commit identities (TaskIntent.source_base_sha, cycle base) are 40-hex."""
+    if not isinstance(value, str) or not _COMMIT_SHA_RE.fullmatch(value):
+        raise ControlPlaneError(
+            ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+            f"{label} must be a lowercase 40-hex git commit SHA, got {value!r}",
+        )
+    return value
+
+_CONTROL_PLANE_CONTRACT_VERSION = "4.1.1"
+CONTROL_PLANE_CONTRACT_VERSION = _CONTROL_PLANE_CONTRACT_VERSION
 
 
 class ControlPlanePhase(StrEnum):
@@ -85,3 +106,88 @@ class ControlPlaneError(Exception):
         super().__init__(f"[{code}] {message}")
         self.code = code
         self.message = message
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ControlPlaneError(
+            ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+            f"{label} must be a lowercase 64-hex SHA-256 digest, got {value!r}",
+        )
+    return value
+
+
+def _require_identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _IDENTIFIER_RE.match(value):
+        raise ControlPlaneError(
+            ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+            f"Invalid {label}: {value!r}",
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationEvidence:
+    """Immutable validation evidence bound to one cycle, candidate, and base identity.
+
+    A bare ``validation_passed`` boolean is never sufficient: reaching
+    ``READY_FOR_HANDOFF`` requires one of these records whose identity fields
+    exactly match the cycle state and the judged candidate.
+    """
+
+    evidence_id: str
+    cycle_id: str
+    task_id: str
+    node_id: str
+    candidate_id: str
+    base_sha: str
+    execution_epoch: int
+    evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("evidence_id", self.evidence_id),
+            ("cycle_id", self.cycle_id),
+            ("task_id", self.task_id),
+            ("node_id", self.node_id),
+            ("candidate_id", self.candidate_id),
+        ):
+            _require_identifier(value, f"ValidationEvidence.{label}")
+            if not _secure_identifier(value):
+                raise ControlPlaneError(
+                    ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+                    f"ValidationEvidence.{label} must not embed traversal or drive "
+                    f"components: {value!r}",
+                )
+        _require_commit_sha(self.base_sha, "ValidationEvidence.base_sha")
+        if not isinstance(self.execution_epoch, int) or isinstance(self.execution_epoch, bool):
+            raise ControlPlaneError(
+                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+                f"ValidationEvidence.execution_epoch must be int, got {self.execution_epoch!r}",
+            )
+        if self.execution_epoch < 1:
+            raise ControlPlaneError(
+                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+                f"ValidationEvidence.execution_epoch must be >= 1, got {self.execution_epoch}",
+            )
+        if not isinstance(self.evidence_refs, tuple):
+            object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+        if not self.evidence_refs:
+            raise ControlPlaneError(
+                ControlPlaneBlockingReason.CONTROL_PLANE_HANDOFF_INCOMPLETE.value,
+                "ValidationEvidence requires at least one concrete evidence reference",
+            )
+        for ref in self.evidence_refs:
+            validate_evidence_ref(ref, ControlPlaneError)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence_id": self.evidence_id,
+            "cycle_id": self.cycle_id,
+            "task_id": self.task_id,
+            "node_id": self.node_id,
+            "candidate_id": self.candidate_id,
+            "base_sha": self.base_sha,
+            "execution_epoch": self.execution_epoch,
+            "evidence_refs": list(self.evidence_refs),
+        }

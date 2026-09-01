@@ -255,6 +255,23 @@ from ai_engineering.judge import (
     SemanticCandidateEvaluator,
 )
 
+from ai_engineering.workspaces import (
+    DIFF_ARTIFACT_CONTRACT_VERSION,
+    WORKSPACE_SNAPSHOT_CONTRACT_VERSION,
+    DiffArtifact,
+    SnapshotBlockingReason,
+    SnapshotPhase,
+    SnapshotRegistry,
+    WorkspaceSnapshot,
+    WorkspaceSnapshotError,
+    WorkspaceSnapshotManager,
+    compute_diff_digest,
+    generate_diff_artifact,
+    normalize_git_status,
+    validate_repository_relative_path,
+    verify_diff_artifact,
+)
+
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
     "BEHAVIOUR_TRACE_SCHEMA_VERSION",
@@ -482,4 +499,18 @@ __all__ = [
     "JudgeBlockingReason",
     "JudgeEventType",
     "SemanticCandidateEvaluator",
+    "DIFF_ARTIFACT_CONTRACT_VERSION",
+    "DiffArtifact",
+    "SnapshotBlockingReason",
+    "SnapshotPhase",
+    "SnapshotRegistry",
+    "WORKSPACE_SNAPSHOT_CONTRACT_VERSION",
+    "WorkspaceSnapshot",
+    "WorkspaceSnapshotError",
+    "WorkspaceSnapshotManager",
+    "compute_diff_digest",
+    "generate_diff_artifact",
+    "normalize_git_status",
+    "validate_repository_relative_path",
+    "verify_diff_artifact",
 ]

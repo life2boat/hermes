@@ -1,9 +1,6 @@
-"""Deterministic, sanitized evidence contracts for Hermes engineering."""
-
 from ai_engineering.contracts import (
     BEHAVIOUR_EVAL_ENGINE_VERSION,
     BEHAVIOUR_TRACE_SCHEMA_VERSION,
-    SUPPORTED_BEHAVIOUR_TRACE_SCHEMA_VERSIONS,
     COST_POLICY_VERSION,
     MODEL_POLICY_VERSION,
     RATE_CARD_SCHEMA_VERSION,
@@ -164,6 +161,22 @@ from ai_engineering.effective_policy import (
     validate_task_policy,
     verify_effective_policy_report,
 )
+from ai_engineering.workspaces import (
+    WORKSPACE_CONTRACT_VERSION,
+    WORKTREE_LEASE_VERSION,
+    ExecutionMode,
+    LeaseState,
+    LeaseTransitionError,
+    WorkspaceBlockingReason,
+    WorkspaceIdentity,
+    WorkspaceManager,
+    WorkspaceSecurityError,
+    WorktreeLease,
+    WorktreeManager,
+    WorktreeSafetyError,
+    resolve_against_workspace,
+    validate_workspace_path,
+)
 
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
@@ -313,4 +326,18 @@ __all__ = [
     "validate_policy_source",
     "validate_task_policy",
     "verify_effective_policy_report",
+    "WORKSPACE_CONTRACT_VERSION",
+    "WORKTREE_LEASE_VERSION",
+    "ExecutionMode",
+    "LeaseState",
+    "LeaseTransitionError",
+    "WorkspaceBlockingReason",
+    "WorkspaceIdentity",
+    "WorkspaceManager",
+    "WorkspaceSecurityError",
+    "WorktreeLease",
+    "WorktreeManager",
+    "WorktreeSafetyError",
+    "resolve_against_workspace",
+    "validate_workspace_path",
 ]

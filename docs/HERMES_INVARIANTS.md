@@ -229,7 +229,7 @@ authority package when production execution is requested.
 
 ## Migration and backup invariants
 
-### M1. Zero writers before capture or migration
+### M1. Quiescent database for baseline operations
 
 **Invariant:** Active writers equal zero before a migration baseline, backup or
 publication, and the required leases remain held through the protected window.
@@ -431,6 +431,99 @@ data.
 sanitized classifications and synthetic or approved data.
 
 **Authority:** `docs/BEHAVIOUR_EVALS.md`, `scripts/secret_check.sh`.
+
+## Workspace and execution plane invariants
+
+### W1 (INV-WS-V4-001). Canonical checkout is never an agent workspace
+
+**Invariant:** The canonical checkout (`/root/hermes_workspace/hermes` or the
+primary repository root) is never assigned or used as an agent execution workspace.
+
+**Why:** Direct mutation of the canonical working tree destroys provenance,
+bypasses change review, and risks production drift.
+
+**Evidence:** `WorkspaceSecurityError(CANONICAL_CHECKOUT_COLLISION)` raised on
+any attempt to register, create, or resolve an execution workspace to the canonical root.
+
+**Authority:** `ai_engineering/workspaces/workspace_manager.py`,
+`ai_engineering/workspaces/worktree_manager.py`.
+
+### W2 (INV-WS-V4-002). Single authoritative workspace per AgentRun
+
+**Invariant:** Exactly one authoritative isolated workspace is bound to a given
+`AgentRun` or `WorktreeLease`.
+
+**Why:** Concurrent or overlapping execution across unisolated runs causes
+cross-agent state contamination.
+
+**Evidence:** `WorkspaceIdentity` and `WorktreeLease` validation enforcing
+`WORKTREE_IDENTITY_MISMATCH` on foreign caller access.
+
+**Authority:** `ai_engineering/workspaces/workspace_contracts.py`.
+
+### W3 (INV-WS-V4-003). Strict workspace path containment
+
+**Invariant:** All requested write and resolution paths must strictly resolve
+within the authoritative workspace root.
+
+**Why:** Relative traversal (`../`), external absolute paths, canonical
+repository paths, and symlink escapes could overwrite external files.
+
+**Evidence:** `validate_workspace_path` enforcing `WORKSPACE_PATH_ESCAPE` on path escapes.
+
+**Authority:** `ai_engineering/workspaces/workspace_manager.py`.
+
+### W4 (INV-WS-V4-004). Proven base SHA validation
+
+**Invariant:** Every execution workspace must start from and verify its exact
+expected base commit SHA.
+
+**Why:** Starting from an unverified or drifted base creates silent merge
+conflicts and invalidates behaviour assertions.
+
+**Evidence:** `validate_worktree_base_sha` raising `WORKTREE_BASE_SHA_MISMATCH`
+if git HEAD differs from `base_sha`.
+
+**Authority:** `ai_engineering/workspaces/worktree_manager.py`.
+
+### W5 (INV-WS-V4-005). Dirty worktree reuse protection
+
+**Invariant:** An unexpected dirty worktree is never silently reused or
+automatically cleaned with destructive git commands (`reset --hard`, `clean -fd`, `stash`).
+
+**Why:** Automatic destructive cleaning can destroy uncommitted human or agent
+work and hide state anomalies.
+
+**Evidence:** `validate_clean_worktree` raising `WORKTREE_DIRTY_REUSE`.
+
+**Authority:** `ai_engineering/workspaces/worktree_manager.py`.
+
+### W6 (INV-WS-V4-006). Quarantined workspace terminality
+
+**Invariant:** A `QUARANTINED` or `RELEASED` workspace lease is terminal and
+cannot be reactivated or reused for active execution.
+
+**Why:** Quarantined workspaces contain suspected corrupted or malicious state
+that must not re-enter the active execution plane.
+
+**Evidence:** `LeaseState` state machine rejecting transitions from
+`QUARANTINED` or `RELEASED` with `LEASE_TRANSITION_INVALID`.
+
+**Authority:** `ai_engineering/workspaces/workspace_contracts.py`.
+
+### W7 (INV-WS-V4-007). Workspace isolation does not expand authorization
+
+**Invariant:** Creating or leasing an isolated workspace grants only filesystem
+containment and does not grant production authorization, data mutation, secret
+access, or external communication rights.
+
+**Why:** Sandboxing and workspace allocation are orthogonal to authority and
+execution boundaries.
+
+**Evidence:** Non-interference checks and immutable `AuthorityBoundary` preservation.
+
+**Authority:** `ai_engineering/workspaces/workspace_contracts.py`,
+`ai_engineering/contracts.py`.
 
 ## Change validation invariant
 

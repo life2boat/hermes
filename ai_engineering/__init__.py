@@ -177,6 +177,21 @@ from ai_engineering.workspaces import (
     resolve_against_workspace,
     validate_workspace_path,
 )
+from ai_engineering.execution import (
+    AGENT_RUN_CONTRACT_VERSION,
+    RUN_EVENT_SCHEMA_VERSION,
+    ActiveRunRegistry,
+    AgentRunIdentity,
+    AgentRunRecord,
+    RunBlockingReason,
+    RunEventEnvelope,
+    RunEventType,
+    RunIdentityError,
+    RunState,
+    RunStateError,
+    SpawnStatus,
+    StaleEventError,
+)
 
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
@@ -340,4 +355,17 @@ __all__ = [
     "WorktreeSafetyError",
     "resolve_against_workspace",
     "validate_workspace_path",
+    "AGENT_RUN_CONTRACT_VERSION",
+    "RUN_EVENT_SCHEMA_VERSION",
+    "ActiveRunRegistry",
+    "AgentRunIdentity",
+    "AgentRunRecord",
+    "RunBlockingReason",
+    "RunEventEnvelope",
+    "RunEventType",
+    "RunIdentityError",
+    "RunState",
+    "RunStateError",
+    "SpawnStatus",
+    "StaleEventError",
 ]

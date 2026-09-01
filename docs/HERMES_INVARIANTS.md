@@ -1257,6 +1257,119 @@ Execution host management, remote provisioning, and container lifecycle belong t
 
 **Authority:** `ai_engineering/requalification/__init__.py`.
 
+## Execution host abstraction invariants (v4.1 PR-9)
+
+### H1 (INV-HOST-V4-001). Controller is separated from Execution Host
+
+**Invariant:** `controller_platform` represents the orchestrator OS (e.g. Windows) while `host_platform` represents
+the execution environment OS (e.g. Linux inside WSL). The controller platform must never be conflated with the execution host.
+
+**Why:** Enforces clear physical and architectural boundaries between orchestration and command execution.
+
+**Evidence:** `ExecutionHostIdentity.controller_platform` and `host_platform` fields.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
+### H2 (INV-HOST-V4-002). ExecutionMode is strictly LOCAL or WSL in PR-9
+
+**Invariant:** In PR-9, only `ExecutionMode.LOCAL` and `ExecutionMode.WSL` are supported.
+Remote SSH transport is explicitly out of scope and deferred to PR-10.
+
+**Why:** Maintains bounded, verifiable increments across execution plane infrastructure.
+
+**Evidence:** `ExecutionMode` enum validation in `ExecutionHostIdentity` and `ExecutionRequest`.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
+### H3 (INV-HOST-V4-003). Execution Host identity is explicit and immutable
+
+**Invariant:** `ExecutionHostIdentity` contains machine-verifiable capability sets and platform metadata.
+Host identity provides evidence of execution environment, not ambient authorization for production mutations.
+
+**Why:** Prevents forged execution evidence and capability escalation.
+
+**Evidence:** `ExecutionHostIdentity` dataclass.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
+### H4 (INV-HOST-V4-004). Workspace, Run, and Host identities must strictly agree
+
+**Invariant:** `ExecutionRequest.execution_host_id` must match `WorkspaceIdentity.execution_host_id`
+and `AgentRunIdentity.execution_host_id`. Mismatch fails closed with `EXECUTION_HOST_MISMATCH`.
+
+**Why:** Prevents processes from executing in mismatched or unauthorized workspaces.
+
+**Evidence:** Host request validation in `LocalExecutionHost` and `WslExecutionHost`.
+
+**Authority:** `ai_engineering/execution/local_host.py` and `ai_engineering/execution/wsl_host.py`.
+
+### H5 (INV-HOST-V4-005). No implicit host fallback
+
+**Invariant:** An `ExecutionRequest` targeted to WSL must never execute on LOCAL, and a LOCAL request must never
+execute on WSL. No fallback is permitted.
+
+**Why:** Guarantees deterministic execution environments and prevents cross-platform behavioral discrepancies.
+
+**Evidence:** Mode validation in `LocalExecutionHost` and `WslExecutionHost`.
+
+**Authority:** `ai_engineering/execution/local_host.py` and `ai_engineering/execution/wsl_host.py`.
+
+### H6 (INV-HOST-V4-006). Argv-based execution with shell=False default
+
+**Invariant:** Commands must be supplied as an immutable sequence of argv tokens.
+`shell=False` is enforced by default; string concatenation and shell interpolation are forbidden.
+
+**Why:** Eliminates command injection risks and shell parsing ambiguities across platforms.
+
+**Evidence:** `ExecutionRequest.argv` contract and subprocess invocation.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
+### H7 (INV-HOST-V4-007). Foreign absolute cwd is forbidden
+
+**Invariant:** Working directories must resolve strictly within the approved workspace worktree path.
+Foreign absolute paths (e.g. Windows drive paths on Linux or root escapes) are rejected with `EXECUTION_PATH_INVALID`.
+
+**Why:** Enforces workspace containment and prevents filesystem escapes.
+
+**Evidence:** `validate_request` path resolution in execution hosts.
+
+**Authority:** `ai_engineering/execution/local_host.py` and `ai_engineering/execution/wsl_host.py`.
+
+### H8 (INV-HOST-V4-008). CANCEL_REQUESTED != EXITED and Timeout != Exited
+
+**Invariant:** Requesting cancellation transitions logical state to `CANCEL_REQUESTED`.
+A process is marked `EXITED` only upon confirmed process termination.
+A timed out execution is marked `TIMED_OUT`, not successful exit.
+
+**Why:** Maintains honest, race-free process lifecycle state tracking.
+
+**Evidence:** `ExecutionState` state machine and cancellation handlers.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
+### H9 (INV-HOST-V4-009). Process output is deterministically bounded
+
+**Invariant:** Captured `stdout` and `stderr` are bounded by `max_stdout_bytes` and `max_stderr_bytes`.
+Truncation is recorded explicitly in metadata without crashing or unbounded memory retention.
+
+**Why:** Protects host and controller memory from unbounded output streams.
+
+**Evidence:** `ExecutionResult.stdout_truncated` and `stderr_truncated` flags.
+
+**Authority:** `ai_engineering/execution/local_host.py` and `ai_engineering/execution/wsl_host.py`.
+
+### H10 (INV-HOST-V4-010). Execution abstraction has no production authority
+
+**Invariant:** ExecutionHost provides generic command execution within isolated workspaces.
+It does not grant production deployment, database migration, or credential mutation authority.
+
+**Why:** Strictly confines host execution to verified offline candidate workspaces.
+
+**Evidence:** `HostCapability` enum definition and absence of production capabilities.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

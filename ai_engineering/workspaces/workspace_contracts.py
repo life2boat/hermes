@@ -29,6 +29,7 @@ class ExecutionMode(StrEnum):
     """Supported workspace execution modes."""
 
     LOCAL = "LOCAL"
+    WSL = "WSL"
     ISOLATED = "ISOLATED"
     CONTAINER = "CONTAINER"
     REMOTE = "REMOTE"

@@ -713,6 +713,105 @@ only; it does not spawn processes, create worktrees, or invoke model APIs.
 
 **Authority:** `ai_engineering/parallel/`.
 
+## Parallel repository investigation invariants
+
+### I1 (INV-INV-V4-001). Preparatory strategy constraint for repository investigation
+
+**Invariant:** Parallel repository investigation batches require an approved
+`ParallelizationDecision` with strategy `PREPARATORY`; non-preparatory strategies
+are strictly rejected.
+
+**Why:** Investigation fan-out is strictly intended for read-only exploration and
+information gathering before implementation synthesis.
+
+**Evidence:** `ParallelRepositoryInvestigator.execute_batch` asserting strategy `PREPARATORY`.
+
+**Authority:** `ai_engineering/investigation/investigation_runner.py`.
+
+### I2 (INV-INV-V4-002). Strict read-only investigator authority and command allowlist
+
+**Invariant:** Repository investigators have pure read-only authority. File writes,
+git mutations (`commit`, `checkout`, `reset`, `clean`, `merge`), deletions (`rm`),
+and in-place editors (`sed -i`) are strictly prohibited and blocked in code.
+
+**Why:** Background investigation must never alter working tree state, branch pointers,
+or repository history.
+
+**Evidence:** `validate_investigation_command` and read-only file scanners.
+
+**Authority:** `ai_engineering/investigation/investigation_runner.py`.
+
+### I3 (INV-INV-V4-003). Exact base SHA binding across investigation batches
+
+**Invariant:** All investigators within a batch must bind to the exact same base SHA;
+any mismatch against current repository HEAD fails closed immediately.
+
+**Why:** Divergent base SHAs produce contradictory search observations and broken
+evidence provenance.
+
+**Evidence:** `execute_single_investigation` asserting `git rev-parse HEAD == base_sha`.
+
+**Authority:** `ai_engineering/investigation/investigation_runner.py`.
+
+### I4 (INV-INV-V4-004). Repository-relative result paths and filesystem fencing
+
+**Invariant:** All match paths and scope paths must resolve strictly within the
+repository root and be serialized as repository-relative paths (`path/to/file.py`);
+absolute paths and `..` traversals are rejected.
+
+**Why:** Machine-readable handoff contracts must remain portable and protected
+against path traversal escapes.
+
+**Evidence:** `RepositoryMatch.__post_init__` and `RepositoryInvestigationRequest.__post_init__`.
+
+**Authority:** `ai_engineering/investigation/investigation_contracts.py`.
+
+### I5 (INV-INV-V4-005). Stale result fencing and cancellation handling
+
+**Invariant:** Results from cancelled, superseded, or non-live agent runs are
+fenced and rejected from aggregate state.
+
+**Why:** Asynchronous late-arriving results from aborted branches must not pollute
+the active execution context.
+
+**Evidence:** `execute_single_investigation` validating against `ActiveRunRegistry`.
+
+**Authority:** `ai_engineering/investigation/investigation_runner.py`.
+
+### I6 (INV-INV-V4-006). Concurrency budget compliance
+
+**Invariant:** Concurrent investigator threads/processes must never exceed the
+effective agent limit defined by `ParallelizationDecision` and `ConcurrencyBudget`.
+
+**Why:** Execution must not overwhelm system resources or exceed concurrency quotas.
+
+**Evidence:** `ParallelRepositoryInvestigator.execute_batch` clamping thread workers to budget.
+
+**Authority:** `ai_engineering/investigation/investigation_runner.py`.
+
+### I7 (INV-INV-V4-007). Repository state non-mutation
+
+**Invariant:** Repository `HEAD` and `git status --porcelain` must be byte-identical
+before and after repository investigation batch execution.
+
+**Why:** Proof of zero side effects in read-only investigation plane.
+
+**Evidence:** Fixture assertions in `tests/ai_engineering/test_investigation_invariants.py`.
+
+**Authority:** `ai_engineering/investigation/`.
+
+### I8 (INV-INV-V4-008). Zero TaskGraph and production mutation
+
+**Invariant:** Repository investigators do not mutate `TaskGraph` nodes or acquire
+production mutation authority.
+
+**Why:** Decoupled investigation produces raw evidence for subsequent planning
+without auto-advancing graph lifecycle.
+
+**Evidence:** Pure functional return of `RepositoryInvestigationAggregate`.
+
+**Authority:** `ai_engineering/investigation/`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

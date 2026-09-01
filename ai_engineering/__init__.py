@@ -192,6 +192,20 @@ from ai_engineering.execution import (
     SpawnStatus,
     StaleEventError,
 )
+from ai_engineering.parallel import (
+    DEFAULT_MAX_CANDIDATES,
+    GLOBAL_MAX_CANDIDATES_LIMIT,
+    PARALLELIZATION_DECISION_SCHEMA_VERSION,
+    PARALLELIZATION_POLICY_VERSION,
+    ConcurrencyBudget,
+    ParallelizationBlockingReason,
+    ParallelizationDecision,
+    ParallelizationPolicy,
+    ParallelizationPolicyError,
+    ParallelizationPolicyInput,
+    ParallelizationStrategy,
+    evaluate_parallelization_policy,
+)
 
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
@@ -368,4 +382,16 @@ __all__ = [
     "RunStateError",
     "SpawnStatus",
     "StaleEventError",
+    "DEFAULT_MAX_CANDIDATES",
+    "GLOBAL_MAX_CANDIDATES_LIMIT",
+    "PARALLELIZATION_DECISION_SCHEMA_VERSION",
+    "PARALLELIZATION_POLICY_VERSION",
+    "ConcurrencyBudget",
+    "ParallelizationBlockingReason",
+    "ParallelizationDecision",
+    "ParallelizationPolicy",
+    "ParallelizationPolicyError",
+    "ParallelizationPolicyInput",
+    "ParallelizationStrategy",
+    "evaluate_parallelization_policy",
 ]

@@ -620,6 +620,99 @@ enabling execution capability at runtime.
 
 **Authority:** `ai_engineering/execution/`.
 
+## Parallelization policy and concurrency budget invariants
+
+### P1 (INV-PAR-V4-001). Explicit policy approval for parallel execution
+
+**Invariant:** Parallel agent execution requires explicit positive approval
+from `ParallelizationPolicy`. In the absence of an explicit approval rule,
+`strategy` defaults strictly to `NONE`.
+
+**Why:** Implicit or speculative fan-out causes runaway resource usage and
+state indeterminism.
+
+**Evidence:** `ParallelizationPolicy.evaluate` default fallback to `NONE` with `allowed=False`.
+
+**Authority:** `ai_engineering/parallel/parallel_policy.py`.
+
+### P2 (INV-PAR-V4-002). Bounded concurrency budget
+
+**Invariant:** Total concurrent candidates and agents are strictly bounded by
+`ConcurrencyBudget` and can never exceed hard system limits (`max_candidates <= 3`).
+
+**Why:** Unbounded parallelism creates resource exhaustion and unmanageable
+candidate convergence trees.
+
+**Evidence:** `ConcurrencyBudget.__post_init__` and policy clamping.
+
+**Authority:** `ai_engineering/parallel/parallel_contracts.py`.
+
+### P3 (INV-PAR-V4-003). Parallelism does not expand authorization
+
+**Invariant:** Child parallel candidates strictly inherit the intersection of
+parent authority and node boundary; parallelization never grants permissions
+absent from parent scope.
+
+**Why:** Subordinate execution paths must never escalate privilege or bypass
+environmental boundaries.
+
+**Evidence:** `ParallelizationPolicy.evaluate` validating against `AuthorityBoundary`.
+
+**Authority:** `ai_engineering/parallel/parallel_policy.py`,
+`ai_engineering/contracts.py`.
+
+### P4 (INV-PAR-V4-004). Production mutation parallelism prohibition
+
+**Invariant:** Direct parallel execution of production mutation (deployment, DB
+migration, runtime modification, Qdrant vector mutation, secret rotation) is
+strictly prohibited.
+
+**Why:** Concurrent production writers cause non-deterministic race conditions,
+corrupted state, and irrecoverable outages.
+
+**Evidence:** `ParallelizationPolicy.evaluate` returning `allowed=False`, `strategy=NONE`,
+`requires_single_mutation_owner=True`, and `PARALLEL_MUTATION_CONFLICT`.
+
+**Authority:** `ai_engineering/parallel/parallel_policy.py`.
+
+### P5 (INV-PAR-V4-005). Strict rehearsal separation from production mutation
+
+**Invariant:** `REHEARSAL` strategy is strictly limited to simulation, schema
+validation, and analysis with non-production/read-only side effects; it never
+grants active production mutation authority.
+
+**Why:** Rehearsal exists to build confidence prior to a single-owner production
+mutation barrier.
+
+**Evidence:** `ParallelizationPolicy.evaluate` allowing `REHEARSAL` only under
+read-only side effects while enforcing `requires_single_mutation_owner=True`.
+
+**Authority:** `ai_engineering/parallel/parallel_policy.py`.
+
+### P6 (INV-PAR-V4-006). Deterministic policy evaluation
+
+**Invariant:** Policy evaluation is a deterministic function of normalized task
+metadata, complexity, uncertainty, risk, and budget; same inputs always produce
+identical decisions and JSON representations.
+
+**Why:** Non-deterministic routing causes unpredictable pipeline behaviour and
+flaky execution graphs.
+
+**Evidence:** `ParallelizationDecision.to_json` byte-equivalence across repeated evaluations.
+
+**Authority:** `ai_engineering/parallel/parallel_policy.py`.
+
+### P7 (INV-PAR-V4-007). Zero process spawning in policy layer
+
+**Invariant:** `ParallelizationPolicy` evaluates policy contracts and bounds
+only; it does not spawn processes, create worktrees, or invoke model APIs.
+
+**Why:** Policy routing must remain decoupled from execution runtime.
+
+**Evidence:** Non-interference assertions in test suites.
+
+**Authority:** `ai_engineering/parallel/`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

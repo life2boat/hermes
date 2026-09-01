@@ -525,6 +525,101 @@ execution boundaries.
 **Authority:** `ai_engineering/workspaces/workspace_contracts.py`,
 `ai_engineering/contracts.py`.
 
+## Agent run identity, execution epoch, and stale event fencing invariants
+
+### E1 (INV-EXEC-V4-001). Immutable agent run identity and collision protection
+
+**Invariant:** `run_id` uniquely identifies an immutable `AgentRunIdentity`.
+Registering an existing `run_id` with differing identity attributes is strictly
+rejected with `RUN_IDENTITY_COLLISION`.
+
+**Why:** Duplicate or mutated run identities cause non-deterministic execution
+attribution and cross-run state pollution.
+
+**Evidence:** `ActiveRunRegistry.register_run` enforcing `RUN_IDENTITY_COLLISION`
+on identity field mismatches.
+
+**Authority:** `ai_engineering/execution/run_contracts.py`,
+`ai_engineering/execution/run_registry.py`.
+
+### E2 (INV-EXEC-V4-002). Execution epoch lifecycle fencing
+
+**Invariant:** `execution_epoch` strictly increments across lifecycle
+generations for an execution slot. Inbound events with mismatched or older
+epochs are rejected with `STALE_RUN_MUTATION`.
+
+**Why:** Network retries, asynchronous message delivery, and delayed worker
+callbacks can deliver stale telemetry that corrupts newer execution epochs.
+
+**Evidence:** `ActiveRunRegistry.process_event` raising `STALE_RUN_MUTATION` on
+epoch divergence.
+
+**Authority:** `ai_engineering/execution/run_registry.py`.
+
+### E3 (INV-EXEC-V4-003). Stale run event fencing
+
+**Invariant:** Events from superseded, unmapped, or completed runs cannot mutate
+active run state or prematurely terminate new active runs.
+
+**Why:** Late exit or failure events from old runs could otherwise kill newly
+spawned active replacement runs.
+
+**Evidence:** `ActiveRunRegistry.process_event` rejecting stale run identifiers
+with `STALE_RUN_EVENT`.
+
+**Authority:** `ai_engineering/execution/run_registry.py`.
+
+### E4 (INV-EXEC-V4-004). Cancellation request non-exit invariant
+
+**Invariant:** A cancellation request (`CANCEL_REQUESTED`) transitions run
+intent but does not assume immediate process exit (`EXITED`).
+
+**Why:** Cancellation requests are in-flight control signals; process exit must
+be explicitly confirmed by process termination evidence.
+
+**Evidence:** `RunState` transition table and `ActiveRunRegistry.request_cancel`.
+
+**Authority:** `ai_engineering/execution/run_state.py`.
+
+### E5 (INV-EXEC-V4-005). Idempotent spawn contract
+
+**Invariant:** Repeated spawn requests for an already active run return
+`ALREADY_ACTIVE` idempotently without duplicate process spawning or lease
+mutations.
+
+**Why:** Retries or parallel orchestration ticks must not trigger duplicate
+execution processes for the same run authority.
+
+**Evidence:** `ActiveRunRegistry.spawn_agent` returning `(record, SpawnStatus.ALREADY_ACTIVE)`.
+
+**Authority:** `ai_engineering/execution/run_registry.py`.
+
+### E6 (INV-EXEC-V4-006). Run-to-workspace and lease authority containment
+
+**Invariant:** An agent run cannot exceed its bound workspace authority; lease
+ownership mismatch is rejected with `RUN_LEASE_OWNERSHIP_MISMATCH`.
+
+**Why:** Agent runs must only operate on isolated workspaces where they hold
+explicit and matching lease ownership.
+
+**Evidence:** `ActiveRunRegistry.register_run` validating workspace registration
+and lease owner equality.
+
+**Authority:** `ai_engineering/execution/run_registry.py`.
+
+### E7 (INV-EXEC-V4-007). Zero process spawning in PR-2 contracts
+
+**Invariant:** PR-2 implements immutable contracts, fencing rules, and state
+machines only; actual OS subprocess spawning and parallel execution remain
+completely deactivated (`OFF`).
+
+**Why:** Foundation safety contracts must be validated and merged before
+enabling execution capability at runtime.
+
+**Evidence:** Feature flag verification and domain-only implementation.
+
+**Authority:** `ai_engineering/execution/`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

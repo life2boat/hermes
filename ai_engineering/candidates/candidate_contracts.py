@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_engineering.parallel.parallel_contracts import ParallelizationStrategy
+from ai_engineering.workspaces.snapshot_contracts import DiffArtifact, WorkspaceSnapshot
 
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
@@ -275,6 +276,11 @@ class CandidateResult:
     completed_at: str
     success: bool
     candidate_head_sha: str | None = None
+    pre_execution_snapshot: WorkspaceSnapshot | None = None
+    post_execution_snapshot: WorkspaceSnapshot | None = None
+    post_validation_snapshot: WorkspaceSnapshot | None = None
+    final_snapshot: WorkspaceSnapshot | None = None
+    diff_artifact: DiffArtifact | None = None
 
     def __post_init__(self) -> None:
         # Validate changed_paths are repository-relative and normalized
@@ -310,12 +316,22 @@ class CandidateResult:
             "completed_at": self.completed_at,
             "success": self.success,
             "candidate_head_sha": self.candidate_head_sha,
+            "pre_execution_snapshot": self.pre_execution_snapshot.to_dict() if self.pre_execution_snapshot else None,
+            "post_execution_snapshot": self.post_execution_snapshot.to_dict() if self.post_execution_snapshot else None,
+            "post_validation_snapshot": self.post_validation_snapshot.to_dict() if self.post_validation_snapshot else None,
+            "final_snapshot": self.final_snapshot.to_dict() if self.final_snapshot else None,
+            "diff_artifact": self.diff_artifact.to_dict() if self.diff_artifact else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CandidateResult:
         val_results = tuple(ValidationCommandResult.from_dict(d) for d in data.get("validation_results", ()))
         state = CandidateState(data["state"]) if isinstance(data["state"], str) else data["state"]
+        pre_snap = WorkspaceSnapshot.from_dict(data["pre_execution_snapshot"]) if data.get("pre_execution_snapshot") else None
+        post_snap = WorkspaceSnapshot.from_dict(data["post_execution_snapshot"]) if data.get("post_execution_snapshot") else None
+        val_snap = WorkspaceSnapshot.from_dict(data["post_validation_snapshot"]) if data.get("post_validation_snapshot") else None
+        final_snap = WorkspaceSnapshot.from_dict(data["final_snapshot"]) if data.get("final_snapshot") else None
+        diff_art = DiffArtifact.from_dict(data["diff_artifact"]) if data.get("diff_artifact") else None
         return cls(
             candidate_id=data["candidate_id"],
             task_id=data["task_id"],
@@ -332,6 +348,11 @@ class CandidateResult:
             completed_at=data["completed_at"],
             success=data["success"],
             candidate_head_sha=data.get("candidate_head_sha"),
+            pre_execution_snapshot=pre_snap,
+            post_execution_snapshot=post_snap,
+            post_validation_snapshot=val_snap,
+            final_snapshot=final_snap,
+            diff_artifact=diff_art,
         )
 
 

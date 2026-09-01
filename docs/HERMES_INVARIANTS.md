@@ -1021,6 +1021,129 @@ uncontrolled remote provider calls in core judging infrastructure.
 
 **Authority:** `ai_engineering/judge/semantic_evaluator.py`.
 
+## Candidate workspace snapshot & diff artifact invariants (v4.1 PR-7)
+
+### S1 (INV-SNAPSHOT-V4-001). WorkspaceSnapshot is immutable point-in-time evidence
+
+**Invariant:** Once emitted, `WorkspaceSnapshot` and `DiffArtifact` instances are frozen
+and cannot be mutated. Any subsequent workspace state changes produce a new snapshot ID.
+
+**Why:** Prevents historical state mutation, race conditions, and observational tampering.
+
+**Evidence:** `WorkspaceSnapshot` and `DiffArtifact` dataclasses (`frozen=True`).
+
+**Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
+
+### S2 (INV-SNAPSHOT-V4-002). Snapshot capture is strictly read-only
+
+**Invariant:** Snapshot capture executes only non-mutating Git operations (`status`, `rev-parse`, `diff`, `ls-files`).
+It must never execute `git add`, `commit`, `reset`, `clean`, `checkout`, `restore`, `merge`, `rebase`, `cherry-pick`, or `push`.
+
+**Why:** Guarantees that observation cannot pollute, reset, or alter isolated candidate workspaces.
+
+**Evidence:** `WorkspaceSnapshotManager` read-only operations.
+
+**Authority:** `ai_engineering/workspaces/snapshot_manager.py`.
+
+### S3 (INV-SNAPSHOT-V4-003). Deterministic diff digest
+
+**Invariant:** Normalized diff content produces a deterministic SHA-256 digest independent of timestamps,
+absolute paths, OS platform, or thread scheduling.
+
+**Why:** Enables tamper-evident cryptographic attestation of worktree changes.
+
+**Evidence:** `compute_diff_digest` and `verify_diff_artifact` in `ai_engineering/workspaces/diff_artifacts.py`.
+
+**Authority:** `ai_engineering/workspaces/diff_artifacts.py`.
+
+### S4 (INV-SNAPSHOT-V4-004). Changed paths are repository-relative and non-escaping
+
+**Invariant:** All paths exposed in snapshots and diff artifacts are repository-relative, normalized,
+and strictly fenced against traversal escapes (`..`, absolute Linux/Windows paths, UNC paths, backslashes).
+
+**Why:** Prevents directory traversal attacks and environment-dependent file resolution bugs.
+
+**Evidence:** `validate_repository_relative_path` validator.
+
+**Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
+
+### S5 (INV-SNAPSHOT-V4-005). Foreign absolute path handoff is forbidden
+
+**Invariant:** Candidate-to-judge and inter-agent handoffs rely exclusively on workspace IDs, candidate IDs,
+run IDs, base SHAs, repository-relative paths, and artifact identifiers, never on host-specific absolute paths.
+
+**Why:** Enables seamless multi-host and container execution isolation.
+
+**Evidence:** `DiffArtifact` and `WorkspaceSnapshot` contract interfaces.
+
+**Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
+
+### S6 (INV-SNAPSHOT-V4-006). Canonical checkout protection
+
+**Invariant:** Candidate workspace snapshot capture against the canonical repository checkout is strictly forbidden
+and blocked with `WORKSPACE_SNAPSHOT_CANONICAL_FORBIDDEN`.
+
+**Why:** Guarantees that the canonical checkout cannot be confused with an isolated candidate worktree.
+
+**Evidence:** Canonical checkout path validation in `WorkspaceSnapshotManager`.
+
+**Authority:** `ai_engineering/workspaces/snapshot_manager.py`.
+
+### S7 (INV-SNAPSHOT-V4-007). Base SHA and workspace identity binding
+
+**Invariant:** Snapshot capture verifies that workspace identity, candidate identity, run identity,
+base SHA, and active worktree lease ownership are mutually consistent and valid.
+
+**Why:** Prevents cross-workspace pollution and orphaned execution capture.
+
+**Evidence:** Identity binding checks in `WorkspaceSnapshotManager`.
+
+**Authority:** `ai_engineering/workspaces/snapshot_manager.py`.
+
+### S8 (INV-SNAPSHOT-V4-008). Stale run and epoch fencing
+
+**Invariant:** Snapshot capture and artifact registration are rejected if the active agent run identity
+is non-live, terminated, or from a stale execution epoch (`STALE_RUN_EVENT`).
+
+**Why:** Fences against delayed or out-of-order background execution events.
+
+**Evidence:** Run state verification in `WorkspaceSnapshotManager`.
+
+**Authority:** `ai_engineering/workspaces/snapshot_manager.py`.
+
+### S9 (INV-SNAPSHOT-V4-009). Snapshot evidence does not grant merge or deployment authority
+
+**Invariant:** `WorkspaceSnapshot` and `DiffArtifact` represent observational evidence only.
+They do not grant automatic merge, cherry-pick, TaskGraph mutation, or deployment authority.
+
+**Why:** Maintains fail-closed separation between evidence collection and governance actions.
+
+**Evidence:** Architectural boundary specifications.
+
+**Authority:** `docs/HERMES_INVARIANTS.md`.
+
+### S10 (INV-SNAPSHOT-V4-010). PR-8 owns drift requalification
+
+**Invariant:** PR-7 snapshot contracts capture base SHA and diff metadata as-is.
+Requalification and base drift reconciliation are owned exclusively by PR-8.
+
+**Why:** Enforces bounded scope and clean evolutionary stages across PRs.
+
+**Evidence:** `WorkspaceSnapshot` and `DiffArtifact` contracts.
+
+**Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
+
+### S11 (INV-SNAPSHOT-V4-011). Raw prompt storage is forbidden
+
+**Invariant:** No raw model prompts, untrusted inputs, or provider payloads may be stored
+in durable snapshot telemetry or diff artifacts (`RAW_PROMPT_STORAGE=FORBIDDEN`).
+
+**Why:** Enforces zero secret leakage and data minimization policies.
+
+**Evidence:** Strict schema validation in `DiffArtifact` and `WorkspaceSnapshot`.
+
+**Authority:** `ai_engineering/workspaces/snapshot_contracts.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

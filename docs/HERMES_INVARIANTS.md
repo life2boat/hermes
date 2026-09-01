@@ -1703,6 +1703,194 @@ reach.
 
 **Authority:** `ai_engineering/control_plane/orchestrator.py`.
 
+## Operator Observability Plane Invariants (v4.1 PR-12)
+
+The Operator Observability Plane (`ai_engineering/observability/`) is a
+deterministic, read-only projection over the authoritative PR-1..PR-11.1
+contracts. Observability owns projection only.
+
+### OBS-1 (INV-OBS-V4-001). Observability Is Projection-Only
+
+**Invariant:** Observability never creates, mutates, repairs, or
+authorizes control-plane state. It classifies and summarizes existing
+authoritative evidence; it never calls control-plane mutators
+(transition, record_*, request_cancel, release_lease, spawn, execute,
+merge, deploy).
+
+**Why:** An operator view that can write becomes a competing source of
+truth and a mutation backchannel.
+
+**Evidence:** AST-scan tests and deep equality tests in
+`test_observability_readonly_safety.py`.
+
+**Authority:** `ai_engineering/observability/`.
+
+### OBS-2 (INV-OBS-V4-002). No Observability Mutation Authority
+
+**Invariant:** Observability views are frozen, typed, allowlisted
+representations holding only scalars. Mutating a rendered view can never
+affect `EngineeringCycleState`, `EngineeringCycleRegistry`,
+`WorkspaceIdentity`, `AgentRunIdentity`, `CandidateResult`, or
+`ExecutionHost` state. Observability grants and revokes no authority.
+
+**Why:** Mutable views would expose live references to authoritative
+objects.
+
+**Evidence:** frozen-dataclass views; mutation negative tests.
+
+**Authority:** `ai_engineering/observability/views.py`.
+
+### OBS-3 (INV-OBS-V4-003). No False Green From Missing Safety Evidence
+
+**Invariant:** Missing safety-critical evidence never renders OK:
+remote `UNVERIFIABLE` is not healthy, missing validation does not make
+handoff readiness true, identity conflict is not OK, stale base is not
+fresh, missing TaskIntent binding is not trusted. Health precedence is
+`CONFLICTED > UNVERIFIABLE > BLOCKED > STALE > DEGRADED > OK`.
+
+**Why:** A green operator panel for an unsafe state is worse than no
+panel.
+
+**Evidence:** `test_observability_projection_views.py` (no-false-green
+health override; evidence-dependent phases).
+
+**Authority:** `ai_engineering/observability/projection.py`.
+
+### OBS-4 (INV-OBS-V4-004). Remote UNVERIFIABLE Remains Non-Terminal
+
+**Invariant:** The projection never renders remote disconnect or
+cancel-acknowledgement as `EXITED`/`CANCELLED`. `UNVERIFIABLE` is
+distinguished from terminal states in host views, run views, overall
+health, and handoff readiness.
+
+**Why:** Reuses the PR-10 invariant inside the operator view.
+
+**Evidence:** `test_observability_projection_views.py::TestRemoteUnverifiable`.
+
+**Authority:** `ai_engineering/observability/projection.py`.
+
+### OBS-5 (INV-OBS-V4-005). Operator Serialization Is Redacted and Bounded
+
+**Invariant:** Output is bounded by explicit `ProjectionLimits`; any
+truncation is disclosed (`truncated`, `original_count`,
+`returned_count`) and degrades projection health to PARTIAL. A
+centralized redaction policy redacts credential-shaped values and
+forbidden raw-prompt-style fields before anything crosses the operator
+boundary, independent of producer correctness.
+
+**Why:** Unbounded or leaking output is a production hazard.
+
+**Evidence:** `test_observability_determinism_bounds.py`,
+`test_observability_redaction_paths.py`.
+
+**Authority:** `ai_engineering/observability/redaction.py`,
+`ai_engineering/observability/contracts.py`.
+
+### OBS-6 (INV-OBS-V4-006). Raw Prompts Are Never Serialized
+
+**Invariant:** Operator output never contains raw prompts, raw
+provider responses, or raw tool output. TaskIntent observability
+exposes only safe metadata (intent digest, revision, task class, gates).
+
+**Why:** RAW_PROMPT_STORAGE remains forbidden; the operator boundary
+inherits that rule.
+
+**Evidence:** leak tests in `test_observability_redaction_paths.py`.
+
+**Authority:** `ai_engineering/observability/views.py`.
+
+### OBS-7 (INV-OBS-V4-007). Projection Identity Conflicts Fail Closed
+
+**Invariant:** Any disagreement across cycle, task, node, run,
+workspace, candidate, host, epoch, repository, or base SHA makes the
+projection CONFLICTED and health CONFLICTED. There is no best-effort
+reconciliation and no silent omission of conflicting records.
+
+**Why:** A conflicted projection rendered as complete would mislead
+operators.
+
+**Evidence:** `test_observability_identity_conflicts.py`.
+
+**Authority:** `ai_engineering/observability/projection.py`.
+
+### OBS-8 (INV-OBS-V4-008). Artifact Paths Are Repository-Relative or Opaque
+
+**Invariant:** All artifact references crossing the operator boundary
+are evidence IDs or canonical repository-relative paths (validated by
+the canonical snapshot-contract validator). POSIX absolute, Windows
+drive, UNC, device, and traversal paths are rejected or redacted.
+Foreign absolute worktree paths are never serialized.
+
+**Why:** Reuses the PR-7/PR-11.1 path-safety invariant at the operator
+boundary.
+
+**Evidence:** `test_observability_redaction_paths.py::TestArtifactPathSafety`.
+
+**Authority:** `ai_engineering/control_plane/_evidence_refs.py`,
+`ai_engineering/observability/projection.py`.
+
+### OBS-9 (INV-OBS-V4-009). Serialization Is Deterministic
+
+**Invariant:** The same authoritative input state produces byte-stable
+serialized output: stable field order (canonical JSON), deterministic
+collection ordering (sorted keys, event timeline ordered by
+`created_at` then `event_id`), no wall clock, no randomness, no object
+reprs, no memory addresses. Current time is dependency-injected for
+lease-age classification; without a clock, expiry is UNVERIFIABLE, not
+guessed.
+
+**Why:** Deterministic output is required for audit, replay, and
+tooling.
+
+**Evidence:** `test_observability_determinism_bounds.py`.
+
+**Authority:** `ai_engineering/observability/rendering.py`.
+
+### OBS-10 (INV-OBS-V4-010). Barrier Explanations Use Machine-Readable Reasons
+
+**Invariant:** Every barrier (validation, requalification, handoff
+readiness, production serialization, remote execution verifiability,
+candidate completion, candidate judgement) exposes `ready`, machine
+reason codes, and missing requirements. Canonical control-plane
+blockers surface under their canonical names; observability reason
+codes (`OBSERVABILITY_*`) never duplicate or replace them.
+
+**Why:** `ready=false` without explanation is not operable.
+
+**Evidence:** `test_observability_barriers_events.py`.
+
+**Authority:** `ai_engineering/observability/contracts.py`,
+`ai_engineering/observability/projection.py`.
+
+### OBS-11 (INV-OBS-V4-011). Production Serialization Visibility Does Not Grant Ownership
+
+**Invariant:** The production serialization view reports
+`active_mutation_agents`, owner count, and readiness. It never assigns
+an owner and confers no production execution authority.
+
+**Why:** Observing a barrier must not become a way to pass it.
+
+**Evidence:** `test_observability_projection_views.py::TestProductionSerialization`.
+
+**Authority:** `ai_engineering/observability/projection.py`.
+
+### OBS-12 (INV-OBS-V4-012). Projection Provenance Is Explicit
+
+**Invariant:** Every snapshot records `generated_from`: repository id,
+base SHA, cycle/task/node identity, execution epoch, and exactly which
+authoritative sources were present or absent (with record counts).
+Optional absent sources are explicit and machine-readable; a projection
+never pretends to be complete. The schema version is explicit
+(`OBSERVABILITY_SCHEMA_VERSION`) and unsupported future versions fail
+closed.
+
+**Why:** Operators must be able to trust or reject a projection based
+on what it was built from.
+
+**Evidence:** provenance tests in `test_observability_readonly_safety.py`.
+
+**Authority:** `ai_engineering/observability/contracts.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

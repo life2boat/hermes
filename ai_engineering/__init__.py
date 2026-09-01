@@ -222,6 +222,22 @@ from ai_engineering.investigation import (
     validate_investigation_command,
 )
 
+from ai_engineering.candidates import (
+    CandidateBatchAggregate,
+    CandidateBlockingReason,
+    CandidateError,
+    CandidateIdentity,
+    CandidateImplementationBatch,
+    CandidateImplementationRequest,
+    CandidateResult,
+    CandidateState,
+    ParallelCandidateRunner,
+    ValidationCommandResult,
+    execute_single_candidate,
+    make_candidate_branch_name,
+    validate_candidate_command,
+)
+
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
     "BEHAVIOUR_TRACE_SCHEMA_VERSION",
@@ -422,4 +438,17 @@ __all__ = [
     "RepositoryMatch",
     "execute_single_investigation",
     "validate_investigation_command",
+    "CandidateBatchAggregate",
+    "CandidateBlockingReason",
+    "CandidateError",
+    "CandidateIdentity",
+    "CandidateImplementationBatch",
+    "CandidateImplementationRequest",
+    "CandidateResult",
+    "CandidateState",
+    "ParallelCandidateRunner",
+    "ValidationCommandResult",
+    "execute_single_candidate",
+    "make_candidate_branch_name",
+    "validate_candidate_command",
 ]

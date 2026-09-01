@@ -206,6 +206,21 @@ from ai_engineering.parallel import (
     ParallelizationStrategy,
     evaluate_parallelization_policy,
 )
+from ai_engineering.investigation import (
+    INVESTIGATION_CONTRACT_VERSION,
+    INVESTIGATION_RESULT_SCHEMA_VERSION,
+    MAX_SNIPPET_LENGTH,
+    InvestigationBlockingReason,
+    InvestigationError,
+    ParallelRepositoryInvestigator,
+    RepositoryInvestigationAggregate,
+    RepositoryInvestigationBatch,
+    RepositoryInvestigationRequest,
+    RepositoryInvestigationResult,
+    RepositoryMatch,
+    execute_single_investigation,
+    validate_investigation_command,
+)
 
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
@@ -394,4 +409,17 @@ __all__ = [
     "ParallelizationPolicyInput",
     "ParallelizationStrategy",
     "evaluate_parallelization_policy",
+    "INVESTIGATION_CONTRACT_VERSION",
+    "INVESTIGATION_RESULT_SCHEMA_VERSION",
+    "MAX_SNIPPET_LENGTH",
+    "InvestigationBlockingReason",
+    "InvestigationError",
+    "ParallelRepositoryInvestigator",
+    "RepositoryInvestigationAggregate",
+    "RepositoryInvestigationBatch",
+    "RepositoryInvestigationRequest",
+    "RepositoryInvestigationResult",
+    "RepositoryMatch",
+    "execute_single_investigation",
+    "validate_investigation_command",
 ]

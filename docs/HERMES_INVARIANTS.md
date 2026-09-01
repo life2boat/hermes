@@ -812,6 +812,113 @@ without auto-advancing graph lifecycle.
 
 **Authority:** `ai_engineering/investigation/`.
 
+## Candidate implementations invariants
+
+### C1 (INV-CAND-V4-001). Candidate strategy constraint for candidate batch execution
+
+**Invariant:** Parallel candidate implementation batches require an approved
+`ParallelizationDecision` with strategy `CANDIDATE`; non-candidate strategies
+(`NONE`, `PREPARATORY`, `REVIEW`, `REHEARSAL`) are strictly rejected.
+
+**Why:** Creating isolated writable candidate worktrees is permissible only under
+an explicit candidate exploration authorization.
+
+**Evidence:** `ParallelCandidateRunner.execute_batch` asserting strategy `CANDIDATE`.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C2 (INV-CAND-V4-002). Isolated writable worktree and lease ownership per candidate
+
+**Invariant:** Every candidate receives a dedicated, isolated writable Git worktree
+with a unique branch, unique workspace ID, unique AgentRunIdentity, and active
+`WorktreeLease`. Two candidates never share a writable worktree.
+
+**Why:** Prevents cross-candidate race conditions, dirty file leaks, and checkout collisions.
+
+**Evidence:** `ParallelCandidateRunner.execute_batch` allocating separate worktrees and leases.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C3 (INV-CAND-V4-003). Exact base SHA binding across candidate batch
+
+**Invariant:** All candidates in a batch must originate from the exact same approved
+base SHA; mismatch against repository HEAD fails closed immediately.
+
+**Why:** Divergent base SHAs corrupt comparative candidate evaluation and evidence provenance.
+
+**Evidence:** `execute_single_candidate` asserting base SHA equality.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C4 (INV-CAND-V4-004). Strict scope fencing and non-expansion of candidate authority
+
+**Invariant:** Candidates may modify only files matching declared repository-relative
+`allowed_paths`. Any out-of-scope mutation invalidates the candidate with `CANDIDATE_SCOPE_VIOLATION`.
+
+**Why:** Prevents untrusted side-effects and maintains bounded blast radius.
+
+**Evidence:** `execute_single_candidate` diff inspection against `allowed_paths`.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C5 (INV-CAND-V4-005). Canonical main non-mutation and main branch protection
+
+**Invariant:** Candidates must never execute inside the canonical checkout or against
+the `main` branch. Canonical HEAD and porcelain status must be byte-identical before
+and after candidate batch execution.
+
+**Why:** Protects authoritative canonical working tree and primary branch pointers.
+
+**Evidence:** `execute_single_candidate` rejecting canonical checkout and `main` branch.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C6 (INV-CAND-V4-006). Zero production mutation authority
+
+**Invariant:** Candidate implementations never receive production mutation ownership
+or access to deployment, migration, secret rotation, or remote SSH execution.
+
+**Why:** Candidate exploration is strictly repository-local and pre-merge.
+
+**Evidence:** `validate_candidate_command` and sandbox execution boundaries.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C7 (INV-CAND-V4-007). Stale result fencing and cancellation handling
+
+**Invariant:** Events and completions from cancelled or superseded execution epochs
+are fenced and cannot overwrite current candidate state.
+
+**Why:** Asynchronous late-arriving callbacks from aborted runs must not pollute active state.
+
+**Evidence:** Integration with `ActiveRunRegistry` in `execute_single_candidate`.
+
+**Authority:** `ai_engineering/candidates/candidate_runner.py`.
+
+### C8 (INV-CAND-V4-008). Concurrency budget compliance
+
+**Invariant:** Concurrent candidate workers are strictly clamped to
+`min(batch.max_parallel, decision.max_agents, decision.max_candidates)` with a default
+hard ceiling of 3.
+
+**Why:** Prevents resource starvation and runaway concurrency fan-out.
+
+**Evidence:** `CandidateImplementationBatch.__post_init__` and `ParallelCandidateRunner`.
+
+**Authority:** `ai_engineering/candidates/candidate_contracts.py`.
+
+### C9 (INV-CAND-V4-009). Candidate result is evidence, not winner
+
+**Invariant:** `CandidateResult` represents raw execution evidence (diffs, validation
+outcomes, changed paths) and never authorizes merge, selection, or winner declaration.
+Semantic judging and selection belong strictly to PR-6.
+
+**Why:** Clean separation between candidate execution and candidate evaluation.
+
+**Evidence:** `CandidateResult` contract containing no winner/selection fields.
+
+**Authority:** `ai_engineering/candidates/candidate_contracts.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

@@ -272,6 +272,22 @@ from ai_engineering.workspaces import (
     verify_diff_artifact,
 )
 
+from ai_engineering.requalification import (
+    REQUALIFICATION_CONTRACT_VERSION,
+    BaseRelationship,
+    CandidateRequalificationEngine,
+    CandidateRequalificationRequest,
+    CandidateRequalificationResult,
+    DriftEvidence,
+    JudgementFreshness,
+    RequalificationBlockingReason,
+    RequalificationDecisionState,
+    RequalificationError,
+    RequalificationEvidence,
+    RequalificationRegistry,
+    ValidationFreshness,
+)
+
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
     "BEHAVIOUR_TRACE_SCHEMA_VERSION",
@@ -513,4 +529,17 @@ __all__ = [
     "normalize_git_status",
     "validate_repository_relative_path",
     "verify_diff_artifact",
+    "BaseRelationship",
+    "CandidateRequalificationEngine",
+    "CandidateRequalificationRequest",
+    "CandidateRequalificationResult",
+    "DriftEvidence",
+    "JudgementFreshness",
+    "REQUALIFICATION_CONTRACT_VERSION",
+    "RequalificationBlockingReason",
+    "RequalificationDecisionState",
+    "RequalificationError",
+    "RequalificationEvidence",
+    "RequalificationRegistry",
+    "ValidationFreshness",
 ]

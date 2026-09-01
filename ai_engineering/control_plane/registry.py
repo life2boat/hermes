@@ -1,4 +1,10 @@
-"""In-memory thread-safe registry for EngineeringCycleState, events, and handoffs."""
+"""In-memory thread-safe registry for EngineeringCycleState, events, and handoffs (PR-11.1).
+
+Collision semantics (D8): recording an item whose identity already exists
+is idempotent only when the recorded value is exactly equal; any
+different value under the same identity is a collision failure.
+Last-writer-wins overwrites are structurally impossible.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,11 @@ from ai_engineering.control_plane.handoff import NodeHandoff
 
 
 class EngineeringCycleRegistry:
-    """In-memory registry tracking active engineering cycles, events, and node handoffs."""
+    """In-memory registry tracking active engineering cycles, events, and node handoffs.
+
+    Non-durable by design (CP10): state reconstruction after a process
+    crash must come from external immutable event logs.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -36,16 +46,37 @@ class EngineeringCycleRegistry:
 
     def update_cycle(self, cycle: EngineeringCycleState) -> None:
         with self._lock:
+            existing = self._cycles.get(cycle.cycle_id)
+            if existing is not None and existing != cycle:
+                raise ControlPlaneError(
+                    ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+                    f"Cycle identity collision on update for cycle_id: {cycle.cycle_id}",
+                )
             self._cycles[cycle.cycle_id] = cycle
 
     def record_event(self, event: ControlPlaneEvent) -> None:
         with self._lock:
-            if event.cycle_id not in self._events:
-                self._events[event.cycle_id] = []
-            self._events[event.cycle_id].append(event)
+            events = self._events.setdefault(event.cycle_id, [])
+            for existing in events:
+                if existing.event_id == event.event_id:
+                    if existing == event:
+                        return  # Idempotent duplicate
+                    raise ControlPlaneError(
+                        ControlPlaneBlockingReason.CONTROL_PLANE_EVENT_COLLISION.value,
+                        f"Event collision on event_id: {event.event_id}",
+                    )
+            events.append(event)
 
     def record_handoff(self, handoff: NodeHandoff) -> None:
         with self._lock:
+            existing = self._handoffs.get(handoff.handoff_id)
+            if existing is not None:
+                if existing == handoff:
+                    return  # Idempotent duplicate
+                raise ControlPlaneError(
+                    ControlPlaneBlockingReason.CONTROL_PLANE_EVENT_COLLISION.value,
+                    f"Handoff collision on handoff_id: {handoff.handoff_id}",
+                )
             self._handoffs[handoff.handoff_id] = handoff
 
     def get_cycle(self, cycle_id: str) -> EngineeringCycleState | None:

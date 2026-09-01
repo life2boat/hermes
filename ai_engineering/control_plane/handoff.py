@@ -1,13 +1,14 @@
-"""NodeHandoff contract carrying immutable validation and execution evidence."""
+"""NodeHandoff contract carrying immutable validation and execution evidence (PR-11.1)."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import re
 from typing import Any
 
+from ai_engineering.control_plane._evidence_refs import validate_evidence_ref
 from ai_engineering.control_plane.contracts import (
     ControlPlaneBlockingReason,
     ControlPlaneError,
@@ -19,7 +20,15 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 @dataclass(frozen=True, slots=True)
 class NodeHandoff:
-    """Immutable handoff payload passed from one Task Graph node to another."""
+    """Immutable handoff payload passed from one Task Graph node to another.
+
+    Evidence references must be evidence identifiers or strictly
+    repository-relative paths (canonical snapshot-contract validation).
+    Foreign absolute paths -- POSIX absolute, Windows drive paths in
+    either slash style, UNC shares -- and traversal components are
+    rejected. Raw prompts and execution-host filesystem identities are
+    never carried.
+    """
 
     handoff_id: str
     task_id: str
@@ -34,35 +43,27 @@ class NodeHandoff:
     created_at: str = "2026-09-01T00:00:00Z"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.handoff_id, str) or not _IDENTIFIER_RE.match(self.handoff_id):
-            raise ControlPlaneError(
-                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
-                f"Invalid handoff_id: {self.handoff_id!r}",
-            )
-        if not isinstance(self.task_id, str) or not _IDENTIFIER_RE.match(self.task_id):
-            raise ControlPlaneError(
-                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
-                f"Invalid task_id: {self.task_id!r}",
-            )
-        if not isinstance(self.source_node_id, str) or not _IDENTIFIER_RE.match(self.source_node_id):
-            raise ControlPlaneError(
-                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
-                f"Invalid source_node_id: {self.source_node_id!r}",
-            )
-        if not isinstance(self.target_node_id, str) or not _IDENTIFIER_RE.match(self.target_node_id):
-            raise ControlPlaneError(
-                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
-                f"Invalid target_node_id: {self.target_node_id!r}",
-            )
-        if not isinstance(self.cycle_id, str) or not _IDENTIFIER_RE.match(self.cycle_id):
-            raise ControlPlaneError(
-                ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
-                f"Invalid cycle_id: {self.cycle_id!r}",
-            )
+        for label, value in (
+            ("handoff_id", self.handoff_id),
+            ("task_id", self.task_id),
+            ("source_node_id", self.source_node_id),
+            ("target_node_id", self.target_node_id),
+            ("cycle_id", self.cycle_id),
+        ):
+            if not isinstance(value, str) or not _IDENTIFIER_RE.match(value):
+                raise ControlPlaneError(
+                    ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
+                    f"Invalid {label}: {value!r}",
+                )
         if not isinstance(self.base_sha, str) or not _SHA_RE.match(self.base_sha):
             raise ControlPlaneError(
                 ControlPlaneBlockingReason.CONTROL_PLANE_STATE_INVALID.value,
                 f"Invalid base_sha: {self.base_sha!r}",
+            )
+        if not isinstance(self.execution_epoch, int) or isinstance(self.execution_epoch, bool):
+            raise ControlPlaneError(
+                ControlPlaneBlockingReason.CONTROL_PLANE_STALE_EVENT.value,
+                f"execution_epoch must be int >= 1, got {self.execution_epoch!r}",
             )
         if self.execution_epoch < 1:
             raise ControlPlaneError(
@@ -74,13 +75,16 @@ class NodeHandoff:
         if not isinstance(self.blocker_refs, tuple):
             object.__setattr__(self, "blocker_refs", tuple(self.blocker_refs))
 
-        # Check for forbidden foreign absolute paths in evidence refs
         for ref in self.evidence_refs:
-            if ref.startswith("/") or ":" in ref and "\\" in ref:
+            try:
+                validate_evidence_ref(ref, ControlPlaneError)
+            except ControlPlaneError as exc:
                 raise ControlPlaneError(
                     ControlPlaneBlockingReason.CONTROL_PLANE_HANDOFF_INCOMPLETE.value,
-                    f"Evidence refs must not contain foreign absolute paths: {ref}",
-                )
+                    exc.message,
+                ) from exc
+        for ref in self.blocker_refs:
+            validate_evidence_ref(ref, ControlPlaneError)
 
     def to_dict(self) -> dict[str, Any]:
         return {

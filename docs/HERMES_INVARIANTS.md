@@ -919,6 +919,108 @@ Semantic judging and selection belong strictly to PR-6.
 
 **Authority:** `ai_engineering/candidates/candidate_contracts.py`.
 
+## Candidate judge invariants
+
+### J1 (INV-JUDGE-V4-001). Hard validation strictly precedes and dominates semantic review
+
+**Invariant:** Mandatory deterministic hard gates must be evaluated first. A candidate
+failing any hard gate (test failure, scope violation, base mismatch, stale run, invalid state)
+can NEVER be eligible or selected regardless of any semantic or LLM score.
+
+**Why:** Prevents non-deterministic semantic evaluations from overriding deterministic safety boundaries.
+
+**Evidence:** `CandidateJudge.evaluate_hard_gates` and `CandidateJudgement` invariant assertions.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J2 (INV-JUDGE-V4-002). Failed hard gates strictly skip semantic review
+
+**Invariant:** When a candidate fails any hard validation gate, the semantic evaluator
+MUST NOT be invoked for that candidate.
+
+**Why:** Conserves compute/evaluator resources and prevents evaluation of unsafe or invalid artifacts.
+
+**Evidence:** `CandidateJudge.judge` evaluating semantic scores only for `eligible_candidates`.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J3 (INV-JUDGE-V4-003). Batch base SHA consistency and cross-base rejection
+
+**Invariant:** All candidate results within a single judge request must originate from
+the exact same approved base SHA matching the request. Mixed-base candidate batches fail closed with `CANDIDATE_BASE_DRIFT`.
+
+**Why:** Comparing candidates across divergent base commits yields invalid comparative evaluations.
+
+**Evidence:** `CandidateJudgeRequest.__post_init__` asserting base SHA identity.
+
+**Authority:** `ai_engineering/judge/judge_contracts.py`.
+
+### J4 (INV-JUDGE-V4-004). Stale execution and superseded epoch fencing
+
+**Invariant:** Candidate results containing stale run event blockers (`STALE_RUN_EVENT`,
+`STALE_RUN_MUTATION`, `RUN_WORKSPACE_MISMATCH`) are rejected by hard validation.
+
+**Why:** Outdated or superseded execution artifacts must never pollute current decision state.
+
+**Evidence:** Hard gate `NO_STALE_EXECUTION` in `CandidateJudge.evaluate_hard_gates`.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J5 (INV-JUDGE-V4-005). Deterministic ranking and input-order independence
+
+**Invariant:** Candidate judging outputs identical rankings, scores, and selection
+regardless of the order candidates appear in the request.
+
+**Why:** Eliminates non-deterministic decision changes caused by array permutation or scheduling jitter.
+
+**Evidence:** Deterministic pre-sorting by `candidate_id` in `CandidateJudge.judge`.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J6 (INV-JUDGE-V4-006). Explicit tie policy and deterministic tie-breaking
+
+**Invariant:** Tied semantic scores are resolved via documented deterministic lexical
+tie-breaking when `allow_tie_break=True`, or explicit `TIE` state without selection when `allow_tie_break=False`.
+
+**Why:** Rejects arbitrary or random winner selection.
+
+**Evidence:** `CandidateJudge.judge` tie handling logic and `CandidateDecisionState.TIE`.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J7 (INV-JUDGE-V4-007). Read-only candidate judge non-mutation
+
+**Invariant:** The CandidateJudge operates strictly read-only against candidate
+workspaces, canonical main, Git branches, and database stores.
+
+**Why:** Prevents unintended side-effects during candidate evaluation.
+
+**Evidence:** `CandidateJudge` class containing zero write/mutation methods.
+
+**Authority:** `ai_engineering/judge/candidate_judge.py`.
+
+### J8 (INV-JUDGE-V4-008). Selection evidence only without merge or production authority
+
+**Invariant:** `CandidateJudgeResult.selected_candidate_id` represents evaluation evidence
+only and does not authorize merge, cherry-pick, TaskGraph transition, or production deployment.
+
+**Why:** Preserves separation of concerns between candidate evaluation and merge/deployment orchestration.
+
+**Evidence:** `CandidateJudgeResult` contract schema.
+
+**Authority:** `ai_engineering/judge/judge_contracts.py`.
+
+### J9 (INV-JUDGE-V4-009). Zero provider calls and injected semantic evaluation
+
+**Invariant:** Candidate judging utilizes an injectable evaluator protocol with zero
+uncontrolled remote provider calls in core judging infrastructure.
+
+**Why:** Ensures determinism, testability, and fail-closed local verification.
+
+**Evidence:** `SemanticCandidateEvaluator` protocol in `ai_engineering/judge/semantic_evaluator.py`.
+
+**Authority:** `ai_engineering/judge/semantic_evaluator.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

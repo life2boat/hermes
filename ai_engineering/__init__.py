@@ -238,6 +238,23 @@ from ai_engineering.candidates import (
     validate_candidate_command,
 )
 
+from ai_engineering.judge import (
+    CANDIDATE_JUDGE_CONTRACT_VERSION,
+    JUDGE_RESULT_SCHEMA_VERSION,
+    CandidateDecisionState,
+    CandidateHardGateResult,
+    CandidateJudge,
+    CandidateJudgeError,
+    CandidateJudgeRequest,
+    CandidateJudgeResult,
+    CandidateJudgement,
+    CandidateSemanticScore,
+    DeterministicSemanticEvaluator,
+    JudgeBlockingReason,
+    JudgeEventType,
+    SemanticCandidateEvaluator,
+)
+
 __all__ = [
     "BEHAVIOUR_EVAL_ENGINE_VERSION",
     "BEHAVIOUR_TRACE_SCHEMA_VERSION",
@@ -451,4 +468,18 @@ __all__ = [
     "execute_single_candidate",
     "make_candidate_branch_name",
     "validate_candidate_command",
+    "CANDIDATE_JUDGE_CONTRACT_VERSION",
+    "JUDGE_RESULT_SCHEMA_VERSION",
+    "CandidateDecisionState",
+    "CandidateHardGateResult",
+    "CandidateJudge",
+    "CandidateJudgeError",
+    "CandidateJudgeRequest",
+    "CandidateJudgeResult",
+    "CandidateJudgement",
+    "CandidateSemanticScore",
+    "DeterministicSemanticEvaluator",
+    "JudgeBlockingReason",
+    "JudgeEventType",
+    "SemanticCandidateEvaluator",
 ]

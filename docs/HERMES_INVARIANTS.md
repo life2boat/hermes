@@ -1482,6 +1482,120 @@ They grant no authority for production deploy, database migration, or credential
 
 **Authority:** `ai_engineering/execution/host_contracts.py`.
 
+## Autonomous Control Plane Integration Invariants (v4.1 PR-11)
+
+### CP1 (INV-CP-V4-001). Control Plane != Execution Plane
+
+**Invariant:** The Control Plane governs TaskIntent, lifecycle authorization, cycle phases, and node handoffs.
+The Execution Plane manages workspaces, runs, processes, snapshots, and candidate evidence.
+Execution plane components cannot grant permissions or mutate control plane authority.
+
+**Why:** Enforces strict boundary between task management policy and low-level agent execution.
+
+**Evidence:** `EngineeringCycleOrchestrator` authority boundaries.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP2 (INV-CP-V4-002). Task Graph != Internal Execution Graph
+
+**Invariant:** The Task Graph models business intent, requirements, and user-facing lifecycle.
+The Internal Execution Graph models internal engineering actions (investigations, candidates, judge rankings).
+Execution tasks cannot redefine or bypass Task Graph constraints.
+
+**Why:** Preserves task governance and prevents subagent execution from expanding scope.
+
+**Evidence:** Distinct phase modeling in `ControlPlanePhase`.
+
+**Authority:** `ai_engineering/control_plane/contracts.py`.
+
+### CP3 (INV-CP-V4-003). Execution Callbacks Cannot Directly Mutate Task Graph
+
+**Invariant:** Execution-plane events (such as candidate completion or test results) update the `EngineeringCycleState`
+within the internal execution graph. They cannot directly transition the outer Task Graph without orchestrator validation.
+
+**Why:** Eliminates unverified race conditions and ensures all results pass validation gates.
+
+**Evidence:** `EngineeringCycleOrchestrator.apply_event`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP4 (INV-CP-V4-004). Selected Candidate != Merged Candidate
+
+**Invariant:** Selecting a winner via `CandidateJudge` records ranking evidence and sets `selected_candidate_id`.
+It does NOT execute Git merges or push changes to branches.
+
+**Why:** Separates evaluation from commit/merge authorization.
+
+**Evidence:** `EngineeringCycleOrchestrator.record_judgement`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP5 (INV-CP-V4-005). READY_FOR_HANDOFF != Deployed / Mutated
+
+**Invariant:** The `READY_FOR_HANDOFF` phase indicates all engineering validation gates passed.
+It does not execute deployments, container restarts, or database modifications.
+
+**Why:** Preserves human/operator approval and deployment boundaries.
+
+**Evidence:** `NodeHandoff` contract.
+
+**Authority:** `ai_engineering/control_plane/handoff.py`.
+
+### CP6 (INV-CP-V4-006). Production Serialization Barrier Requires Active Mutation Agents == 0
+
+**Invariant:** `ProductionSerializationBarrier.ready` is true if and only if `active_mutation_agents == 0`
+and exactly one production owner is specified.
+
+**Why:** Guarantees parallel work fully converges before single-owner serialized mutation.
+
+**Evidence:** `ProductionSerializationBarrier.__post_init__`.
+
+**Authority:** `ai_engineering/control_plane/barriers.py`.
+
+### CP7 (INV-CP-V4-007). Remote UNVERIFIABLE State Fails-Closed to BLOCKED Phase
+
+**Invariant:** If a remote execution becomes `UNVERIFIABLE`, the orchestrator immediately halts progression
+and enters `BLOCKED` with `REMOTE_EXECUTION_UNVERIFIABLE`.
+
+**Why:** Prevents phantom execution results from being accepted.
+
+**Evidence:** Blocker handling in `EngineeringCycleOrchestrator`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP8 (INV-CP-V4-008). Stale Run Events and Epochs Cannot Advance Cycle Phase
+
+**Invariant:** Events carrying an older `execution_epoch` or mismatched `cycle_id` are rejected with `CONTROL_PLANE_STALE_EVENT`.
+Old events cannot mutate current cycle state.
+
+**Why:** Prevents out-of-order event delivery from corrupting state progression.
+
+**Evidence:** Event validation in `EngineeringCycleOrchestrator.apply_event`.
+
+**Authority:** `ai_engineering/control_plane/orchestrator.py`.
+
+### CP9 (INV-CP-V4-009). NodeHandoff Uses Evidence References and Relative Identity
+
+**Invariant:** `NodeHandoff` references evidence by immutable IDs, snapshot digests, and repository-relative paths.
+Embedding foreign absolute filesystem paths or raw prompts is forbidden.
+
+**Why:** Guarantees portable, deterministic handoffs across different controller/worker hosts.
+
+**Evidence:** `NodeHandoff.__post_init__` path checks.
+
+**Authority:** `ai_engineering/control_plane/handoff.py`.
+
+### CP10 (INV-CP-V4-010). In-Memory Cycle Registry is Non-Durable
+
+**Invariant:** `EngineeringCycleRegistry` is an in-memory tracking structure for testing and runtime coordination.
+Process crashes require state reconstruction from external immutable event logs.
+
+**Why:** Clarifies durability expectations and avoids false assumptions of persistent DB storage in PR-11.
+
+**Evidence:** `EngineeringCycleRegistry` implementation.
+
+**Authority:** `ai_engineering/control_plane/registry.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

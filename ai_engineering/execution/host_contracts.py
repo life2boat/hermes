@@ -46,15 +46,20 @@ class HostCapability(StrEnum):
     CAN_SIGNAL_PROCESS = "CAN_SIGNAL_PROCESS"
     CAN_CAPTURE_STDOUT = "CAN_CAPTURE_STDOUT"
     CAN_CAPTURE_STDERR = "CAN_CAPTURE_STDERR"
+    CAN_RECONCILE_PROCESS = "CAN_RECONCILE_PROCESS"
 
 
 class ExecutionState(StrEnum):
     """Lifecycle states of a command execution on an ExecutionHost."""
 
     CREATED = "CREATED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
     STARTING = "STARTING"
     LIVE = "LIVE"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
+    DISCONNECTED = "DISCONNECTED"
+    UNVERIFIABLE = "UNVERIFIABLE"
     EXITED = "EXITED"
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
@@ -66,6 +71,7 @@ class HostStatus(StrEnum):
     AVAILABLE = "AVAILABLE"
     UNAVAILABLE = "UNAVAILABLE"
     INVALID = "INVALID"
+    UNVERIFIABLE = "UNVERIFIABLE"
 
 
 class HostBlockingReason(StrEnum):
@@ -80,6 +86,12 @@ class HostBlockingReason(StrEnum):
     EXECUTION_ID_COLLISION = "EXECUTION_ID_COLLISION"
     EXECUTION_TIMEOUT = "EXECUTION_TIMEOUT"
     EXECUTION_CANCEL_FAILED = "EXECUTION_CANCEL_FAILED"
+    REMOTE_EXECUTION_UNVERIFIABLE = "REMOTE_EXECUTION_UNVERIFIABLE"
+    REMOTE_CONNECTION_FAILED = "REMOTE_CONNECTION_FAILED"
+    REMOTE_AUTH_UNAVAILABLE = "REMOTE_AUTH_UNAVAILABLE"
+    REMOTE_HOST_TRUST_UNVERIFIED = "REMOTE_HOST_TRUST_UNVERIFIED"
+    REMOTE_SESSION_INVALID = "REMOTE_SESSION_INVALID"
+    REMOTE_RECONCILIATION_REQUIRED = "REMOTE_RECONCILIATION_REQUIRED"
     # Reused blockers
     STALE_RUN_EVENT = "STALE_RUN_EVENT"
     STALE_RUN_MUTATION = "STALE_RUN_MUTATION"
@@ -124,10 +136,10 @@ class ExecutionHostIdentity:
                     HostBlockingReason.EXECUTION_MODE_INVALID.value,
                     f"Unsupported execution mode: {self.mode!r}",
                 ) from exc
-        if self.mode not in (ExecutionMode.LOCAL, ExecutionMode.WSL):
+        if self.mode not in (ExecutionMode.LOCAL, ExecutionMode.WSL, ExecutionMode.SSH):
             raise ExecutionHostError(
                 HostBlockingReason.EXECUTION_MODE_INVALID.value,
-                f"Execution mode {self.mode!r} not supported in PR-9 (LOCAL and WSL only)",
+                f"Execution mode {self.mode!r} not supported in host identity",
             )
         if not isinstance(self.capabilities, tuple):
             object.__setattr__(self, "capabilities", tuple(self.capabilities))
@@ -229,10 +241,10 @@ class ExecutionRequest:
                     f"Invalid execution mode: {self.mode!r}",
                 ) from exc
 
-        if self.mode not in (ExecutionMode.LOCAL, ExecutionMode.WSL):
+        if self.mode not in (ExecutionMode.LOCAL, ExecutionMode.WSL, ExecutionMode.SSH):
             raise ExecutionHostError(
                 HostBlockingReason.EXECUTION_MODE_INVALID.value,
-                f"Execution mode {self.mode!r} not supported in PR-9 (LOCAL and WSL only)",
+                f"Execution mode {self.mode!r} not supported in ExecutionRequest",
             )
 
         if not isinstance(self.argv, tuple):

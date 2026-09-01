@@ -1370,6 +1370,118 @@ It does not grant production deployment, database migration, or credential mutat
 
 **Authority:** `ai_engineering/execution/host_contracts.py`.
 
+## SSH-ready remote execution contracts invariants (v4.1 PR-10)
+
+### S1 (INV-SSH-V4-001). SSH Mode is Contract-Only in PR-10
+
+**Invariant:** In PR-10, `ExecutionMode.SSH` defines declarative control-plane contracts.
+Real network connections, socket creation, SSH subprocesses, and remote command executions are forbidden.
+
+**Why:** Prepares the remote execution plane with fail-closed lifecycle guarantees before adding transport complexity.
+
+**Evidence:** `ContractOnlyRemoteTransport` and absence of socket/SSH library imports.
+
+**Authority:** `ai_engineering/execution/remote_transport.py`.
+
+### S2 (INV-SSH-V4-002). Remote Disconnect != Process Death
+
+**Invariant:** Connection loss while a remote execution is `LIVE` transitions the logical state to `DISCONNECTED`
+or `UNVERIFIABLE`. It must never fabricate `EXITED` or invent a synthetic exit code.
+
+**Why:** Maintains honest state modeling across flaky network partitions.
+
+**Evidence:** State transitions in `RemoteExecutionLifecycle`.
+
+**Authority:** `ai_engineering/execution/remote_state.py`.
+
+### S3 (INV-SSH-V4-003). UNVERIFIABLE State Fails Closed
+
+**Invariant:** When remote process status cannot be deterministically proven, the state remains `UNVERIFIABLE`
+with blocker `REMOTE_EXECUTION_UNVERIFIABLE`. This blocker halts candidate validation and merge progression.
+
+**Why:** Prevents phantom execution results or unverified side effects from being accepted.
+
+**Evidence:** `RemoteBlockingReason.REMOTE_EXECUTION_UNVERIFIABLE`.
+
+**Authority:** `ai_engineering/execution/remote_contracts.py`.
+
+### S4 (INV-SSH-V4-004). Remote Process Identity requires Composite Session & Epoch Binding
+
+**Invariant:** A remote process is identified by `(execution_id, run_id, workspace_id, execution_host_id, session_id, remote_process_id, execution_epoch)`.
+A remote OS PID alone is never sufficient identity.
+
+**Why:** Prevents PID reuse or cross-session collision from corrupting execution evidence.
+
+**Evidence:** `RemoteProcessIdentity` dataclass.
+
+**Authority:** `ai_engineering/execution/remote_contracts.py`.
+
+### S5 (INV-SSH-V4-005). Stale Remote Events and Stale Epochs are Fenced
+
+**Invariant:** Remote events carrying a mismatched `session_id` or an older `execution_epoch` are rejected
+with `STALE_RUN_EVENT`. Old session events cannot terminate or mutate an active session.
+
+**Why:** Guarantees strict linear state progression across session reconnects.
+
+**Evidence:** Epoch and session checks in `RemoteExecutionLifecycle`.
+
+**Authority:** `ai_engineering/execution/remote_state.py`.
+
+### S6 (INV-SSH-V4-006). Reconnection requires Explicit Reconciliation Evidence
+
+**Invariant:** Establishing a new remote session does not automatically restore `LIVE` state.
+The remote process status must be explicitly reconciled into `CONFIRMED_LIVE` or `CONFIRMED_EXITED`.
+
+**Why:** Eliminates assumptions regarding remote process survival across network disconnections.
+
+**Evidence:** `RemoteReconciliationResult` contract and application.
+
+**Authority:** `ai_engineering/execution/remote_contracts.py`.
+
+### S7 (INV-SSH-V4-007). Cancel ACK and Timeout do not fabricate Proven Exit
+
+**Invariant:** Acknowledging a cancellation request transitions to `CANCEL_REQUESTED`.
+A timeout while remote status is unknown transitions to `TIMED_OUT` with `UNVERIFIABLE`. Neither state proves process death.
+
+**Why:** Prevents race conditions where a canceled or timed out process is assumed terminated prematurely.
+
+**Evidence:** `RemoteExecutionLifecycle` cancellation and timeout handling.
+
+**Authority:** `ai_engineering/execution/remote_state.py`.
+
+### S8 (INV-SSH-V4-008). Credentials represented exclusively by Opaque References
+
+**Invariant:** SSH configurations must reference credentials via opaque URI schemes (`ref://...`).
+Raw passwords, private key material, tokens, and secret strings are forbidden in configuration contracts.
+
+**Why:** Strictly separates execution configuration from secret storage and prevents accidental credential logging.
+
+**Evidence:** `SshExecutionConfig.credential_ref` validation.
+
+**Authority:** `ai_engineering/execution/remote_contracts.py`.
+
+### S9 (INV-SSH-V4-009). Known-Host Trust Verification is Mandatory
+
+**Invariant:** Remote hosts must specify `known_host_ref` and enforce `verification_required=True`.
+Bypassing host trust verification (`accept_unknown_host=True`) is forbidden.
+
+**Why:** Prevents man-in-the-middle attacks and unauthenticated remote execution.
+
+**Evidence:** `SshExecutionConfig` trust requirements.
+
+**Authority:** `ai_engineering/execution/remote_contracts.py`.
+
+### S10 (INV-SSH-V4-010). Transport Capability provides No Production Authority
+
+**Invariant:** Remote execution host contracts represent isolated development workspace execution.
+They grant no authority for production deploy, database migration, or credential modification.
+
+**Why:** Enforces fail-closed isolation across all execution transport boundaries.
+
+**Evidence:** `HostCapability` enum bounds.
+
+**Authority:** `ai_engineering/execution/host_contracts.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

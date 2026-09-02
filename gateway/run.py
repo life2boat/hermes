@@ -2724,7 +2724,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._weight_reminder_scheduler = None
         self._weight_reminder_scheduler_task: Optional[asyncio.Task] = None
         self._memory_vector_runtime = None
-        
+        self._healbite_conversational_memory = None
+
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
@@ -5738,6 +5739,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._running = True
         await self._start_memory_graph_runtime_if_configured()
         await self._start_memory_vector_runtime_if_configured()
+        await self._start_healbite_conversational_memory_if_configured()
         self._update_runtime_status("running")
         
         # Emit gateway:startup hook
@@ -5914,6 +5916,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._memory_vector_runtime = None
         if runtime is not None:
             await runtime.stop()
+
+    async def _start_healbite_conversational_memory_if_configured(self) -> None:
+        from gateway.healbite_conversational_memory import (
+            HealBiteConversationalMemoryBridge,
+        )
+
+        self._healbite_conversational_memory = (
+            HealBiteConversationalMemoryBridge.from_environment()
+        )
+
+    async def _stop_healbite_conversational_memory(self) -> None:
+        coordinator = getattr(self, "_healbite_conversational_memory", None)
+        self._healbite_conversational_memory = None
+        if coordinator is not None:
+            await coordinator.aclose()
 
     async def _start_memory_graph_runtime_if_configured(self) -> None:
         from gateway.memory.graph_runtime import MemoryGraphRuntime
@@ -6596,6 +6613,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._draining = True
             await GatewayRunner._stop_memory_vector_runtime(self)
             await GatewayRunner._stop_memory_graph_runtime(self)
+            await GatewayRunner._stop_healbite_conversational_memory(self)
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
@@ -8532,6 +8550,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
+            # HealBite conversational memory: post-turn write consideration at
+            # the completed-turn boundary. Tracked in the gateway background
+            # task set; fully failure-contained so it never affects the
+            # response path or generates any extra user-facing output.
+            try:
+                _memory_coordinator = getattr(self, "_healbite_conversational_memory", None)
+                if _memory_coordinator is not None and _final_text.strip():
+                    _memory_task = asyncio.create_task(
+                        _memory_coordinator.consider_user_turn(
+                            source=source,
+                            user_text=event.text or "",
+                        )
+                    )
+                    self._background_tasks.add(_memory_task)
+                    _memory_task.add_done_callback(self._background_tasks.discard)
+            except Exception as _mem_exc:
+                logger.debug("healbite conversational memory consideration failed: %s", _mem_exc)
             return _agent_result
         finally:
             # Unconditional release covers every exit path. _release_running_agent_state
@@ -9003,6 +9038,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
+
+        # HealBite conversational memory: bounded pre-agent retrieval
+        # (feature-gated; degrades to unchanged prompt on any failure).
+        try:
+            _memory_coordinator = getattr(self, "_healbite_conversational_memory", None)
+            if _memory_coordinator is not None:
+                _memory_context = await _memory_coordinator.retrieve_for_turn(
+                    source=source,
+                    query=event.text or "",
+                )
+                if _memory_context:
+                    context_prompt = _memory_context + "\n\n" + context_prompt
+        except Exception:
+            logger.debug("HealBite conversational memory retrieval failed", exc_info=True)
         
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).

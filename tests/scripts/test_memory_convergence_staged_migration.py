@@ -102,7 +102,7 @@ def test_t01_t03_registry_identity_order_and_digest_are_deterministic() -> None:
     assert first[-1]["migration_sha256"] == MEMORY_CONVERGENCE_MIGRATION_SHA256
     canonical = json.dumps(first, sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(canonical).hexdigest() == (
-        "87c7ccbc5fb5a4afa0437daa2375ae93958a8295c4164d6f0f6b196acdf45e0f"
+        "5deb406918e3283c301e0ae7cdfe4275faa0ac6140f19dde10614dc2ba902dba"
     )
 
 

@@ -104,10 +104,10 @@ class _Generator:
 def _seed_db(db_path) -> None:
     with sqlite3.connect(db_path) as connection:
         connection.execute(
-            "CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT)"
+            "CREATE TABLE users (telegram_id INTEGER PRIMARY KEY, username TEXT)"
         )
         connection.executemany(
-            "INSERT INTO users (user_id, username) VALUES (?, ?)",
+            "INSERT INTO users (telegram_id, username) VALUES (?, ?)",
             ((ACTOR, "synthetic"), (OTHER_ACTOR, "other")),
         )
         apply_fridge_menu_schema(connection)

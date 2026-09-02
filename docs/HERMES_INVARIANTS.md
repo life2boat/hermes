@@ -1918,13 +1918,22 @@ execution with unknown authority.
 
 **Authority:** `ai_engineering/runtime/spawn_gate.py`.
 
-### RUNTIME-2. Process cwd is confined to the authorized workspace
+### RUNTIME-2. Initial process working directory is confined to the authorized workspace
 
-**Invariant:** The real process working directory must resolve strictly
-inside its authorized candidate worktree. The canonical checkout,
-foreign workspaces, parent paths, symlink escapes, and traversal
-components are rejected (`RUNTIME_WORKSPACE_ESCAPE`,
-`CANONICAL_CHECKOUT_COLLISION`, `WORKSPACE_PATH_ESCAPE`).
+**Invariant:** The real process *initial* working directory must resolve
+strictly inside its authorized candidate worktree. The canonical
+checkout, foreign workspaces, parent paths, symlink escapes, and
+traversal components are rejected at request time
+(`RUNTIME_WORKSPACE_ESCAPE`, `CANONICAL_CHECKOUT_COLLISION`,
+`WORKSPACE_PATH_ESCAPE`).
+
+**Scope honesty (PR-13.1):** this confines the *initial cwd selection*,
+not the child's runtime behavior. The child is a trusted-policy process
+(see RUNTIME-11): once running, it is not OS-sandboxed and can resolve
+paths anywhere the OS user can. Filesystem side effects outside the
+workspace cannot be universally prevented by this runtime; they are
+bounded by the post-execution checks in RUNTIME-8 and by workspace
+authority, not by filesystem isolation.
 
 **Why:** The cwd is the process's implicit filesystem authority.
 
@@ -1943,12 +1952,22 @@ injection. Controller environment inheritance is opt-out
 (`ExecutionRequest.inherit_environment`), and the runtime always opts
 out.
 
+**Transport separation (PR-13.1):** for WSL execution the controller
+environment used to *launch* the `wsl.exe` transport (an explicit
+controller-side allowlist) is strictly separate from the agent child
+environment, which is injected into the Linux side via `env -i` with a
+deny-by-default allowlist. A broken or poisoned controller child
+environment can never prevent transport launch, and transport
+credentials can never reach the agent child.
+
 **Why:** A spawned process must never inherit authority it was not
 granted.
 
-**Evidence:** environment sentinel tests in `test_runtime_environment.py`.
+**Evidence:** environment sentinel tests in `test_runtime_environment.py`,
+transport-separation tests in `test_runtime_wsl_transport_env.py`.
 
-**Authority:** `ai_engineering/runtime/runtime_policy.py`.
+**Authority:** `ai_engineering/runtime/runtime_policy.py`,
+`ai_engineering/execution/wsl_host.py`.
 
 ### RUNTIME-4. Execution evidence cannot mutate control state
 
@@ -1973,11 +1992,23 @@ the process through the execution host and only a proven process
 termination (`EXITED` with concrete exit code) may produce terminal
 cancellation evidence (`cancel_terminal`).
 
+**Atomicity (PR-13.1):** cancellation requests are consumed atomically
+with spawn registration: a cancel accepted before the process is
+terminable is remembered and acted on the moment it becomes terminable
+(`PENDING_CANCEL_BEFORE_REGISTRATION=CONSUMED`). There is no
+lost-cancel window between `Popen()` and registration. A cancel
+arriving after natural exit is recorded but never claimed as a
+cancellation outcome. After termination the process is reaped
+(bounded wait, forced-kill escalation, bounded reap); a cancellation
+whose termination cannot be proven is never reported as cancelled.
+
 **Why:** An ACK alone can mask a still-running or unreconciled process.
 
-**Evidence:** cancellation tests in `test_runtime_activation.py`.
+**Evidence:** cancellation and race tests in
+`test_runtime_cancellation_atomicity.py`, `test_runtime_activation.py`.
 
-**Authority:** `ai_engineering/runtime/agent_runtime.py`.
+**Authority:** `ai_engineering/runtime/agent_runtime.py`,
+`ai_engineering/execution/local_host.py`.
 
 ### RUNTIME-6. Timeout is not proof of exit
 
@@ -1985,12 +2016,24 @@ cancellation evidence (`cancel_terminal`).
 `exit_proven`, and never produces terminal success evidence.
 Unverifiable states propagate `RUNTIME_PROCESS_UNVERIFIABLE`.
 
+**Termination pipeline (PR-13.1):** timeout follows: timeout detected →
+graceful termination requested → bounded graceful wait → forced kill →
+bounded reap → terminal evidence only when exit is proven. If the
+process cannot be proven dead after escalation, the result is
+`UNVERIFIABLE` with `RUNTIME_PROCESS_UNVERIFIABLE`, never a terminal
+success or cancellation. Direct children are reaped on normal exit,
+cancel, timeout, and launch partial failure
+(`ORPHAN_DIRECT_CHILD_AFTER_CANCEL=FALSE`,
+`ORPHAN_DIRECT_CHILD_AFTER_TIMEOUT=FALSE`).
+
 **Why:** A timed-out process may still be running; synthesizing exit
 evidence would be false green.
 
-**Evidence:** timeout tests in `test_runtime_activation.py`.
+**Evidence:** timeout and reaping tests in
+`test_runtime_timeout_reaping.py`, `test_runtime_activation.py`.
 
-**Authority:** `ai_engineering/runtime/process_runner.py`.
+**Authority:** `ai_engineering/runtime/process_runner.py`,
+`ai_engineering/execution/local_host.py`.
 
 ### RUNTIME-7. Duplicate spawn is idempotent or collision-safe
 
@@ -2016,9 +2059,20 @@ byte-/status-clean; any detected mutation raises
 completion. Writes outside the authorized workspace are never accepted
 as candidate changes.
 
+**Detection vs prevention (PR-13.1):** canonical protection is a
+post-execution *detection* barrier, not write prevention
+(`CANONICAL_WRITE_DETECTED`, not `CANONICAL_WRITE_PREVENTED`). If a
+trusted child mutates the canonical repository during execution, the
+mutation happens; the runtime detects it, fails the candidate, and
+records the security violation on the evidence. No automatic cleanup of
+canonical sources is attempted. The same applies to writes into foreign
+worktrees or arbitrary external paths, which may not be detectable at
+all (trusted-child model, RUNTIME-11).
+
 **Why:** Candidate work must be confined to its isolated worktree.
 
-**Evidence:** write-boundary tests in `test_runtime_workspace_boundary.py`.
+**Evidence:** write-boundary tests in `test_runtime_workspace_boundary.py`,
+trust-model tests in `test_runtime_workspace_trust_model.py`.
 
 **Authority:** `ai_engineering/runtime/agent_runtime.py`.
 
@@ -2049,6 +2103,77 @@ explicitly authorized, bounded, and shadow-scoped.
 **Evidence:** activation policy tests in `test_runtime_activation.py`.
 
 **Authority:** `ai_engineering/runtime/runtime_policy.py`.
+
+### RUNTIME-11. Child capability enforcement matrix (trusted-policy model)
+
+**Invariant:** The runtime's actual enforcement for a spawned child is
+exactly the following matrix — no stronger architecture claim may be
+made anywhere in code, docs, or observability:
+
+| Capability | Enforcement |
+| --- | --- |
+| `INITIAL_EXECUTABLE_POLICY` | ENFORCED (argv allowlist/denylist, `shell=False`) |
+| `CWD_CONFINEMENT` | ENFORCED (initial working directory only) |
+| `ENVIRONMENT_SANITIZATION` | ENFORCED (deny-by-default allowlist; transport env separate) |
+| `FILESYSTEM_SANDBOX` | NOT_ENFORCED |
+| `NETWORK_SANDBOX` | NOT_ENFORCED |
+| `PROCESS_SPAWN_SANDBOX` | NOT_ENFORCED (child may spawn descendants) |
+| `SECRET_INHERITANCE` | ENFORCED (credential-shaped names cannot pass) |
+| `DIRECT_CHILD_REAPING` | ENFORCED (bounded terminate → kill → reap) |
+| `PROCESS_TREE_REAPING` | PLATFORM_DEPENDENT (POSIX: process group; Windows/WSL: direct child only) |
+
+The child process model is `TRUSTED_CHILD_POLICY`, not `OS_SANDBOXED`:
+arbitrary child code can read/write files, open network connections,
+and spawn descendants. Command policy (`shell=False`, forbidden
+basenames, git subcommand denies) guarantees only that no shell command
+string is interpolated and that known production/remote/mutation tools
+are not the *initial* executable; it is NOT an arbitrary-code sandbox.
+
+**Why:** Security claims must match implementation; overstated claims
+create false green audits.
+
+**Evidence:** trust-model tests in
+`test_runtime_workspace_trust_model.py`,
+`test_runtime_timeout_reaping.py`.
+
+**Authority:** `ai_engineering/runtime/runtime_policy.py`,
+`ai_engineering/execution/local_host.py`.
+
+### RUNTIME-12. Process-tree containment is platform-dependent
+
+**Invariant:** `PROCESS_TREE_CONTAINMENT=PLATFORM_DEPENDENT`. On POSIX,
+LOCAL children start in their own session and termination signals the
+whole process group, so descendants are covered. On Windows, and on
+both sides of WSL transport execution, only direct-child termination is
+available; descendants may outlive termination. No runtime surface may
+claim process-tree isolation where it is not enforced.
+
+**Why:** A surviving descendant is a real escape vector only if the
+runtime pretends otherwise.
+
+**Evidence:** process-group tests in `test_runtime_timeout_reaping.py`.
+
+**Authority:** `ai_engineering/execution/local_host.py`,
+`ai_engineering/execution/wsl_host.py`.
+
+### RUNTIME-13. WSL real-execution skip policy is capability-honest
+
+**Invariant:** Real WSL smoke execution may be skipped only for
+objectively absent or unavailable host capability (no `wsl.exe`, no
+distro, unhealthy WSL service). A skip must never mask a runtime
+defect: a launch failure caused by the runtime itself (e.g. sanitized
+environment breaking transport discovery), a host identity mismatch, a
+contract violation, or a payload failure must surface as `FAILED`
+evidence, not a skip. Transport launch uses the controller-side
+transport environment (RUNTIME-3), so a valid WSL transport executes
+even when the agent child environment is deliberately poisoned.
+
+**Why:** `SKIP` is only honest when the capability is genuinely absent.
+
+**Evidence:** transport-separation and skip-classification tests in
+`test_runtime_wsl_transport_env.py`.
+
+**Authority:** `ai_engineering/execution/wsl_host.py`.
 
 ## Change validation invariant
 

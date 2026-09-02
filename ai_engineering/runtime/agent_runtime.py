@@ -13,11 +13,21 @@ Fail-closed guarantees:
   SHADOW_WSL and the spawn authorization gate passes;
 - no host fallback (LOCAL failure never silently runs in WSL and vice
   versa);
-- the child process cwd is confined to the authorized candidate
-  worktree and its environment is deny-by-default;
+- the child process initial working directory is confined to the
+  authorized candidate worktree and its environment is deny-by-default.
+  The child itself is a TRUSTED POLICY process, not an OS sandbox: it is
+  argv-only (shell=False) and command-policy screened, but arbitrary
+  child code can still touch the filesystem, open network connections,
+  and spawn descendants. Filesystem side effects outside the workspace
+  cannot be universally prevented by this runtime; canonical-repository
+  tampering is DETECTED post-execution (CANONICAL_CHECKOUT_PROTECTED)
+  and fails the candidate — it is not prevented;
 - duplicate spawn identities are idempotent or collide fail-closed;
-- timeout is never proof of exit and a cancellation acknowledgement is
-  never terminal evidence;
+- cancellation requests are consumed atomically with spawn
+  registration (no lost-cancel window); a cancellation acknowledgement
+  is never terminal evidence and timeout is never proof of exit;
+  termination is escalate-then-reap and terminal evidence is emitted
+  only when process exit is proven;
 - the runtime emits evidence only and never mutates control-plane
   state; canonical repositories must remain clean.
 """
@@ -351,7 +361,8 @@ class ControlledAgentRuntime:
                     evidence,
                     blockers=evidence.blockers + ("CANONICAL_CHECKOUT_PROTECTED",),
                     error_message=evidence.error_message
-                    or "Canonical repository is not clean after runtime execution",
+                    or "Canonical write DETECTED after execution (post-execution "
+                    "detection, not prevention): canonical repository is not clean",
                 )
         except Exception:
             return replace(

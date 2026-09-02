@@ -38,17 +38,22 @@ def build_candidate_result_from_evidence(
 
     Fail-closed mapping:
 
-    - proven exit 0 + complete snapshot/diff evidence => COMPLETED
+    - proven exit 0 + complete snapshot/diff evidence + zero evidence
+      blockers => COMPLETED
     - proven non-zero exit => FAILED (CANDIDATE_VALIDATION_FAILED is NOT
       claimed here; validators own that blocker — a plain FAILED state
       with the runtime blockers is emitted)
     - proven cancellation => CANCELLED
     - timeout / unproven exit / missing snapshot or diff evidence =>
       FAILED with RUNTIME_EVIDENCE_INCOMPLETE (never a false success)
+    - any evidence blocker (including security violations such as
+      CANONICAL_CHECKOUT_PROTECTED) => never COMPLETED: a security
+      violation always fails the candidate
     """
     blockers = list(evidence.blockers)
     completed_evidence = (
         evidence.exit_proven
+        and not evidence.blockers
         and post_execution_snapshot is not None
         and diff_artifact is not None
         and post_execution_snapshot.workspace_id == evidence.workspace_id

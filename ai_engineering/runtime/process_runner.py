@@ -70,14 +70,30 @@ class AgentProcessRunner:
         workspace_root: Path,
         resolved_working_directory: Path,
     ) -> ExecutionRequest:
-        """Construct the canonical ExecutionRequest with a sanitized environment."""
+        """Construct the canonical ExecutionRequest with a sanitized environment.
+
+        The returned ``env`` is the AGENT CHILD environment (deny-by-default).
+        For WSL requests the child runs on Linux, so a POSIX allowlist is
+        used and the controller PATH is never propagated (it is
+        meaningless inside the WSL distro; the WSL host injects a Linux
+        default PATH). The transport environment used to launch wsl.exe
+        is derived separately inside the WSL host.
+        """
         host = self.host_for(request)
         mode = host.identity().mode
-        env = build_child_environment(
-            self._parent_env,
-            extra=self._extra_env,
-            target_platform="windows" if _controller_is_windows() else "posix",
-        )
+        if mode == ExecutionMode.WSL:
+            env = build_child_environment(
+                self._parent_env,
+                extra=self._extra_env,
+                target_platform="posix",
+            )
+            env.pop("PATH", None)
+        else:
+            env = build_child_environment(
+                self._parent_env,
+                extra=self._extra_env,
+                target_platform="windows" if _controller_is_windows() else "posix",
+            )
         return ExecutionRequest(
             execution_id=request.execution_id,
             run_id=request.run_id,

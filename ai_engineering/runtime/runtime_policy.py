@@ -7,6 +7,10 @@ Three fail-closed policy layers:
 2. :func:`validate_runtime_command` rejects shell invocation and
    production/network/mutation command categories (defense in depth;
    authority and workspace isolation remain the primary boundaries).
+   This is NOT an arbitrary-code sandbox: allowing e.g. the Python
+   interpreter means child code can still touch the filesystem, open
+   network connections, and spawn descendants. shell=False guarantees
+   only that no shell command-string interpolation occurs.
 3. :func:`build_child_environment` constructs a deny-by-default
    allowlisted child environment. Provider API keys, Telegram tokens,
    GitHub tokens, SSH credentials, database URLs, secret-store

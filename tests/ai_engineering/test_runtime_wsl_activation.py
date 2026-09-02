@@ -219,14 +219,18 @@ class TestWslActivation:
             )
 
     def test_real_wsl_smoke(self, tmp_path):
-        wsl_check = subprocess.run(
-            ["wsl.exe", "--status"], capture_output=True, text=True, timeout=30, check=False
-        )
-        if wsl_check.returncode != 0:
+        def _probe_wsl(args, timeout=30):
+            try:
+                return subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+            except (FileNotFoundError, OSError):
+                return None
+
+        wsl_check = _probe_wsl(["wsl.exe", "--status"])
+        if wsl_check is None or wsl_check.returncode != 0:
             pytest.skip("WSL not available on this host")
-        list_out = subprocess.run(
-            ["wsl.exe", "-l", "-q"], capture_output=True, timeout=30, check=False
-        )
+        list_out = _probe_wsl(["wsl.exe", "-l", "-q"])
+        if list_out is None:
+            pytest.skip("WSL not available on this host")
         names = list_out.stdout.decode("utf-16-le", errors="ignore") if list_out.stdout else ""
         distro = None
         for line in names.splitlines():
@@ -238,12 +242,12 @@ class TestWslActivation:
             pytest.skip("No WSL distro installed on this host")
         # Probe actual WSL command health; a broken WSL service (e.g. RPC
         # 0x8007xxxx) is an environmental condition, not a code failure.
-        probe = subprocess.run(
+        probe = _probe_wsl(
             ["wsl.exe", "-d", distro, "--exec", "python3", "-c", "print('probe-ok')"],
-            capture_output=True,
             timeout=60,
-            check=False,
         )
+        if probe is None:
+            pytest.skip("WSL not available on this host")
         probe_out = (probe.stdout or b"").decode("utf-8", errors="ignore")
         if probe.returncode != 0 or "probe-ok" not in probe_out or "\x00" in probe_out:
             pytest.skip("WSL distro present but service unhealthy on this host")

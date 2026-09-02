@@ -108,18 +108,19 @@ class TestWorkspaceConfinement:
     def test_symlink_escape_into_canonical_flagged(self, tmp_path):
         fx = make_local_fixture(tmp_path)
         workspace_root = fx.workspace_manager.canonical_root.parent / "workspaces" / WORKSPACE_ID
-        link = workspace_root / "escape_link"
+        probe_link = tmp_path / "symlink_probe"
         try:
-            os.symlink(fx.canonical_root, link, target_is_directory=True)
+            os.symlink(tmp_path, probe_link, target_is_directory=True)
         except OSError:
             pytest.skip("symlink creation not permitted on this host")
+        child_code = (
+            "import os\n"
+            f"os.symlink({str(fx.canonical_root)!r}, {str(workspace_root / 'escape_link')!r}, target_is_directory=True)\n"
+            f"open({str(workspace_root / 'escape_link' / 'README.md')!r}, 'a').write('TAMPER')\n"
+        )
         request, evidence = execute_default(
             fx,
-            argv=(
-                sys.executable,
-                "-c",
-                f"open(r'{link / 'README.md'}', 'a').write('TAMPER')",
-            ),
+            argv=(sys.executable, "-c", child_code),
             execution_id="exec-w7",
         )
         assert "CANONICAL_CHECKOUT_PROTECTED" in evidence.blockers

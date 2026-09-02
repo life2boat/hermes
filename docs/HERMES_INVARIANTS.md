@@ -1891,6 +1891,165 @@ on what it was built from.
 
 **Authority:** `ai_engineering/observability/contracts.py`.
 
+## Controlled Agent Runtime Invariants (v4.1 PR-13)
+
+The controlled runtime (`ai_engineering/runtime/`) activates real,
+bounded local/WSL agent process execution inside candidate workspaces
+authorized by the existing control plane. It emits evidence only; it
+owns no lifecycle state, grants no authority, and holds no production
+capability.
+
+### RUNTIME-1. Real spawn requires exact bound identities
+
+**Invariant:** A real process spawn requires a valid canonical
+`TaskIntent` whose content digest equals the request's
+`authority_digest`, an `AuthorityBoundary` without production, secret,
+data-store, or external-send effect classes, an ACTIVE `WorktreeLease`
+owned by the run, exact `WorkspaceIdentity` / `AgentRunIdentity` /
+`CandidateIdentity` / `ExecutionHostIdentity` binding, matching
+repository, base SHA, and execution epoch, and a policy-authorized
+argv command. Any failure fails closed before spawn.
+
+**Why:** An unbound or partially bound spawn is arbitrary code
+execution with unknown authority.
+
+**Evidence:** spawn-gate negative tests in `test_runtime_spawn_gate.py`,
+`test_runtime_activation.py`.
+
+**Authority:** `ai_engineering/runtime/spawn_gate.py`.
+
+### RUNTIME-2. Process cwd is confined to the authorized workspace
+
+**Invariant:** The real process working directory must resolve strictly
+inside its authorized candidate worktree. The canonical checkout,
+foreign workspaces, parent paths, symlink escapes, and traversal
+components are rejected (`RUNTIME_WORKSPACE_ESCAPE`,
+`CANONICAL_CHECKOUT_COLLISION`, `WORKSPACE_PATH_ESCAPE`).
+
+**Why:** The cwd is the process's implicit filesystem authority.
+
+**Evidence:** workspace-escape tests in `test_runtime_workspace_boundary.py`.
+
+**Authority:** `ai_engineering/runtime/spawn_gate.py`,
+`ai_engineering/workspaces/workspace_manager.py`.
+
+### RUNTIME-3. Child environment is deny-by-default
+
+**Invariant:** The child process environment is constructed from an
+explicit allowlist; provider API keys, Telegram tokens, GitHub tokens,
+SSH credentials, database URLs, secret-store references, and any
+credential-shaped variable name can never pass, including via
+injection. Controller environment inheritance is opt-out
+(`ExecutionRequest.inherit_environment`), and the runtime always opts
+out.
+
+**Why:** A spawned process must never inherit authority it was not
+granted.
+
+**Evidence:** environment sentinel tests in `test_runtime_environment.py`.
+
+**Authority:** `ai_engineering/runtime/runtime_policy.py`.
+
+### RUNTIME-4. Execution evidence cannot mutate control state
+
+**Invariant:** The runtime emits immutable `AgentExecutionEvidence`
+bound to run, workspace, candidate, host, epoch, and process identity.
+The control plane consumes evidence through its existing validated
+event path; the runtime never transitions cycle state, records judge
+or validation outcomes, mutates the Task Graph, or assigns production
+serialization ownership.
+
+**Why:** Control and execution separation prevents the executor from
+authorizing itself.
+
+**Evidence:** read-only negative tests in `test_runtime_readonly_separation.py`.
+
+**Authority:** `ai_engineering/runtime/agent_runtime.py`.
+
+### RUNTIME-5. Cancel acknowledgement is not terminal evidence
+
+**Invariant:** `CANCEL_REQUESTED != CANCELLED`. Cancellation signals
+the process through the execution host and only a proven process
+termination (`EXITED` with concrete exit code) may produce terminal
+cancellation evidence (`cancel_terminal`).
+
+**Why:** An ACK alone can mask a still-running or unreconciled process.
+
+**Evidence:** cancellation tests in `test_runtime_activation.py`.
+
+**Authority:** `ai_engineering/runtime/agent_runtime.py`.
+
+### RUNTIME-6. Timeout is not proof of exit
+
+**Invariant:** `TIMED_OUT` never carries an exit code, never sets
+`exit_proven`, and never produces terminal success evidence.
+Unverifiable states propagate `RUNTIME_PROCESS_UNVERIFIABLE`.
+
+**Why:** A timed-out process may still be running; synthesizing exit
+evidence would be false green.
+
+**Evidence:** timeout tests in `test_runtime_activation.py`.
+
+**Authority:** `ai_engineering/runtime/process_runner.py`.
+
+### RUNTIME-7. Duplicate spawn is idempotent or collision-safe
+
+**Invariant:** The same spawn identity replays the recorded evidence
+idempotently; a divergent request under the same execution identity, or
+a duplicate in-flight spawn, fails closed
+(`RUNTIME_SPAWN_COLLISION`). Concurrency slots are reserved atomically
+under the canonical budget and can never be oversubscribed by a race.
+
+**Why:** Duplicate processes corrupt workspace ownership and lease
+semantics.
+
+**Evidence:** spawn idempotency and race tests in
+`test_runtime_idempotency_concurrency.py`.
+
+**Authority:** `ai_engineering/runtime/runtime_registry.py`.
+
+### RUNTIME-8. The runtime cannot mutate canonical repositories
+
+**Invariant:** After execution the canonical repository must remain
+byte-/status-clean; any detected mutation raises
+`CANONICAL_CHECKOUT_PROTECTED` on the evidence and rejects candidate
+completion. Writes outside the authorized workspace are never accepted
+as candidate changes.
+
+**Why:** Candidate work must be confined to its isolated worktree.
+
+**Evidence:** write-boundary tests in `test_runtime_workspace_boundary.py`.
+
+**Authority:** `ai_engineering/runtime/agent_runtime.py`.
+
+### RUNTIME-9. The runtime cannot bypass validation or requalification
+
+**Invariant:** Real execution success never yields
+`READY_FOR_HANDOFF` directly. Candidate completion requires the full
+evidence chain (proven result, POST_EXECUTION snapshot, diff
+evidence); deterministic validators, the CandidateJudge, the
+requalification gate, and handoff barriers remain mandatory downstream.
+
+**Why:** Exit code 0 is not validation.
+
+**Evidence:** integration tests in `test_runtime_candidate_integration.py`.
+
+**Authority:** `ai_engineering/runtime/runtime_evidence.py`.
+
+### RUNTIME-10. SHADOW-only activation; no production or SSH authority
+
+**Invariant:** Runtime activation is explicit (`DISABLED` default;
+`SHADOW_LOCAL` / `SHADOW_WSL` opt-in). There is no production mode, no
+remote/SSH mode, no automatic enablement, and no host fallback between
+LOCAL and WSL.
+
+**Why:** Real process execution is a capability expansion and must be
+explicitly authorized, bounded, and shadow-scoped.
+
+**Evidence:** activation policy tests in `test_runtime_activation.py`.
+
+**Authority:** `ai_engineering/runtime/runtime_policy.py`.
+
 ## Change validation invariant
 
 ### V1. Claims match executed evidence

@@ -165,6 +165,12 @@ class WslExecutionHost(ExecutionHost):
 
         wsl_cmd = self.build_wsl_command(request.argv, cwd=request.cwd)
 
+        # Deny-by-default child environment when the request explicitly
+        # opts out of controller environment inheritance (PR-13).
+        exec_env = dict(os.environ) if request.inherit_environment else {}
+        if request.env:
+            exec_env.update(request.env)
+
         try:
             proc = self._process_launcher(
                 wsl_cmd,
@@ -172,6 +178,7 @@ class WslExecutionHost(ExecutionHost):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
+                env=exec_env,
             )
         except Exception as exc:
             return ExecutionResult(

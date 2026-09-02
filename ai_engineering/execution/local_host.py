@@ -176,8 +176,10 @@ class LocalExecutionHost(ExecutionHost):
         else:
             target_cwd = str(Path(request.cwd).resolve())
 
-        # Construct bounded env (never log secrets)
-        exec_env = dict(os.environ)
+        # Construct bounded env (never log secrets). Deny-by-default when
+        # the request explicitly opts out of controller environment
+        # inheritance (PR-13 controlled runtime).
+        exec_env = dict(os.environ) if request.inherit_environment else {}
         if request.env:
             exec_env.update(request.env)
 

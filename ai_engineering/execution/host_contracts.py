@@ -205,6 +205,7 @@ class ExecutionRequest:
     argv: tuple[str, ...]
     cwd: str
     env: Mapping[str, str] = field(default_factory=dict)
+    inherit_environment: bool = True
     timeout_seconds: float = 30.0
     stdin_mode: str = "DEVNULL"
     max_stdout_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
@@ -285,6 +286,7 @@ class ExecutionRequest:
             "mode": self.mode.value,
             "argv": list(self.argv),
             "cwd": self.cwd,
+            "inherit_environment": self.inherit_environment,
             "timeout_seconds": self.timeout_seconds,
             "stdin_mode": self.stdin_mode,
             "max_stdout_bytes": self.max_stdout_bytes,

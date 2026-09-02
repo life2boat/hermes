@@ -1115,6 +1115,68 @@ def test_fridge_menu_component_can_be_selected_additively(tmp_path: Path) -> Non
     assert _table_exists(db_path, PLANNED_INGREDIENTS_TABLE)
 
 
+def test_fridge_menu_migration_succeeds_with_production_users_schema(
+    tmp_path: Path,
+) -> None:
+    """Canonical migration must succeed against a production-style users table.
+
+    Production users use ``telegram_id`` as the identity key. The fridge
+    FK contract must target that column: the broken ``users(user_id)``
+    contract made staged validation fail with
+    ``OperationalError: foreign key mismatch``.
+    """
+    db_path = _fresh_db(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO users (telegram_id, username) VALUES (101, 'prod-one');
+            INSERT INTO users (telegram_id, username) VALUES (202, 'prod-two');
+            """
+        )
+        connection.commit()
+
+    first = _run_cli(db_path, "--components", "fridge_menu")
+    second = _run_cli(db_path, "--components", "fridge_menu")
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert _json_result(first)["schema_changed"] is True
+    assert _json_result(second)["schema_changed"] is False
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        fk_tables = [USER_INVENTORY_TABLE, WEEKLY_MENU_PLANS_TABLE]
+        for table in fk_tables:
+            fk_rows = connection.execute(
+                f"PRAGMA foreign_key_list({table})"
+            ).fetchall()
+            targets = {
+                (str(row[2]), str(row[4]) if row[4] is not None else "")
+                for row in fk_rows
+                if str(row[3]) == "user_id"
+            }
+            assert targets == {("users", "telegram_id")}
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            f"INSERT INTO {USER_INVENTORY_TABLE} "
+            "(id, user_id, normalized_name, display_name, source_type) "
+            "VALUES ('99999999-9999-9999-9999-999999999999', 101, 'eggs', 'Eggs', 'text')"
+        )
+        connection.execute("DELETE FROM users WHERE telegram_id = ?", (101,))
+        assert connection.execute(f"SELECT COUNT(*) FROM {USER_INVENTORY_TABLE}").fetchone()[0] == 0
+
+    assert _table_exists(db_path, USER_INVENTORY_TABLE)
+    assert _table_exists(db_path, WEEKLY_MENU_PLANS_TABLE)
+    assert _table_exists(db_path, PLANNED_MEALS_TABLE)
+    assert _table_exists(db_path, PLANNED_INGREDIENTS_TABLE)
+
+
 def test_weekly_v1_status_schema_migrates_without_data_loss(tmp_path: Path) -> None:
     db_path = _fresh_db(tmp_path)
     revision_count, entry_count, idempotency_count = _insert_weekly_v1_data(

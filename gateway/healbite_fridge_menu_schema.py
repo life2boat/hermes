@@ -8,7 +8,7 @@ PLANNED_MEALS_TABLE = "planned_meals"
 PLANNED_INGREDIENTS_TABLE = "planned_ingredients"
 
 FRIDGE_MENU_SCHEMA_MIGRATION_ID = "healbite-fridge-menu-schema-v1"
-FRIDGE_MENU_SCHEMA_MIGRATION_SHA256 = "c127b926b13b4a90fd0e795d3bf224a7d20ce97c7c20dec2a855ad68ed0212aa"
+FRIDGE_MENU_SCHEMA_MIGRATION_SHA256 = "52bba5ae2c3748f4e2955bef15676f9ec734e0b66100ee13917e0117d60db06f"
 
 FRIDGE_MENU_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {USER_INVENTORY_TABLE} (
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS {USER_INVENTORY_TABLE} (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (id, user_id),
     UNIQUE (user_id, normalized_name),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_user_inventory_user_name
     ON {USER_INVENTORY_TABLE} (user_id, normalized_name);
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_PLANS_TABLE} (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (id, user_id),
     UNIQUE (user_id, week_start),
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_weekly_menu_plans_user_week
     ON {WEEKLY_MENU_PLANS_TABLE} (user_id, week_start, status);

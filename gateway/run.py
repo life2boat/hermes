@@ -2565,20 +2565,28 @@ def _preserve_queued_followup_history_offset(
 
     Preserve the earliest (outermost) history offset so the final transcript slice
     still includes every queued turn that ran during the chain.
+
+    Also retain completion ownership for conversational memory: a successful
+    follow-up must not authorize storing an interrupted original user turn.
     """
     if not isinstance(followup_result, dict):
         return followup_result
     if not isinstance(current_result, dict):
         return followup_result
 
+    merged = dict(followup_result)
+    merged["_memory_origin_completed"] = (
+        current_result.get("completed") is True
+        and _should_clear_resume_pending_after_turn(current_result)
+        and current_result.get("_memory_origin_completed", True) is True
+    )
     current_offset = current_result.get("history_offset")
     followup_offset = followup_result.get("history_offset")
     if not isinstance(current_offset, int):
-        return followup_result
+        return merged
     if isinstance(followup_offset, int) and followup_offset <= current_offset:
-        return followup_result
+        return merged
 
-    merged = dict(followup_result)
     merged["history_offset"] = current_offset
     return merged
 
@@ -8550,23 +8558,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
-            # HealBite conversational memory: post-turn write consideration at
-            # the completed-turn boundary. Tracked in the gateway background
-            # task set; fully failure-contained so it never affects the
-            # response path or generates any extra user-facing output.
-            try:
-                _memory_coordinator = getattr(self, "_healbite_conversational_memory", None)
-                if _memory_coordinator is not None and _final_text.strip():
-                    _memory_task = asyncio.create_task(
-                        _memory_coordinator.consider_user_turn(
-                            source=source,
-                            user_text=event.text or "",
-                        )
-                    )
-                    self._background_tasks.add(_memory_task)
-                    _memory_task.add_done_callback(self._background_tasks.discard)
-            except Exception as _mem_exc:
-                logger.debug("healbite conversational memory consideration failed: %s", _mem_exc)
             return _agent_result
         finally:
             # Unconditional release covers every exit path. _release_running_agent_state
@@ -8918,6 +8909,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        # Capture before queued-message merging or inbound enrichment can
+        # mutate the event. Never persist assistant/tool/context output here.
+        _memory_user_text = event.text or ""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _log_inbound_message_event(event, source)
@@ -9995,8 +9989,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                     except Exception as _e:
                         logger.debug("trailing footer send failed: %s", _e)
-                return None
+                response = None
 
+            # Both streamed (None) and ordinary replies reach this terminal
+            # boundary. Early suppression, stale generations and exceptions do
+            # not. Require an explicit agent completion plus the canonical
+            # failure/interrupt classifier, not truthiness of the reply text.
+            try:
+                _memory_coordinator = getattr(self, "_healbite_conversational_memory", None)
+                if (
+                    _memory_coordinator is not None
+                    and _memory_coordinator.enabled
+                    and agent_result.get("completed") is True
+                    and _should_clear_resume_pending_after_turn(agent_result)
+                    and agent_result.get("_memory_origin_completed", True) is True
+                    and self._is_session_run_current(_quick_key, run_generation)
+                    and not self._draining
+                    and not self._shutdown_event.is_set()
+                ):
+                    async def _consider_memory_turn():
+                        try:
+                            await _memory_coordinator.consider_user_turn(
+                                source=source, user_text=_memory_user_text,
+                            )
+                        except Exception as _mem_exc:
+                            logger.debug(
+                                "healbite conversational memory task failed: %s",
+                                type(_mem_exc).__name__,
+                            )
+
+                    _memory_task = asyncio.create_task(_consider_memory_turn())
+                    self._background_tasks.add(_memory_task)
+                    _memory_task.add_done_callback(self._background_tasks.discard)
+            except Exception as _mem_exc:
+                logger.debug(
+                    "healbite conversational memory scheduling failed: %s",
+                    type(_mem_exc).__name__,
+                )
             return response
             
         except Exception as e:

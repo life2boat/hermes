@@ -66,7 +66,7 @@ def test_worker_honors_injected_time_budget_without_sleep(tmp_path, monkeypatch)
         qdrant_adapter=adapter,
         background_write=False,
     )
-    ticks = iter([0.0, 0.0, 1.0])
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 0.0, 1.0] + [1.0] * 10)
     monkeypatch.setattr(convergence.time, "perf_counter", lambda: next(ticks))
 
     result = bridge.process_vector_sync_batch(batch_size=100, time_budget_seconds=0.5)

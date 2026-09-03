@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -21,6 +22,17 @@ _VALID_OPERATIONS = frozenset({"UPSERT", "DELETE"})
 _READY_STATES = ("PENDING", "RETRY")
 _DEFAULT_ALERT_AGE_SECONDS = _MAX_BACKOFF_SECONDS * 2
 _MAX_REPAIR_OPERATIONS = 25
+_DEFAULT_BUSY_TIMEOUT_SECONDS = 1.0
+_MAX_LOCK_RETRIES = 6
+_LOCK_RETRY_MIN_DELAY = 0.010  # 10ms
+_LOCK_RETRY_MAX_DELAY = 0.050  # 50ms
+
+
+def _is_transient_lock_error(exc: Exception) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +90,69 @@ class MemoryVectorConvergence:
         self.max_attempts = max(1, int(max_attempts))
         self.alert_age_seconds = max(1.0, float(alert_age_seconds))
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=0.25)
+    def _connect(self, *, timeout: float = _DEFAULT_BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=max(0.0, float(timeout)))
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _execute_with_retry(
+        self,
+        fn: Callable[[sqlite3.Connection], Any],
+        *,
+        mode: str | None = "IMMEDIATE",
+        budget_deadline: float | None = None,
+    ) -> Any:
+        last_error: Exception | None = None
+        for attempt in range(_MAX_LOCK_RETRIES):
+            timeout = _DEFAULT_BUSY_TIMEOUT_SECONDS
+            if budget_deadline is not None:
+                remaining = budget_deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                timeout = min(_DEFAULT_BUSY_TIMEOUT_SECONDS, max(0.0, remaining))
+
+            conn = None
+            try:
+                conn = self._connect(timeout=timeout)
+                if mode is not None:
+                    conn.execute(f"BEGIN {mode}")
+                result = fn(conn)
+                conn.commit()
+                return result
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if _is_transient_lock_error(exc):
+                    last_error = exc
+                    if attempt < _MAX_LOCK_RETRIES - 1:
+                        if budget_deadline is not None and time.perf_counter() >= budget_deadline:
+                            break
+                        delay = random.uniform(_LOCK_RETRY_MIN_DELAY, _LOCK_RETRY_MAX_DELAY)
+                        if budget_deadline is not None:
+                            remaining = budget_deadline - time.perf_counter()
+                            if remaining <= 0:
+                                break
+                            delay = min(delay, remaining)
+                        time.sleep(delay)
+                        continue
+                raise
+            except BaseException:
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                raise
+            finally:
+                if conn is not None:
+                    conn.close()
+
+        if last_error is not None:
+            raise last_error
+        raise sqlite3.OperationalError("database is locked (time budget exhausted)")
 
     def ensure_schema(self, conn: sqlite3.Connection) -> None:
         _, epoch = stored_epoch(conn)
@@ -176,16 +247,17 @@ class MemoryVectorConvergence:
         limit = min(_MAX_BATCH_SIZE, max(1, int(batch_size)))
         budget = max(0.001, float(time_budget_seconds))
         started = time.perf_counter()
+        deadline = started + budget
         now = float(self.clock())
         selected_states = _READY_STATES
         placeholders = ", ".join("?" for _ in selected_states)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def _fetch_batch(conn: sqlite3.Connection):
             conn.execute(
                 f"UPDATE {META_TABLE} SET last_reconciliation_at = ? WHERE singleton_id = 1",
                 (now,),
             )
-            rows = conn.execute(
+            return conn.execute(
                 f"""
                 SELECT * FROM {OUTBOX_TABLE}
                 WHERE state IN ({placeholders})
@@ -196,12 +268,20 @@ class MemoryVectorConvergence:
                 (*selected_states, now, limit),
             ).fetchall()
 
+        rows = self._execute_with_retry(
+            _fetch_batch, mode="IMMEDIATE", budget_deadline=deadline
+        )
+
         processed = succeeded = retried = blocked = superseded = 0
         for row in rows:
-            if time.perf_counter() - started >= budget:
+            if time.perf_counter() >= deadline:
                 break
             processed += 1
-            outcome = self._process_operation(dict(row), now=float(self.clock()))
+            outcome = self._process_operation(
+                dict(row),
+                now=float(self.clock()),
+                budget_deadline=deadline,
+            )
             if outcome == "SUCCEEDED":
                 succeeded += 1
             elif outcome == "SUPERSEDED":
@@ -253,10 +333,12 @@ class MemoryVectorConvergence:
                 + status.blocked_count,
             )
 
+        started = time.perf_counter()
+        deadline = started + max(0.001, float(time_budget_seconds))
         placeholders = ", ".join("?" for _ in normalized_ids)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
+
+        def _fetch_repair(conn: sqlite3.Connection):
+            return conn.execute(
                 f"""
                 SELECT * FROM {OUTBOX_TABLE}
                 WHERE state = 'BLOCKED' AND user_id = ?
@@ -266,13 +348,20 @@ class MemoryVectorConvergence:
                 (owner_user_id, *normalized_ids),
             ).fetchall()
 
-        started = time.perf_counter()
+        rows = self._execute_with_retry(
+            _fetch_repair, mode="IMMEDIATE", budget_deadline=deadline
+        )
+
         processed = succeeded = retried = blocked = superseded = 0
         for row in rows:
-            if time.perf_counter() - started >= max(0.001, float(time_budget_seconds)):
+            if time.perf_counter() >= deadline:
                 break
             processed += 1
-            outcome = self._process_operation(dict(row), now=float(self.clock()))
+            outcome = self._process_operation(
+                dict(row),
+                now=float(self.clock()),
+                budget_deadline=deadline,
+            )
             if outcome == "SUCCEEDED":
                 succeeded += 1
             elif outcome == "SUPERSEDED":
@@ -294,11 +383,21 @@ class MemoryVectorConvergence:
             + status.blocked_count,
         )
 
-    def _process_operation(self, operation: dict[str, Any], *, now: float) -> str:
+    def _process_operation(
+        self,
+        operation: dict[str, Any],
+        *,
+        now: float,
+        budget_deadline: float | None = None,
+    ) -> str:
         validated = self._validate_operation(operation)
         if validated is not None:
             self._record_failure(
-                operation, error_class=validated, now=now, terminal=True
+                operation,
+                error_class=validated,
+                now=now,
+                terminal=True,
+                budget_deadline=budget_deadline,
             )
             return "BLOCKED"
 
@@ -315,12 +414,17 @@ class MemoryVectorConvergence:
         if callable(reset_connection):
             reset_connection()
 
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
+        def _select_fact(conn: sqlite3.Connection):
+            return conn.execute(
                 f"SELECT * FROM {FACTS_TABLE} WHERE id = ?",
                 (fact_id,),
             ).fetchone()
+
+        row = self._execute_with_retry(
+            _select_fact,
+            mode=None,
+            budget_deadline=budget_deadline,
+        )
         fact = dict(row) if row is not None else None
 
         if fact is not None and int(fact["user_id"]) != user_id:
@@ -329,6 +433,7 @@ class MemoryVectorConvergence:
                 error_class="OWNER_MISMATCH",
                 now=now,
                 terminal=True,
+                budget_deadline=budget_deadline,
             )
             return "BLOCKED"
 
@@ -347,7 +452,12 @@ class MemoryVectorConvergence:
             else:
                 canonical_revision = int(fact["vector_revision"])
                 if canonical_revision > revision:
-                    self._ack(operation_id, now=now, superseded=True)
+                    self._ack(
+                        operation_id,
+                        now=now,
+                        superseded=True,
+                        budget_deadline=budget_deadline,
+                    )
                     return "SUPERSEDED"
                 if canonical_revision < revision:
                     self._record_failure(
@@ -355,6 +465,7 @@ class MemoryVectorConvergence:
                         error_class="CANONICAL_REVISION_REGRESSION",
                         now=now,
                         terminal=True,
+                        budget_deadline=budget_deadline,
                     )
                     return "BLOCKED"
                 success = self._call_adapter(
@@ -379,7 +490,12 @@ class MemoryVectorConvergence:
                 )
         else:
             if fact is not None:
-                self._ack(operation_id, now=now, superseded=True)
+                self._ack(
+                    operation_id,
+                    now=now,
+                    superseded=True,
+                    budget_deadline=budget_deadline,
+                )
                 return "SUPERSEDED"
             success = self._call_adapter(
                 self.qdrant_adapter.delete_fact,
@@ -390,18 +506,32 @@ class MemoryVectorConvergence:
             )
 
         if success:
-            became_stale = self._enqueue_post_mutation_correction(operation)
-            self._ack(operation_id, now=now, superseded=became_stale)
+            became_stale = self._enqueue_post_mutation_correction(
+                operation, budget_deadline=budget_deadline
+            )
+            self._ack(
+                operation_id,
+                now=now,
+                superseded=became_stale,
+                budget_deadline=budget_deadline,
+            )
             return "SUPERSEDED" if became_stale else "SUCCEEDED"
-        return self._record_retry(operation, now=now)
+        return self._record_retry(
+            operation, now=now, budget_deadline=budget_deadline
+        )
 
-    def _enqueue_post_mutation_correction(self, operation: dict[str, Any]) -> bool:
+    def _enqueue_post_mutation_correction(
+        self,
+        operation: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+    ) -> bool:
         fact_id = int(operation["fact_id"])
         user_id = int(operation["user_id"])
         revision = int(operation["fact_revision"])
         operation_type = str(operation["operation"])
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def _do_correction(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
                 f"SELECT user_id, vector_revision, fact_uuid FROM {FACTS_TABLE} WHERE id = ?",
                 (fact_id,),
@@ -441,6 +571,12 @@ class MemoryVectorConvergence:
                 return True
             return False
 
+        return bool(
+            self._execute_with_retry(
+                _do_correction, mode="IMMEDIATE", budget_deadline=budget_deadline
+            )
+        )
+
     @staticmethod
     def _call_adapter(method: Callable[..., Any], **kwargs: Any) -> bool:
         try:
@@ -470,7 +606,13 @@ class MemoryVectorConvergence:
             return "MALFORMED_OPERATION"
         return None
 
-    def _record_retry(self, operation: dict[str, Any], *, now: float) -> str:
+    def _record_retry(
+        self,
+        operation: dict[str, Any],
+        *,
+        now: float,
+        budget_deadline: float | None = None,
+    ) -> str:
         attempts = int(operation["attempt_count"]) + 1
         terminal = attempts >= self.max_attempts
         self._record_failure(
@@ -479,6 +621,7 @@ class MemoryVectorConvergence:
             now=now,
             terminal=terminal,
             attempts=attempts,
+            budget_deadline=budget_deadline,
         )
         return "BLOCKED" if terminal else "RETRY"
 
@@ -490,6 +633,7 @@ class MemoryVectorConvergence:
         now: float,
         terminal: bool,
         attempts: int | None = None,
+        budget_deadline: float | None = None,
     ) -> None:
         operation_id = operation.get("id")
         if not isinstance(operation_id, int):
@@ -501,8 +645,8 @@ class MemoryVectorConvergence:
         )
         state = "BLOCKED" if terminal else "RETRY"
         backoff = min(_MAX_BACKOFF_SECONDS, float(2 ** min(attempts, 8)))
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def _do_record_failure(conn: sqlite3.Connection) -> None:
             cursor = conn.execute(
                 f"""
                 UPDATE {OUTBOX_TABLE}
@@ -524,9 +668,19 @@ class MemoryVectorConvergence:
                     (error_class,),
                 )
 
-    def _ack(self, operation_id: int, *, now: float, superseded: bool) -> None:
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        self._execute_with_retry(
+            _do_record_failure, mode="IMMEDIATE", budget_deadline=budget_deadline
+        )
+
+    def _ack(
+        self,
+        operation_id: int,
+        *,
+        now: float,
+        superseded: bool,
+        budget_deadline: float | None = None,
+    ) -> None:
+        def _do_ack(conn: sqlite3.Connection) -> None:
             cursor = conn.execute(
                 f"DELETE FROM {OUTBOX_TABLE} WHERE id = ? AND state IN ('PENDING', 'RETRY', 'BLOCKED')",
                 (operation_id,),
@@ -545,10 +699,16 @@ class MemoryVectorConvergence:
                     (0 if superseded else 1, 1 if superseded else 0, now),
                 )
 
-    def get_status(self) -> VectorSyncStatus:
+        self._execute_with_retry(
+            _do_ack, mode="IMMEDIATE", budget_deadline=budget_deadline
+        )
+
+    def get_status(
+        self, *, budget_deadline: float | None = None
+    ) -> VectorSyncStatus:
         now = float(self.clock())
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def _fetch_status(conn: sqlite3.Connection):
             counts = {
                 str(row["state"]): int(row["count"])
                 for row in conn.execute(
@@ -568,6 +728,13 @@ class MemoryVectorConvergence:
                 ORDER BY updated_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
+            return counts, oldest, meta, unresolved_error
+
+        counts, oldest, meta, unresolved_error = self._execute_with_retry(
+            _fetch_status,
+            mode=None,
+            budget_deadline=budget_deadline,
+        )
 
         pending = counts.get("PENDING", 0)
         retryable = counts.get("RETRY", 0)

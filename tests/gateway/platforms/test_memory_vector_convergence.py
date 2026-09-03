@@ -399,11 +399,28 @@ def test_retry_is_bounded(tmp_path, monkeypatch):
 
 
 def test_time_budget_preserved(tmp_path, monkeypatch):
-    """Test that execution stops when time budget is exceeded and does not block indefinitely."""
+    """Test that execution stops when time budget is exceeded under real SQLite lock contention.
+
+    Proves that attempt 0 does not wait for the default 1-second busy timeout when a smaller
+    time budget is requested.
+    """
+    disabled = _bridge(tmp_path, monkeypatch, FakeQdrant(enabled=False), enabled=False)
+    _fact(disabled)
+    disabled.close()
+
     bridge = _bridge(tmp_path, monkeypatch, FakeQdrant())
-    start = time.perf_counter()
-    res = bridge.process_vector_sync_batch(time_budget_seconds=0.01)
-    duration = time.perf_counter() - start
-    assert duration < 1.0
-    assert res is not None
-    bridge.close()
+    db_path = tmp_path / "memory.sqlite"
+    lock_conn = sqlite3.connect(db_path, isolation_level=None)
+    lock_conn.execute("BEGIN EXCLUSIVE")
+    try:
+        start = time.perf_counter()
+        try:
+            bridge.process_vector_sync_batch(time_budget_seconds=0.05)
+        except Exception:
+            pass
+        duration = time.perf_counter() - start
+        assert duration < 0.8
+    finally:
+        lock_conn.execute("ROLLBACK")
+        lock_conn.close()
+        bridge.close()

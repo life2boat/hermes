@@ -91,7 +91,7 @@ class MemoryVectorConvergence:
         self.alert_age_seconds = max(1.0, float(alert_age_seconds))
 
     def _connect(self, *, timeout: float = _DEFAULT_BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=max(0.05, float(timeout)))
+        conn = sqlite3.connect(self.db_path, timeout=max(0.0, float(timeout)))
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -105,11 +105,11 @@ class MemoryVectorConvergence:
         last_error: Exception | None = None
         for attempt in range(_MAX_LOCK_RETRIES):
             timeout = _DEFAULT_BUSY_TIMEOUT_SECONDS
-            if attempt > 0 and budget_deadline is not None:
+            if budget_deadline is not None:
                 remaining = budget_deadline - time.perf_counter()
                 if remaining <= 0:
                     break
-                timeout = min(_DEFAULT_BUSY_TIMEOUT_SECONDS, max(0.01, remaining))
+                timeout = min(_DEFAULT_BUSY_TIMEOUT_SECONDS, max(0.0, remaining))
 
             conn = None
             try:
@@ -291,7 +291,7 @@ class MemoryVectorConvergence:
             else:
                 blocked += 1
 
-        status = self.get_status(budget_deadline=deadline)
+        status = self.get_status()
         return VectorSyncBatchResult(
             status=status.status,
             processed=processed,
@@ -370,7 +370,7 @@ class MemoryVectorConvergence:
                 retried += 1
             else:
                 blocked += 1
-        status = self.get_status(budget_deadline=deadline)
+        status = self.get_status()
         return VectorSyncBatchResult(
             status=status.status,
             processed=processed,

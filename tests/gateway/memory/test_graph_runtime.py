@@ -4,6 +4,14 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import logging
+import time
+
+async def _wait_until(predicate, timeout=2.0, step=0.01):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("Timeout waiting for condition")
+        await asyncio.sleep(step)
 
 from gateway.memory.graph_runtime import (
     GraphRuntimeMode,
@@ -183,8 +191,7 @@ async def test_PRIVACY_exception_sentinel(temp_db, caplog):
     with patch("gateway.memory.graph_runtime.converge_user_graph") as mock_conv:
         mock_conv.side_effect = ValueError("PR7_GRAPH_RUNTIME_SECRET_SENTINEL_314159")
         runtime.schedule_convergence(1)
-        # Wait a bit for worker to process
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: runtime.status == GraphRuntimeStatus.DEGRADED)
         
     await runtime.stop()
     assert runtime.status == GraphRuntimeStatus.DEGRADED
@@ -221,7 +228,7 @@ async def test_WORKER_integrity_block_counters(temp_db):
     with patch("gateway.memory.graph_runtime.converge_user_graph") as mock_conv:
         mock_conv.side_effect = GraphConvergenceIntegrityError("Test")
         runtime.schedule_convergence(1)
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: runtime._counters["integrity_block_count"] == 1)
         
     await runtime.stop()
     assert runtime._counters["integrity_block_count"] == 1
@@ -238,7 +245,7 @@ async def test_WORKER_churn_exhausted_counters(temp_db):
             status.name = "SOURCE_CHURN_RETRY_EXHAUSTED"
         mock_conv.return_value = DummyRes()
         runtime.schedule_convergence(1)
-        await asyncio.sleep(0.1)
+        await _wait_until(lambda: runtime._counters["churn_exhausted_count"] == 1)
         
     await runtime.stop()
     assert runtime._counters["churn_exhausted_count"] == 1

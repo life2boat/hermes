@@ -4,6 +4,7 @@ import logging
 import re
 import sqlite3
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterator
@@ -18,6 +19,7 @@ from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter, QdrantMemoryHit
 from gateway.memory.schema import FACTS_TABLE, validate_memory_convergence_schema
+from gateway.memory.identity import canonical_uuid, validate_identity_schema
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,7 @@ class HealBiteMemoryBridge:
             raise sqlite3.DatabaseError("memory convergence database is unavailable")
         with self._connect() as conn:
             validate_memory_convergence_schema(conn)
+            validate_identity_schema(conn)
             self._fts_enabled = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (_FTS_TABLE,),
@@ -176,21 +179,23 @@ class HealBiteMemoryBridge:
         user_id = require_memory_user_id(user_id)
         with self._connect() as conn:
             row = conn.execute(
-                f"SELECT id, vector_revision FROM {_FACTS_TABLE} "
+                f"SELECT id, vector_revision, fact_uuid FROM {_FACTS_TABLE} "
                 "WHERE user_id = ? AND entity = ? AND key = ?",
                 (user_id, entity, key),
             ).fetchone()
             if row is None:
+                fact_uuid = str(uuid.uuid4())
                 cursor = conn.execute(
                     f"""
-                    INSERT INTO {_FACTS_TABLE}(user_id, entity, key, value, source, trust_score)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO {_FACTS_TABLE}(user_id, entity, key, value, source, trust_score, fact_uuid)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, entity, key, value, source, trust_score),
+                    (user_id, entity, key, value, source, trust_score, fact_uuid),
                 )
                 sqlite_id = int(cursor.lastrowid)
                 revision = 1
             else:
+                fact_uuid = canonical_uuid(row["fact_uuid"])
                 sqlite_id = int(row["id"])
                 revision = int(row["vector_revision"]) + 1
                 conn.execute(
@@ -203,7 +208,7 @@ class HealBiteMemoryBridge:
                     (value, source, trust_score, revision, sqlite_id, user_id),
                 )
             self._convergence.enqueue_upsert(
-                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision
+                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision, fact_uuid=fact_uuid
             )
         self._schedule_reconciliation()
         return sqlite_id
@@ -212,7 +217,7 @@ class HealBiteMemoryBridge:
         user_id = require_memory_user_id(user_id)
         with self._connect() as conn:
             row = conn.execute(
-                f"SELECT vector_revision FROM {_FACTS_TABLE} WHERE id = ? AND user_id = ?",
+                f"SELECT vector_revision, fact_uuid FROM {_FACTS_TABLE} WHERE id = ? AND user_id = ?",
                 (sqlite_id, user_id),
             ).fetchone()
             if row is None:
@@ -223,7 +228,7 @@ class HealBiteMemoryBridge:
                 (sqlite_id, user_id),
             )
             self._convergence.enqueue_delete(
-                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision
+                conn, user_id=user_id, fact_id=sqlite_id, fact_revision=revision, fact_uuid=canonical_uuid(row["fact_uuid"])
             )
         self._schedule_reconciliation()
 
@@ -376,6 +381,7 @@ class HealBiteMemoryBridge:
             return False
         return self.qdrant_adapter.upsert_fact(
             sqlite_id=int(fact["id"]),
+            fact_uuid=canonical_uuid(fact["fact_uuid"]),
             user_id=int(fact["user_id"]),
             text=self._fact_text(fact),
             payload={
@@ -387,7 +393,10 @@ class HealBiteMemoryBridge:
                 "source": fact.get("source"),
                 "trust_score": fact.get("trust_score"),
                 "updated_at": fact.get("updated_at"),
+                "vector_revision": int(fact["vector_revision"]),
+                "fact_uuid": fact["fact_uuid"],
             },
+            wait=True,
         )
 
     @staticmethod
@@ -423,10 +432,15 @@ class HealBiteMemoryBridge:
         for hit in hits:
             if hit.sqlite_id is None:
                 continue
-            if hit.payload.get("user_id") != user_id:
+            if type(hit.payload.get("user_id")) is not int or hit.payload.get("user_id") != user_id:
                 continue
             fact = facts_by_id.get(hit.sqlite_id)
             if fact is None:
+                continue
+            try:
+                if canonical_uuid(hit.payload.get("fact_uuid")) != canonical_uuid(fact.get("fact_uuid")):
+                    continue
+            except ValueError:
                 continue
             payload_revision = hit.payload.get("vector_revision")
             if type(payload_revision) is not int:

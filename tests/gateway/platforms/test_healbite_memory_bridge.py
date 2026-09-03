@@ -200,10 +200,13 @@ def test_qdrant_results_are_validated_against_sqlite(tmp_path):
         source="user",
         trust_score=0.95,
     )
+    fact = bridge.get_fact(sqlite_id=sqlite_id, user_id=33)
+    assert fact is not None
     mock_client.search.return_value = [
         QdrantMemoryHit(
             sqlite_id=sqlite_id,
-            payload={"sqlite_id": sqlite_id, "user_id": 33, "vector_revision": 1},
+            payload={"sqlite_id": sqlite_id, "user_id": 33, "vector_revision": 1,
+                     "fact_uuid": fact["fact_uuid"]},
             score=0.99,
         )
     ]
@@ -379,7 +382,9 @@ def test_rebuild_script_reindexes_all_sqlite_facts_with_expected_payload(tmp_pat
         def __init__(self, *args, **kwargs):
             self.embedding_adapter = kwargs.get("embedding_adapter")
 
-        def upsert_fact(self, *, sqlite_id, user_id, text, payload):
+        def upsert_fact(self, *, sqlite_id, fact_uuid, user_id, text, payload, wait):
+            assert fact_uuid == payload["fact_uuid"]
+            assert wait is True
             captured_calls.append(
                 {
                     "sqlite_id": sqlite_id,

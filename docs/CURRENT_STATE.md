@@ -13,6 +13,18 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## Memory fact UUID / epoch safety V2 — repository candidate
+
+Based on `676de3e5ccb8782e365af649021ee634785266d4`: additive
+`memory_convergence_v2` introduces immutable fact UUIDs, externally pinned legacy
+epochs, UUID-keyed vector intents/points and fail-closed hydration. Authority
+approval v4 → plan v9 → final authority v3 carries the same epoch through staged
+execution. The v1 migration identity remains unchanged. See `skills/memory/SKILL.md`
+and `skills/deploy/SKILL.md` for migration and clean restore qualification.
+This is an implementation candidate for Draft PR / independent audit, not a
+deployed migration. Production state, operator-only conversational-memory rollout,
+Qdrant and historical orphans are unchanged by this work; PR14 is not started.
+
 ## Hermes / HealBite — Memory & Graph Engineering v3 PR-2 (Structural) & PR-2.1 (Integrity) & PR-2.2 (Closure)
 
 - PR-2 foundation is COMPLETE.

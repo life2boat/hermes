@@ -2623,7 +2623,7 @@ class HealBiteNutritionDiary:
             "meal_name": display_name,
             "calories_kcal": record.calories_kcal,
         }
-        indexed = self.qdrant_adapter.upsert_fact(
+        indexed = self.qdrant_adapter.upsert_nutrition_record(
             sqlite_id=sqlite_id,
             user_id=user_id,
             text=text,

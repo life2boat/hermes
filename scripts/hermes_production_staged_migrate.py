@@ -61,14 +61,14 @@ from scripts.hermes_staged_schema_migrate import (  # noqa: E402
 )
 
 
-PLAN_VERSION = 8
+PLAN_VERSION = 9
 MAX_DOCUMENT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 OPERATION_ID_RE = re.compile(r"[0-9a-f]{32}")
 AUTHORITY_OPERATION_CLASS = "PRODUCTION_STAGED_SCHEMA_MIGRATION"
-OPERATIONS_ROOT_APPROVAL_VERSION = 3
+OPERATIONS_ROOT_APPROVAL_VERSION = 4
 CLEAN_START_POLICY_VERSION = 3
 SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 CANONICAL_CONTRACT_RELATIVE_PATH = Path("deploy/hermes-production.json")
@@ -93,6 +93,7 @@ EXPECTED_FEATURE_FLAGS = {
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
 }
 OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset({
+    "LEGACY_EPOCH_UUID",
     "APPROVAL_VERSION",
     "OPERATION_ID",
     "OPERATION_CLASS",
@@ -152,6 +153,7 @@ FAILURE_STATES = frozenset({
     "MANUAL_RECOVERY_REQUIRED",
 })
 PLAN_FIELDS = frozenset({
+    "LEGACY_EPOCH_UUID",
     "PLAN_VERSION",
     "OPERATION_ID",
     "OPERATION_CLASS",
@@ -1642,6 +1644,9 @@ def create_plan(args: argparse.Namespace) -> int:
         raw_expected = operations_root_approval.payload.get(
             "EXPECTED_MUTATION_COMPONENTS"
         )
+        legacy_epoch_uuid = operations_root_approval.payload["LEGACY_EPOCH_UUID"]
+        from scripts.hermes_memory_identity_authority import verify_memory_epoch
+        verify_memory_epoch(db_path, legacy_epoch_uuid)
         if not isinstance(raw_expected, list):
             raise ProductionGateError("EXPECTED_MUTATION_COMPONENTS_INVALID")
         expected_mutation_components = _validate_expected_mutation_components(
@@ -1707,6 +1712,7 @@ def create_plan(args: argparse.Namespace) -> int:
         _fsync_directory(evidence_parent)
         created_at = _now()
         plan_payload: dict[str, Any] = {
+            "LEGACY_EPOCH_UUID": legacy_epoch_uuid,
             "PLAN_VERSION": PLAN_VERSION,
             "OPERATION_ID": operation_id,
             "OPERATION_CLASS": AUTHORITY_OPERATION_CLASS,
@@ -2125,6 +2131,7 @@ def _revalidate_plan(
             deployment_contract=deployment_contract,
         )
         approval_fields: dict[str, Any] = {
+            "LEGACY_EPOCH_UUID": operations_root_approval.payload["LEGACY_EPOCH_UUID"],
             **_document_plan_fields(
                 "OPERATIONS_ROOT_APPROVAL",
                 operations_root_approval,
@@ -2187,6 +2194,8 @@ def _revalidate_plan(
             repository_root,
         ))
         identity, source_schema, integrity, foreign_keys = _read_only_source(db_path)
+        from scripts.hermes_memory_identity_authority import verify_memory_epoch
+        verify_memory_epoch(db_path, plan["LEGACY_EPOCH_UUID"])
         for name in (
             "SOURCE_DEVICE",
             "SOURCE_INODE",
@@ -2269,6 +2278,7 @@ def _revalidate_plan(
             sha256=str(plan["SOURCE_SHA256"]),
         )
         staged_args = argparse.Namespace(
+            legacy_epoch_uuid=plan["LEGACY_EPOCH_UUID"],
             source_db=str(db_path),
             backup_dir=str(backup_parent.path),
             staging_root=str(staging_parent.path),
@@ -3013,6 +3023,8 @@ def _execute_plan_outcome(
             return outcome
         if prepared.source_lease is None:
             raise ProductionGateError("SOURCE_SQLITE_LEASE_MISSING")
+        from gateway.memory.identity import validate_epoch
+        validate_epoch(prepared.source_lease.connection, plan["LEGACY_EPOCH_UUID"])
         locked_pre_ddl_states = _component_schema_states_from_connection(
             prepared.source_lease.connection
         )

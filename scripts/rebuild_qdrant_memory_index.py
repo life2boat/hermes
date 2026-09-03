@@ -5,6 +5,7 @@ import argparse
 
 from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
+from gateway.memory.analytics import MemoryAnalyticsLogger
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 from gateway.platforms.healbite_memory_bridge import HealBiteMemoryBridge
 
@@ -15,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qdrant-url", default=None, help="Qdrant base URL")
     parser.add_argument("--qdrant-api-key", default=None, help="Qdrant API key")
     parser.add_argument("--collection", default=None, help="Qdrant collection name")
+    parser.add_argument("--fresh-collection", action="store_true", help="Create-only clean recovery; requires an unused explicit --collection")
     parser.add_argument("--timeout", type=float, default=1.5, help="Qdrant request timeout in seconds")
     parser.add_argument("--vector-size", type=int, default=32, help="Embedding vector size")
     parser.add_argument("--user-id", type=int, default=None, help="Reindex only one Telegram user_id")
@@ -24,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.fresh_collection and (not args.collection or args.user_id is not None):
+        raise SystemExit("Fresh recovery requires explicit collection and full owner scope")
     embedding_adapter = EmbeddingAdapter(vector_size=args.vector_size)
     if args.dry_run:
         bridge = HealBiteMemoryBridge(
@@ -31,12 +35,14 @@ def main() -> int:
             qdrant_adapter=None,
             embedding_adapter=embedding_adapter,
             background_write=False,
+            ensure_schema_on_init=False,
+            analytics_logger=MemoryAnalyticsLogger(args.db_path, enabled=False),
         )
         try:
             total = sum(1 for _ in bridge.iter_facts(user_id=args.user_id))
         finally:
             bridge.close()
-        scope = f" for user_id={args.user_id}" if args.user_id is not None else ""
+        scope = " for a restricted owner scope" if args.user_id is not None else ""
         print(f"Dry run: {total} facts would be reindexed{scope}")
         return 0
 
@@ -54,14 +60,20 @@ def main() -> int:
         qdrant_adapter=qdrant_adapter,
         embedding_adapter=embedding_adapter,
         background_write=False,
+        ensure_schema_on_init=False,
+        analytics_logger=MemoryAnalyticsLogger(args.db_path, enabled=False),
     )
     try:
+        total = sum(1 for _ in bridge.iter_facts(user_id=args.user_id))
+        if args.fresh_collection and not qdrant_adapter.create_fresh_collection():
+            print("Fresh collection creation failed; existing collection was not reused")
+            return 1
         synced = bridge.rebuild_qdrant_index(user_id=args.user_id)
     finally:
         bridge.close()
     target = args.collection or getattr(qdrant_adapter, "collection_name", "healbite_memory_os")
     print(f"Reindexed {synced} facts into {target}")
-    return 0 if synced >= 0 else 1
+    return 0 if synced == total else 1
 
 
 if __name__ == "__main__":

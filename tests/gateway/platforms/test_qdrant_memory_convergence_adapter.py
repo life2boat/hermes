@@ -1,9 +1,30 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+import uuid
+import pytest
+from typing import Any
 
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
+
+FACT_UUID = "10000000-0000-4000-8000-000000000001"
+
+
+def test_nutrition_compatibility_is_explicit_not_missing_uuid_fallback():
+    client = MagicMock()
+    client.upsert.return_value = {"status": "completed"}
+    adapter = _adapter(client)
+    assert adapter.upsert_nutrition_record(sqlite_id=7, user_id=11, text="synthetic",
+        payload={"record_type": "nutrition_log"}, wait=True)
+    point = client.upsert.call_args.kwargs["points"][0]
+    assert point["id"] == str(uuid.uuid5(uuid.NAMESPACE_URL, "healbite-memory:11:7"))
+    assert "fact_uuid" not in point["payload"]
+    before = client.upsert.call_count
+    with pytest.raises(TypeError):
+        getattr(adapter, "upsert_fact")(sqlite_id=7, user_id=11, text="synthetic",
+            payload={"record_type": "nutrition_log"}, wait=True)
+    assert client.upsert.call_count == before
 
 
 def _adapter(client):
@@ -27,6 +48,7 @@ def test_reconciliation_upsert_uses_strong_wait_acknowledgement():
 
     assert adapter.upsert_fact(
         sqlite_id=7,
+        fact_uuid=FACT_UUID,
         user_id=11,
         text="synthetic",
         payload={"vector_revision": 3},
@@ -42,12 +64,12 @@ def test_delete_derives_scoped_point_id_and_uses_wait_acknowledgement():
     client.delete.return_value = {"result": {"status": "completed"}}
     adapter = _adapter(client)
 
-    assert adapter.delete_fact(sqlite_id=7, user_id=11, wait=True)
+    assert adapter.delete_fact(sqlite_id=7, fact_uuid=FACT_UUID, user_id=11, wait=True)
 
     kwargs = client.delete.call_args.kwargs
     assert kwargs["wait"] is True
-    assert kwargs["points_selector"] == [adapter.point_id(sqlite_id=7, user_id=11)]
-    assert kwargs["points_selector"] != [adapter.point_id(sqlite_id=7, user_id=12)]
+    assert kwargs["points_selector"] == [adapter.point_id(fact_uuid=FACT_UUID, user_id=11)]
+    assert kwargs["points_selector"] != [adapter.point_id(fact_uuid=FACT_UUID, user_id=12)]
 
 
 def test_delete_failure_is_fail_closed_and_redacted(caplog):
@@ -57,7 +79,7 @@ def test_delete_failure_is_fail_closed_and_redacted(caplog):
     client.delete.side_effect = RuntimeError(private_detail)
     adapter = _adapter(client)
 
-    assert not adapter.delete_fact(sqlite_id=7, user_id=11, wait=True)
+    assert not adapter.delete_fact(sqlite_id=7, fact_uuid=FACT_UUID, user_id=11, wait=True)
     assert "RuntimeError" in caplog.text
     assert private_detail not in caplog.text
 
@@ -70,6 +92,7 @@ def test_wait_acceptance_without_completed_status_is_not_convergence():
 
     assert not adapter.upsert_fact(
         sqlite_id=7,
+        fact_uuid=FACT_UUID,
         user_id=11,
         text="synthetic",
         payload={"vector_revision": 3},
@@ -95,8 +118,9 @@ def test_stale_client_is_invalidated_and_rebuilt_on_later_attempt():
         enabled=True,
     )
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "sqlite_id": 7,
+        "fact_uuid": FACT_UUID,
         "user_id": 11,
         "text": "synthetic",
         "payload": {"vector_revision": 3},

@@ -454,6 +454,7 @@ def test_qdrant_file_log_failure_does_not_emit_payload_values(tmp_path):
 
         ok = adapter.upsert_fact(
             sqlite_id=1,
+            fact_uuid="10000000-0000-4000-8000-000000000001",
             user_id=3131313131,
             text="PII_LOG_SMOKE_TEXT_27JUNE",
             payload={"note": "PII_LOG_SMOKE_CALLBACK_SECRET"},

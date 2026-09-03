@@ -67,6 +67,7 @@ def _host_migration(_contract: staged.Contract, staging_dir: Path) -> None:
     result = healbite_schema_migrate.run_migration(
         db_path=str(staging_dir / "database.sqlite"),
         staged_copy=True,
+        legacy_epoch_uuid=_contract.legacy_epoch_uuid,
     )
     assert result.exit_code == 0
     assert result.path_mode == "STAGED_COPY"
@@ -81,6 +82,64 @@ def _fully_migrated_source(root: Path) -> Path:
     assert result.exit_code == 0
     assert result.path_mode == "STAGED_COPY"
     return source
+
+
+def test_legacy_epoch_reaches_staged_target_and_row_validation(tmp_path, monkeypatch):
+    from gateway.memory.schema import FACTS_CREATE_SQL, FACTS_TABLE, OUTBOX_TABLE
+    from gateway.memory.identity import legacy_fact_uuid, stored_epoch
+
+    _prepare_runtime_identity(monkeypatch)
+    epoch = "10000000-0000-4000-8000-000000000001"
+    monkeypatch.setattr(staged, "_inspect_image", lambda *_: REVISION)
+    source = _source(tmp_path)
+    with sqlite3.connect(source) as conn:
+        conn.execute(FACTS_CREATE_SQL.replace("    vector_revision INTEGER NOT NULL DEFAULT 1,\n", ""))
+        conn.execute(f"INSERT INTO {FACTS_TABLE}(id,user_id,entity,key,value) VALUES(14,101,'profile','goal','synthetic')")
+    args = _args(tmp_path, source, legacy_epoch_uuid=epoch)
+    observed = []
+
+    def migrate_with_pinned_epoch(contract, directory):
+        observed.append(contract.legacy_epoch_uuid)
+        _host_migration(contract, directory)
+
+    assert staged.execute_synthetic(args, _migration_runner=migrate_with_pinned_epoch,
+        _compatibility_probe=lambda *_: {"status": "PASS"}) == 0
+    assert observed == [epoch, epoch, epoch]  # Canonical repeated staged runs.
+    with sqlite3.connect(source) as conn:
+        assert stored_epoch(conn) == (True, epoch)
+        assert conn.execute(f"SELECT id,user_id,entity,key,value,vector_revision,fact_uuid FROM {FACTS_TABLE}").fetchone() == (
+            14, 101, "profile", "goal", "synthetic", 1, legacy_fact_uuid(epoch, 101, 14),
+        )
+        assert conn.execute(f"SELECT fact_uuid FROM {OUTBOX_TABLE}").fetchone()[0] == legacy_fact_uuid(epoch, 101, 14)
+
+
+def test_column_parity_cannot_mask_changed_memory_table_constraints(tmp_path):
+    from gateway.memory.schema import FACTS_CREATE_SQL
+
+    source = _source(tmp_path)
+    with sqlite3.connect(source) as conn:
+        conn.execute(FACTS_CREATE_SQL.replace("value TEXT NOT NULL", "value TEXT NOT NULL CHECK(length(value) < 8)"))
+    result = healbite_schema_migrate.run_migration(db_path=str(source), staged_copy=True)
+    assert result.exit_code == 0
+    with pytest.raises(staged.OrchestratorError, match="TARGET_SCHEMA_CONTRACT_MISMATCH"):
+        staged._target_schema_fingerprint(source)
+
+
+def test_target_command_consumes_pinned_epoch_without_generation(tmp_path, monkeypatch):
+    epoch = "10000000-0000-4000-8000-000000000001"
+    command = []
+
+    def run(argv, **kwargs):
+        command.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, '{"status":"success","path_mode":"STAGED_COPY"}', '')
+
+    monkeypatch.setattr(staged.subprocess, "run", run)
+    contract = staged.Contract(tmp_path / "source", tmp_path / "backup", tmp_path,
+        IMAGE_ID, PREVIOUS_IMAGE_ID, REVISION, tmp_path, epoch)
+    staged._run_target_migration(contract, tmp_path)
+    assert command.count("--legacy-epoch-uuid") == 1
+    assert command[command.index("--legacy-epoch-uuid") + 1] == epoch
+    assert command[command.index("--network") + 1] == "none"
 
 
 def test_target_schema_fingerprint_matches_canonical_migration(

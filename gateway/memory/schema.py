@@ -227,6 +227,10 @@ def classify_memory_convergence_schema(
         return MemorySchemaClassification.INCOMPATIBLE
 
     facts_columns = _columns(conn, FACTS_TABLE)
+    # v2 adds exactly one column; the immutable v1 recipe/checksum stays intact.
+    uuid_column = ("fact_uuid", "TEXT", 0, None, 0)
+    if facts_columns and facts_columns[-1] == uuid_column:
+        facts_columns = facts_columns[:-1]
     if facts_columns not in {
         _EXPECTED_COLUMNS[FACTS_TABLE],
         _LEGACY_FACTS_COLUMNS,
@@ -237,10 +241,18 @@ def classify_memory_convergence_schema(
         return MemorySchemaClassification.INCOMPATIBLE
 
     for table in (OUTBOX_TABLE, META_TABLE):
+        columns = _columns(conn, table)
+        sql = _object_sql(conn, table)
+        if table == OUTBOX_TABLE and columns and columns[-1] == uuid_column:
+            columns = columns[:-1]
+            # SQLite ALTER inserts the new column before the table UNIQUE clause.
+            sql = re.sub(r",?\s*fact_uuid text\s*,?", ",", sql)
+            sql = sql.replace(",,", ",")
+            sql = sql.replace(" ,", ",")
         if table in objects and (
             objects[table] != "table"
-            or _columns(conn, table) != _EXPECTED_COLUMNS[table]
-            or _object_sql(conn, table)
+            or columns != _EXPECTED_COLUMNS[table]
+            or sql
             != _normalized_schema_sql(
                 OUTBOX_CREATE_SQL if table == OUTBOX_TABLE else META_CREATE_SQL
             )

@@ -10,8 +10,8 @@ from gateway.memory.schema import (
     FACTS_TABLE,
     META_TABLE,
     OUTBOX_TABLE,
-    migrate_memory_convergence_schema,
 )
+from gateway.memory.identity import canonical_uuid, migrate_identity_schema, stored_epoch
 
 
 _MAX_BATCH_SIZE = 100
@@ -84,7 +84,8 @@ class MemoryVectorConvergence:
         return conn
 
     def ensure_schema(self, conn: sqlite3.Connection) -> None:
-        migrate_memory_convergence_schema(conn, now=float(self.clock()))
+        _, epoch = stored_epoch(conn)
+        migrate_identity_schema(conn, legacy_epoch_uuid=epoch, now=float(self.clock()))
 
     def enqueue_upsert(
         self,
@@ -92,12 +93,14 @@ class MemoryVectorConvergence:
         *,
         user_id: int,
         fact_id: int,
+        fact_uuid: str,
         fact_revision: int,
     ) -> None:
         self._enqueue(
             conn,
             user_id=user_id,
             fact_id=fact_id,
+            fact_uuid=fact_uuid,
             fact_revision=fact_revision,
             operation="UPSERT",
         )
@@ -108,12 +111,14 @@ class MemoryVectorConvergence:
         *,
         user_id: int,
         fact_id: int,
+        fact_uuid: str,
         fact_revision: int,
     ) -> None:
         self._enqueue(
             conn,
             user_id=user_id,
             fact_id=fact_id,
+            fact_uuid=fact_uuid,
             fact_revision=fact_revision,
             operation="DELETE",
         )
@@ -124,18 +129,28 @@ class MemoryVectorConvergence:
         *,
         user_id: int,
         fact_id: int,
+        fact_uuid: str,
         fact_revision: int,
         operation: str,
     ) -> None:
         now = float(self.clock())
+        canonical_uuid(fact_uuid)
+        # Retained v1 integer uniqueness must never silently swallow a distinct
+        # UUID. Ordinary retries deduplicate only the exact immutable identity.
+        collision = conn.execute(
+            f"SELECT fact_uuid FROM {OUTBOX_TABLE} WHERE user_id=? AND fact_id=? AND fact_revision=? AND operation=?",
+            (user_id, fact_id, fact_revision, operation),
+        ).fetchone()
+        if collision is not None and collision[0] != fact_uuid:
+            raise sqlite3.IntegrityError("OUTBOX_IDENTITY_CONFLICT")
         conn.execute(
             f"""
             INSERT OR IGNORE INTO {OUTBOX_TABLE}(
-                user_id, fact_id, operation, fact_revision,
+                user_id, fact_id, operation, fact_revision, fact_uuid,
                 state, next_attempt_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)
             """,
-            (user_id, fact_id, operation, fact_revision, now, now),
+            (user_id, fact_id, operation, fact_revision, fact_uuid, now, now),
         )
 
     def process_batch(
@@ -292,6 +307,7 @@ class MemoryVectorConvergence:
         fact_id = int(operation["fact_id"])
         revision = int(operation["fact_revision"])
         operation_type = str(operation["operation"])
+        fact_uuid = canonical_uuid(operation["fact_uuid"])
 
         reset_connection = getattr(
             self.qdrant_adapter, "reset_connection_for_retry", None
@@ -316,11 +332,15 @@ class MemoryVectorConvergence:
             )
             return "BLOCKED"
 
+        # An old operation must never write a replacement fact at a reused ID.
+        if fact is not None and fact["fact_uuid"] != fact_uuid:
+            fact = None
         if operation_type == "UPSERT":
             if fact is None:
                 success = self._call_adapter(
                     self.qdrant_adapter.delete_fact,
                     sqlite_id=fact_id,
+                    fact_uuid=fact_uuid,
                     user_id=user_id,
                     wait=True,
                 )
@@ -340,6 +360,7 @@ class MemoryVectorConvergence:
                 success = self._call_adapter(
                     self.qdrant_adapter.upsert_fact,
                     sqlite_id=fact_id,
+                    fact_uuid=fact_uuid,
                     user_id=user_id,
                     text=self.fact_text(fact),
                     payload={
@@ -352,6 +373,7 @@ class MemoryVectorConvergence:
                         "trust_score": fact.get("trust_score"),
                         "updated_at": fact.get("updated_at"),
                         "vector_revision": canonical_revision,
+                        "fact_uuid": fact_uuid,
                     },
                     wait=True,
                 )
@@ -362,6 +384,7 @@ class MemoryVectorConvergence:
             success = self._call_adapter(
                 self.qdrant_adapter.delete_fact,
                 sqlite_id=fact_id,
+                fact_uuid=fact_uuid,
                 user_id=user_id,
                 wait=True,
             )
@@ -380,18 +403,19 @@ class MemoryVectorConvergence:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                f"SELECT user_id, vector_revision FROM {FACTS_TABLE} WHERE id = ?",
+                f"SELECT user_id, vector_revision, fact_uuid FROM {FACTS_TABLE} WHERE id = ?",
                 (fact_id,),
             ).fetchone()
             fact = dict(row) if row is not None else None
             if fact is not None and int(fact["user_id"]) != user_id:
                 return True
             if operation_type == "UPSERT":
-                if fact is None:
+                if fact is None or fact["fact_uuid"] != operation["fact_uuid"]:
                     self.enqueue_delete(
                         conn,
                         user_id=user_id,
                         fact_id=fact_id,
+                        fact_uuid=operation["fact_uuid"],
                         fact_revision=revision + 1,
                     )
                     return True
@@ -401,6 +425,7 @@ class MemoryVectorConvergence:
                         conn,
                         user_id=user_id,
                         fact_id=fact_id,
+                        fact_uuid=fact["fact_uuid"],
                         fact_revision=canonical_revision,
                     )
                     return True
@@ -410,6 +435,7 @@ class MemoryVectorConvergence:
                     conn,
                     user_id=user_id,
                     fact_id=fact_id,
+                    fact_uuid=fact["fact_uuid"],
                     fact_revision=int(fact["vector_revision"]),
                 )
                 return True
@@ -424,6 +450,10 @@ class MemoryVectorConvergence:
 
     @staticmethod
     def _validate_operation(operation: dict[str, Any]) -> str | None:
+        try:
+            canonical_uuid(operation.get("fact_uuid"))
+        except ValueError:
+            return "MALFORMED_FACT_UUID"
         if operation.get("operation") not in _VALID_OPERATIONS:
             return "INVALID_OPERATION"
         for field in ("id", "user_id", "fact_id", "fact_revision", "attempt_count"):

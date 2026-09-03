@@ -77,6 +77,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "inventory",
         "fridge_menu",
         "memory_convergence",
+        "memory_convergence_v2",
     )
     manifest = schema_migrate.migration_registry_manifest()
     assert tuple(item["component"] for item in manifest) == (
@@ -86,8 +87,9 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         "inventory",
         "fridge_menu",
         "memory_convergence",
+        "memory_convergence_v2",
     )
-    assert manifest[-3] == {
+    assert manifest[-4] == {
         "component": "inventory",
         "migration_id": INVENTORY_SCHEMA_MIGRATION_ID,
         "migration_sha256": INVENTORY_SCHEMA_MIGRATION_SHA256,
@@ -98,7 +100,7 @@ def test_registry_has_deterministic_inventory_identity_and_order() -> None:
         ).hexdigest()
         == INVENTORY_SCHEMA_MIGRATION_SHA256
     )
-    assert manifest[-2] == {
+    assert manifest[-3] == {
         "component": "fridge_menu",
         "migration_id": FRIDGE_MENU_SCHEMA_MIGRATION_ID,
         "migration_sha256": FRIDGE_MENU_SCHEMA_MIGRATION_SHA256,
@@ -198,12 +200,14 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
         "household",
         "inventory",
         "memory_convergence",
+        "memory_convergence_v2",
         "shopping",
         "weekly",
     ]
     assert payload["migrations"] == schema_migrate.migration_registry_manifest()
-    assert payload["migrations"][-3]["component"] == "inventory"
-    assert payload["migrations"][-1]["component"] == "memory_convergence"
+    assert payload["migrations"][-4]["component"] == "inventory"
+    assert payload["migrations"][-2]["component"] == "memory_convergence"
+    assert payload["migrations"][-1]["component"] == "memory_convergence_v2"
     assert production.PLAN_VERSION == 8
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
     assert "EXPECTED_MUTATION_COMPONENTS" in production.PLAN_FIELDS
@@ -226,6 +230,7 @@ def test_target_plan_omits_absent_registry_component(
         "fridge_menu",
         "household",
         "memory_convergence",
+        "memory_convergence_v2",
         "shopping",
         "weekly",
     ]

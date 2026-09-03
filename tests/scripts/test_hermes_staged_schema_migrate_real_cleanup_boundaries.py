@@ -135,6 +135,8 @@ def _patch_sqlite_close(
 
     def connect_with_failing_close(*args: Any, **kwargs: Any) -> Any:
         connection = real_connect(*args, **kwargs)
+        if args and str(args[0]) == ":memory:":
+            return connection
         attempts.append("acquired")
         return _CloseFailingProxy(connection, attempts, "close")
 

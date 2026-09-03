@@ -6,6 +6,7 @@ import threading
 import pytest
 
 from gateway.memory.convergence import META_TABLE, OUTBOX_TABLE
+from gateway.memory.identity import migrate_identity_schema
 from gateway.platforms.healbite_memory_bridge import HealBiteMemoryBridge
 
 
@@ -237,6 +238,7 @@ def test_representative_legacy_migration_is_idempotent_and_private(tmp_path, mon
             "INSERT INTO memory_os_facts(user_id, entity, key, value) VALUES (?, 'profile', 'goal', ?)",
             [(user_id, "private-fact-content") for user_id in range(1, 501)],
         )
+        migrate_identity_schema(conn, legacy_epoch_uuid="00000000-0000-4000-8000-000000000000")
     monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
     first = HealBiteMemoryBridge(db_path, background_write=False)
     first.close()

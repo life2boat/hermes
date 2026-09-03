@@ -375,6 +375,7 @@ def _write_valid_evidence(
         head=revision,
     )
     approval = {
+        "LEGACY_EPOCH_UUID": "00000000-0000-4000-8000-000000000000",
         "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
         "OPERATION_ID": OPERATION_ID,
         "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,

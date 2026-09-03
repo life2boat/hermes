@@ -208,7 +208,7 @@ def test_target_plan_payload_uses_canonical_registry() -> None:
     assert payload["migrations"][-4]["component"] == "inventory"
     assert payload["migrations"][-2]["component"] == "memory_convergence"
     assert payload["migrations"][-1]["component"] == "memory_convergence_v2"
-    assert production.PLAN_VERSION == 8
+    assert production.PLAN_VERSION == 9
     assert "MIGRATION_REGISTRY" in production.PLAN_FIELDS
     assert "EXPECTED_MUTATION_COMPONENTS" in production.PLAN_FIELDS
     assert "EFFECTIVE_MUTATION_COMPONENTS" in production.PLAN_FIELDS

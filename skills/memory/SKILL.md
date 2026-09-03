@@ -91,6 +91,57 @@ The current rebuild implementation is **upsert-only**. A successful rebuild repo
 
 **Evidence:** Record path/device/inode, pre/post `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, schema/user-version fingerprints, backup SHA-256, and a successful isolated restore test.
 
+## Fact identity and SQLite restore boundary
+
+- New facts receive immutable `uuid4` values in `memory_os_facts.fact_uuid`.
+  Semantic updates retain UUID and increment `vector_revision`. Derived point ID
+  is `uuid5(NAMESPACE_URL, f"healbite-memory:{user_id}:{fact_uuid}")`; SQLite
+  integer IDs are lookup hints, not global identities.
+- Legacy backfill consumes an external `legacy_epoch_uuid`, generated once by
+  `hermes_release_authority.py prepare-authority` before any staged copying.
+  It is pinned through approval v4, plan v9 and final authority v3. Every copy,
+  rehearsal and retry of that operation consumes the SAME value. Independent
+  writable legacy histories require DIFFERENT authority epochs, even if every
+  persisted row is identical. Never derive history from row content or time.
+- Backfill is exactly `uuid5(NAMESPACE_URL,
+  f"healbite-fact-legacy:{legacy_epoch_uuid}:{user_id}:{sqlite_id}")`.
+  `memory_identity_metadata` persists the epoch. Already migrated DBs preserve
+  both epoch and all fact UUIDs; conflicting authority fails with
+  `MIGRATION_EPOCH_MISMATCH` before writes. A fresh, empty UUID-native DB records
+  NULL legacy epoch because no legacy identities exist; subsequent planning
+  preserves that marker. It is not permission to migrate nonempty legacy data
+  without an epoch.
+- Component `memory_convergence_v2` is separate from immutable v1. It backfills
+  all outbox identities (including DELETEs without a live row), reseeds current
+  UPSERTs, and validates exact Memory row transitions. The retained v1 integer
+  unique constraint is additional to UUID uniqueness: conflicting UUID at that
+  key fails closed as `OUTBOX_IDENTITY_CONFLICT`, never silently deduplicates.
+- Hydration requires exact owner, current revision AND UUID equality against
+  SQLite. Missing/old UUID payloads are not eligible. Old ID-keyed Qdrant points
+  are not renamed/deleted by migration or routine upsert-only rebuild.
+- The shared adapter's explicit `upsert_nutrition_record` retains the existing
+  nutrition-log identity; that separate schema is not migrated here. It is not
+  a missing-UUID fallback for Memory facts, and its UUID-less payloads cannot
+  pass Memory hydration. Do not claim epoch remediation for nutrition-log IDs.
+
+Before structural remediation is deployed, any SQLite restore/rollback/replace
+requires separately authorized disabling of conversational-memory serving;
+the existing vector index cannot be trusted. Retain this recovery requirement
+after deployment: UUID hydration blocks stale recall, but does not clean an
+index containing discarded-timeline points.
+
+Authorized clean recovery is: disable serving and quiesce writers/reconciler →
+verified SQLite restore → canonical staged v2 migration if still legacy →
+`rebuild_qdrant_memory_index.py --fresh-collection --collection <unused-name>`
+from the restored full authoritative scope → verify strong acknowledgements,
+identity/revision coverage, owner isolation and outbox convergence → separately
+authorized configuration cutover → requalify → resume serving. Rebuild uses
+schema validation only and never migrates SQLite. `--dry-run` contacts no Qdrant.
+Fresh collection creation must reject existing names; partial failure forbids
+cutover. Pin vector dimensions and the restored SQLite snapshot during rebuild.
+No alias API/cutover automation is implemented in this bounded change. Retain
+the old collection and rollback configuration until separately approved cleanup.
+
 ## Procedure
 
 1. **Define the failure.** Separate missing recall, wrong-user recall, count drift, Qdrant unavailability, SQLite corruption, FTS degradation, and configuration drift. Record only safe error classes.

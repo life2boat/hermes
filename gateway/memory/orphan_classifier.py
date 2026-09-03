@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Mapping
 
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
+from gateway.memory.identity import canonical_uuid
 
 _CLASSIFICATIONS = (
     "CANONICAL_MATCH",
@@ -13,6 +14,7 @@ _CLASSIFICATIONS = (
     "MALFORMED_PAYLOAD",
     "DUPLICATE",
     "UNKNOWN",
+    "UUID_MISMATCH",
 )
 
 
@@ -39,16 +41,20 @@ def classify_historical_points(
     points: Iterable[Mapping[str, Any]],
 ) -> OrphanClassificationReport:
     """Classify sanitized point metadata offline; never authorize deletion."""
-    facts: dict[int, tuple[int, int]] = {}
+    facts: dict[int, tuple[int, int, str]] = {}
     for fact in canonical_facts:
         fact_id = fact.get("id")
         user_id = fact.get("user_id")
         revision = fact.get("vector_revision")
+        try:
+            fact_uuid = canonical_uuid(fact.get("fact_uuid"))
+        except ValueError:
+            continue
         if all(type(value) is int and value > 0 for value in (fact_id, user_id, revision)):
-            facts[int(fact_id)] = (int(user_id), int(revision))
+            facts[int(fact_id)] = (int(user_id), int(revision), fact_uuid)
 
     materialized = list(points)
-    identities: Counter[tuple[int, int, int]] = Counter()
+    identities: Counter[tuple[int, str, int]] = Counter()
     for point in materialized:
         payload = point.get("payload")
         if isinstance(payload, Mapping):
@@ -58,11 +64,15 @@ def classify_historical_points(
                 payload.get("vector_revision"),
             )
             if all(type(value) is int and value > 0 for value in values):
+                try:
+                    fact_uuid = canonical_uuid(payload.get("fact_uuid"))
+                except ValueError:
+                    continue
                 expected = QdrantMemoryAdapter.point_id(
-                    sqlite_id=int(values[1]), user_id=int(values[0])
+                    fact_uuid=fact_uuid, user_id=int(values[0])
                 )
                 if point.get("id") == expected:
-                    identities[(int(values[0]), int(values[1]), int(values[2]))] += 1
+                    identities[(int(values[0]), fact_uuid, int(values[2]))] += 1
 
     records: list[OrphanClassification] = []
     counts: Counter[str] = Counter()
@@ -80,8 +90,8 @@ def classify_historical_points(
 def _classify_one(
     point: Mapping[str, Any],
     *,
-    facts: Mapping[int, tuple[int, int]],
-    identities: Counter[tuple[int, int, int]],
+    facts: Mapping[int, tuple[int, int, str]],
+    identities: Counter[tuple[int, str, int]],
 ) -> str:
     payload = point.get("payload")
     if not isinstance(payload, Mapping):
@@ -91,9 +101,13 @@ def _classify_one(
     revision = payload.get("vector_revision")
     if not all(type(value) is int and value > 0 for value in (user_id, fact_id, revision)):
         return "MALFORMED_PAYLOAD"
-    identity = (int(user_id), int(fact_id), int(revision))
+    try:
+        fact_uuid = canonical_uuid(payload.get("fact_uuid"))
+    except ValueError:
+        return "MALFORMED_PAYLOAD"
+    identity = (int(user_id), fact_uuid, int(revision))
     expected_point_id = QdrantMemoryAdapter.point_id(
-        sqlite_id=int(fact_id), user_id=int(user_id)
+        fact_uuid=fact_uuid, user_id=int(user_id)
     )
     point_id = point.get("id")
     if not isinstance(point_id, str) or point_id != expected_point_id:
@@ -103,9 +117,11 @@ def _classify_one(
     canonical = facts.get(int(fact_id))
     if canonical is None:
         return "MISSING_IN_SQLITE"
-    canonical_owner, canonical_revision = canonical
+    canonical_owner, canonical_revision, canonical_uuid_value = canonical
     if canonical_owner != int(user_id):
         return "FOREIGN_OWNER"
+    if canonical_uuid_value != fact_uuid:
+        return "UUID_MISMATCH"
     if canonical_revision != int(revision):
         return "UNKNOWN"
     return "CANONICAL_MATCH"

@@ -244,6 +244,8 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
         args.migration_image_revision,
     )
     identity, _schema, integrity, foreign_keys = migration._read_only_source(db_path)
+    from scripts.hermes_memory_identity_authority import plan_memory_epoch
+    legacy_epoch_uuid = plan_memory_epoch(db_path)
     if (
         identity["SOURCE_SHA256"] != args.expected_source_sha256
         or integrity != "ok"
@@ -280,6 +282,7 @@ def prepare_initial_authority(args: argparse.Namespace) -> int:
         )
         created_at = migration._now()
         approval_payload: dict[str, Any] = {
+            "LEGACY_EPOCH_UUID": legacy_epoch_uuid,
             "APPROVAL_VERSION": migration.OPERATIONS_ROOT_APPROVAL_VERSION,
             "OPERATION_ID": operation_id,
             "OPERATION_CLASS": migration.AUTHORITY_OPERATION_CLASS,
@@ -653,6 +656,7 @@ def finalize_authority_package(args: argparse.Namespace) -> int:
             raise migration.ProductionGateError("FINAL_AUTHORITY_EXPIRY_INVALID")
         final_path = directory / "final-authority.json"
         final_payload = {
+            "LEGACY_EPOCH_UUID": plan["LEGACY_EPOCH_UUID"],
             "EXECUTION_AUTHORITY_VERSION": (execution.EXECUTION_AUTHORITY_VERSION),
             "CREATED_AT": _timestamp(created_at),
             "EXPIRES_AT": _timestamp(expires_at),

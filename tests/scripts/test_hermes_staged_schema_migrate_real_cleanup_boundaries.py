@@ -21,6 +21,16 @@ class _CloseFailingProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._wrapped, name)
 
+    def __enter__(self) -> Any:
+        if hasattr(self._wrapped, "__enter__"):
+            self._wrapped.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        if hasattr(self._wrapped, "__exit__"):
+            return self._wrapped.__exit__(exc_type, exc_val, exc_tb)
+        return False
+
     def close(self) -> None:
         self._attempts.append(self._label)
         self._wrapped.close()
@@ -125,6 +135,8 @@ def _patch_sqlite_close(
 
     def connect_with_failing_close(*args: Any, **kwargs: Any) -> Any:
         connection = real_connect(*args, **kwargs)
+        if args and str(args[0]) == ":memory:":
+            return connection
         attempts.append("acquired")
         return _CloseFailingProxy(connection, attempts, "close")
 

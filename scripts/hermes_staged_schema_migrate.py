@@ -285,6 +285,7 @@ class Contract:
     previous_image_id: str
     expected_source_revision: str
     synthetic_root: Path | None
+    legacy_epoch_uuid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1054,17 +1055,19 @@ def _database_snapshot(path: Path) -> tuple[tuple[tuple[str, str, str], ...], di
 def _validate_memory_data_transition(
     source: sqlite3.Connection,
     staging_db: Path,
+    *,
+    legacy_epoch_uuid: str | None = None,
 ) -> None:
-    from gateway.memory.schema import validate_memory_convergence_staged_transition
+    from gateway.memory.identity import validate_identity_transition
 
     conn = sqlite3.connect(f"file:{staging_db}?mode=ro", uri=True)
 
     def validate() -> None:
         conn.execute("PRAGMA query_only=ON")
-        validate_memory_convergence_staged_transition(
+        validate_identity_transition(
             source,
             conn,
-            seed_timestamp=0.0,
+            epoch=legacy_epoch_uuid,
         )
 
     _run_body_with_owned_cleanup(
@@ -1083,7 +1086,7 @@ def _expected_schema_names() -> set[str]:
 
     names: set[str] = set()
     pattern = re.compile(
-        r"^create\s+(?:unique\s+)?(?:table|index)\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_]+)",
+        r"^create\s+(?:unique\s+)?(?:table|index|trigger)\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_]+)",
         re.IGNORECASE,
     )
     for statements in _component_statements().values():
@@ -1116,6 +1119,16 @@ def _target_schema_payload() -> dict[str, Any]:
             if name in objects and objects[name] != contract:
                 raise OrchestratorError("EXPECTED_SCHEMA_CONTRACT_DRIFT")
             objects[name] = contract
+    # v2 is additive; target table SQL includes SQLite's canonical ALTER form.
+    # Do not rewrite the v1 registry recipe or its pinned checksum.
+    from gateway.memory.identity import migrate_identity_schema
+    from gateway.memory.schema import FACTS_TABLE, OUTBOX_TABLE
+    from scripts.healbite_schema_migrate import _normalize_schema_sql
+    with sqlite3.connect(":memory:") as memory:
+        migrate_identity_schema(memory, legacy_epoch_uuid=None)
+        for name in (FACTS_TABLE, OUTBOX_TABLE):
+            sql = memory.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()[0]
+            objects[name] = ("table", _normalize_schema_sql(sql))
     return {
         "components": sorted(components),
         "migrations": _target_migration_registry(),
@@ -1169,7 +1182,18 @@ def _target_schema_fingerprint_connection(
         normalized = "" if sql is None else _normalize_schema_sql(str(sql))
         actual[object_name] = (str(object_type).lower(), normalized)
     if actual != expected:
-        raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
+        # The v1 contract permits legacy source/source-default and appended
+        # revision layouts. v2 preserves these columns rather than rebuilding
+        # authoritative tables. Normalize only this validated semantic variant.
+        from gateway.memory.schema import validate_memory_convergence_schema, FACTS_TABLE
+        from gateway.memory.identity import validate_identity_schema, canonical_fact_table_sql_variants
+        validate_memory_convergence_schema(conn)
+        validate_identity_schema(conn)
+        if actual[FACTS_TABLE] not in {("table", sql) for sql in canonical_fact_table_sql_variants()}:
+            raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
+        actual[FACTS_TABLE] = expected[FACTS_TABLE]
+        if actual != expected:
+            raise OrchestratorError("TARGET_SCHEMA_CONTRACT_MISMATCH")
     actual_payload = {
         "components": payload["components"],
         "migrations": payload["migrations"],
@@ -1431,10 +1455,13 @@ def _contract(args: argparse.Namespace, *, synthetic: bool) -> Contract:
         previous_image_id=args.previous_image_id,
         expected_source_revision=args.expected_source_revision,
         synthetic_root=synthetic_root,
+        legacy_epoch_uuid=getattr(args, "legacy_epoch_uuid", None),
     )
 
 
 def _preflight(contract: Contract, *, synthetic: bool, inspect_images: bool) -> SourceIdentity:
+    from scripts.hermes_memory_identity_authority import verify_memory_epoch
+    verify_memory_epoch(contract.source_db, contract.legacy_epoch_uuid)
     identity = _source_identity(contract.source_db, require_private_parent=synthetic)
     if not contract.backup_dir.is_dir() or not contract.staging_root.is_dir():
         raise OrchestratorError("OPERATION_DIRECTORY_MISSING")
@@ -1641,6 +1668,8 @@ def _run_target_migration(contract: Contract, staging_dir: Path) -> None:
         "--staged-copy",
         "--json",
     ]
+    if contract.legacy_epoch_uuid is not None:
+        command.extend(["--legacy-epoch-uuid", contract.legacy_epoch_uuid])
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode != 0:
         raise OrchestratorError("TARGET_IMAGE_MIGRATION_FAILED")
@@ -2043,6 +2072,7 @@ def _execute_staged_body(
         if _sidecars(staging_db):
             raise OrchestratorError("MIGRATED_DATABASE_INVALID")
         memory_data_tables = {
+            "memory_identity_metadata",
             "memory_os_facts",
             "memory_os_vector_sync_outbox",
             "memory_os_vector_sync_meta",
@@ -2066,7 +2096,10 @@ def _execute_staged_body(
                 raise OrchestratorError("BACKFILL_ROWS_CREATED")
         if "memory_os_facts" in expected_names:
             try:
-                _validate_memory_data_transition(source_lease.connection, staging_db)
+                _validate_memory_data_transition(
+                    source_lease.connection, staging_db,
+                    legacy_epoch_uuid=contract.legacy_epoch_uuid,
+                )
             except sqlite3.DatabaseError as exc:
                 raise OrchestratorError("MEMORY_DATA_TRANSITION_INVALID") from exc
         metadata = staging_db.stat()
@@ -2630,6 +2663,7 @@ def build_parser() -> argparse.ArgumentParser:
         child.add_argument("--target-image-id", required=True)
         child.add_argument("--previous-image-id", required=True)
         child.add_argument("--expected-source-revision", required=True)
+        child.add_argument("--legacy-epoch-uuid", help="Previously pinned authority epoch")
         if command == "execute-synthetic":
             child.add_argument("--synthetic-root", required=True)
     return parser

@@ -18,11 +18,12 @@ MAX_ARTIFACT_BYTES = 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}")
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
-EXECUTION_AUTHORITY_VERSION = 2
+EXECUTION_AUTHORITY_VERSION = 3
 INVOCATION_DESCRIPTOR_VERSION = 2
 TRUSTED_FILESYSTEM_ANCHOR = Path("/")
 
 EXECUTION_AUTHORITY_FIELDS = frozenset({
+    "LEGACY_EPOCH_UUID",
     "EXECUTION_AUTHORITY_VERSION",
     "CREATED_AT",
     "EXPIRES_AT",
@@ -1117,6 +1118,7 @@ def load_execution_authority(
             authority,
             {
                 "EXECUTION_AUTHORITY_VERSION": EXECUTION_AUTHORITY_VERSION,
+                "LEGACY_EPOCH_UUID": plan["LEGACY_EPOCH_UUID"],
                 "PLAN_PATH": str(plan_path),
                 "PLAN_SHA256": plan_sha256,
                 "OPERATIONS_ROOT_APPROVAL_PATH": plan["OPERATIONS_ROOT_APPROVAL_PATH"],

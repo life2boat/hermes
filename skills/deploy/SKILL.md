@@ -151,6 +151,38 @@ The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_V
 12. **Verify the post-state.** Require stable samples, expected revision/image, `restart_count=0`, no traceback, Telegram connectivity without sending user messages, unchanged protected-secret fingerprints, SQLite integrity, expected migration state, no unauthorized DB delta, and Qdrant non-interference.
 13. **Close with evidence.** Report exact source and image identities, safe checks/counts, backup verification, migration classification, deploy/rollback status, and remaining risks. Clean only the canonical ephemeral override through the wrapper's cleanup mode.
 
+## Memory UUID migration and restore qualification
+
+`memory_convergence_v2` is a new additive component, not a checksum change to v1.
+Include it in the full registry and in the operator-bound effective changeset
+when missing. Runtime refuses nonempty legacy Memory without this migration.
+The additive UUID triggers also mean a pre-UUID writer is NOT automatically
+compatible with a migrated DB; the canonical previous-image compatibility probe
+must pass before publication. Never bypass that gate or restore an older DB
+merely to make an old image start.
+
+`prepare-authority` assigns `LEGACY_EPOCH_UUID` once before staged copies and
+pins it in approval v4 → plan v9 → final execution authority v3. Rehearsals,
+validation, prepare and target execution consume that exact value through
+`--legacy-epoch-uuid`; the migrator never generates one. New independent legacy
+restore histories require new epochs/authority. Existing migrated metadata and
+fact UUIDs are preserved, including the NULL marker of a UUID-native fresh DB.
+An authority/DB epoch mismatch must fail before any mutation. Old authority
+packages without the required field/version are not eligible.
+
+Validate multiple staged copies of one source/epoch, idempotent retry, immutable
+fact UUIDs, all outbox identities and reseeded current UPSERTs, preserved Memory
+contents/counters, integrity and FK checks. This source change is not permission
+to run a production migration, change a collection pointer or widen rollout.
+
+After ANY SQLite restore/rollback/replacement, disable conversational-memory
+serving under explicit authorization and distrust the old vector index. Build
+and validate a fresh derived collection from restored authoritative SQLite,
+verify convergence and isolated hydration, then authorize cutover/requalification
+before serving resumes. This is required both before and after UUID deployment;
+UUID hydration is not orphan cleanup. The minimal create-only rebuild primitive
+and separate cutover/retirement boundary are documented in `skills/memory/SKILL.md`.
+
 ## Failure/Rollback
 
 - Fail closed before mutation when source, image, backup, capacity, secret, Compose, DB mount, migration rehearsal, or rollback readiness is uncertain.

@@ -142,6 +142,7 @@ def _authority_context(
     secret = _write(artifacts / "secrets-override.yml", b"services: {}\n")
 
     plan = {
+        "LEGACY_EPOCH_UUID": "10000000-0000-4000-8000-000000000001",
         "OPERATIONS_ROOT_APPROVAL_PATH": str(approval),
         "OPERATIONS_ROOT_APPROVAL_SHA256": _sha256(approval),
         "CLEAN_START_POLICY_PATH": str(policy),
@@ -226,6 +227,7 @@ def _authority_context(
     envelope = _write_json(artifacts / "approval-envelope.json", envelope_payload)
     now = authority.datetime.now(authority.timezone.utc)
     final_payload = {
+        "LEGACY_EPOCH_UUID": plan["LEGACY_EPOCH_UUID"],
         "EXECUTION_AUTHORITY_VERSION": authority.EXECUTION_AUTHORITY_VERSION,
         "CREATED_AT": now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "EXPIRES_AT": (now + timedelta(hours=1))
@@ -366,6 +368,7 @@ AUTHORITY_DENIAL_CASES = (
     "final_modified",
     "final_expired",
     "plan_sha_mismatch",
+    "epoch_mismatch",
     "approval_sha_mismatch",
     "policy_sha_mismatch",
     "envelope_missing",
@@ -435,6 +438,9 @@ def test_execution_authority_denial_matrix(
         _rewrite_final(context)
     elif case == "plan_sha_mismatch":
         load_kwargs["plan_sha256"] = "f" * 64
+    elif case == "epoch_mismatch":
+        context.final_payload["LEGACY_EPOCH_UUID"] = "10000000-0000-4000-8000-000000000002"
+        _rewrite_final(context)
     elif case == "approval_sha_mismatch":
         context.final_payload["OPERATIONS_ROOT_APPROVAL_SHA256"] = "f" * 64
         _rewrite_final(context)

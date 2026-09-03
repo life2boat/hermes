@@ -32,6 +32,7 @@ def test_full_registry_is_preserved_while_effective_scope_is_narrow() -> None:
         "inventory",
         "fridge_menu",
         "memory_convergence",
+        "memory_convergence_v2",
     ]
     assert production._derive_effective_mutation_components(states, COMPONENTS) == [
         "fridge_menu"
@@ -137,6 +138,6 @@ def test_pre_ddl_recheck_precedes_production_authorization() -> None:
     assert execute.index("locked_pre_ddl_states") < execute.index(
         "return_code = _execute_authorized_staged"
     )
-    assert production.PLAN_VERSION == 8
-    assert production.OPERATIONS_ROOT_APPROVAL_VERSION == 3
+    assert production.PLAN_VERSION == 9
+    assert production.OPERATIONS_ROOT_APPROVAL_VERSION == 4
     assert production.CLEAN_START_POLICY_VERSION == 3

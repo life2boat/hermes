@@ -320,6 +320,11 @@ def test_legacy_schema_migration_seeds_existing_facts_once(tmp_path, monkeypatch
         )
 
     monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "false")
+    from gateway.memory.identity import migrate_identity_schema
+    with pytest.raises(sqlite3.DatabaseError, match="LEGACY_EPOCH_AUTHORITY_REQUIRED"):
+        HealBiteMemoryBridge(db_path, background_write=False)
+    with sqlite3.connect(db_path) as conn:
+        migrate_identity_schema(conn, legacy_epoch_uuid="10000000-0000-4000-8000-000000000001")
     first = HealBiteMemoryBridge(db_path, background_write=False)
     assert len(_outbox_rows(db_path)) == 1
     first.close()

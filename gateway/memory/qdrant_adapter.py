@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from gateway.memory.settings import env_flag
 from gateway.memory.embedding_adapter import EmbeddingAdapter
+from gateway.memory.identity import canonical_uuid, memory_point_id
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ class QdrantMemoryAdapter:
         client = self._get_client()
         if client is None:
             return False
+
         try:
             get_collection = getattr(client, "get_collection", None)
             create_collection = getattr(client, "create_collection", None)
@@ -237,27 +239,67 @@ class QdrantMemoryAdapter:
             )
             return False
 
+    def create_fresh_collection(self) -> bool:
+        """Create-only recovery. Existing names are atomically rejected by Qdrant.
+
+        No deletion, alias switch, or runtime cutover is performed here.
+        """
+        client = self._get_client()
+        if client is None:
+            return False
+        try:
+            result = client.create_collection(
+                collection_name=self.collection_name, vectors_config=self._vector_config(),
+            )
+            if result is not True and not (isinstance(result, dict) and result.get("result") is True):
+                return False
+            self._collection_ready = True
+            return True
+        except Exception:
+            return False
+
     def upsert_fact(
         self,
         *,
         sqlite_id: int,
+        fact_uuid: str,
         user_id: int,
         text: str,
         payload: dict[str, Any],
         wait: bool = False,
+    ) -> bool:
+        point_id = self.point_id(fact_uuid=fact_uuid, user_id=user_id)
+        return self._upsert_point(
+            point_id=point_id, text=text, wait=wait,
+            payload={**payload, "sqlite_id": sqlite_id, "fact_uuid": canonical_uuid(fact_uuid), "user_id": user_id},
+        )
+
+    def upsert_nutrition_record(
+        self, *, sqlite_id: int, user_id: int, text: str,
+        payload: dict[str, Any], wait: bool = False,
+    ) -> bool:
+        """Compatibility boundary for nutrition_log, NOT a Memory UUID fallback.
+
+        Diary identity/schema is outside the Memory OS migration. Preserve its
+        existing point contract explicitly; Memory hydration rejects this UUID-
+        less payload. Callers cannot opt Memory facts into this path implicitly.
+        """
+        return self._upsert_point(
+            point_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"healbite-memory:{user_id}:{sqlite_id}")),
+            text=text, wait=wait, payload={**payload, "sqlite_id": sqlite_id, "user_id": user_id},
+        )
+
+    def _upsert_point(
+        self, *, point_id: str, text: str, payload: dict[str, Any], wait: bool,
     ) -> bool:
         client = self._get_client()
         if client is None or not self.ensure_collection():
             return False
         vector = self.embedding_adapter.embed_text(text)
         point = {
-            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"healbite-memory:{user_id}:{sqlite_id}")),
+            "id": point_id,
             "vector": vector,
-            "payload": {
-                **payload,
-                "sqlite_id": sqlite_id,
-                "user_id": user_id,
-            },
+            "payload": payload,
         }
         try:
             result = client.upsert(
@@ -287,20 +329,21 @@ class QdrantMemoryAdapter:
             return False
 
     @staticmethod
-    def point_id(*, sqlite_id: int, user_id: int) -> str:
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"healbite-memory:{user_id}:{sqlite_id}"))
+    def point_id(*, fact_uuid: str, user_id: int) -> str:
+        return memory_point_id(user_id, fact_uuid)
 
     def delete_fact(
         self,
         *,
         sqlite_id: int,
+        fact_uuid: str,
         user_id: int,
         wait: bool = False,
     ) -> bool:
+        point_id = self.point_id(fact_uuid=fact_uuid, user_id=user_id)
         client = self._get_client()
         if client is None or not self.ensure_collection():
             return False
-        point_id = self.point_id(sqlite_id=sqlite_id, user_id=user_id)
         try:
             result = client.delete(
                 collection_name=self.collection_name,

@@ -39,7 +39,7 @@ class _RecordingQdrantAdapter:
         self.should_succeed = should_succeed
         self.calls: list[dict] = []
 
-    def upsert_fact(self, **kwargs):
+    def upsert_nutrition_record(self, **kwargs):
         self.calls.append(kwargs)
         return self.should_succeed
 

@@ -3,16 +3,23 @@ from __future__ import annotations
 from gateway.memory.orphan_classifier import classify_historical_points
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 
+FACT_UUID = "10000000-0000-4000-8000-000000000001"
+
+
+def _fact_uuid(fact_id):
+    return f"10000000-0000-4000-8000-{fact_id:012x}"
+
 
 def _point(user_id, fact_id, revision, *, point_id=None, payload=True):
     return {
         "id": point_id
-        or QdrantMemoryAdapter.point_id(sqlite_id=fact_id, user_id=user_id),
+        or (QdrantMemoryAdapter.point_id(fact_uuid=_fact_uuid(fact_id), user_id=user_id) if type(user_id) is int else "malformed-owner"),
         "payload": (
             {
                 "user_id": user_id,
                 "sqlite_id": fact_id,
                 "vector_revision": revision,
+                "fact_uuid": _fact_uuid(fact_id),
             }
             if payload
             else None
@@ -22,8 +29,8 @@ def _point(user_id, fact_id, revision, *, point_id=None, payload=True):
 
 def test_offline_classifier_covers_safe_historical_classes_without_delete_authority():
     facts = [
-        {"id": 1, "user_id": 101, "vector_revision": 2},
-        {"id": 2, "user_id": 202, "vector_revision": 1},
+        {"id": 1, "user_id": 101, "vector_revision": 2, "fact_uuid": FACT_UUID},
+        {"id": 2, "user_id": 202, "vector_revision": 1, "fact_uuid": _fact_uuid(2)},
     ]
     points = [
         _point(101, 1, 2),
@@ -47,7 +54,7 @@ def test_offline_classifier_covers_safe_historical_classes_without_delete_author
 
 
 def test_duplicate_current_identity_is_classified_not_deleted():
-    fact = {"id": 1, "user_id": 101, "vector_revision": 1}
+    fact = {"id": 1, "user_id": 101, "vector_revision": 1, "fact_uuid": FACT_UUID}
     report = classify_historical_points(
         canonical_facts=[fact],
         points=[_point(101, 1, 1), _point(101, 1, 1)],

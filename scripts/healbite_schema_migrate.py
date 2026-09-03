@@ -601,7 +601,7 @@ def _normalize_schema_sql(value: str) -> str:
 
 
 _CREATE_OBJECT_RE = re.compile(
-    r"^create\s+(?:unique\s+)?(?P<type>table|index)\s+(?:if\s+not\s+exists\s+)?(?P<name>[a-zA-Z0-9_]+)",
+    r"^create\s+(?:unique\s+)?(?P<type>table|index|trigger)\s+(?:if\s+not\s+exists\s+)?(?P<name>[a-zA-Z0-9_]+)",
     re.IGNORECASE,
 )
 
@@ -733,6 +733,7 @@ def _validate_component_registry(
 
 
 def _component_registry() -> tuple[MigrationComponent, ...]:
+    from gateway.memory import identity
     return _validate_component_registry(
         (
             _component(
@@ -771,6 +772,12 @@ def _component_registry() -> tuple[MigrationComponent, ...]:
                 source_sql=MEMORY_CONVERGENCE_MIGRATION_SOURCE,
                 expected_sha256=MEMORY_CONVERGENCE_MIGRATION_SHA256,
             ),
+            _component(
+                "memory_convergence_v2", identity.SCHEMA_STATEMENTS,
+                migration_id=identity.MIGRATION_ID,
+                source_sql=identity.MIGRATION_SOURCE,
+                expected_sha256=identity.MIGRATION_SHA256,
+            ),
         )
     )
 
@@ -797,6 +804,7 @@ def _component_statements() -> dict[str, tuple[str, ...]]:
 
 
 def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassification]:
+    from gateway.memory.identity import classify_identity_schema
     plans = {
         name: _classify_component_schema(conn, name, statements)
         for name, statements in _component_statements().items()
@@ -804,6 +812,7 @@ def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassifi
     plans["memory_convergence"] = SchemaClassification(
         classify_memory_convergence_schema(conn).value
     )
+    plans["memory_convergence_v2"] = SchemaClassification(classify_identity_schema(conn).value)
     weekly_state = detect_weekly_menu_schema_state(conn)
     if weekly_state is WeeklyMenuSchemaState.CANONICAL:
         plans["weekly"] = SchemaClassification.CURRENT
@@ -975,6 +984,7 @@ def _migrate_borrowed_connection(
     conn: sqlite3.Connection,
     *,
     selected: tuple[str, ...],
+    legacy_epoch_uuid: str | None = None,
     transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     before_ddl_hook: Callable[[], None] | None = None,
     component_hook: Callable[[str, sqlite3.Connection], None] | None = None,
@@ -982,6 +992,10 @@ def _migrate_borrowed_connection(
     commit_attempted = False
     weekly_v1_upgrade = False
     try:
+        if "memory_convergence_v2" in selected:
+            from gateway.memory.identity import validate_epoch
+            # Fail even before BEGIN/transaction hooks; never rewrite epoch.
+            validate_epoch(conn, legacy_epoch_uuid)
         conn.execute("PRAGMA foreign_keys=ON")
         weekly_v1_upgrade = (
             "weekly" in selected and is_weekly_menu_schema_v1(conn)
@@ -1011,6 +1025,9 @@ def _migrate_borrowed_connection(
             if before is not SchemaClassification.CURRENT:
                 if name == "memory_convergence":
                     migrate_memory_convergence_schema(conn, now=0.0)
+                elif name == "memory_convergence_v2":
+                    from gateway.memory.identity import migrate_identity_schema
+                    migrate_identity_schema(conn, legacy_epoch_uuid=legacy_epoch_uuid)
                 else:
                     _apply_component(conn, name, statements_by_component[name])
             after = (
@@ -1022,6 +1039,9 @@ def _migrate_borrowed_connection(
                     statements_by_component[name],
                 )
             )
+            if name == "memory_convergence_v2":
+                from gateway.memory.identity import classify_identity_schema
+                after = SchemaClassification(classify_identity_schema(conn).value)
             if (
                 name == "weekly"
                 and detect_weekly_menu_schema_state(conn)
@@ -1095,6 +1115,8 @@ def _as_migration_error(exc: Exception) -> MigrationError:
         return exc
     phase = getattr(exc, "_healbite_migration_phase", None)
     if isinstance(exc, sqlite3.Error):
+        if str(exc) in {"MIGRATION_EPOCH_MISMATCH", "LEGACY_EPOCH_AUTHORITY_REQUIRED"}:
+            return MigrationError(ExitClassification.CONTRACT_DRIFT, detail_code=str(exc), phase="memory_convergence_v2")
         return MigrationError(_sqlite_classification(exc), detail_code=type(exc).__name__, phase=phase)
     if isinstance(exc, PermissionError):
         return MigrationError(
@@ -1109,6 +1131,7 @@ def _connect_target(
     target: DatabaseTarget,
     *,
     selected: tuple[str, ...],
+    legacy_epoch_uuid: str | None = None,
     connect_factory: Callable[..., sqlite3.Connection],
     before_open_hook: Callable[[], None] | None,
     transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
@@ -1147,6 +1170,7 @@ def _connect_target(
 
         phases, schema_changed = _migrate_borrowed_connection(
             conn,
+            legacy_epoch_uuid=legacy_epoch_uuid,
             selected=selected,
             transaction_hook=transaction_hook,
             before_ddl_hook=guarded_before_ddl,
@@ -1213,6 +1237,7 @@ def run_migration(
     synthetic_create: bool = False,
     staged_copy: bool = False,
     components: str | None = None,
+    legacy_epoch_uuid: str | None = None,
     _identity: ProcessIdentity | None = None,
     _connect_factory: Callable[..., sqlite3.Connection] = sqlite3.connect,
     _target_resolver: Callable[[str | None, bool, ProcessIdentity | None], DatabaseTarget] | None = None,
@@ -1242,6 +1267,7 @@ def run_migration(
             target = _target_resolver(db_path, synthetic_create, _identity)
         phases, schema_changed = _connect_target(
             target,
+            legacy_epoch_uuid=legacy_epoch_uuid,
             selected=selected,
             connect_factory=_connect_factory,
             before_open_hook=_before_open_hook,
@@ -1365,6 +1391,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping,inventory,fridge_menu")
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
+    parser.add_argument("--legacy-epoch-uuid", help="Consume the epoch pinned by planning authority; never generated here")
     return parser
 
 
@@ -1376,6 +1403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         synthetic_create=bool(args.synthetic_create),
         staged_copy=bool(args.staged_copy),
         components=args.components,
+        legacy_epoch_uuid=args.legacy_epoch_uuid,
     )
     if args.json:
         print(json.dumps(result.as_dict(), ensure_ascii=True, sort_keys=True))

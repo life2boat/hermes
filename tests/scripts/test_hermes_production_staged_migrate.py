@@ -253,6 +253,7 @@ def _write_unit_evidence(context: UnitContext) -> None:
     contract_metadata = context.manifest.stat()
     created_at = production._now()
     approval = {
+        "LEGACY_EPOCH_UUID": "10000000-0000-4000-8000-000000000001",
         "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
         "OPERATION_ID": OPERATION_ID,
         "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,
@@ -1007,7 +1008,7 @@ def test_valid_public_plan_records_root_and_canonical_contract(
     assert payload["MIGRATION_REGISTRY"] == (
         schema_migrate.migration_registry_manifest()
     )
-    assert payload["MIGRATION_REGISTRY"][-1]["component"] == "memory_convergence"
+    assert payload["MIGRATION_REGISTRY"][-1]["component"] == "memory_convergence_v2"
     assert payload["SOURCE_USER_VERSION"] == 0
     assert payload["SOURCE_PARENT_IDENTITY"]["PATH"] == str(context.source.parent)
     assert payload["PLAN_READ_ONLY"] is True
@@ -3066,6 +3067,10 @@ def test_authority_package_producer_roundtrip_uses_existing_consumers(
     assert set(payload) == authority.EXECUTION_AUTHORITY_FIELDS
     assert payload["PLAN_PATH"] == str(plan.path)
     assert payload["PLAN_SHA256"] == plan.sha256
+    epoch = plan.payload["LEGACY_EPOCH_UUID"]
+    approval = json.loads(Path(plan.payload["OPERATIONS_ROOT_APPROVAL_PATH"]).read_text(encoding="ascii"))
+    assert uuid.UUID(epoch).version == 4
+    assert payload["LEGACY_EPOCH_UUID"] == epoch == approval["LEGACY_EPOCH_UUID"]
     assert payload["EXECUTION_AUTHORIZED"] is True
     assert payload["DEPLOY_AUTHORIZED"] is False
     assert payload["CONTAINS_SECRETS"] is False

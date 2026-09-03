@@ -375,6 +375,7 @@ def _write_valid_evidence(
         head=revision,
     )
     approval = {
+        "LEGACY_EPOCH_UUID": "00000000-0000-4000-8000-000000000000",
         "APPROVAL_VERSION": production.OPERATIONS_ROOT_APPROVAL_VERSION,
         "OPERATION_ID": OPERATION_ID,
         "OPERATION_CLASS": production.AUTHORITY_OPERATION_CLASS,
@@ -680,6 +681,7 @@ def _create_final_authority(
     _write_document(
         final,
         {
+            "LEGACY_EPOCH_UUID": plan.payload["LEGACY_EPOCH_UUID"],
             "EXECUTION_AUTHORITY_VERSION": (
                 execution_authority.EXECUTION_AUTHORITY_VERSION
             ),
@@ -764,6 +766,7 @@ def _create_runtime_pin(
         final_authority_sha256,
     ])
     if return_code != 0 or result.get("status") != "PASS":
+        print(f"ATTEST-RUNTIME FAILED. return_code={return_code}, result={result}", file=sys.stderr)
         raise AssertionError("synthetic runtime attestation failed")
     return Path(str(result["runtime_pin_path"])), str(result["runtime_pin_sha256"])
 

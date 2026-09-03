@@ -894,7 +894,7 @@ def test_borrowed_connection_is_not_closed(tmp_path: Path) -> None:
         selected=healbite_schema_migrate.ALL_COMPONENTS,
     )
     assert changed is True
-    assert len(phases) == 6
+    assert len(phases) == 7
     assert tracker.close_count == 0
     assert tracker.execute("SELECT 1").fetchone() == (1,)
     tracker.close()
@@ -1076,6 +1076,7 @@ def test_fresh_db_full_migration_order_and_sanitized_output(tmp_path: Path) -> N
         "inventory",
         "fridge_menu",
         "memory_convergence",
+        "memory_convergence_v2",
     ]
     assert payload["data_backfilled"] is False
     assert str(db_path) not in result.stdout

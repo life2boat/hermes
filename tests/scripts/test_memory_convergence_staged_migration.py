@@ -96,11 +96,12 @@ def test_t01_t03_registry_identity_order_and_digest_are_deterministic() -> None:
         "inventory",
         "fridge_menu",
         "memory_convergence",
+        "memory_convergence_v2",
     ]
     assert names.count("memory_convergence") == 1
     assert first == second
-    assert first[-1]["migration_sha256"] == MEMORY_CONVERGENCE_MIGRATION_SHA256
-    canonical = json.dumps(first, sort_keys=True, separators=(",", ":")).encode()
+    assert first[-2]["migration_sha256"] == MEMORY_CONVERGENCE_MIGRATION_SHA256
+    canonical = json.dumps(first[:-1], sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(canonical).hexdigest() == (
         "5deb406918e3283c301e0ae7cdfe4275faa0ac6140f19dde10614dc2ba902dba"
     )
@@ -350,7 +351,8 @@ def test_m20_t26_t27_target_runtime_requires_staged_schema_and_does_not_write(
 
     current = tmp_path / "current.sqlite"
     with sqlite3.connect(current) as conn:
-        migrate_memory_convergence_schema(conn, now=0)
+        from gateway.memory.identity import migrate_identity_schema
+        migrate_identity_schema(conn, legacy_epoch_uuid=None)
     before = current.read_bytes()
     bridge = HealBiteMemoryBridge(
         current,

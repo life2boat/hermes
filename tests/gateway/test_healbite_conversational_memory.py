@@ -913,31 +913,310 @@ async def test_disabled_gateway_keeps_actual_agent_context_unchanged(
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.asyncio
 async def test_gateway_tracks_only_user_turn_write_without_extra_reply(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, enabled: bool,
 ) -> None:
-    from unittest.mock import AsyncMock
-
-    from gateway.platforms.base import MessageEvent
-    from tests.gateway.test_session_race_guard import _make_runner
-
-    runner = _make_runner()
-    coordinator, bridge = make_coordinator(enabled=enabled)
-    runner._healbite_conversational_memory = coordinator
-    runner._handle_message_with_agent = AsyncMock(return_value="Я люблю брокколи")
-    runner._post_turn_goal_continuation = AsyncMock()
-    adapter = runner.adapters[Platform.TELEGRAM]
-    adapter.send = AsyncMock()
-    event = MessageEvent(text="Я люблю чай с лимоном", source=make_source())
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, enabled=enabled,
+    )
     result = await runner._handle_message(event)
     assert result == "Я люблю брокколи"
-    assert len(runner._background_tasks) == 1
+    assert len(runner._background_tasks) == (1 if enabled else 0)
     await asyncio.gather(*runner._background_tasks)
     await asyncio.sleep(0)
     assert runner._background_tasks == set()
+    assert coordinator.consider_user_turn.await_count == (1 if enabled else 0)
     assert len(bridge.upserts) == (1 if enabled else 0)
     if enabled:
         assert "чай с лимоном" in bridge.upserts[0]["value"]
         assert "брокколи" not in bridge.upserts[0]["value"]
         assert bridge.upserts[0]["user_id"] == 101
+    assert len(bridge.searches) == (1 if enabled else 0)
+    assert runner.adapters[Platform.TELEGRAM].send.await_args_list == []
+
+
+def _memory_turn_runner(monkeypatch, tmp_path, *, enabled=True, streamed=False):
+    """Exercise both real gateway handlers; only agent/network boundaries mocked."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from gateway.platforms.base import MessageEvent
+    from tests.gateway.test_42039_duplicate_user_message import _bootstrap
+
+    runner = _bootstrap(monkeypatch, tmp_path)
+    coordinator, bridge = make_coordinator(enabled=enabled)
+    coordinator.consider_user_turn = AsyncMock(wraps=coordinator.consider_user_turn)
+    runner._healbite_conversational_memory = coordinator
+    runner._post_turn_goal_continuation = AsyncMock()
+    runner._deliver_platform_notice = AsyncMock()  # Unrelated first-chat onboarding.
+    runner._deliver_media_from_response = AsyncMock()
+    runner.adapters[Platform.TELEGRAM] = SimpleNamespace(
+        send=AsyncMock(), stop_typing=AsyncMock(),
+    )
+    runner._run_agent = AsyncMock(return_value={
+        "completed": True, "already_sent": streamed,
+        "final_response": "Я люблю брокколи", "messages": [], "tools": [],
+        "history_offset": 0, "last_prompt_tokens": 0,
+    })
+    event = MessageEvent(text="Я люблю чай с лимоном", source=make_source())
+    return runner, coordinator, bridge, event
+
+
+@pytest.mark.asyncio
+async def test_streaming_success_none_return_schedules_memory_once(monkeypatch, tmp_path):
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=True,
+    )
+    result = await runner._handle_message(event)
+    assert result is None  # Real inner handler took the already-delivered path.
+    runner._deliver_media_from_response.assert_awaited_once()
+    tasks = tuple(runner._background_tasks)
+    await asyncio.gather(*tasks)
+    await asyncio.sleep(0)
+    coordinator.consider_user_turn.assert_awaited_once_with(
+        source=event.source, user_text=event.text,
+    )
+    assert len(tasks) == 1
+    assert runner._background_tasks == set()
+    assert len(bridge.upserts) == 1
+    assert runner.adapters[Platform.TELEGRAM].send.await_args_list == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("final_response", ["", None])
+@pytest.mark.asyncio
+async def test_completed_turn_does_not_require_assistant_text(
+    monkeypatch, tmp_path, streamed, final_response,
+):
+    runner, coordinator, _, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=streamed,
+    )
+    runner._run_agent.return_value["final_response"] = final_response
+    await runner._handle_message(event)
+    tasks = tuple(runner._background_tasks)
+    await asyncio.gather(*tasks)
+    assert len(tasks) == 1
+    coordinator.consider_user_turn.assert_awaited_once_with(
+        source=event.source, user_text=event.text,
+    )
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("invalid_result", [
+    {"failed": True}, {"partial": True}, {"error": "synthetic agent failure"},
+    {"interrupted": True}, {"completed": False}, {"completed": None},
+])
+@pytest.mark.asyncio
+async def test_unsuccessful_agent_result_never_schedules_memory(
+    monkeypatch, tmp_path, streamed, invalid_result,
+):
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=streamed,
+    )
+    runner._run_agent.return_value.update(invalid_result)
+    await runner._handle_message(event)
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_agent_exception_error_reply_does_not_schedule_memory(monkeypatch, tmp_path):
+    runner, coordinator, bridge, event = _memory_turn_runner(monkeypatch, tmp_path)
+    runner._run_agent.side_effect = RuntimeError("synthetic failure")
+    response = await runner._handle_message(event)
+    assert "error (RuntimeError)" in response
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_inflight_turn_does_not_schedule_memory(monkeypatch, tmp_path):
+    runner, coordinator, bridge, event = _memory_turn_runner(monkeypatch, tmp_path)
+    entered = asyncio.Event()
+
+    async def pending_agent(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    runner._run_agent.side_effect = pending_agent
+    turn = asyncio.create_task(runner._handle_message(event))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+    finally:
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert runner._running_agents == {}
+    assert bridge.upserts == []
+
+
+@pytest.mark.parametrize("shutdown_state", ["draining", "stopped"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_shutdown_during_turn_does_not_schedule_memory(
+    monkeypatch, tmp_path, shutdown_state, streamed,
+):
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=streamed,
+    )
+
+    async def shutdown_agent(**kwargs):
+        if shutdown_state == "draining":
+            runner._draining = True
+        else:
+            runner._shutdown_event.set()
+        return runner._run_agent.return_value
+
+    runner._run_agent.side_effect = shutdown_agent
+    await runner._handle_message(event)
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.parametrize("stage", ["agent", "delivery"])
+@pytest.mark.asyncio
+async def test_invalidated_generation_never_schedules_memory(monkeypatch, tmp_path, stage):
+    from gateway.run import GatewayRunner
+
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=True,
+    )
+    # Use the real generation map, including a late invalidation after the
+    # handler's initial stale-result check but during media delivery.
+    runner._begin_session_run_generation = GatewayRunner._begin_session_run_generation.__get__(runner)
+    runner._is_session_run_current = GatewayRunner._is_session_run_current.__get__(runner)
+
+    async def agent(**kwargs):
+        if stage == "agent":
+            runner._invalidate_session_run_generation(kwargs["session_key"])
+            # The bootstrap session key and inbound key differ; invalidate both.
+            for key in tuple(runner._session_run_generation):
+                runner._invalidate_session_run_generation(key)
+        return runner._run_agent.return_value
+
+    async def deliver(*args):
+        for key in tuple(runner._session_run_generation):
+            runner._invalidate_session_run_generation(key)
+
+    runner._run_agent.side_effect = agent
+    if stage == "delivery":
+        runner._deliver_media_from_response.side_effect = deliver
+    assert await runner._handle_message(event) is None
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_suppressed_inbound_turn_is_not_a_streaming_success(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=True,
+    )
+    runner._prepare_inbound_message_text = AsyncMock(return_value=None)
+    assert await runner._handle_message(event) is None
+    runner._run_agent.assert_not_called()
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_failed_streaming_completion_does_not_schedule_memory(monkeypatch, tmp_path):
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=True,
+    )
+    runner._deliver_media_from_response.side_effect = RuntimeError("synthetic delivery failure")
+    response = await runner._handle_message(event)
+    assert "error (RuntimeError)" in response
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_streaming_turn_has_zero_memory_work(monkeypatch, tmp_path):
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, enabled=False, streamed=True,
+    )
+    assert await runner._handle_message(event) is None
+    coordinator.consider_user_turn.assert_not_called()
+    assert runner._background_tasks == set()
     assert bridge.searches == []
-    adapter.send.assert_not_awaited()
+    assert bridge.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_memory_hook_uses_unmodified_user_text_not_enriched_event(monkeypatch, tmp_path):
+    runner, coordinator, _, event = _memory_turn_runner(monkeypatch, tmp_path, streamed=True)
+    original = "  Я люблю чай с лимоном.\n"
+    event.text = original
+
+    async def enrich(**kwargs):
+        kwargs["event"].text = "SYSTEM_TOOL_CONTEXT_SENTINEL"
+        return "ENRICHED_AGENT_INPUT_SENTINEL"
+
+    runner._prepare_inbound_message_text = enrich
+    assert await runner._handle_message(event) is None
+    await asyncio.gather(*runner._background_tasks)
+    coordinator.consider_user_turn.assert_awaited_once_with(
+        source=event.source, user_text=original,
+    )
+    assert runner._run_agent.call_args.kwargs["message"] == "ENRICHED_AGENT_INPUT_SENTINEL"
+
+
+@pytest.mark.asyncio
+async def test_memory_task_exception_is_consumed_without_extra_reply(monkeypatch, tmp_path, caplog):
+    runner, coordinator, _, event = _memory_turn_runner(monkeypatch, tmp_path, streamed=True)
+    coordinator.consider_user_turn.side_effect = RuntimeError("PRIVATE_EXCEPTION_SENTINEL")
+    caplog.set_level(logging.DEBUG, logger="gateway.run")
+    assert await runner._handle_message(event) is None
+    tasks = tuple(runner._background_tasks)
+    assert len(tasks) == 1
+    assert await asyncio.gather(*tasks) == [None]
+    await asyncio.sleep(0)
+    assert tasks[0].exception() is None
+    assert runner._background_tasks == set()
+    coordinator.consider_user_turn.assert_awaited_once()
+    runner.adapters[Platform.TELEGRAM].send.assert_not_awaited()
+    assert "memory task failed: RuntimeError" in caplog.text
+    assert "PRIVATE_EXCEPTION_SENTINEL" not in caplog.text
+
+
+@pytest.mark.parametrize("origin_completed", [False, True])
+@pytest.mark.parametrize("offsets", [(0, 2), (4, 2), (None, None)])
+@pytest.mark.asyncio
+async def test_queued_success_cannot_mask_interrupted_original_turn(
+    monkeypatch, tmp_path, origin_completed, offsets,
+):
+    from gateway.run import _preserve_queued_followup_history_offset
+
+    runner, coordinator, bridge, event = _memory_turn_runner(
+        monkeypatch, tmp_path, streamed=True,
+    )
+    original_result = {
+        "completed": origin_completed, "interrupted": not origin_completed,
+        "history_offset": offsets[0],
+    }
+    followup_result = {**runner._run_agent.return_value, "history_offset": offsets[1]}
+    # Exercise the actual _run_agent queue-return boundary, including a nested
+    # successful follow-up, not a synthetic completion marker in the fixture.
+    nested = _preserve_queued_followup_history_offset(
+        {"completed": True, "history_offset": 1}, followup_result,
+    )
+    runner._run_agent.return_value = _preserve_queued_followup_history_offset(
+        original_result, nested,
+    )
+    # Keep this test about completion ownership, not synthetic transcript offsets.
+    runner._run_agent.return_value["history_offset"] = 0
+    assert await runner._handle_message(event) is None
+    await asyncio.gather(*runner._background_tasks)
+    assert coordinator.consider_user_turn.await_count == int(origin_completed)
+    assert len(bridge.upserts) == int(origin_completed)
+    assert "_memory_origin_completed" not in original_result
+    assert "_memory_origin_completed" not in followup_result

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -339,3 +340,70 @@ def test_legacy_schema_migration_seeds_existing_facts_once(tmp_path, monkeypatch
     assert "vector_revision" in columns
     assert integrity == "ok"
     assert fk_violations == []
+
+
+def test_transient_sqlite_lock_recovered(tmp_path, monkeypatch):
+    """Test that a transient SQLITE_BUSY / database is locked error recovers on retry."""
+    disabled = _bridge(tmp_path, monkeypatch, FakeQdrant(enabled=False), enabled=False)
+    _fact(disabled)
+    disabled.close()
+
+    fake = FakeQdrant()
+    bridge = _bridge(tmp_path, monkeypatch, fake)
+    real_connect = bridge._convergence._connect
+    attempts = [0]
+
+    def flaky_connect(*args, **kwargs):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(bridge._convergence, "_connect", flaky_connect)
+    result = bridge.process_vector_sync_batch()
+    assert result.status == "CONVERGED"
+    assert attempts[0] > 1
+    assert len(fake.upsert_calls) == 1
+    bridge.close()
+
+
+def test_non_lock_sqlite_error_propagates(tmp_path, monkeypatch):
+    """Test that non-lock SQLite errors (schema, corruption, etc.) propagate immediately."""
+    bridge = _bridge(tmp_path, monkeypatch, FakeQdrant())
+
+    def corrupt_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table: memory_vector_outbox")
+
+    monkeypatch.setattr(bridge._convergence, "_connect", corrupt_connect)
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        bridge.process_vector_sync_batch()
+    bridge.close()
+
+
+def test_retry_is_bounded(tmp_path, monkeypatch):
+    """Test that persistent lock failure does not wait indefinitely and raises OperationalError."""
+    bridge = _bridge(tmp_path, monkeypatch, FakeQdrant())
+    attempts = [0]
+
+    def locked_connect(*args, **kwargs):
+        attempts[0] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(bridge._convergence, "_connect", locked_connect)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        bridge.process_vector_sync_batch()
+    from gateway.memory.convergence import _MAX_LOCK_RETRIES
+
+    assert attempts[0] == _MAX_LOCK_RETRIES
+    bridge.close()
+
+
+def test_time_budget_preserved(tmp_path, monkeypatch):
+    """Test that execution stops when time budget is exceeded and does not block indefinitely."""
+    bridge = _bridge(tmp_path, monkeypatch, FakeQdrant())
+    start = time.perf_counter()
+    res = bridge.process_vector_sync_batch(time_budget_seconds=0.01)
+    duration = time.perf_counter() - start
+    assert duration < 1.0
+    assert res is not None
+    bridge.close()

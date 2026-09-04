@@ -92,10 +92,14 @@ def _safe_docker_runner(
 ):
     revisions = revisions or {}
     contract = contract or deploy.load_contract()
+    compose_environment = {
+        **dict(contract.runtime_bindings),
+        **dict(contract.feature_gates),
+    }
     compose_document = {
         "services": {
             contract.target_service: {
-                "environment": dict(contract.feature_gates),
+                "environment": compose_environment,
                 "volumes": [
                     {
                         "type": contract.database_mount_type,
@@ -138,10 +142,14 @@ def _safe_docker_runner(
 
 
 def _with_preflight_documents(contract: deploy.DeploymentContract, runner):
+    compose_environment = {
+        **dict(contract.runtime_bindings),
+        **dict(contract.feature_gates),
+    }
     compose_document = {
         "services": {
             contract.target_service: {
-                "environment": dict(contract.feature_gates),
+                "environment": compose_environment,
                 "volumes": [
                     {
                         "type": contract.database_mount_type,
@@ -349,6 +357,7 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.required_ci_workflows == ("Tests", "Lint (ruff + ty)", "Typecheck", "Nix")
     assert contract.database_source == Path("/var/lib/hermes/production-db/healbite.db")
     assert contract.lease_path == Path("/run/hermes/hermes-deployment-operation.json")
+    assert contract.runtime_bindings == {"QDRANT_COLLECTION": "healbite_memory_os_v2"}
     assert FAKE_SECRET not in text
 
 

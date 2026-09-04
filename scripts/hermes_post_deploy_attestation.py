@@ -107,6 +107,7 @@ class ContainerSnapshot:
     allowlists: tuple[tuple[str, str, int], ...]
     secret_fingerprints: tuple[tuple[str, str], ...]
     runtime_configuration_fingerprint: str
+    qdrant_collection: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ class PostDeployAttestation:
     telegram_health: str
     gateway_health: str
     provider_request_count: int
+    memory_collection_target: str = "PASS"
 
 
 def parse_policy(raw: object) -> RuntimeAttestationPolicy:
@@ -399,6 +401,7 @@ def _container_snapshot(
         for name in protected_secret_names
         if name in environment and environment[name]
     )
+    qdrant_collection = environment.get("QDRANT_COLLECTION")
     mounts: list[MountSnapshot] = []
     for item in mounts_record:
         if not isinstance(item, dict):
@@ -458,6 +461,7 @@ def _container_snapshot(
             "feature_gates": feature_gates,
             "allowlists": allowlists,
             "secret_fingerprints": secret_fingerprints,
+            "qdrant_collection": qdrant_collection,
         }
     )
     return ContainerSnapshot(
@@ -473,6 +477,7 @@ def _container_snapshot(
         allowlists=allowlists,
         secret_fingerprints=secret_fingerprints,
         runtime_configuration_fingerprint=configuration_fingerprint,
+        qdrant_collection=qdrant_collection,
     )
 
 
@@ -613,6 +618,7 @@ def _require_expected_runtime(
     expected_feature_gates: tuple[tuple[str, str], ...],
     expected_allowlists: tuple[tuple[str, str, int], ...],
     expected_secret_fingerprints: tuple[tuple[str, str], ...],
+    expected_qdrant_collection: str = "healbite_memory_os_v2",
 ) -> None:
     if snapshot.image_id != expected_image_id:
         _fail("HERMES_IMAGE_MISMATCH")
@@ -630,6 +636,12 @@ def _require_expected_runtime(
         _fail("ALLOWLIST_DELTA")
     if snapshot.secret_fingerprints != expected_secret_fingerprints:
         _fail("SECRET_FINGERPRINT_DELTA")
+    if snapshot.qdrant_collection is None:
+        _fail("QDRANT_COLLECTION_MISSING")
+    if snapshot.qdrant_collection == "healbite_memory_os":
+        _fail("LEGACY_QDRANT_COLLECTION")
+    if snapshot.qdrant_collection != expected_qdrant_collection:
+        _fail("QDRANT_COLLECTION_MISMATCH")
 
 
 def capture_pre_mutation_baseline(
@@ -798,6 +810,7 @@ def post_deploy_attestation(
     target_image_id: str,
     target_revision: str,
     protected_secret_names: tuple[str, ...],
+    expected_qdrant_collection: str = "healbite_memory_os_v2",
     run: Run = _default_run,
     sleep: Sleep = time.sleep,
 ) -> PostDeployAttestation:
@@ -821,6 +834,7 @@ def post_deploy_attestation(
             expected_feature_gates=baseline.hermes.feature_gates,
             expected_allowlists=baseline.hermes.allowlists,
             expected_secret_fingerprints=baseline.hermes.secret_fingerprints,
+            expected_qdrant_collection=expected_qdrant_collection,
         )
         if previous_sample is not None and (
             sample.container_id != previous_sample.container_id
@@ -864,6 +878,7 @@ def post_deploy_attestation(
         telegram_health="PASS",
         gateway_health="PASS",
         provider_request_count=0,
+        memory_collection_target="PASS",
     )
 
 
@@ -919,6 +934,8 @@ def write_evidence(
             "allowlist_delta": post_result.allowlist_delta,
             "secret_delta": post_result.secret_delta,
             "qdrant": post_result.qdrant_result,
+            "qdrant_service_container_identity": post_result.qdrant_result,
+            "hermes_memory_collection_target": post_result.memory_collection_target,
             "telegram": post_result.telegram_health,
             "gateway": post_result.gateway_health,
             "provider_request_count": post_result.provider_request_count,

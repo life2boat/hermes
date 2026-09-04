@@ -116,6 +116,7 @@ class DeploymentContract:
     image_revision_label: str
     allowed_revision_ref: str
     feature_gates: dict[str, str]
+    runtime_bindings: dict[str, str]
     attestation_policy: attestation.RuntimeAttestationPolicy
 
     @property
@@ -233,7 +234,7 @@ def load_contract(
     if set(raw) != {
         "version", "provenance", "compose", "runtime", "database_mount",
         "capacity", "secrets", "deployment", "rollback", "feature_gates",
-        "attestation",
+        "attestation", "runtime_bindings",
     }:
         _fail("manifest-fields")
     if raw["version"] != 2:
@@ -471,6 +472,15 @@ def load_contract(
         "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "false",
         "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
     }
+    runtime_bindings_raw = _mapping(
+        raw.get("runtime_bindings"), code="manifest-runtime-bindings"
+    )
+    expected_runtime_bindings = {
+        "QDRANT_COLLECTION": "healbite_memory_os_v2",
+    }
+    if runtime_bindings_raw != expected_runtime_bindings:
+        _fail("runtime-binding-policy")
+    normalized_runtime_bindings = dict(expected_runtime_bindings)
     try:
         attestation_policy = attestation.parse_policy(raw["attestation"])
     except attestation.RuntimeAttestationError as exc:
@@ -512,6 +522,7 @@ def load_contract(
         image_revision_label="org.opencontainers.image.revision",
         allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
+        runtime_bindings=normalized_runtime_bindings,
         attestation_policy=attestation_policy,
     )
 
@@ -593,7 +604,11 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
         environment = service["environment"]
     except (KeyError, TypeError):
         _fail("production-override-service")
-    if environment != contract.feature_gates:
+    expected_environment = {
+        **contract.runtime_bindings,
+        **contract.feature_gates,
+    }
+    if environment != expected_environment:
         _fail("production-feature-gates")
     expected_inventory = {
         "feature_gate_names": list(attestation.CANONICAL_FEATURE_GATE_NAMES),
@@ -1336,6 +1351,14 @@ def validate_compose_render(
     }
     if rendered_feature_state != contract.feature_gates:
         _fail("compose-feature-state")
+    for binding_name, expected_value in contract.runtime_bindings.items():
+        if binding_name not in rendered_environment:
+            _fail("compose-runtime-binding-missing")
+        rendered_value = rendered_environment[binding_name]
+        if rendered_value == "healbite_memory_os":
+            _fail("compose-runtime-binding-legacy")
+        if rendered_value != expected_value:
+            _fail("compose-runtime-binding-mismatch")
     mounts = _preflight(
         preflight.compose_mounts_from_document,
         document,
@@ -1423,6 +1446,7 @@ def _print_plan(
     print("IMAGE_REVISION_MATCH=true")
     print(f"COMPOSE_PROJECT={contract.project_name}")
     print(f"TARGET_SERVICE={contract.target_service}")
+    print(f"PLAN_EXPECTED_QDRANT_COLLECTION={contract.runtime_bindings.get('QDRANT_COLLECTION', '')}")
     print(f"COMMAND={shlex.join(command)}")
     print("DEPLOYMENT_ACTIONS_PERFORMED=false")
 
@@ -1683,6 +1707,9 @@ def _post_deploy_attestation(
         target_image_id=target_image_id,
         target_revision=target_revision,
         protected_secret_names=contract.protected_secret_names,
+        expected_qdrant_collection=contract.runtime_bindings.get(
+            "QDRANT_COLLECTION", "healbite_memory_os_v2"
+        ),
         run=_run,
     )
 

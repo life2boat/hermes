@@ -240,5 +240,8 @@
     "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST": "",
     "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": ""
+  },
+  "runtime_bindings": {
+    "QDRANT_COLLECTION": "healbite_memory_os_v2"
   }
 }

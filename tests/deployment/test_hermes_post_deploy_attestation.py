@@ -110,7 +110,11 @@ def _hermes_record(
     env_changes: dict[str, str | None] | None = None,
     mount_source: Path | None = None,
 ) -> dict[str, object]:
-    environment: dict[str, str] = {**FEATURES, "TELEGRAM_BOT_TOKEN": TOKEN}
+    environment: dict[str, str] = {
+        "QDRANT_COLLECTION": "healbite_memory_os_v2",
+        **FEATURES,
+        "TELEGRAM_BOT_TOKEN": TOKEN,
+    }
     for name, value in (env_changes or {}).items():
         if value is None:
             environment.pop(name, None)

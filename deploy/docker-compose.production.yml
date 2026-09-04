@@ -26,6 +26,7 @@
   "services": {
     "hermes-bot": {
       "environment": {
+        "QDRANT_COLLECTION": "healbite_memory_os_v2",
         "HEALBITE_HOUSEHOLDS_ENABLED": "false",
         "HEALBITE_HOUSEHOLDS_ALLOWLIST": "",
         "HEALBITE_INVENTORY_PHOTO_ENABLED": "false",

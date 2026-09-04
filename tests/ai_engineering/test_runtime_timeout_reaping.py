@@ -185,6 +185,7 @@ class TestTimeoutReaping:
         assert not host._active_processes
 
     @pytest.mark.skipif(os.name != "posix", reason="process-group termination is POSIX-only")
+    @pytest.mark.live_system_guard_bypass
     def test_posix_process_group_termination_covers_descendants(self, tmp_path):
         host = LocalExecutionHost(execution_host_id=EXEC_HOST)
         grandchild_pid_file = tmp_path / "grandchild-pid.txt"

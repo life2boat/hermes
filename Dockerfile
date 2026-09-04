@@ -138,7 +138,8 @@ ENV npm_config_install_links=false
 
 RUN npm install --prefer-offline --no-audit && \
     npm cache clean --force && \
-    rm -f /tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d
+    rm -f /tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d && \
+    rm -f /tmp/node-compile-cache/v22.22.3-x64-9de703df-0/0c92995d
 
 # ---------- Layer-cached Python dependency install ----------
 # Copy only pyproject.toml + uv.lock so the Python dep resolve + wheel

@@ -292,7 +292,10 @@ def test_group_c_cleanup_is_bound_to_creating_instructions() -> None:
             "/usr/local/lib/node_modules/npm/man/man7/config.7",
             "/usr/local/lib/node_modules/npm/node_modules/@npmcli/arborist/README.md",
         ),
-        npm_install: ("/tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d",),
+        npm_install: (
+            "/tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d",
+            "/tmp/node-compile-cache/v22.22.3-x64-9de703df-0/0c92995d",
+        ),
         uv_sync: (
             "/opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Cipher/test_pkcs1_15.py",
             "/opt/hermes/.venv/lib/python3.13/site-packages/Crypto/SelfTest/Protocol/test_ecdh.py",
@@ -353,3 +356,23 @@ def test_exception_file_sha_values_are_not_path_hashes() -> None:
         ).hexdigest()
         for item in policy.exceptions
     )
+
+
+def test_node_compile_cache_cleanup_paths_are_exact_and_fail_closed() -> None:
+    instructions = _docker_instructions()
+    npm_install = next(
+        item for item in instructions if item.startswith("RUN npm install")
+    )
+    for path in (
+        "/tmp/node-compile-cache/v22.22.3-x64-9ac5647c-0/0c92995d",
+        "/tmp/node-compile-cache/v22.22.3-x64-9de703df-0/0c92995d",
+    ):
+        assert f"rm -f {path}" in npm_install
+
+    fake_key = (
+        b"-----BEGIN " + b"PRIVATE " + b"KEY-----\n"
+        b"MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7\n"
+        b"-----END " + b"PRIVATE " + b"KEY-----\n"
+    )
+    findings = scanner._scan_bytes(fake_key, protected_names=(), exact_values=())
+    assert any(item.rule_id == "private-key-block" for item in findings)

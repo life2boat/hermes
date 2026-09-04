@@ -111,9 +111,13 @@ from gateway.healbite_user_profile import (
     onboarding_keyboard_rows,
 )
 from gateway.healbite_weekly_menu_telegram import (
+    WEEKLY_MENU_CALLBACK_ROOT,
     WEEKLY_MENU_COMMAND,
+    WEEKLY_MENU_PLACEHOLDER_REPLY,
     WEEKLY_MENU_UNAVAILABLE_REPLY,
+    WeeklyMenuTelegramResult,
     build_weekly_menu_presentation_for_now,
+    build_weekly_menu_telegram_controller,
 )
 from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
 from gateway.healbite_inventory_telegram import (
@@ -584,6 +588,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._inventory_telegram = build_inventory_telegram_controller()
         self._fridge_menu_telegram = build_fridge_menu_telegram_controller()
         self._shopping_telegram = build_shopping_telegram_controller()
+        self._weekly_menu_telegram = build_weekly_menu_telegram_controller(
+            runtime_factory=lambda: build_weekly_menu_runtime_service(),
+        )
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
@@ -1659,11 +1666,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 self.name,
             )
             return False
-        
+
         if not self.config.token:
             logger.error("[%s] No bot token configured", self.name)
             return False
-        
+
         try:
             if not self._acquire_platform_lock('telegram-bot-token', self.config.token, 'Telegram bot token'):
                 return False
@@ -1753,7 +1760,7 @@ class TelegramAdapter(BasePlatformAdapter):
             builder = builder.request(request).get_updates_request(get_updates_request)
             self._app = builder.build()
             self._bot = self._app.bot
-            
+
             # Register handlers
             self._app.add_handler(TelegramMessageHandler(
                 filters.TEXT & ~filters.COMMAND,
@@ -1773,7 +1780,7 @@ class TelegramAdapter(BasePlatformAdapter):
             ))
             # Handle inline keyboard button callbacks (update prompts)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
-            
+
             # Start polling — retry initialize() for transient TLS resets
             try:
                 from telegram.error import NetworkError, TimedOut
@@ -1872,7 +1879,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     drop_pending_updates=True,
                     error_callback=_polling_error_callback,
                 )
-            
+
             # Register bot commands so Telegram shows a hint menu when users type /
             # List is derived from the central COMMAND_REGISTRY — adding a new
             # gateway command there automatically adds it to the Telegram menu.
@@ -1915,7 +1922,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     e,
                     exc_info=True,
                 )
-            
+
             self._mark_connected()
             mode = "webhook" if self._webhook_mode else "polling"
             logger.info("[%s] Connected to Telegram (%s mode)", self.name, mode)
@@ -1932,7 +1939,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
 
             return True
-            
+
         except Exception as e:
             self._release_platform_lock()
             message = f"Telegram startup failed: {e}"
@@ -2021,7 +2028,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
-        
+
         try:
             # Format and split message if needed
             formatted = self.format_message(content)
@@ -2036,12 +2043,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
                     for chunk in chunks
                 ]
-            
+
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
             requested_thread_id = self._message_thread_id_for_send(thread_id)
             used_thread_fallback = False
-            
+
             try:
                 from telegram.error import NetworkError as _NetErr
             except ImportError:
@@ -2257,7 +2264,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     "thread_fallback": used_thread_fallback,
                 },
             )
-            
+
         except Exception as e:
             logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
             err_str = str(e).lower()
@@ -3545,6 +3552,11 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._handle_healbite_inventory_callback(query, data)
             return
 
+        # --- HealBite Weekly Menu callbacks (always consumed locally) ---
+        if data.startswith(WEEKLY_MENU_CALLBACK_ROOT):
+            await self._handle_healbite_weekly_menu_callback(query, data)
+            return
+
         # --- HealBite Shopping callbacks (always consumed locally) ---
         if data.startswith(SHOPPING_CALLBACK_ROOT):
             await self._handle_healbite_shopping_callback(query, data)
@@ -4068,11 +4080,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send audio as a native Telegram voice message or audio file."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
-            
+
             with open(audio_path, "rb") as audio_file:
                 ext = os.path.splitext(audio_path)[1].lower()
                 # .ogg / .opus files -> send as voice (round playable bubble)
@@ -4482,7 +4494,7 @@ class TelegramAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send an image natively as a Telegram photo.
-        
+
         Tries URL-based send first (fast, works for <5MB images).
         Falls back to downloading and uploading as file (supports up to 10MB).
         """
@@ -4578,7 +4590,7 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send an animated GIF natively as a Telegram animation (auto-plays inline)."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
             _anim_thread = self._metadata_thread_id(metadata)
             reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
@@ -4653,10 +4665,10 @@ class TelegramAdapter(BasePlatformAdapter):
         """Get information about a Telegram chat."""
         if not self._bot:
             return {"name": "Unknown", "type": "dm"}
-        
+
         try:
             chat = await self._bot.get_chat(int(chat_id))
-            
+
             chat_type = "dm"
             if chat.type == ChatType.GROUP:
                 chat_type = "group"
@@ -4666,7 +4678,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     chat_type = "forum"
             elif chat.type == ChatType.CHANNEL:
                 chat_type = "channel"
-            
+
             return {
                 "name": chat.title or chat.full_name or str(chat_id),
                 "type": chat_type,
@@ -7757,6 +7769,142 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             await self._send_healbite_shopping_result(message, result)
 
+    def _healbite_weekly_menu_keyboard(
+        self,
+        result: WeeklyMenuTelegramResult,
+    ) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE or not result.screen.rows:
+            return None
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=text, callback_data=callback_data)
+                    for text, callback_data in row
+                ]
+                for row in result.screen.rows
+            ]
+        )
+
+    async def _send_healbite_weekly_menu_result(
+        self,
+        msg: Message,
+        result: WeeklyMenuTelegramResult,
+    ) -> None:
+        chat = getattr(msg, "chat", None)
+        kwargs: Dict[str, Any] = {
+            "chat_id": str(getattr(chat, "id", "")),
+            "text": result.screen.text,
+            "message_thread_id": getattr(msg, "message_thread_id", None),
+            "reply_markup": self._healbite_weekly_menu_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
+
+    @staticmethod
+    def _healbite_weekly_menu_source_message(query: Any) -> Optional[Message]:
+        message = getattr(query, "message", None)
+        if message is None:
+            return None
+        if (
+            isinstance(MaybeInaccessibleMessage, type)
+            and isinstance(message, MaybeInaccessibleMessage)
+            and getattr(message, "text", None) is None
+        ):
+            return None
+        if getattr(message, "message_id", None) is None:
+            return None
+        return message
+
+    async def _handle_healbite_weekly_menu_callback(self, query: Any, data: str) -> None:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        message = self._healbite_weekly_menu_source_message(query)
+        if message is None:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="weekly_menu_callback",
+                action="source_unavailable",
+                lane="healbite_public",
+                result="blocked",
+            )
+            try:
+                await query.answer(text="Сообщение устарело.")
+            except Exception:
+                pass
+            return
+
+        result = self._weekly_menu_telegram.handle_callback(
+            actor_user_id,
+            data,
+            callback_query_id=getattr(query, "id", None),
+        )
+        self._log_healbite_marker(
+            "healbite_route_selected",
+            msg=message,
+            route="weekly_menu_callback",
+            action=result.state,
+            lane="healbite_public",
+            result=(
+                "blocked"
+                if result.state in {"disabled", "stale", "unavailable"}
+                else "allowed"
+            ),
+            error_type=result.error_class,
+        )
+        if result.state == "back":
+            try:
+                await query.answer(text="Главное меню.")
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_menu_message(message, command="/menu")
+            return
+
+        if result.state == "open_shopping":
+            try:
+                await query.answer(text="Список покупок.")
+            except Exception:
+                pass
+            shopping_result = self._shopping_telegram.home(actor_user_id)
+            kwargs: Dict[str, Any] = {
+                "text": shopping_result.screen.text,
+                "reply_markup": self._healbite_shopping_keyboard(shopping_result),
+            }
+            if shopping_result.screen.parse_mode == "HTML" and ParseMode is not None:
+                kwargs["parse_mode"] = ParseMode.HTML
+            try:
+                await query.edit_message_text(**kwargs)
+            except Exception:
+                await self._send_healbite_shopping_result(message, shopping_result)
+            return
+
+        if result.state == "disabled":
+            answer_text = "Раздел пока недоступен."
+        elif result.state in {"stale", "unavailable"}:
+            answer_text = "Действие недоступно."
+        else:
+            answer_text = "Обновлено."
+        try:
+            await query.answer(text=answer_text)
+        except Exception:
+            pass
+
+        kwargs: Dict[str, Any] = {
+            "text": result.screen.text,
+            "reply_markup": self._healbite_weekly_menu_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        try:
+            await query.edit_message_text(**kwargs)
+        except Exception:
+            await self._send_healbite_weekly_menu_result(message, result)
+
+
+
     async def _dispatch_healbite_keyboard_action(
         self,
         msg: Message,
@@ -8287,7 +8435,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         except Exception:
             presentation = None
-        if presentation is None:
+        if presentation is None or presentation.state == "unavailable":
             await self._send_message_with_thread_fallback(
                 chat_id=chat_id,
                 text=WEEKLY_MENU_UNAVAILABLE_REPLY,
@@ -8303,22 +8451,41 @@ class TelegramAdapter(BasePlatformAdapter):
                 content_type="text",
             )
             return True
-        for chunk in presentation.chunks:
-            kwargs = {
-                "chat_id": chat_id,
-                "text": chunk,
-                "message_thread_id": thread_id,
-            }
-            if presentation.parse_mode == "HTML" and ParseMode is not None:
-                kwargs["parse_mode"] = ParseMode.HTML
-            await self._send_message_with_thread_fallback(**kwargs)
+
+        if presentation.state == "placeholder":
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=WEEKLY_MENU_PLACEHOLDER_REPLY,
+                message_thread_id=thread_id,
+            )
+            self._log_healbite_marker(
+                "healbite_reply_sent",
+                msg=msg,
+                route="weekly_menu",
+                outcome="disabled",
+                chunk_count=1,
+                entry_count=0,
+                content_type="text",
+            )
+            return True
+
+        result = self._weekly_menu_telegram.home(actor_user_id)
+        kwargs = {
+            "chat_id": chat_id,
+            "text": result.screen.text,
+            "message_thread_id": thread_id,
+            "reply_markup": self._healbite_weekly_menu_keyboard(result),
+        }
+        if result.screen.parse_mode == "HTML" and ParseMode is not None:
+            kwargs["parse_mode"] = ParseMode.HTML
+        await self._send_message_with_thread_fallback(**kwargs)
         self._log_healbite_marker(
             "healbite_reply_sent",
             msg=msg,
             route="weekly_menu",
-            outcome=presentation.state,
-            chunk_count=len(presentation.chunks),
-            entry_count=presentation.entry_count,
+            outcome=result.state,
+            chunk_count=1,
+            entry_count=result.entry_count or presentation.entry_count,
             duration_ms=presentation.duration_ms,
             content_type="text",
         )
@@ -8683,11 +8850,11 @@ class TelegramAdapter(BasePlatformAdapter):
         msg_type = self._media_message_type(msg)
 
         event = self._build_message_event(msg, msg_type, update_id=update.update_id)
-        
+
         # Add caption as text
         if msg.caption:
             event.text = self._clean_bot_trigger_text(msg.caption)
-        
+
         # Handle stickers: describe via vision tool with caching
         if msg.sticker:
             await self._handle_sticker(msg, event)
@@ -9161,7 +9328,7 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         chat = message.chat
         user = message.from_user
-        
+
         # Determine chat type.  Normalize through ``str`` so tests/mocks and
         # python-telegram-bot enum values both work (``ChatType.CHANNEL`` is
         # string-like, but mocks often provide plain strings).
@@ -9248,7 +9415,7 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_topic=chat_topic,
             message_id=str(message.message_id),
         )
-        
+
         # Extract reply context if this message is a reply.
         # Prefer Telegram's native partial quote (message.quote, TextQuote)
         # so a user replying to a single selected substring of a prior

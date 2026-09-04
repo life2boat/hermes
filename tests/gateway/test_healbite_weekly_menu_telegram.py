@@ -459,3 +459,228 @@ def test_importing_weekly_menu_telegram_module_has_no_startup_side_effects():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_controller_home_empty_state_offers_create_and_back(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_household(db_path, actor_user_id=101)
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+
+    result = controller.home(101)
+
+    assert result.state == "empty"
+    assert "Меню на эту неделю пока не создано" in result.screen.text
+    flat_callbacks = [cb for row in result.screen.rows for label, cb in row]
+    flat_labels = [label for row in result.screen.rows for label, cb in row]
+    assert any("Создать меню" in l for l in flat_labels)
+    assert any("Назад" in l for l in flat_labels)
+    assert any(cb.startswith("weekly_menu:v1:g:") for cb in flat_callbacks)
+    assert "weekly_menu:v1:b" in flat_callbacks
+
+
+def test_controller_home_draft_state_offers_approve_and_regenerate(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _draft_only_week(db_path, actor_user_id=101)
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+
+    result = controller.home(101)
+
+    assert result.state == "draft"
+    assert "Черновик" in result.screen.text
+    flat_callbacks = [cb for row in result.screen.rows for label, cb in row]
+    flat_labels = [label for row in result.screen.rows for label, cb in row]
+    assert any("Одобрить и сохранить" in l for l in flat_labels)
+    assert any("Пересоздать" in l for l in flat_labels)
+    assert any(cb.startswith("weekly_menu:v1:pub:") for cb in flat_callbacks)
+    assert any(cb.startswith("weekly_menu:v1:g:") for cb in flat_callbacks)
+
+
+def test_controller_home_published_state_offers_regenerate_and_shopping(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _publish_week(db_path, actor_user_id=101)
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+
+    result = controller.home(101)
+
+    assert result.state == "published"
+    assert "Овсяная каша" in result.screen.text
+    flat_callbacks = [cb for row in result.screen.rows for label, cb in row]
+    flat_labels = [label for row in result.screen.rows for label, cb in row]
+    assert any("Создать заново" in l for l in flat_labels)
+    assert any("Список покупок" in l for l in flat_labels)
+    assert "weekly_menu:v1:sh" in flat_callbacks
+
+
+def test_controller_handle_callback_navigation_and_stale(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_household(db_path, actor_user_id=101)
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+
+    back_result = controller.handle_callback(101, "weekly_menu:v1:b")
+    assert back_result.state == "back"
+
+    sh_result = controller.handle_callback(101, "weekly_menu:v1:sh")
+    assert sh_result.state == "open_shopping"
+
+    refresh_result = controller.handle_callback(101, "weekly_menu:v1:r")
+    assert refresh_result.state == "empty"
+
+    stale_result = controller.handle_callback(101, "invalid:data")
+    assert stale_result.state == "stale"
+    assert stale_result.error_class == "invalid_callback"
+
+
+def test_controller_handle_callback_generate_and_publish(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _seed_household(db_path, actor_user_id=101)
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+    from gateway.healbite_shopping import HealBiteShoppingStore
+    shop_store = HealBiteShoppingStore(db_path=db_path)
+    shop_store.initialize_schema()
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+    from gateway.healbite_weekly_menu_generation import (
+        WeeklyMenuGenerationResult,
+        WeeklyMenuGenerationStatus,
+    )
+
+    mock_gen_service = Mock()
+    def _mock_gen(actor, week_start, **kwargs):
+        _, _, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        return WeeklyMenuGenerationResult(
+            status=WeeklyMenuGenerationStatus.SUCCESS,
+            revision_view=draft_view,
+        )
+    mock_gen_service.generate_draft_for_week = Mock(side_effect=_mock_gen)
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+    controller._generation_service_factory = lambda: mock_gen_service
+
+    gen_res = controller.handle_callback(101, "weekly_menu:v1:g:20260706")
+    assert gen_res.state == "draft"
+    assert gen_res.notice == "Черновик меню создан!"
+    mock_gen_service.generate_draft_for_week.assert_called_once()
+
+    # Now publish the draft
+    pub_callback = gen_res.screen.rows[0][0][1]
+    assert pub_callback.startswith("weekly_menu:v1:pub:")
+    pub_res = controller.handle_callback(101, pub_callback)
+    assert pub_res.state == "published"
+    assert "Меню опубликовано" in (pub_res.notice or "")
+
+
+def test_controller_isolation_across_users_and_households(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    _publish_week(db_path, actor_user_id=101, entries=_weekly_entries(breakfast_title="Сырники 101"))
+    _publish_week(db_path, actor_user_id=202, entries=_weekly_entries(breakfast_title="Каша 202"))
+    runtime = _runtime(db_path, allowlist={101, 202})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+    )
+
+    res_101 = controller.home(101)
+    res_202 = controller.home(202)
+
+    assert "Сырники 101" in res_101.screen.text
+    assert "Каша 202" not in res_101.screen.text
+
+    assert "Каша 202" in res_202.screen.text
+    assert "Сырники 101" not in res_202.screen.text
+
+    # Cross user callback: 202 tries to publish with 101's parameters
+    # The resolution is always based on authenticated actor, so 202 mutates 202's state only
+    cross_res = controller.handle_callback(202, "weekly_menu:v1:r")
+    assert "Каша 202" in cross_res.screen.text
+    assert "Сырники 101" not in cross_res.screen.text
+
+
+@pytest.mark.asyncio
+async def test_adapter_handles_weekly_menu_callbacks_locally_without_generic_dispatch(tmp_path, monkeypatch):
+    db_path = tmp_path / "healbite.db"
+    _publish_week(db_path, actor_user_id=101)
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.build_weekly_menu_runtime_service",
+        lambda: _runtime(db_path, allowlist={101}),
+    )
+    adapter = _adapter()
+    adapter._send_healbite_menu_message = AsyncMock()
+
+    # Query with back action
+    query = SimpleNamespace(
+        id="q1",
+        from_user=SimpleNamespace(id=101, username="tester", first_name="Tester"),
+        message=_message(text="Меню"),
+        data="weekly_menu:v1:b",
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+
+    await adapter._handle_healbite_weekly_menu_callback(query, "weekly_menu:v1:b")
+
+    query.answer.assert_awaited_once_with(text="Главное меню.")
+    adapter._send_healbite_menu_message.assert_awaited_once()
+
+    # Query with refresh action
+    query_refresh = SimpleNamespace(
+        id="q2",
+        from_user=SimpleNamespace(id=101, username="tester", first_name="Tester"),
+        message=_message(text="Меню"),
+        data="weekly_menu:v1:r",
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+        edit_message_text=AsyncMock(),
+    )
+
+    await adapter._handle_healbite_weekly_menu_callback(query_refresh, "weekly_menu:v1:r")
+
+    query_refresh.answer.assert_awaited_once_with(text="Обновлено.")
+    query_refresh.edit_message_text.assert_awaited_once()
+    assert "Меню на неделю" in query_refresh.edit_message_text.await_args.kwargs["text"]

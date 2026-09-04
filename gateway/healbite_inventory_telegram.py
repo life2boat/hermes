@@ -810,7 +810,17 @@ class HealBiteInventoryTelegramController:
                     error_class="unavailable",
                 )
             if view is None:
-                return self._result("empty", INVENTORY_EMPTY_REPLY)
+                empty_rows = []
+                if self._gate("text", actor_user_id).ready:
+                    empty_rows.append((("Ввести список текстом", self._callback("t")),))
+                if self._gate("photo", actor_user_id).ready:
+                    empty_rows.append((("Отправить фотографию", self._callback("p")),))
+                empty_rows.append((("Назад", self._callback("h")),))
+                return self._result(
+                    "empty",
+                    "<b>🥕 Продукты дома</b>\n\nВ доме пока нет сохранённых продуктов.\nДобавьте список продуктов текстом или отправьте фото.",
+                    rows=empty_rows,
+                )
             if not self._gate(view.snapshot.source_type.value, actor_user_id).ready:
                 return self._result(
                     "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"

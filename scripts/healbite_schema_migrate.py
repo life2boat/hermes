@@ -1009,6 +1009,14 @@ def _migrate_borrowed_connection(
                     phase="weekly",
                 )
         conn.execute("BEGIN IMMEDIATE")
+        if "memory_convergence_v2" in selected:
+            from gateway.memory.identity import validate_epoch
+
+            # The pre-BEGIN check is only a fail-fast guard.  Another authority
+            # may pin a different epoch while this caller waits for SQLite's
+            # write lock, so the migration/skip decision must be authorized
+            # again inside the same serialization boundary as schema preflight.
+            validate_epoch(conn, legacy_epoch_uuid)
         if transaction_hook is not None:
             transaction_hook(conn)
         _sqlite_integrity(conn)

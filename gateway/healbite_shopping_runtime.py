@@ -268,6 +268,20 @@ class HealBiteShoppingRuntimeService:
             not_found_message="shopping list not found",
         )
 
+    def get_source_menu_ingredient_count(
+        self,
+        actor_user_id: object,
+        source_menu_id: str,
+    ) -> int:
+        return self._run_public_operation(
+            actor_user_id,
+            lambda context, store: store.get_source_menu_ingredient_count(
+                context,
+                source_menu_id=source_menu_id,
+            ),
+            not_found_message="source menu not found",
+        )
+
     def add_manual_shopping_item(
         self,
         actor_user_id: object,

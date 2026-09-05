@@ -7747,6 +7747,19 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._send_healbite_menu_message(message, command="/menu")
             return
 
+        if result.state == "open_inventory":
+            try:
+                await query.answer(text="Продукты дома.")
+            except Exception:
+                pass
+            inv_result = self._inventory_telegram.home(actor_user_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_inventory_result(message, inv_result)
+            return
+
         if result.state == "disabled":
             answer_text = "Раздел пока недоступен."
         elif result.state in {"stale", "unavailable", "invalid_input"}:
@@ -7879,6 +7892,19 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.edit_message_text(**kwargs)
             except Exception:
                 await self._send_healbite_shopping_result(message, shopping_result)
+            return
+
+        if result.state == "open_inventory":
+            try:
+                await query.answer(text="Продукты дома.")
+            except Exception:
+                pass
+            inv_result = self._inventory_telegram.home(actor_user_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await self._send_healbite_inventory_result(message, inv_result)
             return
 
         if result.state == "disabled":

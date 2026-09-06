@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import sqlite3
 import threading
@@ -137,7 +138,7 @@ def _publish(weekly, context, household_id: str, entries, *, suffix: str):
         expected_revision_version=draft.revision.version,
         idempotency_key=f"replace-{suffix}",
     )
-    return weekly.publish_weekly_menu_revision(
+    return seed_legacy_published_revision(weekly,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,

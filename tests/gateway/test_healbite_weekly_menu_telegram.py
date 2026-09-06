@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision, complete_weekly_entries
 
 import asyncio
 import sqlite3
@@ -97,7 +98,7 @@ def _publish_week(db_path: Path, *, actor_user_id: int, entries: list[WeeklyMenu
         expected_revision_version=draft.revision.version,
         idempotency_key=f"replace-{actor_user_id}",
     )
-    published = store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,
@@ -584,7 +585,11 @@ def test_controller_handle_callback_generate_and_publish(tmp_path):
 
     mock_gen_service = Mock()
     def _mock_gen(actor, week_start, **kwargs):
-        _, _, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        seeded_store, seeded_context, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        draft_view = seeded_store.replace_draft_entries(
+            seeded_context, draft_view.revision.id, complete_weekly_entries(_weekly_entries()),
+            expected_revision_version=draft_view.revision.version, idempotency_key="complete-generated-week",
+        )
         return WeeklyMenuGenerationResult(
             status=WeeklyMenuGenerationStatus.SUCCESS,
             revision_view=draft_view,

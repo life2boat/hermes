@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import logging
 import re
@@ -320,7 +321,7 @@ def _seed_weekly_source(
         expected_revision_version=draft.revision.version,
         idempotency_key=f"replace-{structured}",
     )
-    published = weekly.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,

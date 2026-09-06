@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -103,7 +104,7 @@ def _seed_weekly_menu(db_path: Path, actor_id: int, *, with_ingredients: bool) -
         expected_revision_version=draft.revision.version,
         idempotency_key=f"entries-{actor_id}",
     )
-    published = menu_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(menu_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,

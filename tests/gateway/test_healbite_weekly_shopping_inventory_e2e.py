@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision, complete_weekly_entries
 
 import sqlite3
 from datetime import datetime, timezone
@@ -151,7 +152,7 @@ def test_e2e_inventory_to_weekly_menu_to_shopping_loop(tmp_path):
         draft_view = weekly_store.replace_draft_entries(
             h1,
             draft.revision.id,
-            [
+            complete_weekly_entries([
                 WeeklyMenuEntryInput(
                     local_date=week,
                     meal_slot=WeeklyMenuMealSlot.BREAKFAST,
@@ -195,7 +196,7 @@ def test_e2e_inventory_to_weekly_menu_to_shopping_loop(tmp_path):
                         ),
                     ),
                 ),
-            ],
+            ]),
             expected_revision_version=draft.revision.version,
             idempotency_key="entries-e2e",
         )
@@ -292,7 +293,7 @@ def test_e2e_isolation_between_households(tmp_path):
         expected_revision_version=d1.revision.version,
         idempotency_key="e1",
     )
-    weekly_store.publish_weekly_menu_revision(
+    seed_legacy_published_revision(weekly_store,
         h1,
         d1.revision.id,
         expected_series_version=entries_view.series.version,

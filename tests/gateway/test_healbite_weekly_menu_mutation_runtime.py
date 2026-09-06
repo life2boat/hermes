@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import complete_weekly_entries
 
 import sqlite3
 from pathlib import Path
@@ -82,7 +83,7 @@ def _add_active_member(
 
 
 def _sample_entries(title: str = "Суп") -> list[WeeklyMenuEntryInput]:
-    return [
+    return complete_weekly_entries([
         WeeklyMenuEntryInput(
             local_date="2026-07-06",
             meal_slot=WeeklyMenuMealSlot.LUNCH,
@@ -90,7 +91,7 @@ def _sample_entries(title: str = "Суп") -> list[WeeklyMenuEntryInput]:
             title=title,
             servings="2",
         )
-    ]
+    ])
 
 
 class _CountingHouseholdStoreFactory:

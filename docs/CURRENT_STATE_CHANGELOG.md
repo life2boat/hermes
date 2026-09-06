@@ -1035,3 +1035,10 @@ PR-6: Deterministic Memory Graph Retrieval & Convergence Evals implementation ca
 - shadow capability available but inactive;
 - serve unavailable;
 - no production/runtime activation.
+# 2026-09-06 — Conversational profile repository candidate
+
+Base `ea423c750720248dc3e1e082cf02f61d165a62f5`: reuse the existing profile,
+add three nullable MVP fields, explicit bounded extraction, atomic partial merge,
+Russian display and optional food-only Memory sync. Old nutrition/onboarding and
+unspecified-value semantics remain compatible. Production qualification and
+migration execution are not performed.

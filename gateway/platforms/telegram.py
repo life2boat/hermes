@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import tempfile
 import html as _html
 import re
@@ -6104,6 +6105,51 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         return True
 
+    async def _maybe_handle_healbite_profile_update(self, msg: Message) -> bool:
+        from gateway.healbite_profile_conversation import (
+            ProfileUpdateValidationError, extract_profile_delta,
+        )
+
+        if str(getattr(getattr(msg, "chat", None), "type", "")) != "private":
+            return False
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat_id = getattr(getattr(msg, "chat", None), "id", None)
+        if type(user_id) is not int or user_id <= 0 or chat_id != user_id:
+            return False
+        if not self._is_callback_user_authorized(str(user_id), chat_id=str(chat_id), chat_type="private"):
+            return False
+        try:
+            delta = extract_profile_delta(getattr(msg, "text", "") or "")
+            if not delta:
+                return False
+            store = get_default_healbite_user_profile()
+            if store.get_user_profile(user_id) is None or store.get_onboarding_state(user_id) is not None:
+                return False
+            preferences = store.apply_conversational_delta(user_id=user_id, delta=delta)
+        except (ProfileUpdateValidationError, sqlite3.Error):
+            await self._send_message_with_thread_fallback(
+                chat_id=str(chat_id), text="Не удалось обновить профиль. Проверьте данные и попробуйте ещё раз.",
+                message_thread_id=getattr(msg, "message_thread_id", None),
+            )
+            return True
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        coordinator = getattr(runner, "_healbite_conversational_memory", None)
+        if coordinator is not None and preferences:
+            from gateway.session import SessionSource
+
+            try:
+                await coordinator.sync_profile_preferences(
+                    source=SessionSource(platform=Platform.TELEGRAM, user_id=str(user_id), chat_id=str(chat_id), chat_type="dm"),
+                    preferences=preferences,
+                )
+            except Exception:
+                logger.warning("[HealBite][profile] memory_sync_unavailable")
+        await self._send_message_with_thread_fallback(
+            chat_id=str(chat_id), text="Профиль обновлён. Сохранённые данные доступны в /profile.",
+            message_thread_id=getattr(msg, "message_thread_id", None),
+        )
+        return True
+
     async def _maybe_handle_healbite_onboarding_reply(self, msg: Message) -> bool:
         text = (getattr(msg, "text", None) or "").strip()
         if not text or text.startswith("/"):
@@ -8111,6 +8157,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if await self._maybe_handle_healbite_weight_pending_reply(msg):
             return
         if await self._maybe_handle_healbite_water_pending_reply(msg):
+            return
+        if await self._maybe_handle_healbite_profile_update(msg):
             return
         await self._ensure_forum_commands(update.message)
 

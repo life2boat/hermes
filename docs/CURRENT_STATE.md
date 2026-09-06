@@ -13,6 +13,15 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## V1 conversational profile — repository candidate
+
+Existing `profiles` gains nullable household size, cooking frequency and budget
+through its additive initializer. Explicit conversational deltas preserve omitted
+fields and commit atomically; food preferences alone can sync through the existing
+gated Memory coordinator. No provider calls, Memory migration, budget-driven menu
+behavior, access changes or production activation. See
+[`design/healbite-conversational-profile.md`](design/healbite-conversational-profile.md).
+
 ## V1 weekly menu draft contract — repository candidate
 
 Based on `f0cb471a6102be21c5e101d2885a40bb727e6585`, Fast Menu now requests and

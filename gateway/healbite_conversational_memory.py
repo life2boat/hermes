@@ -289,6 +289,32 @@ class HealBiteConversationalMemoryBridge:
 
     # ── write path ──────────────────────────────────────────────────
 
+    async def sync_profile_preferences(self, *, source: Any, preferences: dict[str, str]) -> None:
+        """Optional committed profile snapshot; retain existing rollout gates.
+
+        Stable per-field keys allow explicit clearing to replace the old snapshot.
+        No nutrition/demographic/financial fields enter the Memory write path.
+        """
+        user_id = self._passed_turn_gates(source)
+        bridge = self._memory_bridge
+        if user_id is None or bridge is None:
+            return
+        entities = {"allergies": "allergy", "disliked_foods": "dislike", "preferred_cuisines": "diet"}
+        if preferences.keys() - entities.keys():
+            return
+        for field, value in preferences.items():
+            if not isinstance(value, str) or len(value) > 2000:
+                return
+        try:
+            for field, value in preferences.items():
+                await asyncio.to_thread(
+                    bridge.upsert_fact, user_id=user_id, entity=entities[field],
+                    key="profile_" + field, value=value or "Пользователь очистил это поле профиля",
+                    source="profile_explicit_update", trust_score=1.0,
+                )
+        except Exception:
+            logger.warning("[HealBite][profile] memory_sync_unavailable")
+
     async def consider_user_turn(self, *, source: Any, user_text: str) -> None:
         """Consider a completed user turn for HealBite Memory OS persistence.
 

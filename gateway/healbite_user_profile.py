@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from gateway.healbite_households import (
     HouseholdIntegrityError,
@@ -139,6 +139,9 @@ _USER_COLUMNS = {
 }
 
 _PROFILE_COLUMNS = {
+    "household_size": "INTEGER",
+    "cooking_frequency": "TEXT",
+    "budget": "TEXT",
     "activity_level": "TEXT",
     "water_target_ml": "INTEGER",
 }
@@ -166,6 +169,12 @@ class HealBiteUserProfile:
     target_source: str | None = None
     water_target_ml: int | None = None
     created_at: str = ""
+    household_size: int | None = None
+    cooking_frequency: str | None = None
+    budget: str | None = None
+    allergies: str | None = None
+    stop_products: str | None = None
+    preferences: str | None = None
 
     @property
     def daily_protein_target(self) -> float | None:
@@ -302,6 +311,11 @@ def onboarding_keyboard_rows(step: str, profile: HealBiteUserProfile | None = No
     return None
 
 
+def effective_household_size(profile: HealBiteUserProfile | None) -> int:
+    value = profile.household_size if profile is not None else None
+    return value if type(value) is int and value > 0 else 1
+
+
 def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
     if profile is None:
         return (
@@ -348,6 +362,16 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
     else:
         lines.append("🔥 Суточная норма: —")
 
+    for label, value in (
+        ("Человек дома", profile.household_size),
+        ("Как часто готовите", profile.cooking_frequency),
+        ("Бюджет на питание", profile.budget),
+        ("Аллергии", profile.allergies),
+        ("Нелюбимые продукты", profile.stop_products),
+        ("Предпочтения", profile.preferences),
+    ):
+        if value is not None and value != "":
+            lines.append(f"{label}: {value}")
     missing = profile_missing_fields(profile)
     if missing:
         lines.extend(
@@ -540,7 +564,54 @@ class HealBiteUserProfileStore:
                 or ""
             ),
         )
+        if profile_row is not None:
+            for field in ("household_size", "cooking_frequency", "budget", "allergies", "stop_products", "preferences"):
+                if field in profile_row.keys():
+                    setattr(profile, field, profile_row[field])
         return profile
+
+    def apply_conversational_delta(self, *, user_id: int, delta: object) -> dict[str, str]:
+        """Validate then merge only explicit fields within one owner transaction.
+
+        Returns only committed food preference values for optional Memory sync.
+        Does not initialize schema or recalculate nutrition during the update.
+        """
+        from gateway.healbite_profile_conversation import (
+            FIELD_COLUMNS, PREFERENCE_FIELDS, ProfileUpdateValidationError,
+            merge_preference_text, validate_profile_delta,
+        )
+
+        if type(user_id) is not int or user_id <= 0:
+            raise ProfileUpdateValidationError("invalid profile owner")
+        validated = validate_profile_delta(delta)
+        if not validated:
+            return {}
+        synced: dict[str, str] = {}
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._load_profile_row(conn, user_id)
+            if row is None:
+                if self._load_user_row(conn, user_id) is None:
+                    raise ProfileUpdateValidationError("profile required")
+                self._ensure_profile_row(conn, user_id=user_id)
+                row = self._load_profile_row(conn, user_id)
+            if row is None:
+                raise ProfileUpdateValidationError("profile required")
+            updates = {}
+            for field, value in validated.items():
+                column = FIELD_COLUMNS[field]
+                if field in PREFERENCE_FIELDS:
+                    value = merge_preference_text(row[column], cast(list[str], value))
+                    synced[field] = value
+                updates[column] = value
+            identity = self._profiles_identity_column(conn)
+            conn.execute(
+                f"UPDATE {PROFILES_TABLE} SET "
+                + ", ".join(f"{column} = ?" for column in updates)
+                + f", updated_at = ? WHERE {identity} = ?",
+                (*updates.values(), _sqlite_timestamp(), user_id),
+            )
+        return synced
 
     def get_water_target_ml(self, user_id: int) -> int | None:
         profile = self.get_user_profile(int(user_id))

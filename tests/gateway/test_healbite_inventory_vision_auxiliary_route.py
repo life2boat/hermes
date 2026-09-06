@@ -71,7 +71,7 @@ def _aux_response() -> SimpleNamespace:
                                     "name": "milk",
                                     "quantity_value": "1",
                                     "unit": "l",
-                                    "uncertain": True,
+                                    "confidence": 0.5,
                                 }
                             ]
                         }
@@ -103,7 +103,7 @@ async def test_default_vision_uses_strict_auxiliary_route_not_direct_tool(
     image_path.write_bytes(b"synthetic-image")
 
     result = await _controller(tmp_path / "route.db")._default_vision_analyze(
-        str(image_path), "visible items only"
+        [str(image_path)], "visible items only"
     )
 
     assert result == {"success": True, "analysis": _aux_response().choices[0].message.content}
@@ -137,7 +137,7 @@ async def test_auxiliary_failure_is_masked_and_photo_flow_fails_closed(
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
 
     with caplog.at_level(logging.INFO):
-        result = await controller.handle_photo_bytes(ACTOR, b"private-image-id")
+        result = await controller.handle_photo_batch_bytes(ACTOR, [b"private-image-id"])
 
     assert result is not None and result.state == "vision_unavailable"
     assert "credential" not in result.screen.text.lower()
@@ -161,7 +161,7 @@ async def test_auxiliary_photo_result_stays_pending_without_generation_or_shoppi
     controller = _controller(db_path)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
 
-    review = await controller.handle_photo_bytes(ACTOR, b"synthetic-image")
+    review = await controller.handle_photo_batch_bytes(ACTOR, [b"synthetic-image"])
 
     assert review is not None and review.state == "review"
     confirmation = _find_callback(review, "Подтвердить")

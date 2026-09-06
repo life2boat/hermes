@@ -190,7 +190,7 @@ def parse_shopping_callback(data: object) -> ShoppingCallback | None:
         return None
     parts = data[len(SHOPPING_CALLBACK_PREFIX) :].split(":")
     action = parts[0] if parts else ""
-    if action in {"r", "a", "b", "cx"} and len(parts) == 1:
+    if action in {"r", "a", "b", "cx", "inv"} and len(parts) == 1:
         return ShoppingCallback(action)
     if (
         action == "p"
@@ -265,9 +265,25 @@ class HealBiteShoppingTelegramController:
         *,
         runtime_factory: ShoppingRuntimeFactory = build_shopping_runtime_service,
         now_factory: NowFactory | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self._runtime_factory = runtime_factory
         self._now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+        self._env = env
+
+    def _is_inventory_available(self, actor: int | None) -> bool:
+        if actor is None:
+            return False
+        try:
+            from gateway.healbite_feature_gates import (
+                evaluate_feature_gate,
+                load_feature_gate_config,
+            )
+            cfg = load_feature_gate_config("HEALBITE_INVENTORY_TEXT_UI", env=self._env)
+            decision = evaluate_feature_gate(cfg, actor)
+            return decision.ready
+        except Exception:
+            return False
 
     def _runtime_for_actor(
         self,
@@ -337,24 +353,31 @@ class HealBiteShoppingTelegramController:
             if notice:
                 lines.extend([escape(notice), ""])
             lines.append("Список на эту неделю пока не создан.")
+            empty_rows = [
+                (("Сформировать по меню", _generation_callback("gr", week_start, 0)),),
+            ]
+            if self._is_inventory_available(actor):
+                empty_rows.append((("🥕 Перейти в Продукты дома", _callback("inv")),))
+            empty_rows.extend([
+                (("Обновить", _callback("r")),),
+                (("Назад", _callback("b")),),
+            ])
             return ShoppingTelegramResult(
                 state="empty",
                 screen=ShoppingTelegramScreen(
                     "\n".join(lines),
-                    rows=(
-                        (("Сформировать по меню", _generation_callback("gr", week_start, 0)),),
-                        (("Обновить", _callback("r")),),
-                        (("Назад", _callback("b")),),
-                    ),
+                    rows=tuple(empty_rows),
                 ),
                 notice=notice,
             )
-        return self._render_view(view, page=page, notice=notice)
+        return self._render_view(view, actor=actor, runtime=runtime, page=page, notice=notice)
 
     def _render_view(
         self,
         view: ShoppingListView,
         *,
+        actor: int | None = None,
+        runtime: HealBiteShoppingRuntimeService | None = None,
         page: int,
         notice: str | None,
     ) -> ShoppingTelegramResult:
@@ -370,8 +393,28 @@ class HealBiteShoppingTelegramController:
         ]
         if notice:
             lines.extend([escape(notice), ""])
+        ing_count = None
         if not visible:
-            lines.append("Список пуст.")
+            source_menu_id = view.shopping_list.source_menu_id
+            if source_menu_id is None:
+                lines.append("Список пуст.")
+            else:
+                if actor is not None and runtime is not None:
+                    try:
+                        ing_count = runtime.get_source_menu_ingredient_count(actor, source_menu_id)
+                    except Exception:
+                        ing_count = None
+                if ing_count == 0:
+                    lines.extend([
+                        "Список покупок пока пуст.",
+                        "",
+                        "Чтобы Hermes автоматически рассчитал недостающие продукты, "
+                        "составьте меню через «🥕 Продукты дома».",
+                    ])
+                elif ing_count is not None and ing_count > 0:
+                    lines.append("Всё необходимое уже есть дома.")
+                else:
+                    lines.append("Список пуст.")
         rows: list[tuple[tuple[str, str], ...]] = []
         for index, item in enumerate(visible, start=start + 1):
             marker = "✅" if item.checked_state else "▫️"
@@ -414,7 +457,10 @@ class HealBiteShoppingTelegramController:
             if has_generated_items
             else "Сформировать по меню"
         )
-        rows.extend([
+        bottom_rows: list[tuple[tuple[str, str], ...]] = []
+        if not items and ing_count == 0 and self._is_inventory_available(actor):
+            bottom_rows.append((("🥕 Перейти в Продукты дома", _callback("inv")),))
+        bottom_rows.extend([
             ((
                 generation_label,
                 _generation_callback(
@@ -430,6 +476,7 @@ class HealBiteShoppingTelegramController:
             (("Очистить", _callback("cr", view.shopping_list.version)),),
             (("Назад", _callback("b")),),
         ])
+        rows.extend(bottom_rows)
         return ShoppingTelegramResult(
             state="home",
             screen=ShoppingTelegramScreen("\n".join(lines), rows=tuple(rows)),
@@ -519,6 +566,11 @@ class HealBiteShoppingTelegramController:
         if parsed.action == "b":
             return ShoppingTelegramResult(
                 state="back",
+                screen=ShoppingTelegramScreen("", parse_mode=None),
+            )
+        if parsed.action == "inv":
+            return ShoppingTelegramResult(
+                state="open_inventory",
                 screen=ShoppingTelegramScreen("", parse_mode=None),
             )
         if parsed.action == "cx":
@@ -685,6 +737,8 @@ class HealBiteShoppingTelegramController:
             return self._unavailable(error_class="internal_error")
         return self._render_view(
             generated,
+            actor=actor,
+            runtime=runtime,
             page=0,
             notice=SHOPPING_GENERATION_SUCCESS_REPLY,
         )
@@ -715,4 +769,5 @@ def build_shopping_telegram_controller(
     return HealBiteShoppingTelegramController(
         runtime_factory=runtime_factory,
         now_factory=now_factory,
+        env=env,
     )

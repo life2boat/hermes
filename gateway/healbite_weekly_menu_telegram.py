@@ -373,7 +373,7 @@ def parse_weekly_menu_callback(data: object) -> WeeklyMenuCallback | None:
         return None
     parts = data[len(WEEKLY_MENU_CALLBACK_PREFIX) :].split(":")
     action = parts[0] if parts else ""
-    if action in {"b", "r", "sh"} and len(parts) == 1:
+    if action in {"b", "r", "sh", "inv"} and len(parts) == 1:
         return WeeklyMenuCallback(action=action)
     if action == "g" and len(parts) == 2:
         week_start = _parse_week_token(parts[1])
@@ -431,6 +431,7 @@ def render_empty_weekly_menu(
     week_start: str,
     *,
     notice: str | None = None,
+    show_options: bool = True,
 ) -> str:
     lines = [
         "<b>📋 Меню на неделю</b>",
@@ -440,6 +441,15 @@ def render_empty_weekly_menu(
     if notice:
         lines.extend([f"<b>{escape(notice)}</b>", ""])
     lines.append("Меню на эту неделю пока не создано.")
+    if show_options:
+        lines.extend([
+            "",
+            "🥕 <b>Меню из продуктов дома</b>",
+            "Учитывает продукты дома и автоматически формирует список покупок.",
+            "",
+            "⚡ <b>Быстрое меню</b>",
+            "План блюд на неделю без автоматического расчёта покупок.",
+        ])
     return "\n".join(lines)
 
 
@@ -455,8 +465,10 @@ class HealBiteWeeklyMenuTelegramController:
         now_factory: Callable[[], datetime] | None = None,
         timezone_name: str = WEEKLY_MENU_DEFAULT_TIMEZONE,
         db_path: str | Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self._db_path = db_path
+        self._env = env
         self._runtime_factory = runtime_factory or (
             lambda: build_weekly_menu_runtime_service(db_path=self._db_path)
         )
@@ -552,6 +564,20 @@ class HealBiteWeeklyMenuTelegramController:
             error_class=error_class,
         )
 
+    def _is_inventory_available(self, actor: int | None) -> bool:
+        if actor is None:
+            return False
+        try:
+            from gateway.healbite_feature_gates import (
+                evaluate_feature_gate,
+                load_feature_gate_config,
+            )
+            cfg = load_feature_gate_config("HEALBITE_INVENTORY_TEXT_UI", env=self._env)
+            decision = evaluate_feature_gate(cfg, actor)
+            return decision.ready
+        except Exception:
+            return False
+
     def _week_start(self) -> str:
         return current_week_start(now=self._now_factory(), timezone_name=self._timezone_name)
 
@@ -584,15 +610,18 @@ class HealBiteWeeklyMenuTelegramController:
 
         if published_view is not None:
             text = render_published_weekly_menu(published_view, notice=notice)
-            rows = (
-                (("🔄 Создать заново", _callback("g", _week_token(week_start))),),
-                (("🛒 Список покупок", _callback("sh")),),
-                (("⬅️ Назад", _callback("b")),),
-            )
+            pub_rows: list[tuple[tuple[str, str], ...]] = []
+            if self._is_inventory_available(actor):
+                pub_rows.append((("🥕 Меню из продуктов дома", _callback("inv")),))
+                pub_rows.append((("⚡ Создать заново", _callback("g", _week_token(week_start))),))
+            else:
+                pub_rows.append((("🔄 Создать заново", _callback("g", _week_token(week_start))),))
+            pub_rows.append((("🛒 Список покупок", _callback("sh")),))
+            pub_rows.append((("⬅️ Назад", _callback("b")),))
             return WeeklyMenuTelegramResult(
                 state="published",
                 screen=WeeklyMenuTelegramScreen(
-                    text, rows=rows, parse_mode=WEEKLY_MENU_PARSE_MODE
+                    text, rows=tuple(pub_rows), parse_mode=WEEKLY_MENU_PARSE_MODE
                 ),
                 notice=notice,
                 entry_count=len(published_view.entries),
@@ -610,7 +639,7 @@ class HealBiteWeeklyMenuTelegramController:
                     draft_view = None
                 if draft_view is not None:
                     text = render_draft_weekly_menu(draft_view, notice=notice)
-                    rows = (
+                    draft_rows: list[tuple[tuple[str, str], ...]] = [
                         ((
                             "✅ Одобрить и сохранить",
                             _callback(
@@ -620,23 +649,32 @@ class HealBiteWeeklyMenuTelegramController:
                                 draft.version,
                             ),
                         ),),
-                        (("🔄 Пересоздать", _callback("g", _week_token(week_start))),),
-                        (("⬅️ Назад", _callback("b")),),
-                    )
+                    ]
+                    if self._is_inventory_available(actor):
+                        draft_rows.append((("🥕 Меню из продуктов дома", _callback("inv")),))
+                        draft_rows.append((("⚡ Пересоздать", _callback("g", _week_token(week_start))),))
+                    else:
+                        draft_rows.append((("🔄 Пересоздать", _callback("g", _week_token(week_start))),))
+                    draft_rows.append((("⬅️ Назад", _callback("b")),))
                     return WeeklyMenuTelegramResult(
                         state="draft",
                         screen=WeeklyMenuTelegramScreen(
-                            text, rows=rows, parse_mode=WEEKLY_MENU_PARSE_MODE
+                            text, rows=tuple(draft_rows), parse_mode=WEEKLY_MENU_PARSE_MODE
                         ),
                         notice=notice,
                         entry_count=len(draft_view.entries),
                     )
 
-        text = render_empty_weekly_menu(week_start, notice=notice)
-        rows = (
-            (("✨ Создать меню", _callback("g", _week_token(week_start))),),
-            (("⬅️ Назад", _callback("b")),),
-        )
+        inv_available = self._is_inventory_available(actor)
+        text = render_empty_weekly_menu(week_start, notice=notice, show_options=inv_available)
+        empty_rows: list[tuple[tuple[str, str], ...]] = []
+        if inv_available:
+            empty_rows.append((("🥕 Меню из продуктов дома", _callback("inv")),))
+            empty_rows.append((("⚡ Быстрое меню", _callback("g", _week_token(week_start))),))
+        else:
+            empty_rows.append((("✨ Создать меню", _callback("g", _week_token(week_start))),))
+        empty_rows.append((("⬅️ Назад", _callback("b")),))
+        rows = tuple(empty_rows)
         return WeeklyMenuTelegramResult(
             state="empty",
             screen=WeeklyMenuTelegramScreen(
@@ -677,6 +715,11 @@ class HealBiteWeeklyMenuTelegramController:
         if parsed.action == "sh":
             return WeeklyMenuTelegramResult(
                 state="open_shopping",
+                screen=WeeklyMenuTelegramScreen("", parse_mode=None),
+            )
+        if parsed.action == "inv":
+            return WeeklyMenuTelegramResult(
+                state="open_inventory",
                 screen=WeeklyMenuTelegramScreen("", parse_mode=None),
             )
         week_start = parsed.week_start or self._week_start()
@@ -790,7 +833,12 @@ def build_weekly_menu_telegram_controller(
     db_path: str | Path | None = None,
     now_factory: Callable[[], datetime] | None = None,
     timezone_name: str = WEEKLY_MENU_DEFAULT_TIMEZONE,
+    env: dict[str, str] | None = None,
 ) -> HealBiteWeeklyMenuTelegramController:
+    if runtime_factory is None:
+        runtime_factory = lambda: build_weekly_menu_runtime_service(
+            env=env, db_path=db_path
+        )
     return HealBiteWeeklyMenuTelegramController(
         runtime_factory=runtime_factory,
         mutation_factory=mutation_factory,
@@ -800,4 +848,5 @@ def build_weekly_menu_telegram_controller(
         db_path=db_path,
         now_factory=now_factory,
         timezone_name=timezone_name,
+        env=env,
     )

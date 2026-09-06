@@ -1027,6 +1027,27 @@ class HealBiteShoppingStore:
                 return None
             return self._build_list_view(conn, self._row_to_list(rows[0]))
 
+    def get_source_menu_ingredient_count(
+        self,
+        context: HouseholdContext | HouseholdAuthorizationContext,
+        source_menu_id: str,
+    ) -> int:
+        auth = self._authorize(context, household_id=None, operation="read")
+        self._require_canonical_schema()
+        if not _is_valid_uuid(source_menu_id):
+            return 0
+        with self._read_only_connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(i.id)
+                FROM {WEEKLY_MENU_INGREDIENTS_TABLE} i
+                JOIN {WEEKLY_MENU_ENTRIES_TABLE} e ON e.id = i.menu_entry_id
+                WHERE e.menu_id = ? AND e.household_id = ?
+                """,
+                (source_menu_id, auth.household_id),
+            ).fetchone()
+            return 0 if row is None else int(row[0])
+
     def list_shopping_items(
         self,
         context: HouseholdContext | HouseholdAuthorizationContext,

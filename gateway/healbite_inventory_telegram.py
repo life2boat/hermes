@@ -1187,6 +1187,13 @@ class HealBiteInventoryTelegramController:
                 INVENTORY_TEXT_PROMPT,
                 error_class="vision_unavailable",
             )
+        if len(images) > 5:
+            self._pending[actor] = _PendingInput("text")
+            return self._result(
+                "vision_unavailable",
+                INVENTORY_TEXT_PROMPT,
+                error_class="vision_unavailable",
+            )
         paths: list[Path] = []
         try:
             for image_bytes in images:

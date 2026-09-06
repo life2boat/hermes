@@ -116,7 +116,7 @@ def _complete_entries(
     index = 0
     for offset in range(7):
         local_date = (start + timedelta(days=offset)).isoformat()
-        for position, slot in enumerate(slots, start=1):
+        for slot in slots:
             ingredients = (
                 WeeklyMenuIngredientInput(
                     display_name="Вода",
@@ -131,7 +131,7 @@ def _complete_entries(
                 WeeklyMenuEntryInput(
                     local_date=local_date,
                     meal_slot=slot,
-                    position=position,
+                    position=1,
                     title=f"Блюдо {index + 1}",
                     servings="1",
                     origin=WeeklyMenuEntryOrigin.GENERATED,

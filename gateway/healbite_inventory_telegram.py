@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 from gateway.healbite_feature_gates import (
     FeatureGateConfig,
@@ -220,7 +220,7 @@ class _InventoryCallback:
     approval_token: str | None = None
 
 
-VisionAnalyzeFn = Callable[[str, str], Awaitable[object]]
+VisionAnalyzeFn = Callable[[Sequence[str], str], Awaitable[object]]
 
 
 def _positive_actor(value: object) -> int | None:
@@ -326,24 +326,25 @@ class HealBiteInventoryTelegramController:
         self._generation_attempts: dict[tuple[int, str, str], int] = {}
         self._generation_attempts_lock = threading.Lock()
 
-    async def _default_vision_analyze(self, image_path: str, prompt: str) -> object:
+    async def _default_vision_analyze(self, image_paths: Sequence[str], prompt: str) -> object:
         from agent.auxiliary_client import (
             VISION_SINGLE_REQUEST_LLM_CALL_POLICY,
             async_call_llm,
         )
 
-        image_data_url = "data:image/jpeg;base64," + base64.b64encode(
-            Path(image_path).read_bytes()
-        ).decode("ascii")
+        content_list: list[dict[str, object]] = [{"type": "text", "text": prompt}]
+        for path in image_paths:
+            image_data_url = "data:image/jpeg;base64," + base64.b64encode(
+                Path(path).read_bytes()
+            ).decode("ascii")
+            content_list.append({"type": "image_url", "image_url": {"url": image_data_url}})
+
         response = await async_call_llm(
             task="vision",
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
+                    "content": content_list,
                 }
             ],
             temperature=0,
@@ -1166,8 +1167,8 @@ class HealBiteInventoryTelegramController:
         )
         return review
 
-    async def handle_photo_bytes(
-        self, actor_user_id: object, image_bytes: bytes
+    async def handle_photo_batch_bytes(
+        self, actor_user_id: object, images: Sequence[bytes]
     ) -> InventoryTelegramResult | None:
         actor = _positive_actor(actor_user_id)
         pending = None if actor is None else self._pending.get(actor)
@@ -1179,23 +1180,24 @@ class HealBiteInventoryTelegramController:
             return self._result(
                 "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
             )
-        if not image_bytes:
+        if not images or not all(images):
             self._pending[actor] = _PendingInput("text")
             return self._result(
                 "vision_unavailable",
                 INVENTORY_TEXT_PROMPT,
                 error_class="vision_unavailable",
             )
-        path: Path | None = None
+        paths: list[Path] = []
         try:
-            with tempfile.NamedTemporaryFile(
-                prefix="healbite-inventory-", suffix=".jpg", delete=False
-            ) as handle:
-                handle.write(bytes(image_bytes))
-                path = Path(handle.name)
+            for image_bytes in images:
+                with tempfile.NamedTemporaryFile(
+                    prefix="healbite-inventory-", suffix=".jpg", delete=False
+                ) as handle:
+                    handle.write(bytes(image_bytes))
+                    paths.append(Path(handle.name))
             raw = await self._vision_analyze_fn(
-                str(path),
-                "Return only JSON with an items list. Each item has name, quantity_value, unit, uncertain. Identify only visible food products.",
+                [str(p) for p in paths],
+                "Return only JSON with an items list. Each item has name, quantity_value, unit, confidence (float 0.0-1.0). Identify only visible food products.",
             )
             candidates = self._photo_candidates(raw)
             if not self._gate("photo", actor).ready:
@@ -1212,9 +1214,10 @@ class HealBiteInventoryTelegramController:
                 error_class="vision_unavailable",
             )
         finally:
-            if path is not None:
+            import os
+            for p in paths:
                 try:
-                    os.unlink(path)
+                    os.unlink(p)
                 except OSError:
                     pass
         self._pending.pop(actor, None)
@@ -1233,34 +1236,57 @@ class HealBiteInventoryTelegramController:
             or not isinstance(payload["items"], list)
         ):
             raise ValueError("invalid candidate shape")
+            
         items = []
+        seen = {}
         for candidate in payload["items"]:
-            if not isinstance(candidate, dict) or set(candidate) - {
-                "name",
-                "quantity_value",
-                "unit",
-                "uncertain",
-            }:
+            if not isinstance(candidate, dict):
                 raise ValueError("invalid candidate")
+            allowed_keys = {"name", "quantity_value", "unit", "confidence"}
+            if set(candidate) - allowed_keys:
+                raise ValueError("invalid candidate fields")
             if (
                 not isinstance(candidate.get("name"), str)
                 or not candidate["name"].strip()
             ):
-                raise ValueError("invalid candidate")
-            items.append(
-                InventoryItemInput(
-                    display_name=candidate["name"],
-                    quantity_value=None
-                    if candidate.get("quantity_value") is None
-                    else str(candidate["quantity_value"]),
-                    unit="unknown"
-                    if candidate.get("unit") is None
-                    else str(candidate["unit"]),
-                    uncertainty="needs_confirmation"
-                    if candidate.get("uncertain") is True
-                    else None,
+                raise ValueError("invalid candidate name")
+                
+            conf_val = candidate.get("confidence")
+            is_uncertain = True
+            if isinstance(conf_val, (float, int)):
+                if float(conf_val) >= 0.80:
+                    is_uncertain = False
+            
+            item_name = candidate["name"]
+            item_q = None if candidate.get("quantity_value") is None else str(candidate["quantity_value"])
+            item_u = "unknown" if candidate.get("unit") is None else str(candidate["unit"])
+            
+            from gateway.healbite_inventory import _normalize_item_input
+            normalized = _normalize_item_input(InventoryItemInput(display_name=item_name, quantity_value=item_q, unit=item_u))
+            
+            key = (str(normalized["normalized_name"]), str(normalized["unit"]))
+            if key in seen:
+                # Mark uncertain, keep the first one but update uncertainty
+                idx = seen[key]
+                items[idx] = InventoryItemInput(
+                    display_name=items[idx].display_name,
+                    quantity_value=items[idx].quantity_value,
+                    unit=items[idx].unit,
+                    confidence=items[idx].confidence,
+                    uncertainty="needs_confirmation",
                 )
-            )
+            else:
+                seen[key] = len(items)
+                items.append(
+                    InventoryItemInput(
+                        display_name=item_name,
+                        quantity_value=item_q,
+                        unit=item_u,
+                        confidence=str(conf_val) if conf_val is not None else None,
+                        uncertainty="needs_confirmation" if is_uncertain else None,
+                    )
+                )
+                
             if len(items) > INVENTORY_MAX_ITEMS:
                 raise ValueError("candidate item limit exceeded")
         if not items:

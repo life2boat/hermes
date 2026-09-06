@@ -562,6 +562,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_photo_batch_tasks: Dict[str, asyncio.Task] = {}
         self._media_group_events: Dict[str, MessageEvent] = {}
         self._media_group_tasks: Dict[str, asyncio.Task] = {}
+        self._healbite_inventory_photo_batches: dict = {}
+        self._healbite_inventory_photo_tasks: dict = {}
         # Buffer rapid text messages so Telegram client-side splits of long
         # messages are aggregated into a single MessageEvent.  Lower defaults
         # (0.3s / 1.0s instead of 0.6s / 2.0s) let short replies stream
@@ -7515,20 +7517,62 @@ class TelegramAdapter(BasePlatformAdapter):
                 image_bytes = bytes(await file_obj.download_as_bytearray())
         except Exception:
             image_bytes = b""
-        result = await self._inventory_telegram.handle_photo_bytes(
-            actor_user_id,
-            image_bytes,
+
+        media_group_id = getattr(msg, "media_group_id", None)
+        chat_id = getattr(getattr(msg, "chat", None), "id", None)
+        batch_key = f"{actor_user_id}:{chat_id}:{media_group_id}" if media_group_id else f"{actor_user_id}:{chat_id}:single:{msg.message_id}"
+        
+        if batch_key not in self._healbite_inventory_photo_batches:
+            self._healbite_inventory_photo_batches[batch_key] = []
+            
+        msg_id = getattr(msg, "message_id", None)
+        for existing_msg, _ in self._healbite_inventory_photo_batches[batch_key]:
+            if getattr(existing_msg, "message_id", None) == msg_id:
+                return True
+                
+        self._healbite_inventory_photo_batches[batch_key].append((msg, image_bytes))
+        
+        task = self._healbite_inventory_photo_tasks.get(batch_key)
+        if task and not task.done():
+            task.cancel()
+            
+        self._healbite_inventory_photo_tasks[batch_key] = asyncio.create_task(
+            self._flush_healbite_inventory_photo(batch_key, actor_user_id)
         )
-        if result is None:
-            return False
-        self._log_healbite_route_selected(
-            msg=msg,
-            route="inventory_input",
-            action="photo",
-            result=result.state,
-        )
-        await self._send_healbite_inventory_result(msg, result)
         return True
+
+    async def _flush_healbite_inventory_photo(self, batch_key: str, actor_user_id: int) -> None:
+        try:
+            await asyncio.sleep(1.75)
+            batch = self._healbite_inventory_photo_batches.pop(batch_key, [])
+            if not batch:
+                return
+            
+            if len(batch) > 5:
+                batch = batch[:5]
+                notice_msg = batch[0][0]
+                await self._send_message_with_thread_fallback(
+                    chat_id=str(getattr(getattr(notice_msg, "chat", None), "id", "")),
+                    text="За один раз можно обработать до 5 фото.\nПервые 5 отправлены на проверку.\nОстальные фото отправьте отдельной группой.",
+                    message_thread_id=getattr(notice_msg, "message_thread_id", None),
+                )
+                
+            msgs, images = zip(*batch)
+            result = await self._inventory_telegram.handle_photo_batch_bytes(
+                actor_user_id,
+                images,
+            )
+            if result is None:
+                return
+            self._log_healbite_route_selected(
+                msg=msgs[-1],
+                route="inventory_input",
+                action="photo",
+                result=result.state,
+            )
+            await self._send_healbite_inventory_result(msgs[-1], result)
+        except asyncio.CancelledError:
+            pass
 
     @staticmethod
     def _healbite_inventory_source_message(query: Any) -> Optional[Message]:

@@ -557,10 +557,11 @@ async def test_photo_candidate_is_one_shot_pending_and_temp_file_is_removed(
     seen_paths: list[Path] = []
     calls = 0
 
-    async def vision(image_path: str, prompt: str):
+    async def vision(image_paths: Sequence[str], prompt: str):
         nonlocal calls
         calls += 1
-        path = Path(image_path)
+        assert len(image_paths) > 0
+        path = Path(image_paths[0])
         assert path.is_file()
         assert "items" in prompt
         seen_paths.append(path)
@@ -572,7 +573,7 @@ async def test_photo_candidate_is_one_shot_pending_and_temp_file_is_removed(
                         "name": "молоко",
                         "quantity_value": "1",
                         "unit": "l",
-                        "uncertain": True,
+                        "confidence": 0.5,
                     }
                 ]
             }),
@@ -582,7 +583,7 @@ async def test_photo_candidate_is_one_shot_pending_and_temp_file_is_removed(
     home = controller.home(ACTOR)
     controller.handle_callback(ACTOR, _find_callback(home, "фотографию"))
 
-    review = await controller.handle_photo_bytes(ACTOR, b"synthetic-image")
+    review = await controller.handle_photo_batch_bytes(ACTOR, [b"synthetic-image"])
 
     assert review is not None and review.state == "review"
     assert review.item_count == 1
@@ -606,7 +607,7 @@ async def test_photo_mode_rejects_text_and_revalidates_gate_before_snapshot(
     _seed_household(db_path)
     calls = 0
 
-    async def vision(_image_path: str, _prompt: str):
+    async def vision(_image_paths: Sequence[str], _prompt: str):
         nonlocal calls
         calls += 1
         controller._photo_config = _gate(ACTOR, enabled=False)
@@ -618,7 +619,7 @@ async def test_photo_mode_rejects_text_and_revalidates_gate_before_snapshot(
                         "name": "молоко",
                         "quantity_value": "1",
                         "unit": "l",
-                        "uncertain": False,
+                        "confidence": 0.9,
                     }
                 ]
             }),
@@ -631,7 +632,7 @@ async def test_photo_mode_rejects_text_and_revalidates_gate_before_snapshot(
     )
 
     text_result = controller.handle_text(ACTOR, "не изображение")
-    photo_result = await controller.handle_photo_bytes(ACTOR, b"synthetic-image")
+    photo_result = await controller.handle_photo_batch_bytes(ACTOR, [b"synthetic-image"])
 
     assert text_result is not None and text_result.state == "awaiting_photo"
     assert photo_result is not None and photo_result.state == "disabled"
@@ -652,7 +653,7 @@ async def test_vision_failure_switches_to_safe_text_fallback_without_retry(tmp_p
     _seed_household(db_path)
     calls = 0
 
-    async def unavailable(_image_path: str, _prompt: str):
+    async def unavailable(_image_paths: Sequence[str], _prompt: str):
         nonlocal calls
         calls += 1
         raise RuntimeError("synthetic provider failure")
@@ -661,7 +662,7 @@ async def test_vision_failure_switches_to_safe_text_fallback_without_retry(tmp_p
     home = controller.home(ACTOR)
     controller.handle_callback(ACTOR, _find_callback(home, "фотографию"))
 
-    failed = await controller.handle_photo_bytes(ACTOR, b"synthetic-image")
+    failed = await controller.handle_photo_batch_bytes(ACTOR, [b"synthetic-image"])
     recovered = controller.handle_text(ACTOR, "рис 1 кг")
 
     assert failed is not None and failed.state == "vision_unavailable"
@@ -847,7 +848,7 @@ async def test_pending_photo_uses_memory_download_without_general_cache_or_logs(
                         "name": "PRIVATE_VISIBLE_PRODUCT",
                         "quantity_value": None,
                         "unit": None,
-                        "uncertain": False,
+                        "confidence": 0.9,
                     }
                 ]
             }),
@@ -875,6 +876,9 @@ async def test_pending_photo_uses_memory_download_without_general_cache_or_logs(
 
     with caplog.at_level(logging.INFO):
         await adapter._handle_media_message(update, SimpleNamespace())
+        tasks = list(adapter._healbite_inventory_photo_tasks.values())
+        if tasks:
+            await tasks[0]
 
     assert vision.await_count == 1
     adapter._cache_photo_message_to_event.assert_not_awaited()

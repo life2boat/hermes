@@ -62,8 +62,13 @@ from gateway.healbite_weekly_menu_generation_types import (
     WeeklyMenuInventoryItem,
     WeeklyMenuMemberGenerationSnapshot,
 )
+from gateway.healbite_weekly_menu_draft import (
+    WEEKLY_DRAFT_MEAL_SLOTS,
+    WeeklyMenuDraftValidationError,
+    parse_weekly_menu_ingredients,
+    validate_weekly_menu_draft,
+)
 from gateway.healbite_weekly_menu_schema import (
-    MEAL_SLOT_ORDER,
     WeeklyMenuEntryOrigin,
     WeeklyMenuSchemaState,
     normalize_week_start,
@@ -90,6 +95,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_GENERATION_ENTRIES = 56
 _MAX_DIETARY_NOTES = 8
+MAX_WEEKLY_MENU_CONTRACT_ATTEMPTS = 2
 
 
 class WeeklyMenuGeneratorUnavailableError(RuntimeError):
@@ -315,7 +321,7 @@ class CanonicalWeeklyMenuMemberSnapshotProvider:
         return WeeklyMenuGenerationRequest(
             week_start=canonical_week_start,
             dates=tuple(week_dates(canonical_week_start)),
-            allowed_meal_slots=tuple(MEAL_SLOT_ORDER),
+            allowed_meal_slots=WEEKLY_DRAFT_MEAL_SLOTS,
             locale=str(locale or "ru-RU").strip() or "ru-RU",
             member_count=len(member_snapshots),
             members=tuple(member_snapshots),
@@ -473,8 +479,13 @@ class AuxiliaryWeeklyMenuGenerator:
                 "content": (
                     "Составь недельный план питания и верни только JSON-объект вида "
                     "{\"entries\":[...]}. Не добавляй комментарии, markdown или текст вне JSON. "
-                    "Каждая запись должна содержать local_date, meal_slot, position, title и опционально "
-                    "description, servings. Используй русский язык. Не придумывай поля вне схемы."
+                    "Верни ровно 21 запись: на каждую из семи dates по breakfast, lunch, dinner, position=1. "
+                    "Каждая запись должна содержать local_date, meal_slot, position, title, servings "
+                    "(положительное число порций) и непустой ingredients (1..32 объекта). "
+                    "Каждый ingredient содержит ровно name (непустая строка до 200 символов), "
+                    "quantity_value (конечное положительное число), unit (g, kg, ml, l, piece, package, unitless). "
+                    "Количество ингредиентов указано на servings порций. description опционально. "
+                    "Соблюдай dietary restrictions. Используй русский язык. Не придумывай поля вне схемы."
                 ),
             },
             {
@@ -518,6 +529,7 @@ class AuxiliaryWeeklyMenuGenerator:
                     if request.inventory_only
                     else _parse_generation_response(parsed, request=request)
                 )
+                validate_weekly_menu_draft(result, week_start=request.week_start)
             except InventoryMenuContractError as exc:
                 outcome = "schema_validation_failure"
                 safe_reason = _normalize_inventory_schema_failure(exc)
@@ -526,6 +538,10 @@ class AuxiliaryWeeklyMenuGenerator:
                 outcome = "schema_validation_failure"
                 safe_reason = "INVALID_RESPONSE_SCHEMA"
                 raise
+            except WeeklyMenuDraftValidationError as exc:
+                outcome = "schema_validation_failure"
+                safe_reason = "INVALID_RESPONSE_SCHEMA"
+                raise WeeklyMenuGeneratorValidationError("weekly draft contract failed") from exc
             outcome = "success"
             safe_reason = "NONE"
             return result
@@ -570,8 +586,8 @@ def _parse_generation_response(
     for entry in entries_raw:
         if not isinstance(entry, dict):
             raise WeeklyMenuGeneratorValidationError("weekly menu generation entry must be an object")
-        unknown_fields = set(entry.keys()) - {"local_date", "meal_slot", "position", "title", "description", "servings"}
-        missing_fields = {"local_date", "meal_slot", "position", "title"} - set(entry.keys())
+        unknown_fields = set(entry.keys()) - {"local_date", "meal_slot", "position", "title", "description", "servings", "ingredients"}
+        missing_fields = {"local_date", "meal_slot", "position", "title", "servings", "ingredients"} - set(entry.keys())
         if unknown_fields or missing_fields:
             raise WeeklyMenuGeneratorValidationError("weekly menu generation entry shape is invalid")
         local_date = str(entry["local_date"]).strip()
@@ -603,6 +619,10 @@ def _parse_generation_response(
         if dedupe_key in seen_positions:
             raise WeeklyMenuGeneratorValidationError("weekly menu generation entry positions must be unique")
         seen_positions.add(dedupe_key)
+        try:
+            ingredients = parse_weekly_menu_ingredients(entry["ingredients"])
+        except WeeklyMenuDraftValidationError as exc:
+            raise WeeklyMenuGeneratorValidationError("invalid weekly meal ingredients") from exc
         normalized.append(
             WeeklyMenuGeneratedEntry(
                 local_date=local_date,
@@ -611,6 +631,7 @@ def _parse_generation_response(
                 title=title,
                 description=description,
                 servings=servings,
+                ingredients=ingredients,
             )
         )
     return WeeklyMenuGenerationResponse(entries=tuple(normalized))
@@ -850,6 +871,8 @@ class HealBiteWeeklyMenuGenerationService:
         inventory_snapshot_id: str | None = None,
     ) -> WeeklyMenuGenerationResult:
         try:
+            if max_entries != 21:
+                return WeeklyMenuGenerationResult(status=WeeklyMenuGenerationStatus.VALIDATION_FAILED)
             context = self._resolve_owner_context(actor_user_id)
             request = self._member_snapshot_provider.build_request(
                 context,
@@ -905,7 +928,16 @@ class HealBiteWeeklyMenuGenerationService:
                     status=WeeklyMenuGenerationStatus.SUCCESS,
                     revision_view=replay,
                 )
-            generated = self._generator.generate(request)
+            # Retry only invalid provider contracts, before any storage mutation.
+            # Each auxiliary attempt retains its one-request/no-fallback policy.
+            for attempt in range(MAX_WEEKLY_MENU_CONTRACT_ATTEMPTS):
+                try:
+                    generated = self._generator.generate(request)
+                    validate_weekly_menu_draft(generated, week_start=request.week_start)
+                    break
+                except (WeeklyMenuGeneratorValidationError, WeeklyMenuDraftValidationError) as exc:
+                    if attempt + 1 == MAX_WEEKLY_MENU_CONTRACT_ATTEMPTS:
+                        raise WeeklyMenuGeneratorValidationError("weekly draft contract exhausted") from exc
             missing_ingredients = None
             if inventory is not None:
                 missing_ingredients = calculate_missing_ingredients(

@@ -1,5 +1,15 @@
 # CURRENT_STATE changelog
 
+## 2026-09-06 — V1 weekly draft contract candidate
+
+Fast Menu no longer excludes ingredient output. Common 21-meal validation
+guards generated drafts, publication and success replay. Contract-only retries
+are bounded to two attempts; storage failures are not retried. Existing
+inventory parsing and Shopping derivation remain in use. Historical partial
+fixtures model read compatibility, not permission to publish invalid menus.
+Repository-only candidate; no migration, production, provider call or Qdrant
+operation performed. See `design/healbite-weekly-draft-contract.md`.
+
 ## 1.2.65 - 2026-08-18 (PR-4.1 integrity closure candidate)
 Corrected:
 - PR #199 provided the deterministic graph read-path foundation at head

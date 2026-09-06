@@ -21,6 +21,10 @@ from gateway.healbite_households import (
     HouseholdStatus,
 )
 from gateway.healbite_nutrition_diary import resolve_healbite_db_path
+from gateway.healbite_weekly_menu_draft import WeeklyMenuDraftValidationError, validate_weekly_menu_draft
+from gateway.healbite_weekly_menu_generation_types import (
+    WeeklyMenuGeneratedEntry, WeeklyMenuGenerationResponse, WeeklyMenuIngredient,
+)
 from gateway.healbite_weekly_menu_schema import (
     MEAL_SLOT_ORDER,
     WEEKLY_MENU_ENTRIES_TABLE,
@@ -938,6 +942,7 @@ class HealBiteWeeklyMenuStore:
                     payload_hash=payload_hash,
                 )
                 if existing_idempotent is not None:
+                    self._validate_revision_draft(conn, existing_idempotent)
                     conn.commit()
                     return self._build_revision_view(conn, existing_idempotent)
                 if revision.status is not WeeklyMenuRevisionStatus.DRAFT:
@@ -946,8 +951,7 @@ class HealBiteWeeklyMenuStore:
                     raise WeeklyMenuConflictError("weekly menu revision version mismatch")
                 if series.version != expected_series_version:
                     raise WeeklyMenuConflictError("weekly menu series version mismatch")
-                if not self._list_entries_for_revision(conn, revision.id):
-                    raise WeeklyMenuValidationError("cannot publish an empty weekly menu")
+                self._validate_revision_draft(conn, revision)
                 now = _sqlite_timestamp()
                 current_published = self._get_revision_by_status(conn, series.id, WeeklyMenuRevisionStatus.PUBLISHED)
                 if current_published is not None and current_published.id != revision.id:
@@ -1110,6 +1114,7 @@ class HealBiteWeeklyMenuStore:
             )
             if revision is None:
                 return None
+            self._validate_revision_draft(conn, revision)
             return self._build_revision_view(conn, revision)
 
     def apply_generated_draft_entries(
@@ -1131,6 +1136,7 @@ class HealBiteWeeklyMenuStore:
         validated_entries = self._validate_entry_inputs(entries)
         if any(_coerce_origin(entry.origin) is not WeeklyMenuEntryOrigin.GENERATED for entry in validated_entries):
             raise WeeklyMenuValidationError("generated weekly menu entries must use generated origin")
+        self._validate_complete_draft(validated_entries, week_start=canonical_week_start)
         normalized_expected_series_version = (
             None
             if expected_series_version is None
@@ -1157,6 +1163,7 @@ class HealBiteWeeklyMenuStore:
                         payload_hash=str(payload_hash),
                     )
                     if existing_idempotent is not None:
+                        self._validate_revision_draft(conn, existing_idempotent)
                         conn.commit()
                         return self._build_revision_view(conn, existing_idempotent)
                     series = self._get_series_by_household_week(conn, auth.household_id, canonical_week_start)
@@ -1340,6 +1347,32 @@ class HealBiteWeeklyMenuStore:
         if len(canonical) > 32:
             raise WeeklyMenuValidationError(f"invalid {label}")
         return canonical
+
+    @staticmethod
+    def _validate_complete_draft(entries: Sequence[WeeklyMenuEntryInput], *, week_start: str) -> None:
+        response = WeeklyMenuGenerationResponse(tuple(
+            WeeklyMenuGeneratedEntry(
+                local_date=entry.local_date, meal_slot=_coerce_meal_slot(entry.meal_slot).value,
+                position=entry.position, title=entry.title, servings=entry.servings,
+                ingredients=tuple(WeeklyMenuIngredient(i.display_name, i.quantity_value, i.quantity_unit)
+                                  for i in entry.ingredients),
+            ) for entry in entries
+        ))
+        try:
+            validate_weekly_menu_draft(response, week_start=week_start)
+        except WeeklyMenuDraftValidationError as exc:
+            raise WeeklyMenuValidationError("weekly draft contract failed") from exc
+
+    def _validate_revision_draft(self, conn: sqlite3.Connection, revision: WeeklyMenuRevision) -> None:
+        series = self._get_series_by_id(conn, revision.series_id)
+        if series is None:
+            raise WeeklyMenuStateError("weekly menu series missing")
+        inputs = [WeeklyMenuEntryInput(
+            local_date=e.local_date, meal_slot=e.meal_slot, position=e.position,
+            title=e.title, servings=e.servings,
+            ingredients=self._list_ingredient_inputs_for_entry(conn, e.id),
+        ) for e in self._list_entries_for_revision(conn, revision.id)]
+        self._validate_complete_draft(self._validate_entry_inputs(inputs), week_start=series.week_start)
 
     def _normalize_ingredients(
         self,

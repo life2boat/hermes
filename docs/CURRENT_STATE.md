@@ -13,6 +13,18 @@ Hermes / HealBite project state. Chat transcripts, PDFs, pasted reports and
 external notes are archive/evidence only unless this file has been updated in
 Git.
 
+## V1 weekly menu draft contract — repository candidate
+
+Based on `f0cb471a6102be21c5e101d2885a40bb727e6585`, Fast Menu now requests and
+preserves ingredients. A shared 21-meal/nonempty-ingredient contract guards
+generation, publication and success replays; invalid provider contracts allow
+at most two internal attempts, with no storage retry or quota machinery.
+Inventory entrypoint and ingredient schema are unchanged. Historical incomplete
+menus remain readable, not newly publishable. See
+[`design/healbite-weekly-draft-contract.md`](design/healbite-weekly-draft-contract.md).
+This is a repository candidate for Draft PR review, not production activation.
+No production, SQLite migration, Qdrant, allowlist, pricing or PR14 changes.
+
 ## Memory fact UUID / epoch safety V2 — repository candidate
 
 Based on `676de3e5ccb8782e365af649021ee634785266d4`: additive

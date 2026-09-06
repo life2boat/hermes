@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import sqlite3
 from dataclasses import dataclass
@@ -108,7 +109,7 @@ def _publish_menu_revision(db_path: Path):
         expected_revision_version=draft.revision.version,
         idempotency_key="menu-replace-1",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,

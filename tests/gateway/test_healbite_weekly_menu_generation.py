@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import json
 import sqlite3
@@ -21,6 +22,7 @@ from gateway.healbite_weekly_menu_generation import (
     _parse_generation_response,
 )
 from gateway.healbite_weekly_menu_generation_types import (
+    WeeklyMenuIngredient,
     WeeklyMenuGenerationRequest,
     WeeklyMenuMemberGenerationSnapshot,
 )
@@ -138,24 +140,7 @@ class _InvalidGenerator:
 
 
 def _sample_response(title: str = "Меню") -> WeeklyMenuGenerationResponse:
-    return WeeklyMenuGenerationResponse(
-        entries=(
-            WeeklyMenuGeneratedEntry(
-                local_date="2026-07-06",
-                meal_slot="breakfast",
-                position=1,
-                title=title,
-                servings="2",
-            ),
-            WeeklyMenuGeneratedEntry(
-                local_date="2026-07-07",
-                meal_slot="dinner",
-                position=1,
-                title=f"{title} 2",
-                description="Описание",
-            ),
-        )
-    )
+    return _full_week_response(title)
 
 
 def _service(db_path: Path, *, actor_ids: frozenset[int], generator) -> HealBiteWeeklyMenuGenerationService:
@@ -204,7 +189,8 @@ def test_valid_generation_replaces_existing_draft(tmp_path):
     assert result.success is True
     assert result.revision_view is not None
     assert result.revision_view.revision.id == draft.revision.id
-    assert [entry.title for entry in result.revision_view.entries] == ["Замена", "Замена 2"]
+    assert len(result.revision_view.entries) == 21
+    assert all(entry.title.startswith("Замена") for entry in result.revision_view.entries)
 
 
 def test_generation_leaves_existing_published_revision_unchanged(tmp_path):
@@ -221,7 +207,7 @@ def test_generation_leaves_existing_published_revision_unchanged(tmp_path):
         expected_revision_version=draft.revision.version,
         idempotency_key="replace-1",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,
@@ -442,6 +428,8 @@ def _full_week_response(title: str = "?????? ????") -> WeeklyMenuGenerationRespo
                 position=1,
                 title=f"{title} {local_date} {meal_slot}",
                 description="????????",
+                servings="2",
+                ingredients=(WeeklyMenuIngredient("Rice", "100", "g"),),
             )
             for local_date in dates
             for meal_slot in slots
@@ -481,22 +469,23 @@ def test_auxiliary_weekly_generator_uses_strict_single_request_policy(caplog):
         telemetry = kwargs["request_telemetry"]
         telemetry.external_request_budget = kwargs["call_policy"].max_external_requests
         telemetry.external_request_attempts += 1
-        payload = {
-            "entries": [
-                {"local_date": "2026-07-06", "meal_slot": "breakfast", "position": 1, "title": "????"}
-            ]
-        }
+        from dataclasses import asdict
+        payload = {"entries": [
+            {key: value for key, value in asdict(entry).items()
+             if key in {"local_date", "meal_slot", "position", "title", "servings", "ingredients"}}
+            for entry in _full_week_response().entries
+        ]}
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))])
 
     request = WeeklyMenuGenerationRequest(
         week_start="2026-07-06",
-        dates=("2026-07-06",),
-        allowed_meal_slots=("breakfast",),
+        dates=tuple(f"2026-07-{day:02}" for day in range(6, 13)),
+        allowed_meal_slots=("breakfast", "lunch", "dinner"),
         locale="ru-RU",
         member_count=1,
         members=(WeeklyMenuMemberGenerationSnapshot(age_band=None),),
         household_dietary_notes=(),
-        max_entries=1,
+        max_entries=21,
     )
     generator = AuxiliaryWeeklyMenuGenerator(call_llm_fn=_fake_call_llm)
 
@@ -504,7 +493,7 @@ def test_auxiliary_weekly_generator_uses_strict_single_request_policy(caplog):
         response = generator.generate(request)
 
     assert len(calls) == 1
-    assert len(response.entries) == 1
+    assert len(response.entries) == 21
     assert "weekly_menu_provider_call_complete" in caplog.text
     assert "external_request_attempts=1" in caplog.text
     assert "external_request_budget=1" in caplog.text
@@ -544,7 +533,7 @@ def test_successful_provider_then_db_conflict_does_not_call_provider_again(tmp_p
     assert _table_count(db_path, "household_weekly_menu_entries") == 0
 
 
-def test_generator_validation_failure_after_one_provider_call_leaves_zero_rows(tmp_path):
+def test_generator_validation_failure_after_bounded_attempts_leaves_zero_rows(tmp_path):
     db_path = tmp_path / "generation.db"
     _, context = _seed_generation_runtime(db_path)
     class _CountingInvalidGenerator:
@@ -561,7 +550,7 @@ def test_generator_validation_failure_after_one_provider_call_leaves_zero_rows(t
     result = service.generate_draft_for_week(context.actor_user_id, "2026-07-06", idempotency_key="gen-invalid")
 
     assert result.status is WeeklyMenuGenerationStatus.GENERATOR_VALIDATION_FAILED
-    assert generator.calls == 1
+    assert generator.calls == 2
     assert _table_count(db_path, "household_weekly_menus") == 0
     assert _table_count(db_path, "household_weekly_menu_entries") == 0
 

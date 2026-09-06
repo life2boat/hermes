@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import sqlite3
 import threading
@@ -115,7 +116,7 @@ def _publish_menu_revision(db_path: Path, actor_user_id: int = 101):
         expected_revision_version=draft.revision.version,
         idempotency_key="menu-replace-1",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,
@@ -312,7 +313,7 @@ def test_create_derived_list_retains_exact_source_revision_after_new_menu_publis
         expected_revision_version=next_draft.revision.version,
         idempotency_key="menu-replace-2",
     )
-    weekly_store.publish_weekly_menu_revision(
+    seed_legacy_published_revision(weekly_store,
         context,
         next_ready.revision.id,
         expected_series_version=next_ready.series.version,

@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from tests.gateway.weekly_menu_fixtures import complete_weekly_entries
 
 from gateway.healbite_household_schema import HOUSEHOLD_MEMBERS_TABLE, new_household_member_id
 from gateway.healbite_households import (
@@ -113,7 +114,7 @@ def _add_active_member(
 
 
 def _sample_entries(*, week_start: str = "2026-07-06") -> list[WeeklyMenuEntryInput]:
-    return [
+    return complete_weekly_entries([
         WeeklyMenuEntryInput(
             local_date=week_start,
             meal_slot=WeeklyMenuMealSlot.BREAKFAST,
@@ -130,7 +131,7 @@ def _sample_entries(*, week_start: str = "2026-07-06") -> list[WeeklyMenuEntryIn
             description=None,
             servings="3",
         ),
-    ]
+    ], week_start=week_start)
 
 
 def test_read_methods_fail_closed_without_creating_missing_db(tmp_path):
@@ -207,7 +208,7 @@ def test_draft_publish_and_copy_forward_flow(tmp_path):
     )
 
     assert published.revision.status is WeeklyMenuRevisionStatus.PUBLISHED
-    assert len(published.entries) == 2
+    assert len(published.entries) == 21
     assert copied.revision.status is WeeklyMenuRevisionStatus.DRAFT
     assert [entry.title for entry in copied.entries] == [entry.title for entry in published.entries]
     assert copied.revision.source_revision_id == published.revision.id
@@ -241,14 +242,14 @@ def test_publishing_new_revision_archives_previous_published(tmp_path):
     second_ready = store.replace_draft_entries(
         context,
         second_draft.revision.id,
-        [
+        complete_weekly_entries([
             WeeklyMenuEntryInput(
                 local_date="2026-07-08",
                 meal_slot=WeeklyMenuMealSlot.LUNCH,
                 position=1,
                 title="Суп",
             )
-        ],
+        ]),
         expected_revision_version=second_draft.revision.version,
         idempotency_key="replace-b",
     )
@@ -372,7 +373,7 @@ def test_apply_generated_draft_entries_creates_generated_draft_and_replays(tmp_p
     view = store.apply_generated_draft_entries(
         context,
         week_start="2026-07-06",
-        entries=[
+        entries=complete_weekly_entries([
             WeeklyMenuEntryInput(
                 local_date="2026-07-06",
                 meal_slot=WeeklyMenuMealSlot.BREAKFAST,
@@ -380,7 +381,7 @@ def test_apply_generated_draft_entries_creates_generated_draft_and_replays(tmp_p
                 title="Generated breakfast",
                 origin="generated",
             )
-        ],
+        ]),
         expected_series_version=None,
         expected_draft_revision_id=None,
         expected_draft_revision_version=None,
@@ -394,7 +395,7 @@ def test_apply_generated_draft_entries_creates_generated_draft_and_replays(tmp_p
     )
 
     assert view.revision.status is WeeklyMenuRevisionStatus.DRAFT
-    assert len(view.entries) == 1
+    assert len(view.entries) == 21
     assert view.entries[0].origin.value == "generated"
     assert replay is not None
     assert replay.revision.id == view.revision.id
@@ -410,7 +411,7 @@ def test_apply_generated_draft_entries_replaces_existing_draft_with_expected_ver
     replaced = store.apply_generated_draft_entries(
         context,
         week_start="2026-07-06",
-        entries=[
+        entries=complete_weekly_entries([
             WeeklyMenuEntryInput(
                 local_date="2026-07-06",
                 meal_slot=WeeklyMenuMealSlot.DINNER,
@@ -418,7 +419,7 @@ def test_apply_generated_draft_entries_replaces_existing_draft_with_expected_ver
                 title="Generated dinner",
                 origin="generated",
             )
-        ],
+        ]),
         expected_series_version=draft.series.version,
         expected_draft_revision_id=draft.revision.id,
         expected_draft_revision_version=draft.revision.version,
@@ -428,7 +429,8 @@ def test_apply_generated_draft_entries_replaces_existing_draft_with_expected_ver
 
     assert replaced.revision.id == draft.revision.id
     assert replaced.revision.version == draft.revision.version + 1
-    assert [entry.title for entry in replaced.entries] == ["Generated dinner"]
+    assert len(replaced.entries) == 21
+    assert all(entry.title == "Generated dinner" for entry in replaced.entries)
 
 
 def test_audit_schema_returns_aggregate_counts_only(tmp_path):
@@ -456,7 +458,7 @@ def test_audit_schema_returns_aggregate_counts_only(tmp_path):
     assert audit.schema_state.value == "canonical"
     assert audit.series_count == 1
     assert audit.revision_count == 1
-    assert audit.entry_count == 2
+    assert audit.entry_count == 21
     assert audit.orphan_revision_count == 0
     assert audit.orphan_entry_count == 0
     assert audit.cross_household_inconsistency_count == 0

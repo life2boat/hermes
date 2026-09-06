@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.gateway.weekly_menu_fixtures import seed_legacy_published_revision
 
 import json
 import sqlite3
@@ -211,7 +212,7 @@ def test_runtime_reads_week_and_revisions_when_feature_ready(tmp_path):
         expected_revision_version=draft.revision.version,
         idempotency_key="replace-1",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,
@@ -365,7 +366,7 @@ def test_weekly_runtime_reads_do_not_mutate_rows(tmp_path):
         expected_revision_version=draft.revision.version,
         idempotency_key="replace-1",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,
@@ -415,7 +416,7 @@ def test_cross_household_revision_access_does_not_leak_existence(tmp_path):
     series = weekly_store.create_or_get_weekly_menu_series(owner_context, owner_context.household_id, "2026-07-06")
     draft = weekly_store.create_draft_revision(owner_context, series.id, expected_series_version=series.version, idempotency_key="draft-1")
     ready = weekly_store.replace_draft_entries(owner_context, draft.revision.id, _sample_entries(), expected_revision_version=draft.revision.version, idempotency_key="replace-1")
-    published = weekly_store.publish_weekly_menu_revision(owner_context, ready.revision.id, expected_series_version=ready.series.version, expected_revision_version=ready.revision.version, idempotency_key="publish-1")
+    published = seed_legacy_published_revision(weekly_store, owner_context, ready.revision.id, expected_series_version=ready.series.version, expected_revision_version=ready.revision.version, idempotency_key="publish-1")
     runtime = HealBiteWeeklyMenuRuntimeService(
         config=FeatureGateConfig(enabled=True, allowlist=frozenset({101, 202}), configuration_valid=True),
         db_path=db_path,
@@ -578,7 +579,7 @@ def _published_weekly_artifacts(db_path: Path):
         expected_revision_version=draft.revision.version,
         idempotency_key="replace-lifecycle",
     )
-    published = weekly_store.publish_weekly_menu_revision(
+    published = seed_legacy_published_revision(weekly_store,
         context,
         ready.revision.id,
         expected_series_version=ready.series.version,

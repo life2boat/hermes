@@ -7515,6 +7515,22 @@ class TelegramAdapter(BasePlatformAdapter):
         photo = self._largest_photo_size(msg)
         if photo is None:
             return False
+
+        media_group_id = getattr(msg, "media_group_id", None)
+        chat_id = getattr(getattr(msg, "chat", None), "id", None)
+        msg_id = getattr(msg, "message_id", None)
+        batch_key = f"{actor_user_id}:{chat_id}:{media_group_id}" if media_group_id else f"{actor_user_id}:{chat_id}:single:{msg_id}"
+        
+        for k, b in self._healbite_inventory_photo_batches.items():
+            if k.startswith(f"{actor_user_id}:") and k != batch_key:
+                if b.status in ("COLLECTING", "PROCESSING"):
+                    await self._send_message_with_thread_fallback(
+                        chat_id=str(chat_id),
+                        text="Сейчас обрабатывается предыдущая группа фото. Дождитесь результата и отправьте следующую группу отдельно.",
+                        message_thread_id=getattr(msg, "message_thread_id", None),
+                    )
+                    return True
+
         image_bytes = b""
         try:
             allowed, _note = self._telegram_media_size_allowed(
@@ -7527,11 +7543,6 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             image_bytes = b""
 
-        media_group_id = getattr(msg, "media_group_id", None)
-        chat_id = getattr(getattr(msg, "chat", None), "id", None)
-        msg_id = getattr(msg, "message_id", None)
-        batch_key = f"{actor_user_id}:{chat_id}:{media_group_id}" if media_group_id else f"{actor_user_id}:{chat_id}:single:{msg_id}"
-        
         batch = self._healbite_inventory_photo_batches.get(batch_key)
         if batch is None:
             batch = _InventoryBatchState()

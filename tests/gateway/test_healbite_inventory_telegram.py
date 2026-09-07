@@ -1593,7 +1593,12 @@ async def test_different_chat_isolation(tmp_path, fake_sleep):
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
     
-    assert len(adapter._healbite_inventory_photo_batches) == 2
+    assert len(adapter._healbite_inventory_photo_batches) == 1
+    adapter._send_message_with_thread_fallback.assert_called_with(
+        chat_id="222",
+        text="Сейчас обрабатывается предыдущая группа фото. Дождитесь результата и отправьте следующую группу отдельно.",
+        message_thread_id=None,
+    )
     
     fake_sleep.set()
     for t in [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]: await t
@@ -1620,7 +1625,12 @@ async def test_different_media_group_isolation(tmp_path, fake_sleep):
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
     
-    assert len(adapter._healbite_inventory_photo_batches) == 2
+    assert len(adapter._healbite_inventory_photo_batches) == 1
+    adapter._send_message_with_thread_fallback.assert_called_with(
+        chat_id="555",
+        text="Сейчас обрабатывается предыдущая группа фото. Дождитесь результата и отправьте следующую группу отдельно.",
+        message_thread_id=None,
+    )
     
     fake_sleep.set()
     for t in [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]: await t

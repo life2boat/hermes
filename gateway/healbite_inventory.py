@@ -293,12 +293,22 @@ def _normalize_optional_text(value: object, *, maximum: int, label: str) -> str 
 def _normalize_confidence(value: Decimal | str | None) -> str | None:
     if value is None:
         return None
-    raw = _normalize_decimal(value)
-    assert raw is not None
-    parsed = Decimal(raw)
-    if parsed > Decimal("1"):
+    raw = str(value).strip().replace(",", ".")
+    if not raw:
         raise InventoryValidationError("invalid inventory confidence")
-    return raw
+    try:
+        from decimal import Decimal, InvalidOperation
+        parsed = Decimal(raw)
+    except (InvalidOperation, ValueError) as exc:
+        raise InventoryValidationError("invalid inventory confidence") from exc
+    if not parsed.is_finite() or parsed < Decimal("0") or parsed > Decimal("1"):
+        raise InventoryValidationError("invalid inventory confidence")
+    result = format(parsed.normalize(), "f")
+    if "." in result:
+        result = result.rstrip("0").rstrip(".")
+    if not result:
+        result = "0"
+    return result
 
 
 def _normalize_item_input(item: InventoryItemInput) -> dict[str, object]:

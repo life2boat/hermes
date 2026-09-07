@@ -364,8 +364,8 @@ def test_manifest_is_canonical_and_secret_free() -> None:
 def test_photo_activation_contract_defaults_to_disabled_empty_allowlists() -> None:
     contract = deploy.load_contract()
 
-    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ENABLED"] == "true"
-    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ALLOWLIST"] == "968323641"
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ENABLED"] == "false"
+    assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_ALLOWLIST"] == ""
     assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_UI_ENABLED"] == "false"
     assert contract.feature_gates["HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST"] == ""
 
@@ -402,9 +402,9 @@ def test_pinned_manifest_bytes_use_canonical_loader_without_reopen(
         ("HEALBITE_HOUSEHOLDS_ENABLED", True, False),
         ("HEALBITE_HOUSEHOLDS_ENABLED", "false", False),
         ("HEALBITE_HOUSEHOLDS_ENABLED", False, True),
-        ("HEALBITE_INVENTORY_PHOTO_ENABLED", False, False),
-        ("HEALBITE_INVENTORY_PHOTO_ENABLED", "true", False),
-        ("HEALBITE_INVENTORY_PHOTO_ENABLED", True, True),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", True, False),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", "false", False),
+        ("HEALBITE_INVENTORY_PHOTO_ENABLED", False, True),
         ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", True, False),
         ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", "false", False),
         ("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", False, True),
@@ -1398,17 +1398,11 @@ def test_feature_flags_remain_disabled() -> None:
     
     for g in inv.get("feature_gate_names", []):
         assert g in env, f"Missing {g} in environment"
-        if g == "HEALBITE_INVENTORY_PHOTO_ENABLED":
-            assert env[g] in ("true", True)
-        else:
-            assert env[g] in ("false", False)
+        assert env[g] in ("false", False)
         
     for a in inv.get("allowlist_names", []):
         assert a in env, f"Missing {a} in environment"
-        if a == "HEALBITE_INVENTORY_PHOTO_ALLOWLIST":
-            assert env[a] == "968323641"
-        else:
-            assert env[a] == ""
+        assert env[a] == ""
         
     # Remove the hardcoded exact match logic below since we made it generic
 

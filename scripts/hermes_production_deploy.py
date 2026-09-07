@@ -35,6 +35,8 @@ FEATURE_STATE_NAME_RE = re.compile(r"^HEALBITE_[A-Z0-9_]+_(?:ENABLED|ALLOWLIST)$
 MAX_SECRET_SOURCE_BYTES = 1024 * 1024
 DEPLOY_CONFIRMATION = "DEPLOY_HERMES_BOT"
 ROLLBACK_CONFIRMATION = "ROLLBACK_HERMES_BOT"
+CANARY_ACTIVATION_CONFIRMATION = "ACTIVATE CANARY"
+CANARY_DEACTIVATION_CONFIRMATION = "DEACTIVATE CANARY"
 LEGACY_REFERENCES = (
     "/tmp/hermes-" "secrets-override.yml",
     "healbite-s71v2-" "r6-deploy",
@@ -1574,35 +1576,69 @@ def _write_canary_override(contract: DeploymentContract, expected_canary_gates: 
             }
         }
     }
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=contract.runtime_directory) as tf:
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=contract.runtime_directory, encoding="utf-8") as tf:
         json.dump(document, tf)
         temp_name = tf.name
     os.replace(temp_name, path)
 
+import stat
 def _read_canary_authority(contract: DeploymentContract, source: Path) -> dict[str, str]:
-    if not source.exists():
+    if source.is_symlink():
+        _fail("canary-authority-invalid-path")
+    if str(source) != contract.canary_source_file:
+        _fail("canary-authority-invalid-path")
+    if not source.exists() or not source.is_file():
         _fail("canary-authority-missing")
-    lines = source.read_text("utf-8").splitlines()
+    try:
+        st = source.stat()
+    except OSError:
+        _fail("canary-authority-missing")
+    
+    if st.st_size > 10240:
+        _fail("canary-authority-too-large")
+        
+    if st.st_uid not in contract.lease_owner_uids:
+        _fail("canary-authority-invalid-owner")
+        
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        _fail("canary-authority-insecure-mode")
+        
+    try:
+        text = source.read_bytes().decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        _fail("canary-authority-invalid-utf8")
+        
+    lines = text.splitlines()
     gates = {}
     for line in lines:
-        line = line.strip()
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
-            continue
+            _fail("canary-authority-malformed-line")
+            
         k, v = line.split("=", 1)
         k = k.strip()
-        v = v.strip().strip('"').strip("'")
-        if not FEATURE_STATE_NAME_RE.fullmatch(k):
-            continue
+        v = v.strip().strip("\"").strip("'")
+        
+        if k in gates:
+            _fail("canary-authority-duplicate-key")
+            
         feature_name = k.replace("_ENABLED", "").replace("_ALLOWLIST", "")
         if feature_name not in contract.canary_authorized_features:
             _fail("canary-feature-unauthorized")
+            
+        if k.endswith("_ENABLED"):
+            if v not in ("true", "false"):
+                _fail("canary-authority-invalid-boolean")
+                
         gates[k] = v
         
     for f in contract.canary_authorized_features:
         allowlist = gates.get(f"{f}_ALLOWLIST", "")
-        if len([x for x in allowlist.split(",") if x.strip()]) > 5:
+        entries = [x for x in allowlist.split(",") if x.strip()]
+        if not entries:
+            _fail("canary-allowlist-empty")
+        if len(entries) > 5:
             _fail("canary-allowlist-too-large")
             
     return gates
@@ -1615,7 +1651,7 @@ def execute_canary_activation(
     revision: str,
     confirmation: str,
 ) -> None:
-    if confirmation != DEPLOY_CONFIRMATION:
+    if confirmation != CANARY_ACTIVATION_CONFIRMATION:
         _fail("explicit-confirmation-required")
         
     _preflight(
@@ -1997,6 +2033,71 @@ def plan_operation(
     )
     _print_plan(contract, target.image_id, revision, rollback=rollback, source_head_revision=source_head)
 
+
+
+def execute_canary_deactivation(
+    contract: DeploymentContract,
+    *,
+    image: str,
+    revision: str,
+    confirmation: str,
+) -> None:
+    if confirmation != CANARY_DEACTIVATION_CONFIRMATION:
+        _fail("explicit-confirmation-required")
+        
+    _preflight(
+        preflight.validate_deployment_lease_owner,
+        allowed_owner_uids=contract.lease_owner_uids,
+    )
+    target, _source_head = _validate_operation_identity(
+        contract,
+        image=image,
+        revision=revision,
+        current_image=None,
+        rollback=False,
+    )
+    _validate_runtime_directory(contract, create=True)
+    lease = _preflight(
+        preflight.acquire_deployment_lease,
+        path=contract.lease_path,
+        allowed_owner_uids=contract.lease_owner_uids,
+        operation_class="canary",
+        canonical_repository=contract.canonical_repository,
+        target_sha=revision,
+        target_image_id=target.image_id,
+        timeout_seconds=contract.lease_timeout_seconds,
+    )
+    
+    baseline = _capture_pre_mutation_baseline(contract)
+    
+    _remove_canary_override_if_exists(contract)
+    
+    _compose_recreate_hermes(
+        contract,
+        image_id=target.image_id,
+        revision=revision,
+        canary_override=False,
+    )
+    
+    post_result = _post_deploy_attestation(
+        contract,
+        baseline,
+        target_image_id=target.image_id,
+        target_revision=revision,
+    )
+    
+    _write_operation_evidence(
+        contract,
+        target_revision=revision,
+        target_image_id=target.image_id,
+        baseline=baseline,
+        operation_status="PASS",
+        post_result=post_result,
+        original_error=None,
+        rollback_attempted=False,
+        rollback_result="NOT_ATTEMPTED",
+        rollback_error=None,
+    )
 
 def execute_operation(
     contract: DeploymentContract,
@@ -2770,6 +2871,14 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--secret-source", type=Path)
     deploy.add_argument("--confirm", required=True)
 
+    canary_act = subparsers.add_parser("activate-canary")
+    _add_image_arguments(canary_act)
+    canary_act.add_argument("--confirm", required=True)
+
+    canary_deact = subparsers.add_parser("deactivate-canary")
+    _add_image_arguments(canary_deact)
+    canary_deact.add_argument("--confirm", required=True)
+
     rollback = subparsers.add_parser("execute-rollback")
     _add_image_arguments(rollback)
     rollback.add_argument("--secret-source", type=Path)
@@ -2886,6 +2995,14 @@ def main(argv: list[str] | None = None) -> int:
                 confirmation=args.confirm,
             )
             print("CANARY_ACTIVATION_PERFORMED=true")
+        elif args.command == "deactivate-canary":
+            execute_canary_deactivation(
+                contract,
+                image=args.image,
+                revision=args.revision,
+                confirmation=args.confirm,
+            )
+            print("CANARY_DEACTIVATION_PERFORMED=true")
         elif args.command == "execute-deploy":
             execute_operation(
                 contract,

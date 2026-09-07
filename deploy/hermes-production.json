@@ -243,5 +243,11 @@
   },
   "runtime_bindings": {
     "QDRANT_COLLECTION": "healbite_memory_os_v2"
+  },
+  "canary_policy": {
+    "source_environment_file": "/etc/hermes/hermes-canary.env",
+    "authorized_features": [
+      "HEALBITE_INVENTORY_PHOTO"
+    ]
   }
 }

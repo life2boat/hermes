@@ -118,6 +118,8 @@ class DeploymentContract:
     feature_gates: dict[str, str]
     runtime_bindings: dict[str, str]
     attestation_policy: attestation.RuntimeAttestationPolicy
+    canary_source_file: str
+    canary_authorized_features: tuple[str, ...]
 
     @property
     def protected_secret_names(self) -> tuple[str, ...]:
@@ -234,7 +236,7 @@ def load_contract(
     if set(raw) != {
         "version", "provenance", "compose", "runtime", "database_mount",
         "capacity", "secrets", "deployment", "rollback", "feature_gates",
-        "attestation", "runtime_bindings",
+        "attestation", "runtime_bindings", "canary_policy",
     }:
         _fail("manifest-fields")
     if raw["version"] != 2:
@@ -486,6 +488,10 @@ def load_contract(
     except attestation.RuntimeAttestationError as exc:
         _fail(exc.code.lower().replace("_", "-"))
 
+    canary_raw = _mapping(raw.get("canary_policy", {}), code="manifest-canary")
+    canary_source_file = _string(canary_raw.get("source_environment_file", "/etc/hermes/hermes-canary.env"), code="manifest-canary-source")
+    canary_authorized_features = tuple(_string(f, code="manifest-canary-feature") for f in canary_raw.get("authorized_features", []))
+
     return DeploymentContract(
         version=2,
         root=root,
@@ -524,6 +530,8 @@ def load_contract(
         feature_gates=normalized_feature_gates,
         runtime_bindings=normalized_runtime_bindings,
         attestation_policy=attestation_policy,
+        canary_source_file=canary_source_file,
+        canary_authorized_features=canary_authorized_features,
     )
 
 
@@ -1246,8 +1254,8 @@ def validate_revision(revision: str) -> None:
         _fail("revision")
 
 
-def compose_command(contract: DeploymentContract) -> list[str]:
-    return [
+def compose_command(contract: DeploymentContract, canary_override: bool = False) -> list[str]:
+    cmd = [
         "docker",
         "compose",
         "-p",
@@ -1261,6 +1269,9 @@ def compose_command(contract: DeploymentContract) -> list[str]:
         "-f",
         str(contract.secret_override),
     ]
+    if canary_override:
+        cmd.extend(["-f", str(contract.runtime_directory / "hermes-canary-override.yml")])
+    return cmd
 
 
 def _compose_environment(image: str, revision: str) -> dict[str, str]:
@@ -1302,12 +1313,14 @@ def validate_compose_render(
     contract: DeploymentContract,
     image: str,
     revision: str,
+    canary_override: bool = False,
+    expected_canary_gates: dict[str, str] | None = None,
 ) -> tuple[preflight.MountRecord, ...]:
     validate_immutable_image(image)
     validate_revision(revision)
     validate_secret_override(contract)
     environment = _compose_environment(image, revision)
-    base = compose_command(contract)
+    base = compose_command(contract, canary_override=canary_override)
     quiet = _run((*base, "config", "--quiet"), cwd=contract.root, env=environment, timeout=45)
     if quiet.returncode != 0:
         _fail("compose-render")
@@ -1349,7 +1362,10 @@ def validate_compose_render(
         for name, value in rendered_environment.items()
         if isinstance(name, str) and FEATURE_STATE_NAME_RE.fullmatch(name)
     }
-    if rendered_feature_state != contract.feature_gates:
+    expected_state = dict(contract.feature_gates)
+    if expected_canary_gates:
+        expected_state.update(expected_canary_gates)
+    if rendered_feature_state != expected_state:
         _fail("compose-feature-state")
     for binding_name, expected_value in contract.runtime_bindings.items():
         if binding_name not in rendered_environment:
@@ -1549,6 +1565,168 @@ def _validate_live_future_mounts(
     )
 
 
+def _write_canary_override(contract: DeploymentContract, expected_canary_gates: dict[str, str]) -> None:
+    path = contract.runtime_directory / "hermes-canary-override.yml"
+    document = {
+        "services": {
+            contract.target_service: {
+                "environment": expected_canary_gates
+            }
+        }
+    }
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=contract.runtime_directory) as tf:
+        json.dump(document, tf)
+        temp_name = tf.name
+    os.replace(temp_name, path)
+
+def _read_canary_authority(contract: DeploymentContract, source: Path) -> dict[str, str]:
+    if not source.exists():
+        _fail("canary-authority-missing")
+    lines = source.read_text("utf-8").splitlines()
+    gates = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if not FEATURE_STATE_NAME_RE.fullmatch(k):
+            continue
+        feature_name = k.replace("_ENABLED", "").replace("_ALLOWLIST", "")
+        if feature_name not in contract.canary_authorized_features:
+            _fail("canary-feature-unauthorized")
+        gates[k] = v
+        
+    for f in contract.canary_authorized_features:
+        allowlist = gates.get(f"{f}_ALLOWLIST", "")
+        if len([x for x in allowlist.split(",") if x.strip()]) > 5:
+            _fail("canary-allowlist-too-large")
+            
+    return gates
+
+def execute_canary_activation(
+    contract: DeploymentContract,
+    *,
+    source: Path,
+    image: str,
+    revision: str,
+    confirmation: str,
+) -> None:
+    if confirmation != DEPLOY_CONFIRMATION:
+        _fail("explicit-confirmation-required")
+        
+    _preflight(
+        preflight.validate_deployment_lease_owner,
+        allowed_owner_uids=contract.lease_owner_uids,
+    )
+    target, _source_head = _validate_operation_identity(
+        contract,
+        image=image,
+        revision=revision,
+        current_image=None,
+        rollback=False,
+    )
+    _validate_runtime_directory(contract, create=True)
+    lease = _preflight(
+        preflight.acquire_deployment_lease,
+        path=contract.lease_path,
+        allowed_owner_uids=contract.lease_owner_uids,
+        operation_class="canary",
+        canonical_repository=contract.canonical_repository,
+        target_sha=revision,
+        target_image_id=target.image_id,
+        timeout_seconds=contract.lease_timeout_seconds,
+    )
+    
+    canary_gates = _read_canary_authority(contract, source)
+    if not canary_gates:
+        _fail("canary-authority-empty")
+        
+    primary_error: BaseException | None = None
+    baseline: attestation.RuntimeBaseline | None = None
+    secret_transaction: SecretOverrideTransaction | None = None
+    mutation_started = False
+    
+    try:
+        secrets = read_required_secrets(contract, Path("/etc/hermes/hermes-production.env"))
+        with tempfile.TemporaryDirectory(prefix="hermes-canary-plan-") as raw_directory:
+            temporary = _temporary_render_contract(contract, Path(raw_directory))
+            _write_secret_override(temporary, secrets)
+            _write_canary_override(temporary, canary_gates)
+            try:
+                future_mounts = validate_compose_render(
+                    temporary, target.image_id, revision, 
+                    canary_override=True, expected_canary_gates=canary_gates
+                )
+            finally:
+                cleanup_secret_override(temporary)
+        
+        _validate_live_future_mounts(contract, future_mounts)
+        _validate_capacity(contract, phase="deploy", revision=revision, image_id=target.image_id)
+        
+        baseline = _capture_pre_mutation_baseline(contract)
+        mutation_started = True
+        
+        _write_canary_override(contract, canary_gates)
+        secret_transaction = _begin_secret_override_transaction(contract, secrets)
+        
+        _compose_recreate_hermes(
+            contract,
+            image_id=target.image_id,
+            revision=revision,
+            canary_override=True,
+        )
+        
+        expected_canary_feature_gates = tuple(
+            (name, canary_gates.get(name, attestation._feature_gate_state(contract.feature_gates[name])))
+            for name in contract.attestation_policy.feature_gate_names
+        )
+        expected_canary_allowlists = tuple(
+            (name, *attestation._allowlist_state(canary_gates.get(name, contract.feature_gates[name])))
+            for name in contract.attestation_policy.allowlist_names
+        )
+        
+        expected_baseline = replace(
+            baseline,
+            hermes=replace(
+                baseline.hermes,
+                feature_gates=expected_canary_feature_gates,
+                allowlists=expected_canary_allowlists,
+            )
+        )
+        
+        _post_deploy_attestation(
+            contract,
+            expected_baseline,
+            target_image_id=target.image_id,
+            target_revision=revision,
+        )
+        
+        _finish_secret_override_transaction(contract, secret_transaction, preserve_published=True)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            if mutation_started and primary_error is not None and baseline is not None and secret_transaction is not None:
+                # Deterministic recovery
+                try:
+                    os.unlink(contract.runtime_directory / "hermes-canary-override.yml")
+                except FileNotFoundError:
+                    pass
+                _automatic_rollback(contract, baseline, secret_transaction.baseline_secrets)
+        finally:
+            _preflight(preflight.release_deployment_lease, lease)
+
+def _remove_canary_override_if_exists(contract: DeploymentContract) -> None:
+    try:
+        os.unlink(contract.runtime_directory / "hermes-canary-override.yml")
+    except FileNotFoundError:
+        pass
+
 def _ordinary_deploy_pre_mutation_barrier(
     contract: DeploymentContract,
     *,
@@ -1747,10 +1925,11 @@ def _compose_recreate_hermes(
     *,
     image_id: str,
     revision: str,
+    canary_override: bool = False,
 ) -> None:
     environment = _compose_environment(image_id, revision)
     command = (
-        *compose_command(contract),
+        *compose_command(contract, canary_override=canary_override),
         "up",
         "-d",
         "--no-deps",
@@ -1878,6 +2057,7 @@ def execute_operation(
             )
         mutation_started = True
         secret_transaction = _begin_secret_override_transaction(contract, secrets)
+        _remove_canary_override_if_exists(contract)
         _compose_recreate_hermes(
             contract,
             image_id=target.image_id,
@@ -2697,6 +2877,15 @@ def main(argv: list[str] | None = None) -> int:
                 revision=args.revision,
                 rollback_from=args.current_image,
             )
+        elif args.command == "activate-canary":
+            execute_canary_activation(
+                contract,
+                source=Path(contract.canary_source_file),
+                image=args.image,
+                revision=args.revision,
+                confirmation=args.confirm,
+            )
+            print("CANARY_ACTIVATION_PERFORMED=true")
         elif args.command == "execute-deploy":
             execute_operation(
                 contract,

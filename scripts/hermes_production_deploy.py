@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -33,6 +34,11 @@ IMAGE_DIGEST_RE = re.compile(r"^[a-zA-Z0-9._/-]+@sha256:[0-9a-f]{64}$")
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 FEATURE_STATE_NAME_RE = re.compile(r"^HEALBITE_[A-Z0-9_]+_(?:ENABLED|ALLOWLIST)$")
 MAX_SECRET_SOURCE_BYTES = 1024 * 1024
+CANARY_AUTHORITY_PATH = Path("/etc/hermes/hermes-canary.env")
+MAX_CANARY_AUTHORITY_BYTES = 10 * 1024
+MAX_CANARY_ALLOWLIST_MEMBERS = 5
+MAX_CANARY_ALLOWLIST_MEMBER = 9_223_372_036_854_775_807
+CANARY_ALLOWLIST_MEMBER_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 DEPLOY_CONFIRMATION = "DEPLOY_HERMES_BOT"
 ROLLBACK_CONFIRMATION = "ROLLBACK_HERMES_BOT"
 CANARY_ACTIVATION_CONFIRMATION = "ACTIVATE CANARY"
@@ -144,6 +150,14 @@ class SecretOverrideTransaction:
     rollback_path: Path | None
     live_was_present: bool
     previous_fingerprints: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class CanaryOverrideSnapshot:
+    """Exact pre-operation state of the runtime canary override."""
+
+    present: bool
+    data: bytes | None
 
 
 @dataclass(frozen=True)
@@ -491,7 +505,12 @@ def load_contract(
         _fail(exc.code.lower().replace("_", "-"))
 
     canary_raw = _mapping(raw.get("canary_policy", {}), code="manifest-canary")
-    canary_source_file = _string(canary_raw.get("source_environment_file", "/etc/hermes/hermes-canary.env"), code="manifest-canary-source")
+    canary_source_file = _string(
+        canary_raw.get("source_environment_file"),
+        code="manifest-canary-source",
+    )
+    if canary_source_file != str(CANARY_AUTHORITY_PATH):
+        _fail("manifest-canary-source")
     canary_authorized_features = tuple(_string(f, code="manifest-canary-feature") for f in canary_raw.get("authorized_features", []))
 
     return DeploymentContract(
@@ -1567,81 +1586,321 @@ def _validate_live_future_mounts(
     )
 
 
-def _write_canary_override(contract: DeploymentContract, expected_canary_gates: dict[str, str]) -> None:
-    path = contract.runtime_directory / "hermes-canary-override.yml"
+def _canary_override_path(contract: DeploymentContract) -> Path:
+    return contract.runtime_directory / "hermes-canary-override.yml"
+
+
+def _atomic_write_canary_override_bytes(
+    contract: DeploymentContract,
+    data: bytes,
+) -> None:
+    path = _canary_override_path(contract)
+    descriptor: int | None = None
+    temporary_path: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=".hermes-canary-override-",
+            dir=contract.runtime_directory,
+        )
+        temporary_path = Path(raw_path)
+        os.fchmod(descriptor, 0o600)
+        written = 0
+        while written < len(data):
+            count = os.write(descriptor, data[written:])
+            if count <= 0:
+                _fail("canary-override-write")
+            written += count
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary_path, path)
+        temporary_path = None
+        _fsync_runtime_directory(contract)
+    except (OSError, ValueError):
+        _fail("canary-override-write")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
+def _write_canary_override(
+    contract: DeploymentContract,
+    expected_canary_gates: dict[str, str],
+) -> None:
     document = {
         "services": {
-            contract.target_service: {
-                "environment": expected_canary_gates
-            }
+            contract.target_service: {"environment": expected_canary_gates}
         }
     }
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=contract.runtime_directory, encoding="utf-8") as tf:
-        json.dump(document, tf)
-        temp_name = tf.name
-    os.replace(temp_name, path)
+    data = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    _atomic_write_canary_override_bytes(contract, data)
 
-import stat
-def _read_canary_authority(contract: DeploymentContract, source: Path) -> dict[str, str]:
-    if source.is_symlink():
+
+def _stat_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_nlink,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_canary_authority_bytes(
+    source: Path,
+    *,
+    allowed_owner_uids: frozenset[int],
+) -> bytes:
+    """Read an authority file through a no-follow descriptor chain."""
+
+    if os.name != "posix" or not source.is_absolute():
         _fail("canary-authority-invalid-path")
-    if str(source) != contract.canary_source_file:
-        _fail("canary-authority-invalid-path")
-    if not source.exists() or not source.is_file():
-        _fail("canary-authority-missing")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    chain: list[
+        tuple[int, str, int, tuple[int, int, int, int, int, int, int, int, int]]
+    ] = []
+    primary_error: BaseException | None = None
+    authority_opened = False
     try:
-        st = source.stat()
-    except OSError:
-        _fail("canary-authority-missing")
-    
-    if st.st_size > 10240:
-        _fail("canary-authority-too-large")
-        
-    if st.st_uid not in contract.lease_owner_uids:
-        _fail("canary-authority-invalid-owner")
-        
-    if stat.S_IMODE(st.st_mode) != 0o600:
-        _fail("canary-authority-insecure-mode")
-        
+        root_fd = os.open(source.anchor, directory_flags)
+        descriptors.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != 0
+            or stat.S_IMODE(root_metadata.st_mode) & 0o022
+        ):
+            _fail("canary-authority-parent-invalid")
+        parent_fd = root_fd
+        for component in source.parts[1:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            descriptors.append(child_fd)
+            child_metadata = os.fstat(child_fd)
+            path_metadata = os.stat(
+                component,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(child_metadata.st_mode)
+                or child_metadata.st_uid
+                not in frozenset({0, _effective_uid()})
+                or stat.S_IMODE(child_metadata.st_mode) & 0o022
+                or _stat_identity(path_metadata) != _stat_identity(child_metadata)
+            ):
+                _fail("canary-authority-parent-invalid")
+            chain.append(
+                (
+                    parent_fd,
+                    component,
+                    child_fd,
+                    _stat_identity(child_metadata),
+                )
+            )
+            parent_fd = child_fd
+
+        file_fd = os.open(source.name, file_flags, dir_fd=parent_fd)
+        descriptors.append(file_fd)
+        authority_opened = True
+        before = os.fstat(file_fd)
+        path_before = os.stat(
+            source.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(before.st_mode):
+            _fail("canary-authority-not-regular")
+        if before.st_uid not in allowed_owner_uids:
+            _fail("canary-authority-invalid-owner")
+        if stat.S_IMODE(before.st_mode) != 0o600:
+            _fail("canary-authority-insecure-mode")
+        if before.st_size > MAX_CANARY_AUTHORITY_BYTES:
+            _fail("canary-authority-too-large")
+        if _stat_identity(path_before) != _stat_identity(before):
+            _fail("canary-authority-race")
+
+        payload = bytearray()
+        while len(payload) <= MAX_CANARY_AUTHORITY_BYTES:
+            chunk = os.read(
+                file_fd,
+                min(4096, MAX_CANARY_AUTHORITY_BYTES + 1 - len(payload)),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) > MAX_CANARY_AUTHORITY_BYTES:
+            _fail("canary-authority-too-large")
+
+        after = os.fstat(file_fd)
+        path_after = os.stat(
+            source.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        if (
+            _stat_identity(after) != _stat_identity(before)
+            or _stat_identity(path_after) != _stat_identity(before)
+            or len(payload) != before.st_size
+        ):
+            _fail("canary-authority-race")
+        for ancestor_fd, component, child_fd, identity in chain:
+            current_path = os.stat(
+                component,
+                dir_fd=ancestor_fd,
+                follow_symlinks=False,
+            )
+            if (
+                _stat_identity(current_path) != identity
+                or _stat_identity(os.fstat(child_fd)) != identity
+            ):
+                _fail("canary-authority-race")
+        return bytes(payload)
+    except DeploymentContractError as exc:
+        primary_error = exc
+        raise
+    except FileNotFoundError as exc:
+        primary_error = exc
+        _fail("canary-authority-race" if authority_opened else "canary-authority-missing")
+    except PermissionError as exc:
+        primary_error = exc
+        _fail("canary-authority-permission")
+    except OSError as exc:
+        primary_error = exc
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            _fail("canary-authority-invalid-path")
+        _fail("canary-authority-read")
+    finally:
+        close_failed = False
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                close_failed = True
+        if close_failed and primary_error is None:
+            _fail("canary-authority-close")
+
+
+def _parse_canary_authority(
+    data: bytes,
+    *,
+    authorized_features: tuple[str, ...],
+) -> dict[str, str]:
     try:
-        text = source.read_bytes().decode("utf-8", errors="strict")
+        text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         _fail("canary-authority-invalid-utf8")
-        
-    lines = text.splitlines()
-    gates = {}
-    for line in lines:
-        if not line or line.startswith("#"):
+
+    gates: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        if not raw_line or raw_line.startswith("#"):
             continue
-        if "=" not in line:
+        if "=" not in raw_line:
             _fail("canary-authority-malformed-line")
-            
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip().strip("\"").strip("'")
-        
-        if k in gates:
+        key, raw_value = raw_line.split("=", 1)
+        if key != key.strip() or ENV_NAME_RE.fullmatch(key) is None:
+            _fail("canary-authority-malformed-key")
+        if key in gates:
             _fail("canary-authority-duplicate-key")
-            
-        feature_name = k.replace("_ENABLED", "").replace("_ALLOWLIST", "")
-        if feature_name not in contract.canary_authorized_features:
+        if key.endswith("_ENABLED"):
+            feature = key.removesuffix("_ENABLED")
+            kind = "enabled"
+        elif key.endswith("_ALLOWLIST"):
+            feature = key.removesuffix("_ALLOWLIST")
+            kind = "allowlist"
+        else:
+            _fail("canary-authority-unknown-variable")
+        if feature not in authorized_features:
             _fail("canary-feature-unauthorized")
-            
-        if k.endswith("_ENABLED"):
-            if v not in ("true", "false"):
-                _fail("canary-authority-invalid-boolean")
-                
-        gates[k] = v
-        
-    for f in contract.canary_authorized_features:
-        allowlist = gates.get(f"{f}_ALLOWLIST", "")
-        entries = [x for x in allowlist.split(",") if x.strip()]
-        if not entries:
+
+        value = raw_value.strip()
+        if value[:1] in {'"', "'"}:
+            if len(value) < 2 or value[-1] != value[0]:
+                _fail("canary-authority-malformed-line")
+            value = value[1:-1]
+        elif value[-1:] in {'"', "'"}:
+            _fail("canary-authority-malformed-line")
+        if kind == "enabled" and value not in {"true", "false"}:
+            _fail("canary-authority-invalid-boolean")
+        gates[key] = value
+
+    if not gates:
+        _fail("canary-authority-empty")
+    for feature in authorized_features:
+        enabled_key = f"{feature}_ENABLED"
+        allowlist_key = f"{feature}_ALLOWLIST"
+        if enabled_key not in gates:
+            _fail("canary-authority-missing-enabled")
+        if allowlist_key not in gates:
+            _fail("canary-authority-missing-allowlist")
+        if gates[enabled_key] != "true":
+            _fail("canary-authority-not-enabled")
+        raw_members = gates[allowlist_key].split(",")
+        if not raw_members or any(not member.strip() for member in raw_members):
             _fail("canary-allowlist-empty")
-        if len(entries) > 5:
+        members = [member.strip() for member in raw_members]
+        if len(members) > MAX_CANARY_ALLOWLIST_MEMBERS:
             _fail("canary-allowlist-too-large")
-            
+        if len(set(members)) != len(members):
+            _fail("canary-allowlist-duplicate")
+        if any(
+            CANARY_ALLOWLIST_MEMBER_RE.fullmatch(member) is None
+            or int(member) > MAX_CANARY_ALLOWLIST_MEMBER
+            for member in members
+        ):
+            _fail("canary-allowlist-invalid-member")
+        gates[allowlist_key] = ",".join(members)
     return gates
+
+
+def _read_canary_authority(
+    contract: DeploymentContract,
+    source: Path,
+) -> dict[str, str]:
+    if (
+        source != CANARY_AUTHORITY_PATH
+        or source != Path(contract.canary_source_file)
+        or not source.is_absolute()
+    ):
+        _fail("canary-authority-invalid-path")
+    try:
+        source.relative_to(contract.root)
+    except ValueError:
+        pass
+    else:
+        _fail("canary-authority-inside-repository")
+    data = _read_canary_authority_bytes(
+        source,
+        allowed_owner_uids=contract.lease_owner_uids,
+    )
+    return _parse_canary_authority(
+        data,
+        authorized_features=contract.canary_authorized_features,
+    )
+
 
 def execute_canary_activation(
     contract: DeploymentContract,
@@ -1653,7 +1912,7 @@ def execute_canary_activation(
 ) -> None:
     if confirmation != CANARY_ACTIVATION_CONFIRMATION:
         _fail("explicit-confirmation-required")
-        
+
     _preflight(
         preflight.validate_deployment_lease_owner,
         allowed_owner_uids=contract.lease_owner_uids,
@@ -1676,18 +1935,17 @@ def execute_canary_activation(
         target_image_id=target.image_id,
         timeout_seconds=contract.lease_timeout_seconds,
     )
-    
-    canary_gates = _read_canary_authority(contract, source)
-    if not canary_gates:
-        _fail("canary-authority-empty")
-        
+
     primary_error: BaseException | None = None
     baseline: attestation.RuntimeBaseline | None = None
     secret_transaction: SecretOverrideTransaction | None = None
+    previous_canary: CanaryOverrideSnapshot | None = None
+    secrets: dict[str, str] | None = None
     mutation_started = False
-    
+
     try:
-        secrets = read_required_secrets(contract, Path("/etc/hermes/hermes-production.env"))
+        canary_gates = _read_canary_authority(contract, source)
+        secrets = read_required_secrets(contract, contract.approved_secret_source)
         with tempfile.TemporaryDirectory(prefix="hermes-canary-plan-") as raw_directory:
             temporary = _temporary_render_contract(contract, Path(raw_directory))
             _write_secret_override(temporary, secrets)
@@ -1699,23 +1957,25 @@ def execute_canary_activation(
                 )
             finally:
                 cleanup_secret_override(temporary)
-        
+
         _validate_live_future_mounts(contract, future_mounts)
         _validate_capacity(contract, phase="deploy", revision=revision, image_id=target.image_id)
-        
+
         baseline = _capture_pre_mutation_baseline(contract)
+        _validate_automatic_rollback_readiness(contract, baseline, secrets)
+        previous_canary = _capture_canary_override(contract)
         mutation_started = True
-        
+
         _write_canary_override(contract, canary_gates)
         secret_transaction = _begin_secret_override_transaction(contract, secrets)
-        
+
         _compose_recreate_hermes(
             contract,
             image_id=target.image_id,
             revision=revision,
             canary_override=True,
         )
-        
+
         expected_canary_feature_gates = tuple(
             (name, canary_gates.get(name, attestation._feature_gate_state(contract.feature_gates[name])))
             for name in contract.attestation_policy.feature_gate_names
@@ -1724,7 +1984,7 @@ def execute_canary_activation(
             (name, *attestation._allowlist_state(canary_gates.get(name, contract.feature_gates[name])))
             for name in contract.attestation_policy.allowlist_names
         )
-        
+
         expected_baseline = replace(
             baseline,
             hermes=replace(
@@ -1733,35 +1993,121 @@ def execute_canary_activation(
                 allowlists=expected_canary_allowlists,
             )
         )
-        
-        _post_deploy_attestation(
+
+        post_result = _post_deploy_attestation(
             contract,
             expected_baseline,
             target_image_id=target.image_id,
             target_revision=revision,
         )
-        
         _finish_secret_override_transaction(contract, secret_transaction, preserve_published=True)
+        secret_transaction = None
+        _write_operation_evidence(
+            contract,
+            target_revision=revision,
+            target_image_id=target.image_id,
+            baseline=baseline,
+            operation_status="PASS",
+            post_result=post_result,
+            original_error=None,
+            rollback_attempted=False,
+            rollback_result="NOT_ATTEMPTED",
+            rollback_error=None,
+        )
     except BaseException as exc:
-        primary_error = exc
-        raise
+        if (
+            not mutation_started
+            or baseline is None
+            or previous_canary is None
+            or secrets is None
+        ):
+            primary_error = exc
+            raise
+        restoration_error: str | None = None
+        if secret_transaction is not None:
+            try:
+                _finish_secret_override_transaction(
+                    contract,
+                    secret_transaction,
+                    preserve_published=False,
+                )
+            except BaseException as restoration_exc:
+                restoration_error = _attestation_error_code(restoration_exc)
+        final_error = _canary_post_mutation_error(
+            contract,
+            baseline=baseline,
+            previous_canary=previous_canary,
+            rollback_secrets=secrets,
+            target_revision=revision,
+            target_image_id=target.image_id,
+            original_error=exc,
+            prior_rollback_error=restoration_error,
+        )
+        primary_error = final_error
+        raise final_error from exc
     finally:
-        try:
-            if mutation_started and primary_error is not None and baseline is not None and secret_transaction is not None:
-                # Deterministic recovery
-                try:
-                    os.unlink(contract.runtime_directory / "hermes-canary-override.yml")
-                except FileNotFoundError:
-                    pass
-                _automatic_rollback(contract, baseline, secret_transaction.baseline_secrets)
-        finally:
-            _preflight(preflight.release_deployment_lease, lease)
+        _release_canary_lease(
+            contract,
+            lease,
+            primary_error=primary_error,
+        )
+
+
+def _capture_canary_override(
+    contract: DeploymentContract,
+) -> CanaryOverrideSnapshot:
+    path = _canary_override_path(contract)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return CanaryOverrideSnapshot(present=False, data=None)
+    except OSError:
+        _fail("canary-override-state")
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != _effective_uid()
+        or metadata.st_size > MAX_CANARY_AUTHORITY_BYTES
+    ):
+        _fail("canary-override-state")
+    data = _read_protected_bytes(
+        path,
+        expected=metadata,
+        code="canary-override",
+    )
+    if len(data) > MAX_CANARY_AUTHORITY_BYTES:
+        _fail("canary-override-state")
+    return CanaryOverrideSnapshot(present=True, data=data)
+
+
+def _restore_canary_override(
+    contract: DeploymentContract,
+    snapshot: CanaryOverrideSnapshot,
+) -> None:
+    if snapshot.present:
+        if snapshot.data is None:
+            _fail("canary-override-state")
+        _atomic_write_canary_override_bytes(contract, snapshot.data)
+        restored = _capture_canary_override(contract)
+        if not restored.present or restored.data != snapshot.data:
+            _fail("canary-override-restore")
+        return
+    _remove_canary_override_if_exists(contract)
+    if _capture_canary_override(contract).present:
+        _fail("canary-override-restore")
+
 
 def _remove_canary_override_if_exists(contract: DeploymentContract) -> None:
     try:
-        os.unlink(contract.runtime_directory / "hermes-canary-override.yml")
+        os.unlink(_canary_override_path(contract))
     except FileNotFoundError:
         pass
+    except OSError:
+        _fail("canary-override-remove")
+    else:
+        _fsync_runtime_directory(contract)
+
 
 def _ordinary_deploy_pre_mutation_barrier(
     contract: DeploymentContract,
@@ -1981,6 +2327,8 @@ def _automatic_rollback(
     contract: DeploymentContract,
     baseline: attestation.RuntimeBaseline,
     rollback_secrets: dict[str, str],
+    *,
+    canary_override: bool = False,
 ) -> attestation.PostDeployAttestation:
     rollback_baseline = attestation.rollback_log_baseline(baseline)
     rollback_transaction = _begin_secret_override_transaction(
@@ -1989,11 +2337,19 @@ def _automatic_rollback(
     )
     primary_error: BaseException | None = None
     try:
-        _compose_recreate_hermes(
-            contract,
-            image_id=baseline.hermes.image_id,
-            revision=baseline.hermes.revision,
-        )
+        if canary_override:
+            _compose_recreate_hermes(
+                contract,
+                image_id=baseline.hermes.image_id,
+                revision=baseline.hermes.revision,
+                canary_override=True,
+            )
+        else:
+            _compose_recreate_hermes(
+                contract,
+                image_id=baseline.hermes.image_id,
+                revision=baseline.hermes.revision,
+            )
         return _post_deploy_attestation(
             contract,
             rollback_baseline,
@@ -2013,6 +2369,86 @@ def _automatic_rollback(
         except DeploymentContractError:
             if primary_error is None:
                 raise
+
+
+def _canary_post_mutation_error(
+    contract: DeploymentContract,
+    *,
+    baseline: attestation.RuntimeBaseline,
+    previous_canary: CanaryOverrideSnapshot,
+    rollback_secrets: dict[str, str],
+    target_revision: str,
+    target_image_id: str,
+    original_error: BaseException,
+    prior_rollback_error: str | None = None,
+) -> PostMutationDeploymentError:
+    original_error_code = _attestation_error_code(original_error)
+    rollback_error_code = prior_rollback_error
+    rollback_post_result: attestation.PostDeployAttestation | None = None
+    try:
+        _restore_canary_override(contract, previous_canary)
+    except BaseException as restore_exc:
+        rollback_error_code = _attestation_error_code(restore_exc)
+    try:
+        rollback_post_result = _automatic_rollback(
+            contract,
+            baseline,
+            rollback_secrets,
+            canary_override=previous_canary.present,
+        )
+    except BaseException as rollback_exc:
+        if rollback_error_code is None:
+            rollback_error_code = _attestation_error_code(rollback_exc)
+
+    operation_status = "ROLLED_BACK" if rollback_error_code is None else "FAIL"
+    try:
+        _write_operation_evidence(
+            contract,
+            target_revision=target_revision,
+            target_image_id=target_image_id,
+            baseline=baseline,
+            operation_status=operation_status,
+            post_result=rollback_post_result,
+            original_error=original_error_code,
+            rollback_attempted=True,
+            rollback_result="PASS" if rollback_error_code is None else "FAIL",
+            rollback_error=rollback_error_code,
+        )
+    except BaseException as evidence_exc:
+        if rollback_error_code is None:
+            rollback_error_code = _attestation_error_code(evidence_exc)
+            operation_status = "FAIL"
+    return PostMutationDeploymentError(
+        status=operation_status,
+        original_error_code=original_error_code,
+        rollback_error_code=rollback_error_code,
+    )
+
+
+def _release_canary_lease(
+    contract: DeploymentContract,
+    lease: preflight.DeploymentLease,
+    *,
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        _preflight(
+            preflight.release_deployment_lease,
+            lease,
+            allowed_owner_uids=contract.lease_owner_uids,
+        )
+    except DeploymentContractError as release_error:
+        if primary_error is None:
+            raise
+        if isinstance(primary_error, PostMutationDeploymentError):
+            raise PostMutationDeploymentError(
+                status="FAIL",
+                original_error_code=primary_error.original_error_code,
+                rollback_error_code=_attestation_error_code(release_error),
+            ) from primary_error
+        raise DeploymentContractError(
+            "deployment-lease-release-failed-after-error"
+        ) from primary_error
 
 def plan_operation(
     contract: DeploymentContract,
@@ -2044,7 +2480,7 @@ def execute_canary_deactivation(
 ) -> None:
     if confirmation != CANARY_DEACTIVATION_CONFIRMATION:
         _fail("explicit-confirmation-required")
-        
+
     _preflight(
         preflight.validate_deployment_lease_owner,
         allowed_owner_uids=contract.lease_owner_uids,
@@ -2067,37 +2503,105 @@ def execute_canary_deactivation(
         target_image_id=target.image_id,
         timeout_seconds=contract.lease_timeout_seconds,
     )
-    
-    baseline = _capture_pre_mutation_baseline(contract)
-    
-    _remove_canary_override_if_exists(contract)
-    
-    _compose_recreate_hermes(
-        contract,
-        image_id=target.image_id,
-        revision=revision,
-        canary_override=False,
-    )
-    
-    post_result = _post_deploy_attestation(
-        contract,
-        baseline,
-        target_image_id=target.image_id,
-        target_revision=revision,
-    )
-    
-    _write_operation_evidence(
-        contract,
-        target_revision=revision,
-        target_image_id=target.image_id,
-        baseline=baseline,
-        operation_status="PASS",
-        post_result=post_result,
-        original_error=None,
-        rollback_attempted=False,
-        rollback_result="NOT_ATTEMPTED",
-        rollback_error=None,
-    )
+
+    primary_error: BaseException | None = None
+    baseline: attestation.RuntimeBaseline | None = None
+    previous_canary: CanaryOverrideSnapshot | None = None
+    secrets: dict[str, str] | None = None
+    mutation_started = False
+    try:
+        secrets = read_required_secrets(contract, contract.approved_secret_source)
+        with tempfile.TemporaryDirectory(
+            prefix="hermes-canary-deactivation-plan-"
+        ) as raw_directory:
+            temporary = _temporary_render_contract(contract, Path(raw_directory))
+            _write_secret_override(temporary, secrets)
+            try:
+                future_mounts = validate_compose_render(
+                    temporary,
+                    target.image_id,
+                    revision,
+                    canary_override=False,
+                )
+            finally:
+                cleanup_secret_override(temporary)
+        _validate_live_future_mounts(contract, future_mounts)
+        _validate_capacity(
+            contract,
+            phase="deploy",
+            revision=revision,
+            image_id=target.image_id,
+        )
+        baseline = _capture_pre_mutation_baseline(contract)
+        _validate_automatic_rollback_readiness(contract, baseline, secrets)
+        previous_canary = _capture_canary_override(contract)
+        mutation_started = True
+        _remove_canary_override_if_exists(contract)
+        _compose_recreate_hermes(
+            contract,
+            image_id=target.image_id,
+            revision=revision,
+            canary_override=False,
+        )
+        expected_baseline = replace(
+            baseline,
+            hermes=replace(
+                baseline.hermes,
+                feature_gates=tuple(
+                    (name, attestation._feature_gate_state(contract.feature_gates[name]))
+                    for name in contract.attestation_policy.feature_gate_names
+                ),
+                allowlists=tuple(
+                    (name, *attestation._allowlist_state(contract.feature_gates[name]))
+                    for name in contract.attestation_policy.allowlist_names
+                ),
+            ),
+        )
+        post_result = _post_deploy_attestation(
+            contract,
+            expected_baseline,
+            target_image_id=target.image_id,
+            target_revision=revision,
+        )
+        _write_operation_evidence(
+            contract,
+            target_revision=revision,
+            target_image_id=target.image_id,
+            baseline=baseline,
+            operation_status="PASS",
+            post_result=post_result,
+            original_error=None,
+            rollback_attempted=False,
+            rollback_result="NOT_ATTEMPTED",
+            rollback_error=None,
+        )
+    except BaseException as exc:
+        if (
+            not mutation_started
+            or baseline is None
+            or previous_canary is None
+            or secrets is None
+        ):
+            primary_error = exc
+            raise
+        final_error = _canary_post_mutation_error(
+            contract,
+            baseline=baseline,
+            previous_canary=previous_canary,
+            rollback_secrets=secrets,
+            target_revision=revision,
+            target_image_id=target.image_id,
+            original_error=exc,
+        )
+        primary_error = final_error
+        raise final_error from exc
+    finally:
+        _release_canary_lease(
+            contract,
+            lease,
+            primary_error=primary_error,
+        )
+
 
 def execute_operation(
     contract: DeploymentContract,
@@ -2139,6 +2643,7 @@ def execute_operation(
     primary_error: BaseException | None = None
     baseline: attestation.RuntimeBaseline | None = None
     secret_transaction: SecretOverrideTransaction | None = None
+    previous_canary: CanaryOverrideSnapshot | None = None
     mutation_started = False
     restore_attempted = False
     try:
@@ -2152,6 +2657,7 @@ def execute_operation(
             lease=lease,
         )
         baseline = _capture_pre_mutation_baseline(contract)
+        previous_canary = _capture_canary_override(contract)
         if not rollback:
             _validate_automatic_rollback_readiness(
                 contract, baseline, secrets
@@ -2213,10 +2719,30 @@ def execute_operation(
 
         rollback_post_result: attestation.PostDeployAttestation | None = None
         rollback_error_code: str | None = restoration_error_code
+        if previous_canary is None:
+            rollback_error_code = rollback_error_code or "CANARY_STATE_UNAVAILABLE"
+        else:
+            try:
+                _restore_canary_override(contract, previous_canary)
+            except BaseException as canary_restore_exc:
+                if rollback_error_code is None:
+                    rollback_error_code = _attestation_error_code(
+                        canary_restore_exc
+                    )
         try:
-            rollback_post_result = _automatic_rollback(
-                contract, baseline, secrets
-            )
+            if previous_canary is not None and previous_canary.present:
+                rollback_post_result = _automatic_rollback(
+                    contract,
+                    baseline,
+                    secrets,
+                    canary_override=True,
+                )
+            else:
+                rollback_post_result = _automatic_rollback(
+                    contract,
+                    baseline,
+                    secrets,
+                )
         except BaseException as rollback_exc:
             if rollback_error_code is None:
                 rollback_error_code = _attestation_error_code(rollback_exc)

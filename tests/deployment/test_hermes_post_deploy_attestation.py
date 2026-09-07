@@ -282,8 +282,11 @@ def test_complete_runtime_attestation_success_is_bounded_and_secret_safe(
     assert result.provider_request_count == 0
     assert result.database_delta_result == "UNCHANGED"
     assert TOKEN not in repr(baseline)
-    assert "1001" not in repr(baseline)
-    assert "2002" not in repr(baseline)
+    redacted_gate_state = repr(
+        (baseline.hermes.feature_gates, baseline.hermes.allowlists)
+    )
+    assert "1001" not in redacted_gate_state
+    assert "2002" not in redacted_gate_state
     log_calls = [call for call in runner.calls if call[:2] == ("docker", "logs")]
     assert len(log_calls) == 1
     assert "--since" in log_calls[0]

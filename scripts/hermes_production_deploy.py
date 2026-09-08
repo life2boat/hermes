@@ -2350,6 +2350,11 @@ def _automatic_rollback(
         contract,
         rollback_secrets,
     )
+    rollback_target = inspect_local_image(
+        contract,
+        baseline.hermes.image_id,
+        expected_revision=baseline.hermes.revision,
+    )
     primary_error: BaseException | None = None
     try:
         if canary_override:
@@ -2370,6 +2375,7 @@ def _automatic_rollback(
             rollback_baseline,
             target_image_id=baseline.hermes.image_id,
             target_revision=baseline.hermes.revision,
+            image_declared_volume_destinations=rollback_target.declared_volume_destinations,
         )
     except BaseException as exc:
         primary_error = exc

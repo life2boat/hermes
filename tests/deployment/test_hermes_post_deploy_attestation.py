@@ -1047,9 +1047,17 @@ def test_automatic_rollback_restores_previous_image_and_uses_same_health_contrac
     expected = _post_result(policy)
     monkeypatch.setattr(
         deploy,
+        "inspect_local_image",
+        lambda _contract, image, expected_revision=None: SimpleNamespace(
+            image_id=image,
+            declared_volume_destinations=frozenset(["/opt/data"]),
+        ),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_post_deploy_attestation",
-        lambda _contract, _baseline, *, target_image_id, target_revision: (
-            calls.append(("health", target_image_id, target_revision)) or expected
+        lambda _contract, _baseline, *, target_image_id, target_revision, image_declared_volume_destinations: (
+            calls.append(("health", target_image_id, target_revision, image_declared_volume_destinations)) or expected
         ),
     )
     assert deploy._automatic_rollback(
@@ -1059,7 +1067,7 @@ def test_automatic_rollback_restores_previous_image_and_uses_same_health_contrac
         ("cursor", "", ""),
         ("config_publish", "1", ""),
         ("compose", IMAGE_OLD, REVISION_OLD),
-        ("health", IMAGE_OLD, REVISION_OLD),
+        ("health", IMAGE_OLD, REVISION_OLD, frozenset(["/opt/data"])),
         ("config_restore", "", ""),
     ]
 

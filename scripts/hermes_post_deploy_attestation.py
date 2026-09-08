@@ -619,6 +619,7 @@ def _require_expected_runtime(
     expected_allowlists: tuple[tuple[str, str, int], ...],
     expected_secret_fingerprints: tuple[tuple[str, str], ...],
     expected_qdrant_collection: str = "healbite_memory_os_v2",
+    image_declared_volume_destinations: frozenset[str] = frozenset(),
 ) -> None:
     if snapshot.image_id != expected_image_id:
         _fail("HERMES_IMAGE_MISMATCH")
@@ -628,8 +629,24 @@ def _require_expected_runtime(
         _fail("HERMES_NOT_RUNNING")
     if snapshot.restart_count != 0:
         _fail("HERMES_RESTART_COUNT_CHANGED")
+    # Permit anonymous volumes at destinations declared by the immutable candidate
+    # image (Config.Volumes).  Any other unexpected mount — wrong type, wrong source
+    # for a protected bind, or a destination not declared by the image — remains a
+    # hard FAIL.  This is the only allowance; no wildcard acceptance.
     if snapshot.mounts != expected_mounts:
-        _fail("HERMES_MOUNT_SET_CHANGED")
+        expected_targets = {m.target for m in expected_mounts}
+        extra = tuple(m for m in snapshot.mounts if m not in expected_mounts)
+        for m in extra:
+            if (
+                m.target in image_declared_volume_destinations
+                and m.target not in expected_targets
+                and m.mount_type == "volume"
+            ):
+                continue  # image-declared anonymous volume — permitted
+            _fail("HERMES_MOUNT_SET_CHANGED")
+        missing = tuple(m for m in expected_mounts if m not in snapshot.mounts)
+        if missing:
+            _fail("HERMES_MOUNT_SET_CHANGED")
     if snapshot.feature_gates != expected_feature_gates:
         _fail("FEATURE_GATE_DELTA")
     if snapshot.allowlists != expected_allowlists:
@@ -811,6 +828,7 @@ def post_deploy_attestation(
     target_revision: str,
     protected_secret_names: tuple[str, ...],
     expected_qdrant_collection: str = "healbite_memory_os_v2",
+    image_declared_volume_destinations: frozenset[str] = frozenset(),
     run: Run = _default_run,
     sleep: Sleep = time.sleep,
 ) -> PostDeployAttestation:
@@ -835,6 +853,7 @@ def post_deploy_attestation(
             expected_allowlists=baseline.hermes.allowlists,
             expected_secret_fingerprints=baseline.hermes.secret_fingerprints,
             expected_qdrant_collection=expected_qdrant_collection,
+            image_declared_volume_destinations=image_declared_volume_destinations,
         )
         if previous_sample is not None and (
             sample.container_id != previous_sample.container_id

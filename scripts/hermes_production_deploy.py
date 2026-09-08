@@ -164,6 +164,7 @@ class CanaryOverrideSnapshot:
 class InspectedImage:
     image_id: str
     revision: str
+    declared_volume_destinations: frozenset[str] = frozenset()
 
 
 def _preflight(function, *args, **kwargs):
@@ -1455,7 +1456,18 @@ def inspect_local_image(
         validate_revision(expected_revision)
         if revision != expected_revision:
             _fail("image-revision-mismatch")
-    return InspectedImage(image_id=image_id, revision=revision)
+    # Extract image-declared volume destinations from Config.Volumes.
+    # These are destinations that Docker auto-creates as anonymous volumes at
+    # container start.  The set is derived from the immutable attested image only.
+    raw_volumes = config.get("Volumes") if isinstance(config, dict) else None
+    declared_volume_destinations: frozenset[str] = frozenset(
+        dest for dest in (raw_volumes or {}) if isinstance(dest, str)
+    )
+    return InspectedImage(
+        image_id=image_id,
+        revision=revision,
+        declared_volume_destinations=declared_volume_destinations,
+    )
 
 
 def _print_plan(
@@ -1999,6 +2011,7 @@ def execute_canary_activation(
             expected_baseline,
             target_image_id=target.image_id,
             target_revision=revision,
+            image_declared_volume_destinations=target.declared_volume_destinations,
         )
         _finish_secret_override_transaction(contract, secret_transaction, preserve_published=True)
         secret_transaction = None
@@ -2256,6 +2269,7 @@ def _post_deploy_attestation(
     *,
     target_image_id: str,
     target_revision: str,
+    image_declared_volume_destinations: frozenset[str] = frozenset(),
 ) -> attestation.PostDeployAttestation:
     return attestation.post_deploy_attestation(
         contract.attestation_policy,
@@ -2270,6 +2284,7 @@ def _post_deploy_attestation(
         expected_qdrant_collection=contract.runtime_bindings.get(
             "QDRANT_COLLECTION", "healbite_memory_os_v2"
         ),
+        image_declared_volume_destinations=image_declared_volume_destinations,
         run=_run,
     )
 
@@ -2562,6 +2577,7 @@ def execute_canary_deactivation(
             expected_baseline,
             target_image_id=target.image_id,
             target_revision=revision,
+            image_declared_volume_destinations=target.declared_volume_destinations,
         )
         _write_operation_evidence(
             contract,
@@ -2675,6 +2691,7 @@ def execute_operation(
             baseline,
             target_image_id=target.image_id,
             target_revision=revision,
+            image_declared_volume_destinations=target.declared_volume_destinations,
         )
         restore_attempted = True
         _finish_secret_override_transaction(
@@ -3082,8 +3099,8 @@ def execute_recovery(
                 (
                     attestation.MountSnapshot(
                         mount_type=m.mount_type,
-                        source=m.source,
-                        target=m.target,
+                        source=os.path.normpath(m.source),
+                        target=os.path.normpath(m.target),
                         read_only=m.read_only,
                     )
                     for m in future_mounts
@@ -3091,6 +3108,11 @@ def execute_recovery(
                 key=lambda m: m.target,
             )
         )
+        # canonical_mounts derives only from docker compose config and does not
+        # include anonymous volumes that Docker auto-creates for image-declared
+        # VOLUME destinations.  The attestation mount check receives the
+        # image_declared_volume_destinations set so it can distinguish these
+        # from unexpected drift.  No mutation of canonical_mounts is needed here.
         canonical_feature_gates = tuple(
             (name, attestation._feature_gate_state(contract.feature_gates[name]))
             for name in contract.attestation_policy.feature_gate_names

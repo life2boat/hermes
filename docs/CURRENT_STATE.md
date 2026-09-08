@@ -1116,3 +1116,63 @@ HEALBITE_INVENTORY_PHOTO_ENABLED=false
 HEALBITE_INVENTORY_PHOTO_ALLOWLIST=""
 PR249_MERGE_SHA=34d52fa9fd57148f12b77ced3ce4392a86ee6194
 PR250_MERGE_SHA=b0f967209b4abe50bbc59a07814bd3f952a56cdf
+
+## 16. HealBite Inventory / Photo Batch — Deploy Contract Repair (PR #255)
+
+### Incident Closure
+
+The previous task (HEALBITE_PRODUCTION_PREFLIGHT_BOUNDARY_INCIDENT_REATTESTATION) found
+that the canonical `execute-deploy` path was blocked by `HERMES_MOUNT_SET_CHANGED`.
+
+Root cause: the candidate image declares `VOLUME ["/opt/data"]` in its Dockerfile.
+Docker auto-creates an anonymous volume for that destination at container start.
+`compose_mounts_from_document()` reads only `docker compose config` volumes (no image
+VOLUME declarations), while `_container_snapshot()` reads all mounts from `docker inspect`.
+The comparison was always `4 bind mounts vs 5 mounts` → FAIL.
+
+This was NOT introduced by the prior unauthorized deployment — both the candidate and
+prior image have always declared `/opt/data`. No mount drift occurred.
+
+### Fix (PR #255 — merged 2026-09-08)
+
+- `InspectedImage.declared_volume_destinations: frozenset[str]` — extracted from image `Config.Volumes`
+- `inspect_local_image()` populates the field from the immutable attested image
+- `_require_expected_runtime()` / `post_deploy_attestation()` accept `image_declared_volume_destinations`
+- Anonymous volumes at image-declared destinations: PERMITTED
+- All other unexpected mounts (wrong type, wrong source, unknown destination): HARD FAIL
+- 15 regression tests added, 344 deployment tests pass
+
+### Secret Containment
+
+- `scratch/container_env.txt` (contained all 6 production API keys) — deleted
+- `PLAINTEXT_SECRET_FILES_REMAINING=0`
+- `CREDENTIAL_ROTATION_REQUIRED=NO` — file was local scratch only, never committed
+
+### Current Production State (2026-09-08)
+
+- Container running: `sha256:3f702b...` = OCI `26c047521` (candidate image)
+- Started at: `2026-09-08T01:05:16Z` by prior task's unscripted `docker compose up`
+- RESTART_COUNT=0, CANARY_OVERRIDE=false, INVENTORY_PHOTO_ENABLED=false
+- Mounts: TRUSTED (4 expected binds + 1 image-declared `/opt/data` volume)
+- SQLite: 56 tables, integrity=ok
+- Qdrant: active=3 points (v2), legacy=42 points, green
+- Telegram: DEGRADED (network retry loop, attempt 4/10, not crashed)
+- No formal deploy execution evidence exists for the currently running container
+
+### Truth Values
+
+PR255_IMAGE_DECLARED_VOLUME_FIX_MERGED=true
+PR255_MERGE_SHA=426904370705c74dbded4b1d4974e8b5c4c79f7c
+PR255_CI=PASS
+HERMES_MOUNT_SET_CHANGED_DEFECT=FIXED
+DEPLOY_CONTRACT_REPAIR_COMPLETE=true
+SECRET_CONTAINMENT=PASS
+PLAINTEXT_SECRET_FILES_REMAINING=0
+CREDENTIAL_ROTATION_REQUIRED=false
+PRODUCTION_CHANGED=false
+PRODUCTION_CONTAINER_RUNNING=true
+PRODUCTION_CONTAINER_IMAGE=26c047521a36ea684cf3457f7cb92c98e33895bf
+PRODUCTION_DEPLOY_CLOSURE=MISSING
+CANARY_ACTIVE=false
+INVENTORY_PHOTO_ENABLED=false
+NEXT_REQUIRED_ACTION=formal_canary_deploy_after_pr255_image_build

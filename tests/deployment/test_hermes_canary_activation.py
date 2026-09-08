@@ -102,7 +102,7 @@ def _install_operation_harness(
     monkeypatch.setattr(
         deploy,
         "_validate_operation_identity",
-        lambda *_args, **_kwargs: (SimpleNamespace(image_id=IMAGE_ID), REVISION),
+        lambda *_args, **_kwargs: (SimpleNamespace(image_id=IMAGE_ID, declared_volume_destinations=frozenset()), REVISION),
     )
     monkeypatch.setattr(deploy, "_validate_runtime_directory", lambda *_a, **_k: None)
     original_temporary_contract = deploy._temporary_render_contract
@@ -746,14 +746,14 @@ def _install_ordinary_deploy_harness(
     monkeypatch.setattr(
         deploy,
         "_validate_operation_identity",
-        lambda *_a, **_k: (SimpleNamespace(image_id=IMAGE_ID), REVISION),
+        lambda *_a, **_k: (SimpleNamespace(image_id=IMAGE_ID, declared_volume_destinations=frozenset()), REVISION),
     )
     monkeypatch.setattr(deploy, "_validate_runtime_directory", lambda *_a, **_k: None)
     monkeypatch.setattr(
         deploy,
         "_ordinary_deploy_pre_mutation_barrier",
         lambda *_a, **_k: (
-            SimpleNamespace(image_id=IMAGE_ID),
+            SimpleNamespace(image_id=IMAGE_ID, declared_volume_destinations=frozenset()),
             {"TELEGRAM_BOT_TOKEN": "placeholder"},
             REVISION,
         ),

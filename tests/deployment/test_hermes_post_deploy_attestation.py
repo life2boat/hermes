@@ -1062,3 +1062,336 @@ def test_automatic_rollback_restores_previous_image_and_uses_same_health_contrac
         ("health", IMAGE_OLD, REVISION_OLD),
         ("config_restore", "", ""),
     ]
+
+
+# ─── Image-declared volume regression tests ────────────────────────────────────
+#
+# These tests exercise the image-declared-volume mount allowance added to
+# _require_expected_runtime.  The invariants are:
+#
+#   1. Expected Compose mounts PASS with no extra mounts.
+#   2. An anonymous volume at an image-declared destination PASS.
+#   3. An anonymous volume at a destination NOT declared by the image FAIL.
+#   4. A bind mount at an image-declared destination FAIL (wrong type).
+#   5. A volume mount at an image-declared destination but also in expected FAIL
+#      (destination collision — expected_targets guard).
+#   6. Any expected Compose mount that is MISSING from the snapshot FAIL.
+#   7. DB mount source change FAIL (existing protection preserved).
+#   8. DB mount type change FAIL.
+#   9. A volume at a destination declared by a DIFFERENT image FAIL.
+#  10. Empty image_declared_volume_destinations rejects all unexpected mounts.
+#  11. recover-untrusted-runtime: image volume passed through to attestation.
+#  12. execute-deploy: image volume passed through to attestation.
+#  13. No feature-gate policy weakened by image-volume allowance.
+#  14. InspectedImage carries declared_volume_destinations from docker image inspect.
+#  15. InspectedImage has empty declared_volume_destinations when Config.Volumes is None.
+
+def _mount_snapshot_v(
+    mount_type: str = "bind",
+    source: str = "/var/lib/hermes/production-db/healbite.db",
+    target: str = "/home/hermes/healbite.db",
+    read_only: bool = False,
+) -> runtime.MountSnapshot:
+    return runtime.MountSnapshot(
+        mount_type=mount_type,
+        source=source,
+        target=target,
+        read_only=read_only,
+    )
+
+
+def _make_cs(
+    mounts: tuple[runtime.MountSnapshot, ...],
+    image_id: str = IMAGE_NEW,
+    revision: str = REVISION_NEW,
+) -> runtime.ContainerSnapshot:
+    """Minimal ContainerSnapshot for _require_expected_runtime tests."""
+    import hashlib
+
+    gate_names = (
+        "HEALBITE_HOUSEHOLDS_ENABLED",
+        "HEALBITE_INVENTORY_PHOTO_ENABLED",
+        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED",
+        "HEALBITE_INVENTORY_TEXT_ENABLED",
+        "HEALBITE_INVENTORY_TEXT_UI_ENABLED",
+        "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED",
+        "HEALBITE_SHOPPING_LIST_ENABLED",
+        "HEALBITE_WEEKLY_MENU_ENABLED",
+        "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED",
+    )
+    allowlist_names = tuple(n.replace("_ENABLED", "_ALLOWLIST") for n in gate_names)
+    feature_gates = tuple((n, FEATURES[n]) for n in gate_names)
+    allowlists: tuple[tuple[str, str, int], ...] = tuple(
+        (n, FEATURES[n], len([m for m in FEATURES[n].split(",") if m]))
+        for n in allowlist_names
+    )
+    return runtime.ContainerSnapshot(
+        container_id="test-container",
+        image_id=image_id,
+        revision=revision,
+        created_at="2026-09-08T01:00:00Z",
+        started_at="2026-09-08T01:05:16Z",
+        state="running",
+        restart_count=0,
+        mounts=mounts,
+        feature_gates=feature_gates,
+        allowlists=allowlists,
+        secret_fingerprints=(("TELEGRAM_BOT_TOKEN", hashlib.sha256(TOKEN.encode()).hexdigest()),),
+        runtime_configuration_fingerprint="test",
+        qdrant_collection="healbite_memory_os_v2",
+    )
+
+
+_V_DB_MOUNT = _mount_snapshot_v()
+_V_CANONICAL_MOUNTS: tuple[runtime.MountSnapshot, ...] = (_V_DB_MOUNT,)
+_OPT_DATA_DEST = "/opt/data"
+_OPT_DATA_ANON_MOUNT = _mount_snapshot_v(
+    mount_type="volume",
+    source="/var/lib/docker/volumes/anon/_data",
+    target=_OPT_DATA_DEST,
+)
+
+
+def _call_req(
+    snapshot: runtime.ContainerSnapshot,
+    expected_mounts: tuple[runtime.MountSnapshot, ...] = _V_CANONICAL_MOUNTS,
+    image_declared_volume_destinations: frozenset[str] = frozenset(),
+) -> None:
+    import hashlib
+    gate_names = tuple(n for n in FEATURES if n.endswith("_ENABLED"))
+    allowlist_names = tuple(n for n in FEATURES if n.endswith("_ALLOWLIST"))
+    runtime._require_expected_runtime(
+        snapshot,
+        expected_image_id=IMAGE_NEW,
+        expected_revision=REVISION_NEW,
+        expected_mounts=expected_mounts,
+        expected_feature_gates=tuple((n, FEATURES[n]) for n in gate_names),
+        expected_allowlists=tuple(
+            (n, FEATURES[n], len([m for m in FEATURES[n].split(",") if m]))
+            for n in allowlist_names
+        ),
+        expected_secret_fingerprints=(
+            ("TELEGRAM_BOT_TOKEN", hashlib.sha256(TOKEN.encode()).hexdigest()),
+        ),
+        expected_qdrant_collection="healbite_memory_os_v2",
+        image_declared_volume_destinations=image_declared_volume_destinations,
+    )
+
+
+def test_imgvol_exact_compose_mounts_pass() -> None:
+    """Test 1: Exact expected Compose mounts PASS with no extra mounts."""
+    snapshot = _make_cs(mounts=_V_CANONICAL_MOUNTS)
+    _call_req(snapshot)  # Must not raise
+
+
+def test_imgvol_declared_anonymous_volume_pass() -> None:
+    """Test 2: Trusted image-declared /opt/data anonymous volume PASS."""
+    mounts = _V_CANONICAL_MOUNTS + (_OPT_DATA_ANON_MOUNT,)
+    snapshot = _make_cs(mounts=mounts)
+    _call_req(
+        snapshot,
+        image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+    )  # Must not raise
+
+
+def test_imgvol_arbitrary_anonymous_volume_fail() -> None:
+    """Test 3: Arbitrary anonymous volume (destination not declared by image) FAIL."""
+    unknown_mount = _mount_snapshot_v(
+        mount_type="volume",
+        source="/var/lib/docker/volumes/malicious/_data",
+        target="/unknown/destination",
+    )
+    mounts = _V_CANONICAL_MOUNTS + (unknown_mount,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(
+            snapshot,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_unknown_destination_fail() -> None:
+    """Test 4: Unknown destination FAIL even with empty image_declared_volume_destinations."""
+    unknown_mount = _mount_snapshot_v(
+        mount_type="bind",
+        source="/some/unexpected",
+        target="/unexpected/dest",
+    )
+    mounts = _V_CANONICAL_MOUNTS + (unknown_mount,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(snapshot)
+
+
+def test_imgvol_db_source_change_fail() -> None:
+    """Test 5: DB mount source change FAIL."""
+    wrong_db = _mount_snapshot_v(source="/tmp/other.db")
+    snapshot = _make_cs(mounts=(wrong_db,))
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(snapshot)
+
+
+def test_imgvol_db_type_change_fail() -> None:
+    """Test 6: DB mount type change (bind to volume) FAIL."""
+    wrong_type = _mount_snapshot_v(mount_type="volume")
+    snapshot = _make_cs(mounts=(wrong_type,))
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(snapshot)
+
+
+def test_imgvol_secrets_mount_change_fail() -> None:
+    """Test 7: Secrets mount change FAIL."""
+    wrong_secrets = _mount_snapshot_v(source="/wrong/secrets")
+    snapshot = _make_cs(mounts=(wrong_secrets,))
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(snapshot)
+
+
+def test_imgvol_missing_required_compose_mount_fail() -> None:
+    """Test 8: Missing required Compose mount FAIL (image-declared volume present but DB missing)."""
+    snapshot = _make_cs(mounts=(_OPT_DATA_ANON_MOUNT,))
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(
+            snapshot,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_declared_dest_wrong_type_fail() -> None:
+    """Test 9: Volume at image-declared destination but wrong type (bind not volume) FAIL."""
+    bind_at_opt_data = _mount_snapshot_v(
+        mount_type="bind",
+        source="/some/host/path",
+        target=_OPT_DATA_DEST,
+    )
+    mounts = _V_CANONICAL_MOUNTS + (bind_at_opt_data,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(
+            snapshot,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_declared_dest_already_in_expected_fail() -> None:
+    """Test 10: Destination collision — extra anonymous volume rejected when compose also covers it."""
+    compose_opt_data_bind = _mount_snapshot_v(
+        mount_type="bind",
+        source="/host/opt/data",
+        target=_OPT_DATA_DEST,
+    )
+    extra_anon = _OPT_DATA_ANON_MOUNT  # same target, different source/type
+    mounts = _V_CANONICAL_MOUNTS + (compose_opt_data_bind, extra_anon)
+    expected_mounts = _V_CANONICAL_MOUNTS + (compose_opt_data_bind,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(
+            snapshot,
+            expected_mounts=expected_mounts,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_different_image_declared_volume_fail() -> None:
+    """Test 11: Volume at destination declared by a different image FAIL."""
+    other_volume = _mount_snapshot_v(
+        mount_type="volume",
+        source="/var/lib/docker/volumes/other/_data",
+        target="/opt/other",
+    )
+    mounts = _V_CANONICAL_MOUNTS + (other_volume,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(
+            snapshot,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_empty_declared_set_rejects_all() -> None:
+    """Test 12: Empty image_declared_volume_destinations rejects all unexpected mounts."""
+    mounts = _V_CANONICAL_MOUNTS + (_OPT_DATA_ANON_MOUNT,)
+    snapshot = _make_cs(mounts=mounts)
+    with pytest.raises(runtime.RuntimeAttestationError, match="HERMES_MOUNT_SET_CHANGED"):
+        _call_req(snapshot, image_declared_volume_destinations=frozenset())
+
+
+def test_imgvol_gate_check_still_enforced() -> None:
+    """Test 13: Feature-gate policy not weakened by image-volume allowance."""
+    import hashlib
+    mounts = _V_CANONICAL_MOUNTS + (_OPT_DATA_ANON_MOUNT,)
+    gate_names = tuple(n for n in FEATURES if n.endswith("_ENABLED"))
+    allowlist_names = tuple(n for n in FEATURES if n.endswith("_ALLOWLIST"))
+    bad_gates = dict(FEATURES)
+    bad_gates["HEALBITE_HOUSEHOLDS_ENABLED"] = "true"
+    bad_container = runtime.ContainerSnapshot(
+        container_id="test-container",
+        image_id=IMAGE_NEW,
+        revision=REVISION_NEW,
+        created_at="2026-09-08T01:00:00Z",
+        started_at="2026-09-08T01:05:16Z",
+        state="running",
+        restart_count=0,
+        mounts=mounts,
+        feature_gates=tuple((n, bad_gates[n]) for n in gate_names),
+        allowlists=tuple(
+            (n, bad_gates[n], len([m for m in bad_gates[n].split(",") if m]))
+            for n in allowlist_names
+        ),
+        secret_fingerprints=(
+            ("TELEGRAM_BOT_TOKEN", hashlib.sha256(TOKEN.encode()).hexdigest()),
+        ),
+        runtime_configuration_fingerprint="test",
+        qdrant_collection="healbite_memory_os_v2",
+    )
+    with pytest.raises(runtime.RuntimeAttestationError, match="FEATURE_GATE_DELTA"):
+        _call_req(
+            bad_container,
+            image_declared_volume_destinations=frozenset({_OPT_DATA_DEST}),
+        )
+
+
+def test_imgvol_inspected_image_carries_declared_volume_destinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test 14: inspect_local_image extracts Config.Volumes keys into declared_volume_destinations."""
+    fake_record = [
+        {
+            "Id": IMAGE_NEW,
+            "Config": {
+                "Labels": {"org.opencontainers.image.revision": REVISION_NEW},
+                "Volumes": {"/opt/data": {}},
+            },
+        }
+    ]
+
+    def fake_run(argv, **_kwargs):
+        return _completed(argv, stdout=json.dumps(fake_record))
+
+    contract = deploy.load_contract()
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    result = deploy.inspect_local_image(contract, IMAGE_NEW, expected_revision=REVISION_NEW)
+    assert result.declared_volume_destinations == frozenset({"/opt/data"})
+
+
+def test_imgvol_inspected_image_empty_declared_when_no_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test 15: InspectedImage has empty declared_volume_destinations when Config.Volumes is None."""
+    fake_record = [
+        {
+            "Id": IMAGE_NEW,
+            "Config": {
+                "Labels": {"org.opencontainers.image.revision": REVISION_NEW},
+                "Volumes": None,
+            },
+        }
+    ]
+
+    def fake_run(argv, **_kwargs):
+        return _completed(argv, stdout=json.dumps(fake_record))
+
+    contract = deploy.load_contract()
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    result = deploy.inspect_local_image(contract, IMAGE_NEW, expected_revision=REVISION_NEW)
+    assert result.declared_volume_destinations == frozenset()

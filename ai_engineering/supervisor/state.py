@@ -58,9 +58,9 @@ _TERMINAL_PHASES = frozenset({
 
 _VALID_TRANSITIONS: dict[SupervisorPhase, frozenset[SupervisorPhase]] = {
     SupervisorPhase.PENDING: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.CANCELLED}),
-    SupervisorPhase.RUNNING: frozenset({SupervisorPhase.COLLECTING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
+    SupervisorPhase.RUNNING: frozenset({SupervisorPhase.COLLECTING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED, SupervisorPhase.DONE}),
     SupervisorPhase.COLLECTING: frozenset({SupervisorPhase.VERIFYING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
-    SupervisorPhase.VERIFYING: frozenset({SupervisorPhase.DECIDING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
+    SupervisorPhase.VERIFYING: frozenset({SupervisorPhase.DECIDING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.DONE}),
     SupervisorPhase.DECIDING: frozenset({SupervisorPhase.READY_FOR_NEXT_TASK, SupervisorPhase.RUNNING, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
     SupervisorPhase.READY_FOR_NEXT_TASK: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
     SupervisorPhase.BLOCKED: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
@@ -110,6 +110,11 @@ class SupervisorState:
     event_sequence: int
     autonomy_state: Any = None
     budget_state: Any = None
+    active_dispatch_id: str | None = None
+    active_dispatch_digest: str | None = None
+    pr_number: int | None = None
+    pr_head_sha: str | None = None
+    ci_state: str | None = None
 
 
 
@@ -189,6 +194,16 @@ def _state_to_dict(state: SupervisorState) -> dict:
         d["autonomy_state"] = _autonomy_state_to_dict(state.autonomy_state)
     if state.budget_state is not None:
         d["budget_state"] = _budget_state_to_dict(state.budget_state)
+    if state.active_dispatch_id is not None:
+        d["active_dispatch_id"] = state.active_dispatch_id
+    if state.active_dispatch_digest is not None:
+        d["active_dispatch_digest"] = state.active_dispatch_digest
+    if state.pr_number is not None:
+        d["pr_number"] = state.pr_number
+    if state.pr_head_sha is not None:
+        d["pr_head_sha"] = state.pr_head_sha
+    if state.ci_state is not None:
+        d["ci_state"] = state.ci_state
     return d
 
 
@@ -276,6 +291,8 @@ _BASE_STATE_FIELDS = frozenset({
 })
 _OPTIONAL_STATE_FIELDS = frozenset({
     "autonomy_state", "budget_state",
+    "active_dispatch_id", "active_dispatch_digest",
+    "pr_number", "pr_head_sha", "ci_state",
 })
 _ALL_STATE_FIELDS = _BASE_STATE_FIELDS | _OPTIONAL_STATE_FIELDS
 _STATE_FIELDS = _BASE_STATE_FIELDS
@@ -407,6 +424,19 @@ def deserialize_state(raw: str | bytes) -> SupervisorState:
     state_revision = _req_int(payload["state_revision"], "state_revision", 1)
     event_sequence = _req_int(payload["event_sequence"], "event_sequence", 0)
 
+    active_dispatch_id = _opt_str(payload.get("active_dispatch_id"), "active_dispatch_id")
+    active_dispatch_digest = _opt_digest(payload.get("active_dispatch_digest"), "active_dispatch_digest")
+    pr_number_raw = payload.get("pr_number")
+    pr_number = None
+    if pr_number_raw is not None:
+        if isinstance(pr_number_raw, bool) or not isinstance(pr_number_raw, int) or pr_number_raw < 1:
+            _fail("FIELD_INVALID:pr_number")
+        pr_number = pr_number_raw
+    pr_head_sha = None
+    if payload.get("pr_head_sha") is not None:
+        pr_head_sha = _req_sha(payload["pr_head_sha"], "pr_head_sha")
+    ci_state = _opt_str(payload.get("ci_state"), "ci_state")
+
     return SupervisorState(
         schema_version=SUPERVISOR_STATE_SCHEMA_VERSION,
         run_id=run_id,
@@ -436,6 +466,11 @@ def deserialize_state(raw: str | bytes) -> SupervisorState:
         event_sequence=event_sequence,
         autonomy_state=parse_autonomy_state(payload.get("autonomy_state")),
         budget_state=parse_budget_state(payload.get("budget_state")),
+        active_dispatch_id=active_dispatch_id,
+        active_dispatch_digest=active_dispatch_digest,
+        pr_number=pr_number,
+        pr_head_sha=pr_head_sha,
+        ci_state=ci_state,
     )
 
 
@@ -454,6 +489,11 @@ def create_initial_state(
     created_at_utc: str,
     autonomy_state: Any = None,
     budget_state: Any = None,
+    active_dispatch_id: str | None = None,
+    active_dispatch_digest: str | None = None,
+    pr_number: int | None = None,
+    pr_head_sha: str | None = None,
+    ci_state: str | None = None,
 ) -> SupervisorState:
     """Create the initial supervisor state."""
     return SupervisorState(
@@ -485,4 +525,9 @@ def create_initial_state(
         event_sequence=0,
         autonomy_state=autonomy_state,
         budget_state=budget_state,
+        active_dispatch_id=active_dispatch_id,
+        active_dispatch_digest=active_dispatch_digest,
+        pr_number=pr_number,
+        pr_head_sha=pr_head_sha,
+        ci_state=ci_state,
     )

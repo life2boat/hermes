@@ -122,7 +122,25 @@ def evaluate_policy(
         reason_codes.append("AUTONOMY_LEVEL_TOO_LOW")
 
     # 6. Budget Evaluation
-    if budget_state.exhausted_dimensions:
+    limits = work_profile.budget_limits
+    is_budget_exhausted = bool(budget_state.exhausted_dimensions)
+    if limits:
+        if limits.max_supervisor_decisions is not None and budget_state.decisions_used >= limits.max_supervisor_decisions:
+            is_budget_exhausted = True
+        if limits.max_child_tasks is not None and budget_state.child_tasks_used >= limits.max_child_tasks:
+            is_budget_exhausted = True
+        if limits.max_retries_per_task is not None and budget_state.retries_used >= limits.max_retries_per_task:
+            is_budget_exhausted = True
+        if limits.max_fix_cycles_per_task is not None and budget_state.fix_cycles_used >= limits.max_fix_cycles_per_task:
+            is_budget_exhausted = True
+        if limits.max_consecutive_failures is not None and budget_state.consecutive_failures >= limits.max_consecutive_failures:
+            is_budget_exhausted = True
+        if limits.max_provider_calls is not None and budget_state.provider_calls_used >= limits.max_provider_calls:
+            is_budget_exhausted = True
+        if limits.max_policy_denials is not None and budget_state.policy_denials >= limits.max_policy_denials:
+            is_budget_exhausted = True
+
+    if is_budget_exhausted:
         reason_codes.append("AUTONOMY_BUDGET_EXHAUSTED")
 
     if reason_codes:

@@ -745,12 +745,14 @@ class SupervisorLoop:
             # 1. Update budget
             c_inc = 1 if decision.action.value in ("CONTINUE", "FIX") else 0
             r_inc = 1 if decision.action.value == "RETRY" else 0
+            f_inc = 1 if decision.action.value == "FIX" else 0
             updated_budget = evaluate_budget_consumption(
                 state.budget_state,
                 work_profile.budget_limits,
                 decisions_increment=1,
                 child_tasks_increment=c_inc,
                 retries_increment=r_inc,
+                fix_cycles_increment=f_inc,
             )
             b_dg = _compute_budget_digest(updated_budget)
             updated_budget = replace(updated_budget, budget_digest=b_dg)
@@ -786,13 +788,18 @@ class SupervisorLoop:
             )
             self._store.save_event(policy_event)
 
-            # 4. Proceed to NEXT_TASK_GENERATED (candidate task is authoritative)
+            # 4. Proceed to NEXT_TASK_GENERATED or ATTEMPT_INCREMENTED (candidate task is authoritative)
             child_idg = intent_digest(candidate_intent)
+            event_type = (
+                SupervisorEventType.ATTEMPT_INCREMENTED
+                if decision.action.value == "RETRY"
+                else SupervisorEventType.NEXT_TASK_GENERATED
+            )
             task_event = create_event(
                 run_id=run_id,
                 sequence=new_seq + 2,
                 previous_event_digest=policy_event.event_digest,
-                event_type=SupervisorEventType.NEXT_TASK_GENERATED,
+                event_type=event_type,
                 state_revision=state.state_revision + 3,
                 task_id=candidate_intent.task_id,
                 attempt_id=candidate_attempt_id,

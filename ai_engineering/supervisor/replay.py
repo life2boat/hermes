@@ -103,6 +103,37 @@ def replay_events_with_seed(
     return state
 
 
+def _bump_budget(b: Any, decisions: int = 0, child_tasks: int = 0, retries: int = 0, denials: int = 0) -> Any:
+    if b is None:
+        return None
+    try:
+        from dataclasses import replace
+        from ai_engineering.supervisor.policy.contracts import compute_deterministic_digest
+        new_b = replace(
+            b,
+            decisions_used=b.decisions_used + decisions,
+            child_tasks_used=b.child_tasks_used + child_tasks,
+            retries_used=b.retries_used + retries,
+            policy_denials=b.policy_denials + denials,
+        )
+        payload = {
+            "budget_id": new_b.budget_id,
+            "child_tasks_used": new_b.child_tasks_used,
+            "consecutive_failures": new_b.consecutive_failures,
+            "decisions_used": new_b.decisions_used,
+            "exhausted_dimensions": list(new_b.exhausted_dimensions),
+            "fix_cycles_used": new_b.fix_cycles_used,
+            "policy_denials": new_b.policy_denials,
+            "provider_calls_used": new_b.provider_calls_used,
+            "retries_used": new_b.retries_used,
+            "schema_version": new_b.schema_version,
+        }
+        b_dg = compute_deterministic_digest(payload)
+        return replace(new_b, budget_digest=b_dg)
+    except Exception:
+        return b
+
+
 def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorState:
     """Apply a single event to the state, returning the new state."""
     et = event.event_type
@@ -135,31 +166,108 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
+        )
+
+    elif et == SupervisorEventType.WORK_PROFILE_BOUND:
+        return SupervisorState(
+            schema_version=state.schema_version,
+            run_id=state.run_id,
+            root_goal_id=state.root_goal_id,
+            root_goal=state.root_goal,
+            repository=state.repository,
+            canonical_remote=state.canonical_remote,
+            canonical_main_ref=state.canonical_main_ref,
+            current_task_id=event.task_id,
+            current_intent_digest=event.intent_digest,
+            current_intent_revision=state.current_intent_revision,
+            current_base_sha=state.current_base_sha,
+            current_attempt_id=event.attempt_id,
+            attempt_number=state.attempt_number,
+            latest_verified_result_id=state.latest_verified_result_id,
+            latest_verified_result_digest=state.latest_verified_result_digest,
+            latest_context_pack_digest=state.latest_context_pack_digest,
+            latest_decision_id=state.latest_decision_id,
+            latest_decision_digest=state.latest_decision_digest,
+            engineering_cycle_id=state.engineering_cycle_id,
+            engineering_cycle_phase=state.engineering_cycle_phase,
+            phase=state.phase,
+            blockers=state.blockers,
+            created_at_utc=state.created_at_utc,
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
+        )
+
+    elif et == SupervisorEventType.POLICY_EVALUATED:
+        return SupervisorState(
+            schema_version=state.schema_version,
+            run_id=state.run_id,
+            root_goal_id=state.root_goal_id,
+            root_goal=state.root_goal,
+            repository=state.repository,
+            canonical_remote=state.canonical_remote,
+            canonical_main_ref=state.canonical_main_ref,
+            current_task_id=event.task_id,
+            current_intent_digest=event.intent_digest,
+            current_intent_revision=state.current_intent_revision,
+            current_base_sha=state.current_base_sha,
+            current_attempt_id=event.attempt_id,
+            attempt_number=state.attempt_number,
+            latest_verified_result_id=state.latest_verified_result_id,
+            latest_verified_result_digest=state.latest_verified_result_digest,
+            latest_context_pack_digest=state.latest_context_pack_digest,
+            latest_decision_id=event.decision_id or state.latest_decision_id,
+            latest_decision_digest=state.latest_decision_digest,
+            engineering_cycle_id=state.engineering_cycle_id,
+            engineering_cycle_phase=state.engineering_cycle_phase,
+            phase=state.phase,
+            blockers=state.blockers,
+            created_at_utc=state.created_at_utc,
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
+        )
+
+    elif et == SupervisorEventType.AUTONOMY_LEVEL_CHANGED:
+        return SupervisorState(
+            schema_version=state.schema_version,
+            run_id=state.run_id,
+            root_goal_id=state.root_goal_id,
+            root_goal=state.root_goal,
+            repository=state.repository,
+            canonical_remote=state.canonical_remote,
+            canonical_main_ref=state.canonical_main_ref,
+            current_task_id=event.task_id,
+            current_intent_digest=event.intent_digest,
+            current_intent_revision=state.current_intent_revision,
+            current_base_sha=state.current_base_sha,
+            current_attempt_id=event.attempt_id,
+            attempt_number=state.attempt_number,
+            latest_verified_result_id=state.latest_verified_result_id,
+            latest_verified_result_digest=state.latest_verified_result_digest,
+            latest_context_pack_digest=state.latest_context_pack_digest,
+            latest_decision_id=state.latest_decision_id,
+            latest_decision_digest=state.latest_decision_digest,
+            engineering_cycle_id=state.engineering_cycle_id,
+            engineering_cycle_phase=state.engineering_cycle_phase,
+            phase=state.phase,
+            blockers=state.blockers,
+            created_at_utc=state.created_at_utc,
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     elif et == SupervisorEventType.PHASE_TRANSITIONED:
-        # Phase is encoded in the event metadata; we need to look at the new state_revision
-        # and infer the phase from context. Actually, we store phase in payload.
-        # Since we only have payload_digest, we use a different mechanism.
-        # For PHASE_TRANSITIONED, the actual new phase must be deterministically derivable.
-        # We'll use a convention: the event carries phase info via state_revision ordering.
-        # However, for full replay fidelity, we store extra info in task_id field... no.
-        # 
-        # DESIGN: events carry enough info. PHASE_TRANSITIONED events alone don't carry
-        # the new phase explicitly in the event metadata. Instead, we derive state from
-        # the event TYPE and the sequence of events. Each operation (ingest_result,
-        # build_context, accept_decision) transitions the phase deterministically.
-        # We track state by event type sequence.
-        #
-        # The loop stores the current phase in the event payload, but we only have
-        # payload_digest. For full replay without payload content, we need to embed
-        # phase changes in the event metadata somehow.
-        #
-        # FINAL DESIGN: We use a simple mapping: each event type implies a phase transition.
-        # The exact phase for PHASE_TRANSITIONED is derived from which operation
-        # the event represents. We eliminate PHASE_TRANSITIONED as a separate event type
-        # and embed phase in the other events.
-        return state  # fallthrough - phase handled by other events
+        return state
 
     elif et == SupervisorEventType.RESULT_INGESTED:
         return SupervisorState(
@@ -177,7 +285,7 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             current_attempt_id=event.attempt_id,
             attempt_number=state.attempt_number,
             latest_verified_result_id=event.verified_result_id,
-            latest_verified_result_digest=None,  # not in event metadata directly
+            latest_verified_result_digest=state.latest_verified_result_digest,
             latest_context_pack_digest=state.latest_context_pack_digest,
             latest_decision_id=state.latest_decision_id,
             latest_decision_digest=state.latest_decision_digest,
@@ -189,6 +297,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     elif et == SupervisorEventType.CONTEXT_PACK_BUILT:
@@ -208,7 +318,7 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             attempt_number=state.attempt_number,
             latest_verified_result_id=state.latest_verified_result_id,
             latest_verified_result_digest=state.latest_verified_result_digest,
-            latest_context_pack_digest=event.payload_digest,  # use payload_digest as context pack ref
+            latest_context_pack_digest=event.payload_digest,
             latest_decision_id=state.latest_decision_id,
             latest_decision_digest=state.latest_decision_digest,
             engineering_cycle_id=state.engineering_cycle_id,
@@ -219,6 +329,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     elif et == SupervisorEventType.DECISION_ACCEPTED:
@@ -249,6 +361,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=_bump_budget(state.budget_state, decisions=1),
         )
 
     elif et == SupervisorEventType.NEXT_TASK_GENERATED:
@@ -279,6 +393,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=_bump_budget(state.budget_state, child_tasks=1),
         )
 
     elif et == SupervisorEventType.ATTEMPT_INCREMENTED:
@@ -309,6 +425,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=_bump_budget(state.budget_state, retries=1),
         )
 
     elif et == SupervisorEventType.BLOCKER_RECORDED:
@@ -339,6 +457,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=_bump_budget(state.budget_state, denials=1),
         )
 
     elif et == SupervisorEventType.RUN_COMPLETED:
@@ -369,6 +489,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     elif et == SupervisorEventType.RUN_FAILED:
@@ -399,6 +521,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     elif et == SupervisorEventType.RUN_CANCELLED:
@@ -429,6 +553,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,
+            autonomy_state=state.autonomy_state,
+            budget_state=state.budget_state,
         )
 
     else:

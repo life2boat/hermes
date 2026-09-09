@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import Any, NoReturn
 
 try:
     from enum import StrEnum
@@ -47,6 +47,7 @@ class SupervisorPhase(StrEnum):
     DONE = "DONE"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    POLICY_DENIED = "POLICY_DENIED"
 
 
 _TERMINAL_PHASES = frozenset({
@@ -57,12 +58,13 @@ _TERMINAL_PHASES = frozenset({
 
 _VALID_TRANSITIONS: dict[SupervisorPhase, frozenset[SupervisorPhase]] = {
     SupervisorPhase.PENDING: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.CANCELLED}),
-    SupervisorPhase.RUNNING: frozenset({SupervisorPhase.COLLECTING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
+    SupervisorPhase.RUNNING: frozenset({SupervisorPhase.COLLECTING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
     SupervisorPhase.COLLECTING: frozenset({SupervisorPhase.VERIFYING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
     SupervisorPhase.VERIFYING: frozenset({SupervisorPhase.DECIDING, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
-    SupervisorPhase.DECIDING: frozenset({SupervisorPhase.READY_FOR_NEXT_TASK, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
-    SupervisorPhase.READY_FOR_NEXT_TASK: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
+    SupervisorPhase.DECIDING: frozenset({SupervisorPhase.READY_FOR_NEXT_TASK, SupervisorPhase.RUNNING, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
+    SupervisorPhase.READY_FOR_NEXT_TASK: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.DONE, SupervisorPhase.BLOCKED, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.POLICY_DENIED}),
     SupervisorPhase.BLOCKED: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED}),
+    SupervisorPhase.POLICY_DENIED: frozenset({SupervisorPhase.RUNNING, SupervisorPhase.FAILED, SupervisorPhase.CANCELLED, SupervisorPhase.BLOCKED}),
     SupervisorPhase.DONE: frozenset(),
     SupervisorPhase.FAILED: frozenset(),
     SupervisorPhase.CANCELLED: frozenset(),
@@ -106,10 +108,56 @@ class SupervisorState:
     updated_at_utc: str
     state_revision: int
     event_sequence: int
+    autonomy_state: Any = None
+    budget_state: Any = None
 
 
-def _state_to_dict(state: SupervisorState) -> dict:
+
+def _autonomy_state_to_dict(a: Any) -> dict | None:
+    if a is None:
+        return None
+    if isinstance(a, dict):
+        return a
     return {
+        "budget_state_digest": a.budget_state_digest,
+        "created_at_utc": a.created_at_utc,
+        "critical_failures": a.critical_failures,
+        "current_level": a.current_level.value if hasattr(a.current_level, "value") else str(a.current_level),
+        "last_transition_receipt_id": a.last_transition_receipt_id,
+        "maximum_allowed_level": a.maximum_allowed_level.value if hasattr(a.maximum_allowed_level, "value") else str(a.maximum_allowed_level),
+        "profile_digest": a.profile_digest,
+        "profile_id": a.profile_id,
+        "promotion_sequence": a.promotion_sequence,
+        "required_validators_status": dict(a.required_validators_status),
+        "rollback_verified": a.rollback_verified,
+        "run_id": a.run_id,
+        "schema_version": a.schema_version,
+        "state_digest": a.state_digest,
+        "successful_runs": a.successful_runs,
+        "updated_at_utc": a.updated_at_utc,
+    }
+
+
+def _budget_state_to_dict(b: Any) -> dict | None:
+    if b is None:
+        return None
+    if isinstance(b, dict):
+        return b
+    return {
+        "budget_digest": b.budget_digest,
+        "budget_id": b.budget_id,
+        "child_tasks_used": b.child_tasks_used,
+        "consecutive_failures": b.consecutive_failures,
+        "decisions_used": b.decisions_used,
+        "exhausted_dimensions": list(b.exhausted_dimensions),
+        "fix_cycles_used": b.fix_cycles_used,
+        "policy_denials": b.policy_denials,
+        "provider_calls_used": b.provider_calls_used,
+        "retries_used": b.retries_used,
+        "schema_version": b.schema_version,
+    }
+def _state_to_dict(state: SupervisorState) -> dict:
+    d = {
         "attempt_number": state.attempt_number,
         "blockers": list(state.blockers),
         "canonical_main_ref": state.canonical_main_ref,
@@ -137,6 +185,11 @@ def _state_to_dict(state: SupervisorState) -> dict:
         "state_revision": state.state_revision,
         "updated_at_utc": state.updated_at_utc,
     }
+    if state.autonomy_state is not None:
+        d["autonomy_state"] = _autonomy_state_to_dict(state.autonomy_state)
+    if state.budget_state is not None:
+        d["budget_state"] = _budget_state_to_dict(state.budget_state)
+    return d
 
 
 def canonical_serialize_state(state: SupervisorState) -> str:
@@ -212,7 +265,7 @@ def _req_int(v: object, field: str, min_val: int) -> int:
     return v
 
 
-_STATE_FIELDS = frozenset({
+_BASE_STATE_FIELDS = frozenset({
     "schema_version", "run_id", "root_goal_id", "root_goal", "repository",
     "canonical_remote", "canonical_main_ref", "current_task_id", "current_intent_digest",
     "current_intent_revision", "current_base_sha", "current_attempt_id", "attempt_number",
@@ -221,6 +274,64 @@ _STATE_FIELDS = frozenset({
     "engineering_cycle_phase", "phase", "blockers", "created_at_utc", "updated_at_utc",
     "state_revision", "event_sequence",
 })
+_OPTIONAL_STATE_FIELDS = frozenset({
+    "autonomy_state", "budget_state",
+})
+_ALL_STATE_FIELDS = _BASE_STATE_FIELDS | _OPTIONAL_STATE_FIELDS
+_STATE_FIELDS = _BASE_STATE_FIELDS
+
+
+def parse_autonomy_state(val: Any) -> Any:
+    if val is None:
+        return None
+    if not isinstance(val, dict):
+        return val
+    try:
+        from ai_engineering.supervisor.policy.contracts import AutonomyState, AutonomyLevel
+        return AutonomyState(
+            schema_version=val["schema_version"],
+            run_id=val["run_id"],
+            profile_id=val["profile_id"],
+            profile_digest=val["profile_digest"],
+            current_level=AutonomyLevel(val["current_level"]),
+            maximum_allowed_level=AutonomyLevel(val["maximum_allowed_level"]),
+            successful_runs=int(val["successful_runs"]),
+            critical_failures=int(val["critical_failures"]),
+            rollback_verified=bool(val["rollback_verified"]),
+            required_validators_status=dict(val.get("required_validators_status", {})),
+            budget_state_digest=val["budget_state_digest"],
+            promotion_sequence=int(val["promotion_sequence"]),
+            last_transition_receipt_id=val.get("last_transition_receipt_id"),
+            created_at_utc=val["created_at_utc"],
+            updated_at_utc=val["updated_at_utc"],
+            state_digest=val["state_digest"],
+        )
+    except Exception:
+        return val
+
+
+def parse_budget_state(val: Any) -> Any:
+    if val is None:
+        return None
+    if not isinstance(val, dict):
+        return val
+    try:
+        from ai_engineering.supervisor.policy.contracts import AutonomyBudgetState
+        return AutonomyBudgetState(
+            schema_version=val["schema_version"],
+            budget_id=val["budget_id"],
+            budget_digest=val["budget_digest"],
+            decisions_used=int(val["decisions_used"]),
+            child_tasks_used=int(val["child_tasks_used"]),
+            retries_used=int(val["retries_used"]),
+            fix_cycles_used=int(val["fix_cycles_used"]),
+            consecutive_failures=int(val["consecutive_failures"]),
+            provider_calls_used=int(val["provider_calls_used"]),
+            policy_denials=int(val["policy_denials"]),
+            exhausted_dimensions=tuple(val.get("exhausted_dimensions", ())),
+        )
+    except Exception:
+        return val
 
 
 def deserialize_state(raw: str | bytes) -> SupervisorState:
@@ -245,8 +356,8 @@ def deserialize_state(raw: str | bytes) -> SupervisorState:
         _fail("JSON_INVALID")
 
     keys = frozenset(payload)
-    missing = _STATE_FIELDS - keys
-    extra = keys - _STATE_FIELDS
+    missing = _BASE_STATE_FIELDS - keys
+    extra = keys - _ALL_STATE_FIELDS
     if missing or extra:
         _fail("FIELD_INVALID:schema")
 
@@ -323,6 +434,8 @@ def deserialize_state(raw: str | bytes) -> SupervisorState:
         updated_at_utc=updated_at_utc,
         state_revision=state_revision,
         event_sequence=event_sequence,
+        autonomy_state=parse_autonomy_state(payload.get("autonomy_state")),
+        budget_state=parse_budget_state(payload.get("budget_state")),
     )
 
 
@@ -339,6 +452,8 @@ def create_initial_state(
     base_sha: str,
     attempt_id: str,
     created_at_utc: str,
+    autonomy_state: Any = None,
+    budget_state: Any = None,
 ) -> SupervisorState:
     """Create the initial supervisor state."""
     return SupervisorState(
@@ -368,4 +483,6 @@ def create_initial_state(
         updated_at_utc=created_at_utc,
         state_revision=1,
         event_sequence=0,
+        autonomy_state=autonomy_state,
+        budget_state=budget_state,
     )

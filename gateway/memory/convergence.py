@@ -253,11 +253,7 @@ class MemoryVectorConvergence:
         placeholders = ", ".join("?" for _ in selected_states)
 
         def _fetch_batch(conn: sqlite3.Connection):
-            conn.execute(
-                f"UPDATE {META_TABLE} SET last_reconciliation_at = ? WHERE singleton_id = 1",
-                (now,),
-            )
-            return conn.execute(
+            batch = conn.execute(
                 f"""
                 SELECT * FROM {OUTBOX_TABLE}
                 WHERE state IN ({placeholders})
@@ -267,6 +263,12 @@ class MemoryVectorConvergence:
                 """,
                 (*selected_states, now, limit),
             ).fetchall()
+            if batch:
+                conn.execute(
+                    f"UPDATE {META_TABLE} SET last_reconciliation_at = ? WHERE singleton_id = 1",
+                    (now,),
+                )
+            return batch
 
         rows = self._execute_with_retry(
             _fetch_batch, mode="IMMEDIATE", budget_deadline=deadline
@@ -758,10 +760,12 @@ class MemoryVectorConvergence:
             if meta["last_reconciliation_at"] is None
             else float(meta["last_reconciliation_at"])
         )
+        has_active_work = pending > 0 or retryable > 0 or blocked > 0
         if (
             self.vector_enabled
             and last_reconciliation is not None
             and now - last_reconciliation >= self.alert_age_seconds
+            and has_active_work
         ):
             alert_reasons.append("RECONCILER_STALE")
         if alert_reasons:

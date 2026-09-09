@@ -1,0 +1,20 @@
+{
+  "schema_version": "hermes.astra-decision.v1",
+  "run_id": "run-supervisor-01",
+  "task_id": "task-supervisor-01",
+  "attempt_id": "attempt-01",
+  "intent_digest": "e05de48e72622fa75149dbd68d46a01721e7de398f932261ddeca496db3b41ea",
+  "verified_result_id": "14c90a8b2ba0497e1cb733c9469b491837769fbe9013579735a55f9aaceec773",
+  "verified_result_digest": "e89494e2e506fed33362a1c0f4d389f836d4bc097955cdf8a7142409169d9986",
+  "context_pack_digest": "b835227dc7f214c415c4fa6ecc3b31ac061ba7c46ae17a32ddbcc45d1b1dfe2d",
+  "action": "FIX",
+  "rationale_summary": "Action FIX selected based on verification result",
+  "next_objective": "Fix failing tests gate",
+  "acceptance_delta": null,
+  "requested_required_gates": [
+    "tests",
+    "lint"
+  ],
+  "created_at_utc": "2026-09-09T14:14:23+00:00",
+  "decision_id": "3a8c14795a53f5b014c616f4fc31d02fb1c1aec916d797c80bcd81fd4430a3f8"
+}

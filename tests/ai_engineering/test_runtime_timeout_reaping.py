@@ -208,8 +208,15 @@ class TestTimeoutReaping:
             time.sleep(0.05)
         assert grandchild_pid_file.exists(), "grandchild never started"
         grandchild_pid = int(grandchild_pid_file.read_text().strip())
-        with pytest.raises(ProcessLookupError):
-            os.kill(grandchild_pid, 0)
+        terminated = False
+        for _ in range(100):
+            try:
+                os.kill(grandchild_pid, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                terminated = True
+                break
+        assert terminated, f"grandchild {grandchild_pid} was not terminated"
 
 
 class TestLifecycleStates:

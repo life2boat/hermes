@@ -104,7 +104,7 @@ def setup_execute(monkeypatch, protected_contract):
     monkeypatch.setattr(deploy, "_temporary_render_contract", lambda *a: contract)
     monkeypatch.setattr(deploy, "validate_compose_render", lambda *a: [preflight.MountRecord(source=str(contract.database_source), target="/home/hermes/healbite.db", mount_type="bind", read_only=False)])
     monkeypatch.setattr(deploy, "_post_deploy_attestation", lambda *a, **kw: type("MockPostResult", (), {})())
-    monkeypatch.setattr(deploy, "_compose_recreate_hermes", lambda *a, **kw: None)
+    monkeypatch.setattr(deploy, "_compose_recreate_hermes", lambda contract, *, image_id, revision, canary_override=False, require_replacement=False, original_container_id=None: None)
 
     # Fake SQLite
     class MockCursor:

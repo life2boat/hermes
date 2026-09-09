@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "task_id": "TASK-SUPERVISOR-01",
+  "intent_revision": 1,
+  "status": "READY",
+  "task_class": "BOUNDED_IMPLEMENTATION",
+  "desired_outcome": "Implement autonomous supervisor pipeline",
+  "source_repository": "github",
+  "source_main_ref": "refs/remotes/github/main",
+  "source_base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "constraints": [
+    "No new external dependencies"
+  ],
+  "allowed_mutations": [
+    "ai_engineering/supervisor/"
+  ],
+  "forbidden_mutations": [
+    "ai_engineering/contracts.py"
+  ],
+  "stop_boundary": "MERGE",
+  "acceptance_criteria": [
+    {
+      "criterion_id": "AC-1",
+      "statement": "Tests pass"
+    }
+  ],
+  "unknowns": [],
+  "applicable_invariants": [
+    "DETERMINISTIC_PIPELINE"
+  ],
+  "required_gates": [
+    "tests",
+    "lint"
+  ],
+  "parent_intent_digest": null
+}

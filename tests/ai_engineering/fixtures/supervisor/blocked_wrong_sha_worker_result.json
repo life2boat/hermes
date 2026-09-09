@@ -1,0 +1,47 @@
+{
+  "schema_version": "hermes.worker-result.v1",
+  "result_id": "result-wrong-sha-001",
+  "task_id": "TASK-SUPERVISOR-01",
+  "attempt_id": "attempt-001",
+  "worker_id": "worker-agent-01",
+  "base_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "canonical_remote": "github",
+  "repository": "github",
+  "intent_digest": "d40c2617d15ff5d85ef6f032f38d90ed8ce45c99258f261644e11e6ebca28bac",
+  "produced_at_utc": "2026-09-09T13:00:00+00:00",
+  "artifacts": [
+    {
+      "artifact_type": "test_result",
+      "relative_path": "artifacts/test_result.json",
+      "sha256": "98fb55748335dd1db99959773e21ba7b0fbfe7e040b777afa489184501787a3d",
+      "size_bytes": 59,
+      "producer_note": "pytest run passed"
+    },
+    {
+      "artifact_type": "lint_result",
+      "relative_path": "artifacts/lint_result.json",
+      "sha256": "8ec4c4214900e855be84c4542d8cc5e625f9f62d2e7c6197ca7eacf3b07885bf",
+      "size_bytes": 36,
+      "producer_note": "ruff clean"
+    }
+  ],
+  "gate_claims": [
+    {
+      "gate_name": "tests",
+      "claimed_status": "PASS",
+      "evidence_refs": [
+        "artifacts/test_result.json"
+      ],
+      "reason_code": "ALL_TESTS_PASS"
+    },
+    {
+      "gate_name": "lint",
+      "claimed_status": "PASS",
+      "evidence_refs": [
+        "artifacts/lint_result.json"
+      ],
+      "reason_code": "NO_VIOLATIONS"
+    }
+  ]
+}

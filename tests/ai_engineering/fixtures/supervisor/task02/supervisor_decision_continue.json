@@ -1,0 +1,20 @@
+{
+  "schema_version": "hermes.astra-decision.v1",
+  "run_id": "run-supervisor-01",
+  "task_id": "task-supervisor-01",
+  "attempt_id": "attempt-01",
+  "intent_digest": "e05de48e72622fa75149dbd68d46a01721e7de398f932261ddeca496db3b41ea",
+  "verified_result_id": "31f303356763cc2088aba1234869c1808438ca0eadf43f47c4b6a7ce1a7bcb12",
+  "verified_result_digest": "80dd8b20974057e4501919db4894fad0998c5a5c25795f6156c1856a20fd2092",
+  "context_pack_digest": "b835227dc7f214c415c4fa6ecc3b31ac061ba7c46ae17a32ddbcc45d1b1dfe2d",
+  "action": "CONTINUE",
+  "rationale_summary": "Action CONTINUE selected based on verification result",
+  "next_objective": "Continue to next supervisor task",
+  "acceptance_delta": null,
+  "requested_required_gates": [
+    "tests",
+    "lint"
+  ],
+  "created_at_utc": "2026-09-09T14:14:23+00:00",
+  "decision_id": "ee28d576e0eb5d8f669a618310189801177ba6ba790be9a367e7e2892adef0d2"
+}

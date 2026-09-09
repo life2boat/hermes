@@ -1,0 +1,34 @@
+{
+  "schema_version": "hermes.verified-result.v1",
+  "result_id": "14c90a8b2ba0497e1cb733c9469b491837769fbe9013579735a55f9aaceec773",
+  "task_id": "task-supervisor-01",
+  "attempt_id": "attempt-01",
+  "intent_digest": "e05de48e72622fa75149dbd68d46a01721e7de398f932261ddeca496db3b41ea",
+  "base_sha": "a9dc4b18ae8d29e8b2201285afc526e6d98be067",
+  "head_sha": "b1ec5c29bf9e40f8c3302396bfd637e7e9bc5178",
+  "normalized_evidence_digest": "b9b89e479043ab332b2f82551f2f473a1009124277e342b9d4514ab04e205154",
+  "required_gates": [
+    "lint",
+    "tests"
+  ],
+  "gate_results": [
+    {
+      "evidence_refs": [],
+      "gate_name": "lint",
+      "required": true,
+      "status": "PASS"
+    },
+    {
+      "evidence_refs": [],
+      "gate_name": "tests",
+      "required": true,
+      "status": "FAIL"
+    }
+  ],
+  "blockers": [],
+  "status": "FAIL",
+  "reason_codes": [
+    "REQUIRED_GATE_FAILED:tests"
+  ],
+  "verified_at_utc": "2026-09-09T14:14:23+00:00"
+}

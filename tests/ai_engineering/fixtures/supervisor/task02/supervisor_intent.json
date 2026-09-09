@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "task_id": "task-supervisor-01",
+  "intent_revision": 1,
+  "status": "READY",
+  "task_class": "BOUNDED_IMPLEMENTATION",
+  "desired_outcome": "Implement autonomous supervisor state machine with event sourcing",
+  "source_repository": "life2boat/hermes",
+  "source_main_ref": "refs/remotes/github/main",
+  "source_base_sha": "a9dc4b18ae8d29e8b2201285afc526e6d98be067",
+  "constraints": [
+    "No new external dependencies",
+    "All tests must pass"
+  ],
+  "allowed_mutations": [
+    "ai_engineering/supervisor/",
+    "tests/ai_engineering/",
+    "scripts/"
+  ],
+  "forbidden_mutations": [
+    "ai_engineering/contracts.py",
+    "ai_engineering/task_intent.py"
+  ],
+  "stop_boundary": "MERGE",
+  "acceptance_criteria": [
+    {
+      "criterion_id": "AC-1",
+      "statement": "All 50+ tests pass"
+    },
+    {
+      "criterion_id": "AC-2",
+      "statement": "Event chain replay is deterministic"
+    }
+  ],
+  "unknowns": [],
+  "applicable_invariants": [
+    "DETERMINISTIC_PIPELINE",
+    "EVENT_SOURCED_STATE"
+  ],
+  "required_gates": [
+    "tests",
+    "lint"
+  ],
+  "parent_intent_digest": null
+}

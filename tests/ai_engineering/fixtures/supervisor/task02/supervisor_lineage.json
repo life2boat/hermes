@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "node_id": "task-supervisor-01",
+      "kind": "TASK"
+    }
+  ],
+  "edges": []
+}

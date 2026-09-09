@@ -351,3 +351,73 @@ def validate_normalized_evidence(
         reason_codes=tuple(reason_codes),
         verified_at_utc=verified_at_utc,
     )
+
+
+# ─── Deserialization ───────────────────────────────────────────────────────────
+
+class _DuplicateJsonKey(ValueError):
+    pass
+
+
+def _no_dup_keys(pairs: list[tuple[str, object]]) -> dict:
+    result: dict = {}
+    for k, v in pairs:
+        if k in result:
+            raise _DuplicateJsonKey(k)
+        result[k] = v
+    return result
+
+
+def deserialize_verified_result(raw: str | bytes) -> VerifiedResult:
+    """Deserialize a VerifiedResult from JSON. Rejects duplicate JSON keys."""
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValidatorError("JSON_INVALID")
+    else:
+        text = raw
+
+    try:
+        payload = json.loads(text, object_pairs_hook=_no_dup_keys)
+    except (_DuplicateJsonKey, json.JSONDecodeError) as exc:
+        raise ValidatorError("JSON_INVALID") from exc
+
+    if not isinstance(payload, dict):
+        raise ValidatorError("JSON_INVALID")
+
+    sv = payload.get("schema_version")
+    if sv != VERIFIED_RESULT_SCHEMA_VERSION:
+        raise ValidatorError("SCHEMA_VERSION_UNSUPPORTED")
+
+    try:
+        status = Status(payload["status"])
+    except (ValueError, KeyError):
+        raise ValidatorError("FIELD_INVALID:status")
+
+    gate_results = tuple(
+        GateResult(
+            gate_name=gr["gate_name"],
+            required=gr["required"],
+            status=Status(gr["status"]),
+            evidence_refs=tuple(gr.get("evidence_refs", [])),
+        )
+        for gr in payload.get("gate_results", [])
+    )
+
+    return VerifiedResult(
+        schema_version=sv,
+        result_id=payload["result_id"],
+        task_id=payload["task_id"],
+        attempt_id=payload["attempt_id"],
+        intent_digest=payload["intent_digest"],
+        base_sha=payload["base_sha"],
+        head_sha=payload["head_sha"],
+        normalized_evidence_digest=payload["normalized_evidence_digest"],
+        required_gates=tuple(payload.get("required_gates", [])),
+        gate_results=gate_results,
+        blockers=tuple(payload.get("blockers", [])),
+        status=status,
+        reason_codes=tuple(payload.get("reason_codes", [])),
+        verified_at_utc=payload["verified_at_utc"],
+    )

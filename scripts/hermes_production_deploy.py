@@ -2323,6 +2323,8 @@ def _compose_recreate_hermes(
     image_id: str,
     revision: str,
     canary_override: bool = False,
+    require_replacement: bool = False,
+    original_container_id: str | None = None,
 ) -> None:
     environment = _compose_environment(image_id, revision)
     command = (
@@ -2336,6 +2338,20 @@ def _compose_recreate_hermes(
     result = _run(command, cwd=contract.root, env=environment, timeout=300)
     if result.returncode != 0:
         _fail("compose-up")
+
+    if require_replacement:
+        try:
+            r_out = _run(("docker", "inspect", contract.target_service))
+            if r_out.returncode != 0:
+                _fail("missing-runtime-candidate")
+            import json
+            c_info = json.loads(r_out.stdout)[0]
+            if c_info.get("Id") == original_container_id:
+                _fail("original-container-reuse-rejected")
+        except Exception as exc:
+            if isinstance(exc, (attestation.RuntimeAttestationError, DeploymentContractError)):
+                raise
+            _fail("missing-runtime-candidate")
 
 
 def _automatic_rollback(
@@ -3189,8 +3205,7 @@ def execute_recovery(
         candidate_creation_attempted = True
         _compose_recreate_hermes(
             contract,
-            image=image,
-            target_image_id=target.image_id,
+            image_id=target.image_id,
             revision=revision,
             require_replacement=True,
             original_container_id=baseline.hermes.container_id,

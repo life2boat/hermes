@@ -1,0 +1,36 @@
+services:
+  hermes-bot-staging:
+    image: ${STAGING_IMAGE:-ghcr.io/life2boat/hermes:main}
+    container_name: hermes-bot-staging
+    restart: unless-stopped
+    working_dir: /home/hermes
+    env_file:
+      - /home/hermes/.hermes/.env
+    environment:
+      HOME: /home/hermes
+      HERMES_HOME: /home/hermes/.hermes
+      HF_HOME: /home/hermes/.cache/huggingface
+      PYTHONIOENCODING: ${PYTHONIOENCODING:-utf-8}
+      LANG: ${LANG:-C.UTF-8}
+      LC_ALL: ${LC_ALL:-C.UTF-8}
+      QDRANT_COLLECTION: healbite_memory_os_staging
+      QDRANT_HOST: qdrant-staging
+      QDRANT_PORT: "6333"
+    volumes:
+      - /home/hermes/.hermes:/home/hermes/.hermes
+      - /var/lib/hermes/staging-db/healbite.db:/home/hermes/healbite.db
+      - /home/hermes/backups:/home/hermes/backups
+      - /home/hermes/.cache/huggingface:/home/hermes/.cache/huggingface
+    command: ["hermes", "gateway"]
+
+  qdrant-staging:
+    image: qdrant/qdrant:v1.15.4
+    container_name: qdrant-staging
+    restart: unless-stopped
+    ports:
+      - "6335:6333"
+    volumes:
+      - qdrant_data_staging:/qdrant/storage
+
+volumes:
+  qdrant_data_staging:

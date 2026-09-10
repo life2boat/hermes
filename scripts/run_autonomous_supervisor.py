@@ -137,6 +137,52 @@ def main(argv: list[str] | None = None) -> int:
         "--computer-use-activate", action="store_true",
         help="Run computer use smoke task against Antigravity via WindowsRelayBackend",
     )
+    args = parser.parse_known_args(argv)[0]
+    if argv is None:
+        argv = sys.argv[1:]
+        
+    # Handle staging commands first
+    if argv and argv[0].startswith("staging-"):
+        import dataclasses
+        from ai_engineering.supervisor.staging.deploy import StagingDeployer
+        
+        def _dataclass_to_json(obj):
+            return json.dumps(dataclasses.asdict(obj), default=str)
+            
+        deployer = StagingDeployer(str(_REPO_ROOT))
+        
+        if argv[0] == "staging-preflight":
+            import argparse as local_argparse
+            p = local_argparse.ArgumentParser()
+            p.add_argument("--staging-target-id", required=True)
+            p.add_argument("--production-target-id", required=True)
+            parsed = p.parse_args(argv[1:])
+            receipt = deployer.preflight(parsed.staging_target_id, parsed.production_target_id)
+            print(_dataclass_to_json(receipt))
+            return 0 if receipt.success else 1
+            
+        elif argv[0] == "staging-deploy":
+            receipt = deployer.deploy()
+            print(_dataclass_to_json(receipt))
+            return 0 if receipt.success else 1
+            
+        elif argv[0] == "staging-health":
+            receipt = deployer.health()
+            print(_dataclass_to_json(receipt))
+            return 0 if receipt.success else 1
+            
+        elif argv[0] == "staging-canary":
+            receipt = deployer.canary()
+            print(_dataclass_to_json(receipt))
+            return 0 if receipt.success else 1
+            
+        elif argv[0] == "staging-rollback":
+            receipt = deployer.rollback()
+            print(_dataclass_to_json(receipt))
+            return 0 if receipt.success else 1
+            
+        return 1
+
     args = parser.parse_args(argv)
 
     if args.computer_use_preflight:

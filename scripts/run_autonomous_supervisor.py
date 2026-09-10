@@ -104,6 +104,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional path to WorkProfile JSON file",
     )
     parser.add_argument(
+        "--policy-request", default=None, metavar="PATH",
+    )
+    parser.add_argument(
+        "--policy-receipt", default=None, metavar="PATH",
+    )
+    parser.add_argument(
+        "--autonomy-state", default=None, metavar="PATH",
+    )
+    parser.add_argument(
+        "--budget-state", default=None, metavar="PATH",
+    )
+    parser.add_argument(
+        "--attempt-id", default=None, metavar="ID",
+    )
+    parser.add_argument(
+        "--worker-id", default=None, metavar="ID",
+    )
+    parser.add_argument(
+        "--image-digest", default=None, metavar="DIGEST",
+    )
+    parser.add_argument(
         "--root-goal", default=None, metavar="TEXT",
         help="Optional root goal string",
     )
@@ -176,111 +197,81 @@ def main(argv: list[str] | None = None) -> int:
                 print("BLOCKED: Missing profile", file=sys.stderr)
                 return 1
 
-            # Build mock state to invoke policy engine
+            if not getattr(args, "policy_request", None):
+                print("BLOCKED: Missing policy_request", file=sys.stderr)
+                return 1
+            if not getattr(args, "policy_receipt", None):
+                print("BLOCKED: Missing policy_receipt", file=sys.stderr)
+                return 1
+            if not getattr(args, "autonomy_state", None):
+                print("BLOCKED: Missing autonomy_state", file=sys.stderr)
+                return 1
+            if not getattr(args, "budget_state", None):
+                print("BLOCKED: Missing budget_state", file=sys.stderr)
+                return 1
+
             from ai_engineering.supervisor.policy.contracts import (
-                PolicyRequest, WorkProfile, AutonomyState, AutonomyBudgetState, AutonomyLevel, ExecutionTarget, PromotionThresholds, BudgetLimits
+                PolicyVerdict, EffectClass, ExecutionTarget
             )
+            try:
+                profile_data = json.loads(Path(args.profile).read_text(encoding="utf-8"))
+                work_profile = validate_work_profile(profile_data)
                 
-            
-            profile_data = json.loads(Path(args.profile).read_text(encoding="utf-8"))
-            work_profile = validate_work_profile(profile_data)
-            
-            tpa = TaskPolicyAttribution(
-                task_id=intent.task_id,
-                intent_revision=intent.intent_revision,
-                intent_digest=intent_digest(intent),
-                source_base_sha=intent.source_base_sha,
-                constraints=intent.constraints,
-                allowed_mutations=intent.allowed_mutations,
-                forbidden_mutations=intent.forbidden_mutations,
-                stop_boundary=intent.stop_boundary.value,
-                source_id="s"*64
-            )
-            eff_policy = EffectivePolicyReport(
-                schema_version=1,
-                effective_policy_id="e"*64,
-                task_id=intent.task_id,
-                intent_digest=intent_digest(intent),
-                intent_revision=intent.intent_revision,
-                source_base_sha=intent.source_base_sha,
-                subject_sha=intent.source_base_sha,
-                status=EffectivePolicyStatus.COMPLETE,
-                policy_sources=(),
-                task_policy=tpa,
-                invariant_resolutions=(),
-                required_gate_resolutions=(),
-                unresolved_references=(),
-                precedence_source_id="p"*64
-            )
-            
-            autonomy_state = AutonomyState(
-                schema_version="hermes.autonomy-state.v1",
-                run_id="run-1",
-                profile_id=work_profile.profile_id,
-                profile_digest=work_profile.profile_digest,
-                current_level=AutonomyLevel.LEVEL_4_STAGING_AUTONOMY,
-                maximum_allowed_level=work_profile.maximum_autonomy_level,
-                successful_runs=0,
-                critical_failures=0,
-                rollback_verified=False,
-                required_validators_status={},
-                budget_state_digest="b"*64,
-                promotion_sequence=0,
-                last_transition_receipt_id=None,
-                created_at_utc="2026-01-01T00:00:00Z",
-                updated_at_utc="2026-01-01T00:00:00Z",
-                state_digest="a"*64
-            )
-            
-            budget_state = AutonomyBudgetState(
-                schema_version="hermes.autonomy-budget-state.v1",
-                budget_id="b-1",
-                budget_digest="b"*64,
-                decisions_used=0,
-                child_tasks_used=0,
-                retries_used=0,
-                fix_cycles_used=0,
-                consecutive_failures=0,
-                provider_calls_used=0,
-                policy_denials=0,
-                exhausted_dimensions=()
-            )
-            
-            request = PolicyRequest(
-                schema_version="hermes.policy-request.v1",
-                request_id="req-1",
-                run_id="run-1",
-                task_id=intent.task_id,
-                attempt_id="att-1",
-                intent_digest=intent_digest(intent),
-                decision_id="d-1",
-                decision_receipt_id="dr-1",
-                work_profile_id=work_profile.profile_id,
-                work_profile_digest=work_profile.profile_digest,
-                current_autonomy_level=AutonomyLevel.LEVEL_4_STAGING_AUTONOMY,
-                requested_action=argv[0],
-                requested_effect_classes=(EffectClass.DEPLOY,),
-                requested_stop_boundary=StopBoundary.DEPLOY,
-                execution_target=ExecutionTarget.STAGING,
-                effective_policy_id=eff_policy.effective_policy_id,
-                effective_policy_digest=eff_policy.effective_policy_id,
-                budget_state_digest=budget_state.budget_digest
-            )
-            
-            receipt = evaluate_policy(
-                request, intent, eff_policy, work_profile, autonomy_state, budget_state
-            )
-            
-            if receipt.verdict != PolicyVerdict.ALLOW:
-                print(f"BLOCKED: Policy denied: {receipt.reason_codes}", file=sys.stderr)
-                return 1
+                req_data = json.loads(Path(args.policy_request).read_text(encoding="utf-8"))
+                receipt_data = json.loads(Path(args.policy_receipt).read_text(encoding="utf-8"))
+                autonomy_data = json.loads(Path(args.autonomy_state).read_text(encoding="utf-8"))
+                budget_data = json.loads(Path(args.budget_state).read_text(encoding="utf-8"))
                 
-            if EffectClass.DEPLOY.value not in intent.allowed_mutations:
-                print("BLOCKED: EffectClass.DEPLOY not in intent allowed_mutations", file=sys.stderr)
-                return 1
+                req_task_id = req_data.get("task_id")
+                req_target = req_data.get("execution_target")
+                req_effects = req_data.get("requested_effect_classes", [])
                 
-            if ExecutionTarget.STAGING not in work_profile.allowed_targets:
-                print("BLOCKED: ExecutionTarget.STAGING not in work_profile allowed_targets", file=sys.stderr)
+                receipt_verdict = receipt_data.get("verdict")
+                receipt_intent_digest = receipt_data.get("task_intent_digest")
+                receipt_work_profile_digest = receipt_data.get("work_profile_digest")
+                receipt_autonomy_digest = receipt_data.get("autonomy_state_digest")
+                receipt_budget_digest = receipt_data.get("budget_state_digest")
+                
+                # Check verdict
+                if receipt_verdict != PolicyVerdict.ALLOW.value:
+                    print(f"BLOCKED: Policy denied", file=sys.stderr)
+                    return 1
+                
+                # Check task_id
+                if req_task_id != intent.task_id:
+                    print("BLOCKED: PolicyRequest task_id does not match intent", file=sys.stderr)
+                    return 1
+                    
+                # Check intent digest
+                if receipt_intent_digest != intent_digest(intent):
+                    print("BLOCKED: PolicyReceipt intent_digest mismatch", file=sys.stderr)
+                    return 1
+                    
+                # Check target
+                if req_target != ExecutionTarget.STAGING.value:
+                    print("BLOCKED: PolicyRequest target is not STAGING", file=sys.stderr)
+                    return 1
+                    
+                # Check effects
+                if EffectClass.DEPLOY.value not in req_effects and EffectClass.RUNTIME_MUTATION.value not in req_effects:
+                    print("BLOCKED: PolicyRequest missing DEPLOY or RUNTIME_MUTATION", file=sys.stderr)
+                    return 1
+                    
+                # Check bindings
+                if receipt_work_profile_digest != work_profile.profile_digest:
+                    print("BLOCKED: PolicyReceipt work_profile_digest mismatch", file=sys.stderr)
+                    return 1
+                    
+                if receipt_autonomy_digest != autonomy_data.get("state_digest"):
+                    print("BLOCKED: PolicyReceipt autonomy_state_digest mismatch", file=sys.stderr)
+                    return 1
+                    
+                if receipt_budget_digest != budget_data.get("budget_digest"):
+                    print("BLOCKED: PolicyReceipt budget_state_digest mismatch", file=sys.stderr)
+                    return 1
+                    
+            except Exception as e:
+                print(f"BLOCKED: Failed to validate policy receipt: {e}", file=sys.stderr)
                 return 1
 
         if argv[0] == "staging-preflight":
@@ -331,17 +322,37 @@ def main(argv: list[str] | None = None) -> int:
                 import hashlib
                 sha256 = hashlib.sha256((receipt.canary_result or "OK").encode("utf-8")).hexdigest()
                 
+                run_id = getattr(args, "run_id", "default-run-id") or "default-run-id"
+                attempt_id = getattr(args, "attempt_id", "default-attempt") or "default-attempt"
+                worker_id = getattr(args, "worker_id", "default-worker") or "default-worker"
+                image_digest = getattr(args, "image_digest", "none") or "none"
+                
+                payload_for_id = {
+                    "run_id": run_id,
+                    "task_id": intent.task_id,
+                    "attempt_id": attempt_id,
+                    "image_digest": image_digest,
+                    "canary_scenario": "staging_gateway_status"
+                }
+                
+                import hashlib
+                import json as json_lib
+                canonical = json_lib.dumps(payload_for_id, sort_keys=True, separators=(",", ":"))
+                result_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                
+                sha256 = hashlib.sha256((receipt.canary_result or "OK").encode("utf-8")).hexdigest()
+                
                 bundle_dict = {
                     "schema_version": "hermes.worker-result.v1",
-                    "result_id": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                    "result_id": result_id,
                     "task_id": intent.task_id,
-                    "attempt_id": "canary-attempt",
-                    "worker_id": "staging-canary-worker",
+                    "attempt_id": attempt_id,
+                    "worker_id": worker_id,
                     "base_sha": intent.source_base_sha,
                     "head_sha": intent.source_base_sha,
                     "canonical_remote": intent.source_repository,
                     "repository": intent.source_repository,
-                    "intent_digest": "dummy",
+                    "intent_digest": intent_digest(intent),
                     "produced_at_utc": datetime.utcnow().isoformat(),
                     "artifacts": [
                         {

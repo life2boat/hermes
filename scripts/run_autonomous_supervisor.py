@@ -49,6 +49,7 @@ from ai_engineering.supervisor.dispatch.worker import FakeWorkerDispatcher
 from ai_engineering.supervisor.loop import SupervisorLoop
 from ai_engineering.supervisor.policy.contracts import WorkProfile
 from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+from ai_engineering.supervisor.staging.deploy import StagingDeployer
 from ai_engineering.supervisor.state import (
     SupervisorError,
     SupervisorPhase,

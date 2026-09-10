@@ -285,7 +285,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if receipt.success else 1
             
         elif argv[0] == "staging-deploy":
-            receipt = deployer.deploy()
+            expected_digest = os.environ.get("STAGING_IMAGE", "")
+            expected_sha = intent.source_base_sha
+            receipt = deployer.deploy(expected_digest, expected_sha)
             print(_dataclass_to_json(receipt))
             return 0 if receipt.success else 1
             

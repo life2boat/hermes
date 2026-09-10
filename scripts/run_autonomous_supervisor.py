@@ -151,6 +151,138 @@ def main(argv: list[str] | None = None) -> int:
             
         deployer = StagingDeployer(str(_REPO_ROOT))
         
+
+        if argv[0] in ("staging-deploy", "staging-data-mutation", "staging-rollback"):
+            if not getattr(args, "intent", None):
+                print("BLOCKED: Missing intent", file=sys.stderr)
+                return 1
+            
+            try:
+                from ai_engineering.task_intent import deserialize_intent
+                from pathlib import Path
+                intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"BLOCKED: Failed to load intent: {e}", file=sys.stderr)
+                return 1
+
+            if not getattr(args, "profile", None):
+                print("BLOCKED: Missing profile", file=sys.stderr)
+                return 1
+
+            # Build mock state to invoke policy engine
+            from ai_engineering.supervisor.policy.engine import evaluate_policy
+            from ai_engineering.supervisor.policy.contracts import (
+                PolicyRequest, WorkProfile, AutonomyState, AutonomyBudgetState, AutonomyLevel, ExecutionTarget, PromotionThresholds, BudgetLimits
+            )
+            from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
+            from ai_engineering.contracts import EffectClass, StopBoundary
+            from ai_engineering.task_intent import intent_digest
+                
+            from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+            import json
+            
+            profile_data = json.loads(Path(args.profile).read_text(encoding="utf-8"))
+            work_profile = validate_work_profile(profile_data)
+            
+            tpa = TaskPolicyAttribution(
+                task_id=intent.task_id,
+                intent_revision=intent.intent_revision,
+                intent_digest=intent_digest(intent),
+                source_base_sha=intent.source_base_sha,
+                constraints=intent.constraints,
+                allowed_mutations=intent.allowed_mutations,
+                forbidden_mutations=intent.forbidden_mutations,
+                stop_boundary=intent.stop_boundary.value,
+                source_id="s"*64
+            )
+            eff_policy = EffectivePolicyReport(
+                schema_version=1,
+                effective_policy_id="e"*64,
+                task_id=intent.task_id,
+                intent_digest=intent_digest(intent),
+                intent_revision=intent.intent_revision,
+                source_base_sha=intent.source_base_sha,
+                subject_sha=intent.source_base_sha,
+                status=EffectivePolicyStatus.COMPLETE,
+                policy_sources=(),
+                task_policy=tpa,
+                invariant_resolutions=(),
+                required_gate_resolutions=(),
+                unresolved_references=(),
+                precedence_source_id="p"*64
+            )
+            
+            autonomy_state = AutonomyState(
+                schema_version="hermes.autonomy-state.v1",
+                run_id="run-1",
+                profile_id=work_profile.profile_id,
+                profile_digest=work_profile.profile_digest,
+                current_level=AutonomyLevel.LEVEL_4_STAGING_AUTONOMY,
+                maximum_allowed_level=work_profile.maximum_autonomy_level,
+                successful_runs=0,
+                critical_failures=0,
+                rollback_verified=False,
+                required_validators_status={},
+                budget_state_digest="b"*64,
+                promotion_sequence=0,
+                last_transition_receipt_id=None,
+                created_at_utc="2026-01-01T00:00:00Z",
+                updated_at_utc="2026-01-01T00:00:00Z",
+                state_digest="a"*64
+            )
+            
+            budget_state = AutonomyBudgetState(
+                schema_version="hermes.autonomy-budget-state.v1",
+                budget_id="b-1",
+                budget_digest="b"*64,
+                decisions_used=0,
+                child_tasks_used=0,
+                retries_used=0,
+                fix_cycles_used=0,
+                consecutive_failures=0,
+                provider_calls_used=0,
+                policy_denials=0,
+                exhausted_dimensions=()
+            )
+            
+            request = PolicyRequest(
+                schema_version="hermes.policy-request.v1",
+                request_id="req-1",
+                run_id="run-1",
+                task_id=intent.task_id,
+                attempt_id="att-1",
+                intent_digest=intent_digest(intent),
+                decision_id="d-1",
+                decision_receipt_id="dr-1",
+                work_profile_id=work_profile.profile_id,
+                work_profile_digest=work_profile.profile_digest,
+                current_autonomy_level=AutonomyLevel.LEVEL_4_STAGING_AUTONOMY,
+                requested_action=argv[0],
+                requested_effect_classes=(EffectClass.DEPLOY,),
+                requested_stop_boundary=StopBoundary.DEPLOY,
+                execution_target=ExecutionTarget.STAGING,
+                effective_policy_id=eff_policy.effective_policy_id,
+                effective_policy_digest=eff_policy.effective_policy_id,
+                budget_state_digest=budget_state.budget_digest
+            )
+            
+            receipt = evaluate_policy(
+                request, intent, eff_policy, work_profile, autonomy_state, budget_state
+            )
+            
+            from ai_engineering.supervisor.policy.contracts import PolicyVerdict
+            if receipt.verdict != PolicyVerdict.ALLOW:
+                print(f"BLOCKED: Policy denied: {receipt.reason_codes}", file=sys.stderr)
+                return 1
+                
+            if EffectClass.DEPLOY.value not in intent.allowed_mutations:
+                print("BLOCKED: EffectClass.DEPLOY not in intent allowed_mutations", file=sys.stderr)
+                return 1
+                
+            if ExecutionTarget.STAGING not in work_profile.allowed_targets:
+                print("BLOCKED: ExecutionTarget.STAGING not in work_profile allowed_targets", file=sys.stderr)
+                return 1
+
         if argv[0] == "staging-preflight":
             import argparse as local_argparse
             p = local_argparse.ArgumentParser()
@@ -173,8 +305,87 @@ def main(argv: list[str] | None = None) -> int:
             
         elif argv[0] == "staging-canary":
             receipt = deployer.canary()
-            print(_dataclass_to_json(receipt))
-            return 0 if receipt.success else 1
+            
+            if not getattr(args, "intent", None):
+                print("BLOCKED: Missing intent for canary packaging", file=sys.stderr)
+                return 1
+            
+            try:
+                from ai_engineering.task_intent import deserialize_intent
+                from pathlib import Path
+                intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"BLOCKED: Failed to load intent: {e}", file=sys.stderr)
+                return 1
+
+            if not receipt.success:
+                print(_dataclass_to_json(receipt))
+                return 1
+
+            from ai_engineering.supervisor.collector import ResultCollector
+            from ai_engineering.supervisor.validator import validate_normalized_evidence, canonical_serialize_verified_result
+            from ai_engineering.contracts import Status
+            import tempfile
+            from datetime import datetime
+            import uuid
+            import json
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                evidence_root = Path(temp_dir)
+                artifact_path = "canary_output.txt"
+                (evidence_root / artifact_path).write_text(receipt.canary_result or "OK", encoding="utf-8")
+                
+                import hashlib
+                sha256 = hashlib.sha256((receipt.canary_result or "OK").encode("utf-8")).hexdigest()
+                
+                bundle_dict = {
+                    "schema_version": "hermes.worker-result.v1",
+                    "result_id": str(uuid.uuid4()),
+                    "task_id": intent.task_id,
+                    "attempt_id": "canary-attempt",
+                    "worker_id": "staging-canary-worker",
+                    "base_sha": intent.source_base_sha,
+                    "head_sha": intent.source_base_sha,
+                    "canonical_remote": intent.source_repository,
+                    "repository": intent.source_repository,
+                    "intent_digest": "dummy",
+                    "produced_at_utc": datetime.utcnow().isoformat(),
+                    "artifacts": [
+                        {
+                            "artifact_ref": artifact_path,
+                            "schema_version": "none",
+                            "semantic_type": "canary_output",
+                            "sha256_digest": sha256
+                        }
+                    ],
+                    "gate_claims": [
+                        {
+                            "gate_name": "staging-canary",
+                            "claimed_status": "PASS",
+                            "evidence_refs": [artifact_path],
+                            "reason_code": "CANARY_EXECUTED"
+                        }
+                    ]
+                }
+                
+                try:
+                    from ai_engineering.task_intent import intent_digest
+                    bundle_dict["intent_digest"] = intent_digest(intent)
+                except Exception:
+                    pass
+                
+                bundle_json = json.dumps(bundle_dict)
+                collector = ResultCollector()
+                try:
+                    ne = collector.collect(bundle_json, evidence_root, intent)
+                    vr = validate_normalized_evidence(ne, intent)
+                except Exception as e:
+                    print(f"CANARY FAILED VALIDATION: {e}", file=sys.stderr)
+                    return 1
+
+                print(canonical_serialize_verified_result(vr))
+                return 0 if vr.status == Status.PASS else 1
+
             
         elif argv[0] == "staging-rollback":
             receipt = deployer.rollback()

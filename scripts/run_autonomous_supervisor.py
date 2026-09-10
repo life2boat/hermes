@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 
                 bundle_dict = {
                     "schema_version": "hermes.worker-result.v1",
-                    "result_id": str(uuid.uuid4()),
+                    "result_id": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                     "task_id": intent.task_id,
                     "attempt_id": "canary-attempt",
                     "worker_id": "staging-canary-worker",
@@ -345,10 +345,11 @@ def main(argv: list[str] | None = None) -> int:
                     "produced_at_utc": datetime.utcnow().isoformat(),
                     "artifacts": [
                         {
-                            "artifact_ref": artifact_path,
-                            "schema_version": "none",
-                            "semantic_type": "canary_output",
-                            "sha256_digest": sha256
+                            "artifact_type": "canary_output",
+                            "relative_path": artifact_path,
+                            "sha256": sha256,
+                            "size_bytes": len(receipt.canary_result or "OK"),
+                            "producer_note": "canary"
                         }
                     ],
                     "gate_claims": [

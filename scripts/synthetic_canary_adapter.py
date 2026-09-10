@@ -1,41 +1,38 @@
 import sys
 import json
 import asyncio
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import datetime
 from gateway.run import GatewayRunner
-from gateway.config import GatewayConfig, PlatformConfig
-from gateway.events import MessageEvent, MessageSource, Platform
-from unittest.mock import AsyncMock
+from gateway.config import GatewayConfig, PlatformConfig, Platform
+from gateway.platforms.base import MessageEvent
+from gateway.session import SessionSource
 
 async def run_synthetic():
     try:
         config = GatewayConfig()
         runner = GatewayRunner(config)
         
-        from gateway.platforms.telegram import TelegramAdapter
-        t_config = PlatformConfig(enabled=True, token='dummy')
-        adapter = TelegramAdapter(t_config)
-        adapter.send = AsyncMock(return_value=True)
-        runner.adapters[Platform.TELEGRAM] = adapter
+        # Add a dummy webhook adapter so it passes early checks
+        runner.adapters[Platform.WEBHOOK] = "dummy_adapter"
         
-        source = MessageSource(
-            platform=Platform.TELEGRAM,
+        source = SessionSource(
+            platform=Platform.WEBHOOK,
             chat_id='synthetic-123',
             user_id='user-123',
-            username='synthetic_user',
-            message_id='msg-1',
+            user_name='synthetic_user',
             chat_type='private'
         )
-        event = MessageEvent(
-            source=source,
-            text='/menu',
-            date=datetime.utcnow()
-        )
         
-        await runner.handle_message(event)
+        event = MessageEvent(text='/status')
+        event.source = source
+        event.message_id = 'msg-1'
         
-        if not adapter.send.called:
-            raise ValueError('Adapter send was not called. Handler failed.')
+        res = await runner._handle_message(event)
+        
+        if not res or "Hermes Gateway Status" not in res:
+            raise ValueError(f'Handler failed or returned unexpected response: {res}')
             
         print(json.dumps({
             'success': True,

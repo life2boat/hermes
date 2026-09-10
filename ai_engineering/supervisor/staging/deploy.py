@@ -47,9 +47,9 @@ class StagingDeployer:
             )
             
         try:
-            with open(compose_path, 'r') as f:
+            with open(compose_path, 'r', encoding='utf-8') as f:
                 staging_compose = yaml.safe_load(f)
-            with open(prod_compose_path, 'r') as f:
+            with open(prod_compose_path, 'r', encoding='utf-8') as f:
                 prod_compose = yaml.safe_load(f)
         except Exception as e:
             return StagingPreflightReceipt(

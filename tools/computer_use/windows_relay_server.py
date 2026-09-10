@@ -102,7 +102,7 @@ def handle_verb(verb, args):
         if "value" in args:
             cmd.extend(["--value", str(args["value"])])
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"winapp command failed: {result.stderr}")
             

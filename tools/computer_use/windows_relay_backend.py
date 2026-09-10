@@ -25,14 +25,14 @@ class WindowsRelayBackend(ComputerUseBackend):
             # Run powershell.exe to get LOCALAPPDATA from Windows side.
             result = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Command", "Write-Output $env:LOCALAPPDATA"],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
             )
             windows_appdata = result.stdout.strip()
             
             # Convert Windows path to WSL path
             result = subprocess.run(
                 ["wslpath", "-u", windows_appdata],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL
             )
             self.local_app_data = result.stdout.strip()
             

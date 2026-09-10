@@ -144,7 +144,6 @@ def main(argv: list[str] | None = None) -> int:
     # Handle staging commands first
     if argv and argv[0].startswith("staging-"):
         import dataclasses
-        from ai_engineering.supervisor.staging.deploy import StagingDeployer
         
         def _dataclass_to_json(obj):
             return json.dumps(dataclasses.asdict(obj), default=str)
@@ -158,8 +157,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             
             try:
-                from ai_engineering.task_intent import deserialize_intent
-                from pathlib import Path
                 intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"BLOCKED: Failed to load intent: {e}", file=sys.stderr)
@@ -170,16 +167,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
             # Build mock state to invoke policy engine
-            from ai_engineering.supervisor.policy.engine import evaluate_policy
             from ai_engineering.supervisor.policy.contracts import (
                 PolicyRequest, WorkProfile, AutonomyState, AutonomyBudgetState, AutonomyLevel, ExecutionTarget, PromotionThresholds, BudgetLimits
             )
-            from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
-            from ai_engineering.contracts import EffectClass, StopBoundary
-            from ai_engineering.task_intent import intent_digest
                 
-            from ai_engineering.supervisor.policy.work_profile import validate_work_profile
-            import json
             
             profile_data = json.loads(Path(args.profile).read_text(encoding="utf-8"))
             work_profile = validate_work_profile(profile_data)
@@ -270,7 +261,6 @@ def main(argv: list[str] | None = None) -> int:
                 request, intent, eff_policy, work_profile, autonomy_state, budget_state
             )
             
-            from ai_engineering.supervisor.policy.contracts import PolicyVerdict
             if receipt.verdict != PolicyVerdict.ALLOW:
                 print(f"BLOCKED: Policy denied: {receipt.reason_codes}", file=sys.stderr)
                 return 1
@@ -311,8 +301,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             
             try:
-                from ai_engineering.task_intent import deserialize_intent
-                from pathlib import Path
                 intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"BLOCKED: Failed to load intent: {e}", file=sys.stderr)
@@ -322,13 +310,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(_dataclass_to_json(receipt))
                 return 1
 
-            from ai_engineering.supervisor.collector import ResultCollector
-            from ai_engineering.supervisor.validator import validate_normalized_evidence, canonical_serialize_verified_result
-            from ai_engineering.contracts import Status
             import tempfile
-            from datetime import datetime
             import uuid
-            import json
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 evidence_root = Path(temp_dir)
@@ -369,7 +352,6 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 
                 try:
-                    from ai_engineering.task_intent import intent_digest
                     bundle_dict["intent_digest"] = intent_digest(intent)
                 except Exception:
                     pass
@@ -409,11 +391,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.computer_use_activate:
         from tools.computer_use.windows_relay_backend import WindowsRelayBackend
-        from ai_engineering.supervisor.computer_use.driver import ComputerUseDriver
         from ai_engineering.supervisor.computer_use.contracts import (
             ComputerUseTask, UIActionProposal, UIActionReceipt, UIActionStatus, VisualEvidence
         )
-        from ai_engineering.supervisor.computer_use.receipts import ComputerUseActivationReceipt
 
         class BackendComputerUseDriver(ComputerUseDriver):
             def __init__(self, backend: WindowsRelayBackend):

@@ -31,6 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from ai_engineering.supervisor.staging.deploy import StagingDeployer
 
 from ai_engineering.contracts import EffectClass, StopBoundary
 from ai_engineering.supervisor.policy.engine import evaluate_policy

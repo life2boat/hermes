@@ -14,6 +14,8 @@ class StagingDeploymentReceipt:
     success: bool
     timestamp: datetime
     container_id: Optional[str] = None
+    repo_digest: Optional[str] = None
+    oci_revision: Optional[str] = None
     error_message: Optional[str] = None
 
 @dataclass

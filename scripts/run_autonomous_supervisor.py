@@ -391,9 +391,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.computer_use_activate:
         from tools.computer_use.windows_relay_backend import WindowsRelayBackend
+        from ai_engineering.supervisor.computer_use.driver import ComputerUseDriver
         from ai_engineering.supervisor.computer_use.contracts import (
             ComputerUseTask, UIActionProposal, UIActionReceipt, UIActionStatus, VisualEvidence
         )
+        from ai_engineering.supervisor.computer_use.receipts import ComputerUseActivationReceipt
 
         class BackendComputerUseDriver(ComputerUseDriver):
             def __init__(self, backend: WindowsRelayBackend):

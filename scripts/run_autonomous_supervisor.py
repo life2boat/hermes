@@ -31,6 +31,15 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+
+from ai_engineering.contracts import EffectClass, StopBoundary
+from ai_engineering.supervisor.policy.engine import evaluate_policy
+from ai_engineering.supervisor.policy.contracts import PolicyVerdict
+from ai_engineering.task_intent import intent_digest, deserialize_intent
+from ai_engineering.supervisor.collector import ResultCollector
+from ai_engineering.supervisor.validator import validate_normalized_evidence, canonical_serialize_verified_result
+from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+
 from ai_engineering.contracts import Status
 from ai_engineering.effective_policy import (
     EffectivePolicyReport,

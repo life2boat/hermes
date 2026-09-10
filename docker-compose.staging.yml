@@ -1,11 +1,11 @@
 services:
   hermes-bot-staging:
-    image: ${STAGING_IMAGE:-ghcr.io/life2boat/hermes:main}
+    image: ${STAGING_IMAGE:?STAGING_IMAGE must be set}
     container_name: hermes-bot-staging
     restart: unless-stopped
     working_dir: /home/hermes
     env_file:
-      - /home/hermes/.hermes/.env
+      - /home/hermes/.hermes-staging/.env
     environment:
       HOME: /home/hermes
       HERMES_HOME: /home/hermes/.hermes
@@ -17,10 +17,10 @@ services:
       QDRANT_HOST: qdrant-staging
       QDRANT_PORT: "6333"
     volumes:
-      - /home/hermes/.hermes:/home/hermes/.hermes
+      - /home/hermes/.hermes-staging:/home/hermes/.hermes
       - /var/lib/hermes/staging-db/healbite.db:/home/hermes/healbite.db
-      - /home/hermes/backups:/home/hermes/backups
-      - /home/hermes/.cache/huggingface:/home/hermes/.cache/huggingface
+      - /home/hermes/staging-backups:/home/hermes/backups
+      - /home/hermes/.cache/huggingface-staging:/home/hermes/.cache/huggingface
     command: ["hermes", "gateway"]
 
   qdrant-staging:

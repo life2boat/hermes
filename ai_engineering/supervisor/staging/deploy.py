@@ -119,7 +119,7 @@ class StagingDeployer:
             target_id=staging_target_id
         )
 
-    def deploy(self, expected_digest: str | None = None, expected_sha: str | None = None) -> StagingDeploymentReceipt:
+    def deploy(self, expected_digest: str, expected_sha: str) -> StagingDeploymentReceipt:
         cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "up", "-d"]
         try:
             subprocess.run(
@@ -142,18 +142,12 @@ class StagingDeployer:
             oci_revision = labels.get("org.opencontainers.image.revision")
             container_id = container_info.get("Id", "started")
             
-            if expected_digest and repo_digests and expected_digest != repo_digests:
-                return StagingDeploymentReceipt(
-                    success=False,
-                    timestamp=datetime.utcnow(),
-                    error_message=f"Image authority mismatch: expected {expected_digest}, got {repo_digests}"
-                )
-            if expected_sha and oci_revision and expected_sha != oci_revision:
-                return StagingDeploymentReceipt(
-                    success=False,
-                    timestamp=datetime.utcnow(),
-                    error_message=f"Source authority mismatch: expected {expected_sha}, got {oci_revision}"
-                )
+            if not expected_digest.startswith("ghcr.io/life2boat/hermes@sha256:") or len(expected_digest) != 96:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="Malformed expected_digest")
+            if not repo_digests or expected_digest != repo_digests:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Image authority mismatch: expected {expected_digest}, got {repo_digests}")
+            if not oci_revision or expected_sha != oci_revision:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Source authority mismatch: expected {expected_sha}, got {oci_revision}")
 
             return StagingDeploymentReceipt(
                 success=True,
@@ -190,16 +184,23 @@ class StagingDeployer:
             
             if is_healthy:
                 # Real health check via docker exec
-                check_cmd = ["docker", "exec", "hermes-bot-staging", "hermes", "--version"]
+                check_cmd = ["docker", "exec", "hermes-bot-staging", "hermes", "status"]
                 try:
                     subprocess.run(check_cmd, capture_output=True, text=True, check=True)
                 except subprocess.CalledProcessError as e:
-                    is_healthy = False
                     return StagingHealthReceipt(
-                        success=False,
-                        timestamp=datetime.utcnow(),
-                        is_healthy=False,
-                        error_message=f"Real health check failed: {e.stderr}"
+                        success=False, timestamp=datetime.utcnow(), is_healthy=False,
+                        error_message=f"hermes status failed: {e.stderr or e.stdout}"
+                    )
+                
+                db_cmd = ["docker", "exec", "hermes-bot-staging", "python", "-c", 
+                          "import sqlite3; db = sqlite3.connect('/opt/data/sessions.db'); assert db.execute('PRAGMA integrity_check;').fetchone()[0] == 'ok'"]
+                try:
+                    subprocess.run(db_cmd, capture_output=True, text=True, check=True)
+                except subprocess.CalledProcessError as e:
+                    return StagingHealthReceipt(
+                        success=False, timestamp=datetime.utcnow(), is_healthy=False,
+                        error_message=f"SQLite integrity check failed: {e.stderr or e.stdout}"
                     )
             
             return StagingHealthReceipt(
@@ -219,14 +220,9 @@ class StagingDeployer:
     def canary(self) -> StagingCanaryReceipt:
         try:
             # Execute the minimal internal script bypassing external network but hitting handlers
-            cmd = ["docker", "exec", "hermes-bot-staging", "python", "/app/scripts/synthetic_canary_adapter.py"]
-            # We assume /app is the working directory in the docker container.
-            # If it fails, fallback to local python for testing purposes
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            except Exception:
-                cmd = ["python", "scripts/synthetic_canary_adapter.py"]
-                result = subprocess.run(cmd, cwd=self.workspace_dir, capture_output=True, text=True, check=True)
+            cmd = ["docker", "exec", "hermes-bot-staging", "python", "/opt/hermes/scripts/synthetic_canary_adapter.py"]
+            # Container-only execution: no local fallback allowed.
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 
             data = json.loads(result.stdout.strip())
             return StagingCanaryReceipt(
@@ -234,6 +230,12 @@ class StagingDeployer:
                 timestamp=datetime.fromisoformat(data.get("timestamp")) if data.get("timestamp") else datetime.utcnow(),
                 canary_result=data.get("canary_result", ""),
                 error_message=data.get("error_message")
+            )
+        except subprocess.CalledProcessError as e:
+            return StagingCanaryReceipt(
+                success=False,
+                timestamp=datetime.utcnow(),
+                error_message=f"Canary failed: {e.stderr or e.stdout}"
             )
         except Exception as e:
             return StagingCanaryReceipt(

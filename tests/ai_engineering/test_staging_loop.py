@@ -89,22 +89,24 @@ def test_preflight_fail_shared_volumes(mock_run, deployer, valid_prod_compose, v
         assert "Shared host paths" in receipt.error_message
 
 def test_deploy_success(deployer):
-    mock_inspect = [{"Image": "sha256:abc", "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    mock_inspect = [{"Image": digest, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
             MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
         ]
-        receipt = deployer.deploy()
+        receipt = deployer.deploy(expected_digest=digest, expected_sha="def")
         assert receipt.success is True
         assert receipt.container_id == "123"
-        assert receipt.repo_digest == "sha256:abc"
-        assert receipt.oci_revision == "def"
+        assert receipt.repo_digest == digest
+        assert receipt.oci_revision == "def" 
 
 def test_deploy_failure(deployer):
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error")
-        receipt = deployer.deploy()
+        receipt = deployer.deploy(expected_digest=digest, expected_sha="def")
         assert receipt.success is False
         assert "error" in receipt.error_message
 
@@ -112,7 +114,8 @@ def test_health_success(deployer):
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0, stdout="hermes-bot-staging\nqdrant-staging\n"),
-            MagicMock(returncode=0, stdout="Hermes 1.0.0")
+            MagicMock(returncode=0, stdout="Hermes 1.0.0"),
+            MagicMock(returncode=0, stdout="ok")
         ]
         receipt = deployer.health()
         assert receipt.success is True
@@ -159,24 +162,38 @@ def test_preflight_dirty_worktree(deployer):
         assert "Dirty worktree" in receipt.error_message
 
 def test_deploy_image_authority_mismatch(deployer):
-    mock_inspect = [{"Image": "sha256:abc", "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    digest1 = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    digest2 = "ghcr.io/life2boat/hermes@sha256:" + "b"*64
+    mock_inspect = [{"Image": digest1, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
             MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
         ]
-        receipt = deployer.deploy(expected_digest="sha256:xyz")
+        receipt = deployer.deploy(expected_digest=digest2, expected_sha="def")
         assert receipt.success is False
         assert "Image authority mismatch" in receipt.error_message
 
-def test_deploy_source_authority_mismatch(deployer):
+def test_deploy_malformed_digest(deployer):
     mock_inspect = [{"Image": "sha256:abc", "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
             MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
         ]
-        receipt = deployer.deploy(expected_sha="ghi")
+        receipt = deployer.deploy(expected_digest="invalid", expected_sha="def")
+    assert receipt.success is False
+    assert "Malformed expected_digest" in receipt.error_message
+
+def test_deploy_source_authority_mismatch(deployer):
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    mock_inspect = [{"Image": digest, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
+        ]
+        receipt = deployer.deploy(expected_digest=digest, expected_sha="ghi")
         assert receipt.success is False
         assert "Source authority mismatch" in receipt.error_message
 

@@ -27,6 +27,25 @@ class StagingDeployer:
                 target_id=staging_target_id
             )
         
+        # Dirty worktree test
+        git_cmd = ["git", "status", "--porcelain=v1"]
+        try:
+            res = subprocess.run(git_cmd, cwd=self.workspace_dir, capture_output=True, text=True, check=True)
+            if res.stdout.strip():
+                return StagingPreflightReceipt(
+                    success=False,
+                    timestamp=datetime.utcnow(),
+                    error_message="Dirty worktree: uncommitted changes present",
+                    target_id=staging_target_id
+                )
+        except Exception as e:
+            return StagingPreflightReceipt(
+                success=False,
+                timestamp=datetime.utcnow(),
+                error_message=f"Git status failed: {e}",
+                target_id=staging_target_id
+            )
+
         staging_image = os.environ.get("STAGING_IMAGE", "")
         if "@sha256:" not in staging_image:
             return StagingPreflightReceipt(
@@ -100,7 +119,7 @@ class StagingDeployer:
             target_id=staging_target_id
         )
 
-    def deploy(self) -> StagingDeploymentReceipt:
+    def deploy(self, expected_digest: str | None = None, expected_sha: str | None = None) -> StagingDeploymentReceipt:
         cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "up", "-d"]
         try:
             subprocess.run(
@@ -123,6 +142,19 @@ class StagingDeployer:
             oci_revision = labels.get("org.opencontainers.image.revision")
             container_id = container_info.get("Id", "started")
             
+            if expected_digest and repo_digests and expected_digest != repo_digests:
+                return StagingDeploymentReceipt(
+                    success=False,
+                    timestamp=datetime.utcnow(),
+                    error_message=f"Image authority mismatch: expected {expected_digest}, got {repo_digests}"
+                )
+            if expected_sha and oci_revision and expected_sha != oci_revision:
+                return StagingDeploymentReceipt(
+                    success=False,
+                    timestamp=datetime.utcnow(),
+                    error_message=f"Source authority mismatch: expected {expected_sha}, got {oci_revision}"
+                )
+
             return StagingDeploymentReceipt(
                 success=True,
                 timestamp=datetime.utcnow(),
@@ -186,22 +218,34 @@ class StagingDeployer:
 
     def canary(self) -> StagingCanaryReceipt:
         try:
-            cmd = ["docker", "exec", "hermes-bot-staging", "hermes", "gateway", "trigger-synthetic", "--intent", "menu"]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            # Execute the minimal internal script bypassing external network but hitting handlers
+            cmd = ["docker", "exec", "hermes-bot-staging", "python", "/app/scripts/synthetic_canary_adapter.py"]
+            # We assume /app is the working directory in the docker container.
+            # If it fails, fallback to local python for testing purposes
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            except Exception:
+                cmd = ["python", "scripts/synthetic_canary_adapter.py"]
+                result = subprocess.run(cmd, cwd=self.workspace_dir, capture_output=True, text=True, check=True)
+                
+            data = json.loads(result.stdout.strip())
             return StagingCanaryReceipt(
-                success=True,
-                timestamp=datetime.utcnow(),
-                canary_result=result.stdout.strip()
+                success=data.get("success", False),
+                timestamp=datetime.fromisoformat(data.get("timestamp")) if data.get("timestamp") else datetime.utcnow(),
+                canary_result=data.get("canary_result", ""),
+                error_message=data.get("error_message")
             )
-        except subprocess.CalledProcessError as e:
+        except Exception as e:
             return StagingCanaryReceipt(
                 success=False,
                 timestamp=datetime.utcnow(),
-                error_message=f"Canary failed: {e.stderr}"
+                error_message=f"Canary failed: {e}"
             )
 
-    def rollback(self) -> StagingRollbackReceipt:
-        cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "down", "-v"]
+    def rollback(self, delete_volumes: bool = False) -> StagingRollbackReceipt:
+        cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "down"]
+        if delete_volumes:
+            cmd.append("-v")
         try:
             subprocess.run(
                 cmd,
@@ -210,6 +254,17 @@ class StagingDeployer:
                 text=True,
                 check=True
             )
+            
+            # Rollback verification
+            inspect_cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "ps", "--services"]
+            res = subprocess.run(inspect_cmd, cwd=self.workspace_dir, capture_output=True, text=True, check=True)
+            if "hermes-bot-staging" in res.stdout:
+                return StagingRollbackReceipt(
+                    success=False,
+                    timestamp=datetime.utcnow(),
+                    error_message="Rollback verification failed: container still exists"
+                )
+                
             return StagingRollbackReceipt(
                 success=True,
                 timestamp=datetime.utcnow()

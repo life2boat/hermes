@@ -1,50 +1,47 @@
 from __future__ import annotations
-import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any, Mapping
+import hashlib
+from dataclasses import dataclass, field
+from typing import Optional, Any, Dict
+from enum import Enum
+from ai_engineering.contracts import EffectClass, StopBoundary
 
-def payload_digest(payload: Mapping[str, Any]) -> str:
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+class MessageType(str, Enum):
+    WORK_REQUEST = "WORK_REQUEST"
+    WORK_PROGRESS = "WORK_PROGRESS"
+    WORK_RESULT = "WORK_RESULT"
+    WORK_FAILURE = "WORK_FAILURE"
+    VERIFICATION_REQUEST = "VERIFICATION_REQUEST"
+    VERIFICATION_RESULT = "VERIFICATION_RESULT"
+    CANCEL_REQUEST = "CANCEL_REQUEST"
+    CANCEL_ACK = "CANCEL_ACK"
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class AgentEnvelope:
     message_id: str
     correlation_id: str
-    target_agent: str
-    reply_to: str
-    payload: Mapping[str, Any]
+    causation_id: str
+    run_id: str
+    task_id: str
+    attempt_id: str
+    sender_agent: str
+    recipient_agent: str
+    recipient_capability: str
+    message_type: MessageType
+    payload: Dict[str, Any]
     payload_digest: str
-    timestamp_utc: str
+    task_intent_id: str
+    task_intent_digest: str
+    policy_receipt_id: str
+    policy_receipt_digest: str
+    effect_class: EffectClass
+    stop_boundary: StopBoundary
+    created_at_utc: str
+    expires_at_utc: str
+    retry_count: int = 0
+    max_retries: int = 3
     schema_version: str = "hermes.agent-envelope.v1"
-    task_intent: Any = None
-    policy_receipt: Any = None
-    effect_class: Any = None
-    stop_boundary: Any = None
-    
-    @classmethod
-    def create(cls, message_id: str, correlation_id: str, target_agent: str, reply_to: str, payload: Mapping[str, Any], timestamp_utc: str, task_intent: Any = None, policy_receipt: Any = None, effect_class: Any = None, stop_boundary: Any = None) -> AgentEnvelope:
-        digest = payload_digest(payload)
-        return cls(
-            message_id=message_id,
-            correlation_id=correlation_id,
-            target_agent=target_agent,
-            reply_to=reply_to,
-            payload=payload,
-            payload_digest=digest,
-            timestamp_utc=timestamp_utc,
-            task_intent=task_intent,
-            policy_receipt=policy_receipt,
-            effect_class=effect_class,
-            stop_boundary=stop_boundary
-        )
-    
+
     def verify_integrity(self) -> bool:
-        return self.payload_digest == payload_digest(self.payload)
+        canonical = json.dumps(self.payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(canonical).hexdigest() == self.payload_digest

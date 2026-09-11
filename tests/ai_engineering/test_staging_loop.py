@@ -89,6 +89,64 @@ def test_preflight_fail_shared_volumes(mock_run, deployer, valid_prod_compose, v
         assert receipt.success is False
         assert "Shared host paths" in receipt.error_message
 
+
+def test_deploy_containerd_ctr_fallback_success(deployer):
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    manifest_digest = "sha256:" + "a"*64
+    config_digest = "sha256:abc"
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    # Here, Id is returned as manifest_digest
+    mock_image_inspect = [{"Id": manifest_digest, "RepoDigests": [digest], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect)),
+            # ctr output mock
+            MagicMock(returncode=0, stdout='application/vnd.oci.image.config.v1+json @' + config_digest + '   1234')
+        ]
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest=manifest_digest, config_digest=config_digest, source_sha="def", oci_revision="def", platform="linux/amd64"))
+        assert receipt.success is True
+        assert receipt.container_id == "123"
+
+def test_deploy_containerd_ctr_fallback_failure(deployer):
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    manifest_digest = "sha256:" + "a"*64
+    config_digest = "sha256:abc"
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": manifest_digest, "RepoDigests": [digest], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
+    import subprocess
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect)),
+            # ctr crashes
+            Exception("ctr not found")
+        ]
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest=manifest_digest, config_digest=config_digest, source_sha="def", oci_revision="def", platform="linux/amd64"))
+        assert receipt.success is False
+        assert "IMAGE_CONFIG_DIGEST_UNRESOLVED: ctr config resolution failed" in receipt.error_message
+
+def test_deploy_containerd_ctr_fallback_malformed(deployer):
+    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
+    manifest_digest = "sha256:" + "a"*64
+    config_digest = "sha256:abc"
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": manifest_digest, "RepoDigests": [digest], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
+    import subprocess
+    with patch("subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect)),
+            # ctr returns junk
+            MagicMock(returncode=0, stdout='some junk without config digest')
+        ]
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest=manifest_digest, config_digest=config_digest, source_sha="def", oci_revision="def", platform="linux/amd64"))
+        assert receipt.success is False
+        assert "IMAGE_CONFIG_DIGEST_UNRESOLVED: ctr output malformed" in receipt.error_message
+
 def test_deploy_success(deployer):
     digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
     mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]

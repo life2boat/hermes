@@ -3,6 +3,7 @@ import os
 import time
 import json
 import yaml
+import re
 from datetime import datetime
 from ai_engineering.supervisor.staging.receipts import (
     StagingPreflightReceipt,
@@ -154,14 +155,14 @@ class StagingDeployer:
 
             if docker_image_inspect_id == attestation.registry_digest:
                 try:
-                    import subprocess
-                    import re
                     ctr_res = subprocess.run(["ctr", "-n", "moby", "images", "inspect", running_config_image_id], capture_output=True, text=True, check=True)
                     match = re.search(r'application/vnd\.oci\.image\.config\.v1\+json @(sha256:[a-f0-9]+)', ctr_res.stdout)
                     if match:
                         docker_image_inspect_id = match.group(1)
-                except Exception:
-                    pass
+                    else:
+                        return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="IMAGE_CONFIG_DIGEST_UNRESOLVED: ctr output malformed or missing config digest")
+                except Exception as e:
+                    return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"IMAGE_CONFIG_DIGEST_UNRESOLVED: ctr config resolution failed: {e}")
 
             if docker_image_inspect_id != attestation.config_digest:
                 return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Config Image ID mismatch: expected {attestation.config_digest}, got {docker_image_inspect_id}")

@@ -191,9 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             if not getattr(args, "intent", None):
                 print("BLOCKED: Missing intent", file=sys.stderr)
                 return 1
-            if not getattr(args, "state_dir", None):
-                print("BLOCKED: Missing state_dir", file=sys.stderr)
-                return 1
+
             if not getattr(args, "run_id", None):
                 print("BLOCKED: Missing run_id", file=sys.stderr)
                 return 1
@@ -209,7 +207,52 @@ def main(argv: list[str] | None = None) -> int:
 
             receipt_id = args.policy_receipt
 
-            store = FileSupervisorStateStore(Path(args.state_dir))
+
+            trusted_root_str = os.environ.get("HERMES_TRUSTED_STATE_ROOT")
+            if not trusted_root_str:
+                print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                return 1
+
+            p = Path(trusted_root_str).resolve()
+            if not p.is_absolute() or p.is_symlink():
+                print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                return 1
+
+            if "/tmp" in str(p) or "/scratch" in str(p):
+                print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                return 1
+
+            import subprocess
+            try:
+                git_root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
+                if str(p).startswith(git_root):
+                    print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                    print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                    return 1
+            except Exception:
+                pass
+
+            if os.name == "posix":
+                try:
+                    st = os.stat(p)
+                    if st.st_uid != os.getuid():
+                        print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                        print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                        return 1
+                    if st.st_mode & 0o022:
+                        print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                        print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                        return 1
+                except Exception as e:
+                    print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                    print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                    return 1
+
+            store = FileSupervisorStateStore(p)
+
             try:
                 events = store.load_events(args.run_id)
             except Exception as e:

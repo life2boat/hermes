@@ -8,6 +8,7 @@ from ai_engineering.supervisor.staging.receipts import (
     StagingPreflightReceipt,
     StagingDeploymentReceipt,
     StagingHealthReceipt,
+    ExactImageAttestation,
     StagingCanaryReceipt,
     StagingRollbackReceipt
 )

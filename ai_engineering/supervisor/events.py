@@ -172,12 +172,11 @@ def create_event(
 
 
 def _event_to_dict(event: SupervisorEvent) -> dict:
-    return {
+    d = {
         "attempt_id": event.attempt_id,
         "created_at_utc": event.created_at_utc,
         "decision_id": event.decision_id,
         "event_digest": event.event_digest,
-        "payload": event.payload,
         "event_id": event.event_id,
         "event_type": event.event_type.value,
         "intent_digest": event.intent_digest,
@@ -190,6 +189,9 @@ def _event_to_dict(event: SupervisorEvent) -> dict:
         "task_id": event.task_id,
         "verified_result_id": event.verified_result_id,
     }
+    if getattr(event, "payload", None) is not None:
+        d["payload"] = event.payload
+    return d
 
 
 def canonical_serialize_event(event: SupervisorEvent) -> str:
@@ -249,7 +251,11 @@ def deserialize_event(raw: str | bytes) -> SupervisorEvent:
         _fail("EVENT_JSON_INVALID")
 
     keys = frozenset(payload)
-    if _EVENT_FIELDS - keys or keys - _EVENT_FIELDS:
+    required_keys = frozenset(_EVENT_FIELDS) - {"payload"}
+    if required_keys - keys:
+        _fail("EVENT_FIELD_INVALID")
+    extra_keys = keys - _EVENT_FIELDS
+    if extra_keys:
         _fail("EVENT_FIELD_INVALID")
 
     sv = payload["schema_version"]
@@ -315,6 +321,16 @@ def deserialize_event(raw: str | bytes) -> SupervisorEvent:
     stored_event_digest = payload["event_digest"]
     if not isinstance(stored_event_digest, str) or not re.match(r"^[0-9a-f]{64}$", stored_event_digest):
         _fail("EVENT_FIELD_INVALID")
+
+    event_payload_dict = payload.get("payload")
+    if "payload" in payload:
+        if not isinstance(event_payload_dict, dict):
+            _fail("EVENT_FIELD_INVALID")
+        # Verify payload matches payload_digest
+        payload_raw = json.dumps(event_payload_dict, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        computed_payload_digest = hashlib.sha256(payload_raw.encode("utf-8")).hexdigest()
+        if computed_payload_digest != payload_dg:
+            _fail("EVENT_PAYLOAD_TAMPERED")
 
     # Verify event_id
     id_dict = _event_to_dict_for_id(

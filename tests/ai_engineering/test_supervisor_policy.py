@@ -1126,7 +1126,7 @@ class TestPolicyTamper:
 
         with pytest.raises(SupervisorError) as exc:
             store.load_events(RUN_ID)
-        assert exc.value.code == "EVENT_TAMPERED"
+        assert exc.value.code in ("EVENT_TAMPERED", "EVENT_PAYLOAD_TAMPERED")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

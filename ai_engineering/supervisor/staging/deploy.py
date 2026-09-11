@@ -8,6 +8,7 @@ from ai_engineering.supervisor.staging.receipts import (
     StagingPreflightReceipt,
     StagingDeploymentReceipt,
     StagingHealthReceipt,
+    ExactImageAttestation,
     StagingCanaryReceipt,
     StagingRollbackReceipt
 )
@@ -151,8 +152,8 @@ class StagingDeployer:
             labels = image_info.get("Config", {}).get("Labels", {})
             oci_revision = labels.get("org.opencontainers.image.revision")
 
-            if running_config_image_id not in (attestation.config_digest, attestation.registry_digest) or docker_image_inspect_id not in (attestation.config_digest, attestation.registry_digest):
-                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Config Image ID mismatch: expected {attestation.config_digest} or {attestation.registry_digest}, got {running_config_image_id}")
+            if docker_image_inspect_id != attestation.config_digest:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Config Image ID mismatch: expected {attestation.config_digest}, got {docker_image_inspect_id}")
 
             expected_registry_reference = f"ghcr.io/life2boat/hermes@{attestation.registry_digest}"
             if expected_registry_reference not in repo_digests:

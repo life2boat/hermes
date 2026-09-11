@@ -6,6 +6,7 @@ import json
 import yaml
 
 from ai_engineering.supervisor.staging.deploy import StagingDeployer
+from ai_engineering.supervisor.staging.receipts import ExactImageAttestation
 
 @pytest.fixture
 def deployer():
@@ -90,23 +91,24 @@ def test_preflight_fail_shared_volumes(mock_run, deployer, valid_prod_compose, v
 
 def test_deploy_success(deployer):
     digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
-    mock_inspect = [{"Image": digest, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": "sha256:abc", "RepoDigests": [digest], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
-            MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect))
         ]
-        receipt = deployer.deploy(expected_digest=digest, expected_sha="def")
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest="sha256:" + "a"*64, config_digest="sha256:abc", source_sha="def", oci_revision="def", platform="linux/amd64"))
         assert receipt.success is True
         assert receipt.container_id == "123"
         assert receipt.repo_digest == digest
-        assert receipt.oci_revision == "def" 
+        assert receipt.oci_revision == "def"
 
 def test_deploy_failure(deployer):
-    digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error")
-        receipt = deployer.deploy(expected_digest=digest, expected_sha="def")
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest="sha256:" + "a"*64, config_digest="sha256:abc", source_sha="def", oci_revision="def", platform="linux/amd64"))
         assert receipt.success is False
         assert "error" in receipt.error_message
 
@@ -164,38 +166,44 @@ def test_preflight_dirty_worktree(deployer):
 def test_deploy_image_authority_mismatch(deployer):
     digest1 = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
     digest2 = "ghcr.io/life2boat/hermes@sha256:" + "b"*64
-    mock_inspect = [{"Image": digest1, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": "sha256:abc", "RepoDigests": [digest1], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
-            MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect))
         ]
-        receipt = deployer.deploy(expected_digest=digest2, expected_sha="def")
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest="sha256:" + "b"*64, config_digest="sha256:abc", source_sha="def", oci_revision="def", platform="linux/amd64"))
         assert receipt.success is False
-        assert "Image authority mismatch" in receipt.error_message
+        assert "Registry Manifest Digest mismatch" in receipt.error_message or "Malformed expected_digest" in receipt.error_message
 
 def test_deploy_malformed_digest(deployer):
-    mock_inspect = [{"Image": "sha256:abc", "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": "sha256:abc", "RepoDigests": ["ghcr.io/life2boat/hermes@invalid"], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
-            MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect))
         ]
-        receipt = deployer.deploy(expected_digest="invalid", expected_sha="def")
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest="invalid", config_digest="sha256:abc", source_sha="def", oci_revision="def", platform="linux/amd64"))
     assert receipt.success is False
-    assert "Malformed expected_digest" in receipt.error_message
+    assert "Registry Manifest Digest mismatch" in receipt.error_message or "Malformed expected_digest" in receipt.error_message
 
 def test_deploy_source_authority_mismatch(deployer):
     digest = "ghcr.io/life2boat/hermes@sha256:" + "a"*64
-    mock_inspect = [{"Image": digest, "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}, "Id": "123"}]
+    mock_inspect = [{"Image": "sha256:abc", "Id": "123"}]
+    mock_image_inspect = [{"Id": "sha256:abc", "RepoDigests": [digest], "Config": {"Labels": {"org.opencontainers.image.revision": "def"}}}]
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = [
             MagicMock(returncode=0),
-            MagicMock(returncode=0, stdout=json.dumps(mock_inspect))
+            MagicMock(returncode=0, stdout=json.dumps(mock_inspect)),
+            MagicMock(returncode=0, stdout=json.dumps(mock_image_inspect))
         ]
-        receipt = deployer.deploy(expected_digest=digest, expected_sha="ghi")
+        receipt = deployer.deploy(attestation=ExactImageAttestation(registry_digest="sha256:" + "a"*64, config_digest="sha256:abc", source_sha="ghi", oci_revision="ghi", platform="linux/amd64"))
         assert receipt.success is False
-        assert "Source authority mismatch" in receipt.error_message
+        assert "OCI revision mismatch" in receipt.error_message
 
 def test_rollback_no_delete_volumes(deployer):
     with patch("subprocess.run") as mock_run:

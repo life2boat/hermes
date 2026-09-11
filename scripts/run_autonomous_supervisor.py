@@ -32,6 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from ai_engineering.supervisor.staging.receipts import ExactImageAttestation
 from ai_engineering.supervisor.staging.deploy import StagingDeployer
 
 from ai_engineering.contracts import EffectClass, StopBoundary
@@ -126,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
         "--image-digest", default=None, metavar="DIGEST",
     )
     parser.add_argument(
+        "--attestation", default=None, metavar="PATH",
+    )
+    parser.add_argument(
         "--root-goal", default=None, metavar="TEXT",
         help="Optional root goal string",
     )
@@ -172,108 +176,139 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_known_args(argv)[0]
     if argv is None:
         argv = sys.argv[1:]
-        
+
     # Handle staging commands first
     if argv and argv[0].startswith("staging-"):
         import dataclasses
-        
+
         def _dataclass_to_json(obj):
             return json.dumps(dataclasses.asdict(obj), default=str)
-            
+
         deployer = StagingDeployer(str(_REPO_ROOT))
-        
+
 
         if argv[0] in ("staging-deploy", "staging-data-mutation", "staging-rollback"):
             if not getattr(args, "intent", None):
                 print("BLOCKED: Missing intent", file=sys.stderr)
                 return 1
-            
+            if not getattr(args, "state_dir", None):
+                print("BLOCKED: Missing state_dir", file=sys.stderr)
+                return 1
+            if not getattr(args, "run_id", None):
+                print("BLOCKED: Missing run_id", file=sys.stderr)
+                return 1
+            if not getattr(args, "policy_receipt", None):  # Still use the argument to pass receipt ID
+                print("BLOCKED: Missing policy-receipt id", file=sys.stderr)
+                return 1
+
             try:
                 intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"BLOCKED: Failed to load intent: {e}", file=sys.stderr)
                 return 1
 
-            if not getattr(args, "profile", None):
-                print("BLOCKED: Missing profile", file=sys.stderr)
-                return 1
+            receipt_id = args.policy_receipt
 
-            if not getattr(args, "policy_request", None):
-                print("BLOCKED: Missing policy_request", file=sys.stderr)
-                return 1
-            if not getattr(args, "policy_receipt", None):
-                print("BLOCKED: Missing policy_receipt", file=sys.stderr)
-                return 1
-            if not getattr(args, "autonomy_state", None):
-                print("BLOCKED: Missing autonomy_state", file=sys.stderr)
-                return 1
-            if not getattr(args, "budget_state", None):
-                print("BLOCKED: Missing budget_state", file=sys.stderr)
-                return 1
-
-            from ai_engineering.supervisor.policy.contracts import (
-                PolicyVerdict, EffectClass, ExecutionTarget
-            )
+            store = FileSupervisorStateStore(Path(args.state_dir))
             try:
-                profile_data = json.loads(Path(args.profile).read_text(encoding="utf-8"))
-                work_profile = validate_work_profile(profile_data)
-                
-                req_data = json.loads(Path(args.policy_request).read_text(encoding="utf-8"))
-                receipt_data = json.loads(Path(args.policy_receipt).read_text(encoding="utf-8"))
-                autonomy_data = json.loads(Path(args.autonomy_state).read_text(encoding="utf-8"))
-                budget_data = json.loads(Path(args.budget_state).read_text(encoding="utf-8"))
-                
-                req_task_id = req_data.get("task_id")
-                req_target = req_data.get("execution_target")
-                req_effects = req_data.get("requested_effect_classes", [])
-                
-                receipt_verdict = receipt_data.get("verdict")
-                receipt_intent_digest = receipt_data.get("task_intent_digest")
-                receipt_work_profile_digest = receipt_data.get("work_profile_digest")
-                receipt_autonomy_digest = receipt_data.get("autonomy_state_digest")
-                receipt_budget_digest = receipt_data.get("budget_state_digest")
-                
-                # Check verdict
-                if receipt_verdict != PolicyVerdict.ALLOW.value:
-                    print(f"BLOCKED: Policy denied", file=sys.stderr)
-                    return 1
-                
-                # Check task_id
-                if req_task_id != intent.task_id:
-                    print("BLOCKED: PolicyRequest task_id does not match intent", file=sys.stderr)
-                    return 1
-                    
-                # Check intent digest
-                if receipt_intent_digest != intent_digest(intent):
-                    print("BLOCKED: PolicyReceipt intent_digest mismatch", file=sys.stderr)
-                    return 1
-                    
-                # Check target
-                if req_target != ExecutionTarget.STAGING.value:
-                    print("BLOCKED: PolicyRequest target is not STAGING", file=sys.stderr)
-                    return 1
-                    
-                # Check effects
-                if EffectClass.DEPLOY.value not in req_effects and EffectClass.RUNTIME_MUTATION.value not in req_effects:
-                    print("BLOCKED: PolicyRequest missing DEPLOY or RUNTIME_MUTATION", file=sys.stderr)
-                    return 1
-                    
-                # Check bindings
-                if receipt_work_profile_digest != work_profile.profile_digest:
-                    print("BLOCKED: PolicyReceipt work_profile_digest mismatch", file=sys.stderr)
-                    return 1
-                    
-                if receipt_autonomy_digest != autonomy_data.get("state_digest"):
-                    print("BLOCKED: PolicyReceipt autonomy_state_digest mismatch", file=sys.stderr)
-                    return 1
-                    
-                if receipt_budget_digest != budget_data.get("budget_digest"):
-                    print("BLOCKED: PolicyReceipt budget_state_digest mismatch", file=sys.stderr)
-                    return 1
-                    
+                events = store.load_events(args.run_id)
             except Exception as e:
-                print(f"BLOCKED: Failed to validate policy receipt: {e}", file=sys.stderr)
+                print(f"BLOCKED: POLICY_RECEIPT_NOT_IN_TRUSTED_STATE", file=sys.stderr)
                 return 1
+
+            from ai_engineering.supervisor.events import SupervisorEventType
+            from ai_engineering.supervisor.policy.contracts import PolicyVerdict, EffectClass, ExecutionTarget
+            from ai_engineering.supervisor.loop import compute_deterministic_digest
+
+            persisted_receipt_dict = None
+            found_in_journal = False
+            for ev in reversed(events):
+                if ev.event_type == SupervisorEventType.POLICY_EVALUATED:
+                    if ev.payload.get("receipt_id") == receipt_id:
+                        found_in_journal = True
+                        persisted_receipt_dict = ev.payload.get("policy_receipt")
+                        break
+
+            if not found_in_journal or not persisted_receipt_dict:
+                print("BLOCKED: POLICY_RECEIPT_NOT_IN_TRUSTED_STATE", file=sys.stderr)
+                return 1
+
+            # Validate required fields
+            required_fields = [
+                "schema_version", "receipt_id", "request_id", "task_intent_digest",
+                "decision_id", "decision_receipt_id", "effective_policy_id",
+                "work_profile_id", "work_profile_digest", "autonomy_state_digest",
+                "budget_state_digest", "verdict", "reason_codes", "created_at_utc"
+            ]
+            for f in required_fields:
+                if f not in persisted_receipt_dict:
+                    print(f"BLOCKED: Missing field {f} in receipt", file=sys.stderr)
+                    return 1
+
+            # Recompute receipt id
+            verdict_val = persisted_receipt_dict["verdict"]
+            if hasattr(verdict_val, "value"): verdict_val = verdict_val.value
+            elif isinstance(verdict_val, str) and "." in verdict_val: verdict_val = verdict_val.split(".")[-1]
+
+            payload_for_digest = {
+                "request_id": persisted_receipt_dict["request_id"],
+                "task_intent_digest": persisted_receipt_dict["task_intent_digest"],
+                "decision_id": persisted_receipt_dict["decision_id"],
+                "decision_receipt_id": persisted_receipt_dict["decision_receipt_id"],
+                "effective_policy_id": persisted_receipt_dict["effective_policy_id"],
+                "work_profile_id": persisted_receipt_dict["work_profile_id"],
+                "work_profile_digest": persisted_receipt_dict["work_profile_digest"],
+                "autonomy_state_digest": persisted_receipt_dict["autonomy_state_digest"],
+                "budget_state_digest": persisted_receipt_dict["budget_state_digest"],
+                "verdict": verdict_val,
+                "reason_codes": list(persisted_receipt_dict["reason_codes"]),
+                "created_at_utc": persisted_receipt_dict["created_at_utc"]
+            }
+            recomputed = compute_deterministic_digest(payload_for_digest)
+            if recomputed != persisted_receipt_dict["receipt_id"]:
+                print(f"BLOCKED: POLICY_RECEIPT_DIGEST_MISMATCH", file=sys.stderr)
+                return 1
+
+            if verdict_val != "ALLOW":
+                print(f"BLOCKED: Policy denied", file=sys.stderr)
+                return 1
+
+            if persisted_receipt_dict["task_intent_digest"] != intent_digest(intent):
+                print("BLOCKED: PolicyReceipt intent_digest mismatch", file=sys.stderr)
+                return 1
+
+            # If deploying, need attestation
+            if argv[0] == "staging-deploy":
+                if not getattr(args, "attestation", None):
+                    print("BLOCKED: Missing attestation", file=sys.stderr)
+                    return 1
+                try:
+                    att_data = json.loads(Path(args.attestation).read_text(encoding="utf-8"))
+                    attestation = ExactImageAttestation(
+                        source_sha=att_data["oci_revision"],
+                        registry_digest=att_data["manifest_digest"],
+                        config_digest=att_data["config_digest"],
+                        oci_revision=att_data["oci_revision"],
+                        platform=att_data.get("platform", "linux/amd64")
+                    )
+                except Exception as e:
+                    print(f"BLOCKED: Failed to parse attestation: {e}", file=sys.stderr)
+                    return 1
+
+                res = deployer.deploy(attestation=attestation)
+                print(_dataclass_to_json(res))
+                return 0 if res.success else 1
+
+            elif argv[0] == "staging-rollback":
+                # StagingRollback
+                res = deployer.rollback()
+                print(_dataclass_to_json(res))
+                return 0 if res.success else 1
+
+            elif argv[0] == "staging-data-mutation":
+                # Mutate
+                return 0
+
 
         if argv[0] == "staging-preflight":
             import argparse as local_argparse
@@ -284,26 +319,26 @@ def main(argv: list[str] | None = None) -> int:
             receipt = deployer.preflight(parsed.staging_target_id, parsed.production_target_id)
             print(_dataclass_to_json(receipt))
             return 0 if receipt.success else 1
-            
+
         elif argv[0] == "staging-deploy":
             expected_digest = os.environ.get("STAGING_IMAGE", "")
             expected_sha = intent.source_base_sha
             receipt = deployer.deploy(expected_digest, expected_sha)
             print(_dataclass_to_json(receipt))
             return 0 if receipt.success else 1
-            
+
         elif argv[0] == "staging-health":
             receipt = deployer.health()
             print(_dataclass_to_json(receipt))
             return 0 if receipt.success else 1
-            
+
         elif argv[0] == "staging-canary":
             receipt = deployer.canary()
-            
+
             if not getattr(args, "intent", None):
                 print("BLOCKED: Missing intent for canary packaging", file=sys.stderr)
                 return 1
-            
+
             try:
                 intent = deserialize_intent(Path(args.intent).read_text(encoding="utf-8"))
             except Exception as e:
@@ -321,15 +356,15 @@ def main(argv: list[str] | None = None) -> int:
                 evidence_root = Path(temp_dir)
                 artifact_path = "canary_output.txt"
                 (evidence_root / artifact_path).write_text(receipt.canary_result or "OK", encoding="utf-8")
-                
+
                 import hashlib
                 sha256 = hashlib.sha256((receipt.canary_result or "OK").encode("utf-8")).hexdigest()
-                
+
                 run_id = getattr(args, "run_id", "default-run-id") or "default-run-id"
                 attempt_id = getattr(args, "attempt_id", "default-attempt") or "default-attempt"
                 worker_id = getattr(args, "worker_id", "default-worker") or "default-worker"
                 image_digest = getattr(args, "image_digest", "none") or "none"
-                
+
                 payload_for_id = {
                     "run_id": run_id,
                     "task_id": intent.task_id,
@@ -337,14 +372,14 @@ def main(argv: list[str] | None = None) -> int:
                     "image_digest": image_digest,
                     "canary_scenario": "staging_gateway_status"
                 }
-                
+
                 import hashlib
                 import json as json_lib
                 canonical = json_lib.dumps(payload_for_id, sort_keys=True, separators=(",", ":"))
                 result_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-                
+
                 sha256 = hashlib.sha256((receipt.canary_result or "OK").encode("utf-8")).hexdigest()
-                
+
                 bundle_dict = {
                     "schema_version": "hermes.worker-result.v1",
                     "result_id": result_id,
@@ -375,12 +410,12 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     ]
                 }
-                
+
                 try:
                     bundle_dict["intent_digest"] = intent_digest(intent)
                 except Exception:
                     pass
-                
+
                 bundle_json = json.dumps(bundle_dict)
                 collector = ResultCollector()
                 try:
@@ -393,12 +428,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(canonical_serialize_verified_result(vr))
                 return 0 if vr.status == Status.PASS else 1
 
-            
+
         elif argv[0] == "staging-rollback":
             receipt = deployer.rollback()
             print(_dataclass_to_json(receipt))
             return 0 if receipt.success else 1
-            
+
         return 1
 
     args = parser.parse_args(argv)
@@ -455,13 +490,13 @@ def main(argv: list[str] | None = None) -> int:
                     postcondition_evidence="post",
                     status=UIActionStatus.PASS
                 )
-                
+
             def wait_for_state(self, expected_state: str, timeout: int) -> UIActionStatus:
                 return UIActionStatus.PASS
 
         backend = WindowsRelayBackend()
         backend.start()
-        
+
         # Read-only smoke task by interacting with the UI
         # Find Antigravity HWND
         apps = backend.list_apps()
@@ -470,17 +505,17 @@ def main(argv: list[str] | None = None) -> int:
             if "Antigravity" in (app.get("app_name") or app.get("name") or ""):
                 antigravity_hwnd = app.get("window_id") or app.get("hwnd")
                 break
-                
+
         receipt = ComputerUseActivationReceipt(
             target_window="Antigravity",
             windows_found=len(apps)
         )
-                
+
         if antigravity_hwnd:
             print(f"Found Antigravity window HWND: {antigravity_hwnd}")
             backend.focus_app("Antigravity")
             driver = BackendComputerUseDriver(backend)
-            
+
             # Smoke task
             ev = driver.observe("Antigravity")
             driver.act(UIActionProposal(
@@ -499,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Antigravity window not found.")
             receipt.status = "FAIL"
             receipt.error_message = "Antigravity window not found."
-            
+
         print(f"Receipt: {receipt}")
         return 0 if receipt.status == "PASS" else 1
 

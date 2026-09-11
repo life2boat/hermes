@@ -1,6 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from ai_engineering.supervisor.router.adapters import AgentAdapter, AntigravityAdapter, CodexAdapter, ComputerUseAdapter, AstraAdapter
+from ai_engineering.supervisor.router.adapters import (
+    AgentAdapter, AntigravityAdapter, CodexAdapter, ComputerUseAdapter, AstraAdapter, HttpAgentTransport
+)
 
 @dataclass(frozen=True)
 class AgentCapability:
@@ -28,8 +30,12 @@ class AgentRegistry:
     @classmethod
     def create_default(cls) -> AgentRegistry:
         registry = cls()
-        registry.register("antigravity", AntigravityAdapter(), AgentCapability("antigravity", ("code",), 60))
-        registry.register("codex", CodexAdapter(), AgentCapability("codex", ("code",), 60))
-        registry.register("computer_use", ComputerUseAdapter(), AgentCapability("computer_use", ("gui",), 120))
-        registry.register("astra", AstraAdapter(), AgentCapability("astra", ("propose",), 30))
+        t1 = HttpAgentTransport("http://localhost:8001")
+        t2 = HttpAgentTransport("http://localhost:8002")
+        t3 = HttpAgentTransport("http://localhost:8003")
+        t4 = HttpAgentTransport("http://localhost:8004")
+        registry.register("antigravity", AntigravityAdapter(t1), AgentCapability("antigravity", ("code",), 60))
+        registry.register("codex", CodexAdapter(t2), AgentCapability("codex", ("code",), 60))
+        registry.register("computer_use", ComputerUseAdapter(t3), AgentCapability("computer_use", ("gui",), 120))
+        registry.register("astra", AstraAdapter(t4), AgentCapability("astra", ("propose",), 30))
         return registry

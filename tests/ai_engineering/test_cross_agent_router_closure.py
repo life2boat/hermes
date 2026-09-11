@@ -94,3 +94,28 @@ def test_safe_persistence(tmp_path: Path):
         store.has_processed("../evil")
     with pytest.raises(ValueError):
         store.store_result("../evil", None)
+
+def test_router_unvailable_transport(tmp_path):
+    store = FilePersistentStore(tmp_path)
+    registry = AgentRegistry.create_default()
+    router = CrossAgentRouter(registry, store)
+    # simulate transport unvailable
+    registry.get_adapter('antigravity').transport._available = False
+    
+    envelope = AgentEnvelope.create('msg-99', 'corr-99', 'antigravity', 'user', {}, 'utc')
+    from ai_engineering.supervisor.router.adapters import AgentTransportUnavailableError
+    with pytest.raises((AgentTransportUnavailableError, RuntimeError)):
+        router.route(envelope)
+
+def test_envelope_canonical_contracts():
+    envelope = AgentEnvelope.create(
+        'msg-c1', 'corr-c1', 'astra', 'user', {}, 'utc',
+        task_intent={'intent': 'test'},
+        policy_receipt={'policy': 'test'},
+        effect_class='read_only',
+        stop_boundary='auto'
+    )
+    assert envelope.task_intent == {'intent': 'test'}
+    assert envelope.policy_receipt == {'policy': 'test'}
+    assert envelope.effect_class == 'read_only'
+    assert envelope.stop_boundary == 'auto'

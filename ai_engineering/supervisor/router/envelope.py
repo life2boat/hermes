@@ -1,5 +1,3 @@
-"""Envelope schema and integrity."""
-
 from __future__ import annotations
 import hashlib
 import json
@@ -7,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 def payload_digest(payload: Mapping[str, Any]) -> str:
-    """Compute sha256 digest of canonically serialized payload."""
     serialized = json.dumps(
         payload,
         ensure_ascii=False,
@@ -26,9 +23,14 @@ class AgentEnvelope:
     payload: Mapping[str, Any]
     payload_digest: str
     timestamp_utc: str
+    schema_version: str = "hermes.agent-envelope.v1"
+    task_intent: Any = None
+    policy_receipt: Any = None
+    effect_class: Any = None
+    stop_boundary: Any = None
     
     @classmethod
-    def create(cls, message_id: str, correlation_id: str, target_agent: str, reply_to: str, payload: Mapping[str, Any], timestamp_utc: str) -> AgentEnvelope:
+    def create(cls, message_id: str, correlation_id: str, target_agent: str, reply_to: str, payload: Mapping[str, Any], timestamp_utc: str, task_intent: Any = None, policy_receipt: Any = None, effect_class: Any = None, stop_boundary: Any = None) -> AgentEnvelope:
         digest = payload_digest(payload)
         return cls(
             message_id=message_id,
@@ -37,7 +39,11 @@ class AgentEnvelope:
             reply_to=reply_to,
             payload=payload,
             payload_digest=digest,
-            timestamp_utc=timestamp_utc
+            timestamp_utc=timestamp_utc,
+            task_intent=task_intent,
+            policy_receipt=policy_receipt,
+            effect_class=effect_class,
+            stop_boundary=stop_boundary
         )
     
     def verify_integrity(self) -> bool:

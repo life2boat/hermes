@@ -135,8 +135,7 @@ class StagingDeployer:
             container_info = json.loads(inspect_res.stdout)[0]
             
             repo_digests = container_info.get("Image", "")
-            if "RepoDigests" in container_info and container_info["RepoDigests"]:
-                repo_digests = container_info["RepoDigests"][0]
+            expected_image_hash = expected_digest.split("@")[-1] if "@" in expected_digest else expected_digest
             
             labels = container_info.get("Config", {}).get("Labels", {})
             oci_revision = labels.get("org.opencontainers.image.revision")
@@ -144,7 +143,7 @@ class StagingDeployer:
             
             if not expected_digest.startswith("ghcr.io/life2boat/hermes@sha256:") or len(expected_digest) != 96:
                 return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="Malformed expected_digest")
-            if not repo_digests or expected_digest != repo_digests:
+            if not repo_digests or expected_image_hash != repo_digests:
                 return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Image authority mismatch: expected {expected_digest}, got {repo_digests}")
             if not oci_revision or expected_sha != oci_revision:
                 return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Source authority mismatch: expected {expected_sha}, got {oci_revision}")

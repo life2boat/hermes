@@ -47,4 +47,5 @@ $PY -m pytest -q \
   tests/agent/test_auxiliary_client.py \
   tests/agent/test_prompt_builder.py \
   tests/scripts/test_memory_analytics_report.py \
-  tests/scripts/test_healbite_cli.py
+  tests/scripts/test_healbite_cli.py \
+  tests/ai_engineering/test_cross_agent_router.py

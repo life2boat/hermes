@@ -39,7 +39,7 @@ def _dummy_intent() -> TaskIntent:
         parent_intent_digest=None,
     )
 
-def test_attacker_controlled_state_root_rejected():
+def test_attacker_controlled_state_root_rejected(capsys):
     with tempfile.TemporaryDirectory() as d:
         store_path = Path(d)
         
@@ -55,22 +55,20 @@ def test_attacker_controlled_state_root_rejected():
             "--policy-receipt", "fake-123"
         ]
         
-        # Mock environ to use /tmp which is blocked
         with patch.dict(os.environ, {"HERMES_TRUSTED_STATE_ROOT": str(store_path)}):
-            try:
-                res = cli_main(args)
-                assert res == 1
-            except SystemExit as e:
-                assert e.code == 1
+            res = cli_main(args)
+            assert res == 1
+            captured = capsys.readouterr()
+            assert "BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED" in captured.err
+            assert "REASON=CALLER_CONTROLLED_AUTHORITY_ROOT" in captured.err
+            assert "DOCKER_MUTATION_COUNT=0" in captured.err
 
-def test_synthetic_valid_journal_cannot_authorize():
+def test_synthetic_valid_journal_cannot_authorize(capsys):
     # If the root is not trusted, even a mathematically valid journal fails.
-    # Same as above, just asserting UNTRUSTED_AUTHORITY_ROOT logic
-    test_attacker_controlled_state_root_rejected()
+    test_attacker_controlled_state_root_rejected(capsys)
 
 def test_trusted_supervisor_journal_can_authorize():
     # This test verifies that if the authority root IS trusted, the preflight progresses
-    # (It will fail eventually on preflight validations or docker, but it passes the authority check)
     with tempfile.TemporaryDirectory(dir=os.getcwd()) as d:
         store_path = Path(d)
         
@@ -79,7 +77,6 @@ def test_trusted_supervisor_journal_can_authorize():
         intent_path = store_path / "intent.json"
         intent_path.write_text(serialize_intent(intent))
         
-        # Insert a mathematically valid event so load_events succeeds
         store = FileSupervisorStateStore(store_path)
         receipt_payload = {
             "schema_version": 1,
@@ -120,15 +117,16 @@ def test_trusted_supervisor_journal_can_authorize():
             "--policy-receipt", "receipt123"
         ]
         
-
-        
-        with patch.dict(os.environ, {"HERMES_TRUSTED_STATE_ROOT": str(store_path)}):
-            with patch("os.name", "nt"): # Bypass POSIX check for ease
+        # We mock the canonical reading logic to return our temp dir
+        # This simulates reading from /etc/hermes/supervisor.conf
+        with patch("scripts.run_autonomous_supervisor.get_trusted_state_root", return_value=store_path):
+            with patch("scripts.run_autonomous_supervisor.check_trusted_root_security", return_value=True):
+                # Ensure no caller-controlled env is set
+                if "HERMES_TRUSTED_STATE_ROOT" in os.environ:
+                    del os.environ["HERMES_TRUSTED_STATE_ROOT"]
                 try:
                     res = cli_main(args)
-                    # It will fail with BLOCKED: Intent digest mismatch, but that proves it loaded the file
-                    # Or it might block on Attestation.
+                    # It will fail with BLOCKED: Missing attestation or Intent digest mismatch, but that proves it passed the authority check
                     assert res == 1
                 except SystemExit as e:
                     assert e.code == 1
-

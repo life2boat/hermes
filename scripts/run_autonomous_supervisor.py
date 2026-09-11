@@ -89,6 +89,37 @@ def _exit_code(phase: SupervisorPhase) -> int:
     return 2  # BLOCKED, CANCELLED, PENDING, etc.
 
 
+
+def get_trusted_state_root() -> Path:
+    # Operator/runtime-owned canonical configuration source
+    config_path = Path("/etc/hermes/supervisor.conf")
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("TRUSTED_STATE_ROOT="):
+                    return Path(line.split("=", 1)[1].strip())
+
+    # Fallback to canonical location
+    return Path("/var/lib/hermes/supervisor_state")
+
+def check_trusted_root_security(p: Path) -> bool:
+    if not p.is_absolute() or not p.exists():
+        return False
+    import stat
+    import os
+    try:
+        st = os.stat(p)
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None:
+            if st.st_uid != getuid():
+                return False
+        if st.st_mode & 0o022:
+            return False
+    except Exception:
+        return False
+    return True
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Hermes Autonomous Supervisor CLI (Task No.4)",
@@ -208,50 +239,20 @@ def main(argv: list[str] | None = None) -> int:
             receipt_id = args.policy_receipt
 
 
-            trusted_root_str = os.environ.get("HERMES_TRUSTED_STATE_ROOT")
-            if not trusted_root_str:
+            if os.environ.get("HERMES_TRUSTED_STATE_ROOT"):
                 print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                print("REASON=CALLER_CONTROLLED_AUTHORITY_ROOT", file=sys.stderr)
+                print("DOCKER_MUTATION_COUNT=0", file=sys.stderr)
                 return 1
 
-            p = Path(trusted_root_str).resolve()
-            if not p.is_absolute() or p.is_symlink():
+            trusted_root = get_trusted_state_root()
+            if not check_trusted_root_security(trusted_root):
                 print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
+                print("REASON=SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
+                print("DOCKER_MUTATION_COUNT=0", file=sys.stderr)
                 return 1
 
-            if "/tmp" in str(p) or "/scratch" in str(p):
-                print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
-                return 1
-
-            import subprocess
-            try:
-                git_root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
-                if str(p).startswith(git_root):
-                    print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                    print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
-                    return 1
-            except Exception:
-                pass
-
-            if os.name == "posix":
-                try:
-                    st = os.stat(p)
-                    if st.st_uid != os.getuid():
-                        print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                        print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
-                        return 1
-                    if st.st_mode & 0o022:
-                        print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                        print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
-                        return 1
-                except Exception as e:
-                    print("BLOCKED: SUPERVISOR_AUTHORITY_ROOT_UNTRUSTED", file=sys.stderr)
-                    print("REASON=UNTRUSTED_AUTHORITY_ROOT", file=sys.stderr)
-                    return 1
-
-            store = FileSupervisorStateStore(p)
+            store = FileSupervisorStateStore(trusted_root)
 
             try:
                 events = store.load_events(args.run_id)

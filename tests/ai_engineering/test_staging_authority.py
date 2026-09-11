@@ -77,7 +77,7 @@ def test_tampered_receipt_blocked():
         from ai_engineering.supervisor.events import create_event
         receipt_payload = {
             "request_id": "req1",
-            "task_intent_digest": "dig",
+            "task_intent_digest": "1234567890123456789012345678901234567890123456789012345678901234",
             "decision_id": "dec1",
             "decision_receipt_id": "drec1",
             "effective_policy_id": "pol1",
@@ -101,7 +101,7 @@ def test_tampered_receipt_blocked():
             state_revision=1,
             task_id="task-123",
             attempt_id="attempt-1",
-            intent_digest="dig",
+            intent_digest="1234567890123456789012345678901234567890123456789012345678901234",
             payload={"receipt_id": "tampered-id", "policy_receipt": receipt_payload},
             created_at_utc="2026-01-01T00:00:00",
             decision_id="dec1"

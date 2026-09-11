@@ -62,6 +62,7 @@ class SupervisorEvent:
     intent_digest: str
     verified_result_id: str | None
     decision_id: str | None
+    payload: dict | None
     payload_digest: str     # sha256 of serialized payload dict
     created_at_utc: str
     event_digest: str       # sha256 of entire event (all fields incl. event_id)
@@ -163,6 +164,7 @@ def create_event(
         intent_digest=intent_digest,
         verified_result_id=verified_result_id,
         decision_id=decision_id,
+        payload=payload,
         payload_digest=payload_digest,
         created_at_utc=created_at_utc,
         event_digest=event_digest_val,
@@ -175,6 +177,7 @@ def _event_to_dict(event: SupervisorEvent) -> dict:
         "created_at_utc": event.created_at_utc,
         "decision_id": event.decision_id,
         "event_digest": event.event_digest,
+        "payload": event.payload,
         "event_id": event.event_id,
         "event_type": event.event_type.value,
         "intent_digest": event.intent_digest,
@@ -220,7 +223,7 @@ def _no_dup_keys(pairs: list[tuple[str, object]]) -> dict:
 _EVENT_FIELDS = frozenset({
     "schema_version", "run_id", "sequence", "event_id", "previous_event_digest",
     "event_type", "state_revision", "task_id", "attempt_id", "intent_digest",
-    "verified_result_id", "decision_id", "payload_digest", "created_at_utc", "event_digest",
+    "verified_result_id", "decision_id", "payload", "payload_digest", "created_at_utc", "event_digest",
 })
 
 
@@ -353,6 +356,7 @@ def deserialize_event(raw: str | bytes) -> SupervisorEvent:
         intent_digest=intent_dg,
         verified_result_id=verified_result_id,
         decision_id=decision_id,
+        payload=payload.get("payload"),
         payload_digest=payload_dg,
         created_at_utc=created_at_utc,
         event_digest=stored_event_digest,

@@ -37,3 +37,11 @@ class StagingRollbackReceipt:
     success: bool
     timestamp: datetime
     error_message: Optional[str] = None
+
+@dataclass(frozen=True, slots=True)
+class ExactImageAttestation:
+    source_sha: str
+    registry_digest: str
+    config_digest: str
+    oci_revision: str
+    platform: str

@@ -26,7 +26,7 @@ class StagingDeployer:
                 error_message="STAGING_TARGET_ID must not equal PRODUCTION_TARGET_ID",
                 target_id=staging_target_id
             )
-        
+
         # Dirty worktree test
         git_cmd = ["git", "status", "--porcelain=v1"]
         try:
@@ -64,7 +64,7 @@ class StagingDeployer:
                 error_message=f"{self.compose_file} or docker-compose.yml not found in workspace",
                 target_id=staging_target_id
             )
-            
+
         try:
             with open(compose_path, 'r', encoding='utf-8') as f:
                 staging_compose = yaml.safe_load(f)
@@ -77,10 +77,10 @@ class StagingDeployer:
                 error_message=f"Failed to parse compose files: {e}",
                 target_id=staging_target_id
             )
-            
+
         prod_containers = {c.get("container_name") for c in prod_compose.get("services", {}).values() if c.get("container_name")}
         staging_containers = {c.get("container_name") for c in staging_compose.get("services", {}).values() if c.get("container_name")}
-        
+
         if prod_containers.intersection(staging_containers):
             return StagingPreflightReceipt(
                 success=False,
@@ -88,7 +88,7 @@ class StagingDeployer:
                 error_message="Shared container names found between staging and production",
                 target_id=staging_target_id
             )
-            
+
         prod_volumes = set()
         for svc in prod_compose.get("services", {}).values():
             for vol in svc.get("volumes", []):
@@ -96,7 +96,7 @@ class StagingDeployer:
                     prod_volumes.add(vol.split(":")[0])
             for env in svc.get("env_file", []):
                 prod_volumes.add(env)
-                
+
         staging_volumes = set()
         for svc in staging_compose.get("services", {}).values():
             for vol in svc.get("volumes", []):
@@ -104,7 +104,7 @@ class StagingDeployer:
                     staging_volumes.add(vol.split(":")[0])
             for env in svc.get("env_file", []):
                 staging_volumes.add(env)
-                
+
         if prod_volumes.intersection(staging_volumes):
             return StagingPreflightReceipt(
                 success=False,
@@ -119,7 +119,9 @@ class StagingDeployer:
             target_id=staging_target_id
         )
 
-    def deploy(self, expected_digest: str, expected_sha: str) -> StagingDeploymentReceipt:
+    def deploy(self, attestation: ExactImageAttestation) -> StagingDeploymentReceipt:
+        if not attestation.registry_digest.startswith("sha256:") or len(attestation.registry_digest) != 71:
+            return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="Malformed expected_digest")
         cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "up", "-d"]
         try:
             subprocess.run(
@@ -129,30 +131,41 @@ class StagingDeployer:
                 text=True,
                 check=True
             )
-            
+
             inspect_cmd = ["docker", "inspect", "hermes-bot-staging"]
             inspect_res = subprocess.run(inspect_cmd, capture_output=True, text=True, check=True)
             container_info = json.loads(inspect_res.stdout)[0]
-            
-            repo_digests = container_info.get("Image", "")
-            expected_image_hash = expected_digest.split("@")[-1] if "@" in expected_digest else expected_digest
-            
-            labels = container_info.get("Config", {}).get("Labels", {})
-            oci_revision = labels.get("org.opencontainers.image.revision")
+
+            running_config_image_id = container_info.get("Image", "")
             container_id = container_info.get("Id", "started")
-            
-            if not expected_digest.startswith("ghcr.io/life2boat/hermes@sha256:") or len(expected_digest) != 96:
-                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="Malformed expected_digest")
-            if not repo_digests or expected_image_hash != repo_digests:
-                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Image authority mismatch: expected {expected_digest}, got {repo_digests}")
-            if not oci_revision or expected_sha != oci_revision:
-                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Source authority mismatch: expected {expected_sha}, got {oci_revision}")
+
+            if not running_config_image_id:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message="Container has no Image ID")
+
+            image_inspect_cmd = ["docker", "image", "inspect", running_config_image_id]
+            image_inspect_res = subprocess.run(image_inspect_cmd, capture_output=True, text=True, check=True)
+            image_info = json.loads(image_inspect_res.stdout)[0]
+
+            docker_image_inspect_id = image_info.get("Id")
+            repo_digests = image_info.get("RepoDigests", [])
+            labels = image_info.get("Config", {}).get("Labels", {})
+            oci_revision = labels.get("org.opencontainers.image.revision")
+
+            if attestation.config_digest != running_config_image_id or running_config_image_id != docker_image_inspect_id:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Config Image ID mismatch: expected {attestation.config_digest}, got {running_config_image_id}")
+
+            expected_registry_reference = f"ghcr.io/life2boat/hermes@{attestation.registry_digest}"
+            if expected_registry_reference not in repo_digests:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"Registry Manifest Digest mismatch: expected {expected_registry_reference} in {repo_digests}")
+
+            if attestation.oci_revision != oci_revision:
+                return StagingDeploymentReceipt(success=False, timestamp=datetime.utcnow(), error_message=f"OCI revision mismatch: expected {attestation.oci_revision}, got {oci_revision}")
 
             return StagingDeploymentReceipt(
                 success=True,
                 timestamp=datetime.utcnow(),
                 container_id=container_id,
-                repo_digest=repo_digests,
+                repo_digest=repo_digests[0] if repo_digests else "",
                 oci_revision=oci_revision
             )
         except subprocess.CalledProcessError as e:
@@ -180,7 +193,7 @@ class StagingDeployer:
             )
             running_services = result.stdout.strip().split("\n")
             is_healthy = "hermes-bot-staging" in running_services and "qdrant-staging" in running_services
-            
+
             if is_healthy:
                 # Real health check via docker exec
                 check_cmd = ["docker", "exec", "hermes-bot-staging", "hermes", "status"]
@@ -191,8 +204,8 @@ class StagingDeployer:
                         success=False, timestamp=datetime.utcnow(), is_healthy=False,
                         error_message=f"hermes status failed: {e.stderr or e.stdout}"
                     )
-                
-                db_cmd = ["docker", "exec", "hermes-bot-staging", "python", "-c", 
+
+                db_cmd = ["docker", "exec", "hermes-bot-staging", "python", "-c",
                           "import sqlite3; db = sqlite3.connect('/opt/data/sessions.db'); assert db.execute('PRAGMA integrity_check;').fetchone()[0] == 'ok'"]
                 try:
                     subprocess.run(db_cmd, capture_output=True, text=True, check=True)
@@ -201,7 +214,7 @@ class StagingDeployer:
                         success=False, timestamp=datetime.utcnow(), is_healthy=False,
                         error_message=f"SQLite integrity check failed: {e.stderr or e.stdout}"
                     )
-            
+
             return StagingHealthReceipt(
                 success=is_healthy,
                 timestamp=datetime.utcnow(),
@@ -222,7 +235,7 @@ class StagingDeployer:
             cmd = ["docker", "exec", "hermes-bot-staging", "python", "/opt/hermes/scripts/synthetic_canary_adapter.py"]
             # Container-only execution: no local fallback allowed.
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                
+
             data = json.loads(result.stdout.strip())
             return StagingCanaryReceipt(
                 success=data.get("success", False),
@@ -255,7 +268,7 @@ class StagingDeployer:
                 text=True,
                 check=True
             )
-            
+
             # Rollback verification
             inspect_cmd = ["docker", "compose", "-p", self.project_name, "-f", self.compose_file, "ps", "--services"]
             res = subprocess.run(inspect_cmd, cwd=self.workspace_dir, capture_output=True, text=True, check=True)
@@ -265,7 +278,7 @@ class StagingDeployer:
                     timestamp=datetime.utcnow(),
                     error_message="Rollback verification failed: container still exists"
                 )
-                
+
             return StagingRollbackReceipt(
                 success=True,
                 timestamp=datetime.utcnow()

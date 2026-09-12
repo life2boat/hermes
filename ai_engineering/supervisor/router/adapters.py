@@ -14,12 +14,12 @@ class ComputerUseTransportUnavailableError(AgentTransportUnavailableError):
 
 class AgentTransport(Protocol):
     def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle: ...
-    def cancel(self, operation_id: str) -> None: ...
+    def cancel(self, operation_id: str) -> Any: ...
     def health(self) -> bool: ...
 
 class AgentAdapter(Protocol):
     def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle: ...
-    def cancel(self, operation_id: str) -> None: ...
+    def cancel(self, operation_id: str) -> Any: ...
     def health(self) -> bool: ...
 
 class BaseAgentAdapter:
@@ -56,9 +56,18 @@ class BaseAgentAdapter:
         }
         return self.transport.dispatch(request, timeout)
 
-    def cancel(self, operation_id: str) -> None:
+    def cancel(self, operation_id: str) -> bool:
         if self.transport:
-            self.transport.cancel(operation_id)
+            res = self.transport.cancel(operation_id)
+            if isinstance(res, bool):
+                return res
+            return True
+        return True
+
+    def is_running(self, operation_id: str) -> bool:
+        if self.transport and hasattr(self.transport, "is_running"):
+            return bool(self.transport.is_running(operation_id))
+        return False
 
     def health(self) -> bool:
         return self.transport is not None and self.transport.health()

@@ -2,27 +2,35 @@ from __future__ import annotations
 import os
 import json
 import uuid
-import datetime
+import hashlib
 import asyncio
-from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
-from ai_engineering.supervisor.worker_result import WorkerResultBundle
-from ai_engineering.supervisor.router.envelope import AgentEnvelope, MessageType, compute_payload_digest
-from ai_engineering.supervisor.router.registry import AgentRegistry
-from ai_engineering.supervisor.router.adapters import (
-    PolicyDeniedError,
-)
-from ai_engineering.contracts import EffectClass, StopBoundary
-from ai_engineering.control_plane.orchestrator import _STOP_BOUNDARY_RANK
-from ai_engineering.task_intent import TaskIntent, intent_digest
-from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict, compute_deterministic_digest
+import datetime
+from dataclasses import dataclass, replace
+from typing import Any, Mapping, Sequence, Iterable
+from pathlib import Path
 
-# ── Exceptions ─────────────────────────────────────────────────────────────
+from ai_engineering.contracts import EffectClass, StopBoundary, Status
+from ai_engineering.task_intent import TaskIntent, intent_digest
+from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
+from ai_engineering.supervisor.worker_result import WorkerResultBundle, deserialize_worker_result, canonical_serialize_worker_result
+from ai_engineering.supervisor.events import SupervisorEventType
+from ai_engineering.control_plane.orchestrator import _STOP_BOUNDARY_RANK
+from .envelope import AgentEnvelope, MessageType
+from .adapters import (
+    AgentAdapter,
+    AgentTransportUnavailableError,
+    PolicyDeniedError,
+    ComputerUseTransportUnavailableError,
+)
+from .registry import AgentRegistry
+
+# ── Router Exceptions ───────────────────────────────────────────────────────
 
 class RouterError(Exception):
     def __init__(self, code: str, message: str = "") -> None:
         self.code = code
-        super().__init__(message or code)
+        self.message = message or code
+        super().__init__(self.message)
 
 class AuthorityInvalidError(RouterError): pass
 class EffectClassEscalationError(RouterError): pass
@@ -35,10 +43,12 @@ class WorkerResultIdentityMismatchError(RouterError): pass
 class IllegalStateTransitionError(RouterError): pass
 class CapabilityNotAuthorizedError(RouterError): pass
 class SourceProvenanceUnresolvedError(RouterError): pass
+class SourceProvenanceMismatchError(RouterError): pass
+class TimeoutCancellationUnconfirmedError(RouterError): pass
 class ReplayMessageInvalidError(RouterError): pass
 class StaleOrForeignAttemptError(RouterError): pass
 
-NON_RETRYABLE_EXCEPTIONS = (
+NON_RETRYABLE_EXCEPTIONS = frozenset({
     AuthorityInvalidError,
     PolicyDeniedError,
     MessageTamperedError,
@@ -49,12 +59,14 @@ NON_RETRYABLE_EXCEPTIONS = (
     WorkerResultIdentityMismatchError,
     CapabilityNotAuthorizedError,
     SourceProvenanceUnresolvedError,
+    SourceProvenanceMismatchError,
+    TimeoutCancellationUnconfirmedError,
     ReplayMessageInvalidError,
     StaleOrForeignAttemptError,
     IllegalStateTransitionError,
-)
+})
 
-# ── Routing Receipt ────────────────────────────────────────────────────────
+# ── Routing Receipt ─────────────────────────────────────────────────────────
 
 @dataclass(frozen=True, slots=True)
 class RoutingReceipt:
@@ -76,10 +88,8 @@ class RoutingReceipt:
     created_at_utc: str
     schema_version: str = "hermes.agent-routing-receipt.v1"
 
-# ── Authority Resolver ──────────────────────────────────────────────────────
-
 def compute_policy_receipt_digest(receipt: PolicyReceipt) -> str:
-    data = {
+    canonical = {
         "schema_version": receipt.schema_version,
         "receipt_id": receipt.receipt_id,
         "request_id": receipt.request_id,
@@ -92,23 +102,32 @@ def compute_policy_receipt_digest(receipt: PolicyReceipt) -> str:
         "autonomy_state_digest": receipt.autonomy_state_digest,
         "budget_state_digest": receipt.budget_state_digest,
         "verdict": receipt.verdict.value if hasattr(receipt.verdict, "value") else str(receipt.verdict),
-        "reason_codes": list(receipt.reason_codes),
+        "reason_codes": sorted(list(receipt.reason_codes)),
         "created_at_utc": receipt.created_at_utc,
     }
-    return compute_deterministic_digest(data)
+    dumped = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(dumped).hexdigest()
+
+# ── Authority Resolver ──────────────────────────────────────────────────────
 
 class AuthorityResolver:
     def __init__(
         self,
-        intent_store: Mapping[tuple[str, str], TaskIntent] | None = None,
-        receipt_store: Mapping[tuple[str, str], PolicyReceipt] | None = None,
-        provenance_store: Mapping[str, Mapping[str, str]] | None = None,
-        permitted_capabilities_store: Mapping[tuple[str, str], Sequence[str]] | None = None,
+        supervisor_store: Any | None = None,
+        supervisor_loop: Any | None = None,
+        intent_store: dict[tuple[str, str], TaskIntent] | None = None,
+        receipt_store: dict[tuple[str, str], PolicyReceipt] | None = None,
+        provenance_store: dict[str, dict[str, str]] | None = None,
+        permitted_capabilities_store: dict[tuple[str, str], tuple[str, ...]] | None = None,
     ) -> None:
-        self.intent_store = dict(intent_store or {})
-        self.receipt_store = dict(receipt_store or {})
-        self.provenance_store = dict(provenance_store or {})
-        self.permitted_capabilities_store = dict(permitted_capabilities_store or {})
+        self.supervisor_store = supervisor_store
+        self.supervisor_loop = supervisor_loop
+        self.intent_store: dict[tuple[str, str], TaskIntent] = intent_store if intent_store is not None else {}
+        self.receipt_store: dict[tuple[str, str], PolicyReceipt] = receipt_store if receipt_store is not None else {}
+        self.provenance_store: dict[str, dict[str, str]] = provenance_store if provenance_store is not None else {}
+        self.permitted_capabilities_store: dict[tuple[str, str], tuple[str, ...]] = (
+            permitted_capabilities_store if permitted_capabilities_store is not None else {}
+        )
 
     def register_authority(
         self,
@@ -116,12 +135,12 @@ class AuthorityResolver:
         task_id: str,
         intent: TaskIntent,
         receipt: PolicyReceipt,
-        provenance: Mapping[str, str] | None = None,
+        provenance: dict[str, str] | None = None,
         permitted_capabilities: Sequence[str] | None = None,
     ) -> None:
         self.intent_store[(run_id, task_id)] = intent
         self.receipt_store[(run_id, task_id)] = receipt
-        if provenance:
+        if provenance is not None:
             self.provenance_store[run_id] = dict(provenance)
         else:
             self.provenance_store[run_id] = {
@@ -139,7 +158,20 @@ class AuthorityResolver:
         run_id: str,
         task_id: str,
     ) -> TaskIntent:
-        stored = self.intent_store.get((run_id, task_id))
+        stored = None
+        if self.supervisor_loop is not None and hasattr(self.supervisor_loop, "_intents"):
+            stored = self.supervisor_loop._intents.get(task_id) or self.supervisor_loop._intents.get(run_id)
+        if stored is None:
+            stored = self.intent_store.get((run_id, task_id))
+        if stored is None and self.supervisor_store is not None:
+            try:
+                state = self.supervisor_store.load_state(run_id)
+                if state and state.current_task_id == task_id:
+                    # Look up from intent_store with just task_id if present
+                    stored = self.intent_store.get(task_id)  # type: ignore
+            except Exception:
+                pass
+
         if stored is None:
             raise AuthorityInvalidError(f"AUTHORITY_INVALID: TaskIntent not found for run={run_id} task={task_id}")
         if stored.task_id != intent_id:
@@ -156,7 +188,44 @@ class AuthorityResolver:
         run_id: str,
         task_id: str,
     ) -> PolicyReceipt:
-        stored = self.receipt_store.get((run_id, task_id))
+        stored = None
+        if self.supervisor_store is not None:
+            try:
+                events = self.supervisor_store.load_events(run_id)
+                for e in reversed(events):
+                    if (
+                        e.event_type == SupervisorEventType.POLICY_EVALUATED
+                        or getattr(e.event_type, "value", str(e.event_type)) == "POLICY_EVALUATED"
+                    ):
+                        if e.payload.get("receipt_id") == receipt_id or (
+                            isinstance(e.payload.get("policy_receipt"), dict)
+                            and e.payload["policy_receipt"].get("receipt_id") == receipt_id
+                        ):
+                            pr_data = e.payload.get("policy_receipt", {})
+                            if pr_data:
+                                verdict_val = pr_data.get("verdict", "ALLOW")
+                                stored = PolicyReceipt(
+                                    schema_version=pr_data.get("schema_version", "hermes.supervisor-policy-receipt.v1"),
+                                    receipt_id=pr_data["receipt_id"],
+                                    request_id=pr_data.get("request_id", ""),
+                                    task_intent_digest=pr_data.get("task_intent_digest", ""),
+                                    decision_id=pr_data.get("decision_id", ""),
+                                    decision_receipt_id=pr_data.get("decision_receipt_id", ""),
+                                    effective_policy_id=pr_data.get("effective_policy_id", ""),
+                                    work_profile_id=pr_data.get("work_profile_id", ""),
+                                    work_profile_digest=pr_data.get("work_profile_digest", ""),
+                                    autonomy_state_digest=pr_data.get("autonomy_state_digest", ""),
+                                    budget_state_digest=pr_data.get("budget_state_digest", ""),
+                                    verdict=PolicyVerdict(verdict_val) if hasattr(PolicyVerdict, verdict_val) else PolicyVerdict[verdict_val],
+                                    reason_codes=tuple(pr_data.get("reason_codes", ())),
+                                    created_at_utc=pr_data.get("created_at_utc", ""),
+                                )
+                                break
+            except Exception:
+                pass
+
+        if stored is None:
+            stored = self.receipt_store.get((run_id, task_id))
         if stored is None:
             raise AuthorityInvalidError(f"AUTHORITY_INVALID: PolicyReceipt not found for run={run_id} task={task_id}")
         if stored.receipt_id != receipt_id:
@@ -169,6 +238,18 @@ class AuthorityResolver:
         return stored
 
     def get_provenance(self, run_id: str, task_id: str) -> dict[str, str]:
+        if self.supervisor_store is not None:
+            try:
+                state = self.supervisor_store.load_state(run_id)
+                if state and state.repository and state.current_base_sha:
+                    return {
+                        "repository": state.repository,
+                        "canonical_remote": state.canonical_remote or "github",
+                        "base_sha": state.current_base_sha,
+                    }
+            except Exception:
+                pass
+
         prov = self.provenance_store.get(run_id)
         if not prov:
             stored = self.intent_store.get((run_id, task_id))
@@ -189,8 +270,8 @@ class AuthorityResolver:
 
 class PersistentStore:
     def __init__(self, root_dir: str) -> None:
-        self.root_dir = root_dir
-        os.makedirs(root_dir, exist_ok=True)
+        self.root_dir = os.path.abspath(root_dir)
+        os.makedirs(self.root_dir, exist_ok=True)
 
     def _safe_path(self, message_id: str) -> str:
         if any(c in message_id for c in ("..", "/", chr(92))):
@@ -206,20 +287,24 @@ class PersistentStore:
         operation_id: str | None = None,
         failure_class: str | None = None,
     ) -> None:
-        path = self._safe_path(envelope.message_id)
-        tmp_path = path + ".tmp"
-
-        existing_data = {}
-        if os.path.exists(path):
+        file_path = self._safe_path(envelope.message_id)
+        history = []
+        if os.path.exists(file_path):
             try:
-                with open(path, "r", encoding="utf-8") as rf:
-                    existing_data = json.load(rf)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+                    history = existing.get("history", [])
             except Exception:
                 pass
 
-        now_utc = str(datetime.datetime.now(datetime.UTC))
+        history.append({
+            "state": state,
+            "timestamp_utc": str(datetime.datetime.now(datetime.UTC)),
+            "operation_id": operation_id,
+            "failure_class": failure_class,
+        })
+
         data = {
-            "schema_version": "hermes.agent-persistent-record.v1",
             "message_id": envelope.message_id,
             "correlation_id": envelope.correlation_id,
             "causation_id": envelope.causation_id,
@@ -236,85 +321,136 @@ class PersistentStore:
             "task_intent_digest": envelope.task_intent_digest,
             "policy_receipt_id": envelope.policy_receipt_id,
             "policy_receipt_digest": envelope.policy_receipt_digest,
-            "effect_class": envelope.effect_class.value if hasattr(envelope.effect_class, "value") else str(envelope.effect_class),
-            "stop_boundary": envelope.stop_boundary.value if hasattr(envelope.stop_boundary, "value") else str(envelope.stop_boundary),
-            "state": state,
-            "created_at": existing_data.get("created_at", envelope.created_at_utc),
+            "effect_class": envelope.effect_class.name,
+            "stop_boundary": envelope.stop_boundary.name,
             "created_at_utc": envelope.created_at_utc,
             "expires_at_utc": envelope.expires_at_utc,
-            "updated_at": now_utc,
-            "operation_id": operation_id or existing_data.get("operation_id"),
-            "attempt_number": envelope.retry_count,
-            "retry_budget": max(0, envelope.max_retries - envelope.retry_count),
-            "failure_class": failure_class or existing_data.get("failure_class"),
-            "result": result if result is not None else existing_data.get("result"),
-            "routing_receipt": routing_receipt.routing_receipt_id if routing_receipt else existing_data.get("routing_receipt"),
-            "stale_evidence": existing_data.get("stale_evidence", []),
+            "retry_count": envelope.retry_count,
+            "max_retries": envelope.max_retries,
+            "state": state,
+            "result": result,
+            "operation_id": operation_id,
+            "failure_class": failure_class,
+            "routing_receipt": __import__("dataclasses").asdict(routing_receipt) if routing_receipt else None,
+            "history": history,
         }
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data, indent=2))
-        os.replace(tmp_path, path)
+        tmp_file = f"{file_path}.tmp.{uuid.uuid4().hex}"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        os.replace(tmp_file, file_path)
 
     def load_envelope(self, message_id: str) -> AgentEnvelope:
-        path = self._safe_path(message_id)
-        if not os.path.exists(path):
+        file_path = self._safe_path(message_id)
+        if not os.path.exists(file_path):
             raise FileNotFoundError(f"Message {message_id} not found")
-        with open(path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        payload = data["payload"]
-        if compute_payload_digest(payload) != data["payload_digest"]:
-            raise ReplayMessageInvalidError(f"REPLAY_MESSAGE_INVALID: payload tampered for {message_id}")
-
-        return AgentEnvelope.from_dict(data)
+        env = AgentEnvelope(
+            schema_version="hermes.agent-envelope.v1",
+            message_id=data["message_id"],
+            correlation_id=data["correlation_id"],
+            causation_id=data.get("causation_id"),
+            run_id=data["run_id"],
+            task_id=data["task_id"],
+            attempt_id=data["attempt_id"],
+            sender_agent=data["sender_agent"],
+            recipient_agent=data["recipient_agent"],
+            recipient_capability=data["recipient_capability"],
+            message_type=MessageType(data["message_type"]),
+            payload=data["payload"],
+            payload_digest=data["payload_digest"],
+            task_intent_id=data["task_intent_id"],
+            task_intent_digest=data["task_intent_digest"],
+            policy_receipt_id=data["policy_receipt_id"],
+            policy_receipt_digest=data["policy_receipt_digest"],
+            effect_class=EffectClass[data["effect_class"]],
+            stop_boundary=StopBoundary[data["stop_boundary"]],
+            created_at_utc=data["created_at_utc"],
+            expires_at_utc=data.get("expires_at_utc"),
+            retry_count=data.get("retry_count", 0),
+            max_retries=data.get("max_retries", 2),
+        )
+        if not env.verify_integrity():
+            raise ReplayMessageInvalidError("REPLAY_MESSAGE_INVALID: persisted payload corrupted or tampered")
+        return env
 
     def load_state(self, message_id: str) -> str:
-        path = self._safe_path(message_id)
-        if not os.path.exists(path):
-            return "QUEUED"
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("state", "QUEUED")
+        file_path = self._safe_path(message_id)
+        if not os.path.exists(file_path):
+            return "UNKNOWN"
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("state", "UNKNOWN")
 
     def load_messages(self) -> list[dict[str, Any]]:
-        msgs = []
-        for f in os.listdir(self.root_dir):
-            if f.endswith(".json") and not f.endswith(".tmp"):
-                file_path = os.path.join(self.root_dir, f)
-                with open(file_path, "r", encoding="utf-8") as fd:
-                    data = json.load(fd)
-                    payload = data.get("payload", {})
-                    if compute_payload_digest(payload) != data.get("payload_digest"):
-                        raise ReplayMessageInvalidError(f"REPLAY_MESSAGE_INVALID: tampered file {f}")
-                    msgs.append(data)
-        return msgs
+        messages = []
+        for fname in sorted(os.listdir(self.root_dir)):
+            if fname.endswith(".json") and not fname.startswith("stale_") and not fname.startswith("effect_"):
+                p = os.path.join(self.root_dir, fname)
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "payload" in data and "payload_digest" in data:
+                    self.load_envelope(data["message_id"])
+                messages.append(data)
+        return messages
 
     def load_result(self, message_id: str) -> dict[str, Any] | None:
-        path = self._safe_path(message_id)
-        if not os.path.exists(path):
+        file_path = self._safe_path(message_id)
+        if not os.path.exists(file_path):
             return None
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("result")
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("result")
 
     def record_stale_evidence(self, envelope: AgentEnvelope, stale_bundle: WorkerResultBundle) -> None:
-        path = self._safe_path(envelope.message_id)
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            stale_list = data.get("stale_evidence", [])
-            stale_list.append({
-                "result_id": stale_bundle.result_id,
-                "attempt_id": stale_bundle.attempt_id,
-                "recorded_at_utc": str(datetime.datetime.now(datetime.UTC)),
-            })
-            data["stale_evidence"] = stale_list
-            tmp_path = path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2))
-            os.replace(tmp_path, path)
+        p = os.path.join(self.root_dir, f"stale_{envelope.message_id}_{uuid.uuid4().hex[:6]}.json")
+        data = {
+            "message_id": envelope.message_id,
+            "correlation_id": envelope.correlation_id,
+            "task_id": envelope.task_id,
+            "attempt_id": envelope.attempt_id,
+            "recorded_at_utc": str(datetime.datetime.now(datetime.UTC)),
+            "bundle": json.loads(canonical_serialize_worker_result(stale_bundle)),
+        }
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
 
-FilePersistentStore = PersistentStore
+    def _effect_receipt_path(self, operation_id: str) -> str:
+        safe_id = "".join(c for c in operation_id if c.isalnum() or c in "._-")
+        return os.path.join(self.root_dir, f"effect_{safe_id}.json")
 
-# ── Ranks ──────────────────────────────────────────────────────────────────
+    def save_effect_receipt(self, operation_id: str, data: dict[str, Any]) -> None:
+        p = self._effect_receipt_path(operation_id)
+        tmp = f"{p}.tmp.{uuid.uuid4().hex}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, sort_keys=True, indent=2)
+        os.replace(tmp, p)
+
+    def load_effect_receipt(self, operation_id: str) -> dict[str, Any] | None:
+        p = self._effect_receipt_path(operation_id)
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None
+
+    def find_effect_receipt(self, correlation_id: str, attempt_id: str) -> dict[str, Any] | None:
+        for fname in os.listdir(self.root_dir):
+            if fname.startswith("effect_") and fname.endswith(".json"):
+                p = os.path.join(self.root_dir, fname)
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if data.get("correlation_id") == correlation_id and data.get("attempt_id") == attempt_id:
+                            return data
+                except Exception:
+                    pass
+        return None
+
+class FilePersistentStore(PersistentStore):
+    pass
+
+# ── Ranks and Evaluation Helpers ────────────────────────────────────────────
 
 def _effect_rank(e: EffectClass) -> int:
     ranks = {
@@ -332,11 +468,22 @@ def _effect_rank(e: EffectClass) -> int:
 def _stop_rank(s: StopBoundary) -> int:
     return _STOP_BOUNDARY_RANK.get(s, 99)
 
+def _is_effect_allowed(effect: EffectClass, allowed: Any, forbidden: Any) -> bool:
+    for f in (forbidden or ()):
+        if (isinstance(f, EffectClass) and f == effect) or str(f) in (effect.name, effect.value):
+            return False
+    if effect == EffectClass.READ_ONLY:
+        return True
+    for a in (allowed or ()):
+        if (isinstance(a, EffectClass) and a == effect) or str(a) in (effect.name, effect.value):
+            return True
+    return False
+
 _VALID_TRANSITIONS: dict[str, set[str]] = {
     "QUEUED": {"ROUTED", "BLOCKED"},
     "ROUTED": {"DISPATCHED", "BLOCKED", "CANCEL_REQUESTED", "CANCELLED", "DEFER"},
-    "DISPATCHED": {"RUNNING", "FAILED", "TIMED_OUT", "CANCEL_REQUESTED", "CANCELLED"},
-    "RUNNING": {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCEL_REQUESTED"},
+    "DISPATCHED": {"RUNNING", "FAILED", "TIMED_OUT", "CANCEL_REQUESTED", "CANCELLED", "BLOCKED"},
+    "RUNNING": {"SUCCEEDED", "FAILED", "TIMED_OUT", "CANCEL_REQUESTED", "BLOCKED"},
     "CANCEL_REQUESTED": {"CANCELLED", "FAILED"},
     "SUCCEEDED": set(),
     "FAILED": set(),
@@ -383,7 +530,11 @@ class CrossAgentRouter:
             failure_class=failure_class,
         )
 
-    def route(self, envelope: AgentEnvelope) -> RoutingReceipt:
+    def route(
+        self,
+        envelope: AgentEnvelope,
+        caller_provenance: dict[str, str] | None = None,
+    ) -> RoutingReceipt:
         if any(c in envelope.message_id for c in ("..", "/", chr(92))):
             raise ValueError("Path traversal detected")
 
@@ -401,7 +552,7 @@ class CrossAgentRouter:
             self._transition(envelope, "BLOCKED")
             raise PolicyDeniedError("POLICY_DENIED: missing policy receipt id")
 
-        # Resolve trusted authority from stores (fails closed on mismatch or forged references)
+        # Resolve trusted authority from stores
         intent = self.authority_resolver.resolve_task_intent(
             envelope.task_intent_id, envelope.task_intent_digest, envelope.run_id, envelope.task_id
         )
@@ -409,12 +560,49 @@ class CrossAgentRouter:
             envelope.policy_receipt_id, envelope.policy_receipt_digest, envelope.run_id, envelope.task_id
         )
 
-        # Check effect class escalation
-        if _effect_rank(envelope.effect_class) > _stop_rank(intent.stop_boundary):
+        # Validate source provenance binding (trusted vs caller)
+        try:
+            trusted_prov = self.authority_resolver.get_provenance(envelope.run_id, envelope.task_id)
+        except SourceProvenanceUnresolvedError:
+            self._transition(envelope, "BLOCKED")
+            return RoutingReceipt(
+                routing_receipt_id=str(uuid.uuid4()),
+                message_id=envelope.message_id,
+                correlation_id=envelope.correlation_id,
+                run_id=envelope.run_id,
+                task_id=envelope.task_id,
+                attempt_id=envelope.attempt_id,
+                requested_capability=envelope.recipient_capability,
+                selected_agent=envelope.recipient_agent,
+                task_intent_id=envelope.task_intent_id,
+                policy_receipt_id=envelope.policy_receipt_id,
+                effective_effect_class=envelope.effect_class.name,
+                effective_stop_boundary=envelope.stop_boundary.name,
+                decision="BLOCK",
+                reason="SOURCE_PROVENANCE_UNRESOLVED",
+                attempt_number=envelope.retry_count,
+                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+            )
+        if caller_provenance is not None:
+            for k in ("repository", "canonical_remote", "base_sha"):
+                if k in caller_provenance and caller_provenance[k] != trusted_prov.get(k):
+                    self._transition(envelope, "BLOCKED")
+                    raise SourceProvenanceMismatchError(
+                        f"SOURCE_PROVENANCE_MISMATCH: caller {k}={caller_provenance[k]} != trusted {trusted_prov.get(k)}"
+                    )
+        if isinstance(envelope.payload, dict) and "repository" in envelope.payload:
+            if envelope.payload["repository"] != trusted_prov["repository"]:
+                self._transition(envelope, "BLOCKED")
+                raise SourceProvenanceMismatchError(
+                    f"SOURCE_PROVENANCE_MISMATCH: payload repository {envelope.payload['repository']} != trusted {trusted_prov['repository']}"
+                )
+
+        # 1. Independent EffectClass verification (must be allowed and not forbidden)
+        if not _is_effect_allowed(envelope.effect_class, intent.allowed_mutations, intent.forbidden_mutations):
             self._transition(envelope, "BLOCKED")
             raise EffectClassEscalationError("EFFECT_CLASS_ESCALATION")
 
-        # Check stop boundary escalation
+        # 2. Independent StopBoundary verification
         if _stop_rank(envelope.stop_boundary) > _stop_rank(intent.stop_boundary):
             self._transition(envelope, "BLOCKED")
             raise StopBoundaryEscalationError("STOP_BOUNDARY_ESCALATION")
@@ -443,102 +631,9 @@ class CrossAgentRouter:
                 created_at_utc=str(datetime.datetime.now(datetime.UTC)),
             )
 
-        # Real capability-policy intersection:
-        # requested ∩ agent.capabilities ∩ TaskIntent.allowed_mutations ∩ PolicyReceipt permitted capabilities
-        if envelope.recipient_capability not in definition.capabilities:
-            self._transition(envelope, "BLOCKED")
-            return RoutingReceipt(
-                routing_receipt_id=str(uuid.uuid4()),
-                message_id=envelope.message_id,
-                correlation_id=envelope.correlation_id,
-                run_id=envelope.run_id,
-                task_id=envelope.task_id,
-                attempt_id=envelope.attempt_id,
-                requested_capability=envelope.recipient_capability,
-                selected_agent=envelope.recipient_agent,
-                task_intent_id=envelope.task_intent_id,
-                policy_receipt_id=envelope.policy_receipt_id,
-                effective_effect_class=envelope.effect_class.name,
-                effective_stop_boundary=envelope.stop_boundary.name,
-                decision="BLOCK",
-                reason="CAPABILITY_NOT_AUTHORIZED: not in agent capabilities",
-                attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
-            )
-
-        # Check intent capabilities
-        if hasattr(intent, "allowed_mutations") and intent.allowed_mutations:
-            if envelope.recipient_capability not in intent.allowed_mutations:
-                self._transition(envelope, "BLOCKED")
-                return RoutingReceipt(
-                    routing_receipt_id=str(uuid.uuid4()),
-                    message_id=envelope.message_id,
-                    correlation_id=envelope.correlation_id,
-                    run_id=envelope.run_id,
-                    task_id=envelope.task_id,
-                    attempt_id=envelope.attempt_id,
-                    requested_capability=envelope.recipient_capability,
-                    selected_agent=envelope.recipient_agent,
-                    task_intent_id=envelope.task_intent_id,
-                    policy_receipt_id=envelope.policy_receipt_id,
-                    effective_effect_class=envelope.effect_class.name,
-                    effective_stop_boundary=envelope.stop_boundary.name,
-                    decision="BLOCK",
-                    reason="CAPABILITY_NOT_AUTHORIZED: denied by TaskIntent",
-                    attempt_number=envelope.retry_count,
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
-                )
-
-        # Check policy receipt permitted capabilities
-        permitted_caps = self.authority_resolver.get_permitted_capabilities(envelope.run_id, envelope.task_id)
-        if permitted_caps is not None and envelope.recipient_capability not in permitted_caps:
-            self._transition(envelope, "BLOCKED")
-            return RoutingReceipt(
-                routing_receipt_id=str(uuid.uuid4()),
-                message_id=envelope.message_id,
-                correlation_id=envelope.correlation_id,
-                run_id=envelope.run_id,
-                task_id=envelope.task_id,
-                attempt_id=envelope.attempt_id,
-                requested_capability=envelope.recipient_capability,
-                selected_agent=envelope.recipient_agent,
-                task_intent_id=envelope.task_intent_id,
-                policy_receipt_id=envelope.policy_receipt_id,
-                effective_effect_class=envelope.effect_class.name,
-                effective_stop_boundary=envelope.stop_boundary.name,
-                decision="BLOCK",
-                reason="CAPABILITY_NOT_AUTHORIZED: denied by PolicyReceipt",
-                attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
-            )
-
-        # Check dynamic source provenance
-        try:
-            self.authority_resolver.get_provenance(envelope.run_id, envelope.task_id)
-        except SourceProvenanceUnresolvedError:
-            self._transition(envelope, "BLOCKED")
-            return RoutingReceipt(
-                routing_receipt_id=str(uuid.uuid4()),
-                message_id=envelope.message_id,
-                correlation_id=envelope.correlation_id,
-                run_id=envelope.run_id,
-                task_id=envelope.task_id,
-                attempt_id=envelope.attempt_id,
-                requested_capability=envelope.recipient_capability,
-                selected_agent=envelope.recipient_agent,
-                task_intent_id=envelope.task_intent_id,
-                policy_receipt_id=envelope.policy_receipt_id,
-                effective_effect_class=envelope.effect_class.name,
-                effective_stop_boundary=envelope.stop_boundary.name,
-                decision="BLOCK",
-                reason="SOURCE_PROVENANCE_UNRESOLVED",
-                attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
-            )
-
-        # Health check
         if not adapter.health():
-            return RoutingReceipt(
+            self._transition(envelope, "ROUTED")
+            receipt_defer = RoutingReceipt(
                 routing_receipt_id=str(uuid.uuid4()),
                 message_id=envelope.message_id,
                 correlation_id=envelope.correlation_id,
@@ -555,6 +650,80 @@ class CrossAgentRouter:
                 reason="WORKER_UNAVAILABLE",
                 attempt_number=envelope.retry_count,
                 created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+            )
+            self._transition(envelope, "DEFER", routing_receipt=receipt_defer)
+            return receipt_defer
+
+        # Check permitted capabilities if configured in authority
+        permitted_caps = self.authority_resolver.get_permitted_capabilities(envelope.run_id, envelope.task_id)
+        if permitted_caps is not None:
+            if envelope.recipient_capability not in permitted_caps:
+                self._transition(envelope, "BLOCKED")
+                return RoutingReceipt(
+                    routing_receipt_id=str(uuid.uuid4()),
+                    message_id=envelope.message_id,
+                    correlation_id=envelope.correlation_id,
+                    run_id=envelope.run_id,
+                    task_id=envelope.task_id,
+                    attempt_id=envelope.attempt_id,
+                    requested_capability=envelope.recipient_capability,
+                    selected_agent=envelope.recipient_agent,
+                    task_intent_id=envelope.task_intent_id,
+                    policy_receipt_id=envelope.policy_receipt_id,
+                    effective_effect_class=envelope.effect_class.name,
+                    effective_stop_boundary=envelope.stop_boundary.name,
+                    decision="BLOCK",
+                    reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} denied by PolicyReceipt",
+                    attempt_number=envelope.retry_count,
+                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                )
+
+        if envelope.recipient_capability not in definition.capabilities:
+            self._transition(envelope, "BLOCKED")
+            return RoutingReceipt(
+                routing_receipt_id=str(uuid.uuid4()),
+                message_id=envelope.message_id,
+                correlation_id=envelope.correlation_id,
+                run_id=envelope.run_id,
+                task_id=envelope.task_id,
+                attempt_id=envelope.attempt_id,
+                requested_capability=envelope.recipient_capability,
+                selected_agent=envelope.recipient_agent,
+                task_intent_id=envelope.task_intent_id,
+                policy_receipt_id=envelope.policy_receipt_id,
+                effective_effect_class=envelope.effect_class.name,
+                effective_stop_boundary=envelope.stop_boundary.name,
+                decision="BLOCK",
+                reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} not in agent capabilities",
+                attempt_number=envelope.retry_count,
+                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+            )
+
+        if envelope.recipient_capability not in intent.allowed_mutations:
+            self._transition(envelope, "BLOCKED")
+            return RoutingReceipt(
+                routing_receipt_id=str(uuid.uuid4()),
+                message_id=envelope.message_id,
+                correlation_id=envelope.correlation_id,
+                run_id=envelope.run_id,
+                task_id=envelope.task_id,
+                attempt_id=envelope.attempt_id,
+                requested_capability=envelope.recipient_capability,
+                selected_agent=envelope.recipient_agent,
+                task_intent_id=envelope.task_intent_id,
+                policy_receipt_id=envelope.policy_receipt_id,
+                effective_effect_class=envelope.effect_class.name,
+                effective_stop_boundary=envelope.stop_boundary.name,
+                decision="BLOCK",
+                reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} denied by TaskIntent",
+                attempt_number=envelope.retry_count,
+                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+            )
+
+        if envelope.message_type not in definition.supported_message_types:
+            self._transition(envelope, "BLOCKED")
+            raise UnsupportedMessageTypeError(
+                f"AGENT_MESSAGE_TYPE_UNSUPPORTED: {envelope.message_type} not supported by {envelope.recipient_agent}"
             )
 
         receipt = RoutingReceipt(
@@ -582,52 +751,65 @@ class CrossAgentRouter:
         self,
         envelope: AgentEnvelope,
         fallback_candidate: str | None = None,
+        caller_provenance: dict[str, str] | None = None,
     ) -> WorkerResultBundle:
-        # Idempotency check: if already SUCCEEDED, return cached result
+        # Idempotency check 1: if already SUCCEEDED, return cached result
         if self.store.load_state(envelope.message_id) == "SUCCEEDED":
             cached_res = self.store.load_result(envelope.message_id)
             if cached_res:
-                from ai_engineering.supervisor.worker_result import deserialize_worker_result
                 return deserialize_worker_result(json.dumps(cached_res))
 
-        receipt = self.route(envelope)
+        # Idempotency check 2: crash-safe replay reconciliation
+        # If worker effect succeeded and receipt exists, recover without re-executing effect!
+        existing_effect = self.store.find_effect_receipt(envelope.correlation_id, envelope.attempt_id)
+        if existing_effect and existing_effect.get("status") == "COMMITTED" and "result" in existing_effect:
+            res_bundle = deserialize_worker_result(json.dumps(existing_effect["result"]))
+            self._transition(
+                envelope,
+                "SUCCEEDED",
+                result=existing_effect["result"],
+                operation_id=existing_effect.get("operation_id"),
+            )
+            return res_bundle
 
-        # Handle fallback if worker is unavailable
+        receipt = self.route(envelope, caller_provenance=caller_provenance)
+
+        # Handle fallback if primary is unavailable (DEFER)
         if receipt.decision == "DEFER" and fallback_candidate:
             cand_def = self.registry.get_definition(fallback_candidate)
             cand_adapter = self.registry.get_adapter(fallback_candidate)
             if cand_def and cand_adapter and cand_adapter.health():
+                # Fresh authority check before fallback dispatch
+                self.authority_resolver.resolve_task_intent(
+                    envelope.task_intent_id, envelope.task_intent_digest, envelope.run_id, envelope.task_id
+                )
+                self.authority_resolver.resolve_policy_receipt(
+                    envelope.policy_receipt_id, envelope.policy_receipt_digest, envelope.run_id, envelope.task_id
+                )
+                if envelope.recipient_capability not in cand_def.capabilities:
+                    raise CapabilityNotAuthorizedError(
+                        f"CAPABILITY_NOT_AUTHORIZED: {envelope.recipient_capability} not in {cand_def.capabilities}"
+                    )
                 new_attempt_id = f"att-fallback-{uuid.uuid4().hex[:6]}"
-                fallback_env = AgentEnvelope(
-                    schema_version=envelope.schema_version,
+                fallback_env = replace(
+                    envelope,
                     message_id=str(uuid.uuid4()),
                     correlation_id=envelope.correlation_id,
                     causation_id=envelope.message_id,
-                    run_id=envelope.run_id,
-                    task_id=envelope.task_id,
                     attempt_id=new_attempt_id,
-                    sender_agent=envelope.sender_agent,
                     recipient_agent=fallback_candidate,
-                    recipient_capability=envelope.recipient_capability,
-                    message_type=envelope.message_type,
-                    payload=envelope.payload,
-                    payload_digest=envelope.payload_digest,
-                    task_intent_id=envelope.task_intent_id,
-                    task_intent_digest=envelope.task_intent_digest,
-                    policy_receipt_id=envelope.policy_receipt_id,
-                    policy_receipt_digest=envelope.policy_receipt_digest,
-                    effect_class=envelope.effect_class,
-                    stop_boundary=envelope.stop_boundary,
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
-                    expires_at_utc=envelope.expires_at_utc,
                     retry_count=envelope.retry_count + 1,
-                    max_retries=envelope.max_retries,
+                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
                 )
-                return await self.dispatch(fallback_env)
+                from .envelope import compute_payload_digest
+                fallback_env = replace(fallback_env, payload_digest=compute_payload_digest(fallback_env.payload))
+                return await self.dispatch(fallback_env, caller_provenance=caller_provenance)
 
         if receipt.decision != "ROUTE":
             if receipt.reason.startswith("CAPABILITY_NOT_AUTHORIZED"):
                 raise CapabilityNotAuthorizedError(receipt.reason)
+            if receipt.reason.startswith("SOURCE_PROVENANCE_UNRESOLVED"):
+                raise SourceProvenanceUnresolvedError(receipt.reason)
             raise RouterError(receipt.reason)
 
         adapter = self.registry.get_adapter(envelope.recipient_agent)
@@ -644,20 +826,70 @@ class CrossAgentRouter:
                 timeout=float(definition.timeout_seconds),
             )
         except asyncio.TimeoutError:
+            cancel_confirmed = adapter.cancel(operation_id)
+            is_running = getattr(adapter, "is_running", lambda op: False)(operation_id)
+            if cancel_confirmed is False or is_running:
+                self._transition(
+                    envelope,
+                    "BLOCKED",
+                    operation_id=operation_id,
+                    failure_class="TIMEOUT_CANCELLATION_UNCONFIRMED",
+                )
+                raise TimeoutCancellationUnconfirmedError("TIMEOUT_CANCELLATION_UNCONFIRMED")
+
             self._transition(envelope, "TIMED_OUT", operation_id=operation_id, failure_class="TIMEOUT")
-            adapter.cancel(operation_id)
             raise asyncio.TimeoutError("WORK_TIMEOUT")
         except Exception as exc:
+            if type(exc) in NON_RETRYABLE_EXCEPTIONS:
+                self._transition(envelope, "FAILED", operation_id=operation_id, failure_class=type(exc).__name__)
+                raise
+
+            # Retry classification and budget check
+            if envelope.retry_count < envelope.max_retries:
+                # Fresh authority recheck before retry
+                self.authority_resolver.resolve_task_intent(
+                    envelope.task_intent_id, envelope.task_intent_digest, envelope.run_id, envelope.task_id
+                )
+                self.authority_resolver.resolve_policy_receipt(
+                    envelope.policy_receipt_id, envelope.policy_receipt_digest, envelope.run_id, envelope.task_id
+                )
+                new_attempt_id = f"{envelope.attempt_id}-retry-{envelope.retry_count + 1}"
+                retry_env = replace(
+                    envelope,
+                    message_id=str(uuid.uuid4()),
+                    causation_id=envelope.message_id,
+                    attempt_id=new_attempt_id,
+                    retry_count=envelope.retry_count + 1,
+                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                )
+                from .envelope import compute_payload_digest
+                retry_env = replace(retry_env, payload_digest=compute_payload_digest(retry_env.payload))
+                return await self.dispatch(
+                    retry_env,
+                    fallback_candidate=fallback_candidate,
+                    caller_provenance=caller_provenance,
+                )
+
             self._transition(envelope, "FAILED", operation_id=operation_id, failure_class=type(exc).__name__)
             raise
 
-        # Check if attempt timed out or was terminated while dispatching (stale result)
+        # Stale attempt check
         current_state = self.store.load_state(envelope.message_id)
-        if current_state in ("TIMED_OUT", "CANCELLED", "FAILED"):
+        if current_state in ("TIMED_OUT", "CANCELLED", "FAILED", "BLOCKED"):
             self.store.record_stale_evidence(envelope, res)
             raise StaleResultError(f"STALE_RESULT: attempt was terminated with state {current_state}")
 
-        # Strict result identity validation (Section 13)
+        # Save effect receipt immediately after worker returns to guarantee crash safety
+        effect_data = {
+            "operation_id": operation_id,
+            "correlation_id": envelope.correlation_id,
+            "attempt_id": envelope.attempt_id,
+            "status": "COMMITTED",
+            "result": json.loads(canonical_serialize_worker_result(res)),
+        }
+        self.store.save_effect_receipt(operation_id, effect_data)
+
+        # Strict result identity validation
         if res.task_id != envelope.task_id:
             self._transition(envelope, "FAILED", operation_id=operation_id, failure_class="WORKER_RESULT_IDENTITY_MISMATCH")
             raise WorkerResultIdentityMismatchError(f"WORKER_RESULT_IDENTITY_MISMATCH: task_id {res.task_id} != {envelope.task_id}")
@@ -677,7 +909,6 @@ class CrossAgentRouter:
             self._transition(envelope, "FAILED", operation_id=operation_id, failure_class="WORKER_RESULT_IDENTITY_MISMATCH")
             raise WorkerResultIdentityMismatchError(f"WORKER_RESULT_IDENTITY_MISMATCH: base_sha {res.base_sha} != {provenance['base_sha']}")
 
-        from ai_engineering.supervisor.worker_result import canonical_serialize_worker_result
         res_dict = json.loads(canonical_serialize_worker_result(res))
         self._transition(envelope, "SUCCEEDED", result=res_dict, operation_id=operation_id)
         return res

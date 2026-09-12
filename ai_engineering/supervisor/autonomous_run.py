@@ -80,6 +80,59 @@ class AstraProposalProvider:
     async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
         raise NotImplementedError
 
+class ScriptedAstraProposalProvider(AstraProposalProvider):
+    """Scripted Astra proposal provider yielding IMPLEMENT then STOP_SUCCESS upon VerifiedResult PASS."""
+
+    def __init__(
+        self,
+        target_worker: str = "codex",
+        target_capability: str = "code",
+        expected_effect_class: str = "REPOSITORY_WRITE",
+        expected_stop_boundary: str = "LOCAL_DIFF",
+    ) -> None:
+        self.target_worker = target_worker
+        self.target_capability = target_capability
+        self.expected_effect_class = expected_effect_class
+        self.expected_stop_boundary = expected_stop_boundary
+        self.step = 0
+
+    async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
+        if state.latest_verified_result_id:
+            return AstraNextActionProposal(
+                schema_version="hermes.astra-next-action.v1",
+                proposal_id=f"prop-stop-{run_id}",
+                run_id=run_id,
+                task_id=state.current_task_id,
+                action_type=NextActionType.STOP_SUCCESS,
+                objective="VerifiedResult PASS evidenced, terminating run successfully.",
+                recommended_capability="none",
+                recommended_worker="none",
+                expected_effect_class="READ_ONLY",
+                expected_stop_boundary="READ_ONLY",
+                allowed_scope=(),
+                required_validators=(),
+                success_criteria="",
+                reasoning_summary="Autonomous task implementation evidenced PASS",
+            )
+
+        self.step += 1
+        return AstraNextActionProposal(
+            schema_version="hermes.astra-next-action.v1",
+            proposal_id=f"prop-impl-{self.step}",
+            run_id=run_id,
+            task_id=state.current_task_id,
+            action_type=NextActionType.IMPLEMENT,
+            objective="Implement bounded task intent",
+            recommended_capability=self.target_capability,
+            recommended_worker=self.target_worker,
+            expected_effect_class=self.expected_effect_class,
+            expected_stop_boundary=self.expected_stop_boundary,
+            allowed_scope=(),
+            required_validators=(),
+            success_criteria="Verification PASS",
+            reasoning_summary="Autonomous IMPLEMENT action dispatched",
+        )
+
 class CIStatusProvider:
     async def wait_for_ci(self, run_id: str, sha: str) -> bool:
         raise NotImplementedError
@@ -110,20 +163,35 @@ class AutonomousRunCoordinator:
         events = self.store.load_events(self.run_id)
         from ai_engineering.supervisor.events import SupervisorEventType
 
-        self.iterations = 0
+        proposals_count = 0
+        decisions_count = 0
         self.child_tasks = 0
         self.retries = 0
         self.fix_cycles = 0
         self.consecutive_failures = 0
         self.provider_calls = 0
 
+        self.policy_receipts: list[str] = []
+        self.routing_receipts: list[str] = []
+        self.verified_results: list[str] = []
+
         for ev in events:
-            if getattr(ev.event_type, "value", str(ev.event_type)) == "ASTRA_PROPOSAL_CREATED":
+            ev_type = getattr(ev.event_type, "value", str(ev.event_type))
+            if ev_type == "ASTRA_PROPOSAL_CREATED":
                 self.provider_calls += 1
-            if getattr(ev.event_type, "value", str(ev.event_type)) == "DISPATCH_SENT":
+                proposals_count += 1
+            elif ev_type == "DISPATCH_SENT":
                 self.child_tasks += 1
-            if getattr(ev.event_type, "value", str(ev.event_type)) == "DECISION_ACCEPTED":
-                self.iterations += 1
+                if ev.payload and ev.payload.get("routing_receipt_id"):
+                    self.routing_receipts.append(ev.payload["routing_receipt_id"])
+            elif ev_type == "RESULT_INGESTED":
+                if ev.payload and ev.payload.get("result_id"):
+                    self.verified_results.append(ev.payload["result_id"])
+            elif ev_type == "POLICY_EVALUATED":
+                if ev.payload and ev.payload.get("receipt_id"):
+                    self.policy_receipts.append(ev.payload["receipt_id"])
+            elif ev_type == "DECISION_ACCEPTED":
+                decisions_count += 1
                 if ev.payload:
                     action = ev.payload.get("action")
                     if action == "RETRY":
@@ -134,9 +202,8 @@ class AutonomousRunCoordinator:
                         self.consecutive_failures += 1
                     else:
                         self.consecutive_failures = 0
-        self.policy_receipts: list[str] = []
-        self.routing_receipts: list[str] = []
-        self.verified_results: list[str] = []
+
+        self.iterations = max(proposals_count, decisions_count)
 
         # Test mock hook
         self._mock_astra_proposal: AstraNextActionProposal | None = None
@@ -202,14 +269,30 @@ class AutonomousRunCoordinator:
                 if not state.latest_verified_result_id:
                     terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
                     break
-                vr = self.loop._vr_cache.get(f"id:{state.latest_verified_result_id}") or self.loop._vr_cache.get(state.latest_verified_result_id)
+                vr = None
+                if hasattr(self.loop, "get_verified_result"):
+                    vr = self.loop.get_verified_result(self.run_id, state.latest_verified_result_id)
+                if not vr:
+                    vr = self.loop._vr_cache.get(f"id:{state.latest_verified_result_id}") or self.loop._vr_cache.get(state.latest_verified_result_id)
+                if not vr:
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.supervisor.events import SupervisorEventType
+                    from ai_engineering.supervisor.validator import deserialize_verified_result
+                    for ev in reversed(events):
+                        if getattr(ev.event_type, "value", str(ev.event_type)) == "RESULT_INGESTED":
+                            if ev.payload and ev.payload.get("result_id") == state.latest_verified_result_id:
+                                vr_data = ev.payload.get("verified_result")
+                                if vr_data:
+                                    vr = deserialize_verified_result(json.dumps(vr_data) if isinstance(vr_data, dict) else str(vr_data))
+                                    self.loop._vr_cache[state.latest_verified_result_id] = vr
+                                    break
                 if not vr or getattr(vr.status, "value", str(vr.status)) != "PASS":
                     terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
                     break
                 if state.blockers:
                     terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
                     break
-                if any(getattr(claim.status, "value", str(claim.status)) != "PASS" for claim in vr.gate_claims):
+                if any(getattr(gr.status, "value", str(gr.status)) != "PASS" for gr in vr.gate_results if gr.required):
                     terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
                     break
                 terminal_reason = "GOAL_COMPLETE"
@@ -291,19 +374,74 @@ class AutonomousRunCoordinator:
             try:
                 worker_bundle = await self.router.dispatch(envelope)
                 import os
-                file_path = os.path.join(self.router.store.root_dir, f"{envelope.message_id}.json")
-                if os.path.exists(file_path):
-                    with open(file_path, "r", encoding="utf-8") as rf:
-                        rd = __import__('json').load(rf)
-                    if rd.get("routing_receipt"):
-                        self.routing_receipts.append(rd["routing_receipt"]["routing_receipt_id"])
-                    else:
-                        self.routing_receipts.append(envelope.message_id)
-                else:
-                    self.routing_receipts.append(envelope.message_id)
+                routing_receipt_id = None
+                store_root = getattr(self.router.store, "root_dir", None) or getattr(self.router.store, "_root", None)
+                if store_root:
+                    file_path = os.path.join(store_root, f"{envelope.message_id}.json")
+                    if os.path.exists(file_path):
+                        with open(file_path, "r", encoding="utf-8") as rf:
+                            rd = __import__('json').load(rf)
+                        if rd.get("routing_receipt") and rd["routing_receipt"].get("routing_receipt_id"):
+                            routing_receipt_id = rd["routing_receipt"]["routing_receipt_id"]
+
+                if not routing_receipt_id:
+                    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                    events = self.store.load_events(self.run_id)
+                    blocker_event = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.BLOCKER_RECORDED,
+                        state_revision=next_state.state_revision + 1,
+                        task_id=next_state.current_task_id,
+                        attempt_id=next_state.current_attempt_id,
+                        intent_digest=next_state.current_intent_digest,
+                        payload={
+                            "blocker": "ROUTING_RECEIPT_MISSING",
+                            "reason_codes": ["ROUTING_RECEIPT_MISSING"],
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(blocker_event)
+                    terminal_reason = "BLOCKED"
+                    break
+
+                self.routing_receipts.append(routing_receipt_id)
                 self.child_tasks += 1
 
-                intent = self.loop._intents.get(next_state.current_task_id) or self.loop._intents[self.run_id]
+                from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                events = self.store.load_events(self.run_id)
+                dispatch_event = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.DISPATCH_SENT,
+                    state_revision=next_state.state_revision,
+                    task_id=next_state.current_task_id,
+                    attempt_id=next_state.current_attempt_id,
+                    intent_digest=next_state.current_intent_digest,
+                    payload={
+                        "message_id": envelope.message_id,
+                        "worker_id": worker_bundle.worker_id,
+                        "routing_receipt_id": routing_receipt_id,
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                )
+                self.store.save_event(dispatch_event)
+
+                intent = self.loop._intents.get(next_state.current_task_id) or self.loop._intents.get(self.run_id)
+                if intent is None:
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.task_intent import deserialize_intent
+                    for e in reversed(events):
+                        ev_type = getattr(e.event_type, "value", str(e.event_type))
+                        if ev_type in ("RUN_INITIALIZED", "NEXT_TASK_GENERATED", "ATTEMPT_INCREMENTED"):
+                            if "task_intent" in e.payload:
+                                intent = deserialize_intent(json.dumps(e.payload["task_intent"]))
+                                self.loop._intents[intent.task_id] = intent
+                                self.loop._intents[self.run_id] = intent
+                                break
+
                 worker_bundle_json = canonical_serialize_worker_result(worker_bundle)
                 normalized_evidence = self.result_collector.collect(worker_bundle_json, self.evidence_root, intent)
 
@@ -405,13 +543,27 @@ class AutonomousRunCoordinator:
             NextActionType.STOP_BLOCKED: SupervisorAction.BLOCK,
         }
 
-        intent = self.loop._intents.get(state.current_task_id) or self.loop._intents[self.run_id]
+        intent = self.loop._intents.get(state.current_task_id) or self.loop._intents.get(self.run_id)
+        if intent is None:
+            events = self.store.load_events(self.run_id)
+            from ai_engineering.task_intent import deserialize_intent
+            for e in reversed(events):
+                ev_type = getattr(e.event_type, "value", str(e.event_type))
+                if ev_type in ("RUN_INITIALIZED", "NEXT_TASK_GENERATED", "ATTEMPT_INCREMENTED"):
+                    if "task_intent" in e.payload:
+                        intent = deserialize_intent(json.dumps(e.payload["task_intent"]))
+                        self.loop._intents[intent.task_id] = intent
+                        self.loop._intents[self.run_id] = intent
+                        break
+
         pack, _ = self.loop.build_context_pack(self.run_id, intent)
         from ai_engineering.supervisor.context_pack import context_pack_digest
         pack_dg = context_pack_digest(pack)
 
         vr_digest = state.latest_verified_result_digest or ""
         if not vr_digest and state.latest_verified_result_id:
+            if hasattr(self.loop, "get_verified_result"):
+                self.loop.get_verified_result(self.run_id, state.latest_verified_result_id)
             vr_digest = self.loop._vr_cache.get(f"digest:{state.latest_verified_result_id}", "")
 
         return AstraDecision(

@@ -273,6 +273,12 @@ class AuthorityResolver:
 
     def _resolve_work_profile_and_policy(self, run_id: str) -> tuple[WorkProfile, EffectivePolicyReport]:
         wp, ep = None, None
+        if self.supervisor_loop is not None and hasattr(self.supervisor_loop, "_profiles"):
+            wp = self.supervisor_loop._profiles.get(run_id)
+            ep = getattr(self.supervisor_loop, "_effective_policies", {}).get(run_id)
+            if wp and ep:
+                return wp, ep
+
         if self.supervisor_store:
             events = self.supervisor_store.load_events(run_id)
             for e in reversed(events):
@@ -281,14 +287,25 @@ class AuthorityResolver:
                         from ai_engineering.supervisor.policy.work_profile import validate_work_profile
                         wp = validate_work_profile(e.payload["work_profile"])
                         if e.payload.get("effective_policy"):
-                            from ai_engineering.effective_policy import deserialize_effective_policy_report
-                            import json
                             ep_dict = e.payload["effective_policy"]
-                            if isinstance(ep_dict, dict):
-                                ep_str = json.dumps(ep_dict)
-                            else:
-                                ep_str = str(ep_dict)
-                            ep = deserialize_effective_policy_report(ep_str)
+                            try:
+                                from ai_engineering.effective_policy import deserialize_effective_policy_report
+                                import json
+                                ep_str = json.dumps(ep_dict) if isinstance(ep_dict, dict) else str(ep_dict)
+                                ep = deserialize_effective_policy_report(ep_str)
+                            except Exception:
+                                from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
+                                d = dict(ep_dict) if isinstance(ep_dict, dict) else {}
+                                tp = d.get("task_policy")
+                                tpa = TaskPolicyAttribution(**tp) if isinstance(tp, dict) else tp
+                                d["task_policy"] = tpa
+                                if "status" in d and not isinstance(d["status"], EffectivePolicyStatus):
+                                    d["status"] = EffectivePolicyStatus(d["status"])
+                                d["policy_sources"] = tuple(d.get("policy_sources", ()))
+                                d["invariant_resolutions"] = tuple(d.get("invariant_resolutions", ()))
+                                d["required_gate_resolutions"] = tuple(d.get("required_gate_resolutions", ()))
+                                d["unresolved_references"] = tuple(d.get("unresolved_references", ()))
+                                ep = EffectivePolicyReport(**d)
                     break
         if not wp or not ep:
             raise PolicyDeniedError(f"POLICY_DENIED: Authority unresolved on cold restart. wp={wp is not None}, ep={ep is not None}, events={len(events) if 'events' in locals() else 0}")
@@ -409,11 +426,13 @@ class PersistentStore:
     ) -> None:
         file_path = self._safe_path(envelope.message_id)
         history = []
+        existing_receipt = None
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     existing = json.load(f)
                     history = existing.get("history", [])
+                    existing_receipt = existing.get("routing_receipt")
             except Exception:
                 pass
 
@@ -451,7 +470,7 @@ class PersistentStore:
             "result": result,
             "operation_id": operation_id,
             "failure_class": failure_class,
-            "routing_receipt": __import__("dataclasses").asdict(routing_receipt) if routing_receipt else None,
+            "routing_receipt": __import__("dataclasses").asdict(routing_receipt) if routing_receipt else existing_receipt,
             "history": history,
         }
         tmp_file = f"{file_path}.tmp.{uuid.uuid4().hex}"
@@ -522,6 +541,17 @@ class PersistentStore:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             return data.get("result")
+
+    def load_routing_receipt(self, message_id: str) -> RoutingReceipt | None:
+        file_path = self._safe_path(message_id)
+        if not os.path.exists(file_path):
+            return None
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            rd = data.get("routing_receipt")
+            if not rd:
+                return None
+            return RoutingReceipt(**rd)
 
     def record_stale_evidence(self, envelope: AgentEnvelope, stale_bundle: WorkerResultBundle) -> None:
         p = os.path.join(self.root_dir, f"stale_{envelope.message_id}_{uuid.uuid4().hex[:6]}.json")

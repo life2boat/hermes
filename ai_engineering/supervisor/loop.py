@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -34,6 +35,7 @@ from ai_engineering.supervisor.state import (
 from ai_engineering.supervisor.store import FileSupervisorStateStore
 from ai_engineering.supervisor.validator import VerifiedResult, canonical_serialize_verified_result
 from ai_engineering.task_intent import TaskIntent, TaskLineage, intent_digest
+from ai_engineering.contracts import EffectClass, StopBoundary
 from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus
 from ai_engineering.supervisor.policy.contracts import (
     AutonomyBudgetState,
@@ -167,11 +169,18 @@ class SupervisorLoop:
         self,
         run_id: str,
         profile: WorkProfile | dict,
-        initial_level: AutonomyLevel | None = None,
+        initial_level: AutonomyLevel | EffectivePolicyReport | None = None,
         created_at_utc: str | None = None,
         effective_policy: EffectivePolicyReport | None = None,
+        policy: EffectivePolicyReport | None = None,
     ) -> SupervisorState:
         """Bind a work profile and initialize autonomy and budget state."""
+        if isinstance(initial_level, EffectivePolicyReport):
+            effective_policy = initial_level
+            initial_level = None
+        if policy is not None:
+            effective_policy = policy
+
         if isinstance(profile, dict):
             work_profile = validate_work_profile(profile)
         elif isinstance(profile, WorkProfile):
@@ -183,7 +192,7 @@ class SupervisorLoop:
         events = self._store.load_events(run_id)
         ts = created_at_utc or state.updated_at_utc
 
-        level = initial_level or AutonomyLevel.LEVEL_0_OBSERVE
+        level = initial_level or work_profile.maximum_autonomy_level or AutonomyLevel.LEVEL_0_OBSERVE
 
         # 1. Initialize budget state
         budget_id = f"budget-{run_id}"
@@ -422,6 +431,9 @@ class SupervisorLoop:
         new_seq = len(events) + 1
         prev_digest = events[-1].event_digest if events else None
 
+        from ai_engineering.supervisor.validator import canonical_serialize_verified_result
+        vr_serialized = json.loads(canonical_serialize_verified_result(verified_result))
+
         event = create_event(
             run_id=run_id,
             sequence=new_seq,
@@ -435,6 +447,7 @@ class SupervisorLoop:
                 "result_id": verified_result.result_id,
                 "result_digest": verified_result_digest,
                 "status": verified_result.status.value,
+                "verified_result": vr_serialized,
             },
             created_at_utc=verified_result.verified_at_utc,
             verified_result_id=verified_result.result_id,
@@ -478,6 +491,32 @@ class SupervisorLoop:
         )
         return new_state
 
+    def get_verified_result(self, run_id: str, result_id: str) -> VerifiedResult | None:
+        """Get VerifiedResult from in-memory cache or rehydrate from event log."""
+        if result_id in self._vr_cache:
+            return self._vr_cache[result_id]
+        if f"id:{result_id}" in self._vr_cache:
+            return self._vr_cache[f"id:{result_id}"]
+
+        events = self._store.load_events(run_id)
+        from ai_engineering.supervisor.events import SupervisorEventType
+        from ai_engineering.supervisor.validator import deserialize_verified_result
+        for ev in reversed(events):
+            if (
+                ev.event_type == SupervisorEventType.RESULT_INGESTED
+                or getattr(ev.event_type, "value", str(ev.event_type)) == "RESULT_INGESTED"
+            ):
+                if ev.payload and ev.payload.get("result_id") == result_id:
+                    vr_data = ev.payload.get("verified_result")
+                    if vr_data:
+                        vr_str = json.dumps(vr_data) if isinstance(vr_data, dict) else str(vr_data)
+                        vr = deserialize_verified_result(vr_str)
+                        self._vr_cache[result_id] = vr
+                        if ev.payload.get("result_digest"):
+                            self._vr_cache[f"digest:{result_id}"] = ev.payload["result_digest"]
+                        return vr
+        return None
+
     def build_context_pack(
         self,
         run_id: str,
@@ -490,7 +529,7 @@ class SupervisorLoop:
         # Get verified result if available
         vr: VerifiedResult | None = None
         if state.latest_verified_result_id:
-            vr = self._vr_cache.get(state.latest_verified_result_id)
+            vr = self.get_verified_result(run_id, state.latest_verified_result_id)
 
         pack = build_context_pack(state, intent, vr)
         pack_digest = context_pack_digest(pack)
@@ -713,6 +752,15 @@ class SupervisorLoop:
         })
         target = execution_target or (work_profile.allowed_targets[0] if work_profile.allowed_targets else ExecutionTarget.DEV)
 
+        req_effects = []
+        for m in candidate_intent.allowed_mutations:
+            try:
+                req_effects.append(EffectClass(m))
+            except (ValueError, KeyError):
+                pass
+        if not req_effects:
+            req_effects = [EffectClass.READ_ONLY]
+
         policy_request = PolicyRequest(
             schema_version=POLICY_REQUEST_SCHEMA_VERSION,
             request_id=req_id,
@@ -726,7 +774,7 @@ class SupervisorLoop:
             work_profile_digest=work_profile.profile_digest,
             current_autonomy_level=state.autonomy_state.current_level,
             requested_action=decision.action.value,
-            requested_effect_classes=candidate_intent.allowed_mutations,
+            requested_effect_classes=tuple(req_effects),
             requested_stop_boundary=candidate_intent.stop_boundary,
             execution_target=target,
             effective_policy_id=eff_policy.effective_policy_id,

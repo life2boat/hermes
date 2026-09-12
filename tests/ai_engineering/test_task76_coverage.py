@@ -77,7 +77,8 @@ print(json.dumps({
         "--intent", str(intent_path),
         "--state-dir", str(state_dir),
         "--run-id", "test-run",
-        "--worker-cmd", sys.executable, str(worker_script)
+        "--worker-cmd", sys.executable, str(worker_script),
+        "--provider-mode", "test"
     ], capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(Path.cwd())))
 
     assert res.returncode == 0

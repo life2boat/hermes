@@ -5,8 +5,10 @@ from __future__ import annotations
 import sys
 if sys.platform != 'win32':
     import fcntl
+    msvcrt = None
 else:
     fcntl = None
+    import msvcrt
 import json
 import os
 import re
@@ -96,6 +98,8 @@ class FileSupervisorStateStore:
         try:
             if fcntl:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif msvcrt:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         except OSError:
             os.close(fd)
             _fail("STORE_WRITER_LOCK_CONTENTION")
@@ -106,6 +110,12 @@ class FileSupervisorStateStore:
         if fd is not None:
             if fcntl:
                 fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
             os.close(fd)
 
     def save_seed_state(self, state: SupervisorState) -> None:

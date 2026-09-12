@@ -59,6 +59,7 @@ async def async_main():
     parser.add_argument("--worker-cmd", nargs='+', required=True, help="Worker command array (e.g. codex)")
     parser.add_argument("--astra-cmd", nargs='+', default=None, help="Command array for Astra proposal provider")
     parser.add_argument("--github-repository", default="life2boat/hermes", help="GitHub repository (owner/repo)")
+    parser.add_argument("--provider-mode", choices=["real", "test"], default="real", help="Provider execution mode (real or test)")
     parser.add_argument("--ci-mode", choices=["local", "github"], default="local", help="CI provider mode")
     parser.add_argument("--ci-required-check", nargs='*', default=None, help="Required CI check names")
     parser.add_argument("--ci-timeout", type=float, default=600.0, help="CI wait timeout in seconds")
@@ -183,6 +184,14 @@ async def async_main():
         if hasattr(intent.stop_boundary, "value")
         else str(intent.stop_boundary)
     )
+
+    if args.provider_mode == "real":
+        if not args.astra_cmd:
+            sys.stderr.write("Error: ASTRA_PROVIDER_UNAVAILABLE: --astra-cmd is required in real provider mode\n")
+            return 1
+        if args.ci_mode != "github":
+            sys.stderr.write("Error: CI_PROVIDER_UNAVAILABLE: --ci-mode github is required in real provider mode\n")
+            return 1
 
     if args.astra_cmd:
         astra_provider: AstraProposalProvider = ConfiguredAstraProposalProvider(args.astra_cmd)

@@ -97,28 +97,41 @@ def _create_state(tmp_path: Path, run_id: str = "run-1", task_id: str = "t1") ->
 
 
 def _create_work_profile() -> WorkProfile:
-    return WorkProfile(
-        schema_version="hermes.work-profile.v1",
-        profile_id="test-profile",
-        profile_version=1,
-        profile_digest="test-profile-digest",
-        preferred_worker_model=None,
-        preferred_verifier_model=None,
-        preferred_supervisor_model=None,
-        escalation_model=None,
-        allowed_task_classes=("BOUNDED_IMPLEMENTATION",),
-        maximum_autonomy_level=AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION,
-        allowed_effect_classes=(EffectClass.READ_ONLY, EffectClass.REPOSITORY_WRITE),
-        forbidden_effect_classes=(),
-        allowed_targets=(ExecutionTarget.DEV,),
-        required_validators=(),
-        promotion_thresholds=PromotionThresholds(1, 0, False),
-        budget_limits=BudgetLimits(20, 10, 3, 3, 2, 50, 10),
-        production_execution_allowed=False,
-        vector_mutation_allowed=False,
-        secret_mutation_allowed=False,
-        external_send_allowed=False,
-    )
+    from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+    raw = {
+        "schema_version": "hermes.work-profile.v1",
+        "profile_id": "test-profile",
+        "profile_version": 1,
+        "preferred_worker_model": None,
+        "preferred_verifier_model": None,
+        "preferred_supervisor_model": None,
+        "escalation_model": None,
+        "allowed_task_classes": ("BOUNDED_IMPLEMENTATION",),
+        "maximum_autonomy_level": AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION.value,
+        "allowed_effect_classes": (EffectClass.READ_ONLY.value, EffectClass.REPOSITORY_WRITE.value),
+        "forbidden_effect_classes": (),
+        "allowed_targets": (ExecutionTarget.DEV.value,),
+        "required_validators": (),
+        "promotion_thresholds": {
+            "required_successful_runs": 1,
+            "allowed_critical_failures": 0,
+            "require_rollback_verified": False,
+        },
+        "budget_limits": {
+            "max_supervisor_decisions": 20,
+            "max_child_tasks": 10,
+            "max_retries_per_task": 3,
+            "max_fix_cycles_per_task": 3,
+            "max_consecutive_failures": 2,
+            "max_provider_calls": 50,
+            "max_policy_denials": 10,
+        },
+        "production_execution_allowed": False,
+        "vector_mutation_allowed": False,
+        "secret_mutation_allowed": False,
+        "external_send_allowed": False,
+    }
+    return validate_work_profile(raw)
 
 
 def _create_effective_policy(intent: TaskIntent) -> EffectivePolicyReport:
@@ -331,7 +344,7 @@ def test_evaluate_ci_checks_all_green():
     sha = "c" * 40
     checks = [
         CICheckResult("Tests", "completed", "success"),
-        CICheckResult("Lint", "completed", "success"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success"),
         CICheckResult("Typecheck", "completed", "success"),
         CICheckResult("Nix", "completed", "success"),
         CICheckResult("Agent Release Gate", "completed", "success"),
@@ -348,7 +361,7 @@ def test_evaluate_ci_checks_attribution_governance_only():
     sha = "c" * 40
     checks = [
         CICheckResult("Tests", "completed", "success"),
-        CICheckResult("Lint", "completed", "success"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success"),
         CICheckResult("Typecheck", "completed", "success"),
         CICheckResult("Nix", "completed", "success"),
         CICheckResult("Agent Release Gate", "completed", "success"),
@@ -364,7 +377,7 @@ def test_evaluate_ci_checks_in_progress_queued():
     sha = "c" * 40
     checks = [
         CICheckResult("Tests", "in_progress", ""),
-        CICheckResult("Lint", "queued", ""),
+        CICheckResult("Lint (ruff + ty)", "queued", ""),
         CICheckResult("Typecheck", "completed", "success"),
     ]
     status, passed, issues = evaluate_ci_checks(sha, sha, checks)
@@ -375,7 +388,7 @@ def test_evaluate_ci_checks_failure():
     sha = "c" * 40
     checks = [
         CICheckResult("Tests", "completed", "failure"),
-        CICheckResult("Lint", "completed", "success"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success"),
     ]
     status, passed, issues = evaluate_ci_checks(sha, sha, checks)
     assert status == "FAILURE"
@@ -389,7 +402,7 @@ def test_evaluate_ci_checks_missing():
     ]
     status, passed, issues = evaluate_ci_checks(sha, sha, checks)
     assert status == "MISSING"
-    assert any("MISSING: Lint" in iss for iss in issues)
+    assert any("MISSING: Lint (ruff + ty)" in iss for iss in issues)
 
 
 @pytest.mark.asyncio
@@ -406,7 +419,7 @@ async def test_github_ci_provider_runner_polling():
             ]
         return target_sha, [
             {"name": "Tests", "status": "completed", "conclusion": "success"},
-            {"name": "Lint", "status": "completed", "conclusion": "success"},
+            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success"},
             {"name": "Typecheck", "status": "completed", "conclusion": "success"},
             {"name": "Nix", "status": "completed", "conclusion": "success"},
             {"name": "Agent Release Gate", "status": "completed", "conclusion": "success"},
@@ -527,7 +540,7 @@ sys.stdout.flush()
     async def mock_ci_runner(repo: str, target_sha: str):
         return target_sha, [
             {"name": "Tests", "status": "completed", "conclusion": "success"},
-            {"name": "Lint", "status": "completed", "conclusion": "success"},
+            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success"},
             {"name": "Typecheck", "status": "completed", "conclusion": "success"},
             {"name": "Nix", "status": "completed", "conclusion": "success"},
             {"name": "Agent Release Gate", "status": "completed", "conclusion": "success"},
@@ -1238,3 +1251,536 @@ def test_astra_receipt_secret_redaction():
     assert receipt.provider_executable == "python"
     assert receipt.argument_count == 5
     assert receipt.command_digest == cmd_dg
+
+
+# ==============================================================================
+# TASK 7.7 FINAL TRUSTED-PROVIDER CLOSURE INVARIANT TESTS
+# ==============================================================================
+
+def test_ci_exact_workflow_name_binding():
+    """Exact workflow name matching: substrings like 'Tests Optional' or 'Nix Experimental' must not match."""
+    sha = "e" * 40
+
+    # Case 1: 'Tests Optional' succeeds, but required 'Tests' is missing -> overall status must be MISSING
+    checks_missing_tests = [
+        CICheckResult("Tests Optional", "completed", "success"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success"),
+        CICheckResult("Typecheck", "completed", "success"),
+        CICheckResult("Nix", "completed", "success"),
+        CICheckResult("Agent Release Gate", "completed", "success"),
+        CICheckResult("Supply Chain Audit", "completed", "success"),
+        CICheckResult("History Check", "completed", "success"),
+    ]
+    status, passed, issues = evaluate_ci_checks(sha, sha, checks_missing_tests)
+    assert status == "MISSING"
+    assert any("MISSING: Tests" in iss for iss in issues)
+
+    # Case 2: 'Nix' failed, but 'Nix Experimental' succeeded -> overall status must be FAILURE (from 'Nix')
+    checks_nix_failure = [
+        CICheckResult("Tests", "completed", "success"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success"),
+        CICheckResult("Typecheck", "completed", "success"),
+        CICheckResult("Nix", "completed", "failure"),
+        CICheckResult("Nix Experimental", "completed", "success"),
+        CICheckResult("Agent Release Gate", "completed", "success"),
+        CICheckResult("Supply Chain Audit", "completed", "success"),
+        CICheckResult("History Check", "completed", "success"),
+    ]
+    status, passed, issues = evaluate_ci_checks(sha, sha, checks_nix_failure)
+    assert status == "FAILURE"
+    assert any("FAILED: Nix" in iss for iss in issues)
+
+
+def test_ci_pr_event_binding():
+    """Only pull_request events satisfy CI checks; workflow_dispatch and push runs must be ignored."""
+    sha = "f" * 40
+
+    # Tests succeeded under workflow_dispatch, but no pull_request run exists for Tests -> MISSING
+    checks_dispatch = [
+        CICheckResult("Tests", "completed", "success", event="workflow_dispatch"),
+        CICheckResult("Lint (ruff + ty)", "completed", "success", event="pull_request"),
+        CICheckResult("Typecheck", "completed", "success", event="pull_request"),
+        CICheckResult("Nix", "completed", "success", event="pull_request"),
+        CICheckResult("Agent Release Gate", "completed", "success", event="pull_request"),
+        CICheckResult("Supply Chain Audit", "completed", "success", event="pull_request"),
+        CICheckResult("History Check", "completed", "success", event="pull_request"),
+    ]
+    status, passed, issues = evaluate_ci_checks(sha, sha, checks_dispatch)
+    assert status == "MISSING"
+    assert any("MISSING: Tests" in iss for iss in issues)
+
+    # Also test with raw dict representation as fetched from GitHub API
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    runs_dispatch = [
+        {"id": 1, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "workflow_dispatch"},
+        {"id": 2, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+        {"id": 3, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+        {"id": 4, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+        {"id": 5, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+        {"id": 6, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+        {"id": 7, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success", "event": "pull_request"},
+    ]
+    snap = evaluate_workflow_runs("life2boat/hermes", sha, runs_dispatch)
+    assert snap.overall_status == "MISSING"
+
+
+class _WaitForCIAstraProposalProvider(ScriptedAstraProposalProvider):
+    async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs):
+        return AstraNextActionProposal(
+            schema_version="hermes.astra-next-action.v1",
+            proposal_id=f"prop-ci-{run_id}",
+            run_id=run_id,
+            task_id=state.current_task_id,
+            action_type=NextActionType.WAIT_FOR_CI,
+            objective="Wait for CI checks",
+            recommended_capability="code",
+            recommended_worker="codex",
+            expected_effect_class=EffectClass.READ_ONLY.value,
+            expected_stop_boundary=StopBoundary.READ_ONLY.value,
+        )
+
+
+@pytest.mark.asyncio
+async def test_ci_true_restart_resume_integration(tmp_path: Path):
+    """Multi-process crash acceptance: Coordinator A starts CI wait cycle and is killed.
+    Coordinator B restarts, rehydrates pending CI SHA directly from journal, polls CI with 0 Astra calls,
+    observes CI_GREEN, clears pending CI SHA, and only then calls Astra for next proposal."""
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-restart", "run-restart")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    init_state = loop.initialize_run(
+        intent=intent,
+        lineage=None,
+        root_goal=intent.desired_outcome,
+        root_goal_id="run-restart",
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    loop.bind_profile("run-restart", wp, ep)
+
+    from ai_engineering.contracts import Status, GateResult
+    from ai_engineering.supervisor.validator import VerifiedResult
+    vr = VerifiedResult(
+        schema_version="hermes.verified-result.v1",
+        result_id="3" * 64,
+        task_id="t-restart",
+        attempt_id=init_state.current_attempt_id,
+        intent_digest=intent_digest(intent),
+        base_sha=intent.source_base_sha,
+        head_sha=intent.source_base_sha,
+        normalized_evidence_digest="a" * 64,
+        required_gates=("tests",),
+        gate_results=(GateResult("tests", True, Status.PASS, ()),),
+        blockers=(),
+        status=Status.PASS,
+        reason_codes=(),
+        verified_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    loop.ingest_verified_result("run-restart", vr, "v" * 64)
+
+    ci_poll_count = 0
+    async def mock_ci_runner(repo: str, target_sha: str):
+        nonlocal ci_poll_count
+        ci_poll_count += 1
+        if ci_poll_count <= 2:
+            return target_sha, [
+                {"name": "Tests", "status": "in_progress", "conclusion": "", "event": "pull_request"},
+            ]
+        return target_sha, [
+            {"name": "Tests", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Typecheck", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Nix", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Agent Release Gate", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Supply Chain Audit", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "History Check", "status": "completed", "conclusion": "success", "event": "pull_request"},
+        ]
+
+    ci_provider = GitHubCIStatusProvider(
+        repository="life2boat/hermes",
+        timeout_seconds=5.0,
+        poll_interval_seconds=0.01,
+        runner=mock_ci_runner,
+    )
+
+    # Coordinator A: receives WAIT_FOR_CI proposal, starts CI poll, then process crashes
+    astra_a = _WaitForCIAstraProposalProvider()
+    coord_a = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=10),
+        run_id="run-restart",
+        astra_provider=astra_a,
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+    )
+
+    # Manually emit CI_WAIT_STARTED in Coordinator A as would happen when WAIT_FOR_CI is handled
+    state_a = store.load_state("run-restart")
+    target_sha = "a" * 40
+    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+    events = store.load_events("run-restart")
+    start_ev = create_event(
+        run_id="run-restart",
+        sequence=len(events) + 1,
+        previous_event_digest=events[-1].event_digest if events else None,
+        event_type=SupervisorEventType.CI_WAIT_STARTED,
+        state_revision=state_a.state_revision,
+        task_id=state_a.current_task_id,
+        attempt_id=state_a.current_attempt_id,
+        intent_digest=state_a.current_intent_digest,
+        payload={"exact_sha": target_sha, "sha": target_sha},
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
+    store.save_event(start_ev)
+
+    # Process A dies! Delete all Process A instances
+    del coord_a, astra_a, state_a
+
+    # Process B starts: fresh Coordinator instance pointing to the same store
+    astra_b_called = False
+    class GuardedAstraProposalProvider(ScriptedAstraProposalProvider):
+        async def request_proposal(self, run_id, state, **kwargs):
+            nonlocal astra_b_called
+            astra_b_called = True
+            # When called, CI must already have been resolved to CI_GREEN!
+            events_now = store.load_events("run-restart")
+            green_events = [e for e in events_now if getattr(e.event_type, "value", str(e.event_type)) == "CI_GREEN"]
+            assert len(green_events) == 1, "Astra must NOT be called before CI_GREEN is persisted!"
+            return AstraNextActionProposal(
+                schema_version="hermes.astra-next-action.v1",
+                proposal_id="prop-stop",
+                run_id=run_id,
+                task_id=state.current_task_id,
+                action_type=NextActionType.STOP_SUCCESS,
+                objective="Goal completed after CI",
+                recommended_capability="code",
+                recommended_worker="codex",
+                expected_effect_class=EffectClass.READ_ONLY.value,
+                expected_stop_boundary=StopBoundary.READ_ONLY.value,
+            )
+
+    guarded_astra = GuardedAstraProposalProvider(
+        target_worker="codex",
+        target_capability="code",
+        expected_effect_class=EffectClass.READ_ONLY.value,
+        expected_stop_boundary=StopBoundary.READ_ONLY.value,
+    )
+
+    coord_b = AutonomousRunCoordinator(
+        loop=SupervisorLoop(store),
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=SupervisorLoop(store)), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=10),
+        run_id="run-restart",
+        astra_provider=guarded_astra,
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+    )
+
+    # Verify Coordinator B rehydrated pending_ci_sha from event journal
+    assert coord_b.pending_ci_sha == target_sha
+
+    # Coordinator B resumes execution
+    receipt = await coord_b.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+    assert astra_b_called is True
+    assert coord_b.pending_ci_sha is None
+
+    # Verify CI_GREEN was emitted before STOP_SUCCESS proposal
+    final_events = store.load_events("run-restart")
+    event_types = [getattr(e.event_type, "value", str(e.event_type)) for e in final_events]
+    assert "CI_GREEN" in event_types
+    green_idx = event_types.index("CI_GREEN")
+    stop_idx = event_types.index("ASTRA_PROPOSAL_CREATED")
+    assert green_idx < stop_idx
+
+
+@pytest.mark.asyncio
+async def test_ci_terminal_failed_events_and_replay(tmp_path: Path):
+    """When CI checks fail, CI_FAILED event is persisted with exact_sha and result, and replay clears pending_ci_sha."""
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-fail", "run-fail")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(
+        intent=intent,
+        lineage=None,
+        root_goal=intent.desired_outcome,
+        root_goal_id="run-fail",
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    loop.bind_profile("run-fail", wp, ep)
+
+    target_sha = "a" * 40
+    async def mock_fail_runner(repo: str, sha: str):
+        return sha, [
+            {"name": "Tests", "status": "completed", "conclusion": "failure", "event": "pull_request"},
+            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success", "event": "pull_request"},
+        ]
+
+    ci_provider = GitHubCIStatusProvider(
+        repository="life2boat/hermes",
+        timeout_seconds=5.0,
+        poll_interval_seconds=0.01,
+        runner=mock_fail_runner,
+    )
+
+    astra = _WaitForCIAstraProposalProvider()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-fail",
+        astra_provider=astra,
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "CI_FAILED"
+    assert coord.pending_ci_sha is None
+
+    events = store.load_events("run-fail")
+    failed_events = [e for e in events if getattr(e.event_type, "value", str(e.event_type)) == "CI_FAILED"]
+    assert len(failed_events) == 1
+    assert failed_events[0].payload["exact_sha"] == target_sha
+    assert failed_events[0].payload["result"] == "FAILURE"
+
+    # Replay on fresh coordinator confirms pending_ci_sha is cleared (not left hanging)
+    coord_replayed = AutonomousRunCoordinator(
+        loop=SupervisorLoop(store),
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=SupervisorLoop(store)), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-fail",
+        astra_provider=astra,
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+    )
+    assert coord_replayed.pending_ci_sha is None
+
+
+def test_effective_policy_authority_context_narrowing(tmp_path: Path):
+    """Authority context narrowing: EffectivePolicy forbids src/protected/**, TaskIntent allows code and src/**.
+    Intersection must forbid src/protected/** and exclude it from allowed_mutations."""
+    state = _create_state(tmp_path, "run-narrow", "t-narrow")
+    intent = TaskIntent(
+        schema_version=1,
+        task_id="t-narrow",
+        intent_revision=1,
+        status=IntentStatus.READY,
+        task_class=TaskClass.BOUNDED_IMPLEMENTATION,
+        desired_outcome="Narrowed authority test",
+        source_repository="life2boat/hermes",
+        source_main_ref="refs/remotes/github/main",
+        source_base_sha="a" * 40,
+        constraints=(),
+        allowed_mutations=("code", "src/**", "src/protected/**"),
+        forbidden_mutations=("src/private/**",),
+        stop_boundary=StopBoundary.READY_PR,
+        acceptance_criteria=(),
+        unknowns=(),
+        applicable_invariants=(),
+        required_gates=(),
+        parent_intent_digest=None,
+    )
+    wp = _create_work_profile()
+    tpa = TaskPolicyAttribution(
+        task_id="t-narrow",
+        intent_revision=1,
+        intent_digest=intent_digest(intent),
+        source_base_sha="a" * 40,
+        constraints=(),
+        allowed_mutations=("code", "src/**"),
+        forbidden_mutations=("src/protected/**",),
+        stop_boundary="LOCAL_DIFF",
+        source_id="0" * 64,
+    )
+    ep = EffectivePolicyReport(
+        schema_version=1,
+        effective_policy_id="0" * 64,
+        task_id="t-narrow",
+        intent_digest=intent_digest(intent),
+        intent_revision=1,
+        source_base_sha="a" * 40,
+        subject_sha="a" * 40,
+        status=EffectivePolicyStatus.COMPLETE,
+        policy_sources=(),
+        task_policy=tpa,
+        invariant_resolutions=(),
+        required_gate_resolutions=(),
+        unresolved_references=(),
+        precedence_source_id="0" * 64,
+        authority_expansion=False,
+    )
+
+    req = build_canonical_astra_request(
+        run_id="run-narrow",
+        state=state,
+        intent=intent,
+        work_profile=wp,
+        effective_policy=ep,
+        real_mode=True,
+    )
+
+    auth = req["authority_boundary"]
+    assert "src/protected/**" in auth["forbidden_mutations"]
+    assert "src/private/**" in auth["forbidden_mutations"]
+    assert "src/protected/**" not in auth["allowed_mutations"]
+    assert auth["stop_boundary"] == "LOCAL_DIFF"
+
+
+def test_restart_authority_rehydration(tmp_path: Path):
+    """Restart rehydrates TaskIntent, WorkProfile, and EffectivePolicy from persistent event store."""
+    store1 = FileSupervisorStateStore(tmp_path)
+    loop1 = SupervisorLoop(store1)
+    intent = _create_minimal_intent("t-rehydrate", "run-rehydrate")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    state1 = loop1.initialize_run(
+        intent=intent,
+        lineage=None,
+        root_goal=intent.desired_outcome,
+        root_goal_id="run-rehydrate",
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    loop1.bind_profile("run-rehydrate", wp, ep)
+
+    del loop1, store1
+
+    # Fresh store and loop with empty caches
+    store2 = FileSupervisorStateStore(tmp_path)
+    loop2 = SupervisorLoop(store2)
+    coord2 = AutonomousRunCoordinator(
+        loop=loop2,
+        store=store2,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store2, supervisor_loop=loop2), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-rehydrate",
+        astra_provider=ScriptedAstraProposalProvider("codex", "code", EffectClass.READ_ONLY.value, StopBoundary.READ_ONLY.value),
+        ci_provider=GitHubCIStatusProvider("life2boat/hermes"),
+        evidence_root=str(tmp_path),
+    )
+
+    rehydrated_intent, rehydrated_wp, rehydrated_ep = coord2._rehydrate_authority_context(state1)
+    assert rehydrated_intent is not None
+    assert rehydrated_intent.task_id == "t-rehydrate"
+    assert rehydrated_wp is not None
+    assert rehydrated_wp.profile_id == "test-profile"
+    assert rehydrated_ep is not None
+    assert rehydrated_ep.task_id == "t-rehydrate"
+
+
+@pytest.mark.asyncio
+async def test_secret_safe_failure_error(tmp_path: Path):
+    """Subprocess prints sensitive token to stderr; verify token is in neither exception, receipt, event, nor CLI."""
+    secret_token = "SUPER_SECRET_LEAK_TOKEN_XYZ999"
+    script = tmp_path / "secret_leaking_provider.py"
+    script.write_text(f"""
+import sys
+sys.stderr.write("Fatal crash with token {secret_token}\\n")
+sys.exit(3)
+""", encoding="utf-8")
+
+    provider = ConfiguredAstraProposalProvider(
+        [sys.executable, str(script)],
+        timeout_seconds=5.0,
+    )
+    dir_a = tmp_path / "dir_a"
+    state = _create_state(dir_a, "run-sec-safe-a", "t-sec-safe-a")
+
+    with pytest.raises(AstraProviderUnavailableError) as exc_info:
+        await provider.request_proposal("run-sec-safe-a", state)
+
+    exc_str = str(exc_info.value)
+    assert secret_token not in exc_str
+    assert "ASTRA_PROVIDER_UNAVAILABLE exit_code=3" in exc_str
+
+    receipt = provider.latest_receipt
+    assert receipt is not None
+    receipt_json = json.dumps(__import__("dataclasses").asdict(receipt))
+    assert secret_token not in receipt_json
+    assert receipt.exit_code == 3
+    assert len(receipt.stderr_digest) == 64
+
+    # Run inside AutonomousRunCoordinator and verify journal events are completely secret-clean
+    dir_b = tmp_path / "dir_b"
+    store = FileSupervisorStateStore(dir_b)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-sec-safe", "run-sec-safe")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-sec-safe", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-sec-safe", wp, ep)
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(dir_b / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-sec-safe",
+        astra_provider=provider,
+        ci_provider=GitHubCIStatusProvider("life2boat/hermes"),
+        evidence_root=str(dir_b),
+        provider_mode="real",
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert "ASTRA_PROVIDER_FAILED" in receipt.terminal_reason
+    assert secret_token not in receipt.terminal_reason
+
+    events = store.load_events("run-sec-safe")
+    for ev in events:
+        ev_json = json.dumps(__import__("dataclasses").asdict(ev))
+        assert secret_token not in ev_json
+
+
+@pytest.mark.asyncio
+async def test_real_mode_missing_authority_context_blocks(tmp_path: Path):
+    """In real provider mode, missing WorkProfile, EffectivePolicy, or TaskIntent fail-closes immediately."""
+    dir_1 = tmp_path / "dir_1"
+    state = _create_state(dir_1, "run-no-auth-1", "t-no-auth-1")
+
+    # 1. build_canonical_astra_request fail-closed
+    with pytest.raises(AstraProviderUnavailableError) as exc_info:
+        build_canonical_astra_request("run-no-auth-1", state, real_mode=True)
+    assert exc_info.value.code == "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE"
+
+    # 2. AutonomousRunCoordinator fail-closed in real mode
+    dir_2 = tmp_path / "dir_2"
+    store = FileSupervisorStateStore(dir_2)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-no-auth-2", "run-no-auth-2")
+    # Initialize run but DO NOT bind work profile or effective policy
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-no-auth-2", datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(dir_2 / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-no-auth-2",
+        astra_provider=ScriptedAstraProposalProvider("codex", "code", EffectClass.READ_ONLY.value, StopBoundary.READ_ONLY.value),
+        ci_provider=GitHubCIStatusProvider("life2boat/hermes"),
+        evidence_root=str(dir_2),
+        provider_mode="real",
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE"

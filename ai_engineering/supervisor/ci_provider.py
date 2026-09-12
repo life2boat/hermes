@@ -73,6 +73,7 @@ class WorkflowObservation:
     head_sha: str
     status: str       # "completed", "in_progress", "queued"
     conclusion: str   # "success", "failure", "skipped", "cancelled", etc.
+    event: str = "pull_request"
 
     @property
     def name(self) -> str:
@@ -87,6 +88,7 @@ class CICheckResult:
     details_url: str = ""
     run_id: int = 0
     head_sha: str = ""
+    event: str = "pull_request"
 
     @property
     def workflow_name(self) -> str:
@@ -155,12 +157,7 @@ def compute_ci_receipt_digest(receipt_data: Mapping[str, Any]) -> str:
 
 
 def _match_workflow(req_low: str, runs_by_name: Mapping[str, Any]) -> Any | None:
-    if req_low in runs_by_name:
-        return runs_by_name[req_low]
-    for name_low, r in runs_by_name.items():
-        if req_low in name_low or name_low in req_low:
-            return r
-    return None
+    return runs_by_name.get(req_low.strip().lower())
 
 
 def evaluate_workflow_runs(
@@ -172,10 +169,10 @@ def evaluate_workflow_runs(
     checked_at_utc: str | None = None,
     observed_sha: str | None = None,
 ) -> CIStatusSnapshot:
-    """Evaluates GitHub Actions workflow runs against exact SHA and required technical workflows."""
+    """Evaluates GitHub Actions workflow runs against exact SHA, pull_request event, and required technical workflows."""
     ts = checked_at_utc or datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # Index observed runs by workflow name (case-insensitive)
+    # Index observed runs by workflow name (case-insensitive, exact name only)
     runs_by_name: dict[str, dict[str, Any]] = {}
     observed_shas: set[str] = set()
 
@@ -183,6 +180,13 @@ def evaluate_workflow_runs(
         head_sha = str(r.get("head_sha", "")).strip()
         if head_sha:
             observed_shas.add(head_sha)
+
+        # PR-Event binding: Every selected run must satisfy event == pull_request.
+        # Do not allow push/workflow_dispatch/schedule runs to satisfy PR CI.
+        ev = str(r.get("event") or "pull_request").strip().lower()
+        if ev != "pull_request":
+            continue
+
         name = str(r.get("name", "")).strip()
         if name:
             # If multiple runs for same workflow, take highest ID (latest)
@@ -225,9 +229,11 @@ def evaluate_workflow_runs(
 
     all_observed_completed = True
     for r in raw_runs:
-        st = str(r.get("status", "")).lower()
-        if st in ("queued", "in_progress", "waiting", "requested", "pending"):
-            all_observed_completed = False
+        ev = str(r.get("event") or "pull_request").strip().lower()
+        if ev == "pull_request":
+            st = str(r.get("status", "")).lower()
+            if st in ("queued", "in_progress", "waiting", "requested", "pending"):
+                all_observed_completed = False
 
     for req in required_workflows:
         req_low = req.strip().lower()
@@ -244,6 +250,7 @@ def evaluate_workflow_runs(
         run_head_sha = str(matched.get("head_sha", requested_sha))
         st = str(matched.get("status", "")).lower()
         cc = str(matched.get("conclusion") or "").lower()
+        ev = str(matched.get("event") or "pull_request").strip().lower()
 
         obs = WorkflowObservation(
             workflow_name=req,
@@ -251,6 +258,7 @@ def evaluate_workflow_runs(
             head_sha=run_head_sha,
             status=st,
             conclusion=cc,
+            event=ev,
         )
         required_obs.append(obs)
 
@@ -275,6 +283,7 @@ def evaluate_workflow_runs(
                 head_sha=str(matched.get("head_sha", requested_sha)),
                 status=str(matched.get("status", "")).lower(),
                 conclusion=str(matched.get("conclusion") or "").lower(),
+                event=str(matched.get("event") or "pull_request").strip().lower(),
             )
             governance_obs.append(obs)
 
@@ -345,7 +354,14 @@ def evaluate_ci_checks(
 
     checks_by_name: dict[str, Any] = {}
     for c in checks:
-        c_name = getattr(c, "name", getattr(c, "workflow_name", "")).strip().lower()
+        if isinstance(c, dict):
+            ev = str(c.get("event", "pull_request") or "pull_request").strip().lower()
+            c_name = str(c.get("name", c.get("workflow_name", ""))).strip().lower()
+        else:
+            ev = str(getattr(c, "event", "pull_request") or "pull_request").strip().lower()
+            c_name = str(getattr(c, "name", getattr(c, "workflow_name", ""))).strip().lower()
+        if ev != "pull_request":
+            continue
         checks_by_name[c_name] = c
 
     def is_governance(name: str) -> bool:
@@ -440,8 +456,8 @@ class GitHubCIStatusProvider(CIStatusProvider):
         while True:
             cmd = [
                 "gh", "api",
-                f"repos/{repo}/actions/runs?head_sha={sha}&per_page={per_page}&page={page}",
-                "--jq", "{total_count: .total_count, workflow_runs: [.workflow_runs[] | {id: .id, name: .name, head_sha: .head_sha, status: .status, conclusion: .conclusion}]}"
+                f"repos/{repo}/actions/runs?head_sha={sha}&event=pull_request&per_page={per_page}&page={page}",
+                "--jq", "{total_count: .total_count, workflow_runs: [.workflow_runs[] | {id: .id, name: .name, head_sha: .head_sha, status: .status, conclusion: .conclusion, event: .event}]}"
             ]
             try:
                 proc = await asyncio.create_subprocess_exec(

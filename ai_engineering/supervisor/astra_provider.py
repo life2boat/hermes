@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ai_engineering.contracts import EffectClass, StopBoundary
+from ai_engineering.control_plane.orchestrator import _STOP_BOUNDARY_RANK
 from ai_engineering.effective_policy import EffectivePolicyReport
 from ai_engineering.supervisor.autonomous_run import (
     AstraNextActionProposal,
@@ -101,6 +102,24 @@ def compute_astra_receipt_digest(receipt_data: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _most_restrictive_stop_boundary(*boundaries: Any) -> str:
+    best_rank = 999
+    best_boundary = "READ_ONLY"
+    for b in boundaries:
+        if not b:
+            continue
+        val = b.value if hasattr(b, "value") else str(b)
+        try:
+            sb = StopBoundary(val)
+            rank = _STOP_BOUNDARY_RANK.get(sb, 999)
+        except Exception:
+            rank = 999
+        if rank < best_rank:
+            best_rank = rank
+            best_boundary = val
+    return best_boundary
+
+
 def build_canonical_astra_request(
     run_id: str,
     state: SupervisorState,
@@ -111,8 +130,16 @@ def build_canonical_astra_request(
     effective_policy: EffectivePolicyReport | None = None,
     verified_result: VerifiedResult | None = None,
     context_pack_digest: str | None = None,
+    real_mode: bool = False,
 ) -> dict[str, Any]:
     """Builds canonical hermes.astra-request.v1 payload conforming to Section 15 contract."""
+    if real_mode:
+        if work_profile is None or effective_policy is None or intent is None:
+            raise AstraProviderUnavailableError(
+                "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE: WorkProfile, EffectivePolicy, and TaskIntent must be present in real mode",
+                code="ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE",
+            )
+
     b = budget or BudgetConfig()
     s = stats or {}
 
@@ -155,22 +182,60 @@ def build_canonical_astra_request(
                 "reason_code": getattr(gr, "reason_code", ""),
             })
 
-    # 5. Authority Boundary derived from TaskIntent + WorkProfile + EffectivePolicy
-    allowed_caps = list(intent.allowed_mutations) if (intent and hasattr(intent, "allowed_mutations")) else []
+    # 5. Authority Boundary derived from conservative intersection of TaskIntent + WorkProfile + EffectivePolicy.task_policy
+    # Forbidden mutations (UNION of all sources)
+    forbidden_set: set[str] = set()
+    if intent and hasattr(intent, "forbidden_mutations") and intent.forbidden_mutations:
+        forbidden_set.update(intent.forbidden_mutations)
+    if effective_policy and hasattr(effective_policy, "task_policy") and effective_policy.task_policy:
+        if hasattr(effective_policy.task_policy, "forbidden_mutations") and effective_policy.task_policy.forbidden_mutations:
+            forbidden_set.update(effective_policy.task_policy.forbidden_mutations)
+
+    # Allowed mutations (INTERSECTION of intent and effective policy, minus forbidden)
+    intent_allowed = list(intent.allowed_mutations) if (intent and hasattr(intent, "allowed_mutations")) else []
+    if effective_policy and hasattr(effective_policy, "task_policy") and effective_policy.task_policy:
+        ep_allowed = set(effective_policy.task_policy.allowed_mutations) if hasattr(effective_policy.task_policy, "allowed_mutations") else set()
+        if ep_allowed:
+            allowed_mutations = [m for m in intent_allowed if m in ep_allowed]
+        else:
+            allowed_mutations = intent_allowed
+    else:
+        allowed_mutations = intent_allowed
+
+    # Astra must never see forbidden scope as allowed!
+    allowed_mutations = [m for m in allowed_mutations if m not in forbidden_set]
+
+    # Stop boundary: most restrictive trusted boundary
+    boundaries = []
+    if intent and hasattr(intent, "stop_boundary"):
+        boundaries.append(intent.stop_boundary)
+    if effective_policy and hasattr(effective_policy, "task_policy") and effective_policy.task_policy:
+        if hasattr(effective_policy.task_policy, "stop_boundary"):
+            boundaries.append(effective_policy.task_policy.stop_boundary)
+    stop_b = _most_restrictive_stop_boundary(*boundaries) if boundaries else "LOCAL_DIFF"
+
+    # Effect classes: trusted WorkProfile restrictions plus any applicable effective-policy constraints
     if work_profile:
         allowed_effects = [e.value if hasattr(e, "value") else str(e) for e in work_profile.allowed_effect_classes]
-        forbidden_effects = [e.value if hasattr(e, "value") else str(e) for e in work_profile.forbidden_effect_classes]
+        forbidden_effects = set(e.value if hasattr(e, "value") else str(e) for e in work_profile.forbidden_effect_classes)
         production_allowed = work_profile.production_execution_allowed
-    else:
+    elif not real_mode:
         allowed_effects = ["READ_ONLY", "REPOSITORY_WRITE"]
-        forbidden_effects = []
+        forbidden_effects = set()
+        production_allowed = False
+    else:
+        allowed_effects = ["READ_ONLY"]
+        forbidden_effects = set()
         production_allowed = False
 
-    stop_b = (
-        intent.stop_boundary.value
-        if (intent and hasattr(intent.stop_boundary, "value"))
-        else (str(intent.stop_boundary) if intent else "LOCAL_DIFF")
-    )
+    # Apply effective policy forbidden mutations that correspond to effect classes
+    for fm in forbidden_set:
+        if fm in allowed_effects:
+            forbidden_effects.add(fm)
+
+    allowed_effects = [e for e in allowed_effects if e not in forbidden_effects]
+    forbidden_effects_list = sorted(list(forbidden_effects))
+    forbidden_mutations_list = sorted(list(forbidden_set))
 
     return {
         "schema_version": "hermes.astra-request.v1",
@@ -234,9 +299,11 @@ def build_canonical_astra_request(
             },
         },
         "authority_boundary": {
-            "allowed_capabilities": allowed_caps,
+            "allowed_capabilities": allowed_mutations,
+            "allowed_mutations": allowed_mutations,
+            "forbidden_mutations": forbidden_mutations_list,
             "allowed_effect_classes": allowed_effects,
-            "forbidden_effect_classes": forbidden_effects,
+            "forbidden_effect_classes": forbidden_effects_list,
             "stop_boundary": stop_b,
             "production_execution_allowed": production_allowed,
         },
@@ -351,7 +418,9 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         self.env = dict(env) if env is not None else None
         self.latest_receipt: AstraProviderReceipt | None = None
 
-        self.provider_executable = str(self.cmd[0])
+        from pathlib import Path
+        exe_raw = str(self.cmd[0]) if self.cmd else "unknown"
+        self.provider_executable = Path(exe_raw).name if exe_raw != "unknown" else "unknown"
         self.command_digest = compute_command_digest(self.cmd)
         self.argument_count = len(self.cmd)
 
@@ -413,6 +482,7 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         effective_policy: EffectivePolicyReport | None = None,
         verified_result: VerifiedResult | None = None,
         context_pack_digest: str | None = None,
+        real_mode: bool = False,
         **kwargs: Any,
     ) -> AstraNextActionProposal:
         req_data = build_canonical_astra_request(
@@ -425,6 +495,7 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
             effective_policy=effective_policy,
             verified_result=verified_result,
             context_pack_digest=context_pack_digest,
+            real_mode=real_mode,
         )
         req_bytes = json.dumps(req_data, indent=2).encode("utf-8")
 
@@ -455,7 +526,8 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 created_at_utc=created_at_utc,
             )
             raise AstraProviderUnavailableError(
-                f"Failed to spawn Astra command {self.cmd[0]}: {e}"
+                f"ASTRA_PROVIDER_UNAVAILABLE exit_code=-1 provider_executable={self.provider_executable}",
+                code="ASTRA_PROVIDER_UNAVAILABLE",
             ) from e
 
         try:
@@ -487,12 +559,12 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 created_at_utc=created_at_utc,
             )
             raise AstraProviderTimeoutError(
-                f"Astra command timed out after {self.timeout_seconds}s"
+                f"ASTRA_PROVIDER_TIMEOUT exit_code=-1 provider_executable={self.provider_executable}",
+                code="ASTRA_PROVIDER_TIMEOUT",
             ) from e
 
         duration_ms = int((time.monotonic() - start_time) * 1000)
         stdout_str = stdout_bytes.decode("utf-8", errors="replace")
-        stderr_str = stderr_bytes.decode("utf-8", errors="replace")
         stdout_digest = hashlib.sha256(stdout_bytes).hexdigest()
         stderr_digest = hashlib.sha256(stderr_bytes).hexdigest()
 
@@ -509,7 +581,8 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 created_at_utc=created_at_utc,
             )
             raise AstraProviderUnavailableError(
-                f"Astra command {self.cmd[0]} exited with non-zero code {proc.returncode}: {stderr_str}"
+                f"ASTRA_PROVIDER_UNAVAILABLE exit_code={proc.returncode} provider_executable={self.provider_executable}",
+                code="ASTRA_PROVIDER_UNAVAILABLE",
             )
 
         try:
@@ -520,14 +593,15 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 task_id=state.current_task_id,
                 proposal_id="",
                 action_type="",
-                exit_code=0,
+                exit_code=proc.returncode or 0,
                 stdout_digest=stdout_digest,
                 stderr_digest=stderr_digest,
                 duration_ms=duration_ms,
                 created_at_utc=created_at_utc,
             )
             raise AstraProviderInvalidJsonError(
-                f"Astra output is not valid JSON: {e}"
+                f"ASTRA_PROVIDER_INVALID_JSON exit_code={proc.returncode} provider_executable={self.provider_executable}",
+                code="ASTRA_PROVIDER_INVALID_JSON",
             ) from e
 
         try:

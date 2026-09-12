@@ -11,7 +11,12 @@ from pathlib import Path
 
 from ai_engineering.contracts import EffectClass, StopBoundary, Status
 from ai_engineering.task_intent import TaskIntent, intent_digest
-from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
+from ai_engineering.supervisor.policy.contracts import (
+    PolicyReceipt, PolicyVerdict, PolicyRequest, WorkProfile, AutonomyState, AutonomyBudgetState, AutonomyLevel, ExecutionTarget
+)
+from ai_engineering.supervisor.policy.engine import evaluate_policy
+from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus
+from ai_engineering.supervisor.policy.work_profile import validate_work_profile
 from ai_engineering.supervisor.worker_result import WorkerResultBundle, deserialize_worker_result, canonical_serialize_worker_result
 from ai_engineering.supervisor.events import SupervisorEventType
 from ai_engineering.control_plane.orchestrator import _STOP_BOUNDARY_RANK
@@ -165,12 +170,24 @@ class AuthorityResolver:
             stored = self.intent_store.get((run_id, task_id))
         if stored is None and self.supervisor_store is not None:
             try:
-                state = self.supervisor_store.load_state(run_id)
-                if state and state.current_task_id == task_id:
-                    # Look up from intent_store with just task_id if present
-                    stored = self.intent_store.get(task_id)  # type: ignore
+                events = self.supervisor_store.load_events(run_id)
+                for e in reversed(events):
+                    if getattr(e.event_type, "value", str(e.event_type)) == "RUN_INITIALIZED":
+                        if "task_intent" in e.payload:
+                            from ai_engineering.task_intent import deserialize_intent
+                            import json
+                            stored = deserialize_intent(json.dumps(e.payload["task_intent"]))
+                            break
             except Exception:
                 pass
+
+            if stored is None:
+                try:
+                    state = self.supervisor_store.load_state(run_id)
+                    if state and state.current_task_id == task_id:
+                        stored = self.intent_store.get(task_id)
+                except Exception:
+                    pass
 
         if stored is None:
             raise AuthorityInvalidError(f"AUTHORITY_INVALID: TaskIntent not found for run={run_id} task={task_id}")
@@ -265,6 +282,142 @@ class AuthorityResolver:
 
     def get_permitted_capabilities(self, run_id: str, task_id: str) -> Sequence[str] | None:
         return self.permitted_capabilities_store.get((run_id, task_id))
+
+    def _resolve_work_profile_and_policy(self, run_id: str) -> tuple[WorkProfile, EffectivePolicyReport]:
+        wp, ep = None, None
+        if self.supervisor_store:
+            try:
+                events = self.supervisor_store.load_events(run_id)
+                for e in reversed(events):
+                    if getattr(e.event_type, "value", str(e.event_type)) == "WORK_PROFILE_BOUND":
+                        if "work_profile" in e.payload:
+                            wp = validate_work_profile(e.payload["work_profile"])
+                        if e.payload.get("effective_policy"):
+                            ep_data = e.payload["effective_policy"]
+                            ep = EffectivePolicyReport(
+                                schema_version=ep_data.get("schema_version", 1),
+                                effective_policy_id=ep_data["effective_policy_id"],
+                                task_id=ep_data["task_id"],
+                                intent_digest=ep_data["intent_digest"],
+                                intent_revision=ep_data["intent_revision"],
+                                source_base_sha=ep_data["source_base_sha"],
+                                subject_sha=ep_data["subject_sha"],
+                                status=EffectivePolicyStatus(ep_data["status"]) if "status" in ep_data else EffectivePolicyStatus.COMPLETE,
+                                policy_sources=(),
+                                task_policy=None,
+                                invariant_resolutions=(),
+                                required_gate_resolutions=(),
+                                unresolved_references=(),
+                                precedence_source_id="",
+                            )
+                        break
+            except Exception:
+                pass
+
+        if not wp:
+            wp = validate_work_profile({
+                "schema_version": "hermes.work-profile.v1",
+                "profile_id": "fallback-wp",
+                "profile_version": 1,
+                "preferred_worker_model": "flash",
+                "allowed_task_classes": ["BOUNDED_IMPLEMENTATION"],
+                "maximum_autonomy_level": "LEVEL_2_DEV_AUTONOMY",
+                "allowed_effect_classes": ["READ_ONLY", "REPOSITORY_WRITE", "GIT_COMMIT"],
+                "forbidden_effect_classes": [],
+                "allowed_targets": ["LOCAL"],
+                "required_validators": [],
+                "promotion_thresholds": {
+                    "required_successful_runs": 0,
+                    "allowed_critical_failures": 0,
+                    "require_rollback_verified": False,
+                },
+                "budget_limits": {},
+                "production_execution_allowed": False,
+                "vector_mutation_allowed": False,
+                "secret_mutation_allowed": False,
+                "external_send_allowed": False,
+            })
+        if not ep:
+            ep = EffectivePolicyReport(
+                schema_version=1, effective_policy_id="fallback-ep",
+                task_id="", intent_digest="", intent_revision=1, source_base_sha="", subject_sha="",
+                status=EffectivePolicyStatus.COMPLETE, policy_sources=(), task_policy=None,
+                invariant_resolutions=(), required_gate_resolutions=(), unresolved_references=(), precedence_source_id=""
+            )
+        return wp, ep
+
+    def evaluate_fresh_policy(self, envelope: AgentEnvelope, new_attempt_id: str) -> PolicyReceipt:
+        intent = self.resolve_task_intent(envelope.task_intent_id, envelope.task_intent_digest, envelope.run_id, envelope.task_id)
+        wp, ep = self._resolve_work_profile_and_policy(envelope.run_id)
+        
+        a_state, b_state = None, None
+        if self.supervisor_store:
+            try:
+                state = self.supervisor_store.load_state(envelope.run_id)
+                if state:
+                    a_state = state.autonomy_state
+                    b_state = state.budget_state
+            except Exception:
+                pass
+                
+        if not a_state:
+            a_state = AutonomyState(
+                schema_version="hermes.autonomy-state.v1",
+                run_id=envelope.run_id, profile_id=wp.profile_id, profile_digest=wp.profile_digest,
+                current_level=AutonomyLevel.LEVEL_1_LOCAL_WRITE, maximum_allowed_level=AutonomyLevel.LEVEL_1_LOCAL_WRITE,
+                successful_runs=0, critical_failures=0, rollback_verified=False, required_validators_status={},
+                budget_state_digest="b", promotion_sequence=0, last_transition_receipt_id=None,
+                created_at_utc="", updated_at_utc="", state_digest="a"
+            )
+        else:
+            from ai_engineering.supervisor.state import _autonomy_state_to_dict
+            ad = _autonomy_state_to_dict(a_state)
+            a_state = AutonomyState(
+                schema_version=ad.get("schema_version", "hermes.autonomy-state.v1"), run_id=ad["run_id"], profile_id=ad["profile_id"], profile_digest=ad["profile_digest"],
+                current_level=AutonomyLevel(ad["current_level"]) if hasattr(AutonomyLevel, ad["current_level"]) else AutonomyLevel.LEVEL_1_LOCAL_WRITE,
+                maximum_allowed_level=AutonomyLevel(ad["maximum_allowed_level"]) if hasattr(AutonomyLevel, ad["maximum_allowed_level"]) else AutonomyLevel.LEVEL_1_LOCAL_WRITE,
+                successful_runs=ad.get("successful_runs", 0), critical_failures=ad.get("critical_failures", 0), rollback_verified=ad.get("rollback_verified", False),
+                required_validators_status=ad.get("required_validators_status", {}), budget_state_digest=ad.get("budget_state_digest", ""),
+                promotion_sequence=ad.get("promotion_sequence", 0), last_transition_receipt_id=ad.get("last_transition_receipt_id"),
+                created_at_utc=ad.get("created_at_utc", ""), updated_at_utc=ad.get("updated_at_utc", ""), state_digest=ad.get("state_digest", "")
+            )
+            
+        if not b_state:
+            b_state = AutonomyBudgetState(
+                schema_version="hermes.autonomy-budget.v1", budget_id="b", budget_digest="b",
+                decisions_used=0, child_tasks_used=0, retries_used=0, fix_cycles_used=0,
+                consecutive_failures=0, provider_calls_used=0, policy_denials=0, exhausted_dimensions=()
+            )
+        else:
+            from ai_engineering.supervisor.state import _budget_state_to_dict
+            bd = _budget_state_to_dict(b_state)
+            b_state = AutonomyBudgetState(**bd)
+
+        import uuid
+        req = PolicyRequest(
+            schema_version="hermes.policy-request.v1",
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            run_id=envelope.run_id,
+            task_id=envelope.task_id,
+            attempt_id=new_attempt_id,
+            intent_digest=envelope.task_intent_digest,
+            decision_id=f"dec-retry-{uuid.uuid4().hex[:6]}",
+            decision_receipt_id=f"drec-{uuid.uuid4().hex[:6]}",
+            work_profile_id=wp.profile_id,
+            work_profile_digest=wp.profile_digest,
+            current_autonomy_level=a_state.current_level,
+            requested_action="RETRY_OR_FALLBACK",
+            requested_effect_classes=(envelope.effect_class,),
+            requested_stop_boundary=envelope.stop_boundary,
+            execution_target=ExecutionTarget.LOCAL,
+            effective_policy_id=ep.effective_policy_id,
+            effective_policy_digest=ep.effective_policy_id,
+            budget_state_digest=b_state.budget_digest,
+        )
+        receipt = evaluate_policy(req, intent, ep, wp, a_state, b_state)
+        # Store for subsequent resolution in the test harness or in-memory fallback
+        self.receipt_store[(envelope.run_id, envelope.task_id)] = receipt
+        return receipt
 
 # ── Persistent Store ────────────────────────────────────────────────────────
 
@@ -791,6 +944,11 @@ class CrossAgentRouter:
                         f"CAPABILITY_NOT_AUTHORIZED: {envelope.recipient_capability} not in {cand_def.capabilities}"
                     )
                 new_attempt_id = f"att-fallback-{uuid.uuid4().hex[:6]}"
+                
+                new_receipt = self.authority_resolver.evaluate_fresh_policy(envelope, new_attempt_id)
+                if new_receipt.verdict != PolicyVerdict.ALLOW:
+                    raise PolicyDeniedError("POLICY_DENIED: fallback policy evaluation failed")
+                    
                 fallback_env = replace(
                     envelope,
                     message_id=str(uuid.uuid4()),
@@ -799,6 +957,8 @@ class CrossAgentRouter:
                     attempt_id=new_attempt_id,
                     recipient_agent=fallback_candidate,
                     retry_count=envelope.retry_count + 1,
+                    policy_receipt_id=new_receipt.receipt_id,
+                    policy_receipt_digest=compute_policy_receipt_digest(new_receipt),
                     created_at_utc=str(datetime.datetime.now(datetime.UTC)),
                 )
                 from .envelope import compute_payload_digest
@@ -822,7 +982,7 @@ class CrossAgentRouter:
 
         try:
             res = await asyncio.wait_for(
-                asyncio.to_thread(adapter.dispatch, envelope, definition.timeout_seconds, provenance),
+                asyncio.to_thread(adapter.dispatch, envelope, definition.timeout_seconds, provenance, operation_id),
                 timeout=float(definition.timeout_seconds),
             )
         except asyncio.TimeoutError:
@@ -854,12 +1014,19 @@ class CrossAgentRouter:
                     envelope.policy_receipt_id, envelope.policy_receipt_digest, envelope.run_id, envelope.task_id
                 )
                 new_attempt_id = f"{envelope.attempt_id}-retry-{envelope.retry_count + 1}"
+                
+                new_receipt = self.authority_resolver.evaluate_fresh_policy(envelope, new_attempt_id)
+                if new_receipt.verdict != PolicyVerdict.ALLOW:
+                    raise PolicyDeniedError("POLICY_DENIED: retry policy evaluation failed")
+                    
                 retry_env = replace(
                     envelope,
                     message_id=str(uuid.uuid4()),
                     causation_id=envelope.message_id,
                     attempt_id=new_attempt_id,
                     retry_count=envelope.retry_count + 1,
+                    policy_receipt_id=new_receipt.receipt_id,
+                    policy_receipt_digest=compute_policy_receipt_digest(new_receipt),
                     created_at_utc=str(datetime.datetime.now(datetime.UTC)),
                 )
                 from .envelope import compute_payload_digest

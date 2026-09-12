@@ -18,7 +18,7 @@ class AgentTransport(Protocol):
     def health(self) -> bool: ...
 
 class AgentAdapter(Protocol):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle: ...
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any], operation_id: str) -> WorkerResultBundle: ...
     def cancel(self, operation_id: str) -> Any: ...
     def health(self) -> bool: ...
 
@@ -26,7 +26,7 @@ class BaseAgentAdapter:
     def __init__(self, transport: Optional[AgentTransport] = None) -> None:
         self.transport = transport
 
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle:
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any], operation_id: str) -> WorkerResultBundle:
         if not self.transport or not self.transport.health():
             raise AgentTransportUnavailableError("AGENT_TRANSPORT_UNAVAILABLE")
 
@@ -34,6 +34,7 @@ class BaseAgentAdapter:
             raise ValueError("SOURCE_PROVENANCE_UNRESOLVED")
 
         request = {
+            "operation_id": operation_id,
             "message_id": envelope.message_id,
             "worker_id": envelope.recipient_agent,
             "correlation_id": envelope.correlation_id,
@@ -57,11 +58,13 @@ class BaseAgentAdapter:
         return self.transport.dispatch(request, timeout)
 
     def cancel(self, operation_id: str) -> bool:
-        if self.transport:
-            res = self.transport.cancel(operation_id)
-            if isinstance(res, bool):
-                return res
+        if not self.transport:
             return True
+        res = self.transport.cancel(operation_id)
+        if hasattr(self.transport, "is_running"):
+            return not self.transport.is_running(operation_id)
+        if isinstance(res, bool):
+            return res
         return True
 
     def is_running(self, operation_id: str) -> bool:
@@ -79,12 +82,12 @@ class CodexAdapter(BaseAgentAdapter):
     pass
 
 class ComputerUseAdapter(BaseAgentAdapter):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle:
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any], operation_id: str) -> WorkerResultBundle:
         if not envelope.policy_receipt_id or not envelope.policy_receipt_digest:
             raise PolicyDeniedError("POLICY_DENIED")
         if not self.transport or not self.transport.health():
             raise ComputerUseTransportUnavailableError("COMPUTER_USE_TRANSPORT_UNAVAILABLE")
-        return super().dispatch(envelope, timeout, provenance)
+        return super().dispatch(envelope, timeout, provenance, operation_id)
 
 class AstraAdapter(BaseAgentAdapter):
     pass

@@ -155,7 +155,7 @@ class SupervisorLoop:
             task_id=intent.task_id,
             attempt_id=attempt_id,
             intent_digest=idg,
-            payload={"root_goal": root_goal, "root_goal_id": root_goal_id},
+            payload={"root_goal": root_goal, "root_goal_id": root_goal_id, "task_intent": __import__("dataclasses").asdict(intent)},
             created_at_utc=created_at_utc,
         )
         self._store.save_event(event)
@@ -276,6 +276,8 @@ class SupervisorLoop:
                 "initial_level": level.value,
                 "budget_digest": b_digest,
                 "autonomy_state_digest": a_digest,
+                "work_profile": __import__('dataclasses').asdict(work_profile),
+                "effective_policy": __import__('dataclasses').asdict(effective_policy) if effective_policy else None,
             },
             created_at_utc=ts,
         )

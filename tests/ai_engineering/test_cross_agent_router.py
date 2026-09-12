@@ -1050,7 +1050,7 @@ async def test_32_computer_use_requires_valid_policy_receipt(tmp_path: Any) -> N
     )
     provenance = resolver.get_provenance(env_healthy.run_id, env_healthy.task_id)
     with pytest.raises(ComputerUseTransportUnavailableError, match="COMPUTER_USE_TRANSPORT_UNAVAILABLE"):
-        adapter.dispatch(env_healthy, timeout=2, provenance=provenance)
+        adapter.dispatch(env_healthy, timeout=2, provenance=provenance, operation_id="op-1")
 
 @pytest.mark.asyncio
 async def test_33_provenance_mismatch_fails_closed(tmp_path: Any) -> None:

@@ -15,7 +15,7 @@ class AgentTransport(Protocol):
     def health(self) -> bool: ...
 
 class AgentAdapter(Protocol):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int) -> WorkerResultBundle: ...
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle: ...
     def cancel(self, correlation_id: str) -> None: ...
     def health(self) -> bool: ...
 
@@ -23,9 +23,11 @@ class BaseAgentAdapter:
     def __init__(self, transport: Optional[AgentTransport] = None):
         self.transport = transport
         
-    def dispatch(self, envelope: AgentEnvelope, timeout: int) -> WorkerResultBundle:
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle:
         if not self.transport or not self.transport.health():
             raise AgentTransportUnavailableError(f"AGENT_TRANSPORT_UNAVAILABLE")
+        
+        prov = provenance or {}
         
         request = {
             "message_id": envelope.message_id,
@@ -33,9 +35,9 @@ class BaseAgentAdapter:
             "run_id": envelope.run_id,
             "task_id": envelope.task_id,
             "attempt_id": envelope.attempt_id,
-            "repository": "life2boat/hermes",
-            "canonical_remote": "github",
-            "base_sha": "5bf77a9fde5caf9435fb9f61820f5c09b23258c5",
+            "repository": prov.get("repository", "life2boat/hermes"),
+            "canonical_remote": prov.get("canonical_remote", "github"),
+            "base_sha": prov.get("base_sha", "5bf77a9fde5caf9435fb9f61820f5c09b23258c5"),
             "objective": envelope.payload.get("objective", ""),
             "allowed_scope": envelope.payload.get("allowed_scope", []),
             "task_intent_id": envelope.task_intent_id,
@@ -60,11 +62,11 @@ class AntigravityAdapter(BaseAgentAdapter): pass
 class CodexAdapter(BaseAgentAdapter): pass
 
 class ComputerUseAdapter(BaseAgentAdapter):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int) -> WorkerResultBundle:
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle:
         if not envelope.policy_receipt_id:
             raise PolicyDeniedError("POLICY_DENIED")
         if not self.transport or not self.transport.health():
             raise AgentTransportUnavailableError("COMPUTER_USE_TRANSPORT_UNAVAILABLE")
-        return super().dispatch(envelope, timeout)
+        return super().dispatch(envelope, timeout, provenance)
 
 class AstraAdapter(BaseAgentAdapter): pass

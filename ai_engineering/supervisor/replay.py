@@ -575,9 +575,33 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             event_sequence=event.sequence,
         )
 
-    elif et == SupervisorEventType.ASTRA_PROPOSAL_CREATED:
+    elif et in (
+        SupervisorEventType.ASTRA_PROPOSAL_CREATED,
+        SupervisorEventType.ASTRA_REQUESTED,
+        SupervisorEventType.ASTRA_PROVIDER_FAILED,
+        SupervisorEventType.CI_WAIT_STARTED,
+        SupervisorEventType.CI_STATUS_OBSERVED,
+    ):
         return replace(
             state,
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+        )
+
+    elif et == SupervisorEventType.CI_GREEN:
+        return replace(
+            state,
+            ci_state="PASS",
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+        )
+
+    elif et == SupervisorEventType.CI_WAIT_TIMEOUT:
+        return replace(
+            state,
+            ci_state="TIMEOUT",
             updated_at_utc=event.created_at_utc,
             state_revision=event.state_revision,
             event_sequence=event.sequence,

@@ -41,16 +41,28 @@ from ai_engineering.effective_policy import (
     TaskPolicyAttribution,
 )
 
+from ai_engineering.supervisor.astra_provider import ConfiguredAstraProposalProvider
+from ai_engineering.supervisor.ci_provider import (
+    GitHubCIStatusProvider,
+    REQUIRED_TECHNICAL_CHECKS,
+)
+
 class LocalCIProvider(CIStatusProvider):
     async def wait_for_ci(self, run_id: str, sha: str) -> bool:
         return True
 
 async def async_main():
-    parser = argparse.ArgumentParser(description="Hermes Autonomous Run CLI (Task 7.6)")
+    parser = argparse.ArgumentParser(description="Hermes Autonomous Run CLI (Task 7.7)")
     parser.add_argument("--intent", required=True, help="Path to TaskIntent JSON file")
     parser.add_argument("--state-dir", required=True, help="Path to persistent state directory")
     parser.add_argument("--run-id", required=True, help="Unique Run ID")
     parser.add_argument("--worker-cmd", nargs='+', required=True, help="Worker command array (e.g. codex)")
+    parser.add_argument("--astra-cmd", nargs='+', default=None, help="Command array for Astra proposal provider")
+    parser.add_argument("--github-repository", default="life2boat/hermes", help="GitHub repository (owner/repo)")
+    parser.add_argument("--ci-mode", choices=["local", "github"], default="local", help="CI provider mode")
+    parser.add_argument("--ci-required-check", nargs='*', default=None, help="Required CI check names")
+    parser.add_argument("--ci-timeout", type=float, default=600.0, help="CI wait timeout in seconds")
+    parser.add_argument("--ci-poll-interval", type=float, default=10.0, help="CI poll interval in seconds")
     args = parser.parse_args()
 
     intent_text = Path(args.intent).read_text(encoding="utf-8")
@@ -172,12 +184,26 @@ async def async_main():
         else str(intent.stop_boundary)
     )
 
-    astra_provider = ScriptedAstraProposalProvider(
-        target_worker="codex",
-        target_capability=cap,
-        expected_effect_class=eff_class,
-        expected_stop_boundary=stop_b,
-    )
+    if args.astra_cmd:
+        astra_provider: AstraProposalProvider = ConfiguredAstraProposalProvider(args.astra_cmd)
+    else:
+        astra_provider = ScriptedAstraProposalProvider(
+            target_worker="codex",
+            target_capability=cap,
+            expected_effect_class=eff_class,
+            expected_stop_boundary=stop_b,
+        )
+
+    if args.ci_mode == "github":
+        req_checks = tuple(args.ci_required_check) if args.ci_required_check else REQUIRED_TECHNICAL_CHECKS
+        ci_provider: CIStatusProvider = GitHubCIStatusProvider(
+            repository=args.github_repository,
+            required_checks=req_checks,
+            timeout_seconds=args.ci_timeout,
+            poll_interval_seconds=args.ci_poll_interval,
+        )
+    else:
+        ci_provider = LocalCIProvider()
 
     coord = AutonomousRunCoordinator(
         loop=loop,
@@ -187,7 +213,7 @@ async def async_main():
         budget=budget,
         run_id=args.run_id,
         astra_provider=astra_provider,
-        ci_provider=LocalCIProvider(),
+        ci_provider=ci_provider,
         evidence_root=args.state_dir,
     )
 

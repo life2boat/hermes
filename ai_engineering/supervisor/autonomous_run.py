@@ -3,8 +3,9 @@ import hashlib
 import uuid
 import datetime
 import asyncio
+import inspect
 from enum import Enum
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from ai_engineering.supervisor.state import SupervisorState, SupervisorPhase, _fail
@@ -74,10 +75,12 @@ class AutonomousRunReceipt:
     started_at: str
     completed_at: str
     receipt_digest: str = ""
+    astra_receipts: list[str] = field(default_factory=list)
+    ci_receipts: list[str] = field(default_factory=list)
 
 
 class AstraProposalProvider:
-    async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
+    async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs: Any) -> AstraNextActionProposal:
         raise NotImplementedError
 
 class ScriptedAstraProposalProvider(AstraProposalProvider):
@@ -96,7 +99,7 @@ class ScriptedAstraProposalProvider(AstraProposalProvider):
         self.expected_stop_boundary = expected_stop_boundary
         self.step = 0
 
-    async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
+    async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs: Any) -> AstraNextActionProposal:
         if state.latest_verified_result_id:
             return AstraNextActionProposal(
                 schema_version="hermes.astra-next-action.v1",
@@ -134,7 +137,7 @@ class ScriptedAstraProposalProvider(AstraProposalProvider):
         )
 
 class CIStatusProvider:
-    async def wait_for_ci(self, run_id: str, sha: str) -> bool:
+    async def wait_for_ci(self, run_id: str, sha: str, **kwargs: Any) -> Any:
         raise NotImplementedError
 
 class AutonomousRunCoordinator:
@@ -174,12 +177,19 @@ class AutonomousRunCoordinator:
         self.policy_receipts: list[str] = []
         self.routing_receipts: list[str] = []
         self.verified_results: list[str] = []
+        self.astra_receipts: list[str] = []
+        self.ci_receipts: list[str] = []
 
         for ev in events:
             ev_type = getattr(ev.event_type, "value", str(ev.event_type))
             if ev_type == "ASTRA_PROPOSAL_CREATED":
                 self.provider_calls += 1
                 proposals_count += 1
+                if ev.payload and ev.payload.get("receipt_id"):
+                    self.astra_receipts.append(ev.payload["receipt_id"])
+            elif ev_type == "CI_STATUS_OBSERVED":
+                if ev.payload and ev.payload.get("receipt_id"):
+                    self.ci_receipts.append(ev.payload["receipt_id"])
             elif ev_type == "DISPATCH_SENT":
                 self.child_tasks += 1
                 if ev.payload and ev.payload.get("routing_receipt_id"):
@@ -263,7 +273,12 @@ class AutonomousRunCoordinator:
 
             self.iterations += 1
 
-            proposal = await self._request_proposal(state)
+            try:
+                proposal = await self._request_proposal(state)
+            except Exception as e:
+                code = getattr(e, "code", type(e).__name__)
+                terminal_reason = f"ASTRA_PROVIDER_FAILED_{code}"
+                break
 
             if proposal.action_type == NextActionType.STOP_SUCCESS:
                 if not state.latest_verified_result_id:
@@ -302,15 +317,109 @@ class AutonomousRunCoordinator:
                 break
 
             if proposal.action_type == NextActionType.WAIT_FOR_CI:
-                terminal_reason = "CI_PROVIDER_UNAVAILABLE"
-                break
+                events = self.store.load_events(self.run_id)
+                from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                start_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.CI_WAIT_STARTED,
+                    state_revision=state.state_revision,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={"sha": state.current_base_sha},
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                )
+                self.store.save_event(start_ev)
+
+                try:
+                    ci_res = await self.ci_provider.wait_for_ci(self.run_id, state.current_base_sha)
+                except Exception as e:
+                    code = getattr(e, "code", type(e).__name__)
+                    terminal_reason = f"CI_PROVIDER_FAILED_{code}"
+                    break
+
+                if hasattr(ci_res, "overall_status"):
+                    overall = ci_res.overall_status
+                elif isinstance(ci_res, bool):
+                    overall = "SUCCESS" if ci_res else "FAILURE"
+                else:
+                    overall = str(ci_res)
+
+                ci_receipt = getattr(self.ci_provider, "latest_receipt", None)
+                ci_receipt_id = ci_receipt.receipt_id if ci_receipt else ""
+                if ci_receipt_id:
+                    self.ci_receipts.append(ci_receipt_id)
+
+                events = self.store.load_events(self.run_id)
+                obs_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.CI_STATUS_OBSERVED,
+                    state_revision=state.state_revision,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "sha": state.current_base_sha,
+                        "overall_status": overall,
+                        "receipt_id": ci_receipt_id,
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                )
+                self.store.save_event(obs_ev)
+
+                if overall == "SUCCESS":
+                    events = self.store.load_events(self.run_id)
+                    green_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.CI_GREEN,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"sha": state.current_base_sha},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(green_ev)
+                    continue
+                elif overall == "TIMED_OUT":
+                    events = self.store.load_events(self.run_id)
+                    to_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.CI_WAIT_TIMEOUT,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"sha": state.current_base_sha},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(to_ev)
+                    terminal_reason = "CI_WAIT_TIMEOUT"
+                    break
+                elif overall == "SHA_MISMATCH":
+                    terminal_reason = "CI_SHA_MISMATCH"
+                    break
+                elif overall == "MISSING":
+                    terminal_reason = "CI_REQUIRED_CHECK_MISSING"
+                    break
+                else:
+                    terminal_reason = "CI_FAILED"
+                    break
 
             if proposal.action_type == NextActionType.CREATE_PR:
-                terminal_reason = "UNSUPPORTED"
+                terminal_reason = "PR_PROVIDER_UNAVAILABLE"
                 break
 
             if proposal.action_type == NextActionType.MERGE_IF_GREEN:
-                terminal_reason = "BLOCKED"
+                terminal_reason = "MERGE_PROVIDER_UNAVAILABLE"
                 break
 
             decision = self._convert_proposal_to_decision(proposal, state)
@@ -497,7 +606,9 @@ class AutonomousRunCoordinator:
             terminal_reason=terminal_reason,
             started_at=started_at,
             completed_at=completed_at,
-            receipt_digest=""
+            receipt_digest="",
+            astra_receipts=self.astra_receipts,
+            ci_receipts=self.ci_receipts,
         )
 
         digest_str = json.dumps({
@@ -517,12 +628,86 @@ class AutonomousRunCoordinator:
 
     async def _request_proposal(self, state: SupervisorState) -> AstraNextActionProposal:
         self.provider_calls += 1
-        if self._mock_astra_proposal:
-            proposal = self._mock_astra_proposal
-        else:
-            proposal = await self.astra_provider.request_proposal(self.run_id, state)
 
         from ai_engineering.supervisor.events import create_event, SupervisorEventType
+        events = self.store.load_events(self.run_id)
+        req_ev = create_event(
+            run_id=self.run_id,
+            sequence=len(events) + 1,
+            previous_event_digest=events[-1].event_digest if events else None,
+            event_type=SupervisorEventType.ASTRA_REQUESTED,
+            state_revision=state.state_revision,
+            task_id=state.current_task_id,
+            attempt_id=state.current_attempt_id,
+            intent_digest=state.current_intent_digest,
+            payload={"run_id": self.run_id, "task_id": state.current_task_id},
+            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        self.store.save_event(req_ev)
+
+        intent = self.loop._intents.get(state.current_task_id) or self.loop._intents.get(self.run_id)
+        if intent is None:
+            events = self.store.load_events(self.run_id)
+            from ai_engineering.task_intent import deserialize_intent
+            for e in reversed(events):
+                ev_type = getattr(e.event_type, "value", str(e.event_type))
+                if ev_type in ("RUN_INITIALIZED", "NEXT_TASK_GENERATED", "ATTEMPT_INCREMENTED"):
+                    if "task_intent" in e.payload:
+                        intent = deserialize_intent(json.dumps(e.payload["task_intent"]))
+                        self.loop._intents[intent.task_id] = intent
+                        self.loop._intents[self.run_id] = intent
+                        break
+
+        stats = {
+            "iterations": self.iterations,
+            "child_tasks": self.child_tasks,
+            "retries": self.retries,
+            "fix_cycles": self.fix_cycles,
+            "consecutive_failures": self.consecutive_failures,
+            "provider_calls": self.provider_calls,
+        }
+
+        try:
+            if self._mock_astra_proposal:
+                proposal = self._mock_astra_proposal
+            else:
+                try:
+                    sig = inspect.signature(self.astra_provider.request_proposal)
+                    has_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if has_kw or "intent" in sig.parameters:
+                        proposal = await self.astra_provider.request_proposal(
+                            self.run_id, state, intent=intent, budget=self.budget, stats=stats
+                        )
+                    else:
+                        proposal = await self.astra_provider.request_proposal(self.run_id, state)
+                except (TypeError, ValueError):
+                    proposal = await self.astra_provider.request_proposal(self.run_id, state)
+        except Exception as e:
+            events = self.store.load_events(self.run_id)
+            fail_ev = create_event(
+                run_id=self.run_id,
+                sequence=len(events) + 1,
+                previous_event_digest=events[-1].event_digest if events else None,
+                event_type=SupervisorEventType.ASTRA_PROVIDER_FAILED,
+                state_revision=state.state_revision,
+                task_id=state.current_task_id,
+                attempt_id=state.current_attempt_id,
+                intent_digest=state.current_intent_digest,
+                payload={
+                    "error_type": type(e).__name__,
+                    "error_code": getattr(e, "code", type(e).__name__),
+                    "error_message": str(e),
+                },
+                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+            )
+            self.store.save_event(fail_ev)
+            raise
+
+        receipt = getattr(self.astra_provider, "latest_receipt", None)
+        receipt_id = receipt.receipt_id if receipt else ""
+        if receipt_id:
+            self.astra_receipts.append(receipt_id)
+
         events = self.store.load_events(self.run_id)
         ev = create_event(
             run_id=self.run_id,
@@ -533,7 +718,11 @@ class AutonomousRunCoordinator:
             task_id=state.current_task_id,
             attempt_id=state.current_attempt_id,
             intent_digest=state.current_intent_digest,
-            payload={"proposal_id": proposal.proposal_id},
+            payload={
+                "proposal_id": proposal.proposal_id,
+                "action_type": getattr(proposal.action_type, "value", str(proposal.action_type)),
+                "receipt_id": receipt_id,
+            },
             created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         self.store.save_event(ev)

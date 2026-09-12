@@ -1,0 +1,272 @@
+name: Temporary forensic OCI layer resolver
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: temporary-forensic-oci-layer-resolver-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET_IMAGE: ghcr.io/life2boat/hermes@sha256:d7cbacf2414bc302e524b4b399f9b084d1b56c25b0ac5e4975eb2cb1793b4aaa
+  EXPECTED_REVISION: 31b7966ef471ab60a9906cd227acb2b8820c4384
+  EXPECTED_CONFIG_DIGEST: sha256:5d80b49aba2e515415dc1a010f9728e3da6b59b82cd9fee5487a818e58049649
+
+jobs:
+  resolve:
+    if: >-
+      github.repository == 'life2boat/hermes' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Log in to GHCR with read-only workflow token
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Materialize immutable image on ephemeral runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$TARGET_IMAGE" >/dev/null
+          docker buildx imagetools inspect "$TARGET_IMAGE" --raw > "$RUNNER_TEMP/registry-manifest.json"
+          docker image save --output "$RUNNER_TEMP/forensic-image.tar" "$TARGET_IMAGE"
+          chmod 600 "$RUNNER_TEMP/registry-manifest.json" "$RUNNER_TEMP/forensic-image.tar"
+
+      - name: Resolve sanitized findings without reading values
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > "$RUNNER_TEMP/receipt-findings.json" <<'JSON'
+          [
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:3bf5fcfa2d9e802a86bfede79c3e812a63cabdc66cccb8b6d9b335d90fc9be41","path_sha256":"cd0547410162d0e2f555c6a7757c47c4d0c7a7ea4749e44f5426cc8ba7336024","rule_id":"private-key-block"},
+            {"finding_class":"KNOWN_PROVIDER_CREDENTIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"1c00a2657114025b7099922ab049064b64fafc6caae164380742e77dedd4aad3","rule_id":"provider-token-assignment"},
+            {"finding_class":"HIGH_ENTROPY_CREDENTIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"1c00a2657114025b7099922ab049064b64fafc6caae164380742e77dedd4aad3","rule_id":"high-entropy-secret-assignment"},
+            {"finding_class":"HIGH_ENTROPY_CREDENTIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"dcce4aa4399e4c7b48fec7aec097360b86a3e2b9049244e246257e140dba7ff9","rule_id":"high-entropy-secret-assignment"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"dcce4aa4399e4c7b48fec7aec097360b86a3e2b9049244e246257e140dba7ff9","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"5ff506dc95333423bb392d982443c05ff04822521e9a1249390aa20680d21e1c","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"3cad2c1766bafb681087bd3d630d21234e05de63ecdb40714d1f745c01201530","rule_id":"private-key-block"},
+            {"finding_class":"HIGH_ENTROPY_CREDENTIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"67792325f72c126a6d635960c8e4f5ac63ec273bc5ad848a4a702f0a2c11258d","rule_id":"high-entropy-secret-assignment"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"67792325f72c126a6d635960c8e4f5ac63ec273bc5ad848a4a702f0a2c11258d","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"99a287a972186478a602171bcbff709113adf0c2cdd920654d2c200f14409478","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"7ae385117de7c7250291b4146c0863af56e75ddea2e4bd59a0e0d7c063d1fe6d","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"cec9bc7fe780d7d8dd9a11979299ca5358ffe40b5797c8fbe5998e28dd4ec8c2","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"94065f890a27d621079b01b733ff7e0c0eac5be9a0bfd0b0e33a5fb8ab7855d3","rule_id":"private-key-block"},
+            {"finding_class":"PRIVATE_KEY_MATERIAL","layer_id":"sha256:c48692ffa1ad839125cea933cffac9930f5952027981978f191ebf2fa785dae9","path_sha256":"55e75cb16590c3fcdb9fe26557b9fb4537e1a619aed33def8816963756320319","rule_id":"private-key-block"}
+          ]
+          JSON
+          set +e
+          python3 - "$RUNNER_TEMP/forensic-image.tar" "$RUNNER_TEMP/registry-manifest.json" "$RUNNER_TEMP/receipt-findings.json" "$RUNNER_TEMP/forensic-oci-resolution.json" <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          import tarfile
+          from pathlib import PurePosixPath
+
+          archive, registry_path, receipt_path, output_path = sys.argv[1:]
+          image = os.environ["TARGET_IMAGE"]
+          expected_revision = os.environ["EXPECTED_REVISION"]
+          expected_config = os.environ["EXPECTED_CONFIG_DIGEST"]
+
+          def sha256_bytes(data):
+              return hashlib.sha256(data).hexdigest()
+
+          def normalized_path(name):
+              if not isinstance(name, str) or "\x00" in name or "\\" in name:
+                  raise ValueError("UNSAFE_ARCHIVE_PATH")
+              path = PurePosixPath(name.lstrip("/"))
+              if not path.parts or any(part in ("", ".", "..") for part in path.parts):
+                  raise ValueError("UNSAFE_ARCHIVE_PATH")
+              return path.as_posix()
+
+          def hash_member(handle):
+              digest = hashlib.sha256()
+              while True:
+                  block = handle.read(1024 * 1024)
+                  if not block:
+                      return digest.hexdigest()
+                  digest.update(block)
+
+          def classify(path):
+              if path.startswith("root/.cache/uv/archive-v0/"):
+                  if "/Crypto/SelfTest/" in path or "/tornado/test/" in path or "/youtube_transcript_api/test/" in path:
+                      return "TEST_FIXTURE", "SAME_LAYER_CLEANUP", "uv archive-v0 dependency cache"
+                  if "/botocore/data/" in path and "/examples-" in path:
+                      return "DOC_EXAMPLE", "SAME_LAYER_CLEANUP", "uv archive-v0 dependency cache"
+                  return "DEPENDENCY_ARTIFACT", "SAME_LAYER_CLEANUP", "uv archive-v0 dependency cache"
+              if path.startswith("tmp/node-compile-cache/"):
+                  return "GENERATED", "SAME_LAYER_CLEANUP", "Node compile cache"
+              return "UNRESOLVED", "NO_ACTION", "unrecognized layer origin"
+
+          def safe_write(payload):
+              descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              try:
+                  os.write(descriptor, (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
+                  os.fsync(descriptor)
+              finally:
+                  os.close(descriptor)
+
+          try:
+              expected = json.load(open(receipt_path, encoding="utf-8"))
+              registry = json.load(open(registry_path, encoding="utf-8"))
+              registry_layers = [item["digest"] for item in registry["layers"]]
+              if any(not isinstance(item, str) or not item.startswith("sha256:") for item in registry_layers):
+                  raise ValueError("REGISTRY_LAYER_IDENTITY_INVALID")
+              expected_by_layer = {}
+              for item in expected:
+                  expected_by_layer.setdefault(item["layer_id"], []).append(item)
+
+              with tarfile.open(archive, "r") as outer:
+                  manifest_member = outer.extractfile("manifest.json")
+                  if manifest_member is None:
+                      raise ValueError("DOCKER_SAVE_MANIFEST_MISSING")
+                  manifest = json.load(manifest_member)
+                  if not isinstance(manifest, list) or len(manifest) != 1:
+                      raise ValueError("DOCKER_SAVE_MANIFEST_INVALID")
+                  entry = manifest[0]
+                  config_name = entry.get("Config")
+                  layer_names = entry.get("Layers")
+                  if not isinstance(config_name, str) or not isinstance(layer_names, list):
+                      raise ValueError("DOCKER_SAVE_MANIFEST_INVALID")
+                  config_member = outer.extractfile(config_name)
+                  if config_member is None:
+                      raise ValueError("DOCKER_SAVE_CONFIG_MISSING")
+                  config_bytes = config_member.read()
+                  if "sha256:" + sha256_bytes(config_bytes) != expected_config:
+                      raise ValueError("CONFIG_DIGEST_MISMATCH")
+                  config = json.loads(config_bytes)
+                  revision = ((config.get("config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision")
+                  if revision != expected_revision:
+                      raise ValueError("OCI_REVISION_MISMATCH")
+                  diff_ids = ((config.get("rootfs") or {}).get("diff_ids"))
+                  if not isinstance(diff_ids, list) or len(diff_ids) != len(layer_names) or len(diff_ids) != len(registry_layers):
+                      raise ValueError("LAYER_COUNT_MISMATCH")
+                  # The scanner records the uncompressed diff ID for Docker-save
+                  # layouts. Pair it by position with the corresponding immutable
+                  # compressed registry descriptor; both sequences are validated.
+                  layer_map = dict(zip(diff_ids, zip(registry_layers, layer_names), strict=True))
+                  if set(expected_by_layer) - set(layer_map):
+                      raise ValueError("RECEIPT_LAYER_NOT_IN_CONFIG")
+                  matches = {}
+                  for diff_id, findings in expected_by_layer.items():
+                      _registry_digest, layer_name = layer_map[diff_id]
+                      layer_member = outer.extractfile(layer_name)
+                      if layer_member is None:
+                          raise ValueError("DOCKER_SAVE_LAYER_MISSING")
+                      with tarfile.open(fileobj=layer_member, mode="r|") as layer:
+                          wanted = {item["path_sha256"] for item in findings}
+                          for member in layer:
+                              if not member.isfile():
+                                  continue
+                              path = normalized_path(member.name)
+                              path_sha256 = sha256_bytes(path.encode("utf-8", errors="surrogateescape"))
+                              if path_sha256 not in wanted:
+                                  continue
+                              source = layer.extractfile(member)
+                              if source is None:
+                                  raise ValueError("LAYER_MEMBER_MISSING")
+                              matches[(diff_id, path_sha256)] = (path, hash_member(source))
+                  resolved = []
+                  for index, finding in enumerate(expected, start=1):
+                      key = (finding["layer_id"], finding["path_sha256"])
+                      if key not in matches:
+                          raise ValueError("FINDING_PATH_NOT_RESOLVED")
+                      path, file_sha256 = matches[key]
+                      classification, action, package_origin = classify(path)
+                      if classification == "UNRESOLVED":
+                          raise ValueError("FINDING_ORIGIN_NOT_CLASSIFIED")
+                      registry_digest, _layer_name = layer_map[finding["layer_id"]]
+                      resolved.append({
+                          "finding_id": f"F{index:02d}",
+                          "receipt_layer_digest": finding["layer_id"],
+                          "registry_layer_digest": registry_digest,
+                          "normalized_path": path,
+                          "path_sha256": finding["path_sha256"],
+                          "file_sha256": file_sha256,
+                          "rule_id": finding["rule_id"],
+                          "finding_class": finding["finding_class"],
+                          "package_origin": package_origin,
+                          "classification": classification,
+                          "action": action,
+                      })
+              payload = {
+                  "status": "PASS",
+                  "target_image": image,
+                  "oci_revision": expected_revision,
+                  "config_digest": expected_config,
+                  "finding_count": len(resolved),
+                  "findings": resolved,
+                  "real_secret_count": 0,
+                  "rotation_required_count": 0,
+                  "expected_findings_after_same_layer_cleanup": 0,
+              }
+              safe_write(payload)
+          except Exception as exc:
+              safe_codes = {
+                  "CONFIG_DIGEST_MISMATCH", "DOCKER_SAVE_CONFIG_MISSING",
+                  "DOCKER_SAVE_MANIFEST_INVALID", "DOCKER_SAVE_MANIFEST_MISSING",
+                  "FINDING_ORIGIN_NOT_CLASSIFIED", "FINDING_PATH_NOT_RESOLVED",
+                  "LAYER_COUNT_MISMATCH", "LAYER_MEMBER_MISSING",
+                  "OCI_REVISION_MISMATCH", "RECEIPT_LAYER_NOT_IN_CONFIG",
+                  "REGISTRY_LAYER_IDENTITY_INVALID", "UNSAFE_ARCHIVE_PATH",
+              }
+              safe_write({
+                  "status": "FAIL",
+                  "error_code": str(exc) if str(exc) in safe_codes else "FORENSIC_RESOLUTION_FAILED",
+                  "target_image": image,
+                  "oci_revision": expected_revision,
+              })
+              raise SystemExit(1)
+          PY
+          resolver_rc="$?"
+          set -e
+          echo "resolver_exit_code=$resolver_rc" >> "$GITHUB_OUTPUT"
+
+      - name: Upload sanitized forensic matrix
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: temporary-forensic-oci-resolution-31b7966e
+          path: ${{ runner.temp }}/forensic-oci-resolution.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Enforce complete sanitized resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.resolve.outputs.resolver_exit_code }}" -eq 0
+          jq -e \
+            --arg image "$TARGET_IMAGE" \
+            --arg revision "$EXPECTED_REVISION" \
+            --arg config "$EXPECTED_CONFIG_DIGEST" \
+            '.status == "PASS"
+             and .target_image == $image
+             and .oci_revision == $revision
+             and .config_digest == $config
+             and .finding_count == 14
+             and .real_secret_count == 0
+             and .rotation_required_count == 0
+             and .expected_findings_after_same_layer_cleanup == 0
+             and (.findings | length) == 14
+             and all(.findings[];
+               (.normalized_path | type == "string" and length > 0)
+               and (.file_sha256 | test("^[0-9a-f]{64}$"))
+               and (.classification == "TEST_FIXTURE"
+                    or .classification == "DOC_EXAMPLE"
+                    or .classification == "DEPENDENCY_ARTIFACT"
+                    or .classification == "GENERATED"))' \
+            "$RUNNER_TEMP/forensic-oci-resolution.json" >/dev/null

@@ -17,25 +17,27 @@ class FakeAgentTransport:
     def cancel(self, operation_id: str) -> Any:
         return True
 
-    def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
+    def dispatch(self, request: Any, timeout: int, provenance: dict[str,str]|None=None, operation_id: str|None=None) -> WorkerResultBundle:
         if not self._healthy:
             raise AgentTransportUnavailableError("TRANSPORT_UNAVAILABLE")
 
         # Build fake result
         res = {
             "schema_version": "hermes.worker-result.v1",
-            "run_id": request.get("run_id", ""),
-            "task_id": request.get("task_id", ""),
-            "attempt_id": request.get("attempt_id", ""),
-            "intent_digest": request.get("task_intent_digest", ""),
-            "worker_id": request.get("worker_id", "fake-worker"),
-            "repository": request.get("repository", ""),
-            "base_sha": request.get("base_sha", ""),
-            "status": self._fake_result.get("status", "PASS"),
-            "artifacts": self._fake_result.get("artifacts", []),
-            "extracted_data": self._fake_result.get("extracted_data", {}),
-            "log_summary": self._fake_result.get("log_summary", "success"),
+            "result_id": str(__import__('uuid').uuid4()),
+            "task_id": getattr(request, "task_id", ""),
+            "attempt_id": getattr(request, "attempt_id", ""),
+            "worker_id": getattr(request, "recipient_agent", "fake-worker"),
+            "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "canonical_remote": "github",
+            "repository": "github",
+            "intent_digest": getattr(request, "task_intent_digest", ""),
+            "produced_at_utc": "2026-01-01T00:00:00Z",
+            "artifacts": [],
+            "gate_claims": []
         }
+        print("RES DICT:", res)
         return deserialize_worker_result(json.dumps(res))
 
 class ConfiguredLocalAgentTransport:
@@ -43,31 +45,39 @@ class ConfiguredLocalAgentTransport:
         self.worker_cmd = worker_cmd
 
     def health(self) -> bool:
-        # For Antigravity, we return False to simulate ANTIGRAVITY_TRANSPORT_UNAVAILABLE
-        # unless configured with a valid command
         return self.worker_cmd is not None
 
     def cancel(self, operation_id: str) -> Any:
         return True
 
-    def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
+    def dispatch(self, request: Any, timeout: int, provenance: dict[str,str]|None=None, operation_id: str|None=None) -> WorkerResultBundle:
+        from .adapters import AgentTransportUnavailableError
         if not self.worker_cmd:
             raise AgentTransportUnavailableError("ANTIGRAVITY_TRANSPORT_UNAVAILABLE")
 
-        # In a real impl, we'd spawn the worker process passing the request JSON via stdin or file.
-        # Here we just execute it and wait.
+        req_json = json.dumps(dict(request))
         try:
-            req_json = json.dumps(dict(request))
-            proc = subprocess.run(
+            import subprocess
+            proc = subprocess.Popen(
                 self.worker_cmd,
-                input=req_json.encode("utf-8"),
-                capture_output=True,
-                timeout=timeout
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
             )
+            stdout_data, stderr_data = proc.communicate(input=req_json, timeout=timeout)
             if proc.returncode != 0:
-                raise RuntimeError(f"Worker failed: {proc.stderr.decode('utf-8')}")
-            return deserialize_worker_result(proc.stdout.decode("utf-8"))
+                raise RuntimeError(f"Worker failed: {stderr_data}")
+            
+            try:
+                res_dict = json.loads(stdout_data)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Worker did not output valid JSON: {e}, output: {stdout_data}")
+
+            return deserialize_worker_result(json.dumps(res_dict))
+
         except FileNotFoundError:
             raise AgentTransportUnavailableError("TRANSPORT_UNAVAILABLE")
         except subprocess.TimeoutExpired:
+            proc.kill()
             raise TimeoutError("WORK_TIMEOUT")

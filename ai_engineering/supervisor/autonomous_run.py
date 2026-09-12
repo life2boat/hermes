@@ -3,7 +3,7 @@ import hashlib
 import uuid
 import datetime
 import asyncio
-from enum import StrEnum
+from enum import Enum
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
@@ -12,14 +12,14 @@ from ai_engineering.supervisor.loop import SupervisorLoop
 from ai_engineering.supervisor.store import FileSupervisorStateStore
 from ai_engineering.supervisor.decision import AstraDecision, SupervisorAction
 from ai_engineering.supervisor.context_pack import ContextPack
-from ai_engineering.supervisor.router.router import CrossAgentRouter
-from ai_engineering.supervisor.router.envelope import AgentEnvelope
+from ai_engineering.supervisor.router.router import CrossAgentRouter, compute_policy_receipt_digest, AuthorityResolver
+from ai_engineering.supervisor.router.envelope import AgentEnvelope, MessageType
 from ai_engineering.supervisor.collector import ResultCollector
 from ai_engineering.supervisor.worker_result import canonical_serialize_worker_result
 from ai_engineering.contracts import GateResult, Status, EffectClass, StopBoundary
 from ai_engineering.task_intent import TaskIntent
 
-class NextActionType(StrEnum):
+class NextActionType(str, Enum):
     INSPECT = "INSPECT"
     IMPLEMENT = "IMPLEMENT"
     VALIDATE = "VALIDATE"
@@ -66,12 +66,23 @@ class AutonomousRunReceipt:
     final_source_sha: str
     iterations: int
     child_tasks: int
+    budgets: dict[str, int]
     policy_receipts: list[str]
     routing_receipts: list[str]
     verified_results: list[str]
     terminal_reason: str
     started_at: str
     completed_at: str
+    receipt_digest: str = ""
+
+
+class AstraProposalProvider:
+    async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
+        raise NotImplementedError
+
+class CIStatusProvider:
+    async def wait_for_ci(self, run_id: str, sha: str) -> bool:
+        raise NotImplementedError
 
 class AutonomousRunCoordinator:
     def __init__(
@@ -82,6 +93,8 @@ class AutonomousRunCoordinator:
         result_collector: ResultCollector,
         budget: BudgetConfig,
         run_id: str,
+        astra_provider: AstraProposalProvider,
+        ci_provider: CIStatusProvider,
         evidence_root: str = "/tmp"
     ) -> None:
         self.loop = loop
@@ -91,6 +104,8 @@ class AutonomousRunCoordinator:
         self.budget = budget
         self.run_id = run_id
         self.evidence_root = evidence_root
+        self.astra_provider = astra_provider
+        self.ci_provider = ci_provider
 
         self.iterations = 0
         self.child_tasks = 0
@@ -106,13 +121,33 @@ class AutonomousRunCoordinator:
         state = self.store.load_state(self.run_id)
 
         if not state:
+            from ai_engineering.supervisor.state import _fail
             _fail("RUN_NOT_INITIALIZED")
 
         initial_sha = state.current_base_sha
         terminal_reason = "UNKNOWN"
 
+        from ai_engineering.supervisor.events import SupervisorEvent, SupervisorEventType, create_event
+        events = self.store.load_events(self.run_id)
+        ev = create_event(
+            run_id=self.run_id,
+            sequence=len(events) + 1,
+            previous_event_digest=events[-1].event_digest if events else None,
+            event_type=SupervisorEventType.PHASE_TRANSITIONED,
+            state_revision=1,
+            task_id=state.current_task_id,
+            attempt_id=state.current_attempt_id,
+            intent_digest=state.current_intent_digest,
+            payload={"phase": "STARTED"},
+            created_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
+        )
+        self.store.save_event(ev)
+
         while True:
             if self.iterations >= self.budget.max_supervisor_decisions:
+                terminal_reason = "BUDGET_EXHAUSTED"
+                break
+            if self.child_tasks >= self.budget.max_child_tasks:
                 terminal_reason = "BUDGET_EXHAUSTED"
                 break
 
@@ -124,30 +159,64 @@ class AutonomousRunCoordinator:
 
             self.iterations += 1
 
-            # Request proposal
-            proposal = self._request_proposal(state)
+            proposal = await self._request_proposal(state)
 
-            if proposal.action_type in (NextActionType.STOP_SUCCESS, NextActionType.STOP_BLOCKED):
-                terminal_reason = "GOAL_COMPLETE" if proposal.action_type == NextActionType.STOP_SUCCESS else "POLICY_BLOCKED"
+            if proposal.action_type == NextActionType.STOP_SUCCESS:
+                if not state.latest_verified_result_id:
+                    terminal_reason = "EVIDENCE_MISSING"
+                    break
+                terminal_reason = "GOAL_COMPLETE"
+                break
+            elif proposal.action_type == NextActionType.STOP_BLOCKED:
+                terminal_reason = "POLICY_BLOCKED"
                 break
 
             if proposal.action_type == NextActionType.WAIT_FOR_CI:
-                # Simulate CI waiting loop (we don't busy loop)
-                await asyncio.sleep(0.1)
+                success = await self.ci_provider.wait_for_ci(self.run_id, state.current_base_sha)
+                if not success:
+                    terminal_reason = "CI_FAILED"
+                    break
+                continue
+            
+            if proposal.action_type in (NextActionType.CREATE_PR, NextActionType.MERGE_IF_GREEN):
+                events = self.store.load_events(self.run_id)
+                ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.PHASE_TRANSITIONED,
+                    state_revision=1,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={"action": proposal.action_type.value},
+                    created_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
+                )
+                self.store.save_event(ev)
                 continue
 
-            # Convert proposal to AstraDecision
             decision = self._convert_proposal_to_decision(proposal, state)
 
-            # Policy evaluation happens inside loop.accept_decision
             try:
-                receipt, next_state = self.loop.accept_decision(
+                decision_receipt, next_state = self.loop.accept_decision(
                     run_id=self.run_id,
                     decision=decision,
                     context_pack_digest=decision.context_pack_digest,
                     verified_result_status="FAIL" if proposal.action_type in (NextActionType.FIX, NextActionType.RETRY) else "PASS",
                     validated_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
                 )
+                events = self.store.load_events(self.run_id)
+                print("DEBUG EVENTS:", [getattr(e.event_type, "value", str(e.event_type)) for e in events])
+                policy_event = next(e for e in reversed(events) if getattr(e.event_type, "value", str(e.event_type)) == "POLICY_EVALUATED")
+                pr_data = policy_event.payload["policy_receipt"]
+                from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
+                pr_data_copy = dict(pr_data)
+                pr_data_copy["verdict"] = PolicyVerdict(pr_data["verdict"])
+                # Extract reason codes to tuple
+                pr_data_copy["reason_codes"] = tuple(pr_data["reason_codes"])
+                receipt = PolicyReceipt(**pr_data_copy)
+                
+                print("REASON CODES:", receipt.reason_codes)
                 self.policy_receipts.append(receipt.receipt_id)
             except Exception as e:
                 import traceback
@@ -155,7 +224,6 @@ class AutonomousRunCoordinator:
                 terminal_reason = f"POLICY_DENIED: {e}"
                 break
 
-            # If ALLOW, Create AgentEnvelope and dispatch
             envelope = AgentEnvelope(
                 message_id=str(uuid.uuid4()),
                 correlation_id=str(uuid.uuid4()),
@@ -166,17 +234,21 @@ class AutonomousRunCoordinator:
                 sender_agent="supervisor",
                 recipient_agent=proposal.recommended_worker,
                 recipient_capability=proposal.recommended_capability,
-                message_type="WORK_REQUEST",
+                message_type=MessageType.WORK_REQUEST,
                 payload={
                     "objective": proposal.objective,
                     "allowed_scope": proposal.allowed_scope,
                     "required_validators": proposal.required_validators,
                 },
-                payload_digest="",
+                payload_digest=__import__("ai_engineering.supervisor.router.envelope", fromlist=["compute_payload_digest"]).compute_payload_digest({
+                    "objective": proposal.objective,
+                    "allowed_scope": proposal.allowed_scope,
+                    "required_validators": proposal.required_validators,
+                }),
                 task_intent_id=next_state.current_task_id,
                 task_intent_digest=next_state.current_intent_digest,
                 policy_receipt_id=receipt.receipt_id,
-                policy_receipt_digest=hashlib.sha256(receipt.receipt_id.encode()).hexdigest(),
+                policy_receipt_digest=compute_policy_receipt_digest(receipt),
                 effect_class=EffectClass(proposal.expected_effect_class),
                 stop_boundary=StopBoundary(proposal.expected_stop_boundary),
                 created_at_utc=datetime.datetime.now(datetime.UTC).isoformat(),
@@ -184,16 +256,16 @@ class AutonomousRunCoordinator:
             )
 
             try:
-                # Dispatch through router
                 worker_bundle = await self.router.dispatch(envelope)
+                self.routing_receipts.append(envelope.message_id)
                 self.child_tasks += 1
 
-                # Normalization
                 intent = self.loop._intents.get(next_state.current_task_id) or self.loop._intents[self.run_id]
                 worker_bundle_json = canonical_serialize_worker_result(worker_bundle)
                 normalized_evidence = self.result_collector.collect(worker_bundle_json, self.evidence_root, intent)
 
                 from ai_engineering.supervisor.validator import validate_normalized_evidence, canonical_serialize_verified_result
+                import hashlib
                 vr = validate_normalized_evidence(normalized_evidence, intent)
                 vr_digest = hashlib.sha256(canonical_serialize_verified_result(vr).encode("utf-8")).hexdigest()
 
@@ -209,7 +281,13 @@ class AutonomousRunCoordinator:
         completed_at = datetime.datetime.now(datetime.UTC).isoformat()
         final_state = self.store.load_state(self.run_id)
 
-        return AutonomousRunReceipt(
+        import json
+        budget_dict = {
+            "max_supervisor_decisions": self.budget.max_supervisor_decisions,
+            "max_child_tasks": self.budget.max_child_tasks
+        }
+        
+        receipt_obj = AutonomousRunReceipt(
             schema_version="hermes.autonomous-run-receipt.v1",
             run_id=self.run_id,
             root_task_intent_digest=final_state.current_intent_digest,
@@ -217,34 +295,35 @@ class AutonomousRunCoordinator:
             final_source_sha=final_state.current_base_sha,
             iterations=self.iterations,
             child_tasks=self.child_tasks,
+            budgets=budget_dict,
             policy_receipts=self.policy_receipts,
             routing_receipts=self.routing_receipts,
             verified_results=self.verified_results,
             terminal_reason=terminal_reason,
             started_at=started_at,
-            completed_at=completed_at
+            completed_at=completed_at,
+            receipt_digest=""
         )
+        
+        digest_str = json.dumps({
+            "run_id": receipt_obj.run_id,
+            "root_task_intent_digest": receipt_obj.root_task_intent_digest,
+            "final_source_sha": receipt_obj.final_source_sha,
+            "iterations": receipt_obj.iterations,
+            "terminal_reason": receipt_obj.terminal_reason
+        }, sort_keys=True)
+        import hashlib
+        h = hashlib.sha256(digest_str.encode()).hexdigest()
+        
+        import dataclasses
+        receipt_obj = dataclasses.replace(receipt_obj, receipt_digest=h)
+        return receipt_obj
 
-    def _request_proposal(self, state: SupervisorState) -> AstraNextActionProposal:
+
+    async def _request_proposal(self, state: SupervisorState) -> AstraNextActionProposal:
         if self._mock_astra_proposal:
             return self._mock_astra_proposal
-
-        return AstraNextActionProposal(
-            schema_version="hermes.astra-next-action.v1",
-            proposal_id=str(uuid.uuid4()),
-            run_id=self.run_id,
-            task_id=state.current_task_id,
-            action_type=NextActionType.STOP_SUCCESS,
-            objective="Default stop",
-            recommended_capability="none",
-            recommended_worker="none",
-            expected_effect_class="READ_ONLY",
-            expected_stop_boundary="READ_ONLY",
-            allowed_scope=(),
-            required_validators=(),
-            success_criteria="",
-            reasoning_summary="No mock provided"
-        )
+        return await self.astra_provider.request_proposal(self.run_id, state)
 
     def _convert_proposal_to_decision(self, proposal: AstraNextActionProposal, state: SupervisorState) -> AstraDecision:
         action_map = {

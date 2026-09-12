@@ -12,27 +12,37 @@ from ai_engineering.supervisor.router.transports import ConfiguredLocalAgentTran
 from ai_engineering.supervisor.loop import SupervisorLoop
 from ai_engineering.supervisor.store import FileSupervisorStateStore
 from ai_engineering.supervisor.router.router import CrossAgentRouter
-from ai_engineering.supervisor.worker_result import ResultCollector
+from ai_engineering.supervisor.collector import ResultCollector
 from ai_engineering.task_intent import deserialize_intent
 
-# Mock or actual registry/authority for router
-class MockRegistry:
-    def get_adapter(self, agent_id):
-        # We assume local command passed in args
-        return ConfiguredLocalAgentTransport(["echo", "mock_worker"])
-    def get_definition(self, agent_id):
-        class MockDef:
-            capabilities = ["code"]
-            timeout_seconds = 300
-        return MockDef()
+from ai_engineering.supervisor.router.registry import AgentRegistry, AgentDefinition
+from ai_engineering.supervisor.router.envelope import MessageType
+from ai_engineering.supervisor.state import SupervisorState
+from ai_engineering.contracts import AstraNextActionProposal
+from ai_engineering.supervisor.autonomous_run import AstraProposalProvider, CIStatusProvider
 
-class MockAuthority:
-    def get_provenance(self, run_id, task_id):
-        return {}
-    def resolve_task_intent(self, *args):
-        pass
-    def resolve_policy_receipt(self, *args):
-        pass
+class LocalAstraProvider(AstraProposalProvider):
+    async def request_proposal(self, run_id: str, state: SupervisorState) -> AstraNextActionProposal:
+        return AstraNextActionProposal(
+            schema_version="hermes.astra-next-action.v1",
+            proposal_id="prop-1",
+            run_id=run_id,
+            task_id=state.current_task_id,
+            action_type="STOP_SUCCESS",
+            objective="Default test stop",
+            recommended_capability="none",
+            recommended_worker="none",
+            expected_effect_class="READ_ONLY",
+            expected_stop_boundary="READ_ONLY",
+            allowed_scope=(),
+            required_validators=(),
+            success_criteria="",
+            reasoning_summary="Auto-stop in local CLI"
+        )
+
+class LocalCIProvider(CIStatusProvider):
+    async def wait_for_ci(self, run_id: str, sha: str) -> bool:
+        return True
 
 async def async_main():
     parser = argparse.ArgumentParser(description="Hermes Autonomous Run CLI (Task 7.6)")
@@ -48,13 +58,16 @@ async def async_main():
     store = FileSupervisorStateStore(Path(args.state_dir))
     loop = SupervisorLoop(store)
 
-    registry = MockRegistry()
-    # Override the adapter dynamically
-    registry.get_adapter = lambda x: ConfiguredLocalAgentTransport(args.worker_cmd)
+    registry = AgentRegistry()
+    registry.register(
+        AgentDefinition("codex", ["code", "test"], [MessageType.WORK_REQUEST], 300),
+        ConfiguredLocalAgentTransport(args.worker_cmd)
+    )
 
+    from ai_engineering.supervisor.router.router import AuthorityResolver
     router = CrossAgentRouter(
         registry=registry,
-        authority_resolver=MockAuthority(),
+        authority_resolver=AuthorityResolver(store),
         store=store
     )
 
@@ -79,7 +92,9 @@ async def async_main():
         router=router,
         result_collector=collector,
         budget=budget,
-        run_id=args.run_id
+        run_id=args.run_id,
+        astra_provider=LocalAstraProvider(),
+        ci_provider=LocalCIProvider()
     )
 
     receipt = await coord.run_until_terminal()

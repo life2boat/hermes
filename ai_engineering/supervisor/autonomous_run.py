@@ -320,7 +320,7 @@ class AutonomousRunCoordinator:
                     run_id=self.run_id,
                     decision=decision,
                     context_pack_digest=decision.context_pack_digest,
-                    verified_result_status="FAIL" if proposal.action_type in (NextActionType.FIX, NextActionType.RETRY) else "PASS",
+                    verified_result_status="FAIL" if proposal.action_type == NextActionType.FIX else ("BLOCKED" if proposal.action_type == NextActionType.RETRY else "PASS"),
                     validated_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
                 )
                 events = self.store.load_events(self.run_id)
@@ -334,6 +334,16 @@ class AutonomousRunCoordinator:
                 receipt = PolicyReceipt(**pr_data_copy)
 
                 self.policy_receipts.append(receipt.receipt_id)
+
+                action_val = getattr(decision.action, "value", str(decision.action))
+                if action_val == "RETRY":
+                    self.retries += 1
+                    self.consecutive_failures += 1
+                elif action_val == "FIX":
+                    self.fix_cycles += 1
+                    self.consecutive_failures += 1
+                else:
+                    self.consecutive_failures = 0
             except Exception as e:
                 import traceback
                 traceback.print_exc()

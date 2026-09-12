@@ -688,10 +688,55 @@ class SupervisorLoop:
         # Work profile IS bound: generate candidate task, evaluate policy
         work_profile = self._profiles.get(run_id)
         if work_profile is None:
+            events = self._store.load_events(run_id)
+            for e in reversed(events):
+                if "WORK_PROFILE_BOUND" in str(e.event_type):
+                    from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+                    wp_data = dict(e.payload["work_profile"])
+                    try:
+                        work_profile = validate_work_profile(wp_data)
+                    except Exception:
+                        wp_data.pop("profile_digest", None)
+                        work_profile = validate_work_profile(wp_data)
+                    self._profiles[run_id] = work_profile
+                    if e.payload.get("effective_policy") and run_id not in self._effective_policies:
+                        ep_dict = e.payload["effective_policy"]
+                        try:
+                            from ai_engineering.effective_policy import deserialize_effective_policy_report
+                            import json
+                            ep_str = json.dumps(ep_dict) if isinstance(ep_dict, dict) else str(ep_dict)
+                            self._effective_policies[run_id] = deserialize_effective_policy_report(ep_str)
+                        except Exception:
+                            from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
+                            d = dict(ep_dict) if isinstance(ep_dict, dict) else {}
+                            tp = d.get("task_policy")
+                            tpa = TaskPolicyAttribution(**tp) if isinstance(tp, dict) else tp
+                            d["task_policy"] = tpa
+                            if "status" in d and not isinstance(d["status"], EffectivePolicyStatus):
+                                d["status"] = EffectivePolicyStatus(d["status"])
+                            d["policy_sources"] = tuple(d.get("policy_sources", ()))
+                            d["invariant_resolutions"] = tuple(d.get("invariant_resolutions", ()))
+                            d["required_gate_resolutions"] = tuple(d.get("required_gate_resolutions", ()))
+                            d["unresolved_references"] = tuple(d.get("unresolved_references", ()))
+                            self._effective_policies[run_id] = EffectivePolicyReport(**d)
+                    break
+        if work_profile is None:
             _fail("WORK_PROFILE_NOT_FOUND")
 
         # Resolve parent intent
         p_intent = parent_intent or self._intents.get(state.current_task_id) or self._intents.get(run_id)
+        if p_intent is None:
+            events = self._store.load_events(run_id)
+            from ai_engineering.task_intent import deserialize_intent
+            import json
+            for e in reversed(events):
+                ev_type = getattr(e.event_type, "value", str(e.event_type))
+                if ev_type in ("RUN_INITIALIZED", "NEXT_TASK_GENERATED", "ATTEMPT_INCREMENTED"):
+                    if "task_intent" in e.payload:
+                        p_intent = deserialize_intent(json.dumps(e.payload["task_intent"]))
+                        self._intents[p_intent.task_id] = p_intent
+                        self._intents[run_id] = p_intent
+                        break
         if p_intent is None:
             _fail("PARENT_INTENT_NOT_FOUND")
 

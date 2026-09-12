@@ -380,7 +380,7 @@ class AuthorityResolver:
                         "current_level": a_state.current_level.value,
                         "policy_receipt": __import__('dataclasses').asdict(receipt),
                     },
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                    created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
                 )
                 self.supervisor_store.save_event(policy_event)
 
@@ -419,7 +419,7 @@ class PersistentStore:
 
         history.append({
             "state": state,
-            "timestamp_utc": str(datetime.datetime.now(datetime.UTC)),
+            "timestamp_utc": str(datetime.datetime.now(datetime.timezone.utc)),
             "operation_id": operation_id,
             "failure_class": failure_class,
         })
@@ -530,7 +530,7 @@ class PersistentStore:
             "correlation_id": envelope.correlation_id,
             "task_id": envelope.task_id,
             "attempt_id": envelope.attempt_id,
-            "recorded_at_utc": str(datetime.datetime.now(datetime.UTC)),
+            "recorded_at_utc": str(datetime.datetime.now(datetime.timezone.utc)),
             "bundle": json.loads(canonical_serialize_worker_result(stale_bundle)),
         }
         with open(p, "w", encoding="utf-8") as f:
@@ -701,7 +701,7 @@ class CrossAgentRouter:
                 decision="BLOCK",
                 reason="SOURCE_PROVENANCE_UNRESOLVED",
                 attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
             )
         if caller_provenance is not None:
             for k in ("repository", "canonical_remote", "base_sha"):
@@ -748,7 +748,7 @@ class CrossAgentRouter:
                 decision="BLOCK",
                 reason="UNKNOWN_AGENT",
                 attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
             )
 
         if not adapter.health():
@@ -769,7 +769,7 @@ class CrossAgentRouter:
                 decision="DEFER",
                 reason="WORKER_UNAVAILABLE",
                 attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
             )
             self._transition(envelope, "DEFER", routing_receipt=receipt_defer)
             return receipt_defer
@@ -795,7 +795,7 @@ class CrossAgentRouter:
                     decision="BLOCK",
                     reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} denied by PolicyReceipt",
                     attempt_number=envelope.retry_count,
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                    created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
                 )
 
         if envelope.recipient_capability not in definition.capabilities:
@@ -816,7 +816,7 @@ class CrossAgentRouter:
                 decision="BLOCK",
                 reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} not in agent capabilities",
                 attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
             )
 
         if envelope.recipient_capability not in intent.allowed_mutations:
@@ -837,7 +837,7 @@ class CrossAgentRouter:
                 decision="BLOCK",
                 reason=f"CAPABILITY_NOT_AUTHORIZED: capability {envelope.recipient_capability} denied by TaskIntent",
                 attempt_number=envelope.retry_count,
-                created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
             )
 
         if envelope.message_type not in definition.supported_message_types:
@@ -862,7 +862,7 @@ class CrossAgentRouter:
             decision="ROUTE",
             reason="AUTHORIZED",
             attempt_number=envelope.retry_count,
-            created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+            created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
         )
         self._transition(envelope, "ROUTED", routing_receipt=receipt)
         return receipt
@@ -926,7 +926,7 @@ class CrossAgentRouter:
                     retry_count=envelope.retry_count + 1,
                     policy_receipt_id=new_receipt.receipt_id,
                     policy_receipt_digest=compute_policy_receipt_digest(new_receipt),
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                    created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
                 )
                 from .envelope import compute_payload_digest
                 fallback_env = replace(fallback_env, payload_digest=compute_payload_digest(fallback_env.payload))
@@ -994,7 +994,7 @@ class CrossAgentRouter:
                     retry_count=envelope.retry_count + 1,
                     policy_receipt_id=new_receipt.receipt_id,
                     policy_receipt_digest=compute_policy_receipt_digest(new_receipt),
-                    created_at_utc=str(datetime.datetime.now(datetime.UTC)),
+                    created_at_utc=str(datetime.datetime.now(datetime.timezone.utc)),
                 )
                 from .envelope import compute_payload_digest
                 retry_env = replace(retry_env, payload_digest=compute_payload_digest(retry_env.payload))

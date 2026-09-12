@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-import fcntl
+import sys
+if sys.platform != 'win32':
+    import fcntl
+else:
+    fcntl = None
 import json
 import os
 import re
@@ -90,7 +94,8 @@ class FileSupervisorStateStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             _fail("STORE_WRITER_LOCK_CONTENTION")
@@ -99,7 +104,8 @@ class FileSupervisorStateStore:
     def _release_lock(self, run_id: str) -> None:
         fd = self._lock_fds.pop(run_id, None)
         if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl:
+                fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     def save_seed_state(self, state: SupervisorState) -> None:

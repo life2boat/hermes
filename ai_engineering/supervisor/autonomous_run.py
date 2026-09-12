@@ -107,8 +107,33 @@ class AutonomousRunCoordinator:
         self.astra_provider = astra_provider
         self.ci_provider = ci_provider
 
+        events = self.store.load_events(self.run_id)
+        from ai_engineering.supervisor.events import SupervisorEventType
+        
         self.iterations = 0
         self.child_tasks = 0
+        self.retries = 0
+        self.fix_cycles = 0
+        self.consecutive_failures = 0
+        self.provider_calls = 0
+
+        for ev in events:
+            if getattr(ev.event_type, "value", str(ev.event_type)) == "ASTRA_PROPOSAL_CREATED":
+                self.provider_calls += 1
+            if getattr(ev.event_type, "value", str(ev.event_type)) == "DISPATCH_SENT":
+                self.child_tasks += 1
+            if getattr(ev.event_type, "value", str(ev.event_type)) == "DECISION_ACCEPTED":
+                self.iterations += 1
+                if ev.payload:
+                    action = ev.payload.get("action")
+                    if action == "RETRY":
+                        self.retries += 1
+                        self.consecutive_failures += 1
+                    elif action == "FIX":
+                        self.fix_cycles += 1
+                        self.consecutive_failures += 1
+                    else:
+                        self.consecutive_failures = 0
         self.policy_receipts: list[str] = []
         self.routing_receipts: list[str] = []
         self.verified_results: list[str] = []
@@ -117,7 +142,7 @@ class AutonomousRunCoordinator:
         self._mock_astra_proposal: AstraNextActionProposal | None = None
 
     async def run_until_terminal(self) -> AutonomousRunReceipt:
-        started_at = datetime.datetime.now(datetime.UTC).isoformat()
+        started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         state = self.store.load_state(self.run_id)
 
         if not state:
@@ -139,7 +164,7 @@ class AutonomousRunCoordinator:
             attempt_id=state.current_attempt_id,
             intent_digest=state.current_intent_digest,
             payload={"phase": "STARTED"},
-            created_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
+            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )
         self.store.save_event(ev)
 
@@ -148,6 +173,18 @@ class AutonomousRunCoordinator:
                 terminal_reason = "BUDGET_EXHAUSTED"
                 break
             if self.child_tasks >= self.budget.max_child_tasks:
+                terminal_reason = "BUDGET_EXHAUSTED"
+                break
+            if self.retries >= self.budget.max_retries:
+                terminal_reason = "BUDGET_EXHAUSTED"
+                break
+            if self.fix_cycles >= self.budget.max_fix_cycles:
+                terminal_reason = "BUDGET_EXHAUSTED"
+                break
+            if self.consecutive_failures >= self.budget.max_consecutive_failures:
+                terminal_reason = "BUDGET_EXHAUSTED"
+                break
+            if self.provider_calls >= self.budget.max_provider_calls:
                 terminal_reason = "BUDGET_EXHAUSTED"
                 break
 
@@ -163,7 +200,17 @@ class AutonomousRunCoordinator:
 
             if proposal.action_type == NextActionType.STOP_SUCCESS:
                 if not state.latest_verified_result_id:
-                    terminal_reason = "EVIDENCE_MISSING"
+                    terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
+                    break
+                vr = self.loop._vr_cache.get(f"id:{state.latest_verified_result_id}") or self.loop._vr_cache.get(state.latest_verified_result_id)
+                if not vr or getattr(vr.status, "value", str(vr.status)) != "PASS":
+                    terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
+                    break
+                if state.blockers:
+                    terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
+                    break
+                if any(getattr(claim.status, "value", str(claim.status)) != "PASS" for claim in vr.gate_claims):
+                    terminal_reason = "STOP_SUCCESS_NOT_EVIDENCED"
                     break
                 terminal_reason = "GOAL_COMPLETE"
                 break
@@ -172,28 +219,16 @@ class AutonomousRunCoordinator:
                 break
 
             if proposal.action_type == NextActionType.WAIT_FOR_CI:
-                success = await self.ci_provider.wait_for_ci(self.run_id, state.current_base_sha)
-                if not success:
-                    terminal_reason = "CI_FAILED"
-                    break
-                continue
+                terminal_reason = "CI_PROVIDER_UNAVAILABLE"
+                break
             
-            if proposal.action_type in (NextActionType.CREATE_PR, NextActionType.MERGE_IF_GREEN):
-                events = self.store.load_events(self.run_id)
-                ev = create_event(
-                    run_id=self.run_id,
-                    sequence=len(events) + 1,
-                    previous_event_digest=events[-1].event_digest if events else None,
-                    event_type=SupervisorEventType.PHASE_TRANSITIONED,
-                    state_revision=1,
-                    task_id=state.current_task_id,
-                    attempt_id=state.current_attempt_id,
-                    intent_digest=state.current_intent_digest,
-                    payload={"action": proposal.action_type.value},
-                    created_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
-                )
-                self.store.save_event(ev)
-                continue
+            if proposal.action_type == NextActionType.CREATE_PR:
+                terminal_reason = "UNSUPPORTED"
+                break
+            
+            if proposal.action_type == NextActionType.MERGE_IF_GREEN:
+                terminal_reason = "BLOCKED"
+                break
 
             decision = self._convert_proposal_to_decision(proposal, state)
 
@@ -203,10 +238,9 @@ class AutonomousRunCoordinator:
                     decision=decision,
                     context_pack_digest=decision.context_pack_digest,
                     verified_result_status="FAIL" if proposal.action_type in (NextActionType.FIX, NextActionType.RETRY) else "PASS",
-                    validated_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
+                    validated_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
                 )
                 events = self.store.load_events(self.run_id)
-                print("DEBUG EVENTS:", [getattr(e.event_type, "value", str(e.event_type)) for e in events])
                 policy_event = next(e for e in reversed(events) if getattr(e.event_type, "value", str(e.event_type)) == "POLICY_EVALUATED")
                 pr_data = policy_event.payload["policy_receipt"]
                 from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
@@ -216,7 +250,6 @@ class AutonomousRunCoordinator:
                 pr_data_copy["reason_codes"] = tuple(pr_data["reason_codes"])
                 receipt = PolicyReceipt(**pr_data_copy)
                 
-                print("REASON CODES:", receipt.reason_codes)
                 self.policy_receipts.append(receipt.receipt_id)
             except Exception as e:
                 import traceback
@@ -251,13 +284,23 @@ class AutonomousRunCoordinator:
                 policy_receipt_digest=compute_policy_receipt_digest(receipt),
                 effect_class=EffectClass(proposal.expected_effect_class),
                 stop_boundary=StopBoundary(proposal.expected_stop_boundary),
-                created_at_utc=datetime.datetime.now(datetime.UTC).isoformat(),
+                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 expires_at_utc=""
             )
 
             try:
                 worker_bundle = await self.router.dispatch(envelope)
-                self.routing_receipts.append(envelope.message_id)
+                import os
+                file_path = os.path.join(self.router.store.root_dir, f"{envelope.message_id}.json")
+                if os.path.exists(file_path):
+                    with open(file_path, "r", encoding="utf-8") as rf:
+                        rd = __import__('json').load(rf)
+                    if rd.get("routing_receipt"):
+                        self.routing_receipts.append(rd["routing_receipt"]["routing_receipt_id"])
+                    else:
+                        self.routing_receipts.append(envelope.message_id)
+                else:
+                    self.routing_receipts.append(envelope.message_id)
                 self.child_tasks += 1
 
                 intent = self.loop._intents.get(next_state.current_task_id) or self.loop._intents[self.run_id]
@@ -278,13 +321,17 @@ class AutonomousRunCoordinator:
                 terminal_reason = f"ROUTER_ERROR_{type(e).__name__}"
                 break
 
-        completed_at = datetime.datetime.now(datetime.UTC).isoformat()
+        completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         final_state = self.store.load_state(self.run_id)
 
         import json
         budget_dict = {
             "max_supervisor_decisions": self.budget.max_supervisor_decisions,
-            "max_child_tasks": self.budget.max_child_tasks
+            "max_child_tasks": self.budget.max_child_tasks,
+            "max_retries": self.budget.max_retries,
+            "max_fix_cycles": self.budget.max_fix_cycles,
+            "max_consecutive_failures": self.budget.max_consecutive_failures,
+            "max_provider_calls": self.budget.max_provider_calls
         }
         
         receipt_obj = AutonomousRunReceipt(
@@ -321,9 +368,28 @@ class AutonomousRunCoordinator:
 
 
     async def _request_proposal(self, state: SupervisorState) -> AstraNextActionProposal:
+        self.provider_calls += 1
         if self._mock_astra_proposal:
-            return self._mock_astra_proposal
-        return await self.astra_provider.request_proposal(self.run_id, state)
+            proposal = self._mock_astra_proposal
+        else:
+            proposal = await self.astra_provider.request_proposal(self.run_id, state)
+        
+        from ai_engineering.supervisor.events import create_event, SupervisorEventType
+        events = self.store.load_events(self.run_id)
+        ev = create_event(
+            run_id=self.run_id,
+            sequence=len(events) + 1,
+            previous_event_digest=events[-1].event_digest if events else None,
+            event_type=SupervisorEventType.ASTRA_PROPOSAL_CREATED,
+            state_revision=state.state_revision,
+            task_id=state.current_task_id,
+            attempt_id=state.current_attempt_id,
+            intent_digest=state.current_intent_digest,
+            payload={"proposal_id": proposal.proposal_id},
+            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        )
+        self.store.save_event(ev)
+        return proposal
 
     def _convert_proposal_to_decision(self, proposal: AstraNextActionProposal, state: SupervisorState) -> AstraDecision:
         action_map = {
@@ -363,5 +429,5 @@ class AutonomousRunCoordinator:
             next_objective=proposal.objective,
             acceptance_delta=None,
             requested_required_gates=(),
-            created_at_utc=datetime.datetime.now(datetime.UTC).isoformat()
+            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
         )

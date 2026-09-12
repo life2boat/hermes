@@ -346,28 +346,40 @@ def _create_test_env(tmp_path: Path, run_id: str = "r1"):
         "parent_intent_digest": None
     }
     intent = deserialize_intent(json.dumps(intent_json))
-    wp = WorkProfile(
-        schema_version="hermes.work-profile.v1",
-        profile_id="wp1",
-        profile_version=1,
-        profile_digest="wp1",
-        preferred_worker_model=None,
-        preferred_verifier_model=None,
-        preferred_supervisor_model=None,
-        escalation_model=None,
-        allowed_task_classes=("BOUNDED_IMPLEMENTATION",),
-        maximum_autonomy_level=AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION,
-        allowed_effect_classes=(EffectClass.READ_ONLY,),
-        forbidden_effect_classes=(),
-        allowed_targets=(ExecutionTarget.DEV, ExecutionTarget.LOCAL),
-        required_validators=(),
-        promotion_thresholds=PromotionThresholds(1, 0, False),
-        budget_limits=BudgetLimits(20, 10, 1, 1, 1, 1, 1),
-        production_execution_allowed=True,
-        vector_mutation_allowed=True,
-        secret_mutation_allowed=True,
-        external_send_allowed=True
-    )
+    from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+    wp = validate_work_profile({
+        "schema_version": "hermes.work-profile.v1",
+        "profile_id": "wp1",
+        "profile_version": 1,
+        "preferred_worker_model": None,
+        "preferred_verifier_model": None,
+        "preferred_supervisor_model": None,
+        "escalation_model": None,
+        "allowed_task_classes": ("BOUNDED_IMPLEMENTATION",),
+        "maximum_autonomy_level": AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION.value,
+        "allowed_effect_classes": (EffectClass.READ_ONLY.value,),
+        "forbidden_effect_classes": (),
+        "allowed_targets": (ExecutionTarget.DEV.value, ExecutionTarget.LOCAL.value),
+        "required_validators": (),
+        "promotion_thresholds": {
+            "required_successful_runs": 1,
+            "allowed_critical_failures": 0,
+            "require_rollback_verified": False,
+        },
+        "budget_limits": {
+            "max_supervisor_decisions": 100,
+            "max_child_tasks": 100,
+            "max_retries_per_task": 100,
+            "max_fix_cycles_per_task": 100,
+            "max_consecutive_failures": 100,
+            "max_provider_calls": 100,
+            "max_policy_denials": 100,
+        },
+        "production_execution_allowed": True,
+        "vector_mutation_allowed": True,
+        "secret_mutation_allowed": True,
+        "external_send_allowed": True,
+    })
 
     from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
     ep = EffectivePolicyReport(
@@ -752,3 +764,106 @@ async def test_real_authority_fallback(tmp_path: Path):
     assert bundle.worker_id == "fallback"
     assert bundle.task_id == next_st.current_task_id
 
+
+@pytest.mark.asyncio
+async def test_max_retries_live_process(tmp_path: Path):
+    store, loop, router, reg, router_store, intent, wp, ep = _create_test_env(tmp_path, "r-retries")
+    reg.register(
+        AgentDefinition(agent_id="codex", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
+        CodexAdapter(FakeAgentTransport(healthy=True))
+    )
+    budget = BudgetConfig(max_retries=2)
+    coord = AutonomousRunCoordinator(
+        evidence_root=tmp_path, loop=loop, store=store, router=router,
+        result_collector=ResultCollector(), budget=budget, run_id="r-retries",
+        astra_provider=MockAstra([NextActionType.RETRY, NextActionType.RETRY, NextActionType.RETRY]),
+        ci_provider=MockCI()
+    )
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "BUDGET_EXHAUSTED"
+    assert coord.retries == 2
+    assert coord.child_tasks == 2
+
+
+@pytest.mark.asyncio
+async def test_max_fix_cycles_live_process(tmp_path: Path):
+    store, loop, router, reg, router_store, intent, wp, ep = _create_test_env(tmp_path, "r-fix")
+    reg.register(
+        AgentDefinition(agent_id="codex", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
+        CodexAdapter(FakeAgentTransport(healthy=True))
+    )
+    budget = BudgetConfig(max_fix_cycles=2)
+    coord = AutonomousRunCoordinator(
+        evidence_root=tmp_path, loop=loop, store=store, router=router,
+        result_collector=ResultCollector(), budget=budget, run_id="r-fix",
+        astra_provider=MockAstra([NextActionType.FIX, NextActionType.FIX, NextActionType.FIX]),
+        ci_provider=MockCI()
+    )
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "BUDGET_EXHAUSTED"
+    assert coord.fix_cycles == 2
+    assert coord.child_tasks == 2
+
+
+@pytest.mark.asyncio
+async def test_max_consecutive_failures_live_process(tmp_path: Path):
+    store, loop, router, reg, router_store, intent, wp, ep = _create_test_env(tmp_path, "r-consec")
+    reg.register(
+        AgentDefinition(agent_id="codex", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
+        CodexAdapter(FakeAgentTransport(healthy=True))
+    )
+    budget = BudgetConfig(max_consecutive_failures=2)
+    coord = AutonomousRunCoordinator(
+        evidence_root=tmp_path, loop=loop, store=store, router=router,
+        result_collector=ResultCollector(), budget=budget, run_id="r-consec",
+        astra_provider=MockAstra([NextActionType.FIX, NextActionType.RETRY, NextActionType.FIX]),
+        ci_provider=MockCI()
+    )
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "BUDGET_EXHAUSTED"
+    assert coord.consecutive_failures == 2
+    assert coord.child_tasks == 2
+
+
+@pytest.mark.asyncio
+async def test_restart_no_double_count(tmp_path: Path):
+    store, loop, router, reg, router_store, intent, wp, ep = _create_test_env(tmp_path, "r-dblcount")
+    reg.register(
+        AgentDefinition(agent_id="codex", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
+        CodexAdapter(FakeAgentTransport(healthy=True))
+    )
+    # Process A executes exactly 1 RETRY and then terminates via STOP_BLOCKED
+    coord_a = AutonomousRunCoordinator(
+        evidence_root=tmp_path, loop=loop, store=store, router=router,
+        result_collector=ResultCollector(), budget=BudgetConfig(max_retries=2), run_id="r-dblcount",
+        astra_provider=MockAstra([NextActionType.RETRY, NextActionType.STOP_BLOCKED]),
+        ci_provider=MockCI()
+    )
+    receipt_a = await coord_a.run_until_terminal()
+    assert receipt_a.terminal_reason == "POLICY_BLOCKED"
+    assert coord_a.retries == 1
+
+    # Destroy Coordinator A runtime
+    del coord_a, loop, store, router
+
+    # Create Coordinator B from persisted event history
+    store_b = FileSupervisorStateStore(tmp_path)
+    loop_b = SupervisorLoop(store_b)
+    router_b = CrossAgentRouter(reg, AuthorityResolver(store_b, loop_b), router_store)
+    coord_b = AutonomousRunCoordinator(
+        evidence_root=tmp_path, loop=loop_b, store=store_b, router=router_b,
+        result_collector=ResultCollector(), budget=BudgetConfig(max_retries=2), run_id="r-dblcount",
+        astra_provider=MockAstra([NextActionType.RETRY, NextActionType.RETRY]),
+        ci_provider=MockCI()
+    )
+
+    # Required: retries == 1, not 0, not 2
+    assert coord_b.retries == 1
+    assert coord_b.retries != 0
+    assert coord_b.retries != 2
+
+    # Run Coordinator B and verify cumulative budget enforcement without double counting
+    receipt_b = await coord_b.run_until_terminal()
+    assert receipt_b.terminal_reason == "BUDGET_EXHAUSTED"
+    assert coord_b.retries == 2
+    assert coord_b.child_tasks == 2

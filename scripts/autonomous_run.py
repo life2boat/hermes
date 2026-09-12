@@ -224,6 +224,7 @@ async def async_main():
         astra_provider=astra_provider,
         ci_provider=ci_provider,
         evidence_root=args.state_dir,
+        provider_mode=args.provider_mode,
     )
 
     receipt = await coord.run_until_terminal()

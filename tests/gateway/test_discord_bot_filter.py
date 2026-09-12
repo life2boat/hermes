@@ -54,7 +54,7 @@ class TestDiscordBotFilter(unittest.TestCase):
                 if not client_user or client_user not in message.mentions:
                     return False
             # "all" falls through
-        
+
         return True  # message accepted
 
     def test_own_messages_always_ignored(self):

@@ -165,7 +165,7 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
         )
         for f in setup_data.get("facts", [])
     )
-    
+
     mutation = setup_data.get("mutation")
     mutation_fact_data = setup_data.get("mutation_fact")
     mutation_fact = None
@@ -180,7 +180,7 @@ def _parse_scenario(data: dict[str, Any]) -> MemoryGraphScenario:
         )
 
     setup = MemoryGraphSetup(
-        facts=facts, 
+        facts=facts,
         graph_seed=setup_data.get("graph_seed", "NONE"),
         mutation=mutation,
         mutation_fact=mutation_fact,
@@ -234,7 +234,7 @@ def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraph
     manifest_path = corpus_dir / "manifest.json"
     if not manifest_path.exists():
         raise ValueError(f"manifest.json not found in {corpus_dir}")
-    
+
     with open(manifest_path, "rb") as f:
         manifest_bytes = f.read()
         try:
@@ -242,56 +242,56 @@ def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraph
         except UnicodeDecodeError:
             raise ValueError("manifest.json must be valid UTF-8")
         manifest = _parse_json_strict(manifest_text)
-        
+
     expected_keys = {"schema_version", "engine_version", "dataset_version", "corpus_status", "datasets"}
     if set(manifest.keys()) != expected_keys:
         raise ValueError("manifest.json has missing or unknown fields")
-        
+
     if manifest["schema_version"] != 1:
         raise ValueError("manifest schema_version must be 1")
     if manifest["engine_version"] != 1:
         raise ValueError("manifest engine_version must be 1")
     if manifest["dataset_version"] != "memory-graph-v1":
         raise ValueError("manifest dataset_version must be memory-graph-v1")
-        
+
     datasets = manifest["datasets"]
     if not isinstance(datasets, list) or len(datasets) != 8:
         raise ValueError("manifest datasets must be a list of exactly 8 categories")
-        
+
     dataset_expected_keys = {"category", "path", "critical"}
     seen_categories = set()
     seen_paths = set()
     files_to_hash = []
-    
+
     expected_categories = {"RETRIEVAL", "FRESHNESS", "PRIVACY", "ISOLATION", "INTEGRITY", "CONVERGENCE", "DETERMINISM", "TRANSACTION"}
-    
+
     for ds in datasets:
         if set(ds.keys()) != dataset_expected_keys:
             raise ValueError("dataset has missing or unknown fields")
-            
+
         cat = ds["category"]
         if cat not in expected_categories:
             raise ValueError(f"Unknown category: {cat}")
         if cat in seen_categories:
             raise ValueError(f"Duplicate category: {cat}")
         seen_categories.add(cat)
-            
+
         path = ds["path"]
         if not path.endswith(".jsonl"):
             raise ValueError("wrong extension")
         if ".." in path or path.startswith("/") or path.startswith("\\"):
             raise ValueError("invalid path (traversal or absolute)")
-            
+
         if path in seen_paths:
             raise ValueError(f"Duplicate path: {path}")
         seen_paths.add(path)
-        
+
         file = corpus_dir / path
         if not file.exists():
             raise ValueError(f"File missing: {file}")
-            
+
         files_to_hash.append((cat, file))
-        
+
     dataset_version = manifest["dataset_version"]
     hasher = hashlib.sha256()
     scenarios = []
@@ -305,9 +305,9 @@ def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraph
                 content_text = content.decode("utf-8")
             except UnicodeDecodeError:
                 raise ValueError("dataset must be valid UTF-8")
-                
+
             hasher.update(file.name.encode("utf-8"))
-            
+
             lines = content_text.splitlines()
             for line in lines:
                 line = line.strip()
@@ -318,7 +318,7 @@ def _compute_corpus_digest(corpus_dir: Path) -> tuple[str, str, list[MemoryGraph
     # whitespace change -> same digest
     # JSON key reorder -> same digest
     # dataset declaration reorder -> same digest
-    
+
     # We serialize all scenarios in deterministic order to the hasher
     scenarios.sort(key=lambda x: x.scenario_id)
     import dataclasses

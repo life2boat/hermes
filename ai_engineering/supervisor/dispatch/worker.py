@@ -32,7 +32,7 @@ class FakeWorkerDispatcher(WorkerDispatcher):
     def dispatch(self, envelope: DispatchEnvelope) -> DispatchReceipt:
         from ai_engineering.supervisor.dispatch.contracts import DispatchReceipt, DispatchStatus
         from datetime import datetime, timezone
-        
+
         status = DispatchStatus.FAILED if self.fail_to_dispatch else DispatchStatus.DISPATCHED
         reason_code = "DISPATCH_UNAVAILABLE" if self.fail_to_dispatch else None
 
@@ -61,8 +61,8 @@ class AntigravityAdapter(WorkerDispatcher):
     def dispatch(self, envelope: DispatchEnvelope) -> DispatchReceipt:
         from ai_engineering.supervisor.dispatch.contracts import DispatchReceipt, DispatchStatus
         from datetime import datetime, timezone
-        # Per prompt instructions: 
-        # "The real Antigravity adapter must report: ANTIGRAVITY_STRUCTURED_DISPATCH_UNAVAILABLE 
+        # Per prompt instructions:
+        # "The real Antigravity adapter must report: ANTIGRAVITY_STRUCTURED_DISPATCH_UNAVAILABLE
         # when no supported integration is available. It must never silently pretend a task was dispatched."
         return DispatchReceipt(
             schema_version="hermes.dispatch-receipt.v1",

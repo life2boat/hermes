@@ -642,7 +642,7 @@ async def test_25_safe_fallback_with_policy_recheck(tmp_path: Any) -> None:
         codex_transport=healthy_codex,
     )
     env = make_envelope({"cmd": "check"}, intent, receipt, recipient_agent="anti")
-    
+
     def mock_eval(envelope, next_attempt_id):
         new_receipt = make_receipt(intent=intent)
         router.authority_resolver.receipt_store[(envelope.run_id, envelope.task_id)] = new_receipt
@@ -722,9 +722,9 @@ async def test_28_crash_safe_effect_replay(tmp_path: Any) -> None:
     # 1. First dispatch crashes immediately after saving effect receipt
     with pytest.raises(RuntimeError, match="SIMULATED_HARD_CRASH"):
         await router.dispatch(env)
-        
+
     assert transport.dispatch_count == 1
-    
+
     # State in store is STILL "RUNNING" because crash happened before _transition("SUCCEEDED")
     assert store.load_state(env.message_id) == "RUNNING"
 
@@ -1032,7 +1032,7 @@ async def test_31_full_multi_agent_e2e_loop(tmp_path: Any) -> None:
     )
     # Using the standard loop logic to evaluate policy and generate the event
     trusted_resolver.intent_store[("run-e2e-real", intent.task_id)] = intent
-    
+
     # We create a dummy receipt just to initialize the envelope
     dummy_receipt = make_receipt(intent=intent)
     dummy_env = make_envelope(

@@ -187,15 +187,15 @@ async def test_LIFE_incompatible_schema(tmp_path):
 async def test_PRIVACY_exception_sentinel(temp_db, caplog):
     runtime = MemoryGraphRuntime(mode=GraphRuntimeMode.SHADOW, db_path=temp_db)
     await runtime.start()
-    
+
     with patch("gateway.memory.graph_runtime.converge_user_graph") as mock_conv:
         mock_conv.side_effect = ValueError("PR7_GRAPH_RUNTIME_SECRET_SENTINEL_314159")
         runtime.schedule_convergence(1)
         await _wait_until(lambda: runtime.status == GraphRuntimeStatus.DEGRADED)
-        
+
     await runtime.stop()
     assert runtime.status == GraphRuntimeStatus.DEGRADED
-    
+
     for record in caplog.records:
         assert "PR7_GRAPH_RUNTIME_SECRET_SENTINEL_314159" not in record.message
         assert "PR7_GRAPH_RUNTIME_SECRET_SENTINEL_314159" not in (getattr(record, "exc_text", "") or "")
@@ -224,12 +224,12 @@ async def test_TX_request_owned_connection(temp_db):
 async def test_WORKER_integrity_block_counters(temp_db):
     runtime = MemoryGraphRuntime(mode=GraphRuntimeMode.SHADOW, db_path=temp_db)
     await runtime.start()
-    
+
     with patch("gateway.memory.graph_runtime.converge_user_graph") as mock_conv:
         mock_conv.side_effect = GraphConvergenceIntegrityError("Test")
         runtime.schedule_convergence(1)
         await _wait_until(lambda: runtime._counters["integrity_block_count"] == 1)
-        
+
     await runtime.stop()
     assert runtime._counters["integrity_block_count"] == 1
     assert runtime.status == GraphRuntimeStatus.DEGRADED
@@ -238,7 +238,7 @@ async def test_WORKER_integrity_block_counters(temp_db):
 async def test_WORKER_churn_exhausted_counters(temp_db):
     runtime = MemoryGraphRuntime(mode=GraphRuntimeMode.SHADOW, db_path=temp_db)
     await runtime.start()
-    
+
     with patch("gateway.memory.graph_runtime.converge_user_graph") as mock_conv:
         class DummyRes:
             status = MagicMock()
@@ -246,6 +246,6 @@ async def test_WORKER_churn_exhausted_counters(temp_db):
         mock_conv.return_value = DummyRes()
         runtime.schedule_convergence(1)
         await _wait_until(lambda: runtime._counters["churn_exhausted_count"] == 1)
-        
+
     await runtime.stop()
     assert runtime._counters["churn_exhausted_count"] == 1

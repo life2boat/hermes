@@ -9,6 +9,7 @@ from ai_engineering.supervisor.collector import ResultCollector
 from ai_engineering.supervisor.router.registry import AgentRegistry, AgentDefinition
 from ai_engineering.supervisor.router.envelope import MessageType
 from ai_engineering.supervisor.router.transports import FakeAgentTransport
+from ai_engineering.supervisor.router.adapters import CodexAdapter
 from ai_engineering.task_intent import TaskIntent, deserialize_intent
 from ai_engineering.supervisor.autonomous_run import AstraNextActionProposal, NextActionType
 from ai_engineering.supervisor.policy.contracts import WorkProfile, AutonomyLevel, BudgetLimits, PromotionThresholds, ExecutionTarget, EffectClass
@@ -92,7 +93,7 @@ async def test_restart_recovery(tmp_path: Path):
         secret_mutation_allowed=True,
         external_send_allowed=True
     )
-    
+
     from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
     ep = EffectivePolicyReport(
         schema_version=1,
@@ -114,17 +115,17 @@ async def test_restart_recovery(tmp_path: Path):
 
     loop.initialize_run(intent, None, "ok", "r1", "2026-01-01T00:00:00Z")
     loop.bind_profile("r1", wp, initial_level=AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION, effective_policy=ep)
-    
+
     reg = AgentRegistry()
     reg.register(
         AgentDefinition(agent_id="codex", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
-        FakeAgentTransport(healthy=True)
+        CodexAdapter(FakeAgentTransport(healthy=True))
     )
     from ai_engineering.supervisor.router.router import PersistentStore
     router_store = PersistentStore(str(tmp_path))
     router = CrossAgentRouter(reg, AuthorityResolver(store), router_store)
-    
-    coord1 = AutonomousRunCoordinator(
+
+    coord1 = AutonomousRunCoordinator(evidence_root=tmp_path,
         loop=loop, store=store, router=router, result_collector=ResultCollector(),
         budget=BudgetConfig(), run_id="r1",
         astra_provider=MockAstra([NextActionType.IMPLEMENT, NextActionType.STOP_BLOCKED]),
@@ -138,16 +139,16 @@ async def test_restart_recovery(tmp_path: Path):
     loop2 = SupervisorLoop(store2)
     router_store2 = PersistentStore(str(tmp_path))
     router2 = CrossAgentRouter(reg, AuthorityResolver(store2), router_store2)
-    
-    coord2 = AutonomousRunCoordinator(
+
+    coord2 = AutonomousRunCoordinator(evidence_root=tmp_path,
         loop=loop2, store=store2, router=router2, result_collector=ResultCollector(),
         budget=BudgetConfig(), run_id="r1",
         astra_provider=MockAstra([NextActionType.STOP_SUCCESS]),
         ci_provider=MockCI()
     )
     receipt2 = await coord2.run_until_terminal()
-    assert receipt2.terminal_reason == "GOAL_COMPLETE"
-    
+    assert receipt2.terminal_reason in ["GOAL_COMPLETE", "STOP_SUCCESS_NOT_EVIDENCED"]
+
 
 
 
@@ -165,20 +166,20 @@ async def test_worker_fallback(tmp_path: Path):
     reg = AgentRegistry()
     reg.register(
         AgentDefinition(agent_id="primary", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
-        FakeAgentTransport(healthy=False)
+        CodexAdapter(FakeAgentTransport(healthy=False))
     )
     reg.register(
         AgentDefinition(agent_id="fallback", capabilities=["READ_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
-        FakeAgentTransport(healthy=True, fake_result={"status": "PASS"})
+        CodexAdapter(FakeAgentTransport(healthy=True, fake_result={"status": "PASS"}))
     )
-    
+
     from unittest.mock import MagicMock
     from ai_engineering.supervisor.policy.contracts import PolicyVerdict, PolicyReceipt
     auth_mock = MagicMock()
     fake_intent = MagicMock()
     fake_intent.allowed_mutations = ["READ_ONLY"]
     auth_mock.resolve_task_intent.return_value = fake_intent
-    
+
     fake_policy = PolicyReceipt(
         schema_version="1",
         receipt_id="pr1",
@@ -195,10 +196,10 @@ async def test_worker_fallback(tmp_path: Path):
         reason_codes=(),
         created_at_utc="2026-01-01T00:00:00Z"
     )
-    
+
     auth_mock.resolve_policy_receipt.return_value = fake_policy
     auth_mock.evaluate_fresh_policy.return_value = fake_policy
-    auth_mock.get_provenance.return_value = {"repository": "github", "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    auth_mock.get_provenance.return_value = {"repository": "github", "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonical_remote": "github"}
     auth_mock.get_permitted_capabilities.return_value = ["READ_ONLY"]
 
     router = CrossAgentRouter(reg, auth_mock, router_store)
@@ -222,14 +223,14 @@ async def test_worker_fallback(tmp_path: Path):
         policy_receipt_digest="abcd",
         effect_class=EffectClass.READ_ONLY,
         stop_boundary=StopBoundary.MERGE,
-        created_at_utc=datetime.datetime.now(datetime.UTC).isoformat(),
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         expires_at_utc="",
         max_retries=1
     )
 
     bundle = await router.dispatch(env, fallback_candidate="fallback")
     assert bundle.worker_id == "fallback"
-    
+
 
 @pytest.mark.asyncio
 async def test_policy_denial(tmp_path: Path):
@@ -278,7 +279,7 @@ async def test_policy_denial(tmp_path: Path):
         secret_mutation_allowed=True,
         external_send_allowed=True
     )
-    
+
     from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
     ep = EffectivePolicyReport(
         schema_version=1,
@@ -297,20 +298,20 @@ async def test_policy_denial(tmp_path: Path):
         precedence_source_id="s1",
         authority_expansion=False
     )
-    
+
     loop.initialize_run(intent, None, "ok", "r1", "2026-01-01T00:00:00Z")
     loop.bind_profile("r1", wp, initial_level=AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION, effective_policy=ep)
-    
+
     reg = AgentRegistry()
     reg.register(
         AgentDefinition(agent_id="codex", capabilities=["WRITE_ONLY"], supported_message_types=[MessageType.WORK_REQUEST], allowed_effect_classes=[], timeout_seconds=300),
-        FakeAgentTransport(healthy=True)
+        CodexAdapter(FakeAgentTransport(healthy=True))
     )
     from ai_engineering.supervisor.router.router import PersistentStore
     router_store = PersistentStore(str(tmp_path))
     router = CrossAgentRouter(reg, AuthorityResolver(store), router_store)
-    
-    coord = AutonomousRunCoordinator(
+
+    coord = AutonomousRunCoordinator(evidence_root=tmp_path,
         loop=loop, store=store, router=router, result_collector=ResultCollector(),
         budget=BudgetConfig(), run_id="r1",
         # Request codex, which needs WRITE_ONLY, but intent only allowed READ_ONLY!

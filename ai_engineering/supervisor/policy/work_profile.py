@@ -31,14 +31,14 @@ def validate_work_profile(profile_dict: Mapping[str, Any]) -> WorkProfile:
         forbidden_effect_classes = tuple(EffectClass(e) for e in profile_dict["forbidden_effect_classes"])
         allowed_targets = tuple(ExecutionTarget(t) for t in profile_dict["allowed_targets"])
         required_validators = tuple(profile_dict["required_validators"])
-        
+
         pt_dict = profile_dict["promotion_thresholds"]
         promotion_thresholds = PromotionThresholds(
             required_successful_runs=int(pt_dict["required_successful_runs"]),
             allowed_critical_failures=int(pt_dict["allowed_critical_failures"]),
             require_rollback_verified=bool(pt_dict["require_rollback_verified"]),
         )
-        
+
         bl_dict = profile_dict["budget_limits"]
         budget_limits = BudgetLimits(
             max_supervisor_decisions=bl_dict.get("max_supervisor_decisions"),
@@ -49,13 +49,13 @@ def validate_work_profile(profile_dict: Mapping[str, Any]) -> WorkProfile:
             max_provider_calls=bl_dict.get("max_provider_calls"),
             max_policy_denials=bl_dict.get("max_policy_denials"),
         )
-        
+
         # Determine digest if it exists, otherwise compute it (if we're instantiating raw)
         # Normally, profile comes with digest, but if we're generating it we must compute canonical without digest first.
         # But we'll just require profile_digest to match the payload minus profile_digest.
         payload_for_digest = dict(profile_dict)
         provided_digest = payload_for_digest.pop("profile_digest", None)
-        
+
         computed_digest = compute_deterministic_digest(payload_for_digest)
         if provided_digest is not None and provided_digest != computed_digest:
             raise PolicyError("PROFILE_DIGEST_MISMATCH")

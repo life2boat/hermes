@@ -575,5 +575,12 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
             event_sequence=event.sequence,
         )
 
+    elif et == SupervisorEventType.ASTRA_PROPOSAL_CREATED:
+        return replace(
+            state,
+            updated_at_utc=event.created_at_utc,
+            state_revision=event.state_revision,
+            event_sequence=event.sequence,
+        )
     else:
         _fail(f"REPLAY_UNKNOWN_EVENT_TYPE:{et}")

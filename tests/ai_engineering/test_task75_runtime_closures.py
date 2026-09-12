@@ -139,7 +139,7 @@ async def test_cancellation_unconfirmed_blocks_execution(tmp_path):
     # - cancel() возвращает None, API подтверждения остановки отсутствует: результат BLOCKED / TIMEOUT_CANCELLATION_UNCONFIRMED;
     store = FileSupervisorStateStore(tmp_path)
     run_id = "run-test-cancel"
-    
+
     # Setup initial state
     state = make_state(run_id)
     # mock save state
@@ -153,22 +153,22 @@ async def test_cancellation_unconfirmed_blocks_execution(tmp_path):
     from ai_engineering.supervisor.router.router import compute_policy_receipt_digest
     receipt = make_receipt(intent_digest(intent))
     resolver.receipt_store[(run_id, "task-01")] = receipt
-    
+
     transport = FlakyTransport("timeout_no_is_running")
     # Wrap transport so it acts like real transport but lacks is_running
     class NoIsRunningTransport:
         def dispatch(self, r, t): return transport.dispatch(r, t)
         def cancel(self, op): return transport.cancel(op)
         def health(self): return True
-        
+
     adapter = BaseAgentAdapter(NoIsRunningTransport())
     from ai_engineering.supervisor.router.router import PersistentStore
     router = CrossAgentRouter(registry=make_registry(adapter), authority_resolver=resolver, store=PersistentStore(str(tmp_path)))
-    
-    
+
+
     receipt = make_receipt(intent_digest(intent))
     env = make_env(run_id, intent_digest(intent), compute_policy_receipt_digest(receipt))
-    
+
     with pytest.raises(TimeoutCancellationUnconfirmedError):
         await router.dispatch(env)
 
@@ -177,7 +177,7 @@ async def test_cancellation_confirmed(tmp_path):
     # - подтверждённая остановка реального тестового worker: после TIMED_OUT нет продолжающегося исполнения и позднего контрольного эффекта;
     store = FileSupervisorStateStore(tmp_path)
     run_id = "run-test-cancel-conf"
-    
+
     state = make_state(run_id)
     with open(os.path.join(tmp_path, "state.json"), "w") as f:
         from ai_engineering.supervisor.state import _state_to_dict
@@ -196,10 +196,10 @@ async def test_cancellation_confirmed(tmp_path):
     receipt = make_receipt(intent_digest(intent))
     env = make_env(run_id, intent_digest(intent), compute_policy_receipt_digest(receipt))
     env = replace(env, max_retries=0)
-    
+
     with pytest.raises(asyncio.TimeoutError):
         await router.dispatch(env)
-    
+
     assert transport.running == False
 
 @pytest.mark.asyncio
@@ -207,7 +207,7 @@ async def test_authority_missing_blocks_dispatch(tmp_path):
     # - отсутствие WorkProfile, EffectivePolicy, autonomy state или budget не создаёт синтетическую authority и не допускает dispatch;
     store = FileSupervisorStateStore(tmp_path)
     run_id = "run-no-auth"
-    
+
     # State has NO autonomy/budget
     state = make_state(run_id, no_auth=True)
     with open(os.path.join(tmp_path, "state.json"), "w") as f:
@@ -217,14 +217,14 @@ async def test_authority_missing_blocks_dispatch(tmp_path):
     resolver = AuthorityResolver(store)
     intent = make_intent("task-01")
     resolver.intent_store[(run_id, "task-01")] = intent
-    
+
     resolver.receipt_store[(run_id, "task-01")] = make_receipt(intent_digest(intent))
-    
+
     # In evaluate_fresh_policy, it should raise PolicyDeniedError if authority is missing
-    
+
     receipt = make_receipt(intent_digest(intent))
     env = make_env(run_id, intent_digest(intent), compute_policy_receipt_digest(receipt))
-    
+
     with pytest.raises(PolicyDeniedError, match="Authority unresolved"):
         resolver.evaluate_fresh_policy(env, "att-retry-1")
 
@@ -243,7 +243,7 @@ async def test_subclass_exceptions_block_retry(tmp_path):
 
     store = FileSupervisorStateStore(tmp_path)
     run_id = "run-subclass"
-    
+
     state = make_state(run_id)
     with open(os.path.join(tmp_path, "state.json"), "w") as f:
         from ai_engineering.supervisor.state import _state_to_dict
@@ -252,15 +252,15 @@ async def test_subclass_exceptions_block_retry(tmp_path):
     resolver = AuthorityResolver(store)
     intent = make_intent("task-01")
     resolver.intent_store[(run_id, "task-01")] = intent
-    
+
     resolver.receipt_store[(run_id, "task-01")] = make_receipt(intent_digest(intent))
-    
+
     from ai_engineering.supervisor.router.router import PersistentStore
     router = CrossAgentRouter(registry=make_registry(BaseAgentAdapter(ErrorTransport())), authority_resolver=resolver, store=PersistentStore(str(tmp_path)))
-    
+
     receipt = make_receipt(intent_digest(intent))
     env = make_env(run_id, intent_digest(intent), compute_policy_receipt_digest(receipt))
-    
+
     # Should raise SubclassedAuthorityError without hitting retry logic (which would complain about missing policy)
     with pytest.raises(SubclassedAuthorityError):
         await router.dispatch(env)

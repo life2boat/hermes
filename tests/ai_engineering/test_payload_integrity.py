@@ -24,14 +24,14 @@ def test_event_payload_tamper_detected():
         created_at_utc="2026-09-11T00:00:00Z"
     )
     raw = canonical_serialize_event(ev)
-    
+
     # Tamper with the payload inside the serialized string
     raw_tampered = raw.replace('"ALLOW"', '"DENY"')
-    
+
     # deserialize_event should detect the tamper
     with pytest.raises(SupervisorError) as exc:
         deserialize_event(raw_tampered)
-    
+
     assert exc.value.code == "EVENT_PAYLOAD_TAMPERED"
 
 def test_legacy_event_without_payload_replays():
@@ -49,12 +49,12 @@ def test_legacy_event_without_payload_replays():
         created_at_utc="2026-09-11T00:00:00Z"
     )
     raw = canonical_serialize_event(ev)
-    
+
     # Remove the payload field to simulate legacy event
     d = json.loads(raw)
     del d["payload"]
     raw_legacy = json.dumps(d)
-    
+
     # deserialize_event should accept it and set payload to None
     ev_legacy = deserialize_event(raw_legacy)
     assert ev_legacy.payload is None

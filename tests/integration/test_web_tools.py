@@ -86,7 +86,7 @@ def print_info(text: str, indent: int = 0):
 
 class WebToolsTester:
     """Test suite for web tools"""
-    
+
     def __init__(self, verbose: bool = False, test_llm: bool = True):
         self.verbose = verbose
         self.test_llm = test_llm
@@ -97,7 +97,7 @@ class WebToolsTester:
         }
         self.start_time = None
         self.end_time = None
-    
+
     def log_result(self, test_name: str, status: str, details: str = ""):
         """Log test result"""
         result = {
@@ -106,7 +106,7 @@ class WebToolsTester:
             "details": details,
             "timestamp": datetime.now().isoformat()
         }
-        
+
         if status == "passed":
             self.test_results["passed"].append(result)
             print_success(f"{test_name}: {details}" if details else test_name)
@@ -116,11 +116,11 @@ class WebToolsTester:
         elif status == "skipped":
             self.test_results["skipped"].append(result)
             print_warning(f"{test_name} skipped: {details}" if details else f"{test_name} skipped")
-    
+
     def test_environment(self) -> bool:
         """Test environment setup and API keys"""
         print_section("Environment Check")
-        
+
         # Check web backend API key (Parallel or Firecrawl)
         if not check_web_api_key():
             self.log_result("Web Backend API Key", "failed", "PARALLEL_API_KEY or FIRECRAWL_API_KEY not set")
@@ -128,38 +128,38 @@ class WebToolsTester:
         else:
             backend = _get_backend()
             self.log_result("Web Backend API Key", "passed", f"Using {backend} backend")
-        
+
         # Check auxiliary LLM provider (optional)
         if not check_auxiliary_model():
             self.log_result("Auxiliary LLM", "skipped", "No auxiliary LLM provider available (LLM tests will be skipped)")
             self.test_llm = False
         else:
             self.log_result("Auxiliary LLM", "passed", "Found")
-        
+
         return True
-    
+
     def test_web_search(self) -> List[str]:
         """Test web search functionality"""
         print_section("Test 1: Web Search")
-        
+
         test_queries = [
             ("Python web scraping tutorial", 5),
             ("Firecrawl API documentation", 3),
             ("inflammatory arthritis symptoms treatment", 8)  # Test medical query from your example
         ]
-        
+
         extracted_urls = []
-        
+
         for query, limit in test_queries:
             try:
                 print(f"\n  Testing search: '{query}' (limit={limit})")
-                
+
                 if self.verbose:
                     print(f"  Calling web_search_tool(query='{query}', limit={limit})")
-                
+
                 # Perform search
                 result = web_search_tool(query, limit)
-                
+
                 # Parse result
                 try:
                     data = json.loads(result)
@@ -168,40 +168,40 @@ class WebToolsTester:
                     if self.verbose:
                         print(f"    Raw response (first 500 chars): {result[:500]}...")
                     continue
-                
+
                 if "error" in data:
                     self.log_result(f"Search: {query[:30]}...", "failed", f"API error: {data['error']}")
                     continue
-                
+
                 # Check structure
                 if "success" not in data or "data" not in data:
                     self.log_result(f"Search: {query[:30]}...", "failed", "Missing success or data fields")
                     if self.verbose:
                         print(f"    Response keys: {list(data.keys())}")
                     continue
-                
+
                 web_results = data.get("data", {}).get("web", [])
-                
+
                 if not web_results:
                     self.log_result(f"Search: {query[:30]}...", "failed", "Empty web results array")
                     if self.verbose:
                         print(f"    data.web content: {data.get('data', {}).get('web')}")
                     continue
-                
+
                 # Validate each result
                 valid_results = 0
                 missing_fields = []
-                
+
                 for i, result in enumerate(web_results):
                     required_fields = ["url", "title", "description"]
                     has_all_fields = all(key in result for key in required_fields)
-                    
+
                     if has_all_fields:
                         valid_results += 1
                         # Collect URLs for extraction test
                         if len(extracted_urls) < 3:
                             extracted_urls.append(result["url"])
-                        
+
                         if self.verbose:
                             print(f"    Result {i+1}: ✓ {result['title'][:50]}...")
                             print(f"      URL: {result['url'][:60]}...")
@@ -210,38 +210,38 @@ class WebToolsTester:
                         missing_fields.append(f"Result {i+1} missing: {missing}")
                         if self.verbose:
                             print(f"    Result {i+1}: ✗ Missing fields: {missing}")
-                
+
                 # Log results
                 if valid_results == len(web_results):
                     self.log_result(
-                        f"Search: {query[:30]}...", 
-                        "passed", 
+                        f"Search: {query[:30]}...",
+                        "passed",
                         f"All {valid_results} results valid"
                     )
                 else:
                     self.log_result(
-                        f"Search: {query[:30]}...", 
-                        "failed", 
+                        f"Search: {query[:30]}...",
+                        "failed",
                         f"Only {valid_results}/{len(web_results)} valid. Issues: {'; '.join(missing_fields[:3])}"
                     )
-                    
+
             except Exception as e:
                 self.log_result(f"Search: {query[:30]}...", "failed", f"Exception: {type(e).__name__}: {str(e)}")
                 if self.verbose:
                     import traceback
                     print(f"    Traceback: {traceback.format_exc()}")
-        
+
         if self.verbose and extracted_urls:
             print(f"\n  URLs collected for extraction test: {len(extracted_urls)}")
             for url in extracted_urls:
                 print(f"    - {url}")
-        
+
         return extracted_urls
-    
+
     async def test_web_extract(self, urls: List[str] = None):
         """Test web content extraction"""
         print_section("Test 2: Web Extract (without LLM)")
-        
+
         # Use provided URLs or defaults
         if not urls:
             urls = [
@@ -251,7 +251,7 @@ class WebToolsTester:
             print(f"  Using default URLs for testing")
         else:
             print(f"  Using {len(urls)} URLs from search results")
-        
+
         # Test extraction
         if urls:
             try:
@@ -259,16 +259,16 @@ class WebToolsTester:
                 print(f"\n  Extracting content from {len(test_urls)} URL(s)...")
                 for url in test_urls:
                     print(f"    - {url}")
-                
+
                 if self.verbose:
                     print(f"  Calling web_extract_tool(urls={test_urls}, format='markdown', use_llm_processing=False)")
-                
+
                 result = await web_extract_tool(
                     test_urls,
                     format="markdown",
                     use_llm_processing=False
                 )
-                
+
                 # Parse result
                 try:
                     data = json.loads(result)
@@ -277,30 +277,30 @@ class WebToolsTester:
                     if self.verbose:
                         print(f"    Raw response (first 500 chars): {result[:500]}...")
                     return
-                
+
                 if "error" in data:
                     self.log_result("Extract (no LLM)", "failed", f"API error: {data['error']}")
                     return
-                
+
                 results = data.get("results", [])
-                
+
                 if not results:
                     self.log_result("Extract (no LLM)", "failed", "No results in response")
                     if self.verbose:
                         print(f"    Response keys: {list(data.keys())}")
                     return
-                
+
                 # Validate each result
                 valid_results = 0
                 failed_results = 0
                 total_content_length = 0
                 extraction_details = []
-                
+
                 for i, result in enumerate(results):
                     title = result.get("title", "No title")
                     content = result.get("content", "")
                     error = result.get("error")
-                    
+
                     if error:
                         failed_results += 1
                         extraction_details.append(f"Page {i+1}: ERROR - {error}")
@@ -318,78 +318,78 @@ class WebToolsTester:
                         extraction_details.append(f"Page {i+1}: {title[:40]}... (EMPTY)")
                         if self.verbose:
                             print(f"    Page {i+1}: ⚠ {title[:50]}... - Empty content")
-                
+
                 # Log results
                 if valid_results > 0:
                     self.log_result(
-                        "Extract (no LLM)", 
-                        "passed", 
+                        "Extract (no LLM)",
+                        "passed",
                         f"{valid_results}/{len(results)} pages extracted, {total_content_length} total chars"
                     )
                 else:
                     self.log_result(
-                        "Extract (no LLM)", 
-                        "failed", 
+                        "Extract (no LLM)",
+                        "failed",
                         f"No valid content. {failed_results} errors, {len(results) - failed_results} empty"
                     )
                     if self.verbose:
                         print(f"\n  Extraction details:")
                         for detail in extraction_details:
                             print(f"    {detail}")
-                    
+
             except Exception as e:
                 self.log_result("Extract (no LLM)", "failed", f"Exception: {type(e).__name__}: {str(e)}")
                 if self.verbose:
                     import traceback
                     print(f"    Traceback: {traceback.format_exc()}")
-    
+
     async def test_web_extract_with_llm(self, urls: List[str] = None):
         """Test web extraction with LLM processing"""
         print_section("Test 3: Web Extract (with Gemini LLM)")
-        
+
         if not self.test_llm:
             self.log_result("Extract (with LLM)", "skipped", "LLM testing disabled")
             return
-        
+
         # Use a URL likely to have substantial content
         test_url = urls[0] if urls else "https://docs.firecrawl.dev/features/scrape"
-        
+
         try:
             print(f"\n  Extracting and processing: {test_url}")
-            
+
             result = await web_extract_tool(
                 [test_url],
                 format="markdown",
                 use_llm_processing=True,
                 min_length=1000  # Lower threshold for testing
             )
-            
+
             data = json.loads(result)
-            
+
             if "error" in data:
                 self.log_result("Extract (with LLM)", "failed", data["error"])
                 return
-            
+
             results = data.get("results", [])
-            
+
             if not results:
                 self.log_result("Extract (with LLM)", "failed", "No results returned")
                 return
-            
+
             result = results[0]
             content = result.get("content", "")
-            
+
             if content:
                 content_len = len(content)
-                
+
                 # Check if content was actually processed (should be shorter than typical raw content)
                 if content_len > 0:
                     self.log_result(
-                        "Extract (with LLM)", 
-                        "passed", 
+                        "Extract (with LLM)",
+                        "passed",
                         f"Content processed: {content_len} chars"
                     )
-                    
+
                     if self.verbose:
                         print(f"\n    First 300 chars of processed content:")
                         print(f"    {content[:300]}...")
@@ -397,60 +397,60 @@ class WebToolsTester:
                     self.log_result("Extract (with LLM)", "failed", "No content after processing")
             else:
                 self.log_result("Extract (with LLM)", "failed", "No content field in result")
-                
+
         except json.JSONDecodeError as e:
             self.log_result("Extract (with LLM)", "failed", f"Invalid JSON: {e}")
         except Exception as e:
             self.log_result("Extract (with LLM)", "failed", str(e))
-    
+
     async def run_all_tests(self):
         """Run all tests"""
         self.start_time = datetime.now()
-        
+
         print_header("WEB TOOLS TEST SUITE")
         print(f"Started at: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
+
         # Test environment
         if not self.test_environment():
             print_error("\nCannot proceed without required API keys!")
             return False
-        
+
         # Test search and collect URLs
         urls = self.test_web_search()
-        
+
         # Test extraction
         await self.test_web_extract(urls if urls else None)
-        
+
         # Test extraction with LLM
         if self.test_llm:
             await self.test_web_extract_with_llm(urls if urls else None)
-        
+
         # Print summary
         self.end_time = datetime.now()
         duration = (self.end_time - self.start_time).total_seconds()
-        
+
         print_header("TEST SUMMARY")
         print(f"Duration: {duration:.2f} seconds")
         print(f"\n{Colors.GREEN}Passed: {len(self.test_results['passed'])}{Colors.ENDC}")
         print(f"{Colors.FAIL}Failed: {len(self.test_results['failed'])}{Colors.ENDC}")
         print(f"{Colors.WARNING}Skipped: {len(self.test_results['skipped'])}{Colors.ENDC}")
-        
+
         # List failed tests
         if self.test_results["failed"]:
             print(f"\n{Colors.FAIL}{Colors.BOLD}Failed Tests:{Colors.ENDC}")
             for test in self.test_results["failed"]:
                 print(f"  - {test['test']}: {test['details']}")
-        
+
         # Save results to file
         self.save_results()
-        
+
         return len(self.test_results["failed"]) == 0
-    
+
     def save_results(self):
         """Save test results to a JSON file"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"test_results_web_tools_{timestamp}.json"
-        
+
         results = {
             "test_suite": "Web Tools",
             "start_time": self.start_time.isoformat() if self.start_time else None,
@@ -469,7 +469,7 @@ class WebToolsTester:
                 "auxiliary_model": check_auxiliary_model(),
             }
         }
-        
+
         try:
             with open(filename, 'w') as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
@@ -484,23 +484,23 @@ async def main():
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM processing tests")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode for web tools")
-    
+
     args = parser.parse_args()
-    
+
     # Set debug mode if requested
     if args.debug:
         os.environ["WEB_TOOLS_DEBUG"] = "true"
         print_info("Debug mode enabled for web tools")
-    
+
     # Create tester
     tester = WebToolsTester(
         verbose=args.verbose,
         test_llm=not args.no_llm
     )
-    
+
     # Run tests
     success = await tester.run_all_tests()
-    
+
     # Exit with appropriate code
     sys.exit(0 if success else 1)
 

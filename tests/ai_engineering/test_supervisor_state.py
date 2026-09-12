@@ -442,7 +442,7 @@ class TestEventChain:
         store2 = FileSupervisorStateStore(tmp_path)
         state = make_initial_state()
 
-        # Initialize one store  
+        # Initialize one store
         store1.save_seed_state(state)
         store1._acquire_lock(RUN_ID)
 

@@ -221,6 +221,6 @@ class TestGatewayTextIntercept:
         pending = cm.get_pending_for_session("sk-tf")
         assert pending is not None
         assert pending.clarify_id == "id-tf"
-        
+
         # Clean up
         cm.clear_session("sk-tf")

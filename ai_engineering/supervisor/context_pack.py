@@ -151,7 +151,7 @@ def build_context_pack(
     verified_result: VerifiedResult | None = None,
 ) -> ContextPack:
     """Build a ContextPack from supervisor state and task intent.
-    
+
     Applies redaction checks on root_goal and desired_outcome.
     Enforces MAX_CONTEXT_PACK_BYTES limit.
     """

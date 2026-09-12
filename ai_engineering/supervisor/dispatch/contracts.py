@@ -1,7 +1,12 @@
 import json
 import hashlib
 from dataclasses import dataclass, asdict
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        pass
 from typing import Mapping
 
 from ai_engineering.contracts import EffectClass, StopBoundary

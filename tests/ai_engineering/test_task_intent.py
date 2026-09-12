@@ -493,7 +493,7 @@ def test_self_supersession_fails():
     }
     parent = validate_intent(parent_payload)
     digest = intent_digest(parent)
-    
+
     # Fake self supersession - parent claims it supersedes itself
     bad_child_payload = parent_payload.copy()
     bad_child_payload["intent_revision"] = 2
@@ -503,7 +503,7 @@ def test_self_supersession_fails():
     # The test is that if the new intent has the exact same digest as the parent, it fails.
     # But intent_digest(child) != intent_digest(parent) normally because intent_revision changed.
     # We construct an invalid state manually for the validator function:
-    
+
     with pytest.raises(TaskIntentValidationError) as excinfo:
         validate_intent_revision(bad_child, bad_child)
     assert excinfo.value.code == "SELF_SUPERSESSION"

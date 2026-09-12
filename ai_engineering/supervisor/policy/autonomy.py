@@ -60,10 +60,10 @@ def evaluate_promotion(
 
     current_val = _level_int(current)
     max_val = _level_int(profile.maximum_autonomy_level)
-    
+
     if current_val < max_val:
         return _level_from_int(current_val + 1)
-    
+
     return current
 
 
@@ -74,10 +74,10 @@ def evaluate_demotion(
     policy_invalidated: bool
 ) -> AutonomyLevel:
     current = state.current_level
-    
+
     if _level_int(current) > _level_int(profile.maximum_autonomy_level):
         current = profile.maximum_autonomy_level
-        
+
     if policy_invalidated or critical_failure_occurred:
         return AutonomyLevel.LEVEL_0_OBSERVE
 

@@ -6,11 +6,32 @@ import hashlib
 import asyncio
 import pytest
 from typing import Any, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import replace, asdict
+from pathlib import Path
 
 from ai_engineering.contracts import EffectClass, StopBoundary, Status
-from ai_engineering.task_intent import TaskIntent, deserialize_intent, intent_digest
-from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
+from ai_engineering.task_intent import TaskIntent, TaskLineage, LineageNode, LINEAGE_SCHEMA_VERSION, NodeKind, RelationKind, deserialize_intent, intent_digest
+from ai_engineering.supervisor.policy.contracts import (
+    PolicyReceipt,
+    PolicyVerdict,
+    PolicyRequest,
+    AutonomyState,
+    AutonomyBudgetState,
+    AutonomyLevel,
+    ExecutionTarget,
+    PromotionThresholds,
+    BudgetLimits,
+    WORK_PROFILE_SCHEMA_VERSION,
+    AUTONOMY_STATE_SCHEMA_VERSION,
+    AUTONOMY_BUDGET_STATE_SCHEMA_VERSION,
+    compute_deterministic_digest,
+)
+from ai_engineering.supervisor.policy.engine import evaluate_policy
+from ai_engineering.supervisor.policy.work_profile import validate_work_profile
+from ai_engineering.effective_policy import EffectivePolicyReport, EffectivePolicyStatus, TaskPolicyAttribution
+from ai_engineering.supervisor.store import FileSupervisorStateStore
+from ai_engineering.supervisor.loop import SupervisorLoop
+from ai_engineering.supervisor.events import SupervisorEventType, create_event
 from ai_engineering.supervisor.worker_result import (
     WorkerResultBundle,
     canonical_serialize_worker_result,
@@ -40,6 +61,8 @@ from ai_engineering.supervisor.router import (
     IllegalStateTransitionError,
     CapabilityNotAuthorizedError,
     SourceProvenanceUnresolvedError,
+    SourceProvenanceMismatchError,
+    TimeoutCancellationUnconfirmedError,
     ReplayMessageInvalidError,
     StaleOrForeignAttemptError,
     PolicyDeniedError,
@@ -51,25 +74,41 @@ from ai_engineering.supervisor.router import (
 # ── Test Helpers ───────────────────────────────────────────────────────────
 
 class FakeTransport:
-    def __init__(self, available: bool = True, slow_seconds: float = 0.0) -> None:
+    def __init__(
+        self,
+        available: bool = True,
+        slow_seconds: float = 0.0,
+        cancel_confirmation: bool = True,
+    ) -> None:
         self.available = available
         self.slow_seconds = slow_seconds
+        self.cancel_confirmation = cancel_confirmation
         self.dispatch_count = 0
         self.cancelled_ops: list[str] = []
         self.last_request: dict[str, Any] | None = None
+        self._is_running = False
 
     def health(self) -> bool:
         return self.available
 
-    def cancel(self, operation_id: str) -> None:
+    def cancel(self, operation_id: str) -> bool:
         self.cancelled_ops.append(operation_id)
+        if self.cancel_confirmation:
+            self._is_running = False
+            return True
+        return False
+
+    def is_running(self, operation_id: str) -> bool:
+        return self._is_running
 
     def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
         self.dispatch_count += 1
         self.last_request = dict(request)
         if self.slow_seconds > 0:
             import time
+            self._is_running = True
             time.sleep(self.slow_seconds)
+            self._is_running = False
         return WorkerResultBundle(
             schema_version="hermes.worker-result.v1",
             result_id=f"res-{uuid.uuid4().hex[:8]}",
@@ -85,7 +124,6 @@ class FakeTransport:
             artifacts=(),
             gate_claims=(),
         )
-
 def make_intent(
     task_id: str = "task-001",
     stop_boundary: StopBoundary = StopBoundary.LOCAL_DIFF,
@@ -503,7 +541,7 @@ async def test_22_wrong_attempt_cancellation_rejected(tmp_path: Any) -> None:
 async def test_23_real_timeout_terminates_and_cancels(tmp_path: Any) -> None:
     intent = make_intent()
     receipt = make_receipt(intent=intent)
-    slow_transport = FakeTransport(True, slow_seconds=3.0)
+    slow_transport = FakeTransport(True, slow_seconds=3.0, cancel_confirmation=True)
     router, _, store = setup_test_router(tmp_path, intent, receipt, anti_transport=slow_transport)
     env = make_envelope({"cmd": "check"}, intent, receipt)
 
@@ -512,6 +550,20 @@ async def test_23_real_timeout_terminates_and_cancels(tmp_path: Any) -> None:
 
     assert store.load_state(env.message_id) == "TIMED_OUT"
     assert len(slow_transport.cancelled_ops) > 0
+
+@pytest.mark.asyncio
+async def test_23b_timeout_unconfirmed_cancellation_blocks(tmp_path: Any) -> None:
+    intent = make_intent()
+    receipt = make_receipt(intent=intent)
+    # Transport that cannot confirm termination (orphan execution danger)
+    unconfirmed_transport = FakeTransport(True, slow_seconds=3.0, cancel_confirmation=False)
+    router, _, store = setup_test_router(tmp_path, intent, receipt, anti_transport=unconfirmed_transport)
+    env = make_envelope({"cmd": "check"}, intent, receipt)
+
+    with pytest.raises(TimeoutCancellationUnconfirmedError, match="TIMEOUT_CANCELLATION_UNCONFIRMED"):
+        await router.dispatch(env)
+
+    assert store.load_state(env.message_id) == "BLOCKED"
 
 def test_24_retry_classification_non_retryable() -> None:
     for exc_cls in (
@@ -525,11 +577,50 @@ def test_24_retry_classification_non_retryable() -> None:
         WorkerResultIdentityMismatchError,
         CapabilityNotAuthorizedError,
         SourceProvenanceUnresolvedError,
+        SourceProvenanceMismatchError,
+        TimeoutCancellationUnconfirmedError,
         ReplayMessageInvalidError,
         StaleOrForeignAttemptError,
         IllegalStateTransitionError,
     ):
         assert exc_cls in NON_RETRYABLE_EXCEPTIONS
+
+@pytest.mark.asyncio
+async def test_24b_retry_loop_with_budget_and_attempt_increment(tmp_path: Any) -> None:
+    intent = make_intent()
+    receipt = make_receipt(intent=intent)
+
+    class FlakyTransport(FakeTransport):
+        def __init__(self, available: bool = True) -> None:
+            super().__init__(available)
+            self.attempt_calls = 0
+
+        def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
+            self.attempt_calls += 1
+            if self.attempt_calls == 1:
+                raise RuntimeError("temporary transport blip")
+            return super().dispatch(request, timeout)
+
+    flaky_t = FlakyTransport(True)
+    router, _, store = setup_test_router(tmp_path, intent, receipt, anti_transport=flaky_t)
+    env = make_envelope({"cmd": "retry_me"}, intent, receipt, attempt_id="att-orig")
+    object.__setattr__(env, "max_retries", 2)
+    object.__setattr__(env, "retry_count", 0)
+
+    res = await router.dispatch(env)
+    assert res is not None
+    assert flaky_t.attempt_calls == 2
+    assert "retry-1" in res.attempt_id
+
+    # Exhausted retry budget fails closed
+    flaky_t2 = FlakyTransport(True)
+    router2, _, _ = setup_test_router(tmp_path / "t2", intent, receipt, anti_transport=flaky_t2)
+    env2 = make_envelope({"cmd": "fail_fast"}, intent, receipt)
+    object.__setattr__(env2, "max_retries", 0)
+    object.__setattr__(env2, "retry_count", 0)
+    with pytest.raises(RuntimeError, match="temporary transport blip"):
+        await router2.dispatch(env2)
+    assert flaky_t2.attempt_calls == 1
 
 @pytest.mark.asyncio
 async def test_25_safe_fallback_with_policy_recheck(tmp_path: Any) -> None:
@@ -556,7 +647,6 @@ async def test_26_stale_previous_attempt_result_rejected(tmp_path: Any) -> None:
     receipt = make_receipt(intent=intent)
     env = make_envelope({"cmd": "check"}, intent, receipt)
 
-    # Late result arrival where store is transitioned to TIMED_OUT mid-dispatch
     class LateTransport(FakeTransport):
         def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
             store.save(env, "TIMED_OUT")
@@ -606,18 +696,32 @@ async def test_28_crash_safe_effect_replay(tmp_path: Any) -> None:
     intent = make_intent()
     receipt = make_receipt(intent=intent)
     transport = FakeTransport(True)
-    router, _, _ = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
+    router, _, store = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
     env = make_envelope({"cmd": "commit_effect"}, intent, receipt)
 
-    # First dispatch commits effect and succeeds
+    # 1. First dispatch succeeds and commits effect receipt
     res1 = await router.dispatch(env)
     assert transport.dispatch_count == 1
 
-    # Re-dispatching the exact same envelope (after restart / replay) must return cached result
-    # without re-dispatching to worker (idempotency guarantee)
-    res2 = await router.dispatch(env)
+    # 2. Inject deterministic crash BEFORE SUCCEEDED:
+    # State in store is set back to RUNNING while effect receipt remains on disk
+    store_file = os.path.join(str(tmp_path), f"{env.message_id}.json")
+    with open(store_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data["state"] = "RUNNING"
+    with open(store_file, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    assert store.load_state(env.message_id) == "RUNNING"
+
+    # 3. Simulate restart with new router on same persistent store
+    router2, _, store2 = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
+
+    # 4. Re-dispatch reconciles effect receipt without re-executing effect!
+    res2 = await router2.dispatch(env)
+    # INVARIANT: WORKER_EFFECT_EXECUTION_COUNT == 1
     assert transport.dispatch_count == 1
     assert res2.result_id == res1.result_id
+    assert store2.load_state(env.message_id) == "SUCCEEDED"
 
 @pytest.mark.asyncio
 async def test_29_result_collector_and_verified_result_integration(tmp_path: Any) -> None:
@@ -630,7 +734,6 @@ async def test_29_result_collector_and_verified_result_integration(tmp_path: Any
     worker_bundle = await router.dispatch(env)
     assert worker_bundle.task_id == intent.task_id
 
-    # Pipeline integration: WorkerResultBundle -> ResultCollector -> validate_normalized_evidence -> VerifiedResult
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
     bundle_json = canonical_serialize_worker_result(worker_bundle)
@@ -647,53 +750,284 @@ async def test_29_result_collector_and_verified_result_integration(tmp_path: Any
 
 @pytest.mark.asyncio
 async def test_30_astra_proposal_loop_and_negative_escalation(tmp_path: Any) -> None:
-    # Negative authority test:
-    # TaskIntent is strictly bounded to LOCAL_DIFF
-    intent = make_intent(stop_boundary=StopBoundary.LOCAL_DIFF)
+    intent = make_intent(
+        task_id="task-astra-30",
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+        allowed_mutations=("code", "REPOSITORY_WRITE"),
+    )
+    i_dig = intent_digest(intent)
 
-    # Astra proposes DEPLOY -> PolicyEngine rejects and issues DENY verdict
-    denied_receipt = make_receipt(intent=intent, verdict=PolicyVerdict.DENY)
+    eff_pol = EffectivePolicyReport(
+        schema_version=1,
+        effective_policy_id="eff-pol-30",
+        task_id=intent.task_id,
+        intent_digest=i_dig,
+        intent_revision=1,
+        source_base_sha=intent.source_base_sha,
+        subject_sha="subj-30",
+        status=EffectivePolicyStatus.COMPLETE,
+        policy_sources=(),
+        task_policy=TaskPolicyAttribution(
+            task_id=intent.task_id,
+            intent_revision=1,
+            intent_digest=i_dig,
+            source_base_sha=intent.source_base_sha,
+            constraints=(),
+            allowed_mutations=intent.allowed_mutations,
+            forbidden_mutations=intent.forbidden_mutations,
+            stop_boundary="LOCAL_DIFF",
+            source_id="src-30",
+        ),
+        invariant_resolutions=(),
+        required_gate_resolutions=(),
+        unresolved_references=(),
+        precedence_source_id="src-30",
+    )
+
+    wp_dict = {
+        "schema_version": WORK_PROFILE_SCHEMA_VERSION,
+        "profile_id": "wp-30",
+        "profile_version": 1,
+        "preferred_worker_model": "flash",
+        "preferred_verifier_model": "pro",
+        "preferred_supervisor_model": "pro",
+        "escalation_model": "pro",
+        "allowed_task_classes": ["BOUNDED_IMPLEMENTATION"],
+        "maximum_autonomy_level": "LEVEL_2_DEV_AUTONOMY",
+        "allowed_effect_classes": ["READ_ONLY", "REPOSITORY_WRITE"],
+        "forbidden_effect_classes": ["DEPLOY"],
+        "allowed_targets": ["LOCAL"],
+        "required_validators": ["tests"],
+        "promotion_thresholds": {
+            "required_successful_runs": 3,
+            "allowed_critical_failures": 0,
+            "require_rollback_verified": False,
+        },
+        "budget_limits": {
+            "max_supervisor_decisions": 10,
+            "max_child_tasks": 5,
+            "max_retries_per_task": 2,
+            "max_fix_cycles_per_task": 2,
+            "max_consecutive_failures": 2,
+            "max_provider_calls": 20,
+            "max_policy_denials": 3,
+        },
+        "production_execution_allowed": False,
+        "vector_mutation_allowed": False,
+        "secret_mutation_allowed": False,
+        "external_send_allowed": False,
+    }
+    work_profile = validate_work_profile(wp_dict)
+
+    bs_dict = {
+        "budget_id": "bud-30",
+        "child_tasks_used": 0,
+        "consecutive_failures": 0,
+        "decisions_used": 0,
+        "exhausted_dimensions": [],
+        "fix_cycles_used": 0,
+        "policy_denials": 0,
+        "provider_calls_used": 0,
+        "retries_used": 0,
+        "schema_version": AUTONOMY_BUDGET_STATE_SCHEMA_VERSION,
+    }
+    b_dig = compute_deterministic_digest(bs_dict)
+    budget_state = AutonomyBudgetState(
+        schema_version=AUTONOMY_BUDGET_STATE_SCHEMA_VERSION,
+        budget_id="bud-30",
+        budget_digest=b_dig,
+        decisions_used=0,
+        child_tasks_used=0,
+        retries_used=0,
+        fix_cycles_used=0,
+        consecutive_failures=0,
+        provider_calls_used=0,
+        policy_denials=0,
+        exhausted_dimensions=(),
+    )
+
+    auto_state = AutonomyState(
+        schema_version=AUTONOMY_STATE_SCHEMA_VERSION,
+        run_id="run-30",
+        profile_id=work_profile.profile_id,
+        profile_digest=work_profile.profile_digest,
+        current_level=AutonomyLevel.LEVEL_1_LOCAL_WRITE,
+        maximum_allowed_level=AutonomyLevel.LEVEL_2_DEV_AUTONOMY,
+        successful_runs=0,
+        critical_failures=0,
+        rollback_verified=False,
+        required_validators_status={},
+        budget_state_digest=b_dig,
+        promotion_sequence=0,
+        last_transition_receipt_id=None,
+        created_at_utc="2026-09-12T00:00:00Z",
+        updated_at_utc="2026-09-12T00:00:00Z",
+        state_digest="a-dig-30",
+    )
+
+    # Negative case: Astra proposes DEPLOY -> PolicyEngine DENY
+    req_deny = PolicyRequest(
+        schema_version="hermes.policy-request.v1",
+        request_id="req-deny-30",
+        run_id="run-30",
+        task_id=intent.task_id,
+        attempt_id="att-30",
+        intent_digest=i_dig,
+        decision_id="dec-deny-30",
+        decision_receipt_id="drec-deny-30",
+        work_profile_id=work_profile.profile_id,
+        work_profile_digest=work_profile.profile_digest,
+        current_autonomy_level=auto_state.current_level,
+        requested_action="DEPLOY",
+        requested_effect_classes=(EffectClass.DEPLOY,),
+        requested_stop_boundary=StopBoundary.DEPLOY,
+        execution_target=ExecutionTarget.LOCAL,
+        effective_policy_id=eff_pol.effective_policy_id,
+        effective_policy_digest=eff_pol.effective_policy_id,
+        budget_state_digest=budget_state.budget_digest,
+    )
+    receipt_deny = evaluate_policy(req_deny, intent, eff_pol, work_profile, auto_state, budget_state)
+    assert receipt_deny.verdict == PolicyVerdict.DENY
 
     transport = FakeTransport(True)
-    router, _, _ = setup_test_router(tmp_path, intent, denied_receipt, anti_transport=transport)
-    env = make_envelope({"cmd": "deploy_to_production"}, intent, denied_receipt)
+    router, _, _ = setup_test_router(tmp_path, intent, receipt_deny, anti_transport=transport)
+    env_deny = make_envelope({"cmd": "deploy"}, intent, receipt_deny, effect_class=EffectClass.REPOSITORY_WRITE)
 
-    # Must fail closed with PolicyDeniedError and zero worker dispatches
     with pytest.raises(PolicyDeniedError, match="POLICY_DENIED"):
-        await router.dispatch(env)
-
+        await router.dispatch(env_deny)
     assert transport.dispatch_count == 0
+
+    # Positive case: Astra proposes REPOSITORY_WRITE within bounds -> PolicyEngine ALLOW
+    req_allow = PolicyRequest(
+        schema_version="hermes.policy-request.v1",
+        request_id="req-allow-30",
+        run_id="run-30",
+        task_id=intent.task_id,
+        attempt_id="att-30",
+        intent_digest=i_dig,
+        decision_id="dec-allow-30",
+        decision_receipt_id="drec-allow-30",
+        work_profile_id=work_profile.profile_id,
+        work_profile_digest=work_profile.profile_digest,
+        current_autonomy_level=auto_state.current_level,
+        requested_action="WRITE",
+        requested_effect_classes=(EffectClass.REPOSITORY_WRITE,),
+        requested_stop_boundary=StopBoundary.LOCAL_DIFF,
+        execution_target=ExecutionTarget.LOCAL,
+        effective_policy_id=eff_pol.effective_policy_id,
+        effective_policy_digest=eff_pol.effective_policy_id,
+        budget_state_digest=budget_state.budget_digest,
+    )
+    receipt_allow = evaluate_policy(req_allow, intent, eff_pol, work_profile, auto_state, budget_state)
+    assert receipt_allow.verdict == PolicyVerdict.ALLOW
+
+    router_allow, _, _ = setup_test_router(tmp_path / "allow", intent, receipt_allow, anti_transport=transport)
+    env_allow = make_envelope({"cmd": "write"}, intent, receipt_allow, effect_class=EffectClass.REPOSITORY_WRITE)
+    res_allow = await router_allow.dispatch(env_allow)
+    assert res_allow is not None
+    assert transport.dispatch_count == 1
 
 @pytest.mark.asyncio
 async def test_31_full_multi_agent_e2e_loop(tmp_path: Any) -> None:
-    # 1. Authoritative TaskIntent
-    intent = make_intent(task_id="task-e2e-100", stop_boundary=StopBoundary.LOCAL_DIFF)
+    # Full repository-component path:
+    # TaskIntent -> Persistent Supervisor -> PolicyEngine -> persisted PolicyReceipt ->
+    # trusted AuthorityResolver (reading from store) -> AgentEnvelope -> CrossAgentRouter ->
+    # FakeTransport -> WorkerResultBundle -> ResultCollector -> VerifiedResult -> SupervisorLoop.ingest_verified_result
+    sup_store = FileSupervisorStateStore(tmp_path / "supervisor_state")
+    sup_loop = SupervisorLoop(sup_store)
 
-    # 2. Astra proposal approved by policy
-    receipt = make_receipt(receipt_id="rcpt-e2e-100", intent=intent, verdict=PolicyVerdict.ALLOW)
+    intent = make_intent(
+        task_id="task-e2e-real",
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+        allowed_mutations=("code", "REPOSITORY_WRITE"),
+    )
+    lineage = TaskLineage(
+        schema_version=LINEAGE_SCHEMA_VERSION,
+        nodes=(LineageNode(node_id=intent.task_id, kind=NodeKind.TASK),),
+        edges=(),
+    )
 
-    # 3. AgentEnvelope constructed referencing authority
-    env = make_envelope({"objective": "e2e flow"}, intent, receipt)
+    state = sup_loop.initialize_run(
+        intent=intent,
+        lineage=lineage,
+        root_goal="E2E test run",
+        root_goal_id="run-e2e-real",
+        created_at_utc="2026-09-12T00:00:00Z",
+    )
 
-    # 4. CrossAgentRouter verifies authority and routes to Antigravity
+    receipt = make_receipt(receipt_id="rcpt-e2e-real", intent=intent, verdict=PolicyVerdict.ALLOW)
+
+    # Persist POLICY_EVALUATED event into FileSupervisorStateStore
+    event = create_event(
+        run_id="run-e2e-real",
+        sequence=2,
+        previous_event_digest=sup_store.load_events("run-e2e-real")[-1].event_digest,
+        event_type=SupervisorEventType.POLICY_EVALUATED,
+        state_revision=state.state_revision + 1,
+        task_id=intent.task_id,
+        attempt_id=state.current_attempt_id,
+        intent_digest=intent_digest(intent),
+        payload={
+            "receipt_id": receipt.receipt_id,
+            "verdict": receipt.verdict.value,
+            "reason_codes": list(receipt.reason_codes),
+            "policy_receipt": asdict(receipt),
+        },
+        created_at_utc="2026-09-12T00:01:00Z",
+    )
+    sup_store.save_event(event)
+
+    # Initialize trusted AuthorityResolver strictly backed by FileSupervisorStateStore & SupervisorLoop
+    # (NO manual register_authority call!)
+    trusted_resolver = AuthorityResolver(
+        supervisor_store=sup_store,
+        supervisor_loop=sup_loop,
+    )
+
     transport = FakeTransport(True)
-    router, _, _ = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
+    registry = AgentRegistry()
+    registry.register(
+        AgentDefinition(
+            agent_id="anti",
+            capabilities=["code", "test"],
+            supported_message_types=[MessageType.WORK_REQUEST],
+            allowed_effect_classes=[EffectClass.READ_ONLY, EffectClass.REPOSITORY_WRITE],
+            timeout_seconds=2,
+        ),
+        AntigravityAdapter(transport),
+    )
+    router_store = PersistentStore(str(tmp_path / "router_store"))
+    router = CrossAgentRouter(registry, trusted_resolver, router_store)
 
-    # 5. Worker execution
+    env = make_envelope(
+        {"cmd": "e2e_execute"},
+        intent,
+        receipt,
+        run_id="run-e2e-real",
+        attempt_id=state.current_attempt_id,
+        recipient_agent="anti",
+        recipient_capability="code",
+        effect_class=EffectClass.REPOSITORY_WRITE,
+    )
+
+    # Dispatch through CrossAgentRouter
     worker_bundle = await router.dispatch(env)
     assert transport.dispatch_count == 1
+    assert worker_bundle.task_id == intent.task_id
 
-    # 6. ResultCollector validates untrusted worker output
-    evidence_dir = tmp_path / "e2e_evidence"
+    # Pipeline: WorkerResultBundle -> ResultCollector -> VerifiedResult
+    evidence_dir = tmp_path / "evidence_e2e"
     evidence_dir.mkdir()
     bundle_json = canonical_serialize_worker_result(worker_bundle)
     ne = ResultCollector().collect(bundle_json, evidence_dir, intent)
-
-    # 7. Deterministic verification to produce VerifiedResult
-    vr = validate_normalized_evidence(ne, intent, verified_at_utc="2026-09-12T00:00:00Z")
+    vr = validate_normalized_evidence(ne, intent, verified_at_utc="2026-09-12T00:02:00Z")
     assert vr.status == Status.PASS
-    assert vr.task_id == intent.task_id
-    assert vr.intent_digest == intent_digest(intent)
+
+    # Ingest VerifiedResult into SupervisorLoop
+    vr_digest = hashlib.sha256(json.dumps(asdict(vr), sort_keys=True).encode("utf-8")).hexdigest()
+    updated_state = sup_loop.ingest_verified_result("run-e2e-real", vr, vr_digest)
+    assert updated_state.latest_verified_result_id == vr.result_id
+    assert updated_state.phase.value == "VERIFYING"
 
 @pytest.mark.asyncio
 async def test_32_computer_use_requires_valid_policy_receipt(tmp_path: Any) -> None:
@@ -702,7 +1036,6 @@ async def test_32_computer_use_requires_valid_policy_receipt(tmp_path: Any) -> N
     comp_transport = FakeTransport(True)
     router, resolver, _ = setup_test_router(tmp_path, intent, receipt, comp_transport=comp_transport)
 
-    # Computer use without policy receipt ID must be blocked with PolicyDeniedError
     env_no_rcpt = make_envelope(
         {"cmd": "click"}, intent, receipt, recipient_agent="comp", recipient_capability="os"
     )
@@ -710,7 +1043,6 @@ async def test_32_computer_use_requires_valid_policy_receipt(tmp_path: Any) -> N
     with pytest.raises(PolicyDeniedError, match="POLICY_DENIED"):
         await router.dispatch(env_no_rcpt)
 
-    # ComputerUseAdapter direct dispatch with unavailable transport must raise ComputerUseTransportUnavailableError
     unhealthy_comp = FakeTransport(available=False)
     adapter = ComputerUseAdapter(unhealthy_comp)
     env_healthy = make_envelope(
@@ -719,3 +1051,147 @@ async def test_32_computer_use_requires_valid_policy_receipt(tmp_path: Any) -> N
     provenance = resolver.get_provenance(env_healthy.run_id, env_healthy.task_id)
     with pytest.raises(ComputerUseTransportUnavailableError, match="COMPUTER_USE_TRANSPORT_UNAVAILABLE"):
         adapter.dispatch(env_healthy, timeout=2, provenance=provenance)
+
+@pytest.mark.asyncio
+async def test_33_provenance_mismatch_fails_closed(tmp_path: Any) -> None:
+    intent = make_intent(source_repository="life2boat/hermes", base_sha="54e404eab378b6a5a8ca7c9d3bf8bed01810ec35")
+    receipt = make_receipt(intent=intent)
+    transport = FakeTransport(True)
+    router, _, _ = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
+    env = make_envelope({"cmd": "check"}, intent, receipt)
+
+    # 1. Caller attempts to override repository
+    with pytest.raises(SourceProvenanceMismatchError, match="SOURCE_PROVENANCE_MISMATCH"):
+        await router.dispatch(env, caller_provenance={"repository": "attacker/repo"})
+
+    # 2. Caller attempts to override base_sha
+    with pytest.raises(SourceProvenanceMismatchError, match="SOURCE_PROVENANCE_MISMATCH"):
+        await router.dispatch(env, caller_provenance={"base_sha": "0000000000000000000000000000000000000000"})
+
+    # 3. Payload specifies mismatched repository
+    env_tampered_payload = make_envelope({"cmd": "check", "repository": "attacker/repo"}, intent, receipt)
+    with pytest.raises(SourceProvenanceMismatchError, match="SOURCE_PROVENANCE_MISMATCH"):
+        await router.dispatch(env_tampered_payload)
+
+    assert transport.dispatch_count == 0
+
+@pytest.mark.asyncio
+async def test_34_effect_class_and_stop_boundary_independence(tmp_path: Any) -> None:
+    intent = make_intent(
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+        allowed_mutations=("code", "REPOSITORY_WRITE"),
+    )
+    receipt = make_receipt(intent=intent)
+    transport = FakeTransport(True)
+    router, _, _ = setup_test_router(tmp_path, intent, receipt, anti_transport=transport)
+
+    # Case 1: Stop boundary is compliant (LOCAL_DIFF <= LOCAL_DIFF), but effect class is escalated (DEPLOY not allowed)
+    env_escalated_effect = make_envelope(
+        {"cmd": "deploy"},
+        intent,
+        receipt,
+        effect_class=EffectClass.DEPLOY,
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+    )
+    with pytest.raises(EffectClassEscalationError, match="EFFECT_CLASS_ESCALATION"):
+        router.route(env_escalated_effect)
+
+    # Case 2: Effect class is compliant (READ_ONLY), but stop boundary is escalated (DEPLOY > LOCAL_DIFF)
+    env_escalated_stop = make_envelope(
+        {"cmd": "read"},
+        intent,
+        receipt,
+        effect_class=EffectClass.READ_ONLY,
+        stop_boundary=StopBoundary.DEPLOY,
+    )
+    with pytest.raises(StopBoundaryEscalationError, match="STOP_BOUNDARY_ESCALATION"):
+        router.route(env_escalated_stop)
+
+    # Case 3: Effect class is explicitly forbidden
+    intent_forbidden = make_intent(
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+        allowed_mutations=("REPOSITORY_WRITE",),
+    )
+    object.__setattr__(intent_forbidden, "forbidden_mutations", ("GIT_COMMIT",))
+    receipt_f = make_receipt(intent=intent_forbidden)
+    router_f, _, _ = setup_test_router(tmp_path / "f", intent_forbidden, receipt_f, anti_transport=transport)
+    env_forbidden = make_envelope(
+        {"cmd": "commit"},
+        intent_forbidden,
+        receipt_f,
+        effect_class=EffectClass.GIT_COMMIT,
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+    )
+    with pytest.raises(EffectClassEscalationError, match="EFFECT_CLASS_ESCALATION"):
+        router_f.route(env_forbidden)
+
+    # Case 4: Both effect class and stop boundary compliant -> succeeds
+    env_valid = make_envelope(
+        {"cmd": "write"},
+        intent,
+        receipt,
+        effect_class=EffectClass.REPOSITORY_WRITE,
+        stop_boundary=StopBoundary.LOCAL_DIFF,
+    )
+    receipt_out = router.route(env_valid)
+    assert receipt_out.decision == "ROUTE"
+
+@pytest.mark.asyncio
+async def test_35_trusted_supervisor_store_authority_lookup(tmp_path: Any) -> None:
+    sup_store = FileSupervisorStateStore(tmp_path / "sup_store")
+    sup_loop = SupervisorLoop(sup_store)
+
+    intent = make_intent(task_id="task-store-35", base_sha="54e404eab378b6a5a8ca7c9d3bf8bed01810ec35")
+    lineage = TaskLineage(
+        schema_version=LINEAGE_SCHEMA_VERSION,
+        nodes=(LineageNode(node_id=intent.task_id, kind=NodeKind.TASK),),
+        edges=(),
+    )
+
+    state = sup_loop.initialize_run(
+        intent=intent,
+        lineage=lineage,
+        root_goal="Store authority test",
+        root_goal_id="run-store-35",
+        created_at_utc="2026-09-12T00:00:00Z",
+    )
+
+    receipt = make_receipt(receipt_id="rcpt-store-35", intent=intent, verdict=PolicyVerdict.ALLOW)
+    event = create_event(
+        run_id="run-store-35",
+        sequence=2,
+        previous_event_digest=sup_store.load_events("run-store-35")[-1].event_digest,
+        event_type=SupervisorEventType.POLICY_EVALUATED,
+        state_revision=state.state_revision + 1,
+        task_id=intent.task_id,
+        attempt_id=state.current_attempt_id,
+        intent_digest=intent_digest(intent),
+        payload={
+            "receipt_id": receipt.receipt_id,
+            "verdict": receipt.verdict.value,
+            "reason_codes": list(receipt.reason_codes),
+            "policy_receipt": asdict(receipt),
+        },
+        created_at_utc="2026-09-12T00:01:00Z",
+    )
+    sup_store.save_event(event)
+
+    resolver = AuthorityResolver(supervisor_store=sup_store, supervisor_loop=sup_loop)
+
+    # Resolves TaskIntent from supervisor loop / store
+    res_intent = resolver.resolve_task_intent(
+        intent.task_id, intent_digest(intent), "run-store-35", intent.task_id
+    )
+    assert res_intent.task_id == intent.task_id
+
+    # Resolves PolicyReceipt from supervisor events
+    res_receipt = resolver.resolve_policy_receipt(
+        receipt.receipt_id, compute_policy_receipt_digest(receipt), "run-store-35", intent.task_id
+    )
+    assert res_receipt.receipt_id == receipt.receipt_id
+    assert res_receipt.verdict == PolicyVerdict.ALLOW
+
+    # Resolves Provenance from supervisor state
+    prov = resolver.get_provenance("run-store-35", intent.task_id)
+    assert prov["repository"] == intent.source_repository
+    assert prov["base_sha"] == intent.source_base_sha

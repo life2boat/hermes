@@ -9,64 +9,73 @@ class AgentTransportUnavailableError(Exception):
 class PolicyDeniedError(Exception):
     pass
 
+class ComputerUseTransportUnavailableError(AgentTransportUnavailableError):
+    pass
+
 class AgentTransport(Protocol):
     def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle: ...
     def cancel(self, operation_id: str) -> None: ...
     def health(self) -> bool: ...
 
 class AgentAdapter(Protocol):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle: ...
-    def cancel(self, correlation_id: str) -> None: ...
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle: ...
+    def cancel(self, operation_id: str) -> None: ...
     def health(self) -> bool: ...
 
 class BaseAgentAdapter:
-    def __init__(self, transport: Optional[AgentTransport] = None):
+    def __init__(self, transport: Optional[AgentTransport] = None) -> None:
         self.transport = transport
-        
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle:
+
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle:
         if not self.transport or not self.transport.health():
-            raise AgentTransportUnavailableError(f"AGENT_TRANSPORT_UNAVAILABLE")
-        
-        prov = provenance or {}
-        
+            raise AgentTransportUnavailableError("AGENT_TRANSPORT_UNAVAILABLE")
+
+        if not provenance or not provenance.get("repository") or not provenance.get("canonical_remote") or not provenance.get("base_sha"):
+            raise ValueError("SOURCE_PROVENANCE_UNRESOLVED")
+
         request = {
             "message_id": envelope.message_id,
+            "worker_id": envelope.recipient_agent,
             "correlation_id": envelope.correlation_id,
             "run_id": envelope.run_id,
             "task_id": envelope.task_id,
             "attempt_id": envelope.attempt_id,
-            "repository": prov.get("repository", "life2boat/hermes"),
-            "canonical_remote": prov.get("canonical_remote", "github"),
-            "base_sha": prov.get("base_sha", "5bf77a9fde5caf9435fb9f61820f5c09b23258c5"),
+            "repository": provenance["repository"],
+            "canonical_remote": provenance["canonical_remote"],
+            "base_sha": provenance["base_sha"],
             "objective": envelope.payload.get("objective", ""),
             "allowed_scope": envelope.payload.get("allowed_scope", []),
             "task_intent_id": envelope.task_intent_id,
             "task_intent_digest": envelope.task_intent_digest,
             "policy_receipt_id": envelope.policy_receipt_id,
             "policy_receipt_digest": envelope.policy_receipt_digest,
-            "effective_effect_class": envelope.effect_class.name,
-            "effective_stop_boundary": envelope.stop_boundary.name,
-            "required_validators": [],
-            "result_schema": "hermes.worker-result.v1"
+            "effective_effect_class": envelope.effect_class.value if hasattr(envelope.effect_class, "value") else str(envelope.effect_class),
+            "effective_stop_boundary": envelope.stop_boundary.value if hasattr(envelope.stop_boundary, "value") else str(envelope.stop_boundary),
+            "required_validators": envelope.payload.get("required_validators", []),
+            "result_schema": "hermes.worker-result.v1",
         }
         return self.transport.dispatch(request, timeout)
-        
-    def cancel(self, correlation_id: str) -> None:
+
+    def cancel(self, operation_id: str) -> None:
         if self.transport:
-            self.transport.cancel(correlation_id)
-            
+            self.transport.cancel(operation_id)
+
     def health(self) -> bool:
         return self.transport is not None and self.transport.health()
 
-class AntigravityAdapter(BaseAgentAdapter): pass
-class CodexAdapter(BaseAgentAdapter): pass
+class AntigravityAdapter(BaseAgentAdapter):
+    pass
+
+class CodexAdapter(BaseAgentAdapter):
+    pass
 
 class ComputerUseAdapter(BaseAgentAdapter):
-    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Optional[dict[str, Any]] = None) -> WorkerResultBundle:
-        if not envelope.policy_receipt_id:
+    def dispatch(self, envelope: AgentEnvelope, timeout: int, provenance: Mapping[str, Any]) -> WorkerResultBundle:
+        if not envelope.policy_receipt_id or not envelope.policy_receipt_digest:
             raise PolicyDeniedError("POLICY_DENIED")
         if not self.transport or not self.transport.health():
-            raise AgentTransportUnavailableError("COMPUTER_USE_TRANSPORT_UNAVAILABLE")
+            raise ComputerUseTransportUnavailableError("COMPUTER_USE_TRANSPORT_UNAVAILABLE")
         return super().dispatch(envelope, timeout, provenance)
 
-class AstraAdapter(BaseAgentAdapter): pass
+class AstraAdapter(BaseAgentAdapter):
+    pass

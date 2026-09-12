@@ -63,7 +63,7 @@ def test_report_id_semantic_binding():
     from ai_engineering.memory_graph_eval import run_eval_engine
     import hashlib
     import json
-    
+
     corpus_dir = Path("evals/memory_graph")
     r1 = run_eval_engine(corpus_dir)
     r2 = run_eval_engine(corpus_dir)
@@ -77,9 +77,9 @@ def test_report_id_semantic_binding():
         d["report_id"] = ""
         payload = json.dumps(d, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
-        
+
     assert compute_id(r1) == r1.report_id
-    
+
     r3 = dataclasses.replace(r1, fail_count=r1.fail_count + 1)
     assert compute_id(r3) != r1.report_id
 
@@ -94,7 +94,7 @@ def test_CLI_exit_codes(tmp_path, monkeypatch):
     import subprocess
     import os
     import json
-    
+
     # Run CLI on valid passing corpus (default evals/memory_graph)
     env = os.environ.copy()
     env["PYTHONPATH"] = "."
@@ -131,7 +131,7 @@ def test_CLI_exit_codes(tmp_path, monkeypatch):
     }))
     for n in ["f", "p", "i", "in", "c", "d", "t"]:
         (fail_dir / "datasets" / f"{n}.jsonl").write_text("")
-        
+
     (fail_dir / "datasets" / "r.jsonl").write_text(json.dumps({
         "schema_version": 1, "scenario_id": "r1", "category": "RETRIEVAL", "critical": True,
         "setup": {"users": []}, "action": {"type": "READ_CONTEXT", "user_id": 1, "query": {"entity": "e", "key": "k"}},
@@ -206,7 +206,7 @@ def test_safety_counters(tmp_path, monkeypatch):
     monkeypatch.setattr(eval_mod, 'evaluate_scenario', mock_eval)
 
     report = eval_mod.run_eval_engine(tmp_path)
-    
+
     assert report.cross_user_leakage_count == 1
     assert report.excluded_fact_leakage_count == 1
     assert report.integrity_fail_open_count == 1

@@ -50,7 +50,7 @@ def test_cli_isolated_e2e(tmp_path: Path):
     }))
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    
+
     worker_script = tmp_path / "worker.py"
     worker_script.write_text("""
 import sys, json, uuid
@@ -71,7 +71,7 @@ print(json.dumps({
     "gate_claims": [{"claim_id":"1", "validator_id":"test", "claimed_status":"PASS", "evidence_summary":"", "produced_at_utc": "2026-01-01T00:00:00Z"}]
 }))
 """)
-    
+
     res = subprocess.run([
         sys.executable, "scripts/autonomous_run.py",
         "--intent", str(intent_path),
@@ -79,7 +79,7 @@ print(json.dumps({
         "--run-id", "test-run",
         "--worker-cmd", sys.executable, str(worker_script)
     ], capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(Path.cwd())))
-    
+
     assert "GOAL_COMPLETE" in res.stdout or "STOP_SUCCESS_NOT_EVIDENCED" in res.stdout
 
 def test_transport_layering():
@@ -114,16 +114,16 @@ def test_subprocess_explicit_cancellation(tmp_path: Path):
     worker_script.write_text("import time; time.sleep(10)")
     t = trans.ConfiguredLocalAgentTransport([sys.executable, str(worker_script)])
     import threading
-    
+
     def run_dispatch():
         try:
             t.dispatch({"operation_id": "op-cancel"}, timeout=10)
         except Exception:
             pass
-            
+
     th = threading.Thread(target=run_dispatch)
     th.start()
-    
+
     import time
     time.sleep(0.5) # Wait for it to start
     assert t.is_running("op-cancel")
@@ -172,7 +172,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
         root_goal_id=run_id,
         created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
-    
+
     # Fake some events
     from ai_engineering.supervisor.events import create_event, SupervisorEventType
     events = store.load_events(run_id)
@@ -189,7 +189,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
         created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
     store.save_event(ev1)
-    
+
     events = store.load_events(run_id)
     ev2 = create_event(
         run_id=run_id,
@@ -204,7 +204,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
         created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
     store.save_event(ev2)
-    
+
     events = store.load_events(run_id)
     ev3 = create_event(
         run_id=run_id,
@@ -219,7 +219,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
         created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
     store.save_event(ev3)
-    
+
     # Initialize coordinator and verify budget load
     coord = ar.AutonomousRunCoordinator(
         loop=loop,
@@ -231,7 +231,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
         astra_provider=MagicMock(),
         ci_provider=MagicMock()
     )
-    
+
     # We call a dummy method that relies on budget loading or run_until_terminal directly?
     # run_until_terminal will immediately block and load events.
     # To test we can mock astra_provider to return STOP_SUCCESS
@@ -256,7 +256,7 @@ async def test_budget_restart_persistence(tmp_path: Path):
             )
     coord.astra_provider = MockAstra()
     receipt = await coord.run_until_terminal()
-    
+
     # It loaded previous budget
     assert coord.provider_calls == 2 # 1 from fake events, 1 from the MockAstra call
     assert coord.child_tasks == 1

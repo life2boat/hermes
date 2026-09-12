@@ -42,19 +42,19 @@ def _dummy_intent() -> TaskIntent:
 def test_attacker_controlled_state_root_rejected(capsys):
     with tempfile.TemporaryDirectory() as d:
         store_path = Path(d)
-        
+
         intent = _dummy_intent()
         from ai_engineering.task_intent import serialize_intent
         intent_path = store_path / "intent.json"
         intent_path.write_text(serialize_intent(intent))
-        
+
         args = [
             "staging-deploy",
             "--intent", str(intent_path),
             "--run-id", "run-123",
             "--policy-receipt", "fake-123"
         ]
-        
+
         with patch.dict(os.environ, {"HERMES_TRUSTED_STATE_ROOT": str(store_path)}):
             res = cli_main(args)
             assert res == 1
@@ -71,12 +71,12 @@ def test_trusted_supervisor_journal_can_authorize():
     # This test verifies that if the authority root IS trusted, the preflight progresses
     with tempfile.TemporaryDirectory(dir=os.getcwd()) as d:
         store_path = Path(d)
-        
+
         intent = _dummy_intent()
         from ai_engineering.task_intent import serialize_intent
         intent_path = store_path / "intent.json"
         intent_path.write_text(serialize_intent(intent))
-        
+
         store = FileSupervisorStateStore(store_path)
         receipt_payload = {
             "schema_version": 1,
@@ -94,7 +94,7 @@ def test_trusted_supervisor_journal_can_authorize():
             "reason_codes": [],
             "created_at_utc": "2026-01-01T00:00:00"
         }
-        
+
         ev = create_event(
             run_id="run-123",
             sequence=1,
@@ -109,14 +109,14 @@ def test_trusted_supervisor_journal_can_authorize():
             decision_id="dec1"
         )
         store.save_event(ev)
-        
+
         args = [
             "staging-deploy",
             "--intent", str(intent_path),
             "--run-id", "run-123",
             "--policy-receipt", "receipt123"
         ]
-        
+
         # We mock the canonical reading logic to return our temp dir
         # This simulates reading from /etc/hermes/supervisor.conf
         with patch("scripts.run_autonomous_supervisor.get_trusted_state_root", return_value=store_path):

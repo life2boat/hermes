@@ -185,7 +185,7 @@ def test_reconciler_liveness_alert_is_machine_readable(tmp_path, monkeypatch):
     status = bridge.get_vector_sync_status()
     assert status.status == "CONVERGED"
     assert status.alert_status == "OK"  # No active work, so stale reconciler is not an alert
-    
+
     # Now add active work manually so it is not processed synchronously
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"INSERT INTO {OUTBOX_TABLE} (user_id, fact_id, fact_uuid, operation, fact_revision, state, created_at, updated_at) VALUES (1, 1, '00000000-0000-0000-0000-000000000000', 'UPSERT', 1, 'PENDING', 0.0, 0.0)")

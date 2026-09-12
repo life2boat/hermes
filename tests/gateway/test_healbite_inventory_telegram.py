@@ -1232,20 +1232,20 @@ async def test_single_photo(tmp_path, fake_sleep):
     async def vision(image_paths: Sequence[str], prompt: str):
         nonlocal calls; calls += 1
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg = _message(photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"image")))))])
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg, effective_message=None), SimpleNamespace())
-    
+
     fake_sleep.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
-        
+
     assert calls == 1
-    
+
 @pytest.mark.asyncio
 async def test_two_photo_media_group(tmp_path, fake_sleep):
     db_path = tmp_path / "two.db"
@@ -1255,23 +1255,23 @@ async def test_two_photo_media_group(tmp_path, fake_sleep):
         nonlocal calls; calls += 1
         assert len(image_paths) == 2
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     def make_msg(msg_id):
         m = _message(message_id=msg_id, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
         m.media_group_id = "group1"
         return m
-        
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=make_msg(1), effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=make_msg(2), effective_message=None), SimpleNamespace())
-    
+
     fake_sleep.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
-        
+
     assert calls == 1
 
 @pytest.mark.asyncio
@@ -1283,19 +1283,19 @@ async def test_five_photo_media_group(tmp_path, fake_sleep):
         nonlocal calls; calls += 1
         assert len(image_paths) == 5
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     def make_msg(msg_id):
         m = _message(message_id=msg_id, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
         m.media_group_id = "group5"
         return m
-        
+
     for i in range(5):
         await adapter._handle_media_message(SimpleNamespace(update_id=i, message=make_msg(i), effective_message=None), SimpleNamespace())
-        
+
     fake_sleep.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
@@ -1310,24 +1310,24 @@ async def test_six_photo_media_group_and_notice(tmp_path, fake_sleep):
         nonlocal calls; calls += 1
         assert len(image_paths) == 5
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     notice_calls = []
     async def fake_send_message(**kwargs):
         notice_calls.append(kwargs.get("text", ""))
     adapter._send_message_with_thread_fallback = AsyncMock(side_effect=fake_send_message)
-    
+
     def make_msg(msg_id):
         m = _message(message_id=msg_id, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
         m.media_group_id = "group6"
         return m
-        
+
     for i in range(6):
         await adapter._handle_media_message(SimpleNamespace(update_id=i, message=make_msg(i), effective_message=None), SimpleNamespace())
-        
+
     fake_sleep.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
@@ -1343,21 +1343,21 @@ async def test_duplicate_before_flush(tmp_path, fake_sleep):
         nonlocal calls; calls += 1
         assert len(image_paths) == 1
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg = _message(message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg.media_group_id = "g1"
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg, effective_message=None), SimpleNamespace()) # duplicate!
-    
+
     fake_sleep.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
-    
+
     assert calls == 1
     # State cleared
     assert ACTOR not in controller._pending
@@ -1368,7 +1368,7 @@ async def test_duplicate_during_processing_not_cancelled_deterministic(tmp_path,
     _seed_household(db_path)
     calls = 0
     blocker = asyncio.Event()
-    
+
     sleep_called = asyncio.Event()
     original_sleep = asyncio.sleep
     async def custom_sleep(delay):
@@ -1377,31 +1377,31 @@ async def test_duplicate_during_processing_not_cancelled_deterministic(tmp_path,
             return
         return await original_sleep(delay)
     monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", custom_sleep)
-    
+
     async def vision(image_paths: Sequence[str], prompt: str):
         nonlocal calls; calls += 1
         await blocker.wait()
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg1 = _message(message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg1.media_group_id = "g1"
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
-    
+
     await sleep_called.wait()
     await original_sleep(0.05) # let processor transition to PROCESSING
-    
+
     # Send duplicate while processing
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg1, effective_message=None), SimpleNamespace())
-    
+
     blocker.set() # Unblock vision
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
-    
+
     assert calls == 1
     assert ACTOR not in controller._pending
 
@@ -1411,7 +1411,7 @@ async def test_late_unique_event_safe(tmp_path, monkeypatch):
     _seed_household(db_path)
     calls = 0
     blocker = asyncio.Event()
-    
+
     sleep_called = asyncio.Event()
     original_sleep = asyncio.sleep
     async def custom_sleep(delay):
@@ -1420,37 +1420,37 @@ async def test_late_unique_event_safe(tmp_path, monkeypatch):
             return
         return await original_sleep(delay)
     monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", custom_sleep)
-    
+
     async def vision(image_paths: Sequence[str], prompt: str):
         nonlocal calls; calls += 1
         await blocker.wait()
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     notice_calls = []
     async def fake_send(**kwargs): notice_calls.append(kwargs.get("text", ""))
     adapter._send_message_with_thread_fallback = AsyncMock(side_effect=fake_send)
-    
+
     msg1 = _message(message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg1.media_group_id = "g1"
     msg2 = _message(message_id=2, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg2.media_group_id = "g1"
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
-    
+
     await sleep_called.wait()
     await original_sleep(0.05) # let processing start
-    
+
     # Send NEW unique event to same group while processing
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
-    
+
     blocker.set()
     tasks = [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]
     if tasks: await tasks[0]
-    
+
     assert calls == 1
     assert any("уже обрабатывается" in text for text in notice_calls)
 
@@ -1459,11 +1459,11 @@ async def test_confidence_values(tmp_path):
     db_path = tmp_path / "conf.db"
     _seed_household(db_path)
     scope = _controller(db_path)._resolve_scope(ACTOR)[1]
-    
+
     def _latest_snap_id(db):
         with sqlite3.connect(db) as conn:
             return conn.execute("SELECT id FROM healbite_inventory_snapshots ORDER BY rowid DESC LIMIT 1").fetchone()[0]
-    
+
     # 0.80 -> detected
     async def vis80(paths, p): return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "quantity_value": "1", "unit": "l", "confidence": 0.80}]})}
     c1 = _controller(db_path, vision_analyze_fn=vis80)
@@ -1473,7 +1473,7 @@ async def test_confidence_values(tmp_path):
     snap1 = c1._store().get_snapshot(scope, snap_id)
     assert snap1.items[0].uncertainty is None
     assert snap1.items[0].confidence == "0.8"
-    
+
     # 0.79 -> uncertain
     async def vis79(paths, p): return {"success": True, "analysis": json.dumps({"items": [{"name": "B", "quantity_value": "1", "unit": "l", "confidence": 0.79}]})}
     c2 = _controller(db_path, vision_analyze_fn=vis79)
@@ -1483,7 +1483,7 @@ async def test_confidence_values(tmp_path):
     snap2 = c2._store().get_snapshot(scope, snap_id)
     assert snap2.items[0].uncertainty == "needs_confirmation"
     assert snap2.items[0].confidence == "0.79"
-    
+
     # 0.0 -> valid uncertain
     async def vis0(paths, p): return {"success": True, "analysis": json.dumps({"items": [{"name": "C", "quantity_value": "1", "unit": "l", "confidence": 0.0}]})}
     c3 = _controller(db_path, vision_analyze_fn=vis0)
@@ -1516,7 +1516,7 @@ async def test_confidence_values(tmp_path):
     c6.handle_callback(ACTOR, _find_callback(c6.home(ACTOR), "фотографию"))
     res6 = await c6.handle_photo_batch_bytes(ACTOR, [b"img"])
     assert res6.state == "vision_unavailable"
-    
+
 @pytest.mark.asyncio
 async def test_empty_image_in_batch(tmp_path):
     db_path = tmp_path / "empty.db"
@@ -1550,22 +1550,22 @@ async def test_different_actor_isolation(tmp_path, fake_sleep):
     async def vision(image_paths: Sequence[str], prompt: str):
         calls.append(len(image_paths))
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     controller.handle_callback(OTHER_ACTOR, _find_callback(controller.home(OTHER_ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg1 = _message(actor=ACTOR, message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg1.media_group_id = "g1"
     msg2 = _message(actor=OTHER_ACTOR, message_id=2, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg2.media_group_id = "g1" # Same media_group_id
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
-    
+
     assert len(adapter._healbite_inventory_photo_batches) == 2
-    
+
     fake_sleep.set()
     for t in [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]: await t
     assert calls == [1, 1]
@@ -1578,28 +1578,28 @@ async def test_different_chat_isolation(tmp_path, fake_sleep):
     async def vision(image_paths: Sequence[str], prompt: str):
         calls.append(len(image_paths))
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg1 = _message(actor=ACTOR, message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg1.media_group_id = "g1"
     msg2 = _message(actor=ACTOR, message_id=2, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg2.media_group_id = "g1"
     msg2.chat = SimpleNamespace(id=222, type="private", title=None, full_name=None)
     msg2.chat_id = 222
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
-    
+
     assert len(adapter._healbite_inventory_photo_batches) == 1
     adapter._send_message_with_thread_fallback.assert_called_with(
         chat_id="222",
         text="Сейчас обрабатывается предыдущая группа фото. Дождитесь результата и отправьте следующую группу отдельно.",
         message_thread_id=None,
     )
-    
+
     fake_sleep.set()
     for t in [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]: await t
     assert calls == [1]
@@ -1612,26 +1612,26 @@ async def test_different_media_group_isolation(tmp_path, fake_sleep):
     async def vision(image_paths: Sequence[str], prompt: str):
         calls.append(len(image_paths))
         return {"success": True, "analysis": json.dumps({"items": [{"name": "A", "confidence": 0.9}]})}
-        
+
     controller = _controller(db_path, vision_analyze_fn=vision)
     controller.handle_callback(ACTOR, _find_callback(controller.home(ACTOR), "фотографию"))
     adapter = _adapter(controller)
-    
+
     msg1 = _message(actor=ACTOR, message_id=1, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg1.media_group_id = "g1"
     msg2 = _message(actor=ACTOR, message_id=2, photo=[SimpleNamespace(file_size=5, get_file=AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"img")))))])
     msg2.media_group_id = "g2"
-    
+
     await adapter._handle_media_message(SimpleNamespace(update_id=1, message=msg1, effective_message=None), SimpleNamespace())
     await adapter._handle_media_message(SimpleNamespace(update_id=2, message=msg2, effective_message=None), SimpleNamespace())
-    
+
     assert len(adapter._healbite_inventory_photo_batches) == 1
     adapter._send_message_with_thread_fallback.assert_called_with(
         chat_id="555",
         text="Сейчас обрабатывается предыдущая группа фото. Дождитесь результата и отправьте следующую группу отдельно.",
         message_thread_id=None,
     )
-    
+
     fake_sleep.set()
     for t in [b.timer_task for b in adapter._healbite_inventory_photo_batches.values() if b.timer_task]: await t
     assert calls == [1]

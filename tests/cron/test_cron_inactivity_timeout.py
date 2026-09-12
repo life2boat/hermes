@@ -260,7 +260,7 @@ class TestInactivityTimeout:
 
     def test_agent_without_activity_summary_uses_wallclock_fallback(self):
         """If agent lacks get_activity_summary, idle_secs stays 0 (never times out).
-        
+
         This ensures backward compat if somehow an old agent is used.
         The polling loop will eventually complete when the task finishes.
         """

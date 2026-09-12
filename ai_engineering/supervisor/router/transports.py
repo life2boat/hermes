@@ -76,7 +76,7 @@ class ConfiguredLocalAgentTransport:
 
         req_json = json.dumps(dict(request))
         operation_id = request.get("operation_id", str(uuid.uuid4()))
-        
+
         try:
             import subprocess
             proc = subprocess.Popen(
@@ -87,15 +87,15 @@ class ConfiguredLocalAgentTransport:
                 text=True
             )
             self._procs[operation_id] = proc
-            
+
             stdout_data, stderr_data = proc.communicate(input=req_json, timeout=timeout)
-            
+
             if operation_id in self._procs:
                 del self._procs[operation_id]
-                
+
             if proc.returncode != 0:
                 raise RuntimeError(f"Worker failed: {stderr_data}")
-            
+
             try:
                 res_dict = json.loads(stdout_data)
             except json.JSONDecodeError as e:

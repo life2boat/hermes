@@ -423,9 +423,9 @@ def test_privacy_canary_detected_in_application_payload():
     # Simulate a log line where the payload contains a canary
     raw_log = "2026-08-19 09:37:50,013 INFO my_logger: User input was 09:37"
     cleaned = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} \w+ [\w\.]+:\s+", "", raw_log, flags=re.MULTILINE)
-    
+
     assert cleaned == "User input was 09:37"
-    
+
     # Assert _assert_private_values_absent will raise AssertionError on this cleaned string
     import pytest
     with pytest.raises(AssertionError):

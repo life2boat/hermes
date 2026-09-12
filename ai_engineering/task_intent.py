@@ -196,28 +196,28 @@ def _intent_from_mapping(value: Mapping[str, object]) -> TaskIntent:
     raw_version = value.get("schema_version")
     if raw_version != TASK_INTENT_SCHEMA_VERSION or isinstance(raw_version, bool):
         _fail_intent("SCHEMA_VERSION_UNSUPPORTED")
-    
+
     payload = _exact_fields(value, _INTENT_FIELDS, _fail_intent)
-    
+
     task_id = _identifier(payload["task_id"], fail_func=_fail_intent)
     if not isinstance(payload["intent_revision"], int) or payload["intent_revision"] < 1:
         _fail_intent("VALUE_INVALID")
-    
+
     status = _enum(payload["status"], IntentStatus, "STATUS_INVALID", _fail_intent)
-    
+
     if not isinstance(payload["desired_outcome"], str) or not payload["desired_outcome"].strip():
         _fail_intent("DESIRED_OUTCOME_EMPTY")
-        
+
     base_sha = payload["source_base_sha"]
     if not isinstance(base_sha, str) or _SHA_RE.fullmatch(base_sha) is None:
         _fail_intent("VALUE_INVALID")
 
     constraints = tuple(_string(x, _fail_intent) for x in _items(payload["constraints"], _fail_intent))
-    
+
     allowed = tuple(_string(x, _fail_intent) for x in _items(payload["allowed_mutations"], _fail_intent))
     for p in allowed:
         _validate_path(p, _fail_intent)
-        
+
     forbidden = tuple(_string(x, _fail_intent) for x in _items(payload["forbidden_mutations"], _fail_intent))
     for p in forbidden:
         _validate_path(p, _fail_intent)
@@ -260,7 +260,7 @@ def _intent_from_mapping(value: Mapping[str, object]) -> TaskIntent:
 
     applicable_invariants = tuple(_string(x, _fail_intent) for x in _items(payload["applicable_invariants"], _fail_intent))
     required_gates = tuple(_string(x, _fail_intent) for x in _items(payload["required_gates"], _fail_intent))
-    
+
     parent_digest = payload["parent_intent_digest"]
     if parent_digest is not None:
         if not isinstance(parent_digest, str) or _DIGEST_RE.fullmatch(parent_digest) is None:
@@ -376,10 +376,10 @@ def deserialize_intent(value: str | bytes) -> TaskIntent:
         raw = value.encode("utf-8")
     else:
         _fail_intent("JSON_INVALID")
-    
+
     if not raw or len(raw) > MAX_INTENT_BYTES or b"\x00" in raw:
         _fail_intent("JSON_INVALID")
-        
+
     try:
         payload = json.loads(
             text,
@@ -388,7 +388,7 @@ def deserialize_intent(value: str | bytes) -> TaskIntent:
         )
     except (json.JSONDecodeError, _DuplicateJsonKey, ValueError, RecursionError) as exc:
         raise TaskIntentValidationError("JSON_INVALID") from exc
-        
+
     return _intent_from_mapping(_mapping(payload, _fail_intent))
 
 
@@ -442,12 +442,12 @@ def _lineage_from_mapping(value: Mapping[str, object]) -> TaskLineage:
     raw_version = value.get("schema_version")
     if raw_version != LINEAGE_SCHEMA_VERSION or isinstance(raw_version, bool):
         _fail_lineage("SCHEMA_VERSION_UNSUPPORTED")
-        
+
     payload = _exact_fields(value, _LINEAGE_FIELDS, _fail_lineage)
-    
+
     nodes: list[LineageNode] = []
     node_kinds: dict[str, NodeKind] = {}
-    
+
     for item in _items(payload["nodes"], _fail_lineage):
         n_payload = _exact_fields(item, _NODE_FIELDS, _fail_lineage)
         nid = _string(n_payload["node_id"], _fail_lineage)
@@ -462,27 +462,27 @@ def _lineage_from_mapping(value: Mapping[str, object]) -> TaskLineage:
     graph: dict[str, list[str]] = {nid: [] for nid in node_kinds}
     # Keep track of in-degrees for cycle detection.
     in_degree: dict[str, int] = {nid: 0 for nid in node_kinds}
-    
+
     has_targets: set[str] = set()
     has_sources: set[str] = set()
-    
+
     for item in _items(payload["edges"], _fail_lineage):
         e_payload = _exact_fields(item, _EDGE_FIELDS, _fail_lineage)
         sid = _string(e_payload["source_id"], _fail_lineage)
         tid = _string(e_payload["target_id"], _fail_lineage)
         relation = _enum(e_payload["relation"], RelationKind, "INVALID_RELATION_KIND", _fail_lineage)
-        
+
         if sid not in node_kinds or tid not in node_kinds:
             _fail_lineage("DANGLING_EDGE")
-            
+
         skind = node_kinds[sid]
         tkind = node_kinds[tid]
-        
+
         if (skind, relation, tkind) not in _VALID_RELATIONS:
             _fail_lineage("INVALID_RELATION_DIRECTION")
-            
+
         edges.append(LineageEdge(source_id=sid, target_id=tid, relation=relation))
-        
+
         # Supercedes relation shouldn't create structural cycles if revisions are linear,
         # but let's check general directed cycles.
         graph[sid].append(tid)
@@ -500,7 +500,7 @@ def _lineage_from_mapping(value: Mapping[str, object]) -> TaskLineage:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
-                
+
     if visited_count != len(node_kinds):
         _fail_lineage("UNINTENDED_CYCLE")
 

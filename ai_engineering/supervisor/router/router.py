@@ -298,17 +298,17 @@ class AuthorityResolver:
     def evaluate_fresh_policy(self, envelope: AgentEnvelope, new_attempt_id: str) -> PolicyReceipt:
         intent = self.resolve_task_intent(envelope.task_intent_id, envelope.task_intent_digest, envelope.run_id, envelope.task_id)
         wp, ep = self._resolve_work_profile_and_policy(envelope.run_id)
-        
+
         a_state, b_state = None, None
         if self.supervisor_store:
             state = self.supervisor_store.load_state(envelope.run_id)
             if state:
                 a_state = state.autonomy_state
                 b_state = state.budget_state
-                
+
         if not a_state or not b_state:
             raise PolicyDeniedError("POLICY_DENIED: Autonomy or Budget state unresolved")
-            
+
         from ai_engineering.supervisor.state import _autonomy_state_to_dict, _budget_state_to_dict
         from ai_engineering.supervisor.policy.contracts import AutonomyState, AutonomyBudgetState, AutonomyLevel, PolicyRequest, PolicyReceipt, ExecutionTarget
         from ai_engineering.supervisor.policy.engine import evaluate_policy
@@ -329,7 +329,7 @@ class AuthorityResolver:
             fix_cycles_used=bd.get("fix_cycles_used", 0), consecutive_failures=bd.get("consecutive_failures", 0), provider_calls_used=bd.get("provider_calls_used", 0),
             policy_denials=bd.get("policy_denials", 0), exhausted_dimensions=tuple(bd.get("exhausted_dimensions", ()))
         )
-            
+
 
 
         import uuid
@@ -911,7 +911,7 @@ class CrossAgentRouter:
                         f"CAPABILITY_NOT_AUTHORIZED: {envelope.recipient_capability} not in {cand_def.capabilities}"
                     )
                 new_attempt_id = f"att-fallback-{uuid.uuid4().hex[:6]}"
-                
+
                 new_receipt = self.authority_resolver.evaluate_fresh_policy(envelope, new_attempt_id)
                 if new_receipt.verdict != PolicyVerdict.ALLOW:
                     raise PolicyDeniedError("POLICY_DENIED: fallback policy evaluation failed")
@@ -981,7 +981,7 @@ class CrossAgentRouter:
                     envelope.policy_receipt_id, envelope.policy_receipt_digest, envelope.run_id, envelope.task_id
                 )
                 new_attempt_id = f"{envelope.attempt_id}-retry-{envelope.retry_count + 1}"
-                
+
                 new_receipt = self.authority_resolver.evaluate_fresh_policy(envelope, new_attempt_id)
                 if new_receipt.verdict != PolicyVerdict.ALLOW:
                     raise PolicyDeniedError("POLICY_DENIED: retry policy evaluation failed")

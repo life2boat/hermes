@@ -21,7 +21,7 @@ def collect_production_attestation(
     """
     collected_at_utc = datetime.now(UTC)
     results = []
-    
+
     for collector in collectors:
         try:
             # We trust collectors to return a CollectorResult.
@@ -33,7 +33,7 @@ def collect_production_attestation(
             # and return CollectorStatus.UNAVAILABLE. If it didn't, let it bubble up,
             # because that means a bug in the collector implementation.
             raise
-            
+
     return create_attestation(
         target=target,
         collected_at_utc=collected_at_utc,

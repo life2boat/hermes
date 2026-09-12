@@ -483,7 +483,7 @@ def test_strip_responses_format_tools():
 
     result, stripped = strip_pattern_and_format(tools)
     assert stripped == 1, f"Expected 1 pattern stripped, got {stripped}"
-    
+
     # Verify pattern keyword was removed from includeDomains
     domains = result[0]["parameters"]["properties"]["includeDomains"]["items"]
     assert "pattern" not in domains, f"pattern should be stripped: {domains}"
@@ -510,7 +510,7 @@ def test_strip_responses_idempotent():
     result, first = strip_pattern_and_format(tools)
     assert first == 0, f"Expected 0 stripped (property pattern preserved), got {first}"
     assert "pattern" in result[0]["parameters"]["properties"], "property named pattern should survive"
-    
+
     # Pass 2 - idempotent
     _, second = strip_pattern_and_format(tools)
     assert second == 0, f"Expected 0 on second pass, got {second}"

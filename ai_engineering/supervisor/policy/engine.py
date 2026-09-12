@@ -50,7 +50,7 @@ def evaluate_policy(
         reason_codes.append("POLICY_BINDING_MISMATCH")
     if request.current_autonomy_level != autonomy_state.current_level:
         reason_codes.append("POLICY_BINDING_MISMATCH")
-        
+
     if request.task_id != task_intent.task_id:
         reason_codes.append("POLICY_BINDING_MISMATCH")
 
@@ -63,7 +63,7 @@ def evaluate_policy(
     # 3. StopBoundary evaluation
     req_rank = _rank(request.requested_stop_boundary)
     intent_rank = _rank(task_intent.stop_boundary)
-    
+
     # Autonomy Level Ceilings
     autonomy_ceilings = {
         AutonomyLevel.LEVEL_0_OBSERVE: _rank(StopBoundary.READ_ONLY),
@@ -75,10 +75,10 @@ def evaluate_policy(
         AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION: _rank(StopBoundary.LIVE_SMOKE),
     }
     level_ceiling_rank = autonomy_ceilings.get(request.current_autonomy_level, -1)
-    
+
     if req_rank > intent_rank:
         reason_codes.append("TASK_INTENT_AUTHORITY_DENIED")
-    
+
     if req_rank > level_ceiling_rank:
         reason_codes.append("AUTONOMY_LEVEL_TOO_LOW")
 
@@ -88,7 +88,7 @@ def evaluate_policy(
             reason_codes.append("TASK_INTENT_AUTHORITY_DENIED")
         if ec in task_intent.forbidden_mutations:
             reason_codes.append("TASK_INTENT_AUTHORITY_DENIED")
-            
+
         if ec not in work_profile.allowed_effect_classes and ec != EffectClass.READ_ONLY:
             reason_codes.append("WORK_PROFILE_DENIED")
         if ec in work_profile.forbidden_effect_classes:
@@ -100,7 +100,7 @@ def evaluate_policy(
             reason_codes.append("SECRET_MUTATION_PERMISSION_REQUIRED")
         if ec == EffectClass.EXTERNAL_SEND and not work_profile.external_send_allowed:
             reason_codes.append("EXTERNAL_SEND_PERMISSION_REQUIRED")
-            
+
         if request.current_autonomy_level == AutonomyLevel.LEVEL_0_OBSERVE:
             if ec != EffectClass.READ_ONLY:
                 reason_codes.append("EFFECT_CLASS_DENIED")
@@ -114,10 +114,10 @@ def evaluate_policy(
     # 5. Target environment evaluation
     if request.execution_target not in work_profile.allowed_targets:
         reason_codes.append("TARGET_ENVIRONMENT_DENIED")
-        
+
     if request.execution_target == ExecutionTarget.PRODUCTION and not work_profile.production_execution_allowed:
         reason_codes.append("PRODUCTION_PERMISSION_REQUIRED")
-        
+
     if request.execution_target == ExecutionTarget.PRODUCTION and request.current_autonomy_level != AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION:
         reason_codes.append("AUTONOMY_LEVEL_TOO_LOW")
 
@@ -151,7 +151,7 @@ def evaluate_policy(
         reason_codes = []
 
     ts = _utc_now()
-    
+
     # Compute receipt_id deterministically
     payload_for_digest = {
         "request_id": request.request_id,

@@ -21,7 +21,7 @@ class SecretSourceStructuralCollector:
     def collect(self) -> CollectorResult:
         try:
             expected_p = Path(self.expected_path).resolve()
-            
+
             observations: dict[str, Any] = {
                 "approved_source_exists": False,
                 "legacy_source_present": False,

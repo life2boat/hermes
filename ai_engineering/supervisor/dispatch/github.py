@@ -43,10 +43,10 @@ class FakeGitHubProvider(GitHubProvider):
     def __init__(self):
         self.prs: dict[int, PRState] = {}
         self.cis: dict[tuple[int, str], CIDetailedState] = {}
-        
+
     def add_pr(self, repository: str, pr_number: int, pr: PRState):
         self.prs[pr_number] = pr
-        
+
     def add_ci(self, repository: str, pr_number: int, head_sha: str, ci: CIDetailedState):
         self.cis[(pr_number, head_sha)] = ci
 

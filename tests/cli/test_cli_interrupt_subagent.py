@@ -71,7 +71,7 @@ class TestCLISubagentInterrupt(unittest.TestCase):
             child_started.set()
             # Find the child in parent._active_children
             child = parent._active_children[-1] if parent._active_children else None
-            
+
             # Simulate the agent loop: poll _interrupt_requested like run_conversation does
             for i in range(100):  # Up to 10 seconds (100 * 0.1s)
                 if child and child._interrupt_requested:
@@ -85,7 +85,7 @@ class TestCLISubagentInterrupt(unittest.TestCase):
                         "interrupt_message": child._interrupt_message,
                     }
                 time.sleep(0.1)
-            
+
             return {
                 "final_response": "Finished without interrupt",
                 "messages": [],
@@ -139,20 +139,20 @@ class TestCLISubagentInterrupt(unittest.TestCase):
 
         # Now simulate user interrupt (from main/process thread)
         time.sleep(0.2)  # Give child a moment to be in its loop
-        
+
         print(f"Parent has {len(parent._active_children)} active children")
         assert len(parent._active_children) >= 1, f"Expected child in _active_children, got {len(parent._active_children)}"
 
         # This is what the CLI does:
         parent.interrupt("Hey stop that")
-        
+
         print(f"Parent._interrupt_requested: {parent._interrupt_requested}")
         for i, child in enumerate(parent._active_children):
             print(f"Child {i}._interrupt_requested: {child._interrupt_requested}")
 
         # Wait for child to detect interrupt
         detected = interrupt_detected.wait(timeout=3.0)
-        
+
         # Wait for delegate to finish
         agent_thread.join(timeout=5)
 

@@ -109,7 +109,7 @@ class AutonomousRunCoordinator:
 
         events = self.store.load_events(self.run_id)
         from ai_engineering.supervisor.events import SupervisorEventType
-        
+
         self.iterations = 0
         self.child_tasks = 0
         self.retries = 0
@@ -221,11 +221,11 @@ class AutonomousRunCoordinator:
             if proposal.action_type == NextActionType.WAIT_FOR_CI:
                 terminal_reason = "CI_PROVIDER_UNAVAILABLE"
                 break
-            
+
             if proposal.action_type == NextActionType.CREATE_PR:
                 terminal_reason = "UNSUPPORTED"
                 break
-            
+
             if proposal.action_type == NextActionType.MERGE_IF_GREEN:
                 terminal_reason = "BLOCKED"
                 break
@@ -249,7 +249,7 @@ class AutonomousRunCoordinator:
                 # Extract reason codes to tuple
                 pr_data_copy["reason_codes"] = tuple(pr_data["reason_codes"])
                 receipt = PolicyReceipt(**pr_data_copy)
-                
+
                 self.policy_receipts.append(receipt.receipt_id)
             except Exception as e:
                 import traceback
@@ -333,7 +333,7 @@ class AutonomousRunCoordinator:
             "max_consecutive_failures": self.budget.max_consecutive_failures,
             "max_provider_calls": self.budget.max_provider_calls
         }
-        
+
         receipt_obj = AutonomousRunReceipt(
             schema_version="hermes.autonomous-run-receipt.v1",
             run_id=self.run_id,
@@ -351,7 +351,7 @@ class AutonomousRunCoordinator:
             completed_at=completed_at,
             receipt_digest=""
         )
-        
+
         digest_str = json.dumps({
             "run_id": receipt_obj.run_id,
             "root_task_intent_digest": receipt_obj.root_task_intent_digest,
@@ -361,7 +361,7 @@ class AutonomousRunCoordinator:
         }, sort_keys=True)
         import hashlib
         h = hashlib.sha256(digest_str.encode()).hexdigest()
-        
+
         import dataclasses
         receipt_obj = dataclasses.replace(receipt_obj, receipt_digest=h)
         return receipt_obj
@@ -373,7 +373,7 @@ class AutonomousRunCoordinator:
             proposal = self._mock_astra_proposal
         else:
             proposal = await self.astra_provider.request_proposal(self.run_id, state)
-        
+
         from ai_engineering.supervisor.events import create_event, SupervisorEventType
         events = self.store.load_events(self.run_id)
         ev = create_event(

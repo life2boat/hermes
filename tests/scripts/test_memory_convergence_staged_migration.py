@@ -434,28 +434,28 @@ def test_schema_03_04_05_06_07_08_09_10_migration_preserves_authority() -> None:
     with sqlite3.connect(":memory:") as conn:
         conn.execute(PROD_SHAPE_SQL)
         conn.execute("CREATE INDEX idx_test_1 ON memory_os_facts(user_id)")
-        
+
         # Insert authoritative rows
         conn.execute("INSERT INTO memory_os_facts (user_id, entity, key, value) VALUES (1, 'e1', 'k1', 'v1')")
-        
+
         _migrate_memory(conn)
-        
+
         # SCHEMA-03 migration preserves all authoritative rows
         rows = conn.execute("SELECT user_id, entity, key, value FROM memory_os_facts").fetchall()
         assert len(rows) == 1
         assert rows[0] == (1, 'e1', 'k1', 'v1')
-        
+
         # SCHEMA-04 NULL/default semantics match chosen target contract
         # The column still has the same default and not null semantics because we used ALTER TABLE
         col_info = conn.execute("PRAGMA table_xinfo(memory_os_facts)").fetchall()
         source_col = [c for c in col_info if c[1] == 'source'][0]
         assert source_col[3] == 1 # not null
         assert source_col[4] == "'unknown'" # default
-        
+
         # SCHEMA-05 indexes preserved
         indexes = conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memory_os_facts'").fetchall()
         assert any(i[0] == "idx_test_1" for i in indexes)
-        
+
         # SCHEMA-09 migration idempotent
         _migrate_memory(conn)
         assert classify_memory_convergence_schema(conn) is MemorySchemaClassification.CURRENT

@@ -317,7 +317,7 @@ class TestEdgeCases:
 
 class TestMarkdownStripPatch:
     """Tests for the original signal-markdown-strip-patch.
-    
+
     Covers: fenced code blocks with language tags, links preserved,
     headings converted to bold, multiple headings, UTF-16 correctness
     for multi-byte characters, and marker stripping completeness.
@@ -414,7 +414,7 @@ class TestMarkdownStripPatch:
 
 class TestSignalStreamingPatch:
     """Tests for signal-streaming-patch: cursor suppression and edit support.
-    
+
     These verify the adapter-level properties that prevent the streaming
     cursor from leaking into Signal messages.
     """

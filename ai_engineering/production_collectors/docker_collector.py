@@ -61,7 +61,7 @@ class DockerRuntimeCollector:
                 restart_count = int(parts[1])
             except ValueError:
                 restart_count = -1
-            
+
             image = parts[2]
             project = parts[3] if parts[3] != "<no value>" else ""
             service = parts[4] if parts[4] != "<no value>" else ""
@@ -108,7 +108,7 @@ class DockerRuntimeCollector:
                             # Expected mount logic
                             if dst.strip() == self.expected_db_mount or src.strip() == self.expected_db_mount:
                                 db_mount_matches = True
-                
+
                 observations["db_mount_matches_expected"] = db_mount_matches
 
             return create_collector_result(

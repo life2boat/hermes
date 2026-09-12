@@ -276,7 +276,7 @@ class AuthorityResolver:
         if self.supervisor_store:
             events = self.supervisor_store.load_events(run_id)
             for e in reversed(events):
-                if getattr(e.event_type, "value", str(e.event_type)) == "WORK_PROFILE_BOUND":
+                if "WORK_PROFILE_BOUND" in str(e.event_type):
                     if "work_profile" in e.payload:
                         from ai_engineering.supervisor.policy.work_profile import validate_work_profile
                         wp = validate_work_profile(e.payload["work_profile"])
@@ -291,7 +291,8 @@ class AuthorityResolver:
                             ep = deserialize_effective_policy_report(ep_str)
                     break
         if not wp or not ep:
-            raise PolicyDeniedError("POLICY_DENIED: Authority unresolved on cold restart")
+            raise PolicyDeniedError(f"POLICY_DENIED: Authority unresolved on cold restart. wp={wp is not None}, ep={ep is not None}, events={len(events) if 'events' in locals() else 0}")
+
         return wp, ep
 
     def evaluate_fresh_policy(self, envelope: AgentEnvelope, new_attempt_id: str) -> PolicyReceipt:

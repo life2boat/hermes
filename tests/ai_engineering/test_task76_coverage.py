@@ -68,7 +68,7 @@ print(json.dumps({
     "intent_digest": req.get("task_intent_digest", ""),
     "produced_at_utc": "2026-01-01T00:00:00Z",
     "artifacts": [],
-    "gate_claims": [{"claim_id":"1", "validator_id":"test", "claimed_status":"PASS", "evidence_summary":"", "produced_at_utc": "2026-01-01T00:00:00Z"}]
+    "gate_claims": [{"gate_name": "test", "claimed_status": "PASS", "evidence_refs": [], "reason_code": "OK"}]
 }))
 """)
 
@@ -80,7 +80,8 @@ print(json.dumps({
         "--worker-cmd", sys.executable, str(worker_script)
     ], capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(Path.cwd())))
 
-    assert "GOAL_COMPLETE" in res.stdout or "STOP_SUCCESS_NOT_EVIDENCED" in res.stdout
+    assert res.returncode == 0
+    assert "GOAL_COMPLETE" in res.stdout
 
 def test_transport_layering():
     t = trans.ConfiguredLocalAgentTransport(["echo"])

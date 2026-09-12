@@ -39,35 +39,43 @@ class FakeAgentTransport:
         }
         return deserialize_worker_result(json.dumps(res))
 
+import threading
+
 class ConfiguredLocalAgentTransport:
     def __init__(self, worker_cmd: list[str] | None = None) -> None:
         self.worker_cmd = worker_cmd
         self._procs: dict[str, subprocess.Popen] = {}
+        self._completed_or_cancelled: set[str] = set()
+        self._lock = threading.Lock()
 
     def health(self) -> bool:
         return self.worker_cmd is not None
 
     def cancel(self, operation_id: str) -> bool:
-        if operation_id in self._procs:
-            proc = self._procs[operation_id]
+        with self._lock:
+            self._completed_or_cancelled.add(operation_id)
+            proc = self._procs.pop(operation_id, None)
+        if proc:
             proc.terminate()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-            self._procs.pop(operation_id, None)
             return True
-        return False
+        return True
 
     def is_running(self, operation_id: str) -> bool:
-        if operation_id in self._procs:
-            proc = self._procs[operation_id]
+        with self._lock:
+            proc = self._procs.get(operation_id)
+            if not proc:
+                return False
             if proc.poll() is None:
                 return True
             else:
-                del self._procs[operation_id]
-        return False
+                self._procs.pop(operation_id, None)
+                self._completed_or_cancelled.add(operation_id)
+                return False
 
     def dispatch(self, request: Mapping[str, Any], timeout: int) -> WorkerResultBundle:
         from .adapters import AgentTransportUnavailableError
@@ -79,19 +87,23 @@ class ConfiguredLocalAgentTransport:
 
         try:
             import subprocess
-            proc = subprocess.Popen(
-                self.worker_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            self._procs[operation_id] = proc
+            with self._lock:
+                if operation_id in self._completed_or_cancelled:
+                    raise TimeoutError("WORK_TIMEOUT")
+                proc = subprocess.Popen(
+                    self.worker_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                self._procs[operation_id] = proc
 
             stdout_data, stderr_data = proc.communicate(input=req_json, timeout=timeout)
 
-            if operation_id in self._procs:
-                del self._procs[operation_id]
+            with self._lock:
+                self._procs.pop(operation_id, None)
+                self._completed_or_cancelled.add(operation_id)
 
             if proc.returncode != 0:
                 raise RuntimeError(f"Worker failed: {stderr_data}")
@@ -106,13 +118,14 @@ class ConfiguredLocalAgentTransport:
         except FileNotFoundError:
             raise AgentTransportUnavailableError("TRANSPORT_UNAVAILABLE")
         except subprocess.TimeoutExpired:
-            if operation_id in self._procs:
-                proc = self._procs[operation_id]
-                proc.terminate()
+            with self._lock:
+                self._completed_or_cancelled.add(operation_id)
+                proc_to_kill = self._procs.pop(operation_id, None)
+            if proc_to_kill:
+                proc_to_kill.terminate()
                 try:
-                    proc.wait(timeout=2)
+                    proc_to_kill.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                del self._procs[operation_id]
+                    proc_to_kill.kill()
+                    proc_to_kill.wait()
             raise TimeoutError("WORK_TIMEOUT")

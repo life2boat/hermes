@@ -31,6 +31,7 @@ from ai_engineering.supervisor.autonomous_run import (
     AutonomousRunCoordinator,
     BudgetConfig,
     NextActionType,
+    ScriptedAstraProposalProvider,
 )
 from ai_engineering.supervisor.ci_provider import (
     CICheckResult,
@@ -818,3 +819,422 @@ async def test_e2e_astra_provider_failure_events(tmp_path: Path):
     event_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
     assert "ASTRA_REQUESTED" in event_types
     assert "ASTRA_PROVIDER_FAILED" in event_types
+
+
+# ==============================================================================
+# PR #298 SHAPED WORKFLOW FIXTURE & NEGATIVE TESTS
+# ==============================================================================
+
+def test_pr298_shaped_workflow_fixture():
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 107, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 108, "name": "Contributor Attribution Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 109, "name": "Docker Build and Publish", "head_sha": sha, "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs(
+        repository="life2boat/hermes",
+        requested_sha=sha,
+        raw_runs=raw_runs,
+    )
+    assert snapshot.overall_status == "SUCCESS"
+    assert snapshot.all_required_completed is True
+    assert snapshot.all_required_success is True
+    assert len(snapshot.required_workflow_observations) == 7
+    assert len(snapshot.governance_observations) == 1
+    assert snapshot.governance_observations[0].workflow_name == "Contributor Attribution Check"
+    assert snapshot.governance_observations[0].conclusion == "success"
+    assert snapshot.observed_sha == sha
+    assert len(snapshot.snapshot_digest) == 64
+
+
+def test_workflow_negative_tests_tests_failed():
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "failure"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 107, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "FAILURE"
+    assert snapshot.all_required_success is False
+
+
+def test_workflow_negative_tests_nix_in_progress():
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "in_progress", "conclusion": None},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 107, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "IN_PROGRESS"
+
+
+def test_workflow_negative_tests_history_check_missing():
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "MISSING"
+
+
+def test_workflow_strict_success_semantics_skipped_is_failure():
+    """Strict success semantics: skipped or neutral conclusion for required technical check is FAILURE."""
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "skipped"},
+        {"id": 107, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "FAILURE"
+    assert snapshot.all_required_success is False
+
+
+def test_workflow_attribution_failure_does_not_block_technical():
+    """Contributor Attribution Check failure is recorded as governance but does NOT block technical CI."""
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 102, "name": "Lint (ruff + ty)", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 103, "name": "Typecheck", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 104, "name": "Nix", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 105, "name": "Agent Release Gate", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 106, "name": "Supply Chain Audit", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 107, "name": "History Check", "head_sha": sha, "status": "completed", "conclusion": "success"},
+        {"id": 108, "name": "Contributor Attribution Check", "head_sha": sha, "status": "completed", "conclusion": "failure"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "SUCCESS"
+    assert snapshot.all_required_success is True
+    assert len(snapshot.governance_observations) == 1
+    assert snapshot.governance_observations[0].conclusion == "failure"
+
+
+def test_workflow_exact_sha_mismatch():
+    sha = "d65ef87d02dba27d687043f6c7fa5c5648c6d54d"
+    raw_runs = [
+        {"id": 101, "name": "Tests", "head_sha": "different_sha_000000000000000000000000", "status": "completed", "conclusion": "success"},
+    ]
+    from ai_engineering.supervisor.ci_provider import evaluate_workflow_runs
+    snapshot = evaluate_workflow_runs("life2boat/hermes", sha, raw_runs)
+    assert snapshot.overall_status == "SHA_MISMATCH"
+
+
+def test_ci_restart_resume_preserves_sha(tmp_path: Path):
+    """Crash/restart during CI wait retains pending SHA in event replay."""
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-res", "run-res")
+    loop.initialize_run(
+        intent=intent,
+        lineage=None,
+        root_goal=intent.desired_outcome,
+        root_goal_id="run-res",
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+
+    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+    events = store.load_events("run-res")
+    target_sha = "f00baa" * 6 + "0000"
+    wait_ev = create_event(
+        run_id="run-res",
+        sequence=len(events) + 1,
+        previous_event_digest=events[-1].event_digest if events else None,
+        event_type=SupervisorEventType.CI_WAIT_STARTED,
+        state_revision=1,
+        task_id="t-res",
+        attempt_id="att-1",
+        intent_digest=intent_digest(intent),
+        payload={"sha": target_sha},
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    store.save_event(wait_ev)
+
+    # Coordinator restarted
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-res",
+        astra_provider=ScriptedAstraProposalProvider(),
+        ci_provider=GitHubCIStatusProvider(),
+        evidence_root=str(tmp_path),
+    )
+    assert coord.pending_ci_sha == target_sha
+
+
+@pytest.mark.asyncio
+async def test_ci_max_poll_attempts_terminates_timeout(tmp_path: Path):
+    """When polling exceeds max_poll_attempts, coordinator emits CI_WAIT_TIMEOUT."""
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-to-poll", "run-to-poll")
+    loop.initialize_run(
+        intent=intent,
+        lineage=None,
+        root_goal=intent.desired_outcome,
+        root_goal_id="run-to-poll",
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+    loop.bind_profile("run-to-poll", wp, ep)
+
+    class MockAstraCI(ConfiguredAstraProposalProvider):
+        def __init__(self):
+            pass
+        async def request_proposal(self, run_id, state, **kwargs):
+            return AstraNextActionProposal(
+                schema_version="hermes.astra-next-action.v1",
+                proposal_id="prop-ci",
+                run_id=run_id,
+                task_id=state.current_task_id,
+                action_type=NextActionType.WAIT_FOR_CI,
+                objective="Wait for CI",
+                recommended_capability="none",
+                recommended_worker="none",
+                expected_effect_class="READ_ONLY",
+                expected_stop_boundary="READ_ONLY",
+                allowed_scope=(),
+                required_validators=(),
+                success_criteria="",
+                reasoning_summary="Check CI",
+            )
+
+    async def mock_runner_hang(repo: str, target_sha: str):
+        return target_sha, [
+            {"name": "Tests", "status": "in_progress", "conclusion": ""},
+        ]
+
+    ci_provider = GitHubCIStatusProvider(
+        repository="life2boat/hermes",
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.01,
+        max_poll_attempts=2,
+        runner=mock_runner_hang,
+    )
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-to-poll",
+        astra_provider=MockAstraCI(),
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "CI_WAIT_TIMEOUT"
+
+    events = store.load_events("run-to-poll")
+    ev_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
+    assert "CI_STATUS_OBSERVED" in ev_types
+    assert "CI_WAIT_TIMEOUT" in ev_types
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_mode_fail_closed(tmp_path: Path, monkeypatch):
+    """In real provider-mode, CLI fails closed if --astra-cmd is missing or --ci-mode != github."""
+    from scripts.autonomous_run import async_main
+    intent_file = tmp_path / "intent.json"
+    intent = _create_minimal_intent("t-cli", "run-cli")
+    from ai_engineering.task_intent import serialize_intent
+    intent_file.write_text(serialize_intent(intent), encoding="utf-8")
+
+    # 1. Real mode without --astra-cmd -> fails closed (exit code 1)
+    test_args = [
+        "autonomous_run.py",
+        "--intent", str(intent_file),
+        "--state-dir", str(tmp_path),
+        "--run-id", "run-cli-1",
+        "--worker-cmd", "echo",
+        "--provider-mode", "real",
+        "--ci-mode", "github",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+    rc1 = await async_main()
+    assert rc1 == 1
+
+    # 2. Real mode with --ci-mode local -> fails closed (exit code 1)
+    test_args = [
+        "autonomous_run.py",
+        "--intent", str(intent_file),
+        "--state-dir", str(tmp_path),
+        "--run-id", "run-cli-2",
+        "--worker-cmd", "echo",
+        "--astra-cmd", "echo",
+        "--provider-mode", "real",
+        "--ci-mode", "local",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+    rc2 = await async_main()
+    assert rc2 == 1
+
+    # 3. Test mode without --astra-cmd and with --ci-mode local -> allowed
+    test_args = [
+        "autonomous_run.py",
+        "--intent", str(intent_file),
+        "--state-dir", str(tmp_path),
+        "--run-id", "run-cli-3",
+        "--worker-cmd", "echo",
+        "--provider-mode", "test",
+        "--ci-mode", "local",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+    rc3 = await async_main()
+    assert rc3 in (0, 1)
+
+
+def test_astra_proposal_schema_and_enum_validation():
+    """Astra proposal validator strictly validates schema version and EffectClass/StopBoundary enums."""
+    base_raw = {
+        "schema_version": "hermes.astra-next-action.v1",
+        "proposal_id": "prop-valid",
+        "run_id": "run-1",
+        "task_id": "t1",
+        "action_type": "IMPLEMENT",
+        "objective": "Build",
+        "recommended_capability": "code",
+        "recommended_worker": "codex",
+        "expected_effect_class": "REPOSITORY_WRITE",
+        "expected_stop_boundary": "LOCAL_DIFF",
+    }
+
+    # 1. Schema version mismatch
+    bad_schema = dict(base_raw, schema_version="hermes.astra-next-action.v2")
+    with pytest.raises(AstraProposalInvalidError):
+        parse_and_validate_astra_proposal(bad_schema, expected_run_id="run-1", expected_task_id="t1")
+
+    # 2. Invalid EffectClass
+    bad_effect = dict(base_raw, expected_effect_class="INVALID_MUTATION_EFFECT")
+    with pytest.raises(AstraProposalInvalidError):
+        parse_and_validate_astra_proposal(bad_effect, expected_run_id="run-1", expected_task_id="t1")
+
+    # 3. Invalid StopBoundary
+    bad_boundary = dict(base_raw, expected_stop_boundary="RUNAWAY_UNBOUNDED")
+    with pytest.raises(AstraProposalInvalidError):
+        parse_and_validate_astra_proposal(bad_boundary, expected_run_id="run-1", expected_task_id="t1")
+
+
+def test_astra_request_contract_rich_payload(tmp_path: Path):
+    """Astra request payload contains all Section 15 contract fields."""
+    intent = _create_minimal_intent("t-rich", "run-rich")
+    state = _create_state(tmp_path, run_id="run-rich", task_id="t-rich")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    from ai_engineering.contracts import GateResult, Status
+    from ai_engineering.supervisor.validator import VerifiedResult
+    vr = VerifiedResult(
+        schema_version="hermes.verified-result.v1",
+        result_id="f" * 64,
+        task_id="t-rich",
+        attempt_id="att-1",
+        intent_digest="a" * 64,
+        base_sha="b" * 40,
+        head_sha="c" * 40,
+        normalized_evidence_digest="d" * 64,
+        required_gates=("unit_tests",),
+        gate_results=(
+            GateResult(
+                gate_name="unit_tests",
+                required=True,
+                status=Status.PASS,
+                evidence_refs=(),
+            ),
+        ),
+        blockers=(),
+        status=Status.PASS,
+        reason_codes=(),
+        verified_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+
+    req = build_canonical_astra_request(
+        run_id="run-rich",
+        state=state,
+        intent=intent,
+        budget=BudgetConfig(),
+        stats={"iterations": 2},
+        work_profile=wp,
+        effective_policy=ep,
+        verified_result=vr,
+        context_pack_digest="e" * 64,
+    )
+
+    assert req["schema_version"] == "hermes.astra-request.v1"
+    assert req["source"]["repository"] == "github" or req["source"]["repository"] == "life2boat/hermes"
+    assert req["source"]["canonical_remote"] == "github"
+    assert len(req["task_intent"]["task_intent_digest"]) == 64
+    assert req["latest_verified_result"]["status"] == "PASS"
+    assert len(req["latest_verified_result"]["required_gate_results"]) == 1
+    assert req["latest_verified_result"]["required_gate_results"][0]["gate_name"] == "unit_tests"
+    assert req["authority_boundary"]["stop_boundary"] == "LOCAL_DIFF"
+    assert req["authority_boundary"]["production_execution_allowed"] is False
+    assert req["context"]["context_pack_digest"] == "e" * 64
+
+
+def test_astra_receipt_secret_redaction():
+    """Astra receipt stores executable, argument count, and digest, never raw sensitive args."""
+    from ai_engineering.supervisor.astra_provider import AstraProviderReceipt, compute_command_digest
+    cmd = ["python", "-m", "secret_worker", "--token", "super_secret_password_12345"]
+    cmd_dg = compute_command_digest(cmd)
+    receipt = AstraProviderReceipt(
+        schema_version="hermes.astra-provider-receipt.v1",
+        receipt_id="r" * 64,
+        run_id="run-sec",
+        task_id="t-sec",
+        proposal_id="prop-sec",
+        action_type="IMPLEMENT",
+        provider_executable="python",
+        command_digest=cmd_dg,
+        argument_count=len(cmd),
+        exit_code=0,
+        stdout_digest="out_dg",
+        stderr_digest="err_dg",
+        duration_ms=42,
+        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    )
+    import dataclasses
+    receipt_dict = dataclasses.asdict(receipt)
+    serialized = json.dumps(receipt_dict)
+    assert "super_secret_password_12345" not in serialized
+    assert receipt.provider_executable == "python"
+    assert receipt.argument_count == 5
+    assert receipt.command_digest == cmd_dg

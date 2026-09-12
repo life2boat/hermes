@@ -1,10 +1,12 @@
-"""Real Astra Proposal Provider for Hermes Autonomous Supervisor (Task 7.7).
+"""Real Astra Proposal Provider for Hermes Autonomous Supervisor (Task 7.7 Corrective Closure).
 
 Astra is PROPOSAL-ONLY:
 - It generates candidate NextActionProposals based on run state, budget, and task intent.
 - It CANNOT grant authority, execute mutations, or sign policy receipts.
 - Subprocess execution is bounded with strict termination (terminate -> wait -> kill).
-- Validates proposal schema, run_id, task_id, and action types.
+- Validates exact proposal schema (hermes.astra-next-action.v1), identity (run_id, task_id), action types, and EffectClass/StopBoundary enums.
+- Generates redacted, secret-safe receipts (provider_executable, command_digest, argument_count).
+- Produces failure receipts for all provider failure paths.
 """
 
 from __future__ import annotations
@@ -13,21 +15,23 @@ import asyncio
 import datetime
 import hashlib
 import json
-import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from ai_engineering.contracts import EffectClass, StopBoundary
+from ai_engineering.effective_policy import EffectivePolicyReport
 from ai_engineering.supervisor.autonomous_run import (
     AstraNextActionProposal,
     AstraProposalProvider,
     BudgetConfig,
     NextActionType,
 )
+from ai_engineering.supervisor.policy.contracts import WorkProfile
 from ai_engineering.supervisor.state import SupervisorState
-from ai_engineering.task_intent import TaskIntent
+from ai_engineering.supervisor.validator import VerifiedResult
+from ai_engineering.task_intent import TaskIntent, intent_digest
 
 
 class AstraProviderError(Exception):
@@ -72,12 +76,24 @@ class AstraProviderReceipt:
     task_id: str
     proposal_id: str
     action_type: str
-    cmd: tuple[str, ...]
+    provider_executable: str
+    command_digest: str
+    argument_count: int
     exit_code: int
     stdout_digest: str
     stderr_digest: str
     duration_ms: int
     created_at_utc: str
+
+    @property
+    def cmd(self) -> tuple[str, ...]:
+        """Backward compatibility property returning provider executable and summary."""
+        return (self.provider_executable, f"args:{self.argument_count}", f"digest:{self.command_digest[:8]}")
+
+
+def compute_command_digest(cmd: Sequence[str]) -> str:
+    canonical = " ".join(cmd)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def compute_astra_receipt_digest(receipt_data: Mapping[str, Any]) -> str:
@@ -91,7 +107,12 @@ def build_canonical_astra_request(
     intent: TaskIntent | None = None,
     budget: BudgetConfig | None = None,
     stats: Mapping[str, int] | None = None,
+    work_profile: WorkProfile | None = None,
+    effective_policy: EffectivePolicyReport | None = None,
+    verified_result: VerifiedResult | None = None,
+    context_pack_digest: str | None = None,
 ) -> dict[str, Any]:
+    """Builds canonical hermes.astra-request.v1 payload conforming to Section 15 contract."""
     b = budget or BudgetConfig()
     s = stats or {}
 
@@ -102,31 +123,54 @@ def build_canonical_astra_request(
     consecutive_failures = s.get("consecutive_failures", 0)
     provider_calls = s.get("provider_calls", 0)
 
-    task_intent_dict: dict[str, Any] = {}
-    authority_boundary_dict: dict[str, Any] = {}
+    # 1. Task Intent details
+    task_intent_id = intent.task_id if intent else state.current_task_id
+    task_intent_dg = intent_digest(intent) if intent else state.current_intent_digest
+    desired_outcome = intent.desired_outcome if intent else ""
+    task_class = (
+        intent.task_class.value
+        if (intent and hasattr(intent.task_class, "value"))
+        else (str(intent.task_class) if intent else "")
+    )
 
-    if intent is not None:
-        task_intent_dict = {
-            "task_id": intent.task_id,
-            "desired_outcome": intent.desired_outcome,
-            "task_class": intent.task_class.value if hasattr(intent.task_class, "value") else str(intent.task_class),
-            "stop_boundary": intent.stop_boundary.value if hasattr(intent.stop_boundary, "value") else str(intent.stop_boundary),
-            "allowed_mutations": list(intent.allowed_mutations) if hasattr(intent, "allowed_mutations") else [],
-            "forbidden_mutations": list(intent.forbidden_mutations) if hasattr(intent, "forbidden_mutations") else [],
-            "required_gates": list(intent.required_gates) if hasattr(intent, "required_gates") else [],
-            "parent_intent_digest": intent.parent_intent_digest,
-        }
-        authority_boundary_dict = {
-            "allowed_scope": list(intent.allowed_mutations) if hasattr(intent, "allowed_mutations") else [],
-            "stop_boundary": intent.stop_boundary.value if hasattr(intent.stop_boundary, "value") else str(intent.stop_boundary),
-            "forbidden_mutations": list(intent.forbidden_mutations) if hasattr(intent, "forbidden_mutations") else [],
-        }
+    # 2. Source details
+    repository = getattr(state, "repository", None) or (intent.source_repository if intent else "life2boat/hermes")
+    canonical_remote = getattr(state, "canonical_remote", None) or "github"
+    base_sha = state.current_base_sha
+
+    # 3. Supervisor details
+    phase_val = state.phase.value if hasattr(state.phase, "value") else str(state.phase)
+    blockers_list = list(state.blockers) if state.blockers else []
+
+    # 4. Latest Verified Result details
+    vr_status = ""
+    gate_results_list = []
+    if verified_result:
+        vr_status = verified_result.status.value if hasattr(verified_result.status, "value") else str(verified_result.status)
+        for gr in verified_result.gate_results:
+            gate_results_list.append({
+                "gate_name": gr.gate_name,
+                "status": gr.status.value if hasattr(gr.status, "value") else str(gr.status),
+                "required": gr.required,
+                "reason_code": getattr(gr, "reason_code", ""),
+            })
+
+    # 5. Authority Boundary derived from TaskIntent + WorkProfile + EffectivePolicy
+    allowed_caps = list(intent.allowed_mutations) if (intent and hasattr(intent, "allowed_mutations")) else []
+    if work_profile:
+        allowed_effects = [e.value if hasattr(e, "value") else str(e) for e in work_profile.allowed_effect_classes]
+        forbidden_effects = [e.value if hasattr(e, "value") else str(e) for e in work_profile.forbidden_effect_classes]
+        production_allowed = work_profile.production_execution_allowed
     else:
-        authority_boundary_dict = {
-            "allowed_scope": [],
-            "stop_boundary": "LOCAL_DIFF",
-            "forbidden_mutations": [],
-        }
+        allowed_effects = ["READ_ONLY", "REPOSITORY_WRITE"]
+        forbidden_effects = []
+        production_allowed = False
+
+    stop_b = (
+        intent.stop_boundary.value
+        if (intent and hasattr(intent.stop_boundary, "value"))
+        else (str(intent.stop_boundary) if intent else "LOCAL_DIFF")
+    )
 
     return {
         "schema_version": "hermes.astra-request.v1",
@@ -134,19 +178,28 @@ def build_canonical_astra_request(
         "run_id": run_id,
         "task_id": state.current_task_id,
         "attempt_id": state.current_attempt_id,
-        "task_intent": task_intent_dict,
+        "task_intent": {
+            "task_intent_id": task_intent_id,
+            "task_intent_digest": task_intent_dg,
+            "desired_outcome": desired_outcome,
+            "task_class": task_class,
+        },
         "source": {
-            "base_sha": state.current_base_sha,
-            "current_intent_digest": state.current_intent_digest,
+            "repository": repository,
+            "canonical_remote": canonical_remote,
+            "base_sha": base_sha,
         },
         "supervisor": {
-            "phase": getattr(state.phase, "value", str(state.phase)),
+            "phase": phase_val,
             "state_revision": state.state_revision,
+            "blockers": blockers_list,
             "iterations": iterations,
         },
         "latest_verified_result": {
-            "result_id": state.latest_verified_result_id,
+            "id": state.latest_verified_result_id,
             "digest": state.latest_verified_result_digest,
+            "status": vr_status,
+            "required_gate_results": gate_results_list,
         },
         "budget": {
             "max_supervisor_decisions": b.max_supervisor_decisions,
@@ -155,6 +208,14 @@ def build_canonical_astra_request(
             "max_fix_cycles": b.max_fix_cycles,
             "max_consecutive_failures": b.max_consecutive_failures,
             "max_provider_calls": b.max_provider_calls,
+            "maximum": {
+                "max_supervisor_decisions": b.max_supervisor_decisions,
+                "max_child_tasks": b.max_child_tasks,
+                "max_retries": b.max_retries,
+                "max_fix_cycles": b.max_fix_cycles,
+                "max_consecutive_failures": b.max_consecutive_failures,
+                "max_provider_calls": b.max_provider_calls,
+            },
             "consumed": {
                 "iterations": iterations,
                 "child_tasks": child_tasks,
@@ -172,9 +233,15 @@ def build_canonical_astra_request(
                 "provider_calls": max(0, b.max_provider_calls - provider_calls),
             },
         },
-        "authority_boundary": authority_boundary_dict,
+        "authority_boundary": {
+            "allowed_capabilities": allowed_caps,
+            "allowed_effect_classes": allowed_effects,
+            "forbidden_effect_classes": forbidden_effects,
+            "stop_boundary": stop_b,
+            "production_execution_allowed": production_allowed,
+        },
         "context": {
-            "blockers": list(state.blockers) if state.blockers else [],
+            "context_pack_digest": context_pack_digest or "",
         },
     }
 
@@ -186,6 +253,13 @@ def parse_and_validate_astra_proposal(
 ) -> AstraNextActionProposal:
     if not isinstance(data, dict):
         raise AstraProposalInvalidError("Proposal payload must be a JSON object")
+
+    # 1. Exact schema validation (Section 16)
+    schema_ver = data.get("schema_version")
+    if schema_ver != "hermes.astra-next-action.v1":
+        raise AstraProposalInvalidError(
+            f"Invalid proposal schema_version '{schema_ver}'. Required: hermes.astra-next-action.v1"
+        )
 
     req_fields = (
         "schema_version",
@@ -203,7 +277,7 @@ def parse_and_validate_astra_proposal(
         if rf not in data:
             raise AstraProposalInvalidError(f"Missing required proposal field: {rf}")
 
-    # Check identity
+    # 2. Check identity
     if data["run_id"] != expected_run_id:
         raise AstraProposalIdentityMismatchError(
             f"Proposal run_id '{data['run_id']}' != expected '{expected_run_id}'"
@@ -213,7 +287,7 @@ def parse_and_validate_astra_proposal(
             f"Proposal task_id '{data['task_id']}' != expected '{expected_task_id}'"
         )
 
-    # Check action type
+    # 3. Check action type
     raw_action = data["action_type"]
     valid_actions = {a.value for a in NextActionType}
     if raw_action not in valid_actions:
@@ -221,10 +295,28 @@ def parse_and_validate_astra_proposal(
             f"Unsupported proposal action_type '{raw_action}'. Allowed: {sorted(valid_actions)}"
         )
 
+    # 4. EffectClass Enum Validation (Section 17)
+    raw_effect = data["expected_effect_class"]
+    try:
+        EffectClass(raw_effect)
+    except (ValueError, KeyError) as e:
+        raise AstraProposalInvalidError(
+            f"Invalid expected_effect_class '{raw_effect}' does not parse as EffectClass"
+        ) from e
+
+    # 5. StopBoundary Enum Validation (Section 18)
+    raw_stop = data["expected_stop_boundary"]
+    try:
+        StopBoundary(raw_stop)
+    except (ValueError, KeyError) as e:
+        raise AstraProposalInvalidError(
+            f"Invalid expected_stop_boundary '{raw_stop}' does not parse as StopBoundary"
+        ) from e
+
     action_enum = NextActionType(raw_action)
 
     return AstraNextActionProposal(
-        schema_version=str(data.get("schema_version", "hermes.astra-next-action.v1")),
+        schema_version="hermes.astra-next-action.v1",
         proposal_id=str(data["proposal_id"]),
         run_id=str(data["run_id"]),
         task_id=str(data["task_id"]),
@@ -242,7 +334,7 @@ def parse_and_validate_astra_proposal(
 
 
 class ConfiguredAstraProposalProvider(AstraProposalProvider):
-    """Subprocess-backed Astra Proposal Provider with bounded execution."""
+    """Subprocess-backed Astra Proposal Provider with bounded execution and secret-safe failure receipts."""
 
     def __init__(
         self,
@@ -259,6 +351,57 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         self.env = dict(env) if env is not None else None
         self.latest_receipt: AstraProviderReceipt | None = None
 
+        self.provider_executable = str(self.cmd[0])
+        self.command_digest = compute_command_digest(self.cmd)
+        self.argument_count = len(self.cmd)
+
+    def _create_receipt(
+        self,
+        run_id: str,
+        task_id: str,
+        proposal_id: str,
+        action_type: str,
+        exit_code: int,
+        stdout_digest: str,
+        stderr_digest: str,
+        duration_ms: int,
+        created_at_utc: str,
+    ) -> AstraProviderReceipt:
+        receipt_data = {
+            "schema_version": "hermes.astra-provider-receipt.v1",
+            "run_id": run_id,
+            "task_id": task_id,
+            "proposal_id": proposal_id,
+            "action_type": action_type,
+            "provider_executable": self.provider_executable,
+            "command_digest": self.command_digest,
+            "argument_count": self.argument_count,
+            "exit_code": exit_code,
+            "stdout_digest": stdout_digest,
+            "stderr_digest": stderr_digest,
+            "duration_ms": duration_ms,
+            "created_at_utc": created_at_utc,
+        }
+        receipt_id = compute_astra_receipt_digest(receipt_data)
+        receipt = AstraProviderReceipt(
+            schema_version="hermes.astra-provider-receipt.v1",
+            receipt_id=receipt_id,
+            run_id=run_id,
+            task_id=task_id,
+            proposal_id=proposal_id,
+            action_type=action_type,
+            provider_executable=self.provider_executable,
+            command_digest=self.command_digest,
+            argument_count=self.argument_count,
+            exit_code=exit_code,
+            stdout_digest=stdout_digest,
+            stderr_digest=stderr_digest,
+            duration_ms=duration_ms,
+            created_at_utc=created_at_utc,
+        )
+        self.latest_receipt = receipt
+        return receipt
+
     async def request_proposal(
         self,
         run_id: str,
@@ -266,6 +409,10 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         intent: TaskIntent | None = None,
         budget: BudgetConfig | None = None,
         stats: Mapping[str, int] | None = None,
+        work_profile: WorkProfile | None = None,
+        effective_policy: EffectivePolicyReport | None = None,
+        verified_result: VerifiedResult | None = None,
+        context_pack_digest: str | None = None,
         **kwargs: Any,
     ) -> AstraNextActionProposal:
         req_data = build_canonical_astra_request(
@@ -274,6 +421,10 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
             intent=intent,
             budget=budget,
             stats=stats,
+            work_profile=work_profile,
+            effective_policy=effective_policy,
+            verified_result=verified_result,
+            context_pack_digest=context_pack_digest,
         )
         req_bytes = json.dumps(req_data, indent=2).encode("utf-8")
 
@@ -291,8 +442,20 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 env=self.env,
             )
         except Exception as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            self._create_receipt(
+                run_id=run_id,
+                task_id=state.current_task_id,
+                proposal_id="",
+                action_type="",
+                exit_code=-1,
+                stdout_digest="",
+                stderr_digest="",
+                duration_ms=duration_ms,
+                created_at_utc=created_at_utc,
+            )
             raise AstraProviderUnavailableError(
-                f"Failed to spawn Astra command {self.cmd}: {e}"
+                f"Failed to spawn Astra command {self.cmd[0]}: {e}"
             ) from e
 
         try:
@@ -301,7 +464,7 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError as e:
-            # Terminate and cleanup process strictly (no orphan processes)
+            duration_ms = int((time.monotonic() - start_time) * 1000)
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=1.0)
@@ -311,6 +474,18 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                     await asyncio.wait_for(proc.wait(), timeout=1.0)
                 except Exception:
                     pass
+
+            self._create_receipt(
+                run_id=run_id,
+                task_id=state.current_task_id,
+                proposal_id="",
+                action_type="",
+                exit_code=-1,
+                stdout_digest="",
+                stderr_digest="",
+                duration_ms=duration_ms,
+                created_at_utc=created_at_utc,
+            )
             raise AstraProviderTimeoutError(
                 f"Astra command timed out after {self.timeout_seconds}s"
             ) from e
@@ -322,28 +497,11 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         stderr_digest = hashlib.sha256(stderr_bytes).hexdigest()
 
         if proc.returncode != 0:
-            receipt_data = {
-                "schema_version": "hermes.astra-provider-receipt.v1",
-                "run_id": run_id,
-                "task_id": state.current_task_id,
-                "proposal_id": "",
-                "action_type": "",
-                "cmd": list(self.cmd),
-                "exit_code": proc.returncode or -1,
-                "stdout_digest": stdout_digest,
-                "stderr_digest": stderr_digest,
-                "duration_ms": duration_ms,
-                "created_at_utc": created_at_utc,
-            }
-            receipt_id = compute_astra_receipt_digest(receipt_data)
-            self.latest_receipt = AstraProviderReceipt(
-                schema_version="hermes.astra-provider-receipt.v1",
-                receipt_id=receipt_id,
+            self._create_receipt(
                 run_id=run_id,
                 task_id=state.current_task_id,
                 proposal_id="",
                 action_type="",
-                cmd=self.cmd,
                 exit_code=proc.returncode or -1,
                 stdout_digest=stdout_digest,
                 stderr_digest=stderr_digest,
@@ -357,28 +515,11 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
         try:
             parsed_json = json.loads(stdout_str)
         except json.JSONDecodeError as e:
-            receipt_data = {
-                "schema_version": "hermes.astra-provider-receipt.v1",
-                "run_id": run_id,
-                "task_id": state.current_task_id,
-                "proposal_id": "",
-                "action_type": "",
-                "cmd": list(self.cmd),
-                "exit_code": 0,
-                "stdout_digest": stdout_digest,
-                "stderr_digest": stderr_digest,
-                "duration_ms": duration_ms,
-                "created_at_utc": created_at_utc,
-            }
-            receipt_id = compute_astra_receipt_digest(receipt_data)
-            self.latest_receipt = AstraProviderReceipt(
-                schema_version="hermes.astra-provider-receipt.v1",
-                receipt_id=receipt_id,
+            self._create_receipt(
                 run_id=run_id,
                 task_id=state.current_task_id,
                 proposal_id="",
                 action_type="",
-                cmd=self.cmd,
                 exit_code=0,
                 stdout_digest=stdout_digest,
                 stderr_digest=stderr_digest,
@@ -389,34 +530,31 @@ class ConfiguredAstraProposalProvider(AstraProposalProvider):
                 f"Astra output is not valid JSON: {e}"
             ) from e
 
-        proposal = parse_and_validate_astra_proposal(
-            parsed_json,
-            expected_run_id=run_id,
-            expected_task_id=state.current_task_id,
-        )
+        try:
+            proposal = parse_and_validate_astra_proposal(
+                parsed_json,
+                expected_run_id=run_id,
+                expected_task_id=state.current_task_id,
+            )
+        except AstraProviderError as e:
+            self._create_receipt(
+                run_id=run_id,
+                task_id=state.current_task_id,
+                proposal_id=str(parsed_json.get("proposal_id", "")),
+                action_type=str(parsed_json.get("action_type", "")),
+                exit_code=0,
+                stdout_digest=stdout_digest,
+                stderr_digest=stderr_digest,
+                duration_ms=duration_ms,
+                created_at_utc=created_at_utc,
+            )
+            raise
 
-        receipt_data = {
-            "schema_version": "hermes.astra-provider-receipt.v1",
-            "run_id": run_id,
-            "task_id": state.current_task_id,
-            "proposal_id": proposal.proposal_id,
-            "action_type": proposal.action_type.value,
-            "cmd": list(self.cmd),
-            "exit_code": 0,
-            "stdout_digest": stdout_digest,
-            "stderr_digest": stderr_digest,
-            "duration_ms": duration_ms,
-            "created_at_utc": created_at_utc,
-        }
-        receipt_id = compute_astra_receipt_digest(receipt_data)
-        self.latest_receipt = AstraProviderReceipt(
-            schema_version="hermes.astra-provider-receipt.v1",
-            receipt_id=receipt_id,
+        self._create_receipt(
             run_id=run_id,
             task_id=state.current_task_id,
             proposal_id=proposal.proposal_id,
             action_type=proposal.action_type.value,
-            cmd=self.cmd,
             exit_code=0,
             stdout_digest=stdout_digest,
             stderr_digest=stderr_digest,

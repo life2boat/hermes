@@ -125,6 +125,36 @@ def test_task8_qualify_dirty_build_context(base_request, base_manifest, base_gat
     assert receipt.report.technical_release_candidate_ready is False
     assert "GATE_FAILED: BUILD_CONTEXT" in receipt.report.technical_blockers
 
+def test_task8_qualify_one_blocked_gate_no_fail(base_request, base_manifest, base_gates):
+    base_gates[6] = GateResult("SECRET_CONTRACT", Status.BLOCKED)
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=base_manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z"
+    )
+    assert receipt.result == Status.BLOCKED
+    assert "GATE_BLOCKED: SECRET_CONTRACT" in receipt.report.technical_blockers
+    assert receipt.report.technical_release_candidate_ready is False
+
+def test_task8_qualify_fail_plus_blocked(base_request, base_manifest, base_gates):
+    base_gates[6] = GateResult("SECRET_CONTRACT", Status.BLOCKED)
+    base_gates[2] = GateResult("BUILD_CONTEXT", Status.FAIL)
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=base_manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z"
+    )
+    assert receipt.result == Status.FAIL
+    assert receipt.report.technical_release_candidate_ready is False
+
 def test_task8_qualify_missing_gates(base_request, base_manifest, base_gates):
     # Remove one gate
     incomplete_gates = base_gates[:-1]

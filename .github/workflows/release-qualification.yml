@@ -191,8 +191,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api -X GET /repos/${{ github.repository }}/commits/${{ inputs.target_sha }}/check-runs --paginate > check_runs.json
-          jq -c '[.check_runs[] | {canonical_name: .name, run_id: .id, head_sha: .head_sha, status: .status, conclusion: .conclusion, completed_at: .completed_at}]' check_runs.json > structured_ci_evidence.json
+          python3 scripts/collect_ci_evidence.py ${{ inputs.target_sha }}
           echo 'STRUCTURED_CI_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat structured_ci_evidence.json >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV

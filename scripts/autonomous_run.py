@@ -247,7 +247,7 @@ async def async_main(argv: list[str] | None = None):
     from ai_engineering.supervisor.pr_provider import CandidateHeadIdentity, compute_candidate_head_identity_digest
     import dataclasses as _dc
     candidate_head_identity = None
-    if args.candidate_head_ref:
+    if args.candidate_head_ref and args.provider_mode != "real":
         cid_fields = {
             "schema_version": "hermes.candidate-head-identity.v1",
             "candidate_id": "",

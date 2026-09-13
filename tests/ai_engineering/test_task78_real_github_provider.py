@@ -223,15 +223,26 @@ def _create_candidate_identity(
     base_sha: str = "a" * 40,
     base_ref: str = "main",
 ) -> CandidateHeadIdentity:
-    return CandidateHeadIdentity(
+    from ai_engineering.supervisor.pr_provider import compute_candidate_head_identity_digest
+    cid = CandidateHeadIdentity(
         schema_version="hermes.candidate-head-identity.v1",
+        candidate_id="cid-dummy",
+        run_id="run-dummy",
+        task_id="task-dummy",
         repository=repo,
         remote_name="origin",
         head_ref=head_ref,
         head_sha=head_sha,
         base_ref=base_ref,
         base_sha=base_sha,
+        source_base_sha="c" * 40,
+        published_at_utc="2026-09-13T00:00:00+00:00",
+        digest=""
     )
+    import dataclasses
+    d = dataclasses.asdict(cid)
+    dg = compute_candidate_head_identity_digest(d)
+    return dataclasses.replace(cid, digest=dg)
 
 
 class MockCIProvider:

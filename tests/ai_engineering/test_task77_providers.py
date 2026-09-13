@@ -1342,23 +1342,26 @@ class _WaitForCIAstraProposalProvider(ScriptedAstraProposalProvider):
 
 @pytest.mark.asyncio
 async def test_ci_true_restart_resume_integration(tmp_path: Path):
-    """Multi-process crash acceptance: Coordinator A starts CI wait cycle and is killed.
-    Coordinator B restarts, rehydrates pending CI SHA directly from journal, polls CI with 0 Astra calls,
-    observes CI_GREEN, clears pending CI SHA, and only then calls Astra for next proposal."""
-    store = FileSupervisorStateStore(tmp_path)
-    loop = SupervisorLoop(store)
+    """Multi-process crash acceptance: Coordinator A starts CI wait cycle,
+    genuinely polls exact SHA, receives IN_PROGRESS, persists CI_STATUS_OBSERVED(IN_PROGRESS),
+    and is interrupted by external process crash before second poll.
+    Fresh Coordinator B restarts, rehydrates pending CI SHA directly from journal,
+    polls CI with same SHA and 0 Astra calls, observes CI_GREEN, clears pending CI SHA,
+    and only then calls Astra for next proposal yielding GOAL_COMPLETE."""
+    store_a = FileSupervisorStateStore(tmp_path)
+    loop_a = SupervisorLoop(store_a)
     intent = _create_minimal_intent("t-restart", "run-restart")
     wp = _create_work_profile()
     ep = _create_effective_policy(intent)
 
-    init_state = loop.initialize_run(
+    init_state = loop_a.initialize_run(
         intent=intent,
         lineage=None,
         root_goal=intent.desired_outcome,
         root_goal_id="run-restart",
         created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    loop.bind_profile("run-restart", wp, ep)
+    loop_a.bind_profile("run-restart", wp, ep)
 
     from ai_engineering.contracts import Status, GateResult
     from ai_engineering.supervisor.validator import VerifiedResult
@@ -1378,77 +1381,99 @@ async def test_ci_true_restart_resume_integration(tmp_path: Path):
         reason_codes=(),
         verified_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
     )
-    loop.ingest_verified_result("run-restart", vr, "v" * 64)
+    loop_a.ingest_verified_result("run-restart", vr, "v" * 64)
 
-    ci_poll_count = 0
-    async def mock_ci_runner(repo: str, target_sha: str):
-        nonlocal ci_poll_count
-        ci_poll_count += 1
-        if ci_poll_count <= 2:
-            return target_sha, [
-                {"name": "Tests", "status": "in_progress", "conclusion": "", "event": "pull_request"},
-            ]
-        return target_sha, [
-            {"name": "Tests", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "Typecheck", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "Nix", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "Agent Release Gate", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "Supply Chain Audit", "status": "completed", "conclusion": "success", "event": "pull_request"},
-            {"name": "History Check", "status": "completed", "conclusion": "success", "event": "pull_request"},
+    target_sha = intent.source_base_sha
+    astra_a_invocations = 0
+
+    class InProgressAstraProposalProvider(ScriptedAstraProposalProvider):
+        async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs):
+            nonlocal astra_a_invocations
+            astra_a_invocations += 1
+            return AstraNextActionProposal(
+                schema_version="hermes.astra-next-action.v1",
+                proposal_id=f"prop-ci-{run_id}",
+                run_id=run_id,
+                task_id=state.current_task_id,
+                action_type=NextActionType.WAIT_FOR_CI,
+                objective="Wait for CI checks",
+                recommended_capability="code",
+                recommended_worker="codex",
+                expected_effect_class=EffectClass.READ_ONLY.value,
+                expected_stop_boundary=StopBoundary.READ_ONLY.value,
+            )
+
+    ci_poll_count_a = 0
+    async def mock_ci_runner_a(repo: str, sha: str):
+        nonlocal ci_poll_count_a
+        ci_poll_count_a += 1
+        return sha, [
+            {"name": "Tests", "status": "in_progress", "conclusion": "", "event": "pull_request"},
         ]
 
-    ci_provider = GitHubCIStatusProvider(
+    ci_provider_a = GitHubCIStatusProvider(
         repository="life2boat/hermes",
-        timeout_seconds=5.0,
-        poll_interval_seconds=0.01,
-        runner=mock_ci_runner,
+        timeout_seconds=10.0,
+        poll_interval_seconds=1.0,
+        runner=mock_ci_runner_a,
     )
 
-    # Coordinator A: receives WAIT_FOR_CI proposal, starts CI poll, then process crashes
-    astra_a = _WaitForCIAstraProposalProvider()
     coord_a = AutonomousRunCoordinator(
-        loop=loop,
-        store=store,
-        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(tmp_path / "router")),
+        loop=loop_a,
+        store=store_a,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store_a, supervisor_loop=loop_a), store=PersistentStore(tmp_path / "router")),
         result_collector=ResultCollector(),
         budget=BudgetConfig(max_supervisor_decisions=10),
         run_id="run-restart",
-        astra_provider=astra_a,
-        ci_provider=ci_provider,
+        astra_provider=InProgressAstraProposalProvider("codex", "code", EffectClass.READ_ONLY.value, StopBoundary.READ_ONLY.value),
+        ci_provider=ci_provider_a,
         evidence_root=str(tmp_path),
     )
 
-    # Manually emit CI_WAIT_STARTED in Coordinator A as would happen when WAIT_FOR_CI is handled
-    state_a = store.load_state("run-restart")
-    target_sha = "a" * 40
-    from ai_engineering.supervisor.events import create_event, SupervisorEventType
-    events = store.load_events("run-restart")
-    start_ev = create_event(
-        run_id="run-restart",
-        sequence=len(events) + 1,
-        previous_event_digest=events[-1].event_digest if events else None,
-        event_type=SupervisorEventType.CI_WAIT_STARTED,
-        state_revision=state_a.state_revision,
-        task_id=state_a.current_task_id,
-        attempt_id=state_a.current_attempt_id,
-        intent_digest=state_a.current_intent_digest,
-        payload={"exact_sha": target_sha, "sha": target_sha},
-        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
-    )
-    store.save_event(start_ev)
+    # Process A genuinely runs: asks Astra -> WAIT_FOR_CI -> polls CI -> receives IN_PROGRESS -> persists CI_STATUS_OBSERVED(IN_PROGRESS)
+    task_a = asyncio.create_task(coord_a.run_until_terminal())
 
-    # Process A dies! Delete all Process A instances
-    del coord_a, astra_a, state_a
+    # Wait until CI_STATUS_OBSERVED(IN_PROGRESS) is genuinely recorded in the journal by Process A
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        events_a = store_a.load_events("run-restart")
+        obs_events = [e for e in events_a if getattr(e.event_type, "value", str(e.event_type)) == "CI_STATUS_OBSERVED"]
+        if obs_events:
+            assert obs_events[0].payload["overall_status"] == "IN_PROGRESS"
+            break
+    else:
+        pytest.fail("Process A did not record CI_STATUS_OBSERVED within expected time")
 
-    # Process B starts: fresh Coordinator instance pointing to the same store
-    astra_b_called = False
+    # Simulate external process crash/cancellation before second poll
+    task_a.cancel()
+    try:
+        await task_a
+    except asyncio.CancelledError:
+        pass
+
+    # Verify Process A state at crash: exactly 1 Astra invocation, 1 CI poll, NO CI_GREEN
+    assert astra_a_invocations == 1
+    assert ci_poll_count_a == 1
+    events_at_crash = store_a.load_events("run-restart")
+    ev_types_at_crash = [getattr(e.event_type, "value", str(e.event_type)) for e in events_at_crash]
+    assert "CI_WAIT_STARTED" in ev_types_at_crash
+    assert "CI_STATUS_OBSERVED" in ev_types_at_crash
+    assert "CI_GREEN" not in ev_types_at_crash
+
+    # Destroy all Process A instances
+    del coord_a, loop_a, store_a, ci_provider_a
+
+    # Process B starts: FRESH Store, FRESH SupervisorLoop, FRESH Coordinator
+    store_b = FileSupervisorStateStore(tmp_path)
+    loop_b = SupervisorLoop(store_b)
+
+    astra_b_invocations = 0
     class GuardedAstraProposalProvider(ScriptedAstraProposalProvider):
-        async def request_proposal(self, run_id, state, **kwargs):
-            nonlocal astra_b_called
-            astra_b_called = True
-            # When called, CI must already have been resolved to CI_GREEN!
-            events_now = store.load_events("run-restart")
+        async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs):
+            nonlocal astra_b_invocations
+            astra_b_invocations += 1
+            # When called, CI must ALREADY have been completed to CI_GREEN!
+            events_now = store_b.load_events("run-restart")
             green_events = [e for e in events_now if getattr(e.event_type, "value", str(e.event_type)) == "CI_GREEN"]
             assert len(green_events) == 1, "Astra must NOT be called before CI_GREEN is persisted!"
             return AstraNextActionProposal(
@@ -1464,41 +1489,68 @@ async def test_ci_true_restart_resume_integration(tmp_path: Path):
                 expected_stop_boundary=StopBoundary.READ_ONLY.value,
             )
 
-    guarded_astra = GuardedAstraProposalProvider(
-        target_worker="codex",
-        target_capability="code",
-        expected_effect_class=EffectClass.READ_ONLY.value,
-        expected_stop_boundary=StopBoundary.READ_ONLY.value,
+    polled_shas_b = []
+    async def mock_ci_runner_b(repo: str, sha: str):
+        # Assert Astra invocation count remains unchanged before resumed CI completes
+        assert astra_b_invocations == 0, "Astra must not be invoked before resumed CI completes!"
+        polled_shas_b.append(sha)
+        return sha, [
+            {"name": "Tests", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Lint (ruff + ty)", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Typecheck", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Nix", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Agent Release Gate", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "Supply Chain Audit", "status": "completed", "conclusion": "success", "event": "pull_request"},
+            {"name": "History Check", "status": "completed", "conclusion": "success", "event": "pull_request"},
+        ]
+
+    ci_provider_b = GitHubCIStatusProvider(
+        repository="life2boat/hermes",
+        timeout_seconds=5.0,
+        poll_interval_seconds=0.01,
+        runner=mock_ci_runner_b,
     )
 
     coord_b = AutonomousRunCoordinator(
-        loop=SupervisorLoop(store),
-        store=store,
-        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=SupervisorLoop(store)), store=PersistentStore(tmp_path / "router")),
+        loop=loop_b,
+        store=store_b,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store_b, supervisor_loop=loop_b), store=PersistentStore(tmp_path / "router")),
         result_collector=ResultCollector(),
         budget=BudgetConfig(max_supervisor_decisions=10),
         run_id="run-restart",
-        astra_provider=guarded_astra,
-        ci_provider=ci_provider,
+        astra_provider=GuardedAstraProposalProvider("codex", "code", EffectClass.READ_ONLY.value, StopBoundary.READ_ONLY.value),
+        ci_provider=ci_provider_b,
         evidence_root=str(tmp_path),
     )
 
-    # Verify Coordinator B rehydrated pending_ci_sha from event journal
+    # 1. Pending exact SHA rehydrated
     assert coord_b.pending_ci_sha == target_sha
+    assert astra_b_invocations == 0
 
     # Coordinator B resumes execution
-    receipt = await coord_b.run_until_terminal()
-    assert receipt.terminal_reason == "GOAL_COMPLETE"
-    assert astra_b_called is True
+    receipt_b = await coord_b.run_until_terminal()
+
+    # 2. Terminal result GOAL_COMPLETE
+    assert receipt_b.terminal_reason == "GOAL_COMPLETE"
+
+    # 3. Same SHA polled by CI provider B
+    assert polled_shas_b == [target_sha]
+
+    # 4. Only then Astra called
+    assert astra_b_invocations == 1
     assert coord_b.pending_ci_sha is None
 
-    # Verify CI_GREEN was emitted before STOP_SUCCESS proposal
-    final_events = store.load_events("run-restart")
+    # 5. CI_GREEN persisted
+    final_events = store_b.load_events("run-restart")
     event_types = [getattr(e.event_type, "value", str(e.event_type)) for e in final_events]
     assert "CI_GREEN" in event_types
     green_idx = event_types.index("CI_GREEN")
-    stop_idx = event_types.index("ASTRA_PROPOSAL_CREATED")
-    assert green_idx < stop_idx
+    stop_indices = [idx for idx, e in enumerate(final_events) if getattr(e.event_type, "value", str(e.event_type)) == "ASTRA_PROPOSAL_CREATED" and e.payload.get("action_type") == "STOP_SUCCESS"]
+    assert len(stop_indices) == 1
+    assert green_idx < stop_indices[0]
+
+
+test_ci_in_progress_crash_resume = test_ci_true_restart_resume_integration
 
 
 @pytest.mark.asyncio
@@ -1784,3 +1836,123 @@ async def test_real_mode_missing_authority_context_blocks(tmp_path: Path):
 
     receipt = await coord.run_until_terminal()
     assert receipt.terminal_reason == "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE"
+
+
+def test_effective_policy_empty_allowset_intersection(tmp_path: Path):
+    """When TaskIntent has allowed_mutations and EffectivePolicy has empty allowed_mutations,
+    intersection must produce empty allowed_mutations and allowed_capabilities (no widening)."""
+    state = _create_state(tmp_path, "run-empty-ep", "t-empty-ep")
+    intent = TaskIntent(
+        schema_version=1,
+        task_id="t-empty-ep",
+        intent_revision=1,
+        status=IntentStatus.READY,
+        source_repository="life2boat/hermes",
+        source_base_sha="a" * 40,
+        source_main_ref="refs/heads/main",
+        desired_outcome="Test empty EP allow-set",
+        task_class=TaskClass.BOUNDED_IMPLEMENTATION,
+        constraints=(),
+        allowed_mutations=("code", "src/**"),
+        forbidden_mutations=(),
+        stop_boundary=StopBoundary.READY_PR,
+        acceptance_criteria=(),
+        unknowns=(),
+        applicable_invariants=(),
+        required_gates=(),
+        parent_intent_digest=None,
+    )
+    wp = _create_work_profile()
+    tpa = TaskPolicyAttribution(
+        task_id="t-empty-ep",
+        intent_revision=1,
+        intent_digest=intent_digest(intent),
+        source_base_sha="a" * 40,
+        constraints=(),
+        allowed_mutations=(),  # EMPTY allow-set!
+        forbidden_mutations=(),
+        stop_boundary="READY_PR",
+        source_id="0" * 64,
+    )
+    ep = EffectivePolicyReport(
+        schema_version=1,
+        effective_policy_id="0" * 64,
+        task_id="t-empty-ep",
+        intent_digest=intent_digest(intent),
+        intent_revision=1,
+        source_base_sha="a" * 40,
+        subject_sha="a" * 40,
+        status=EffectivePolicyStatus.COMPLETE,
+        policy_sources=(),
+        task_policy=tpa,
+        invariant_resolutions=(),
+        required_gate_resolutions=(),
+        unresolved_references=(),
+        precedence_source_id="0" * 64,
+        authority_expansion=False,
+    )
+
+    req = build_canonical_astra_request(
+        run_id="run-empty-ep",
+        state=state,
+        intent=intent,
+        work_profile=wp,
+        effective_policy=ep,
+        real_mode=True,
+    )
+
+    auth = req["authority_boundary"]
+    assert auth["allowed_mutations"] == []
+    assert auth["allowed_capabilities"] == []
+
+
+@pytest.mark.asyncio
+async def test_real_mode_provider_typeerror_fails_closed(tmp_path: Path):
+    """Configured provider deliberately raises TypeError while receiving trusted kwargs;
+    verify only one provider invocation occurs, ASTRA provider failure is recorded,
+    and no second context-free invocation takes place."""
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_minimal_intent("t-type-err", "run-type-err")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-type-err", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-type-err", wp, ep)
+
+    call_count = 0
+    received_kwargs: list[dict[str, Any]] = []
+
+    class TypeErrorAstraProvider(ScriptedAstraProposalProvider):
+        async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs):
+            nonlocal call_count, received_kwargs
+            call_count += 1
+            received_kwargs.append(kwargs)
+            raise TypeError("Deliberate provider type error while receiving trusted kwargs")
+
+    provider = TypeErrorAstraProvider()
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(supervisor_store=store, supervisor_loop=loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-type-err",
+        astra_provider=provider,
+        ci_provider=GitHubCIStatusProvider("life2boat/hermes"),
+        evidence_root=str(tmp_path),
+        provider_mode="real",
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert "ASTRA_PROVIDER_FAILED" in receipt.terminal_reason
+    assert call_count == 1, "Must invoke provider exactly once, no second context-free retry!"
+    assert len(received_kwargs) == 1
+    assert "intent" in received_kwargs[0]
+    assert "work_profile" in received_kwargs[0]
+    assert "effective_policy" in received_kwargs[0]
+    assert received_kwargs[0]["real_mode"] is True
+
+    events = store.load_events("run-type-err")
+    failed_events = [e for e in events if getattr(e.event_type, "value", str(e.event_type)) == "ASTRA_PROVIDER_FAILED"]
+    assert len(failed_events) == 1
+    assert failed_events[0].payload["error_type"] == "TypeError"

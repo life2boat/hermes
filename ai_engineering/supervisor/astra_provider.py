@@ -195,10 +195,7 @@ def build_canonical_astra_request(
     intent_allowed = list(intent.allowed_mutations) if (intent and hasattr(intent, "allowed_mutations")) else []
     if effective_policy and hasattr(effective_policy, "task_policy") and effective_policy.task_policy:
         ep_allowed = set(effective_policy.task_policy.allowed_mutations) if hasattr(effective_policy.task_policy, "allowed_mutations") else set()
-        if ep_allowed:
-            allowed_mutations = [m for m in intent_allowed if m in ep_allowed]
-        else:
-            allowed_mutations = intent_allowed
+        allowed_mutations = [m for m in intent_allowed if m in ep_allowed]
     else:
         allowed_mutations = intent_allowed
 

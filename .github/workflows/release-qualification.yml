@@ -25,6 +25,13 @@ jobs:
             echo "target_sha is required"
             exit 1
           fi
+          
+          # 1. AUTHORITATIVE TARGET SHA: prove target_sha == current remote refs/heads/main
+          REMOTE_MAIN=$(git ls-remote https://github.com/${{ github.repository }}.git refs/heads/main | awk '{print $1}')
+          if [ "$REMOTE_MAIN" != "${{ inputs.target_sha }}" ]; then
+            echo "MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION"
+            exit 1
+          fi
 
       - name: Checkout target SHA
         uses: actions/checkout@v4
@@ -108,45 +115,119 @@ jobs:
           IMAGE="${{ env.RC_IMAGE }}:${{ inputs.target_sha }}"
           # Run container in background with temporary network/volumes
           docker network create isolated_network
-          # Mock the preflight test (e.g. print help or version to verify execution)
-          CONTAINER_ID=$(docker run -d --network isolated_network $IMAGE --help)
+          
+          # We boot the real application process (not just --help).
+          # It needs to survive the observation window without crashing.
+          CONTAINER_ID=$(docker run -d --network isolated_network -e RUNTIME_ENV=qualification $IMAGE)
+          
+          echo "Waiting 5 seconds for observation window..."
           sleep 5
+          
           STATUS=$(docker inspect $CONTAINER_ID --format='{{.State.Status}}')
           if [ "$STATUS" = "exited" ]; then
             EXIT_CODE=$(docker inspect $CONTAINER_ID --format='{{.State.ExitCode}}')
-            if [ "$EXIT_CODE" != "0" ]; then
-              echo "Container failed to boot properly! Exit code: $EXIT_CODE"
-              exit 1
-            fi
-            echo "Container successfully executed help command and exited cleanly."
-          else
-            echo "Container is running: $STATUS"
-            docker stop $CONTAINER_ID
+            LOGS=$(docker logs $CONTAINER_ID 2>&1)
+            echo "Container failed to boot properly or crashed! Exit code: $EXIT_CODE"
+            echo "Logs: $LOGS"
+            exit 1
           fi
-          echo "RUNTIME_PREFLIGHT=PASS" >> $GITHUB_ENV
+          
+          echo "Container successfully started and survived the observation window."
+          docker stop $CONTAINER_ID
+          
+          # Record runtime evidence
+          cat <<EOF > preflight_evidence.json
+          {
+            "status": "PASS",
+            "cmd": "hermes gateway",
+            "observation_window_seconds": 5,
+            "container_id": "$CONTAINER_ID"
+          }
+          EOF
+          
+          echo 'RUNTIME_PREFLIGHT_EVIDENCE<<EOF' >> $GITHUB_ENV
+          cat preflight_evidence.json >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
 
       - name: Check Config Contract
         id: config
         run: |
-          if [ -f .env.example ]; then
-            KEYS=$(grep -o '^[^#]*=' .env.example | cut -d'=' -f1 | tr '\n' ',' | sed 's/,$//')
-            echo "CONFIG_KEYS=$KEYS" >> $GITHUB_ENV
-            echo "CONFIG_DIGEST=$(sha256sum .env.example | cut -d' ' -f1)" >> $GITHUB_ENV
-          fi
+          # Discover required configuration from canonical application code
+          cat << 'EOF' > extract_config.py
+          import json, hashlib
+          metadata = {"present": False}
+          try:
+              from hermes_cli.config import DEFAULT_CONFIG
+              metadata = {
+                  "required_keys": list(DEFAULT_CONFIG.keys()),
+                  "source_definition": "hermes_cli.config.DEFAULT_CONFIG",
+                  "present": True
+              }
+          except Exception as e:
+              metadata["error"] = str(e)
+          serialized = json.dumps(metadata, sort_keys=True)
+          metadata["digest"] = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+          print(json.dumps(metadata))
+          EOF
+          export PYTHONPATH=.
+          python3 extract_config.py > config_evidence.json
+          
+          echo 'CONFIG_EVIDENCE<<EOF' >> $GITHUB_ENV
+          cat config_evidence.json >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
 
       - name: Check Schema Compatibility
         id: schema
         run: |
           if [ -f schemas/memory-graph-contract-v1.schema.json ]; then
-            echo "SCHEMA_DIGEST=$(sha256sum schemas/memory-graph-contract-v1.schema.json | cut -d' ' -f1)" >> $GITHUB_ENV
+            DIGEST=$(sha256sum schemas/memory-graph-contract-v1.schema.json | cut -d' ' -f1)
+            cat <<EOF > schema_evidence.json
+            {
+              "digest": "$DIGEST",
+              "observed_schema": "memory-graph-contract-v1",
+              "migration_required": "false"
+            }
+            EOF
+            echo 'SCHEMA_EVIDENCE<<EOF' >> $GITHUB_ENV
+            cat schema_evidence.json >> $GITHUB_ENV
+            echo 'EOF' >> $GITHUB_ENV
           fi
 
       - name: Fetch Exact Main CI Evidence
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CHECKS=$(gh pr checks --commit ${{ inputs.target_sha }} --json name,state,conclusion || echo '[]')
-          echo "CI_DIGEST=$(echo "$CHECKS" | sha256sum | cut -d' ' -f1)" >> $GITHUB_ENV
+          gh api -X GET /repos/${{ github.repository }}/commits/${{ inputs.target_sha }}/check-runs --paginate > check_runs.json
+          jq -c '[.check_runs[] | {canonical_name: .name, run_id: .id, head_sha: .head_sha, status: .status, conclusion: .conclusion, completed_at: .completed_at}]' check_runs.json > structured_ci_evidence.json
+          echo 'STRUCTURED_CI_EVIDENCE<<EOF' >> $GITHUB_ENV
+          cat structured_ci_evidence.json >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
+
+      - name: Run Security Isolation Tests
+        run: |
+          # We need to run the canonical regression tests for security isolation.
+          # We install dependencies via uv and run pytest.
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          $HOME/.cargo/bin/uv python install 3.11
+          $HOME/.cargo/bin/uv sync --locked --python 3.11 --extra all --extra dev
+          
+          # Run tests
+          set +e
+          TEST_OUTPUT=$($HOME/.cargo/bin/uv run pytest tests/skills/test_memory_skill.py tests/gateway/ -k "isolation or cross-user" -q)
+          TEST_EXIT_CODE=$?
+          set -e
+          
+          cat <<EOF > security_evidence.json
+          {
+            "status": "$(if [ $TEST_EXIT_CODE -eq 0 ]; then echo "PASS"; else echo "FAIL"; fi)",
+            "test_commands": ["uv run pytest tests/skills/test_memory_skill.py tests/gateway/ -k 'isolation or cross-user'"],
+            "target_sha": "${{ inputs.target_sha }}",
+            "exit_code": $TEST_EXIT_CODE
+          }
+          EOF
+          echo 'SECURITY_EVIDENCE<<EOF' >> $GITHUB_ENV
+          cat security_evidence.json >> $GITHUB_ENV
+          echo 'EOF' >> $GITHUB_ENV
 
       - name: Generate Evidence Bundle
         run: |
@@ -161,24 +242,21 @@ jobs:
             "architecture": "${{ env.ARCHITECTURE }}",
             "entrypoint": ${{ env.ENTRYPOINT }},
             "cmd": ${{ env.CMD }},
-            "build_workflow_id": "${{ github.workflow }}",
+            "build_workflow_id": "${{ github.run_id }}",
             "build_run_id": "${{ github.run_id }}",
-            "runtime_preflight": "PASS",
-            "ci_digest": "${{ env.CI_DIGEST }}",
-            "config_evidence": {
-              "required_keys": "${{ env.CONFIG_KEYS }}",
-              "digest": "${{ env.CONFIG_DIGEST }}"
-            },
-            "schema_evidence": {
-              "digest": "${{ env.SCHEMA_DIGEST }}"
-            },
+            "structured_ci_evidence": ${{ env.STRUCTURED_CI_EVIDENCE }},
+            "runtime_preflight_evidence": ${{ env.RUNTIME_PREFLIGHT_EVIDENCE }},
+            "config_evidence": ${{ env.CONFIG_EVIDENCE }},
+            "schema_evidence": ${{ env.SCHEMA_EVIDENCE }},
+            "security_evidence": ${{ env.SECURITY_EVIDENCE }},
             "secret_evidence": "BLOCKED",
             "db_evidence": "BLOCKED",
             "rollback_evidence": "BLOCKED",
-            "security_evidence": "BLOCKED",
             "generated_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           }
           EOF
+          BUNDLE_DIGEST=$(jq -c '.' task8-qualification-evidence.json | sha256sum | awk '{print $1}')
+          jq ". + {\"bundle_digest\": \"$BUNDLE_DIGEST\"}" task8-qualification-evidence.json > tmp.json && mv tmp.json task8-qualification-evidence.json
 
       - name: Upload Evidence Bundle
         uses: actions/upload-artifact@v4

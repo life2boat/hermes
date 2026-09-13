@@ -140,3 +140,33 @@ def test_task8_qualify_missing_gates(base_request, base_manifest, base_gates):
     assert receipt.result == Status.FAIL
     assert receipt.report.technical_release_candidate_ready is False
     assert any("MISSING_MANDATORY_GATES" in b for b in receipt.report.technical_blockers)
+
+import dataclasses
+
+def test_task8_qualify_local_build_id(base_request, base_manifest, base_gates):
+    manifest = dataclasses.replace(base_manifest, build_workflow_id="local")
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z"
+    )
+    assert receipt.result == Status.FAIL
+    assert "LOCAL_BUILD_ID_NOT_ALLOWED" in receipt.report.technical_blockers
+
+def test_task8_qualify_invalid_image_revision(base_request, base_manifest, base_gates):
+    manifest = dataclasses.replace(base_manifest, oci_revision="invalid_sha")
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z"
+    )
+    assert receipt.result == Status.FAIL
+    assert "IMAGE_REVISION_MISMATCH" in receipt.report.technical_blockers

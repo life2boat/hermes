@@ -148,6 +148,7 @@ jobs:
           
           echo 'RUNTIME_PREFLIGHT_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat preflight_evidence.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
       - name: Check Config Contract
@@ -175,6 +176,7 @@ jobs:
           
           echo 'CONFIG_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat config_evidence.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
       - name: Check Schema Compatibility
@@ -185,6 +187,7 @@ jobs:
           EOF
           echo 'SCHEMA_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat schema_evidence.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
       - name: Fetch Exact Main CI Evidence
@@ -194,6 +197,7 @@ jobs:
           python3 scripts/collect_ci_evidence.py ${{ inputs.target_sha }}
           echo 'STRUCTURED_CI_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat structured_ci_evidence.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
       - name: Run Security Isolation Tests

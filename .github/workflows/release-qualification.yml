@@ -252,6 +252,7 @@ jobs:
           
           echo 'SECURITY_EVIDENCE<<EOF' >> $GITHUB_ENV
           cat security_evidence.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
       - name: Generate Evidence Bundle

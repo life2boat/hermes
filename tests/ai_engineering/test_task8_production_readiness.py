@@ -9,7 +9,7 @@ from ai_engineering.contracts import Status
 
 @pytest.fixture
 def base_manifest():
-    return ReleaseCandidateManifest(
+    return ReleaseCandidateManifest.create(
         schema_version=1,
         release_candidate_id="rc-12345",
         repository="life2boat/hermes",
@@ -18,7 +18,7 @@ def base_manifest():
         git_tree_sha="tree_sha_123",
         build_source_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
         container_image_repository="ghcr.io/life2boat/hermes",
-        container_image_digest="sha256:d3f3f0...real_digest",
+        container_image_digest="sha256:d3f3f00000000000000000000000000000000000000000000000000000000000",
         oci_revision="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
         build_workflow_id="wf_123",
         build_run_id="run_123",
@@ -27,12 +27,13 @@ def base_manifest():
         rollback_bundle_digest="rollback_sha",
         required_ci_snapshot_digest="ci_sha",
         qualification_timestamp_utc="2026-09-13T12:00:00Z",
-        manifest_digest="manifest_sha_123"
+        architecture="amd64",
+        entrypoint="[\"/bin/sh\"]"
     )
 
 @pytest.fixture
 def base_request():
-    return ReleaseQualificationRequest(
+    return ReleaseQualificationRequest.create(
         schema_version=1,
         qualification_id="qual-123",
         repository="life2boat/hermes",
@@ -43,7 +44,6 @@ def base_request():
         required_ci_workflows=("tests", "lint"),
         production_target_id="prod-1",
         requested_at_utc="2026-09-13T12:00:00Z",
-        request_digest="req_sha"
     )
 
 @pytest.fixture
@@ -77,6 +77,9 @@ def test_task8_qualify_pass(base_request, base_manifest, base_gates):
     assert receipt.report.technical_release_candidate_ready is True
     assert receipt.report.production_deployment_authorized is False
     assert receipt.report.credential_risk_blocked is False
+    assert receipt.receipt_digest != ""
+    assert receipt.readiness_report_digest != ""
+    assert receipt.manifest_digest == base_manifest.manifest_digest
 
 def test_task8_qualify_credential_risk_blocked(base_request, base_manifest, base_gates):
     qualifier = ReleaseQualifier()
@@ -122,17 +125,18 @@ def test_task8_qualify_dirty_build_context(base_request, base_manifest, base_gat
     assert receipt.report.technical_release_candidate_ready is False
     assert "GATE_FAILED: BUILD_CONTEXT" in receipt.report.technical_blockers
 
-def test_task8_qualify_schema_incompatible(base_request, base_manifest, base_gates):
-    base_gates[8] = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL)
+def test_task8_qualify_missing_gates(base_request, base_manifest, base_gates):
+    # Remove one gate
+    incomplete_gates = base_gates[:-1]
     qualifier = ReleaseQualifier()
     receipt = qualifier.qualify(
         request=base_request,
         manifest=base_manifest,
-        gates=base_gates,
+        gates=incomplete_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
         timestamp="2026-09-13T12:05:00Z"
     )
     assert receipt.result == Status.FAIL
     assert receipt.report.technical_release_candidate_ready is False
-    assert "GATE_FAILED: SCHEMA_COMPATIBILITY" in receipt.report.technical_blockers
+    assert any("MISSING_MANDATORY_GATES" in b for b in receipt.report.technical_blockers)

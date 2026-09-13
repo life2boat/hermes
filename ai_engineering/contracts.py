@@ -91,6 +91,7 @@ class StopBoundary(StrEnum):
     BUILD = "BUILD"
     DEPLOY = "DEPLOY"
     LIVE_SMOKE = "LIVE_SMOKE"
+    READY_FOR_AUTHORIZED_DEPLOYMENT = "READY_FOR_AUTHORIZED_DEPLOYMENT"
 
 
 class EffectClass(StrEnum):
@@ -110,6 +111,7 @@ class EffectClass(StrEnum):
     SECRET_MUTATION = "SECRET_MUTATION"
     EXTERNAL_SEND = "EXTERNAL_SEND"
     OTHER_MUTATION = "OTHER_MUTATION"
+    RELEASE_QUALIFICATION = "RELEASE_QUALIFICATION"
 
 
 class TraceValidationError(ValueError):

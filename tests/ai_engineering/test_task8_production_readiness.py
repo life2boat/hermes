@@ -7,6 +7,7 @@ from ai_engineering.supervisor.production_readiness import (
 )
 from ai_engineering.contracts import Status
 
+
 @pytest.fixture
 def base_manifest():
     return ReleaseCandidateManifest.create(
@@ -28,8 +29,9 @@ def base_manifest():
         required_ci_snapshot_digest="ci_sha",
         qualification_timestamp_utc="2026-09-13T12:00:00Z",
         architecture="amd64",
-        entrypoint="[\"/bin/sh\"]"
+        entrypoint='["/bin/sh"]',
     )
+
 
 @pytest.fixture
 def base_request():
@@ -45,6 +47,7 @@ def base_request():
         production_target_id="prod-1",
         requested_at_utc="2026-09-13T12:00:00Z",
     )
+
 
 @pytest.fixture
 def base_gates():
@@ -63,6 +66,7 @@ def base_gates():
         GateResult("SECURITY_ISOLATION", Status.PASS),
     ]
 
+
 def test_task8_qualify_pass(base_request, base_manifest, base_gates):
     qualifier = ReleaseQualifier()
     receipt = qualifier.qualify(
@@ -71,7 +75,7 @@ def test_task8_qualify_pass(base_request, base_manifest, base_gates):
         gates=base_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.PASS
     assert receipt.report.technical_release_candidate_ready is True
@@ -81,6 +85,7 @@ def test_task8_qualify_pass(base_request, base_manifest, base_gates):
     assert receipt.readiness_report_digest != ""
     assert receipt.manifest_digest == base_manifest.manifest_digest
 
+
 def test_task8_qualify_credential_risk_blocked(base_request, base_manifest, base_gates):
     qualifier = ReleaseQualifier()
     receipt = qualifier.qualify(
@@ -89,12 +94,13 @@ def test_task8_qualify_credential_risk_blocked(base_request, base_manifest, base
         gates=base_gates,
         has_credential_risk=True,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.BLOCKED
     assert receipt.report.technical_release_candidate_ready is True
     assert receipt.report.production_deployment_authorized is False
     assert receipt.report.credential_risk_blocked is True
+
 
 def test_task8_qualify_main_advanced(base_request, base_manifest, base_gates):
     qualifier = ReleaseQualifier()
@@ -104,11 +110,15 @@ def test_task8_qualify_main_advanced(base_request, base_manifest, base_gates):
         gates=base_gates,
         has_credential_risk=False,
         current_main_sha="new_sha",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.FAIL
     assert receipt.report.technical_release_candidate_ready is False
-    assert "MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION" in receipt.report.technical_blockers
+    assert (
+        "MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION"
+        in receipt.report.technical_blockers
+    )
+
 
 def test_task8_qualify_dirty_build_context(base_request, base_manifest, base_gates):
     base_gates[2] = GateResult("BUILD_CONTEXT", Status.FAIL)
@@ -119,11 +129,46 @@ def test_task8_qualify_dirty_build_context(base_request, base_manifest, base_gat
         gates=base_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.FAIL
     assert receipt.report.technical_release_candidate_ready is False
     assert "GATE_FAILED: BUILD_CONTEXT" in receipt.report.technical_blockers
+
+
+def test_task8_qualify_one_blocked_gate_no_fail(
+    base_request, base_manifest, base_gates
+):
+    base_gates[6] = GateResult("SECRET_CONTRACT", Status.BLOCKED)
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=base_manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z",
+    )
+    assert receipt.result == Status.BLOCKED
+    assert "GATE_BLOCKED: SECRET_CONTRACT" in receipt.report.technical_blockers
+    assert receipt.report.technical_release_candidate_ready is False
+
+
+def test_task8_qualify_fail_plus_blocked(base_request, base_manifest, base_gates):
+    base_gates[6] = GateResult("SECRET_CONTRACT", Status.BLOCKED)
+    base_gates[2] = GateResult("BUILD_CONTEXT", Status.FAIL)
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=base_request,
+        manifest=base_manifest,
+        gates=base_gates,
+        has_credential_risk=False,
+        current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
+        timestamp="2026-09-13T12:05:00Z",
+    )
+    assert receipt.result == Status.FAIL
+    assert receipt.report.technical_release_candidate_ready is False
+
 
 def test_task8_qualify_missing_gates(base_request, base_manifest, base_gates):
     # Remove one gate
@@ -135,13 +180,17 @@ def test_task8_qualify_missing_gates(base_request, base_manifest, base_gates):
         gates=incomplete_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.FAIL
     assert receipt.report.technical_release_candidate_ready is False
-    assert any("MISSING_MANDATORY_GATES" in b for b in receipt.report.technical_blockers)
+    assert any(
+        "MISSING_MANDATORY_GATES" in b for b in receipt.report.technical_blockers
+    )
+
 
 import dataclasses
+
 
 def test_task8_qualify_local_build_id(base_request, base_manifest, base_gates):
     manifest = dataclasses.replace(base_manifest, build_workflow_id="local")
@@ -152,10 +201,11 @@ def test_task8_qualify_local_build_id(base_request, base_manifest, base_gates):
         gates=base_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.FAIL
     assert "LOCAL_BUILD_ID_NOT_ALLOWED" in receipt.report.technical_blockers
+
 
 def test_task8_qualify_invalid_image_revision(base_request, base_manifest, base_gates):
     manifest = dataclasses.replace(base_manifest, oci_revision="invalid_sha")
@@ -166,7 +216,7 @@ def test_task8_qualify_invalid_image_revision(base_request, base_manifest, base_
         gates=base_gates,
         has_credential_risk=False,
         current_main_sha="f0e1ca8cb7b35fccc31cd066a37942aead2f652c",
-        timestamp="2026-09-13T12:05:00Z"
+        timestamp="2026-09-13T12:05:00Z",
     )
     assert receipt.result == Status.FAIL
     assert "IMAGE_REVISION_MISMATCH" in receipt.report.technical_blockers

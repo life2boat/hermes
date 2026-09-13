@@ -9,11 +9,13 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any
 from ai_engineering.contracts import Status
 
+
 def _compute_digest(data: Dict[str, Any], omit_key: str) -> str:
     cleaned = {k: v for k, v in data.items() if k != omit_key}
     # Sort keys for deterministic output
-    serialized = json.dumps(cleaned, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+    serialized = json.dumps(cleaned, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class GateResult:
@@ -21,6 +23,7 @@ class GateResult:
     status: Status
     reason: Optional[str] = None
     evidence: Optional[Dict[str, str]] = None
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseCandidateManifest:
@@ -47,10 +50,11 @@ class ReleaseCandidateManifest:
 
     @classmethod
     def create(cls, **kwargs) -> "ReleaseCandidateManifest":
-        if 'manifest_digest' in kwargs:
-            del kwargs['manifest_digest']
+        if "manifest_digest" in kwargs:
+            del kwargs["manifest_digest"]
         digest = _compute_digest(kwargs, "")
         return cls(manifest_digest=digest, **kwargs)
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseQualificationRequest:
@@ -68,10 +72,11 @@ class ReleaseQualificationRequest:
 
     @classmethod
     def create(cls, **kwargs) -> "ReleaseQualificationRequest":
-        if 'request_digest' in kwargs:
-            del kwargs['request_digest']
+        if "request_digest" in kwargs:
+            del kwargs["request_digest"]
         digest = _compute_digest(kwargs, "")
         return cls(request_digest=digest, **kwargs)
+
 
 @dataclass(frozen=True, slots=True)
 class ProductionReadinessReport:
@@ -93,19 +98,25 @@ class ProductionReadinessReport:
 
     @classmethod
     def create(cls, **kwargs) -> "ProductionReadinessReport":
-        if 'report_digest' in kwargs:
-            del kwargs['report_digest']
-        
+        if "report_digest" in kwargs:
+            del kwargs["report_digest"]
+
         # Serialize nested enum carefully
         data_to_hash = dict(kwargs)
-        if 'gate_results' in data_to_hash:
-            data_to_hash['gate_results'] = [
-                {"gate_name": g.gate_name, "status": g.status.value, "reason": g.reason, "evidence": g.evidence} 
-                for g in data_to_hash['gate_results']
+        if "gate_results" in data_to_hash:
+            data_to_hash["gate_results"] = [
+                {
+                    "gate_name": g.gate_name,
+                    "status": g.status.value,
+                    "reason": g.reason,
+                    "evidence": g.evidence,
+                }
+                for g in data_to_hash["gate_results"]
             ]
-            
+
         digest = _compute_digest(data_to_hash, "")
         return cls(report_digest=digest, **kwargs)
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseCandidateReceipt:
@@ -123,23 +134,25 @@ class ReleaseCandidateReceipt:
 
     @classmethod
     def create(cls, **kwargs) -> "ReleaseCandidateReceipt":
-        if 'receipt_digest' in kwargs:
-            del kwargs['receipt_digest']
-        
+        if "receipt_digest" in kwargs:
+            del kwargs["receipt_digest"]
+
         data_to_hash = dict(kwargs)
-        if 'result' in data_to_hash:
-            data_to_hash['result'] = data_to_hash['result'].value
-        if 'report' in data_to_hash:
+        if "result" in data_to_hash:
+            data_to_hash["result"] = data_to_hash["result"].value
+        if "report" in data_to_hash:
             # report is omitted from hash to prevent double hashing, we rely on readiness_report_digest
-            del data_to_hash['report']
-            
+            del data_to_hash["report"]
+
         digest = _compute_digest(data_to_hash, "")
         return cls(receipt_digest=digest, **kwargs)
+
 
 class ReleaseQualifier:
     """
     Validates a release candidate for production readiness without deploying.
     """
+
     REQUIRED_GATES = {
         "SOURCE_ATTESTATION",
         "EXACT_MAIN_CI",
@@ -152,7 +165,7 @@ class ReleaseQualifier:
         "SCHEMA_COMPATIBILITY",
         "ROLLBACK_QUALIFIED",
         "RUNTIME_PREFLIGHT",
-        "SECURITY_ISOLATION"
+        "SECURITY_ISOLATION",
     }
 
     def qualify(
@@ -162,55 +175,75 @@ class ReleaseQualifier:
         gates: List[GateResult],
         has_credential_risk: bool,
         current_main_sha: str,
-        timestamp: str
+        timestamp: str,
     ) -> ReleaseCandidateReceipt:
-        
+
         blockers = []
         main_advanced = False
-        
+
         if current_main_sha != request.canonical_main_sha:
             main_advanced = True
             blockers.append("MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION")
 
         if manifest.build_source_sha != request.canonical_main_sha:
             blockers.append("BUILD_SOURCE_SHA_MISMATCH")
-            
+
         if manifest.oci_revision != request.canonical_main_sha:
             blockers.append("IMAGE_REVISION_MISMATCH")
 
         if manifest.canonical_main_sha != request.canonical_main_sha:
             blockers.append("MANIFEST_SHA_MISMATCH")
-            
+
         if manifest.build_workflow_id == "local" or manifest.build_run_id == "local":
             blockers.append("LOCAL_BUILD_ID_NOT_ALLOWED")
-            
+
         # Check mandatory gate completeness
         provided_gates = {g.gate_name for g in gates}
         missing_gates = self.REQUIRED_GATES - provided_gates
         if missing_gates:
             blockers.append(f"MISSING_MANDATORY_GATES: {sorted(list(missing_gates))}")
-        
+
         # Check for duplicated gates
         if len(provided_gates) != len(gates):
             blockers.append("DUPLICATED_MANDATORY_GATES")
-            
+
         for g in gates:
-            if g.status in (Status.FAIL, Status.BLOCKED):
+            if g.status == Status.FAIL:
                 blockers.append(f"GATE_FAILED: {g.gate_name}")
+            elif g.status == Status.BLOCKED:
+                blockers.append(f"GATE_BLOCKED: {g.gate_name}")
 
         technical_ready = len(blockers) == 0
-        
+
         # NEVER authorized automatically by Task 8
         production_authorized = False
-        
+
         credential_blocked = has_credential_risk
-        
-        report_status = Status.PASS if technical_ready else Status.FAIL
-        if technical_ready and credential_blocked:
+
+        has_fail = any(g.status == Status.FAIL for g in gates)
+        has_blocked = any(g.status == Status.BLOCKED for g in gates)
+
+        if (
+            len(missing_gates) > 0
+            or len(provided_gates) != len(gates)
+            or main_advanced
+            or manifest.build_source_sha != request.canonical_main_sha
+            or manifest.oci_revision != request.canonical_main_sha
+            or manifest.canonical_main_sha != request.canonical_main_sha
+            or manifest.build_workflow_id == "local"
+            or manifest.build_run_id == "local"
+        ):
+            has_fail = True
+
+        if has_fail:
+            report_status = Status.FAIL
+        elif has_blocked or credential_blocked:
             report_status = Status.BLOCKED
-            
+        else:
+            report_status = Status.PASS
+
         report_id = f"report-{manifest.release_candidate_id}"
-        
+
         report = ProductionReadinessReport.create(
             schema_version=1,
             report_id=report_id,
@@ -220,14 +253,22 @@ class ReleaseQualifier:
             gate_results=tuple(gates),
             technical_blockers=tuple(blockers),
             governance_observations=(),
-            migration_required=any(g.gate_name == "SCHEMA_COMPATIBILITY" and g.evidence and g.evidence.get("migration_required") == "true" for g in gates),
-            rollback_verified=any(g.gate_name == "ROLLBACK_QUALIFIED" and g.status == Status.PASS for g in gates),
+            migration_required=any(
+                g.gate_name == "SCHEMA_COMPATIBILITY"
+                and g.evidence
+                and g.evidence.get("migration_required") == "true"
+                for g in gates
+            ),
+            rollback_verified=any(
+                g.gate_name == "ROLLBACK_QUALIFIED" and g.status == Status.PASS
+                for g in gates
+            ),
             credential_risk_blocked=credential_blocked,
             technical_release_candidate_ready=technical_ready,
             production_deployment_authorized=production_authorized,
             generated_at_utc=timestamp,
         )
-        
+
         return ReleaseCandidateReceipt.create(
             schema_version=1,
             receipt_id=f"receipt-{request.qualification_id}",

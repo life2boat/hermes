@@ -71,6 +71,9 @@ jobs:
           context: .
           push: true
           build-contexts: playwright_artifacts=${{ runner.temp }}/playwright-artifacts
+          build-args: |
+            HERMES_GIT_SHA=${{ inputs.target_sha }}
+            PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256=a685b3d071968d5140ce42f8346246b0857167c90eefdde71b6ff011eb97340f
           tags: ${{ env.RC_IMAGE }}:${{ inputs.target_sha }}
           labels: |
             org.opencontainers.image.revision=${{ inputs.target_sha }}

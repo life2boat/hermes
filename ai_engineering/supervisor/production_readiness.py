@@ -4,9 +4,16 @@ Task 8 layer.
 """
 
 import hashlib
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+import json
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Any
 from ai_engineering.contracts import Status
+
+def _compute_digest(data: Dict[str, Any], omit_key: str) -> str:
+    cleaned = {k: v for k, v in data.items() if k != omit_key}
+    # Sort keys for deterministic output
+    serialized = json.dumps(cleaned, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
 @dataclass(frozen=True, slots=True)
 class GateResult:
@@ -34,7 +41,16 @@ class ReleaseCandidateManifest:
     rollback_bundle_digest: str
     required_ci_snapshot_digest: str
     qualification_timestamp_utc: str
+    architecture: str
+    entrypoint: str
     manifest_digest: str
+
+    @classmethod
+    def create(cls, **kwargs) -> "ReleaseCandidateManifest":
+        if 'manifest_digest' in kwargs:
+            del kwargs['manifest_digest']
+        digest = _compute_digest(kwargs, "")
+        return cls(manifest_digest=digest, **kwargs)
 
 @dataclass(frozen=True, slots=True)
 class ReleaseQualificationRequest:
@@ -49,6 +65,13 @@ class ReleaseQualificationRequest:
     production_target_id: str
     requested_at_utc: str
     request_digest: str
+
+    @classmethod
+    def create(cls, **kwargs) -> "ReleaseQualificationRequest":
+        if 'request_digest' in kwargs:
+            del kwargs['request_digest']
+        digest = _compute_digest(kwargs, "")
+        return cls(request_digest=digest, **kwargs)
 
 @dataclass(frozen=True, slots=True)
 class ProductionReadinessReport:
@@ -68,20 +91,70 @@ class ProductionReadinessReport:
     generated_at_utc: str
     report_digest: str
 
+    @classmethod
+    def create(cls, **kwargs) -> "ProductionReadinessReport":
+        if 'report_digest' in kwargs:
+            del kwargs['report_digest']
+        
+        # Serialize nested enum carefully
+        data_to_hash = dict(kwargs)
+        if 'gate_results' in data_to_hash:
+            data_to_hash['gate_results'] = [
+                {"gate_name": g.gate_name, "status": g.status.value, "reason": g.reason, "evidence": g.evidence} 
+                for g in data_to_hash['gate_results']
+            ]
+            
+        digest = _compute_digest(data_to_hash, "")
+        return cls(report_digest=digest, **kwargs)
+
 @dataclass(frozen=True, slots=True)
 class ReleaseCandidateReceipt:
+    schema_version: int
+    receipt_id: str
     qualification_id: str
     canonical_main_sha: str
     image_digest: str
     manifest_digest: str
+    readiness_report_digest: str
     report: ProductionReadinessReport
     result: Status
     created_at_utc: str
+    receipt_digest: str
+
+    @classmethod
+    def create(cls, **kwargs) -> "ReleaseCandidateReceipt":
+        if 'receipt_digest' in kwargs:
+            del kwargs['receipt_digest']
+        
+        data_to_hash = dict(kwargs)
+        if 'result' in data_to_hash:
+            data_to_hash['result'] = data_to_hash['result'].value
+        if 'report' in data_to_hash:
+            # report is omitted from hash to prevent double hashing, we rely on readiness_report_digest
+            del data_to_hash['report']
+            
+        digest = _compute_digest(data_to_hash, "")
+        return cls(receipt_digest=digest, **kwargs)
 
 class ReleaseQualifier:
     """
     Validates a release candidate for production readiness without deploying.
     """
+    REQUIRED_GATES = {
+        "SOURCE_ATTESTATION",
+        "EXACT_MAIN_CI",
+        "BUILD_CONTEXT",
+        "EXACT_MAIN_BUILD",
+        "IMAGE_ATTESTATION",
+        "CONFIG_CONTRACT",
+        "SECRET_CONTRACT",
+        "DB_PATH_SAFETY",
+        "SCHEMA_COMPATIBILITY",
+        "ROLLBACK_QUALIFIED",
+        "RUNTIME_PREFLIGHT",
+        "SECURITY_ISOLATION"
+    }
+
     def qualify(
         self,
         request: ReleaseQualificationRequest,
@@ -108,6 +181,16 @@ class ReleaseQualifier:
         if manifest.canonical_main_sha != request.canonical_main_sha:
             blockers.append("MANIFEST_SHA_MISMATCH")
             
+        # Check mandatory gate completeness
+        provided_gates = {g.gate_name for g in gates}
+        missing_gates = self.REQUIRED_GATES - provided_gates
+        if missing_gates:
+            blockers.append(f"MISSING_MANDATORY_GATES: {sorted(list(missing_gates))}")
+        
+        # Check for duplicated gates
+        if len(provided_gates) != len(gates):
+            blockers.append("DUPLICATED_MANDATORY_GATES")
+            
         for g in gates:
             if g.status in (Status.FAIL, Status.BLOCKED):
                 blockers.append(f"GATE_FAILED: {g.gate_name}")
@@ -125,7 +208,7 @@ class ReleaseQualifier:
             
         report_id = f"report-{manifest.release_candidate_id}"
         
-        report = ProductionReadinessReport(
+        report = ProductionReadinessReport.create(
             schema_version=1,
             report_id=report_id,
             release_candidate_id=manifest.release_candidate_id,
@@ -140,15 +223,17 @@ class ReleaseQualifier:
             technical_release_candidate_ready=technical_ready,
             production_deployment_authorized=production_authorized,
             generated_at_utc=timestamp,
-            report_digest=hashlib.sha256(report_id.encode()).hexdigest()
         )
         
-        return ReleaseCandidateReceipt(
+        return ReleaseCandidateReceipt.create(
+            schema_version=1,
+            receipt_id=f"receipt-{request.qualification_id}",
             qualification_id=request.qualification_id,
             canonical_main_sha=request.canonical_main_sha,
             image_digest=manifest.container_image_digest,
             manifest_digest=manifest.manifest_digest,
+            readiness_report_digest=report.report_digest,
             report=report,
             result=report_status,
-            created_at_utc=timestamp
+            created_at_utc=timestamp,
         )

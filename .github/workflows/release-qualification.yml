@@ -116,7 +116,7 @@ jobs:
           # Run container in background with temporary network
           docker network create isolated_network
           
-          CONTAINER_ID=$(docker run -d --network isolated_network -e RUNTIME_ENV=qualification $IMAGE)
+          CONTAINER_ID=$(docker run -d --network isolated_network -e RUNTIME_ENV=qualification $IMAGE hermes gateway run)
           
           echo "Waiting 5 seconds for observation window..."
           sleep 5

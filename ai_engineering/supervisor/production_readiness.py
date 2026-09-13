@@ -181,6 +181,9 @@ class ReleaseQualifier:
         if manifest.canonical_main_sha != request.canonical_main_sha:
             blockers.append("MANIFEST_SHA_MISMATCH")
             
+        if manifest.build_workflow_id == "local" or manifest.build_run_id == "local":
+            blockers.append("LOCAL_BUILD_ID_NOT_ALLOWED")
+            
         # Check mandatory gate completeness
         provided_gates = {g.gate_name for g in gates}
         missing_gates = self.REQUIRED_GATES - provided_gates

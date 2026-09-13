@@ -280,64 +280,72 @@ class AutonomousRunCoordinator:
             ev_type = getattr(ev.event_type, "value", str(ev.event_type))
             if ev_type == "CANDIDATE_HEAD_IDENTITY_REGISTERED":
                 if ev.payload:
+                    from ai_engineering.supervisor.pr_provider import compute_candidate_head_identity_digest
+                    payload = ev.payload
                     try:
-                        from ai_engineering.supervisor.pr_provider import compute_candidate_head_identity_digest
-                        payload = ev.payload
-                        # Deserialize all fields
+                        schema = payload.get("schema_version")
+                        if schema != CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION:
+                            raise ValueError("Wrong schema")
+
+                        required_fields = ["candidate_id", "run_id", "task_id", "repository",
+                                           "remote_name", "head_ref", "head_sha", "base_ref",
+                                           "base_sha", "source_base_sha", "published_at_utc"]
+                        if any(not payload.get(f) for f in required_fields):
+                            raise ValueError("Missing required fields")
+
+                        stored_digest = payload.get("digest")
+                        if not stored_digest:
+                            raise ValueError("Missing digest")
+
                         cid = CandidateHeadIdentity(
-                            schema_version=payload.get("schema_version", CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION),
-                            candidate_id=payload.get("candidate_id", ""),
-                            run_id=payload.get("run_id", ""),
-                            task_id=payload.get("task_id", ""),
-                            repository=payload.get("repository", ""),
-                            remote_name=payload.get("remote_name", ""),
-                            head_ref=payload.get("head_ref", ""),
-                            head_sha=payload.get("head_sha", ""),
-                            base_ref=payload.get("base_ref", ""),
-                            base_sha=payload.get("base_sha", ""),
-                            source_base_sha=payload.get("source_base_sha", ""),
-                            published_at_utc=payload.get("published_at_utc", ""),
-                            digest=payload.get("digest", ""),
+                            schema_version=schema,
+                            candidate_id=payload["candidate_id"],
+                            run_id=payload["run_id"],
+                            task_id=payload["task_id"],
+                            repository=payload["repository"],
+                            remote_name=payload["remote_name"],
+                            head_ref=payload["head_ref"],
+                            head_sha=payload["head_sha"],
+                            base_ref=payload["base_ref"],
+                            base_sha=payload["base_sha"],
+                            source_base_sha=payload["source_base_sha"],
+                            published_at_utc=payload["published_at_utc"],
+                            digest=stored_digest,
                         )
-                        # Recompute digest and verify exact match
                         import dataclasses
                         cid_fields = dataclasses.asdict(cid)
                         recomputed = compute_candidate_head_identity_digest(cid_fields)
-                        stored_digest = payload.get("digest", "")
-                        if stored_digest and recomputed != stored_digest:
-                            # Digest mismatch — emit CANDIDATE_HEAD_IDENTITY_INVALID and BLOCK
-                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
-                            state_for_block = self.store.load_state(self.run_id)
-                            st_rev = state_for_block.state_revision if state_for_block else 1
-                            t_id = state_for_block.current_task_id if state_for_block else "unknown"
-                            a_id = state_for_block.current_attempt_id if state_for_block else "unknown"
-                            i_dg = state_for_block.current_intent_digest if state_for_block else "0" * 64
-                            all_evs = self.store.load_events(self.run_id)
-                            invalid_ev = create_event(
-                                run_id=self.run_id,
-                                sequence=len(all_evs) + 1,
-                                previous_event_digest=all_evs[-1].event_digest if all_evs else None,
-                                event_type=SupervisorEventType.CANDIDATE_HEAD_IDENTITY_INVALID,
-                                state_revision=st_rev,
-                                task_id=t_id,
-                                attempt_id=a_id,
-                                intent_digest=i_dg,
-                                payload={
-                                    "error_code": "CANDIDATE_HEAD_IDENTITY_INVALID",
-                                    "stored_digest": stored_digest,
-                                    "recomputed_digest": recomputed,
-                                    "message": "CandidateHeadIdentity digest mismatch on restart — identity rejected",
-                                },
-                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                            )
-                            self.store.save_event(invalid_ev)
-                            self.candidate_head_identity = None
-                            self._candidate_head_identity_blocked = True
-                        else:
-                            # Only update if not already set (last-write-wins within replay)
-                            self.candidate_head_identity = cid
-                    except Exception:
-                        pass
+                        if recomputed != stored_digest:
+                            raise ValueError("CandidateHeadIdentity digest mismatch on restart — identity rejected")
+
+                        self.candidate_head_identity = cid
+                    except Exception as e:
+                        # Emit CANDIDATE_HEAD_IDENTITY_INVALID and BLOCK
+                        from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                        state_for_block = self.store.load_state(self.run_id)
+                        st_rev = state_for_block.state_revision if state_for_block else 1
+                        t_id = state_for_block.current_task_id if state_for_block else "unknown"
+                        a_id = state_for_block.current_attempt_id if state_for_block else "unknown"
+                        i_dg = state_for_block.current_intent_digest if state_for_block else "0" * 64
+                        all_evs = self.store.load_events(self.run_id)
+                        invalid_ev = create_event(
+                            run_id=self.run_id,
+                            sequence=len(all_evs) + 1,
+                            previous_event_digest=all_evs[-1].event_digest if all_evs else None,
+                            event_type=SupervisorEventType.CANDIDATE_HEAD_IDENTITY_INVALID,
+                            state_revision=st_rev,
+                            task_id=t_id,
+                            attempt_id=a_id,
+                            intent_digest=i_dg,
+                            payload={
+                                "error_code": "CANDIDATE_HEAD_IDENTITY_INVALID",
+                                "message": str(e),
+                            },
+                            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        )
+                        self.store.save_event(invalid_ev)
+                        self.candidate_head_identity = None
+                        self._candidate_head_identity_blocked = True
             elif ev_type == "ASTRA_PROPOSAL_CREATED":
                 self.provider_calls += 1
                 proposals_count += 1
@@ -702,7 +710,10 @@ class AutonomousRunCoordinator:
         self.store.save_event(ev)
 
         while True:
-            if self.iterations >= self.budget.max_supervisor_decisions:
+            if getattr(self, "_candidate_head_identity_blocked", False):
+                terminal_reason = "CANDIDATE_HEAD_IDENTITY_INVALID"
+                break
+            if getattr(self, "iterations", 0) >= self.budget.max_supervisor_decisions:
                 terminal_reason = "BUDGET_EXHAUSTED"
                 break
             if self.child_tasks >= self.budget.max_child_tasks:

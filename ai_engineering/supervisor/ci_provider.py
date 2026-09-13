@@ -17,9 +17,15 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-from ai_engineering.supervisor.autonomous_run import CIStatusProvider
+from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+
+
+class CIStatusProvider(Protocol):
+    """Protocol for CI status providers. Defined locally to avoid circular import with autonomous_run."""
+
+    async def wait_for_ci(self, run_id: str, sha: str, **kwargs: Any) -> Any:
+        ...
 
 
 class CIProviderError(Exception):

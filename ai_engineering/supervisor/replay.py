@@ -603,6 +603,8 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
         SupervisorEventType.MAIN_IDENTITY_UNAVAILABLE,
         SupervisorEventType.CANDIDATE_HEAD_IDENTITY_MISSING,
         SupervisorEventType.CANDIDATE_HEAD_IDENTITY_REGISTERED,
+        SupervisorEventType.CANDIDATE_HEAD_IDENTITY_INVALID,
+        SupervisorEventType.REAL_PR_PROVIDER_REQUIRED,
     ):
         return replace(
             state,

@@ -1,11 +1,16 @@
 import argparse
 import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import json
 import logging
 import asyncio
 import datetime
 import uuid
-from pathlib import Path
 
 from dataclasses import asdict
 from ai_engineering.supervisor.autonomous_run import (
@@ -51,7 +56,7 @@ class LocalCIProvider(CIStatusProvider):
     async def wait_for_ci(self, run_id: str, sha: str) -> bool:
         return True
 
-async def async_main():
+async def async_main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Hermes Autonomous Run CLI (Task 7.7)")
     parser.add_argument("--intent", required=True, help="Path to TaskIntent JSON file")
     parser.add_argument("--state-dir", required=True, help="Path to persistent state directory")
@@ -67,7 +72,9 @@ async def async_main():
     parser.add_argument("--pr-mode", choices=["fake", "github"], default="fake", help="PR provider mode")
     parser.add_argument("--allow-pr-create", action="store_true", help="Authorize PR creation")
     parser.add_argument("--allow-pr-merge", action="store_true", help="Authorize PR merge")
-    args = parser.parse_args()
+    parser.add_argument("--candidate-head-ref", default=None, metavar="BRANCH",
+                        help="Candidate branch ref (required in real provider mode for CREATE_PR)")
+    args = parser.parse_args(argv)
 
     intent_text = Path(args.intent).read_text(encoding="utf-8")
     intent = deserialize_intent(intent_text)
@@ -102,7 +109,11 @@ async def async_main():
         "escalation_model": None,
         "allowed_task_classes": [intent.task_class.value if hasattr(intent.task_class, "value") else str(intent.task_class)],
         "maximum_autonomy_level": AutonomyLevel.LEVEL_6_AUTHORIZED_PRODUCTION.value,
-        "allowed_effect_classes": [EffectClass.READ_ONLY.value, EffectClass.REPOSITORY_WRITE.value],
+        "allowed_effect_classes": (
+            [EffectClass.READ_ONLY.value, EffectClass.REPOSITORY_WRITE.value]
+            + ([EffectClass.PR_MUTATION.value] if args.allow_pr_create else [])
+            + ([EffectClass.PR_MERGE.value] if args.allow_pr_merge else [])
+        ),
         "forbidden_effect_classes": [],
         "allowed_targets": [ExecutionTarget.DEV.value],
         "required_validators": [],
@@ -195,6 +206,12 @@ async def async_main():
         if args.ci_mode != "github":
             sys.stderr.write("Error: CI_PROVIDER_UNAVAILABLE: --ci-mode github is required in real provider mode\n")
             return 1
+        if args.pr_mode != "github":
+            sys.stderr.write(
+                "Error: REAL_PR_PROVIDER_REQUIRED: --pr-mode github is required in real provider mode. "
+                "FakeGitHubPullRequestBackend is forbidden with --provider-mode real.\n"
+            )
+            return 2
 
     if args.astra_cmd:
         astra_provider: AstraProposalProvider = ConfiguredAstraProposalProvider(args.astra_cmd)
@@ -224,6 +241,45 @@ async def async_main():
         from ai_engineering.supervisor.pr_provider import FakeGitHubPullRequestBackend
         pr_provider = FakeGitHubPullRequestBackend()
 
+    # Build a CandidateHeadIdentity stub from the CLI flag in test/fake mode.
+    # In real mode the coordinator discards injected identity; it must be registered
+    # via remote verification in CREATE_PR. Still pass it so the test path works.
+    from ai_engineering.supervisor.pr_provider import CandidateHeadIdentity, compute_candidate_head_identity_digest
+    import dataclasses as _dc
+    candidate_head_identity = None
+    if args.candidate_head_ref:
+        cid_fields = {
+            "schema_version": "hermes.candidate-head-identity.v1",
+            "candidate_id": "",
+            "run_id": args.run_id,
+            "task_id": intent.task_id,
+            "repository": args.github_repository,
+            "remote_name": "github",
+            "head_ref": args.candidate_head_ref,
+            "head_sha": "",
+            "base_ref": "main",
+            "base_sha": "",
+            "source_base_sha": intent.source_base_sha,
+            "published_at_utc": "",
+            "digest": "",
+        }
+        cid_digest = compute_candidate_head_identity_digest(cid_fields)
+        candidate_head_identity = CandidateHeadIdentity(
+            schema_version=cid_fields["schema_version"],
+            candidate_id=cid_fields["candidate_id"],
+            run_id=cid_fields["run_id"],
+            task_id=cid_fields["task_id"],
+            repository=cid_fields["repository"],
+            remote_name=cid_fields["remote_name"],
+            head_ref=cid_fields["head_ref"],
+            head_sha=cid_fields["head_sha"],
+            base_ref=cid_fields["base_ref"],
+            base_sha=cid_fields["base_sha"],
+            source_base_sha=cid_fields["source_base_sha"],
+            published_at_utc=cid_fields["published_at_utc"],
+            digest=cid_digest,
+        )
+
     coord = AutonomousRunCoordinator(
         loop=loop,
         store=store,
@@ -238,6 +294,8 @@ async def async_main():
         pr_provider=pr_provider,
         allow_pr_create=args.allow_pr_create,
         allow_pr_merge=args.allow_pr_merge,
+        candidate_head_identity=candidate_head_identity,
+        candidate_head_ref=args.candidate_head_ref,
     )
 
     receipt = await coord.run_until_terminal()

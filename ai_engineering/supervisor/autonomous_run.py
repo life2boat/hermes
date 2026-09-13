@@ -213,7 +213,7 @@ class CIStatusProvider:
     async def wait_for_ci(self, run_id: str, sha: str, **kwargs: Any) -> Any:
         raise NotImplementedError
 
-from ai_engineering.supervisor.ci_provider import CIStatusSnapshot, WorkflowObservation
+
 
 class AutonomousRunCoordinator:
     def __init__(
@@ -232,6 +232,7 @@ class AutonomousRunCoordinator:
         allow_pr_create: bool = False,
         allow_pr_merge: bool = False,
         candidate_head_identity: CandidateHeadIdentity | None = None,
+        candidate_head_ref: str | None = None,
     ) -> None:
         self.loop = loop
         self.store = store
@@ -246,7 +247,9 @@ class AutonomousRunCoordinator:
         self.pr_provider = pr_provider
         self.allow_pr_create = allow_pr_create
         self.allow_pr_merge = allow_pr_merge
-        self.candidate_head_identity = candidate_head_identity
+        self.candidate_head_identity: CandidateHeadIdentity | None = None
+        self.candidate_head_ref = candidate_head_ref or (candidate_head_identity.head_ref if candidate_head_identity else None)
+        self._injected_candidate_head_identity = candidate_head_identity
 
         events = self.store.load_events(self.run_id)
         from ai_engineering.supervisor.events import SupervisorEventType
@@ -276,17 +279,63 @@ class AutonomousRunCoordinator:
         for ev in events:
             ev_type = getattr(ev.event_type, "value", str(ev.event_type))
             if ev_type == "CANDIDATE_HEAD_IDENTITY_REGISTERED":
-                if ev.payload and self.candidate_head_identity is None:
+                if ev.payload:
                     try:
-                        self.candidate_head_identity = CandidateHeadIdentity(
-                            schema_version=ev.payload.get("schema_version", CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION),
-                            repository=ev.payload.get("repository", ""),
-                            remote_name=ev.payload.get("remote_name", ""),
-                            head_ref=ev.payload.get("head_ref", ""),
-                            head_sha=ev.payload.get("head_sha", ""),
-                            base_ref=ev.payload.get("base_ref", ""),
-                            base_sha=ev.payload.get("base_sha", ""),
+                        from ai_engineering.supervisor.pr_provider import compute_candidate_head_identity_digest
+                        payload = ev.payload
+                        # Deserialize all fields
+                        cid = CandidateHeadIdentity(
+                            schema_version=payload.get("schema_version", CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION),
+                            candidate_id=payload.get("candidate_id", ""),
+                            run_id=payload.get("run_id", ""),
+                            task_id=payload.get("task_id", ""),
+                            repository=payload.get("repository", ""),
+                            remote_name=payload.get("remote_name", ""),
+                            head_ref=payload.get("head_ref", ""),
+                            head_sha=payload.get("head_sha", ""),
+                            base_ref=payload.get("base_ref", ""),
+                            base_sha=payload.get("base_sha", ""),
+                            source_base_sha=payload.get("source_base_sha", ""),
+                            published_at_utc=payload.get("published_at_utc", ""),
+                            digest=payload.get("digest", ""),
                         )
+                        # Recompute digest and verify exact match
+                        import dataclasses
+                        cid_fields = dataclasses.asdict(cid)
+                        recomputed = compute_candidate_head_identity_digest(cid_fields)
+                        stored_digest = payload.get("digest", "")
+                        if stored_digest and recomputed != stored_digest:
+                            # Digest mismatch — emit CANDIDATE_HEAD_IDENTITY_INVALID and BLOCK
+                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                            state_for_block = self.store.load_state(self.run_id)
+                            st_rev = state_for_block.state_revision if state_for_block else 1
+                            t_id = state_for_block.current_task_id if state_for_block else "unknown"
+                            a_id = state_for_block.current_attempt_id if state_for_block else "unknown"
+                            i_dg = state_for_block.current_intent_digest if state_for_block else "0" * 64
+                            all_evs = self.store.load_events(self.run_id)
+                            invalid_ev = create_event(
+                                run_id=self.run_id,
+                                sequence=len(all_evs) + 1,
+                                previous_event_digest=all_evs[-1].event_digest if all_evs else None,
+                                event_type=SupervisorEventType.CANDIDATE_HEAD_IDENTITY_INVALID,
+                                state_revision=st_rev,
+                                task_id=t_id,
+                                attempt_id=a_id,
+                                intent_digest=i_dg,
+                                payload={
+                                    "error_code": "CANDIDATE_HEAD_IDENTITY_INVALID",
+                                    "stored_digest": stored_digest,
+                                    "recomputed_digest": recomputed,
+                                    "message": "CandidateHeadIdentity digest mismatch on restart — identity rejected",
+                                },
+                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            )
+                            self.store.save_event(invalid_ev)
+                            self.candidate_head_identity = None
+                            self._candidate_head_identity_blocked = True
+                        else:
+                            # Only update if not already set (last-write-wins within replay)
+                            self.candidate_head_identity = cid
                     except Exception:
                         pass
             elif ev_type == "ASTRA_PROPOSAL_CREATED":
@@ -351,13 +400,32 @@ class AutonomousRunCoordinator:
 
         self.iterations = max(proposals_count, decisions_count)
 
-        if self.candidate_head_identity is not None:
-            has_reg = any(getattr(e.event_type, "value", str(e.event_type)) == "CANDIDATE_HEAD_IDENTITY_REGISTERED" for e in events)
+        # Real-mode auto-trust guard: injected candidate_head_identity is NEVER
+        # auto-persisted in real provider mode. Only verified-persisted or remote-
+        # verified identities are accepted.
+        if provider_mode == "real":
+            # In real mode, the injected candidate_head_identity is ignored unless
+            # it was already loaded from the event store above.
+            has_reg = any(
+                getattr(e.event_type, "value", str(e.event_type)) == "CANDIDATE_HEAD_IDENTITY_REGISTERED"
+                for e in events
+            )
             if not has_reg:
-                self.register_candidate_head_identity(self.candidate_head_identity)
+                # Discard any injected identity — it is not yet verified
+                self.candidate_head_identity = None
+        else:
+            # Test mode: accept and persist injected identity if not already in store
+            if candidate_head_identity is not None and self.candidate_head_identity is None:
+                has_reg = any(
+                    getattr(e.event_type, "value", str(e.event_type)) == "CANDIDATE_HEAD_IDENTITY_REGISTERED"
+                    for e in events
+                )
+                if not has_reg:
+                    self.register_candidate_head_identity(candidate_head_identity)
 
         # Test mock hook
         self._mock_astra_proposal: AstraNextActionProposal | None = None
+
 
     def register_candidate_head_identity(self, candidate_id: CandidateHeadIdentity) -> None:
         self.candidate_head_identity = candidate_id
@@ -379,12 +447,18 @@ class AutonomousRunCoordinator:
             intent_digest=i_dg,
             payload={
                 "schema_version": candidate_id.schema_version,
+                "candidate_id": candidate_id.candidate_id,
+                "run_id": candidate_id.run_id,
+                "task_id": candidate_id.task_id,
                 "repository": candidate_id.repository,
                 "remote_name": candidate_id.remote_name,
                 "head_ref": candidate_id.head_ref,
                 "head_sha": candidate_id.head_sha,
                 "base_ref": candidate_id.base_ref,
                 "base_sha": candidate_id.base_sha,
+                "source_base_sha": candidate_id.source_base_sha,
+                "published_at_utc": candidate_id.published_at_utc,
+                "digest": candidate_id.digest,
             },
             created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
@@ -842,7 +916,12 @@ class AutonomousRunCoordinator:
                 )
 
                 if is_real_mode:
-                    if self.candidate_head_identity is None:
+                    cid = self.candidate_head_identity or self._injected_candidate_head_identity
+                    head_branch = (
+                        cid.head_ref if (cid and cid.head_ref)
+                        else self.candidate_head_ref
+                    )
+                    if not head_branch:
                         events = self.store.load_events(self.run_id)
                         from ai_engineering.supervisor.events import create_event, SupervisorEventType
                         fail_ev = create_event(
@@ -856,7 +935,7 @@ class AutonomousRunCoordinator:
                             intent_digest=state.current_intent_digest,
                             payload={
                                 "error_code": "CANDIDATE_HEAD_IDENTITY_MISSING",
-                                "message": "CandidateHeadIdentity must be registered before CREATE_PR in real provider mode",
+                                "message": "Candidate head branch or identity must be provided before CREATE_PR in real provider mode",
                             },
                             created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         )
@@ -864,78 +943,79 @@ class AutonomousRunCoordinator:
                         terminal_reason = "CANDIDATE_HEAD_IDENTITY_MISSING"
                         break
 
-                    cid = self.candidate_head_identity
-                    if cid.head_sha != candidate_head_sha:
-                        events = self.store.load_events(self.run_id)
-                        from ai_engineering.supervisor.events import create_event, SupervisorEventType
-                        fail_ev = create_event(
-                            run_id=self.run_id,
-                            sequence=len(events) + 1,
-                            previous_event_digest=events[-1].event_digest if events else None,
-                            event_type=SupervisorEventType.PR_HEAD_SHA_MISMATCH,
-                            state_revision=state.state_revision,
-                            task_id=state.current_task_id,
-                            attempt_id=state.current_attempt_id,
-                            intent_digest=state.current_intent_digest,
-                            payload={
-                                "error_code": "PR_HEAD_SHA_MISMATCH",
-                                "expected_sha": candidate_head_sha,
-                                "candidate_identity_sha": cid.head_sha,
-                            },
-                            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        )
-                        self.store.save_event(fail_ev)
-                        terminal_reason = "PR_HEAD_SHA_MISMATCH"
-                        break
+                    if cid:
+                        if cid.head_sha and cid.head_sha != candidate_head_sha:
+                            events = self.store.load_events(self.run_id)
+                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                            fail_ev = create_event(
+                                run_id=self.run_id,
+                                sequence=len(events) + 1,
+                                previous_event_digest=events[-1].event_digest if events else None,
+                                event_type=SupervisorEventType.PR_HEAD_SHA_MISMATCH,
+                                state_revision=state.state_revision,
+                                task_id=state.current_task_id,
+                                attempt_id=state.current_attempt_id,
+                                intent_digest=state.current_intent_digest,
+                                payload={
+                                    "error_code": "PR_HEAD_SHA_MISMATCH",
+                                    "expected_sha": candidate_head_sha,
+                                    "candidate_identity_sha": cid.head_sha,
+                                },
+                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            )
+                            self.store.save_event(fail_ev)
+                            terminal_reason = "PR_HEAD_SHA_MISMATCH"
+                            break
 
-                    if cid.repository and intent and getattr(intent, "source_repository", None) and cid.repository != intent.source_repository:
-                        events = self.store.load_events(self.run_id)
-                        from ai_engineering.supervisor.events import create_event, SupervisorEventType
-                        fail_ev = create_event(
-                            run_id=self.run_id,
-                            sequence=len(events) + 1,
-                            previous_event_digest=events[-1].event_digest if events else None,
-                            event_type=SupervisorEventType.PR_IDENTITY_MISMATCH,
-                            state_revision=state.state_revision,
-                            task_id=state.current_task_id,
-                            attempt_id=state.current_attempt_id,
-                            intent_digest=state.current_intent_digest,
-                            payload={
-                                "error_code": "PR_IDENTITY_MISMATCH",
-                                "expected_repo": intent.source_repository,
-                                "candidate_repo": cid.repository,
-                            },
-                            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        )
-                        self.store.save_event(fail_ev)
-                        terminal_reason = "PR_IDENTITY_MISMATCH"
-                        break
+                        if cid.repository and intent and getattr(intent, "source_repository", None) and cid.repository != intent.source_repository:
+                            events = self.store.load_events(self.run_id)
+                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                            fail_ev = create_event(
+                                run_id=self.run_id,
+                                sequence=len(events) + 1,
+                                previous_event_digest=events[-1].event_digest if events else None,
+                                event_type=SupervisorEventType.PR_IDENTITY_MISMATCH,
+                                state_revision=state.state_revision,
+                                task_id=state.current_task_id,
+                                attempt_id=state.current_attempt_id,
+                                intent_digest=state.current_intent_digest,
+                                payload={
+                                    "error_code": "PR_IDENTITY_MISMATCH",
+                                    "expected_repo": intent.source_repository,
+                                    "candidate_repo": cid.repository,
+                                },
+                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            )
+                            self.store.save_event(fail_ev)
+                            terminal_reason = "PR_IDENTITY_MISMATCH"
+                            break
 
-                    if cid.base_sha and intent and getattr(intent, "source_base_sha", None) and cid.base_sha != intent.source_base_sha:
-                        events = self.store.load_events(self.run_id)
-                        from ai_engineering.supervisor.events import create_event, SupervisorEventType
-                        fail_ev = create_event(
-                            run_id=self.run_id,
-                            sequence=len(events) + 1,
-                            previous_event_digest=events[-1].event_digest if events else None,
-                            event_type=SupervisorEventType.PR_IDENTITY_MISMATCH,
-                            state_revision=state.state_revision,
-                            task_id=state.current_task_id,
-                            attempt_id=state.current_attempt_id,
-                            intent_digest=state.current_intent_digest,
-                            payload={
-                                "error_code": "PR_IDENTITY_MISMATCH",
-                                "expected_base_sha": intent.source_base_sha,
-                                "candidate_base_sha": cid.base_sha,
-                            },
-                            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        )
-                        self.store.save_event(fail_ev)
-                        terminal_reason = "PR_IDENTITY_MISMATCH"
-                        break
+                        if cid.base_sha and intent and getattr(intent, "source_base_sha", None) and cid.base_sha != intent.source_base_sha:
+                            events = self.store.load_events(self.run_id)
+                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                            fail_ev = create_event(
+                                run_id=self.run_id,
+                                sequence=len(events) + 1,
+                                previous_event_digest=events[-1].event_digest if events else None,
+                                event_type=SupervisorEventType.PR_IDENTITY_MISMATCH,
+                                state_revision=state.state_revision,
+                                task_id=state.current_task_id,
+                                attempt_id=state.current_attempt_id,
+                                intent_digest=state.current_intent_digest,
+                                payload={
+                                    "error_code": "PR_IDENTITY_MISMATCH",
+                                    "expected_base_sha": intent.source_base_sha,
+                                    "candidate_base_sha": cid.base_sha,
+                                },
+                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            )
+                            self.store.save_event(fail_ev)
+                            terminal_reason = "PR_IDENTITY_MISMATCH"
+                            break
 
-                    head_branch = cid.head_ref
-                    base_branch = cid.base_ref or (state.canonical_main_ref.split("/")[-1] if state.canonical_main_ref else "main")
+                        base_branch = cid.base_ref or (state.canonical_main_ref.split("/")[-1] if state.canonical_main_ref else "main")
+                    else:
+                        base_branch = state.canonical_main_ref.split("/")[-1] if state.canonical_main_ref else "main"
                 else:
                     if self.candidate_head_identity is not None:
                         head_branch = self.candidate_head_identity.head_ref
@@ -994,6 +1074,29 @@ class AutonomousRunCoordinator:
                     self.store.save_event(fail_ev)
                     terminal_reason = "PR_HEAD_SHA_MISMATCH"
                     break
+
+                # Remote proof passed! In real mode, construct trusted CandidateHeadIdentity
+                if is_real_mode:
+                    from ai_engineering.supervisor.pr_provider import compute_candidate_head_identity_digest
+                    trusted_cid_fields = {
+                        "schema_version": CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION,
+                        "candidate_id": getattr(cid, "candidate_id", None) or f"cid-{uuid.uuid4().hex[:12]}",
+                        "run_id": self.run_id,
+                        "task_id": state.current_task_id,
+                        "repository": repo,
+                        "remote_name": getattr(cid, "remote_name", None) or getattr(state, "canonical_remote", "github") or "github",
+                        "head_ref": head_branch,
+                        "head_sha": candidate_head_sha,
+                        "base_ref": base_branch,
+                        "base_sha": state.current_base_sha or (intent.source_base_sha if intent else ""),
+                        "source_base_sha": intent.source_base_sha if intent else (state.current_base_sha or ""),
+                        "published_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "digest": "",
+                    }
+                    trusted_cid_digest = compute_candidate_head_identity_digest(trusted_cid_fields)
+                    trusted_cid_fields["digest"] = trusted_cid_digest
+                    trusted_cid = CandidateHeadIdentity(**trusted_cid_fields)
+                    self.register_candidate_head_identity(trusted_cid)
 
                 # Candidate head verified on remote: emit CANDIDATE_HEAD_PUBLISHED
                 events = self.store.load_events(self.run_id)
@@ -1793,7 +1896,18 @@ class AutonomousRunCoordinator:
                     except Exception:
                         snap = None
 
-                    if isinstance(snap, CIStatusSnapshot):
+                    is_snapshot = (
+                        snap is not None
+                        and getattr(snap, "schema_version", "") == "hermes.ci-status-snapshot.v1"
+                        and hasattr(snap, "requested_sha")
+                        and hasattr(snap, "observed_sha")
+                        and hasattr(snap, "overall_status")
+                        and hasattr(snap, "all_required_completed")
+                        and hasattr(snap, "all_required_success")
+                        and hasattr(snap, "required_workflow_observations")
+                        and hasattr(snap, "snapshot_digest")
+                    )
+                    if is_snapshot:
                         ci_snapshot_digest = snap.snapshot_digest or ""
                         sha_match = (
                             getattr(snap, "requested_sha", "") == cur_pr.head_sha

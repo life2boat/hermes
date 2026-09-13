@@ -111,7 +111,7 @@ def get_all_gates(expected_sha: str) -> Tuple[List[GateResult], str, str, str, s
     
     # CONFIG_CONTRACT
     if os.path.exists(".env.example"):
-        with open(".env.example", "r") as f:
+        with open(".env.example", "r", encoding="utf-8") as f:
             lines = f.readlines()
         keys = [line.split("=")[0] for line in lines if "=" in line and not line.startswith("#")]
         g6 = GateResult("CONFIG_CONTRACT", Status.PASS, evidence={

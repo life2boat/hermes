@@ -105,6 +105,21 @@ class SupervisorLoop:
         self._profiles: dict[str, WorkProfile] = {}
         self._intents: dict[str, TaskIntent] = {}
         self._effective_policies: dict[str, EffectivePolicyReport] = {}
+        self._latest_policy_receipt: dict[str, Any] = {}
+
+    def get_latest_policy_receipt(self, run_id: str) -> Any | None:
+        if run_id in self._latest_policy_receipt:
+            return self._latest_policy_receipt[run_id]
+        events = self._store.load_events(run_id)
+        from ai_engineering.supervisor.policy.contracts import PolicyReceipt, PolicyVerdict
+        for e in reversed(events):
+            if getattr(e.event_type, "value", str(e.event_type)) == "POLICY_EVALUATED":
+                if e.payload and e.payload.get("policy_receipt"):
+                    pr_data = dict(e.payload["policy_receipt"])
+                    if "verdict" in pr_data and isinstance(pr_data["verdict"], str):
+                        pr_data["verdict"] = PolicyVerdict(pr_data["verdict"])
+                    return PolicyReceipt(**pr_data)
+        return None
 
     def initialize_run(
         self,
@@ -756,7 +771,13 @@ class SupervisorLoop:
         candidate_base_sha = new_base_sha or state.current_base_sha
         candidate_attempt_id = new_attempt_id or f"{candidate_task_id}-attempt-1"
 
-        if decision.action.value == "CONTINUE":
+        if decision.action.value == "CREATE_PR":
+            candidate_intent = p_intent
+            lineage = None
+        elif decision.action.value == "MERGE_IF_GREEN":
+            candidate_intent = p_intent
+            lineage = None
+        elif decision.action.value == "CONTINUE":
             candidate_intent, lineage = generator.generate_continue(
                 parent_intent=p_intent,
                 decision=decision,
@@ -801,6 +822,10 @@ class SupervisorLoop:
 
         if requested_effect_classes is not None:
             final_effects = tuple(requested_effect_classes)
+        elif decision.action.value == "CREATE_PR":
+            final_effects = (EffectClass.PR_MUTATION,)
+        elif decision.action.value == "MERGE_IF_GREEN":
+            final_effects = (EffectClass.PR_MERGE,)
         else:
             req_effects = []
             for m in candidate_intent.allowed_mutations:
@@ -812,7 +837,14 @@ class SupervisorLoop:
                 req_effects = [EffectClass.READ_ONLY]
             final_effects = tuple(req_effects)
 
-        final_stop_boundary = requested_stop_boundary if requested_stop_boundary is not None else candidate_intent.stop_boundary
+        if requested_stop_boundary is not None:
+            final_stop_boundary = requested_stop_boundary
+        elif decision.action.value == "CREATE_PR":
+            final_stop_boundary = StopBoundary.READY_PR
+        elif decision.action.value == "MERGE_IF_GREEN":
+            final_stop_boundary = StopBoundary.MERGE
+        else:
+            final_stop_boundary = candidate_intent.stop_boundary
 
         policy_request = PolicyRequest(
             schema_version=POLICY_REQUEST_SCHEMA_VERSION,
@@ -892,29 +924,33 @@ class SupervisorLoop:
             )
             self._store.save_event(policy_event)
 
-            # 4. Proceed to NEXT_TASK_GENERATED or ATTEMPT_INCREMENTED (candidate task is authoritative)
-            child_idg = intent_digest(candidate_intent)
-            event_type = (
-                SupervisorEventType.ATTEMPT_INCREMENTED
-                if decision.action.value == "RETRY"
-                else SupervisorEventType.NEXT_TASK_GENERATED
-            )
-            task_event = create_event(
-                run_id=run_id,
-                sequence=new_seq + 2,
-                previous_event_digest=policy_event.event_digest,
-                event_type=event_type,
-                state_revision=state.state_revision + 3,
-                task_id=candidate_intent.task_id,
-                attempt_id=candidate_attempt_id,
-                intent_digest=child_idg,
-                payload={"action": decision.action.value, "new_task_id": candidate_intent.task_id, "task_intent": __import__('dataclasses').asdict(candidate_intent)},
-                created_at_utc=validated_at_utc,
-                decision_id=decision.decision_id,
-            )
-            self._store.save_event(task_event)
+            self._latest_policy_receipt[run_id] = policy_receipt
 
-            self._intents[candidate_intent.task_id] = candidate_intent
+            child_idg = intent_digest(candidate_intent)
+
+            if decision.action.value not in ("CREATE_PR", "MERGE_IF_GREEN"):
+                # 4. Proceed to NEXT_TASK_GENERATED or ATTEMPT_INCREMENTED (candidate task is authoritative)
+                event_type = (
+                    SupervisorEventType.ATTEMPT_INCREMENTED
+                    if decision.action.value == "RETRY"
+                    else SupervisorEventType.NEXT_TASK_GENERATED
+                )
+                task_event = create_event(
+                    run_id=run_id,
+                    sequence=new_seq + 2,
+                    previous_event_digest=policy_event.event_digest,
+                    event_type=event_type,
+                    state_revision=state.state_revision + 3,
+                    task_id=candidate_intent.task_id,
+                    attempt_id=candidate_attempt_id,
+                    intent_digest=child_idg,
+                    payload={"action": decision.action.value, "new_task_id": candidate_intent.task_id, "task_intent": __import__('dataclasses').asdict(candidate_intent)},
+                    created_at_utc=validated_at_utc,
+                    decision_id=decision.decision_id,
+                )
+                self._store.save_event(task_event)
+
+                self._intents[candidate_intent.task_id] = candidate_intent
 
             # Load seed state
             seed = self._store.load_seed_state(run_id)
@@ -996,6 +1032,7 @@ class SupervisorLoop:
                 decision_id=decision.decision_id,
             )
             self._store.save_event(policy_event)
+            self._latest_policy_receipt[run_id] = policy_receipt
 
             # 4. Record blocker and STOP autonomous continuation
             # Do NOT emit NEXT_TASK_GENERATED

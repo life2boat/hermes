@@ -32,11 +32,18 @@ class SupervisorAction(StrEnum):
     RETRY = "RETRY"         # BLOCKED -> new attempt
     COMPLETE = "COMPLETE"   # PASS -> root goal achieved
     BLOCK = "BLOCK"         # cannot proceed safely
+    CREATE_PR = "CREATE_PR" # PASS -> initiate PR lifecycle
+    MERGE_IF_GREEN = "MERGE_IF_GREEN" # PASS -> merge qualified PR
 
 
 # Admissibility matrix: result_status -> allowed actions
 _ADMISSIBLE: dict[str, frozenset[SupervisorAction]] = {
-    "PASS": frozenset({SupervisorAction.CONTINUE, SupervisorAction.COMPLETE}),
+    "PASS": frozenset({
+        SupervisorAction.CONTINUE,
+        SupervisorAction.COMPLETE,
+        SupervisorAction.CREATE_PR,
+        SupervisorAction.MERGE_IF_GREEN,
+    }),
     "FAIL": frozenset({SupervisorAction.FIX, SupervisorAction.BLOCK}),
     "BLOCKED": frozenset({SupervisorAction.RETRY, SupervisorAction.BLOCK}),
 }

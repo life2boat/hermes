@@ -49,7 +49,7 @@ def main():
             "completed_at": r["updated_at"]
         })
         
-    with open("structured_ci_evidence.json", "w") as f:
+    with open("structured_ci_evidence.json", "w", encoding="utf-8") as f:
         json.dump(evidence, f)
         
 if __name__ == "__main__":

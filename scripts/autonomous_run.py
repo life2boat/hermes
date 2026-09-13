@@ -64,6 +64,9 @@ async def async_main():
     parser.add_argument("--ci-required-check", nargs='*', default=None, help="Required CI check names")
     parser.add_argument("--ci-timeout", type=float, default=600.0, help="CI wait timeout in seconds")
     parser.add_argument("--ci-poll-interval", type=float, default=10.0, help="CI poll interval in seconds")
+    parser.add_argument("--pr-mode", choices=["fake", "github"], default="fake", help="PR provider mode")
+    parser.add_argument("--allow-pr-create", action="store_true", help="Authorize PR creation")
+    parser.add_argument("--allow-pr-merge", action="store_true", help="Authorize PR merge")
     args = parser.parse_args()
 
     intent_text = Path(args.intent).read_text(encoding="utf-8")
@@ -214,6 +217,13 @@ async def async_main():
     else:
         ci_provider = LocalCIProvider()
 
+    if args.pr_mode == "github":
+        from ai_engineering.supervisor.pr_provider import GitHubPullRequestProvider
+        pr_provider = GitHubPullRequestProvider()
+    else:
+        from ai_engineering.supervisor.pr_provider import FakeGitHubPullRequestBackend
+        pr_provider = FakeGitHubPullRequestBackend()
+
     coord = AutonomousRunCoordinator(
         loop=loop,
         store=store,
@@ -225,6 +235,9 @@ async def async_main():
         ci_provider=ci_provider,
         evidence_root=args.state_dir,
         provider_mode=args.provider_mode,
+        pr_provider=pr_provider,
+        allow_pr_create=args.allow_pr_create,
+        allow_pr_merge=args.allow_pr_merge,
     )
 
     receipt = await coord.run_until_terminal()

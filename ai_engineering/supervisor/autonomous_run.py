@@ -20,6 +20,17 @@ from ai_engineering.supervisor.collector import ResultCollector
 from ai_engineering.supervisor.worker_result import canonical_serialize_worker_result
 from ai_engineering.contracts import GateResult, Status, EffectClass, StopBoundary
 from ai_engineering.task_intent import TaskIntent
+from ai_engineering.supervisor.pr_provider import (
+    PullRequestIdentity,
+    PullRequestReceipt,
+    MergeReceipt,
+    PullRequestProvider,
+    compute_pr_receipt_digest,
+    compute_merge_receipt_digest,
+    PULL_REQUEST_IDENTITY_SCHEMA_VERSION,
+    PULL_REQUEST_RECEIPT_SCHEMA_VERSION,
+    MERGE_RECEIPT_SCHEMA_VERSION,
+)
 
 class NextActionType(str, Enum):
     INSPECT = "INSPECT"
@@ -78,6 +89,10 @@ class AutonomousRunReceipt:
     receipt_digest: str = ""
     astra_receipts: list[str] = field(default_factory=list)
     ci_receipts: list[str] = field(default_factory=list)
+    pr_receipts: list[str] = field(default_factory=list)
+    merge_receipts: list[str] = field(default_factory=list)
+    pr_number: int | None = None
+    merged_commit_sha: str | None = None
 
 
 class AstraProposalProvider:
@@ -85,7 +100,7 @@ class AstraProposalProvider:
         raise NotImplementedError
 
 class ScriptedAstraProposalProvider(AstraProposalProvider):
-    """Scripted Astra proposal provider yielding IMPLEMENT then STOP_SUCCESS upon VerifiedResult PASS."""
+    """Scripted Astra proposal provider yielding sequence of actions or default IMPLEMENT then STOP_SUCCESS."""
 
     def __init__(
         self,
@@ -93,14 +108,56 @@ class ScriptedAstraProposalProvider(AstraProposalProvider):
         target_capability: str = "code",
         expected_effect_class: str = "REPOSITORY_WRITE",
         expected_stop_boundary: str = "LOCAL_DIFF",
+        scripted_actions: list[NextActionType] | None = None,
     ) -> None:
         self.target_worker = target_worker
         self.target_capability = target_capability
         self.expected_effect_class = expected_effect_class
         self.expected_stop_boundary = expected_stop_boundary
+        self.scripted_actions = list(scripted_actions) if scripted_actions is not None else None
         self.step = 0
 
     async def request_proposal(self, run_id: str, state: SupervisorState, **kwargs: Any) -> AstraNextActionProposal:
+        if self.scripted_actions is not None:
+            if self.step < len(self.scripted_actions):
+                act = self.scripted_actions[self.step]
+                self.step += 1
+            else:
+                act = NextActionType.STOP_SUCCESS
+            act_type = NextActionType(act) if not isinstance(act, NextActionType) else act
+
+            eff = "READ_ONLY"
+            sb = "READ_ONLY"
+            if act_type == NextActionType.IMPLEMENT:
+                eff = self.expected_effect_class
+                sb = self.expected_stop_boundary
+            elif act_type == NextActionType.CREATE_PR:
+                eff = "PR_MUTATION"
+                sb = "READY_PR"
+            elif act_type == NextActionType.WAIT_FOR_CI:
+                eff = "READ_ONLY"
+                sb = "READY_PR"
+            elif act_type == NextActionType.MERGE_IF_GREEN:
+                eff = "PR_MERGE"
+                sb = "MERGE"
+
+            return AstraNextActionProposal(
+                schema_version="hermes.astra-next-action.v1",
+                proposal_id=f"prop-scripted-{self.step}-{run_id}",
+                run_id=run_id,
+                task_id=state.current_task_id,
+                action_type=act_type,
+                objective=f"Scripted step {self.step}: {act_type.value}",
+                recommended_capability=self.target_capability if act_type == NextActionType.IMPLEMENT else "none",
+                recommended_worker=self.target_worker if act_type == NextActionType.IMPLEMENT else "none",
+                expected_effect_class=eff,
+                expected_stop_boundary=sb,
+                allowed_scope=(),
+                required_validators=(),
+                success_criteria=f"Execution of {act_type.value}",
+                reasoning_summary=f"Scripted action {act_type.value}",
+            )
+
         if state.latest_verified_result_id:
             return AstraNextActionProposal(
                 schema_version="hermes.astra-next-action.v1",
@@ -154,6 +211,9 @@ class AutonomousRunCoordinator:
         ci_provider: CIStatusProvider,
         evidence_root: str = "/tmp",
         provider_mode: str = "real",
+        pr_provider: PullRequestProvider | None = None,
+        allow_pr_create: bool = False,
+        allow_pr_merge: bool = False,
     ) -> None:
         self.loop = loop
         self.store = store
@@ -165,6 +225,9 @@ class AutonomousRunCoordinator:
         self.astra_provider = astra_provider
         self.ci_provider = ci_provider
         self.provider_mode = provider_mode
+        self.pr_provider = pr_provider
+        self.allow_pr_create = allow_pr_create
+        self.allow_pr_merge = allow_pr_merge
 
         events = self.store.load_events(self.run_id)
         from ai_engineering.supervisor.events import SupervisorEventType
@@ -182,7 +245,13 @@ class AutonomousRunCoordinator:
         self.verified_results: list[str] = []
         self.astra_receipts: list[str] = []
         self.ci_receipts: list[str] = []
+        self.pr_receipts: list[str] = []
+        self.merge_receipts: list[str] = []
         self.pending_ci_sha: str | None = None
+        self.active_pr: PullRequestIdentity | None = None
+        self.active_pr_number: int | None = None
+        self.active_pr_head_sha: str | None = None
+        self.merged_commit_sha: str | None = None
 
         for ev in events:
             ev_type = getattr(ev.event_type, "value", str(ev.event_type))
@@ -203,6 +272,26 @@ class AutonomousRunCoordinator:
                     obs_sha = ev.payload.get("exact_sha") or ev.payload.get("sha")
                     if obs_sha:
                         self.pending_ci_sha = obs_sha
+            elif ev_type in ("PR_CREATED", "PR_RECOVERED"):
+                if ev.payload:
+                    rcpt_id = ev.payload.get("receipt_id")
+                    if rcpt_id and rcpt_id not in self.pr_receipts:
+                        self.pr_receipts.append(rcpt_id)
+                    if ev.payload.get("pr_number"):
+                        self.active_pr_number = ev.payload["pr_number"]
+                    if ev.payload.get("head_sha"):
+                        self.active_pr_head_sha = ev.payload["head_sha"]
+            elif ev_type in ("PR_MERGED", "PR_MERGE_RECOVERED"):
+                if ev.payload:
+                    rcpt_id = ev.payload.get("receipt_id")
+                    if rcpt_id and rcpt_id not in self.merge_receipts:
+                        self.merge_receipts.append(rcpt_id)
+                    if ev.payload.get("merged_commit_sha"):
+                        self.merged_commit_sha = ev.payload["merged_commit_sha"]
+            elif ev_type == "PR_HEAD_CHANGED":
+                if ev.payload and ev.payload.get("new_head_sha"):
+                    self.active_pr_head_sha = ev.payload["new_head_sha"]
+                    self.pending_ci_sha = None
             elif ev_type == "DISPATCH_SENT":
                 self.child_tasks += 1
                 if ev.payload and ev.payload.get("routing_receipt_id"):
@@ -545,9 +634,392 @@ class AutonomousRunCoordinator:
                 terminal_reason = "POLICY_BLOCKED"
                 break
 
+            if proposal.action_type == NextActionType.CREATE_PR:
+                if self.pr_provider is None or not self.allow_pr_create:
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_CREATE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": "PR_PROVIDER_UNAVAILABLE" if self.pr_provider is None else "PR_CREATION_NOT_ALLOWED",
+                            "message": "PR provider is not available or PR creation is not allowed",
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_PROVIDER_UNAVAILABLE" if self.pr_provider is None else "PR_CREATION_NOT_ALLOWED"
+                    break
+
+                # 1. Gate on passing VerifiedResult
+                vr = None
+                if state.latest_verified_result_id:
+                    if hasattr(self.loop, "get_verified_result"):
+                        vr = self.loop.get_verified_result(self.run_id, state.latest_verified_result_id)
+                    if not vr and hasattr(self.loop, "_vr_cache"):
+                        vr = self.loop._vr_cache.get(f"id:{state.latest_verified_result_id}") or self.loop._vr_cache.get(state.latest_verified_result_id)
+                    if not vr:
+                        events = self.store.load_events(self.run_id)
+                        from ai_engineering.supervisor.events import SupervisorEventType
+                        from ai_engineering.supervisor.validator import deserialize_verified_result
+                        for ev in reversed(events):
+                            if getattr(ev.event_type, "value", str(ev.event_type)) == "RESULT_INGESTED":
+                                if ev.payload and ev.payload.get("result_id") == state.latest_verified_result_id:
+                                    vr_data = ev.payload.get("verified_result")
+                                    if vr_data:
+                                        vr = deserialize_verified_result(json.dumps(vr_data) if isinstance(vr_data, dict) else str(vr_data))
+                                        break
+
+                if not vr or getattr(vr.status, "value", str(vr.status)) != "PASS":
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_CREATE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": "NO_PASSING_VERIFIED_RESULT",
+                            "message": "PR creation requires a passing VerifiedResult",
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_CREATE_VERIFIED_RESULT_MISSING"
+                    break
+
+                candidate_head_sha = getattr(vr, "head_sha", "") or state.current_base_sha
+
+                # 2. PolicyEngine Authorization for PR_MUTATION
+                intent, work_profile, effective_policy = self._rehydrate_authority_context(state)
+                if work_profile is None or effective_policy is None or intent is None:
+                    terminal_reason = "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE"
+                    break
+
+                from ai_engineering.supervisor.policy.contracts import (
+                    PolicyRequest,
+                    POLICY_REQUEST_SCHEMA_VERSION,
+                    compute_deterministic_digest,
+                    AutonomyLevel,
+                    ExecutionTarget,
+                    PolicyVerdict,
+                )
+                from ai_engineering.supervisor.policy.engine import evaluate_policy
+
+                req_id = compute_deterministic_digest({
+                    "run_id": self.run_id,
+                    "task_id": state.current_task_id,
+                    "action": "CREATE_PR",
+                    "proposal_id": proposal.proposal_id,
+                })
+
+                target_sb = StopBoundary.READY_PR
+                try:
+                    if proposal.expected_stop_boundary:
+                        target_sb = StopBoundary(proposal.expected_stop_boundary)
+                except Exception:
+                    pass
+
+                pol_req = PolicyRequest(
+                    schema_version=POLICY_REQUEST_SCHEMA_VERSION,
+                    request_id=req_id,
+                    run_id=self.run_id,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    decision_id=proposal.proposal_id,
+                    decision_receipt_id=f"rec-{proposal.proposal_id}",
+                    work_profile_id=work_profile.profile_id,
+                    work_profile_digest=work_profile.profile_digest,
+                    current_autonomy_level=state.autonomy_state.current_level if state.autonomy_state else AutonomyLevel.LEVEL_0_OBSERVE,
+                    requested_action="CREATE_PR",
+                    requested_effect_classes=(EffectClass.PR_MUTATION,),
+                    requested_stop_boundary=target_sb,
+                    execution_target=ExecutionTarget.DEV,
+                    effective_policy_id=effective_policy.effective_policy_id,
+                    effective_policy_digest=effective_policy.effective_policy_id,
+                    budget_state_digest=state.budget_state.budget_digest if state.budget_state else "",
+                )
+
+                policy_receipt = evaluate_policy(
+                    request=pol_req,
+                    task_intent=intent,
+                    effective_policy=effective_policy,
+                    work_profile=work_profile,
+                    autonomy_state=state.autonomy_state,
+                    budget_state=state.budget_state,
+                )
+
+                events = self.store.load_events(self.run_id)
+                from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                pol_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.POLICY_EVALUATED,
+                    state_revision=state.state_revision + 1,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "receipt_id": policy_receipt.receipt_id,
+                        "verdict": policy_receipt.verdict.value,
+                        "reason_codes": list(policy_receipt.reason_codes),
+                        "work_profile_id": work_profile.profile_id,
+                        "current_level": state.autonomy_state.current_level.value if state.autonomy_state else "UNKNOWN",
+                        "policy_receipt": __import__('dataclasses').asdict(policy_receipt),
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    decision_id=proposal.proposal_id,
+                )
+                self.store.save_event(pol_ev)
+                self.policy_receipts.append(policy_receipt.receipt_id)
+
+                if policy_receipt.verdict != PolicyVerdict.ALLOW:
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 2,
+                        previous_event_digest=pol_ev.event_digest,
+                        event_type=SupervisorEventType.PR_CREATE_FAILED,
+                        state_revision=state.state_revision + 2,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": "POLICY_DENIED",
+                            "reason_codes": list(policy_receipt.reason_codes),
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        decision_id=proposal.proposal_id,
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = f"POLICY_DENIED: {','.join(policy_receipt.reason_codes)}"
+                    break
+
+                # 3. Idempotent PR search / create
+                repo = state.repository or intent.source_repository or "life2boat/hermes"
+                head_branch = f"feat/{state.current_task_id}"
+                base_branch = state.canonical_main_ref.split("/")[-1] if state.canonical_main_ref else "main"
+
+                pr_action = "CREATED"
+                existing_pr = await self.pr_provider.find_existing_pr(repo, head_branch, base_branch)
+                events = self.store.load_events(self.run_id)
+
+                if existing_pr:
+                    pr_action = "RECOVERED"
+                    pr_identity = existing_pr
+                    if existing_pr.head_sha != candidate_head_sha:
+                        head_change_ev = create_event(
+                            run_id=self.run_id,
+                            sequence=len(events) + 1,
+                            previous_event_digest=events[-1].event_digest if events else None,
+                            event_type=SupervisorEventType.PR_HEAD_CHANGED,
+                            state_revision=state.state_revision + 1,
+                            task_id=state.current_task_id,
+                            attempt_id=state.current_attempt_id,
+                            intent_digest=state.current_intent_digest,
+                            payload={
+                                "pr_number": existing_pr.pr_number,
+                                "old_head_sha": existing_pr.head_sha,
+                                "new_head_sha": candidate_head_sha,
+                            },
+                            created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        )
+                        self.store.save_event(head_change_ev)
+                        events.append(head_change_ev)
+
+                    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    rcpt_payload = {
+                        "schema_version": PULL_REQUEST_RECEIPT_SCHEMA_VERSION,
+                        "run_id": self.run_id,
+                        "task_id": state.current_task_id,
+                        "policy_receipt_id": policy_receipt.receipt_id,
+                        "repository": repo,
+                        "pr_number": existing_pr.pr_number,
+                        "head_branch": existing_pr.head_branch,
+                        "head_sha": existing_pr.head_sha,
+                        "base_branch": existing_pr.base_branch,
+                        "base_sha": existing_pr.base_sha,
+                        "action": pr_action,
+                        "created_at_utc": now_str,
+                    }
+                    pr_dg = compute_pr_receipt_digest(rcpt_payload)
+                    pr_receipt = PullRequestReceipt(
+                        schema_version=PULL_REQUEST_RECEIPT_SCHEMA_VERSION,
+                        receipt_id=f"pr-rcpt-{existing_pr.pr_number}-{self.run_id}",
+                        run_id=self.run_id,
+                        task_id=state.current_task_id,
+                        policy_receipt_id=policy_receipt.receipt_id,
+                        repository=repo,
+                        pr_number=existing_pr.pr_number,
+                        head_branch=existing_pr.head_branch,
+                        head_sha=existing_pr.head_sha,
+                        base_branch=existing_pr.base_branch,
+                        base_sha=existing_pr.base_sha,
+                        action=pr_action,
+                        created_at_utc=now_str,
+                        receipt_digest=pr_dg,
+                    )
+
+                    rec_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_RECOVERED,
+                        state_revision=state.state_revision + 1,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "pr_number": existing_pr.pr_number,
+                            "head_branch": existing_pr.head_branch,
+                            "head_sha": existing_pr.head_sha,
+                            "base_branch": existing_pr.base_branch,
+                            "base_sha": existing_pr.base_sha,
+                            "repository": repo,
+                            "receipt_id": pr_receipt.receipt_id,
+                        },
+                        created_at_utc=now_str,
+                    )
+                    self.store.save_event(rec_ev)
+                else:
+                    req_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_CREATE_REQUESTED,
+                        state_revision=state.state_revision + 1,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "repository": repo,
+                            "head_branch": head_branch,
+                            "base_branch": base_branch,
+                            "title": f"feat: {state.root_goal or state.current_task_id}",
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(req_ev)
+                    events.append(req_ev)
+
+                    is_draft = (target_sb == StopBoundary.DRAFT_PR)
+                    pr_identity = await self.pr_provider.create_pr(
+                        repository=repo,
+                        head_branch=head_branch,
+                        base_branch=base_branch,
+                        title=f"feat: {state.root_goal or state.current_task_id}",
+                        body=f"Autonomous PR lifecycle for task {state.current_task_id}\nObjective: {proposal.objective}",
+                        draft=is_draft,
+                        head_sha=candidate_head_sha,
+                    )
+
+                    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    rcpt_payload = {
+                        "schema_version": PULL_REQUEST_RECEIPT_SCHEMA_VERSION,
+                        "run_id": self.run_id,
+                        "task_id": state.current_task_id,
+                        "policy_receipt_id": policy_receipt.receipt_id,
+                        "repository": repo,
+                        "pr_number": pr_identity.pr_number,
+                        "head_branch": pr_identity.head_branch,
+                        "head_sha": pr_identity.head_sha,
+                        "base_branch": pr_identity.base_branch,
+                        "base_sha": pr_identity.base_sha,
+                        "action": pr_action,
+                        "created_at_utc": now_str,
+                    }
+                    pr_dg = compute_pr_receipt_digest(rcpt_payload)
+                    pr_receipt = PullRequestReceipt(
+                        schema_version=PULL_REQUEST_RECEIPT_SCHEMA_VERSION,
+                        receipt_id=f"pr-rcpt-{pr_identity.pr_number}-{self.run_id}",
+                        run_id=self.run_id,
+                        task_id=state.current_task_id,
+                        policy_receipt_id=policy_receipt.receipt_id,
+                        repository=repo,
+                        pr_number=pr_identity.pr_number,
+                        head_branch=pr_identity.head_branch,
+                        head_sha=pr_identity.head_sha,
+                        base_branch=pr_identity.base_branch,
+                        base_sha=pr_identity.base_sha,
+                        action=pr_action,
+                        created_at_utc=now_str,
+                        receipt_digest=pr_dg,
+                    )
+
+                    created_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_CREATED,
+                        state_revision=state.state_revision + 1,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "pr_number": pr_identity.pr_number,
+                            "head_branch": pr_identity.head_branch,
+                            "head_sha": pr_identity.head_sha,
+                            "base_branch": pr_identity.base_branch,
+                            "base_sha": pr_identity.base_sha,
+                            "repository": repo,
+                            "is_draft": pr_identity.is_draft,
+                            "receipt_id": pr_receipt.receipt_id,
+                        },
+                        created_at_utc=now_str,
+                    )
+                    self.store.save_event(created_ev)
+
+                self.pr_receipts.append(pr_receipt.receipt_id)
+                self.active_pr = pr_identity
+                self.active_pr_number = pr_identity.pr_number
+                self.active_pr_head_sha = pr_identity.head_sha
+                continue
+
             if proposal.action_type == NextActionType.WAIT_FOR_CI:
-                target_sha = self.pending_ci_sha or state.current_base_sha
+                target_sha = self.active_pr_head_sha or self.pending_ci_sha or state.current_base_sha
                 self.pending_ci_sha = target_sha
+
+                repo = state.repository or (intent.source_repository if intent else "life2boat/hermes")
+                if self.pr_provider and self.active_pr_number:
+                    try:
+                        cur_pr = await self.pr_provider.get_pr(repo, self.active_pr_number)
+                        if cur_pr.head_sha != target_sha:
+                            events = self.store.load_events(self.run_id)
+                            from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                            chg_ev = create_event(
+                                run_id=self.run_id,
+                                sequence=len(events) + 1,
+                                previous_event_digest=events[-1].event_digest if events else None,
+                                event_type=SupervisorEventType.PR_HEAD_CHANGED,
+                                state_revision=state.state_revision,
+                                task_id=state.current_task_id,
+                                attempt_id=state.current_attempt_id,
+                                intent_digest=state.current_intent_digest,
+                                payload={
+                                    "pr_number": self.active_pr_number,
+                                    "old_head_sha": target_sha,
+                                    "new_head_sha": cur_pr.head_sha,
+                                },
+                                created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                            )
+                            self.store.save_event(chg_ev)
+                            self.active_pr_head_sha = cur_pr.head_sha
+                            self.pending_ci_sha = None
+                            terminal_reason = "PR_HEAD_CHANGED"
+                            break
+                    except Exception:
+                        pass
 
                 events = self.store.load_events(self.run_id)
                 from ai_engineering.supervisor.events import create_event, SupervisorEventType
@@ -571,12 +1043,364 @@ class AutonomousRunCoordinator:
                     break
                 continue
 
-            if proposal.action_type == NextActionType.CREATE_PR:
-                terminal_reason = "PR_PROVIDER_UNAVAILABLE"
-                break
-
             if proposal.action_type == NextActionType.MERGE_IF_GREEN:
-                terminal_reason = "MERGE_PROVIDER_UNAVAILABLE"
+                if self.pr_provider is None or not self.allow_pr_merge:
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": "MERGE_PROVIDER_UNAVAILABLE" if self.pr_provider is None else "PR_MERGE_NOT_ALLOWED",
+                            "message": "PR provider unavailable or merge not allowed",
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "MERGE_PROVIDER_UNAVAILABLE" if self.pr_provider is None else "PR_MERGE_NOT_ALLOWED"
+                    break
+
+                if not self.active_pr_number:
+                    events = self.store.load_events(self.run_id)
+                    from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"error_code": "NO_ACTIVE_PR", "message": "No active PR to merge"},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_NOT_FOUND"
+                    break
+
+                # PolicyEngine Authorization for MERGE
+                intent, work_profile, effective_policy = self._rehydrate_authority_context(state)
+                if work_profile is None or effective_policy is None or intent is None:
+                    terminal_reason = "ASTRA_AUTHORITY_CONTEXT_UNAVAILABLE"
+                    break
+
+                from ai_engineering.supervisor.policy.contracts import (
+                    PolicyRequest,
+                    POLICY_REQUEST_SCHEMA_VERSION,
+                    compute_deterministic_digest,
+                    AutonomyLevel,
+                    ExecutionTarget,
+                    PolicyVerdict,
+                )
+                from ai_engineering.supervisor.policy.engine import evaluate_policy
+
+                req_id = compute_deterministic_digest({
+                    "run_id": self.run_id,
+                    "task_id": state.current_task_id,
+                    "action": "MERGE_IF_GREEN",
+                    "proposal_id": proposal.proposal_id,
+                })
+
+                pol_req = PolicyRequest(
+                    schema_version=POLICY_REQUEST_SCHEMA_VERSION,
+                    request_id=req_id,
+                    run_id=self.run_id,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    decision_id=proposal.proposal_id,
+                    decision_receipt_id=f"rec-{proposal.proposal_id}",
+                    work_profile_id=work_profile.profile_id,
+                    work_profile_digest=work_profile.profile_digest,
+                    current_autonomy_level=state.autonomy_state.current_level if state.autonomy_state else AutonomyLevel.LEVEL_0_OBSERVE,
+                    requested_action="MERGE_IF_GREEN",
+                    requested_effect_classes=(EffectClass.PR_MERGE,),
+                    requested_stop_boundary=StopBoundary.MERGE,
+                    execution_target=ExecutionTarget.DEV,
+                    effective_policy_id=effective_policy.effective_policy_id,
+                    effective_policy_digest=effective_policy.effective_policy_id,
+                    budget_state_digest=state.budget_state.budget_digest if state.budget_state else "",
+                )
+
+                policy_receipt = evaluate_policy(
+                    request=pol_req,
+                    task_intent=intent,
+                    effective_policy=effective_policy,
+                    work_profile=work_profile,
+                    autonomy_state=state.autonomy_state,
+                    budget_state=state.budget_state,
+                )
+
+                events = self.store.load_events(self.run_id)
+                from ai_engineering.supervisor.events import create_event, SupervisorEventType
+                pol_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.POLICY_EVALUATED,
+                    state_revision=state.state_revision + 1,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "receipt_id": policy_receipt.receipt_id,
+                        "verdict": policy_receipt.verdict.value,
+                        "reason_codes": list(policy_receipt.reason_codes),
+                        "work_profile_id": work_profile.profile_id,
+                        "current_level": state.autonomy_state.current_level.value if state.autonomy_state else "UNKNOWN",
+                        "policy_receipt": __import__('dataclasses').asdict(policy_receipt),
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    decision_id=proposal.proposal_id,
+                )
+                self.store.save_event(pol_ev)
+                self.policy_receipts.append(policy_receipt.receipt_id)
+
+                if policy_receipt.verdict != PolicyVerdict.ALLOW:
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 2,
+                        previous_event_digest=pol_ev.event_digest,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision + 2,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": "POLICY_DENIED",
+                            "reason_codes": list(policy_receipt.reason_codes),
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        decision_id=proposal.proposal_id,
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = f"POLICY_DENIED: {','.join(policy_receipt.reason_codes)}"
+                    break
+
+                # Fresh Merge Gate Revalidation
+                repo = state.repository or intent.source_repository or "life2boat/hermes"
+                cur_pr = await self.pr_provider.get_pr(repo, self.active_pr_number)
+
+                if cur_pr.merged:
+                    rec_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 2,
+                        previous_event_digest=pol_ev.event_digest,
+                        event_type=SupervisorEventType.PR_MERGE_RECOVERED,
+                        state_revision=state.state_revision + 2,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "pr_number": cur_pr.pr_number,
+                            "merged_commit_sha": cur_pr.merge_commit_sha,
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(rec_ev)
+                    self.merged_commit_sha = cur_pr.merge_commit_sha
+                    terminal_reason = "GOAL_COMPLETE"
+                    break
+
+                if cur_pr.state != "open":
+                    events = self.store.load_events(self.run_id)
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"error_code": "PR_NOT_OPEN", "state": cur_pr.state},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_NOT_OPEN"
+                    break
+
+                if cur_pr.is_draft:
+                    events = self.store.load_events(self.run_id)
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"error_code": "PR_IS_DRAFT"},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_IS_DRAFT"
+                    break
+
+                if cur_pr.mergeable is False or cur_pr.mergeable_state == "dirty":
+                    events = self.store.load_events(self.run_id)
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"error_code": "PR_CONFLICT", "mergeable_state": cur_pr.mergeable_state},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_CONFLICT"
+                    break
+
+                if self.active_pr_head_sha and cur_pr.head_sha != self.active_pr_head_sha:
+                    events = self.store.load_events(self.run_id)
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_HEAD_CHANGED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "pr_number": cur_pr.pr_number,
+                            "old_head_sha": self.active_pr_head_sha,
+                            "new_head_sha": cur_pr.head_sha,
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "PR_HEAD_MISMATCH"
+                    break
+
+                # Verify fresh green CI
+                ci_green = False
+                events = self.store.load_events(self.run_id)
+                for ev in reversed(events):
+                    if getattr(ev.event_type, "value", str(ev.event_type)) == "CI_GREEN":
+                        if ev.payload and (ev.payload.get("exact_sha") == cur_pr.head_sha or ev.payload.get("sha") == cur_pr.head_sha):
+                            ci_green = True
+                            break
+
+                if not ci_green:
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={"error_code": "CI_NOT_GREEN", "sha": cur_pr.head_sha},
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = "CI_NOT_GREEN"
+                    break
+
+                # Execute Atomic Squash Merge
+                events = self.store.load_events(self.run_id)
+                req_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.PR_MERGE_REQUESTED,
+                    state_revision=state.state_revision + 1,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "repository": repo,
+                        "pr_number": self.active_pr_number,
+                        "exact_head_sha": cur_pr.head_sha,
+                        "merge_method": "squash",
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+                self.store.save_event(req_ev)
+
+                try:
+                    merge_receipt = await self.pr_provider.merge_pr(
+                        repository=repo,
+                        pr_number=self.active_pr_number,
+                        exact_head_sha=cur_pr.head_sha,
+                        merge_method="squash",
+                    )
+                except Exception as e:
+                    code = getattr(e, "code", type(e).__name__)
+                    events = self.store.load_events(self.run_id)
+                    fail_ev = create_event(
+                        run_id=self.run_id,
+                        sequence=len(events) + 1,
+                        previous_event_digest=events[-1].event_digest if events else None,
+                        event_type=SupervisorEventType.PR_MERGE_FAILED,
+                        state_revision=state.state_revision + 1,
+                        task_id=state.current_task_id,
+                        attempt_id=state.current_attempt_id,
+                        intent_digest=state.current_intent_digest,
+                        payload={
+                            "error_code": code,
+                            "error_message": str(e),
+                        },
+                        created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    )
+                    self.store.save_event(fail_ev)
+                    terminal_reason = f"PR_MERGE_FAILED_{code}"
+                    break
+
+                self.merge_receipts.append(merge_receipt.receipt_id)
+                self.merged_commit_sha = merge_receipt.merged_commit_sha
+
+                events = self.store.load_events(self.run_id)
+                merged_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 1,
+                    previous_event_digest=events[-1].event_digest if events else None,
+                    event_type=SupervisorEventType.PR_MERGED,
+                    state_revision=state.state_revision + 1,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "pr_number": self.active_pr_number,
+                        "merged_commit_sha": merge_receipt.merged_commit_sha,
+                        "receipt_id": merge_receipt.receipt_id,
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+                self.store.save_event(merged_ev)
+
+                recon_ev = create_event(
+                    run_id=self.run_id,
+                    sequence=len(events) + 2,
+                    previous_event_digest=merged_ev.event_digest,
+                    event_type=SupervisorEventType.SOURCE_RECONCILED,
+                    state_revision=state.state_revision + 2,
+                    task_id=state.current_task_id,
+                    attempt_id=state.current_attempt_id,
+                    intent_digest=state.current_intent_digest,
+                    payload={
+                        "previous_base_sha": state.current_base_sha,
+                        "new_base_sha": merge_receipt.merged_commit_sha,
+                    },
+                    created_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                )
+                self.store.save_event(recon_ev)
+
+                terminal_reason = "GOAL_COMPLETE"
                 break
 
             decision = self._convert_proposal_to_decision(proposal, state)
@@ -748,12 +1572,13 @@ class AutonomousRunCoordinator:
             "max_provider_calls": self.budget.max_provider_calls
         }
 
+        final_sha = self.merged_commit_sha or final_state.current_base_sha
         receipt_obj = AutonomousRunReceipt(
             schema_version="hermes.autonomous-run-receipt.v1",
             run_id=self.run_id,
             root_task_intent_digest=final_state.current_intent_digest,
             initial_source_sha=initial_sha,
-            final_source_sha=final_state.current_base_sha,
+            final_source_sha=final_sha,
             iterations=self.iterations,
             child_tasks=self.child_tasks,
             budgets=budget_dict,
@@ -766,6 +1591,10 @@ class AutonomousRunCoordinator:
             receipt_digest="",
             astra_receipts=self.astra_receipts,
             ci_receipts=self.ci_receipts,
+            pr_receipts=self.pr_receipts,
+            merge_receipts=self.merge_receipts,
+            pr_number=self.active_pr_number,
+            merged_commit_sha=self.merged_commit_sha,
         )
 
         digest_str = json.dumps({

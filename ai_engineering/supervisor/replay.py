@@ -563,7 +563,7 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
         )
 
     elif et == SupervisorEventType.SOURCE_RECONCILED:
-        new_base = event.verified_result_id or state.current_base_sha
+        new_base = (event.payload.get("new_base_sha") if event.payload else None) or event.verified_result_id or state.current_base_sha
         return replace(
             state,
             current_base_sha=new_base,
@@ -581,6 +581,15 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
         SupervisorEventType.ASTRA_PROVIDER_FAILED,
         SupervisorEventType.CI_WAIT_STARTED,
         SupervisorEventType.CI_STATUS_OBSERVED,
+        SupervisorEventType.PR_CREATE_REQUESTED,
+        SupervisorEventType.PR_CREATED,
+        SupervisorEventType.PR_RECOVERED,
+        SupervisorEventType.PR_CREATE_FAILED,
+        SupervisorEventType.PR_HEAD_CHANGED,
+        SupervisorEventType.PR_MERGE_REQUESTED,
+        SupervisorEventType.PR_MERGED,
+        SupervisorEventType.PR_MERGE_RECOVERED,
+        SupervisorEventType.PR_MERGE_FAILED,
     ):
         return replace(
             state,

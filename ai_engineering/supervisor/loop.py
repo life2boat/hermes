@@ -601,6 +601,8 @@ class SupervisorLoop:
         new_base_sha: str | None = None,
         new_attempt_id: str | None = None,
         execution_target: ExecutionTarget | None = None,
+        requested_effect_classes: tuple[EffectClass, ...] | None = None,
+        requested_stop_boundary: StopBoundary | None = None,
     ) -> tuple[DecisionReceipt, SupervisorState]:
         """Validate and accept a decision.
         If a work profile is bound, generates candidate child task,
@@ -797,14 +799,20 @@ class SupervisorLoop:
         })
         target = execution_target or (work_profile.allowed_targets[0] if work_profile.allowed_targets else ExecutionTarget.DEV)
 
-        req_effects = []
-        for m in candidate_intent.allowed_mutations:
-            try:
-                req_effects.append(EffectClass(m))
-            except (ValueError, KeyError):
-                pass
-        if not req_effects:
-            req_effects = [EffectClass.READ_ONLY]
+        if requested_effect_classes is not None:
+            final_effects = tuple(requested_effect_classes)
+        else:
+            req_effects = []
+            for m in candidate_intent.allowed_mutations:
+                try:
+                    req_effects.append(EffectClass(m))
+                except (ValueError, KeyError):
+                    pass
+            if not req_effects:
+                req_effects = [EffectClass.READ_ONLY]
+            final_effects = tuple(req_effects)
+
+        final_stop_boundary = requested_stop_boundary if requested_stop_boundary is not None else candidate_intent.stop_boundary
 
         policy_request = PolicyRequest(
             schema_version=POLICY_REQUEST_SCHEMA_VERSION,
@@ -819,8 +827,8 @@ class SupervisorLoop:
             work_profile_digest=work_profile.profile_digest,
             current_autonomy_level=state.autonomy_state.current_level,
             requested_action=decision.action.value,
-            requested_effect_classes=tuple(req_effects),
-            requested_stop_boundary=candidate_intent.stop_boundary,
+            requested_effect_classes=final_effects,
+            requested_stop_boundary=final_stop_boundary,
             execution_target=target,
             effective_policy_id=eff_policy.effective_policy_id,
             effective_policy_digest=eff_policy.effective_policy_id,

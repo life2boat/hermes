@@ -4,6 +4,7 @@ Defines:
 - PullRequestIdentity (hermes.pull-request-identity.v1)
 - PullRequestReceipt (hermes.pull-request-receipt.v1)
 - MergeReceipt (hermes.merge-receipt.v1)
+- CandidateHeadIdentity (hermes.candidate-head-identity.v1)
 - Protocol PullRequestProvider
 - GitHubPullRequestProvider (real REST API provider, strictly no --admin)
 - FakeGitHubPullRequestBackend (deterministic offline test provider)
@@ -25,6 +26,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 PULL_REQUEST_IDENTITY_SCHEMA_VERSION = "hermes.pull-request-identity.v1"
 PULL_REQUEST_RECEIPT_SCHEMA_VERSION = "hermes.pull-request-receipt.v1"
 MERGE_RECEIPT_SCHEMA_VERSION = "hermes.merge-receipt.v1"
+CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION = "hermes.candidate-head-identity.v1"
 
 _SECRET_PATTERN = re.compile(
     r"(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer\s+[A-Za-z0-9_.-]+|token\s+[A-Za-z0-9_.-]+)",
@@ -37,6 +39,16 @@ def scrub_secrets(text: str) -> str:
     if not text:
         return ""
     return _SECRET_PATTERN.sub("[REDACTED]", str(text))
+
+
+def _clean_ref(ref: str) -> str:
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    if ref.startswith("refs/remotes/origin/"):
+        return ref[len("refs/remotes/origin/"):]
+    if ref.startswith("refs/remotes/github/"):
+        return ref[len("refs/remotes/github/"):]
+    return ref
 
 
 class PRProviderError(Exception):
@@ -76,6 +88,24 @@ class PRValidationFailedError(PRProviderError):
 
 class PRAuthorityDeniedError(PRProviderError):
     code: str = "PR_AUTHORITY_DENIED"
+
+
+class PRTimeoutError(PRProviderError):
+    code: str = "PR_TIMEOUT"
+
+    def __init__(self, message: str, code: str = "PR_TIMEOUT") -> None:
+        super().__init__(message, code=code)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateHeadIdentity:
+    schema_version: str = CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION
+    repository: str = ""
+    remote_name: str = ""
+    head_ref: str = ""
+    head_sha: str = ""
+    base_ref: str = ""
+    base_sha: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,24 +155,44 @@ class MergeReceipt:
     receipt_id: str
     run_id: str
     task_id: str
+    attempt_id: str
     policy_receipt_id: str
+    decision_receipt_id: str
     repository: str
     pr_number: int
-    head_sha: str
-    base_sha: str
-    merged_commit_sha: str
+    base_sha_before_merge: str
+    pr_head_sha: str
+    ci_snapshot_digest: str
+    qualification_main_sha: str
     merge_method: str
+    merge_commit_sha: str
     merged_at_utc: str
     receipt_digest: str
 
+    @property
+    def head_sha(self) -> str:
+        return self.pr_head_sha
+
+    @property
+    def base_sha(self) -> str:
+        return self.base_sha_before_merge
+
+    @property
+    def merged_commit_sha(self) -> str:
+        return self.merge_commit_sha
+
 
 def compute_pr_receipt_digest(data: Mapping[str, Any]) -> str:
-    canonical = json.dumps(dict(data), sort_keys=True, separators=(",", ":"))
+    d = dict(data)
+    d.pop("receipt_digest", None)
+    canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def compute_merge_receipt_digest(data: Mapping[str, Any]) -> str:
-    canonical = json.dumps(dict(data), sort_keys=True, separators=(",", ":"))
+    d = dict(data)
+    d.pop("receipt_digest", None)
+    canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -152,7 +202,7 @@ class PullRequestProvider(Protocol):
         ...
 
     async def find_existing_pr(
-        self, repository: str, head_branch: str, base_branch: str
+        self, repository: str, head_branch: str, base_branch: str, exact_head_sha: str | None = None
     ) -> PullRequestIdentity | None:
         ...
 
@@ -176,18 +226,62 @@ class PullRequestProvider(Protocol):
         commit_title: str | None = None,
         commit_message: str | None = None,
         merge_method: str = "squash",
+        run_id: str = "unknown",
+        task_id: str = "unknown",
+        attempt_id: str = "unknown",
+        policy_receipt_id: str = "unknown",
+        decision_receipt_id: str = "unknown",
+        ci_snapshot_digest: str = "unknown",
+        qualification_main_sha: str = "",
+        base_sha_before_merge: str = "",
     ) -> MergeReceipt:
+        ...
+
+    async def get_remote_head_sha(self, repository: str, ref: str) -> str | None:
+        ...
+
+    async def is_ancestor(self, repository: str, ancestor_sha: str, descendant_sha: str) -> bool:
         ...
 
 
 class FakeGitHubPullRequestBackend(PullRequestProvider):
     """In-memory fake implementation of GitHub PR API for deterministic offline testing."""
 
-    def __init__(self) -> None:
+    def __init__(self, auto_seed_remote_head: bool = True) -> None:
         self._prs: dict[int, PullRequestIdentity] = {}
         self._next_pr_number: int = 100
         self.latest_receipt: PullRequestReceipt | None = None
         self.latest_merge_receipt: MergeReceipt | None = None
+        self._remote_heads: dict[tuple[str, str], str] = {}
+        self._ancestry: set[tuple[str, str, str]] = set()
+        self.simulate_create_timeout: bool = False
+        self.simulate_merge_timeout: bool = False
+        self.auto_seed_remote_head: bool = auto_seed_remote_head
+        self.merge_call_count: int = 0
+
+    def set_remote_head(self, repository: str, ref: str, sha: str) -> None:
+        clean = _clean_ref(ref)
+        self._remote_heads[(repository, clean)] = sha
+        self._remote_heads[(repository, ref)] = sha
+
+    def add_ancestry(self, repository: str, ancestor_sha: str, descendant_sha: str) -> None:
+        self._ancestry.add((repository, ancestor_sha, descendant_sha))
+
+    async def get_remote_head_sha(self, repository: str, ref: str) -> str | None:
+        clean = _clean_ref(ref)
+        if (repository, clean) in self._remote_heads:
+            return self._remote_heads[(repository, clean)]
+        if (repository, ref) in self._remote_heads:
+            return self._remote_heads[(repository, ref)]
+        if clean in ("main", "master") and self._prs:
+            first_pr = next(iter(self._prs.values()))
+            return first_pr.base_sha
+        return None
+
+    async def is_ancestor(self, repository: str, ancestor_sha: str, descendant_sha: str) -> bool:
+        if ancestor_sha == descendant_sha:
+            return True
+        return (repository, ancestor_sha, descendant_sha) in self._ancestry
 
     async def get_pr(self, repository: str, pr_number: int) -> PullRequestIdentity:
         if pr_number not in self._prs:
@@ -195,15 +289,35 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
         return self._prs[pr_number]
 
     async def find_existing_pr(
-        self, repository: str, head_branch: str, base_branch: str
+        self, repository: str, head_branch: str, base_branch: str, exact_head_sha: str | None = None
     ) -> PullRequestIdentity | None:
-        clean_head = head_branch.split(":")[-1]
+        clean_head = _clean_ref(head_branch)
+        clean_base = _clean_ref(base_branch)
+        matches = []
         for pr in self._prs.values():
-            if pr.repository == repository and pr.state == "open":
-                pr_clean_head = pr.head_branch.split(":")[-1]
-                if pr_clean_head == clean_head and pr.base_branch == base_branch:
-                    return pr
-        return None
+            if (
+                pr.repository == repository
+                and pr.state == "open"
+                and _clean_ref(pr.head_branch) == clean_head
+                and _clean_ref(pr.base_branch) == clean_base
+            ):
+                matches.append(pr)
+
+        if len(matches) > 1:
+            raise PRValidationFailedError(
+                f"Multiple open PRs match {head_branch}: {[p.pr_number for p in matches]}",
+                code="PR_IDENTITY_AMBIGUOUS",
+            )
+        if not matches:
+            return None
+
+        found = matches[0]
+        if exact_head_sha is not None and found.head_sha != exact_head_sha:
+            raise PRHeadMismatchError(
+                f"Existing PR #{found.pr_number} head SHA mismatch: expected {exact_head_sha}, found {found.head_sha}",
+                code="PR_HEAD_SHA_MISMATCH",
+            )
+        return found
 
     async def create_pr(
         self,
@@ -215,7 +329,7 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
         draft: bool = False,
         head_sha: str | None = None,
     ) -> PullRequestIdentity:
-        existing = await self.find_existing_pr(repository, head_branch, base_branch)
+        existing = await self.find_existing_pr(repository, head_branch, base_branch, exact_head_sha=head_sha)
         if existing:
             return existing
 
@@ -249,6 +363,16 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
             updated_at_utc=now,
         )
         self._prs[pr_num] = pr
+
+        # Auto-seed remote head if not already set
+        if (repository, _clean_ref(head_branch)) not in self._remote_heads:
+            self.set_remote_head(repository, head_branch, head_sha)
+        if (repository, _clean_ref(base_branch)) not in self._remote_heads:
+            self.set_remote_head(repository, base_branch, base_sha)
+
+        if self.simulate_create_timeout:
+            raise PRTimeoutError("Simulated network timeout creating PR", code="PR_TIMEOUT")
+
         return pr
 
     async def merge_pr(
@@ -259,7 +383,16 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
         commit_title: str | None = None,
         commit_message: str | None = None,
         merge_method: str = "squash",
+        run_id: str = "unknown",
+        task_id: str = "unknown",
+        attempt_id: str = "unknown",
+        policy_receipt_id: str = "unknown",
+        decision_receipt_id: str = "unknown",
+        ci_snapshot_digest: str = "unknown",
+        qualification_main_sha: str = "",
+        base_sha_before_merge: str = "",
     ) -> MergeReceipt:
+        self.merge_call_count += 1
         pr = await self.get_pr(repository, pr_number)
 
         if pr.state != "open":
@@ -303,36 +436,53 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
         )
         self._prs[pr_number] = updated_pr
 
+        # Update remote main head to merged commit sha by default
+        self.set_remote_head(repository, "refs/heads/main", merged_sha)
+        self.set_remote_head(repository, "main", merged_sha)
+
         receipt_data = {
             "schema_version": MERGE_RECEIPT_SCHEMA_VERSION,
-            "run_id": "",
-            "task_id": "",
-            "policy_receipt_id": "",
+            "receipt_id": f"merge-rcpt-{pr_number}-{run_id}",
+            "run_id": run_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "policy_receipt_id": policy_receipt_id,
+            "decision_receipt_id": decision_receipt_id,
             "repository": repository,
             "pr_number": pr_number,
-            "head_sha": exact_head_sha,
-            "base_sha": pr.base_sha,
-            "merged_commit_sha": merged_sha,
+            "base_sha_before_merge": base_sha_before_merge or pr.base_sha,
+            "pr_head_sha": exact_head_sha,
+            "ci_snapshot_digest": ci_snapshot_digest,
+            "qualification_main_sha": qualification_main_sha or pr.base_sha,
             "merge_method": merge_method,
+            "merge_commit_sha": merged_sha,
             "merged_at_utc": now,
         }
         r_dg = compute_merge_receipt_digest(receipt_data)
         receipt = MergeReceipt(
             schema_version=MERGE_RECEIPT_SCHEMA_VERSION,
-            receipt_id=f"merge-rcpt-{pr_number}",
-            run_id="",
-            task_id="",
-            policy_receipt_id="",
+            receipt_id=f"merge-rcpt-{pr_number}-{run_id}",
+            run_id=run_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            policy_receipt_id=policy_receipt_id,
+            decision_receipt_id=decision_receipt_id,
             repository=repository,
             pr_number=pr_number,
-            head_sha=exact_head_sha,
-            base_sha=pr.base_sha,
-            merged_commit_sha=merged_sha,
+            base_sha_before_merge=base_sha_before_merge or pr.base_sha,
+            pr_head_sha=exact_head_sha,
+            ci_snapshot_digest=ci_snapshot_digest,
+            qualification_main_sha=qualification_main_sha or pr.base_sha,
             merge_method=merge_method,
+            merge_commit_sha=merged_sha,
             merged_at_utc=now,
             receipt_digest=r_dg,
         )
         self.latest_merge_receipt = receipt
+
+        if self.simulate_merge_timeout:
+            raise PRTimeoutError("Simulated network timeout merging PR", code="PR_TIMEOUT")
+
         return receipt
 
     def set_pr(self, pr: PullRequestIdentity) -> None:
@@ -361,6 +511,7 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
             created_at_utc=pr.created_at_utc,
             updated_at_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
+        self.set_remote_head(pr.repository, pr.head_branch, new_sha)
 
     def simulate_conflict(self, pr_number: int) -> None:
         pr = self._prs[pr_number]
@@ -412,9 +563,12 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
 
 
 class GitHubPullRequestProvider(PullRequestProvider):
-    """Real GitHub Pull Request Provider using REST API.
-    Strictly NO --admin in merge calls!
-    All exceptions and logs are secret-scrubbed.
+    """Real REST API client for GitHub Pull Requests.
+
+    Security guardrails:
+    - Never passes --admin.
+    - Scrubs tokens from all error messages.
+    - Validates exact SHA on squash merge.
     """
 
     def __init__(
@@ -423,11 +577,9 @@ class GitHubPullRequestProvider(PullRequestProvider):
         base_url: str = "https://api.github.com",
         timeout_seconds: float = 30.0,
     ) -> None:
-        self.token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        self.token = token or os.environ.get("GITHUB_TOKEN")
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
-        self.latest_receipt: PullRequestReceipt | None = None
-        self.latest_merge_receipt: MergeReceipt | None = None
 
     def _get_headers(self) -> dict[str, str]:
         headers = {
@@ -483,17 +635,46 @@ class GitHubPullRequestProvider(PullRequestProvider):
             base_branch=base_data.get("ref", ""),
             base_sha=base_data.get("sha", ""),
             title=data.get("title", ""),
-            body=data.get("body") or "",
-            is_draft=bool(data.get("draft", False)),
+            body=data.get("body", "") or "",
+            is_draft=data.get("draft", False),
             state=data.get("state", "open"),
             mergeable=data.get("mergeable"),
-            mergeable_state=data.get("mergeable_state") or "unknown",
-            merged=bool(data.get("merged", False)),
+            mergeable_state=data.get("mergeable_state", "unknown"),
+            merged=data.get("merged", False),
             merged_at=data.get("merged_at"),
             merge_commit_sha=data.get("merge_commit_sha"),
-            created_at_utc=data.get("created_at") or "",
-            updated_at_utc=data.get("updated_at") or "",
+            created_at_utc=data.get("created_at", ""),
+            updated_at_utc=data.get("updated_at", ""),
         )
+
+    async def get_remote_head_sha(self, repository: str, ref: str) -> str | None:
+        clean = _clean_ref(ref)
+        url = f"{self.base_url}/repos/{repository}/commits/{clean}"
+        try:
+            data = await asyncio.to_thread(self._sync_request, "GET", url)
+            return data.get("sha")
+        except PRNotFoundError:
+            return None
+        except Exception:
+            ref_path = f"heads/{clean}" if not ref.startswith("refs/") else ref.replace("refs/", "")
+            url = f"{self.base_url}/repos/{repository}/git/ref/{ref_path}"
+            try:
+                data = await asyncio.to_thread(self._sync_request, "GET", url)
+                return data.get("object", {}).get("sha")
+            except Exception:
+                return None
+
+    async def is_ancestor(self, repository: str, ancestor_sha: str, descendant_sha: str) -> bool:
+        if ancestor_sha == descendant_sha:
+            return True
+        url = f"{self.base_url}/repos/{repository}/compare/{ancestor_sha}...{descendant_sha}"
+        try:
+            data = await asyncio.to_thread(self._sync_request, "GET", url)
+            status = data.get("status")
+            behind_by = data.get("behind_by", 0)
+            return status in ("ahead", "identical") and behind_by == 0
+        except Exception:
+            return False
 
     async def get_pr(self, repository: str, pr_number: int) -> PullRequestIdentity:
         url = f"{self.base_url}/repos/{repository}/pulls/{pr_number}"
@@ -501,14 +682,43 @@ class GitHubPullRequestProvider(PullRequestProvider):
         return self._parse_pr(data, repository)
 
     async def find_existing_pr(
-        self, repository: str, head_branch: str, base_branch: str
+        self, repository: str, head_branch: str, base_branch: str, exact_head_sha: str | None = None
     ) -> PullRequestIdentity | None:
-        clean_head = head_branch.split(":")[-1]
-        url = f"{self.base_url}/repos/{repository}/pulls?state=open&head={clean_head}&base={base_branch}"
+        clean_head = _clean_ref(head_branch)
+        clean_base = _clean_ref(base_branch)
+        owner = repository.split("/")[0] if "/" in repository else ""
+        head_query = f"{owner}:{clean_head}" if owner else clean_head
+        url = f"{self.base_url}/repos/{repository}/pulls?state=open&head={head_query}&base={clean_base}"
         prs = await asyncio.to_thread(self._sync_request, "GET", url)
-        if isinstance(prs, list) and prs:
-            return self._parse_pr(prs[0], repository)
-        return None
+        if not isinstance(prs, list):
+            return None
+
+        matching = []
+        for item in prs:
+            pr = self._parse_pr(item, repository)
+            if (
+                pr.repository == repository
+                and pr.state == "open"
+                and _clean_ref(pr.head_branch) == clean_head
+                and _clean_ref(pr.base_branch) == clean_base
+            ):
+                matching.append(pr)
+
+        if len(matching) > 1:
+            raise PRValidationFailedError(
+                f"Multiple open PRs match {head_branch}: {[p.pr_number for p in matching]}",
+                code="PR_IDENTITY_AMBIGUOUS",
+            )
+        if not matching:
+            return None
+
+        found = matching[0]
+        if exact_head_sha is not None and found.head_sha != exact_head_sha:
+            raise PRHeadMismatchError(
+                f"Existing PR #{found.pr_number} head SHA mismatch: expected {exact_head_sha}, found {found.head_sha}",
+                code="PR_HEAD_SHA_MISMATCH",
+            )
+        return found
 
     async def create_pr(
         self,
@@ -529,7 +739,22 @@ class GitHubPullRequestProvider(PullRequestProvider):
             "draft": draft,
         }
         data = await asyncio.to_thread(self._sync_request, "POST", url, payload)
-        return self._parse_pr(data, repository)
+        pr = self._parse_pr(data, repository)
+
+        # Post-create exact identity re-fetch and check
+        refetched = await self.get_pr(repository, pr.pr_number)
+        if (
+            refetched.repository != repository
+            or _clean_ref(refetched.base_branch) != _clean_ref(base_branch)
+            or _clean_ref(refetched.head_branch) != _clean_ref(head_branch)
+            or (head_sha is not None and refetched.head_sha != head_sha)
+        ):
+            raise PRValidationFailedError(
+                f"Created PR identity mismatch: repo={refetched.repository}, base={refetched.base_branch}, head={refetched.head_branch}, sha={refetched.head_sha}",
+                code="PR_IDENTITY_MISMATCH",
+            )
+
+        return refetched
 
     async def merge_pr(
         self,
@@ -539,7 +764,33 @@ class GitHubPullRequestProvider(PullRequestProvider):
         commit_title: str | None = None,
         commit_message: str | None = None,
         merge_method: str = "squash",
+        run_id: str = "unknown",
+        task_id: str = "unknown",
+        attempt_id: str = "unknown",
+        policy_receipt_id: str = "unknown",
+        decision_receipt_id: str = "unknown",
+        ci_snapshot_digest: str = "unknown",
+        qualification_main_sha: str = "",
+        base_sha_before_merge: str = "",
     ) -> MergeReceipt:
+        self.merge_call_count += 1
+        pr = await self.get_pr(repository, pr_number)
+
+        if pr.state != "open":
+            raise PRMergeFailedError(f"PR #{pr_number} is {pr.state}, cannot merge", code="PR_NOT_OPEN")
+
+        if pr.is_draft:
+            raise PRMergeFailedError(f"PR #{pr_number} is draft, cannot merge", code="PR_IS_DRAFT")
+
+        if pr.mergeable is False or pr.mergeable_state == "dirty":
+            raise PRConflictError(f"PR #{pr_number} has merge conflicts", code="PR_CONFLICT")
+
+        if exact_head_sha != pr.head_sha:
+            raise PRHeadMismatchError(
+                f"Head SHA mismatch for PR #{pr_number}: expected {exact_head_sha}, found {pr.head_sha}",
+                code="PR_HEAD_MISMATCH",
+            )
+
         url = f"{self.base_url}/repos/{repository}/pulls/{pr_number}/merge"
         payload: dict[str, Any] = {
             "sha": exact_head_sha,
@@ -553,41 +804,47 @@ class GitHubPullRequestProvider(PullRequestProvider):
         resp = await asyncio.to_thread(self._sync_request, "PUT", url, payload)
 
         if not resp.get("merged"):
-            raise PRMergeFailedError(
-                scrub_secrets(f"GitHub merge failed: {resp.get('message', 'PR not merged')}"),
-                code="PR_MERGE_FAILED",
-            )
+            msg = resp.get("message", "Merge rejected by GitHub")
+            raise PRMergeFailedError(msg, code="PR_MERGE_FAILED")
 
         merged_sha = resp.get("sha", "")
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         receipt_data = {
             "schema_version": MERGE_RECEIPT_SCHEMA_VERSION,
-            "run_id": "",
-            "task_id": "",
-            "policy_receipt_id": "",
+            "receipt_id": f"merge-rcpt-{pr_number}-{run_id}",
+            "run_id": run_id,
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "policy_receipt_id": policy_receipt_id,
+            "decision_receipt_id": decision_receipt_id,
             "repository": repository,
             "pr_number": pr_number,
-            "head_sha": exact_head_sha,
-            "base_sha": "",
-            "merged_commit_sha": merged_sha,
+            "base_sha_before_merge": base_sha_before_merge or pr.base_sha,
+            "pr_head_sha": exact_head_sha,
+            "ci_snapshot_digest": ci_snapshot_digest,
+            "qualification_main_sha": qualification_main_sha or pr.base_sha,
             "merge_method": merge_method,
+            "merge_commit_sha": merged_sha,
             "merged_at_utc": now,
         }
         r_dg = compute_merge_receipt_digest(receipt_data)
-        receipt = MergeReceipt(
+        return MergeReceipt(
             schema_version=MERGE_RECEIPT_SCHEMA_VERSION,
-            receipt_id=f"merge-rcpt-{pr_number}",
-            run_id="",
-            task_id="",
-            policy_receipt_id="",
+            receipt_id=f"merge-rcpt-{pr_number}-{run_id}",
+            run_id=run_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            policy_receipt_id=policy_receipt_id,
+            decision_receipt_id=decision_receipt_id,
             repository=repository,
             pr_number=pr_number,
-            head_sha=exact_head_sha,
-            base_sha="",
-            merged_commit_sha=merged_sha,
+            base_sha_before_merge=base_sha_before_merge or pr.base_sha,
+            pr_head_sha=exact_head_sha,
+            ci_snapshot_digest=ci_snapshot_digest,
+            qualification_main_sha=qualification_main_sha or pr.base_sha,
             merge_method=merge_method,
+            merge_commit_sha=merged_sha,
             merged_at_utc=now,
             receipt_digest=r_dg,
         )
-        self.latest_merge_receipt = receipt
-        return receipt

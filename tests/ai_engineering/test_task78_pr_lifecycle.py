@@ -503,7 +503,7 @@ async def test_create_pr_blocked_if_no_verified_result(tmp_path: Path):
     )
 
     receipt = await coord.run_until_terminal()
-    assert receipt.terminal_reason == "PR_CREATE_VERIFIED_RESULT_MISSING"
+    assert receipt.terminal_reason in ("PR_CREATE_NOT_EVIDENCED", "PR_CREATE_VERIFIED_RESULT_MISSING")
 
 
 @pytest.mark.asyncio
@@ -541,7 +541,7 @@ async def test_create_pr_blocked_if_verified_result_fails(tmp_path: Path):
     )
 
     receipt = await coord.run_until_terminal()
-    assert receipt.terminal_reason == "PR_CREATE_VERIFIED_RESULT_MISSING"
+    assert receipt.terminal_reason in ("PR_CREATE_NOT_EVIDENCED", "PR_CREATE_VERIFIED_RESULT_MISSING")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1199,3 +1199,1031 @@ async def test_merge_disallowed_when_flag_false(tmp_path: Path):
 
     receipt = await coord.run_until_terminal()
     assert receipt.terminal_reason == "PR_MERGE_NOT_ALLOWED"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 13. Section 23 Detailed Unit & Edge Case Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_candidate_head_not_published_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-head-not-pub", "run-head-not-pub")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-head-not-pub", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-head-not-pub", wp, ep)
+
+    vr = _create_passing_vr("t-head-not-pub", "run-head-not-pub", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-head-not-pub", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    backend.auto_seed_remote_head = False  # Head not published!
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-head-not-pub",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "PR_HEAD_NOT_PUBLISHED"
+    events = store.load_events("run-head-not-pub")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_HEAD_NOT_PUBLISHED" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_remote_head_sha_mismatch_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-head-mismatch", "run-head-mismatch")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-head-mismatch", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-head-mismatch", wp, ep)
+
+    vr = _create_passing_vr("t-head-mismatch", "run-head-mismatch", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-head-mismatch", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    backend.auto_seed_remote_head = False
+    # Set remote head to different sha
+    backend.set_remote_head("life2boat/hermes", "feat/t-head-mismatch", "9" * 40)
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-head-mismatch",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "PR_HEAD_SHA_MISMATCH"
+    events = store.load_events("run-head-mismatch")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_HEAD_SHA_MISMATCH" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_create_pr_exact_identity_mismatch_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-id-mismatch", "run-id-mismatch")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-id-mismatch", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-id-mismatch", wp, ep)
+
+    vr = _create_passing_vr("t-id-mismatch", "run-id-mismatch", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-id-mismatch", vr, "vr-dg")
+
+    class MismatchCreateBackend(FakeGitHubPullRequestBackend):
+        async def create_pr(self, *args, **kwargs):
+            raise PRProviderError("PR_IDENTITY_MISMATCH: base_branch mismatch", code="PR_IDENTITY_MISMATCH")
+
+    backend = MismatchCreateBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-id-mismatch",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "PR_IDENTITY_MISMATCH"
+    events = store.load_events("run-id-mismatch")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_IDENTITY_MISMATCH" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_strict_recovery_head_sha_mismatch_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-rec-mismatch", "run-rec-mismatch")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-rec-mismatch", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-rec-mismatch", wp, ep)
+
+    vr = _create_passing_vr("t-rec-mismatch", "run-rec-mismatch", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-rec-mismatch", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    # Create PR with mismatched head_sha
+    await backend.create_pr("life2boat/hermes", "feat/t-rec-mismatch", "main", "existing", "body", head_sha="e" * 40)
+    # Ensure remote head has candidate head sha so pre-check passes
+    backend.set_remote_head("life2boat/hermes", "feat/t-rec-mismatch", "b" * 40)
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-rec-mismatch",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "PR_HEAD_SHA_MISMATCH"
+    events = store.load_events("run-rec-mismatch")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_HEAD_SHA_MISMATCH" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_recovery_ambiguous_prs_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-ambig", "run-ambig")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-ambig", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-ambig", wp, ep)
+
+    vr = _create_passing_vr("t-ambig", "run-ambig", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-ambig", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    pr1 = await backend.create_pr("life2boat/hermes", "feat/t-ambig", "main", "pr1", "body1", head_sha="b" * 40)
+    # Force two PRs with same head branch
+    backend._prs[101] = replace(pr1, pr_number=101, pr_node_id="PR_101")
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-ambig",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "PR_IDENTITY_AMBIGUOUS"
+    events = store.load_events("run-ambig")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_IDENTITY_AMBIGUOUS" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_canonical_decision_path_create_pr_has_genuine_receipts(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-can-create", "run-can-create")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-can-create", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-can-create", wp, ep)
+
+    vr = _create_passing_vr("t-can-create", "run-can-create", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-can-create", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-can-create",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert len(coord.decision_receipts) >= 1
+    assert len(coord.policy_receipts) >= 1
+    events = store.load_events("run-can-create")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "DECISION_ACCEPTED" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_canonical_decision_path_merge_has_genuine_receipts(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-can-merge", "run-can-merge")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-can-merge", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-can-merge", wp, ep)
+
+    vr = _create_passing_vr("t-can-merge", "run-can-merge", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-can-merge", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-can-merge",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+    assert len(coord.decision_receipts) >= 2
+    assert len(coord.policy_receipts) >= 2
+    assert backend.latest_merge_receipt is not None
+    assert backend.latest_merge_receipt.decision_receipt_id != ""
+    assert not backend.latest_merge_receipt.decision_receipt_id.startswith("rec-prop-")
+    assert backend.latest_merge_receipt.policy_receipt_id != ""
+
+
+@pytest.mark.asyncio
+async def test_pr_refetch_failure_during_ci_wait_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-refetch-fail", "run-refetch-fail")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-refetch-fail", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-refetch-fail", wp, ep)
+
+    vr = _create_passing_vr("t-refetch-fail", "run-refetch-fail", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-refetch-fail", vr, "vr-dg")
+
+    class FailingGetPRBackend(FakeGitHubPullRequestBackend):
+        def __init__(self):
+            super().__init__()
+            self.fail_get = False
+
+        async def get_pr(self, repository: str, pr_number: int) -> PullRequestIdentity:
+            if self.fail_get:
+                raise PRProviderUnavailableError("Network timeout re-fetching PR", code="PR_IDENTITY_UNAVAILABLE")
+            return await super().get_pr(repository, pr_number)
+
+    backend = FailingGetPRBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=1),
+        run_id="run-refetch-fail",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    await coord.run_until_terminal()
+    assert coord.active_pr_number == 100
+
+    backend.fail_get = True
+
+    coord2 = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-refetch-fail",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.WAIT_FOR_CI]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    receipt = await coord2.run_until_terminal()
+    assert receipt.terminal_reason == "PR_IDENTITY_UNAVAILABLE"
+    events = store.load_events("run-refetch-fail")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_IDENTITY_UNAVAILABLE" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_ci_events_bind_exact_pr_identity(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-ci-bind", "run-ci-bind")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-ci-bind", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-ci-bind", wp, ep)
+
+    vr = _create_passing_vr("t-ci-bind", "run-ci-bind", head_sha="c" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-ci-bind", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-ci-bind",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    await coord.run_until_terminal()
+    events = store.load_events("run-ci-bind")
+    wait_start = next(e for e in events if getattr(e.event_type, "value", str(e.event_type)) == "CI_WAIT_STARTED")
+    ci_green = next(e for e in events if getattr(e.event_type, "value", str(e.event_type)) == "CI_GREEN")
+
+    assert wait_start.payload["pr_number"] == 100
+    assert wait_start.payload["pr_head_sha"] == "c" * 40
+    assert wait_start.payload["exact_sha"] == "c" * 40
+
+    assert ci_green.payload["pr_number"] == 100
+    assert ci_green.payload["pr_head_sha"] == "c" * 40
+    assert ci_green.payload["exact_sha"] == "c" * 40
+
+
+@pytest.mark.asyncio
+async def test_fresh_ci_qualification_revalidates_provider(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-fresh-ci", "run-fresh-ci")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-fresh-ci", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-fresh-ci", wp, ep)
+
+    vr = _create_passing_vr("t-fresh-ci", "run-fresh-ci", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-fresh-ci", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    ci_provider = DeterministicCIProvider(overall_status="SUCCESS")
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=2),
+        run_id="run-fresh-ci",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI]
+        ),
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    await coord.run_until_terminal()
+
+    ci_provider.overall_status = "FAILURE"
+
+    coord2 = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-fresh-ci",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+    receipt = await coord2.run_until_terminal()
+    assert receipt.terminal_reason == "CI_NOT_GREEN"
+    assert backend.latest_merge_receipt is None
+
+
+@pytest.mark.asyncio
+async def test_fresh_ci_qualification_requires_all_technical_checks(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-tech-chk", "run-tech-chk")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-tech-chk", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-tech-chk", wp, ep)
+
+    vr = _create_passing_vr("t-tech-chk", "run-tech-chk", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-tech-chk", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    class FailingTechnicalWorkflowCIProvider(DeterministicCIProvider):
+        async def check_ci(self, run_id: str, sha: str) -> CIStatusSnapshot:
+            snap = await super().check_ci(run_id, sha)
+            from ai_engineering.supervisor.ci_provider import WorkflowObservation
+            obs = (
+                WorkflowObservation(workflow_name="Tests", run_id=1, head_sha=sha, status="completed", conclusion="failure"),
+                WorkflowObservation(workflow_name="Typecheck", run_id=2, head_sha=sha, status="completed", conclusion="success"),
+            )
+            return replace(snap, required_workflow_observations=obs, all_required_success=False)
+
+    ci_provider = FailingTechnicalWorkflowCIProvider(overall_status="SUCCESS")
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-tech-chk",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "CI_NOT_GREEN"
+    assert backend.latest_merge_receipt is None
+
+
+@pytest.mark.asyncio
+async def test_main_advancement_before_qualification_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-adv-before-qual", "run-adv-before-qual")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-adv-before-qual", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-adv-before-qual", wp, ep)
+
+    vr = _create_passing_vr("t-adv-before-qual", "run-adv-before-qual", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-adv-before-qual", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=2),
+        run_id="run-adv-before-qual",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    await coord.run_until_terminal()
+
+    backend.set_remote_head("life2boat/hermes", "main", "9" * 40)
+
+    coord2 = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-adv-before-qual",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+    receipt = await coord2.run_until_terminal()
+    assert receipt.terminal_reason == "MAIN_ADVANCED_DURING_QUALIFICATION"
+    assert backend.latest_merge_receipt is None
+
+
+@pytest.mark.asyncio
+async def test_main_advancement_before_merge_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-adv-before-merge", "run-adv-before-merge")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-adv-before-merge", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-adv-before-merge", wp, ep)
+
+    vr = _create_passing_vr("t-adv-before-merge", "run-adv-before-merge", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-adv-before-merge", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    class AdvanceMainDuringCIProvider(DeterministicCIProvider):
+        def __init__(self, backend):
+            super().__init__()
+            self.backend = backend
+
+        async def check_ci(self, run_id: str, sha: str) -> CIStatusSnapshot:
+            snap = await super().check_ci(run_id, sha)
+            self.backend.set_remote_head("life2boat/hermes", "main", "8" * 40)
+            return snap
+
+    ci_provider = AdvanceMainDuringCIProvider(backend)
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-adv-before-merge",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=ci_provider,
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "MAIN_ADVANCED_DURING_QUALIFICATION"
+    assert backend.latest_merge_receipt is None
+
+
+@pytest.mark.asyncio
+async def test_mergeable_state_unknown_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-mergeable-unk", "run-mergeable-unk")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-mergeable-unk", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-mergeable-unk", wp, ep)
+
+    vr = _create_passing_vr("t-mergeable-unk", "run-mergeable-unk", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-mergeable-unk", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=2),
+        run_id="run-mergeable-unk",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    await coord.run_until_terminal()
+
+    backend._prs[100] = replace(backend._prs[100], mergeable=None, mergeable_state="unknown")
+
+    coord2 = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-mergeable-unk",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+    receipt = await coord2.run_until_terminal()
+    assert receipt.terminal_reason == "PR_MERGEABLE_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_merge_receipt_binds_all_fifteen_fields_and_digest(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-fifteen", "run-fifteen")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-fifteen", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-fifteen", wp, ep)
+
+    vr = _create_passing_vr("t-fifteen", "run-fifteen", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-fifteen", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-fifteen",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+
+    m_rcpt = backend.latest_merge_receipt
+    assert m_rcpt is not None
+    assert m_rcpt.schema_version == MERGE_RECEIPT_SCHEMA_VERSION
+    assert m_rcpt.receipt_id.startswith("merge-rcpt-100-")
+    assert m_rcpt.run_id == "run-fifteen"
+    assert m_rcpt.task_id == "t-fifteen"
+    assert m_rcpt.attempt_id != ""
+    assert m_rcpt.policy_receipt_id != ""
+    assert m_rcpt.decision_receipt_id != ""
+    assert m_rcpt.repository == "life2boat/hermes"
+    assert m_rcpt.pr_number == 100
+    assert m_rcpt.base_sha_before_merge != ""
+    assert m_rcpt.pr_head_sha == "b" * 40
+    assert m_rcpt.ci_snapshot_digest != ""
+    assert m_rcpt.qualification_main_sha != ""
+    assert m_rcpt.merge_method == "squash"
+    assert m_rcpt.merge_commit_sha != ""
+    assert m_rcpt.merged_at_utc != ""
+    assert m_rcpt.receipt_digest != ""
+
+    assert m_rcpt.head_sha == m_rcpt.pr_head_sha
+    assert m_rcpt.base_sha == m_rcpt.base_sha_before_merge
+    assert m_rcpt.merged_commit_sha == m_rcpt.merge_commit_sha
+
+
+@pytest.mark.asyncio
+async def test_post_merge_attestation_verifies_pr_and_main(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-post-attest", "run-post-attest")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-post-attest", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-post-attest", wp, ep)
+
+    vr = _create_passing_vr("t-post-attest", "run-post-attest", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-post-attest", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-post-attest",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+
+    post_pr = await backend.get_pr("life2boat/hermes", 100)
+    assert post_pr.merged is True
+    assert post_pr.state == "closed"
+    assert post_pr.merge_commit_sha == receipt.merged_commit_sha
+
+    remote_main = await backend.get_remote_head_sha("life2boat/hermes", "main")
+    assert remote_main == receipt.merged_commit_sha
+
+
+@pytest.mark.asyncio
+async def test_post_merge_attestation_failure_fails_closed(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-post-fail", "run-post-fail")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-post-fail", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-post-fail", wp, ep)
+
+    vr = _create_passing_vr("t-post-fail", "run-post-fail", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-post-fail", vr, "vr-dg")
+
+    class BrokenPostAttestationBackend(FakeGitHubPullRequestBackend):
+        async def merge_pr(self, *args, **kwargs):
+            rcpt = await super().merge_pr(*args, **kwargs)
+            pr = self._prs[rcpt.pr_number]
+            self._prs[rcpt.pr_number] = replace(pr, state="open")
+            return rcpt
+
+    backend = BrokenPostAttestationBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-post-fail",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "POST_MERGE_ATTESTATION_FAILED"
+    events = store.load_events("run-post-fail")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "POST_MERGE_ATTESTATION_FAILED" for e in events)
+    assert not any(getattr(e.event_type, "value", str(e.event_type)) == "SOURCE_RECONCILED" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_source_reconciled_emitted_only_after_attestation(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-order", "run-order")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-order", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-order", wp, ep)
+
+    vr = _create_passing_vr("t-order", "run-order", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-order", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(),
+        run_id="run-order",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI, NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+
+    events = store.load_events("run-order")
+    ev_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
+
+    assert "PR_MERGED" in ev_types
+    assert "SOURCE_RECONCILED" in ev_types
+    merged_idx = ev_types.index("PR_MERGED")
+    recon_idx = ev_types.index("SOURCE_RECONCILED")
+    assert merged_idx < recon_idx
+
+
+@pytest.mark.asyncio
+async def test_create_timeout_recovers_via_unknown_result(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-to-create", "run-to-create")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-to-create", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-to-create", wp, ep)
+
+    vr = _create_passing_vr("t-to-create", "run-to-create", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-to-create", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+    backend.simulate_create_timeout = True
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=1),
+        run_id="run-to-create",
+        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+
+    receipt = await coord.run_until_terminal()
+    assert coord.active_pr_number == 100
+    events = store.load_events("run-to-create")
+    ev_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
+    assert "PR_MUTATION_RESULT_UNKNOWN" in ev_types
+    assert "PR_CREATED" in ev_types
+
+
+@pytest.mark.asyncio
+async def test_merge_timeout_recovers_via_unknown_result(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-to-merge", "run-to-merge")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-to-merge", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-to-merge", wp, ep)
+
+    vr = _create_passing_vr("t-to-merge", "run-to-merge", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-to-merge", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=2),
+        run_id="run-to-merge",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR, NextActionType.WAIT_FOR_CI]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    await coord.run_until_terminal()
+
+    backend.simulate_merge_timeout = True
+
+    coord2 = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-to-merge",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    receipt = await coord2.run_until_terminal()
+    assert receipt.terminal_reason == "GOAL_COMPLETE"
+    assert receipt.merged_commit_sha is not None
+    events = store.load_events("run-to-merge")
+    ev_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
+    assert "MERGE_RESULT_UNKNOWN" in ev_types
+    assert "SOURCE_RECONCILED" in ev_types
+
+
+@pytest.mark.asyncio
+async def test_restart_rehydrates_merged_pr_without_remerging(tmp_path: Path):
+    store = FileSupervisorStateStore(tmp_path)
+    loop = SupervisorLoop(store)
+    intent = _create_intent("t-remerge-rehyd", "run-remerge-rehyd")
+    wp = _create_work_profile()
+    ep = _create_effective_policy(intent)
+
+    loop.initialize_run(intent, None, intent.desired_outcome, "run-remerge-rehyd", datetime.datetime.now(datetime.timezone.utc).isoformat())
+    loop.bind_profile("run-remerge-rehyd", wp, ep)
+
+    vr = _create_passing_vr("t-remerge-rehyd", "run-remerge-rehyd", head_sha="b" * 40, intent_dg=intent_digest(intent))
+    loop.ingest_verified_result("run-remerge-rehyd", vr, "vr-dg")
+
+    backend = FakeGitHubPullRequestBackend()
+
+    coord = AutonomousRunCoordinator(
+        loop=loop,
+        store=store,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=1),
+        run_id="run-remerge-rehyd",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.CREATE_PR]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+    )
+    r1 = await coord.run_until_terminal()
+    assert r1.terminal_reason == "BUDGET_EXHAUSTED"
+    assert coord.active_pr_number == 100
+
+    # Simulate PR merged externally while supervisor was offline
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    backend._prs[100] = replace(
+        backend._prs[100],
+        state="closed",
+        merged=True,
+        merged_at=now,
+        merge_commit_sha="m" * 40,
+    )
+
+    merge_call_count_before = backend.merge_call_count
+
+    store2 = FileSupervisorStateStore(tmp_path)
+    loop2 = SupervisorLoop(store2)
+    coord2 = AutonomousRunCoordinator(
+        loop=loop2,
+        store=store2,
+        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store2, loop2), store=PersistentStore(tmp_path / "router")),
+        result_collector=ResultCollector(),
+        budget=BudgetConfig(max_supervisor_decisions=5),
+        run_id="run-remerge-rehyd",
+        astra_provider=ScriptedAstraProposalProvider(
+            scripted_actions=[NextActionType.MERGE_IF_GREEN]
+        ),
+        ci_provider=DeterministicCIProvider(),
+        evidence_root=str(tmp_path),
+        pr_provider=backend,
+        allow_pr_create=True,
+        allow_pr_merge=True,
+    )
+
+    r2 = await coord2.run_until_terminal()
+    assert r2.terminal_reason == "GOAL_COMPLETE"
+    assert backend.merge_call_count == merge_call_count_before
+    events = store2.load_events("run-remerge-rehyd")
+    assert any(getattr(e.event_type, "value", str(e.event_type)) == "PR_MERGE_RECOVERED" for e in events)

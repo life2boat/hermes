@@ -590,6 +590,16 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
         SupervisorEventType.PR_MERGED,
         SupervisorEventType.PR_MERGE_RECOVERED,
         SupervisorEventType.PR_MERGE_FAILED,
+        SupervisorEventType.PR_IDENTITY_UNAVAILABLE,
+        SupervisorEventType.PR_HEAD_SHA_MISMATCH,
+        SupervisorEventType.PR_IDENTITY_MISMATCH,
+        SupervisorEventType.PR_IDENTITY_AMBIGUOUS,
+        SupervisorEventType.PR_HEAD_NOT_PUBLISHED,
+        SupervisorEventType.MAIN_ADVANCED_DURING_QUALIFICATION,
+        SupervisorEventType.POST_MERGE_ATTESTATION_FAILED,
+        SupervisorEventType.PR_MUTATION_RESULT_UNKNOWN,
+        SupervisorEventType.MERGE_RESULT_UNKNOWN,
+        SupervisorEventType.CANDIDATE_HEAD_PUBLISHED,
     ):
         return replace(
             state,

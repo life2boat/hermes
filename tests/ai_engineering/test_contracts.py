@@ -44,6 +44,7 @@ def test_stop_boundaries_round_trip() -> None:
         "BUILD",
         "DEPLOY",
         "LIVE_SMOKE",
+        "READY_FOR_AUTHORIZED_DEPLOYMENT",
     }
     assert {item.value for item in StopBoundary} == expected
     assert {StopBoundary(value).value for value in expected} == expected
@@ -65,6 +66,7 @@ def test_effect_classes_round_trip() -> None:
         "SECRET_MUTATION",
         "EXTERNAL_SEND",
         "OTHER_MUTATION",
+        "RELEASE_QUALIFICATION",
     }
     assert {item.value for item in EffectClass} == expected
     assert {EffectClass(value).value for value in expected} == expected

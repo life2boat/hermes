@@ -114,6 +114,7 @@ _STOP_BOUNDARY_EFFECT_CEILING: dict[StopBoundary, frozenset[EffectClass]] = {
     StopBoundary.READY_PR: _PR,
     StopBoundary.MERGE: _MERGE,
     StopBoundary.BUILD: _COMMIT | {EffectClass.BUILD},
+    StopBoundary.READY_FOR_AUTHORIZED_DEPLOYMENT: _MERGE | {EffectClass.BUILD, EffectClass.RELEASE_QUALIFICATION},
     StopBoundary.DEPLOY: _MERGE | {EffectClass.BUILD, EffectClass.DEPLOY, EffectClass.RUNTIME_MUTATION},
     StopBoundary.LIVE_SMOKE: _MERGE
     | {EffectClass.BUILD, EffectClass.DEPLOY, EffectClass.RUNTIME_MUTATION},
@@ -127,8 +128,9 @@ _STOP_BOUNDARY_RANK: dict[StopBoundary, int] = {
     StopBoundary.DRAFT_PR: 4,
     StopBoundary.READY_PR: 4,
     StopBoundary.MERGE: 5,
-    StopBoundary.DEPLOY: 6,
-    StopBoundary.LIVE_SMOKE: 7,
+    StopBoundary.READY_FOR_AUTHORIZED_DEPLOYMENT: 6,
+    StopBoundary.DEPLOY: 7,
+    StopBoundary.LIVE_SMOKE: 8,
 }
 
 _PRODUCTION_BOUNDARIES = frozenset({StopBoundary.DEPLOY, StopBoundary.LIVE_SMOKE})

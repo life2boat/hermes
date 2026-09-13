@@ -3,139 +3,152 @@ Production Readiness Qualification & Exact-Main Release Candidate Attestation.
 Task 8 layer.
 """
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from ai_engineering.contracts import Status
 
-@dataclass
-class ReleaseCandidateManifest:
-    canonical_main_sha: str
-    oci_revision: str
-    image_digest: str
-    is_immutable: bool
-    architecture: str
-    entrypoint: str
-
-@dataclass
-class ReleaseQualificationRequest:
-    candidate_manifest: ReleaseCandidateManifest
-    current_canonical_main_sha: str
-    build_source_sha: str
-    source_attestation_passed: bool
-    is_clean_source_tree: bool
-    configuration_keys_present: bool
-    secret_keys_present: bool
-    db_schema_compatible: bool
-    has_credential_risk: bool
-    previous_known_good_sha: Optional[str] = None
-    mock_startup_passed: bool = False
-    security_isolation_passed: bool = False
-
-@dataclass
-class ProductionReadinessReport:
+@dataclass(frozen=True, slots=True)
+class GateResult:
+    gate_name: str
     status: Status
+    reason: Optional[str] = None
+    evidence: Optional[Dict[str, str]] = None
+
+@dataclass(frozen=True, slots=True)
+class ReleaseCandidateManifest:
+    schema_version: int
+    release_candidate_id: str
+    repository: str
+    canonical_main_ref: str
+    canonical_main_sha: str
+    git_tree_sha: str
+    build_source_sha: str
+    container_image_repository: str
+    container_image_digest: str
+    oci_revision: str
+    build_workflow_id: str
+    build_run_id: str
+    configuration_contract_digest: str
+    schema_contract_digest: str
+    rollback_bundle_digest: str
+    required_ci_snapshot_digest: str
+    qualification_timestamp_utc: str
+    manifest_digest: str
+
+@dataclass(frozen=True, slots=True)
+class ReleaseQualificationRequest:
+    schema_version: int
+    qualification_id: str
+    repository: str
+    canonical_remote: str
+    canonical_main_ref: str
+    canonical_main_sha: str
+    task8_run_id: str
+    required_ci_workflows: tuple[str, ...]
+    production_target_id: str
+    requested_at_utc: str
+    request_digest: str
+
+@dataclass(frozen=True, slots=True)
+class ProductionReadinessReport:
+    schema_version: int
+    report_id: str
+    release_candidate_id: str
+    canonical_main_sha: str
+    image_digest: str
+    gate_results: tuple[GateResult, ...]
+    technical_blockers: tuple[str, ...]
+    governance_observations: tuple[str, ...]
+    migration_required: bool
+    rollback_verified: bool
+    credential_risk_blocked: bool
     technical_release_candidate_ready: bool
     production_deployment_authorized: bool
-    credential_risk_blocked: bool
-    main_advanced_during_release_qualification: bool
-    reasons: List[str]
+    generated_at_utc: str
+    report_digest: str
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ReleaseCandidateReceipt:
-    sha: str
+    qualification_id: str
+    canonical_main_sha: str
+    image_digest: str
+    manifest_digest: str
     report: ProductionReadinessReport
+    result: Status
+    created_at_utc: str
 
 class ReleaseQualifier:
-    def qualify(self, request: ReleaseQualificationRequest) -> ReleaseCandidateReceipt:
-        reasons = []
-        status = Status.PASS
-        technical_ready = True
-        deployment_authorized = True
-        credential_blocked = False
+    """
+    Validates a release candidate for production readiness without deploying.
+    """
+    def qualify(
+        self,
+        request: ReleaseQualificationRequest,
+        manifest: ReleaseCandidateManifest,
+        gates: List[GateResult],
+        has_credential_risk: bool,
+        current_main_sha: str,
+        timestamp: str
+    ) -> ReleaseCandidateReceipt:
+        
+        blockers = []
         main_advanced = False
-
-        if request.current_canonical_main_sha != request.candidate_manifest.canonical_main_sha:
-            reasons.append("MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION")
+        
+        if current_main_sha != request.canonical_main_sha:
             main_advanced = True
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
+            blockers.append("MAIN_ADVANCED_DURING_RELEASE_QUALIFICATION")
 
-        if request.build_source_sha != request.candidate_manifest.canonical_main_sha:
-            reasons.append("EXACT_SHA_MISMATCH: build source != canonical main")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
+        if manifest.build_source_sha != request.canonical_main_sha:
+            blockers.append("BUILD_SOURCE_SHA_MISMATCH")
             
-        if request.candidate_manifest.oci_revision != request.candidate_manifest.canonical_main_sha:
-            reasons.append("EXACT_SHA_MISMATCH: oci revision != canonical main")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
+        if manifest.oci_revision != request.canonical_main_sha:
+            blockers.append("IMAGE_REVISION_MISMATCH")
 
-        if not request.source_attestation_passed:
-            reasons.append("SOURCE_ATTESTATION_FAILED")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
+        if manifest.canonical_main_sha != request.canonical_main_sha:
+            blockers.append("MANIFEST_SHA_MISMATCH")
+            
+        for g in gates:
+            if g.status in (Status.FAIL, Status.BLOCKED):
+                blockers.append(f"GATE_FAILED: {g.gate_name}")
 
-        if not request.is_clean_source_tree:
-            reasons.append("DIRTY_BUILD_CONTEXT")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.candidate_manifest.image_digest or not request.candidate_manifest.is_immutable:
-            reasons.append("IMAGE_ATTESTATION_FAILED: missing digest or not immutable")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.configuration_keys_present:
-            reasons.append("CONFIGURATION_CONTRACT_FAILED")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.secret_keys_present:
-            reasons.append("SECRET_CONTRACT_FAILED")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.db_schema_compatible:
-            reasons.append("DB_SCHEMA_INCOMPATIBLE")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.mock_startup_passed:
-            reasons.append("RUNTIME_PREFLIGHT_FAILED")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if not request.security_isolation_passed:
-            reasons.append("SECURITY_ISOLATION_FAILED")
-            status = Status.FAIL
-            technical_ready = False
-            deployment_authorized = False
-
-        if request.has_credential_risk:
-            reasons.append("CREDENTIAL_RISK_BLOCKED")
-            credential_blocked = True
-            deployment_authorized = False
-            if status == Status.PASS:
-                status = Status.BLOCKED
-
+        technical_ready = len(blockers) == 0
+        
+        # NEVER authorized automatically by Task 8
+        production_authorized = False
+        
+        credential_blocked = has_credential_risk
+        
+        report_status = Status.PASS if technical_ready else Status.FAIL
+        if technical_ready and credential_blocked:
+            report_status = Status.BLOCKED
+            
+        report_id = f"report-{manifest.release_candidate_id}"
+        
+        report = ProductionReadinessReport(
+            schema_version=1,
+            report_id=report_id,
+            release_candidate_id=manifest.release_candidate_id,
+            canonical_main_sha=request.canonical_main_sha,
+            image_digest=manifest.container_image_digest,
+            gate_results=tuple(gates),
+            technical_blockers=tuple(blockers),
+            governance_observations=(),
+            migration_required=any(g.gate_name == "SCHEMA_COMPATIBILITY" and g.evidence and g.evidence.get("migration_required") == "true" for g in gates),
+            rollback_verified=any(g.gate_name == "ROLLBACK_QUALIFIED" and g.status == Status.PASS for g in gates),
+            credential_risk_blocked=credential_blocked,
+            technical_release_candidate_ready=technical_ready,
+            production_deployment_authorized=production_authorized,
+            generated_at_utc=timestamp,
+            report_digest=hashlib.sha256(report_id.encode()).hexdigest()
+        )
+        
         return ReleaseCandidateReceipt(
-            sha=request.candidate_manifest.canonical_main_sha,
-            report=ProductionReadinessReport(
-                status=status,
-                technical_release_candidate_ready=technical_ready,
-                production_deployment_authorized=deployment_authorized,
-                credential_risk_blocked=credential_blocked,
-                main_advanced_during_release_qualification=main_advanced,
-                reasons=reasons
-            )
+            qualification_id=request.qualification_id,
+            canonical_main_sha=request.canonical_main_sha,
+            image_digest=manifest.container_image_digest,
+            manifest_digest=manifest.manifest_digest,
+            report=report,
+            result=report_status,
+            created_at_utc=timestamp
         )

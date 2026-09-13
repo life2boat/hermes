@@ -26,15 +26,13 @@ def compute_file_sha256(filepath: str) -> str:
     with open(filepath, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
+from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
+
 def get_all_gates(expected_sha: str, bundle: dict) -> Tuple[List[GateResult], str, str, str, str, str, str, str, str, str, str, str]:
     # 1. BUNDLE_DIGEST validation
     if bundle:
         provided_digest = bundle.get("bundle_digest")
-        bundle_copy = dict(bundle)
-        if "bundle_digest" in bundle_copy:
-            del bundle_copy["bundle_digest"]
-        serialized = json.dumps(bundle_copy, separators=(',', ':'), sort_keys=True)
-        computed_digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+        computed_digest = compute_canonical_digest_from_dict(bundle)
         if provided_digest != computed_digest:
             return [GateResult("SOURCE_ATTESTATION", Status.FAIL, "Mutated bundle")], "", "", "", "", "", "", "", "", "", "", ""
 

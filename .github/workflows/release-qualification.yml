@@ -200,8 +200,8 @@ jobs:
       - name: Run Security Isolation Tests
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
-          $HOME/.cargo/bin/uv python install 3.11
-          $HOME/.cargo/bin/uv sync --locked --python 3.11 --extra all --extra dev
+          $HOME/.local/bin/uv python install 3.11
+          $HOME/.local/bin/uv sync --locked --python 3.11 --extra all --extra dev
           
           # We need a small python script to run pytest and parse output securely because explicit nodes are long
           cat << 'EOF' > run_security.py
@@ -219,7 +219,7 @@ jobs:
               "tests/gateway/test_unauthorized_dm_behavior.py::test_unauthorized_dm_pairs_by_default"
           ]
           
-          cmd = ["$HOME/.cargo/bin/uv", "run", "pytest", "-q"] + nodes
+          cmd = ["$HOME/.local/bin/uv", "run", "pytest", "-q"] + nodes
           proc = subprocess.run(cmd, capture_output=True, text=True, env=dict(subprocess.os.environ))
           
           # Parse collected/failed from stdout manually since pytest-json-report might not be present

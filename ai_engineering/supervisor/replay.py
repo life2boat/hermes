@@ -600,6 +600,9 @@ def _apply_event(state: SupervisorState, event: SupervisorEvent) -> SupervisorSt
         SupervisorEventType.PR_MUTATION_RESULT_UNKNOWN,
         SupervisorEventType.MERGE_RESULT_UNKNOWN,
         SupervisorEventType.CANDIDATE_HEAD_PUBLISHED,
+        SupervisorEventType.MAIN_IDENTITY_UNAVAILABLE,
+        SupervisorEventType.CANDIDATE_HEAD_IDENTITY_MISSING,
+        SupervisorEventType.CANDIDATE_HEAD_IDENTITY_REGISTERED,
     ):
         return replace(
             state,

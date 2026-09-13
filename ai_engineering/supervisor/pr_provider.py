@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -100,12 +101,18 @@ class PRTimeoutError(PRProviderError):
 @dataclass(frozen=True, slots=True)
 class CandidateHeadIdentity:
     schema_version: str = CANDIDATE_HEAD_IDENTITY_SCHEMA_VERSION
+    candidate_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
     repository: str = ""
     remote_name: str = ""
     head_ref: str = ""
     head_sha: str = ""
     base_ref: str = ""
     base_sha: str = ""
+    source_base_sha: str = ""
+    published_at_utc: str = ""
+    digest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +203,13 @@ def compute_merge_receipt_digest(data: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def compute_candidate_head_identity_digest(data: Mapping[str, Any]) -> str:
+    d = dict(data)
+    d.pop("digest", None)
+    canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @runtime_checkable
 class PullRequestProvider(Protocol):
     async def get_pr(self, repository: str, pr_number: int) -> PullRequestIdentity:
@@ -275,6 +289,8 @@ class FakeGitHubPullRequestBackend(PullRequestProvider):
             return self._remote_heads[(repository, ref)]
         if clean in ("main", "master") and self._prs:
             first_pr = next(iter(self._prs.values()))
+            if first_pr.merged and first_pr.merge_commit_sha:
+                return first_pr.merge_commit_sha
             return first_pr.base_sha
         return None
 
@@ -577,7 +593,13 @@ class GitHubPullRequestProvider(PullRequestProvider):
         base_url: str = "https://api.github.com",
         timeout_seconds: float = 30.0,
     ) -> None:
-        self.token = token or os.environ.get("GITHUB_TOKEN")
+        resolved_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if not resolved_token or not resolved_token.strip():
+            raise PRProviderUnavailableError(
+                "GitHub token missing from environment (GITHUB_TOKEN or GH_TOKEN required)",
+                code="PR_AUTH_MISSING",
+            )
+        self.token = resolved_token.strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
@@ -602,6 +624,9 @@ class GitHubPullRequestProvider(PullRequestProvider):
             with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
                 resp_bytes = resp.read()
                 return json.loads(resp_bytes.decode("utf-8")) if resp_bytes else {}
+        except (TimeoutError, socket.timeout) as e:
+            safe_err = scrub_secrets(f"Network timeout: {type(e).__name__}: {str(e)}")
+            raise PRTimeoutError(safe_err, code="PR_TIMEOUT") from None
         except urllib.error.HTTPError as e:
             err_body = ""
             try:
@@ -618,7 +643,16 @@ class GitHubPullRequestProvider(PullRequestProvider):
                 raise PRHeadMismatchError(safe_err, code="PR_HEAD_MISMATCH") from None
             else:
                 raise PRProviderError(safe_err, code=f"HTTP_{e.code}") from None
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, (socket.timeout, TimeoutError)) or "timed out" in str(e.reason).lower():
+                safe_err = scrub_secrets(f"Network timeout: {type(e.reason).__name__}: {str(e.reason)}")
+                raise PRTimeoutError(safe_err, code="PR_TIMEOUT") from None
+            safe_err = scrub_secrets(f"Network error: URLError: {str(e.reason)}")
+            raise PRProviderUnavailableError(safe_err, code="PR_PROVIDER_UNAVAILABLE") from None
         except Exception as e:
+            if "timed out" in str(e).lower():
+                safe_err = scrub_secrets(f"Network timeout: {type(e).__name__}: {str(e)}")
+                raise PRTimeoutError(safe_err, code="PR_TIMEOUT") from None
             safe_err = scrub_secrets(f"Network error: {type(e).__name__}: {str(e)}")
             raise PRProviderUnavailableError(safe_err, code="PR_PROVIDER_UNAVAILABLE") from None
 
@@ -654,14 +688,12 @@ class GitHubPullRequestProvider(PullRequestProvider):
             data = await asyncio.to_thread(self._sync_request, "GET", url)
             return data.get("sha")
         except PRNotFoundError:
-            return None
-        except Exception:
             ref_path = f"heads/{clean}" if not ref.startswith("refs/") else ref.replace("refs/", "")
             url = f"{self.base_url}/repos/{repository}/git/ref/{ref_path}"
             try:
                 data = await asyncio.to_thread(self._sync_request, "GET", url)
                 return data.get("object", {}).get("sha")
-            except Exception:
+            except PRNotFoundError:
                 return None
 
     async def is_ancestor(self, repository: str, ancestor_sha: str, descendant_sha: str) -> bool:
@@ -773,7 +805,6 @@ class GitHubPullRequestProvider(PullRequestProvider):
         qualification_main_sha: str = "",
         base_sha_before_merge: str = "",
     ) -> MergeReceipt:
-        self.merge_call_count += 1
         pr = await self.get_pr(repository, pr_number)
 
         if pr.state != "open":

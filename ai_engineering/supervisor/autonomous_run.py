@@ -199,6 +199,10 @@ class AutonomousRunCoordinator:
             elif ev_type == "CI_STATUS_OBSERVED":
                 if ev.payload and ev.payload.get("receipt_id"):
                     self.ci_receipts.append(ev.payload["receipt_id"])
+                if self.pending_ci_sha is None and ev.payload:
+                    obs_sha = ev.payload.get("exact_sha") or ev.payload.get("sha")
+                    if obs_sha:
+                        self.pending_ci_sha = obs_sha
             elif ev_type == "DISPATCH_SENT":
                 self.child_tasks += 1
                 if ev.payload and ev.payload.get("routing_receipt_id"):
@@ -852,30 +856,36 @@ class AutonomousRunCoordinator:
             if self._mock_astra_proposal:
                 proposal = self._mock_astra_proposal
             else:
-                try:
-                    sig = inspect.signature(self.astra_provider.request_proposal)
-                    has_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                    kw = {}
-                    if has_kw or "intent" in sig.parameters:
-                        kw["intent"] = intent
-                    if has_kw or "budget" in sig.parameters:
-                        kw["budget"] = self.budget
-                    if has_kw or "stats" in sig.parameters:
-                        kw["stats"] = stats
-                    if has_kw or "work_profile" in sig.parameters:
-                        kw["work_profile"] = work_profile
-                    if has_kw or "effective_policy" in sig.parameters:
-                        kw["effective_policy"] = effective_policy
-                    if has_kw or "verified_result" in sig.parameters:
-                        kw["verified_result"] = vr
-                    if has_kw or "context_pack_digest" in sig.parameters:
-                        kw["context_pack_digest"] = pack_dg
-                    if has_kw or "real_mode" in sig.parameters:
-                        kw["real_mode"] = (getattr(self, "provider_mode", "real") == "real")
+                is_real_mode = (getattr(self, "provider_mode", "real") == "real")
+                sig = inspect.signature(self.astra_provider.request_proposal)
+                has_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                kw = {}
+                if has_kw or "intent" in sig.parameters:
+                    kw["intent"] = intent
+                if has_kw or "budget" in sig.parameters:
+                    kw["budget"] = self.budget
+                if has_kw or "stats" in sig.parameters:
+                    kw["stats"] = stats
+                if has_kw or "work_profile" in sig.parameters:
+                    kw["work_profile"] = work_profile
+                if has_kw or "effective_policy" in sig.parameters:
+                    kw["effective_policy"] = effective_policy
+                if has_kw or "verified_result" in sig.parameters:
+                    kw["verified_result"] = vr
+                if has_kw or "context_pack_digest" in sig.parameters:
+                    kw["context_pack_digest"] = pack_dg
+                if has_kw or "real_mode" in sig.parameters:
+                    kw["real_mode"] = is_real_mode
 
+                if is_real_mode:
+                    # In provider_mode=real: NEVER retry without trusted authority context.
+                    # Any TypeError/ValueError from real provider path must fail closed.
                     proposal = await self.astra_provider.request_proposal(self.run_id, state, **kw)
-                except (TypeError, ValueError):
-                    proposal = await self.astra_provider.request_proposal(self.run_id, state)
+                else:
+                    try:
+                        proposal = await self.astra_provider.request_proposal(self.run_id, state, **kw)
+                    except (TypeError, ValueError):
+                        proposal = await self.astra_provider.request_proposal(self.run_id, state)
         except Exception as e:
             receipt = getattr(self.astra_provider, "latest_receipt", None)
             receipt_id = receipt.receipt_id if receipt else ""

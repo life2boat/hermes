@@ -208,6 +208,7 @@ jobs:
           import subprocess
           import json
           import sys
+          import os
           
           # Exact canonical nodes as specified
           nodes = [
@@ -219,8 +220,9 @@ jobs:
               "tests/gateway/test_unauthorized_dm_behavior.py::test_unauthorized_dm_pairs_by_default"
           ]
           
-          cmd = ["$HOME/.local/bin/uv", "run", "pytest", "-q"] + nodes
-          proc = subprocess.run(cmd, capture_output=True, text=True, env=dict(subprocess.os.environ))
+          uv_path = os.path.expanduser("~/.local/bin/uv")
+          cmd = [uv_path, "run", "pytest", "-q"] + nodes
+          proc = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ))
           
           # Parse collected/failed from stdout manually since pytest-json-report might not be present
           # Output looks like: "6 passed in 1.23s" or "5 passed, 1 failed in 1.23s"

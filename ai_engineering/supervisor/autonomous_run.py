@@ -248,8 +248,12 @@ class AutonomousRunCoordinator:
         self.allow_pr_create = allow_pr_create
         self.allow_pr_merge = allow_pr_merge
         self.candidate_head_identity: CandidateHeadIdentity | None = None
-        self.candidate_head_ref = candidate_head_ref or (candidate_head_identity.head_ref if candidate_head_identity else None)
-        self._injected_candidate_head_identity = candidate_head_identity
+        if provider_mode == "real":
+            self.candidate_head_ref = candidate_head_ref
+            self._injected_candidate_head_identity = None
+        else:
+            self.candidate_head_ref = candidate_head_ref or (candidate_head_identity.head_ref if candidate_head_identity else None)
+            self._injected_candidate_head_identity = candidate_head_identity
 
         events = self.store.load_events(self.run_id)
         from ai_engineering.supervisor.events import SupervisorEventType

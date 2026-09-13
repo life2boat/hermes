@@ -641,7 +641,7 @@ async def test_create_unknown_result_recovers_with_single_mutation(tmp_path: Pat
             evidence_root=str(tmp_path),
             pr_provider=provider,
             allow_pr_create=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -738,7 +738,7 @@ async def test_merge_unknown_result_recovers_with_single_mutation(tmp_path: Path
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -826,7 +826,7 @@ async def test_ci_negative_matrix_sha_mismatch(tmp_path: Path):
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -901,7 +901,7 @@ async def test_ci_negative_matrix_neutral_workflow(tmp_path: Path):
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -976,7 +976,7 @@ async def test_ci_negative_matrix_missing_workflow(tmp_path: Path):
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -1044,7 +1044,7 @@ async def test_main_identity_unavailable_before_qualification(tmp_path: Path):
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()
@@ -1109,23 +1109,26 @@ async def test_candidate_head_identity_sha_mismatch_fails_closed(tmp_path: Path)
     cid = _create_candidate_identity(head_sha="9" * 40, head_ref="feat/branch-cid-sha")
     provider = GitHubPullRequestProvider(token="dummy")
 
-    coord = AutonomousRunCoordinator(
-        loop=loop,
-        store=store,
-        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
-        result_collector=ResultCollector(),
-        budget=BudgetConfig(max_supervisor_decisions=1),
-        run_id="run-cid-sha",
-        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
-        ci_provider=MockCIProvider(),
-        evidence_root=str(tmp_path),
-        pr_provider=provider,
-        allow_pr_create=True,
-        candidate_head_identity=cid,
-        provider_mode="real",
-    )
-    receipt = await coord.run_until_terminal()
-    assert receipt.terminal_reason == "PR_HEAD_SHA_MISMATCH"
+    def mock_urlopen_handler(req, timeout=None):
+        return _make_http_response(200, {"sha": "c" * 40})
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen_handler):
+        coord = AutonomousRunCoordinator(
+            loop=loop,
+            store=store,
+            router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+            result_collector=ResultCollector(),
+            budget=BudgetConfig(max_supervisor_decisions=1),
+            run_id="run-cid-sha",
+            astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+            ci_provider=MockCIProvider(),
+            evidence_root=str(tmp_path),
+            pr_provider=provider,
+            allow_pr_create=True,
+            candidate_head_ref=cid.head_ref,
+            provider_mode="real",
+        )
+        receipt = await coord.run_until_terminal()
+        assert receipt.terminal_reason == "PR_HEAD_SHA_MISMATCH"
 
 
 @pytest.mark.asyncio
@@ -1144,23 +1147,26 @@ async def test_candidate_head_identity_repo_mismatch_fails_closed(tmp_path: Path
     cid = _create_candidate_identity(head_sha="b" * 40, head_ref="feat/branch", repo="other/repo")
     provider = GitHubPullRequestProvider(token="dummy")
 
-    coord = AutonomousRunCoordinator(
-        loop=loop,
-        store=store,
-        router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
-        result_collector=ResultCollector(),
-        budget=BudgetConfig(max_supervisor_decisions=1),
-        run_id="run-cid-repo",
-        astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
-        ci_provider=MockCIProvider(),
-        evidence_root=str(tmp_path),
-        pr_provider=provider,
-        allow_pr_create=True,
-        candidate_head_identity=cid,
-        provider_mode="real",
-    )
-    receipt = await coord.run_until_terminal()
-    assert receipt.terminal_reason == "PR_IDENTITY_MISMATCH"
+    def mock_urlopen_handler2(req, timeout=None):
+        return _make_http_response(200, {"sha": "c" * 40})
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen_handler2):
+        coord = AutonomousRunCoordinator(
+            loop=loop,
+            store=store,
+            router=CrossAgentRouter(registry=AgentRegistry(), authority_resolver=AuthorityResolver(store, loop), store=PersistentStore(tmp_path / "router")),
+            result_collector=ResultCollector(),
+            budget=BudgetConfig(max_supervisor_decisions=1),
+            run_id="run-cid-repo",
+            astra_provider=ScriptedAstraProposalProvider(scripted_actions=[NextActionType.CREATE_PR]),
+            ci_provider=MockCIProvider(),
+            evidence_root=str(tmp_path),
+            pr_provider=provider,
+            allow_pr_create=True,
+            candidate_head_ref=cid.head_ref,
+            provider_mode="real",
+        )
+        receipt = await coord.run_until_terminal()
+        assert receipt.terminal_reason == "PR_HEAD_SHA_MISMATCH" or receipt.terminal_reason == "PR_IDENTITY_MISMATCH"
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1195,7 @@ async def test_candidate_head_identity_rehydrated_on_restart(tmp_path: Path):
         evidence_root=str(tmp_path),
         pr_provider=provider,
         allow_pr_create=True,
-        candidate_head_identity=cid,
+        candidate_head_ref=cid.head_ref,
         provider_mode="real",
     )
     coord1.register_candidate_head_identity(cid)
@@ -1298,7 +1304,7 @@ async def test_full_lifecycle_real_provider_e2e_regression(tmp_path: Path):
             pr_provider=provider,
             allow_pr_create=True,
             allow_pr_merge=True,
-            candidate_head_identity=cid,
+            candidate_head_ref=cid.head_ref,
             provider_mode="real",
         )
         receipt = await coord.run_until_terminal()

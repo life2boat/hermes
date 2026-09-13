@@ -287,7 +287,7 @@ jobs:
 
       - name: Run Qualifier
         run: |
-          python3 scripts/hermes_release_qualification.py "${{ inputs.target_sha }}" > qualification-receipt.json
+          PYTHONPATH=. python3 scripts/hermes_release_qualification.py "${{ inputs.target_sha }}" > qualification-receipt.json
           cat qualification-receipt.json
 
       - name: Upload Evidence Bundle

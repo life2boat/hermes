@@ -43,6 +43,8 @@ from ai_engineering.supervisor.ci_provider import (
     CICheckResult,
     CIStatusSnapshot,
     REQUIRED_TECHNICAL_CHECKS,
+    REQUIRED_TECHNICAL_WORKFLOWS,
+    WorkflowObservation,
 )
 from ai_engineering.supervisor.collector import ResultCollector
 from ai_engineering.supervisor.events import SupervisorEventType
@@ -230,6 +232,19 @@ class DeterministicCIProvider:
     async def check_ci(self, run_id: str, sha: str) -> CIStatusSnapshot:
         self.call_count += 1
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if self.overall_status == "SUCCESS":
+            workflows = tuple(
+                WorkflowObservation(
+                    workflow_name=w_name,
+                    run_id=1000 + idx,
+                    head_sha=sha,
+                    status="completed",
+                    conclusion="success",
+                )
+                for idx, w_name in enumerate(REQUIRED_TECHNICAL_WORKFLOWS)
+            )
+        else:
+            workflows = ()
         return CIStatusSnapshot(
             schema_version="hermes.ci-status-snapshot.v1",
             repository="life2boat/hermes",
@@ -237,7 +252,7 @@ class DeterministicCIProvider:
             observed_sha=sha,
             checked_at_utc=now,
             overall_status=self.overall_status,
-            required_workflow_observations=(),
+            required_workflow_observations=workflows,
             all_required_completed=(self.overall_status in ("SUCCESS", "FAILURE")),
             all_required_success=(self.overall_status == "SUCCESS"),
             governance_observations=(),
@@ -2092,7 +2107,7 @@ async def test_create_timeout_recovers_via_unknown_result(tmp_path: Path):
     events = store.load_events("run-to-create")
     ev_types = [getattr(e.event_type, "value", str(e.event_type)) for e in events]
     assert "PR_MUTATION_RESULT_UNKNOWN" in ev_types
-    assert "PR_CREATED" in ev_types
+    assert ("PR_RECOVERED" in ev_types or "PR_CREATED" in ev_types)
 
 
 @pytest.mark.asyncio

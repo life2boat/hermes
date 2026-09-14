@@ -7,6 +7,22 @@ on:
         description: "Target canonical main SHA to qualify"
         required: true
         type: string
+      secret_evidence:
+        description: "Signed secret scan evidence JSON"
+        required: true
+        type: string
+      db_evidence:
+        description: "Signed DB evidence JSON"
+        required: true
+        type: string
+      schema_evidence:
+        description: "Signed schema evidence JSON"
+        required: true
+        type: string
+      rollback_evidence:
+        description: "Signed rollback evidence JSON"
+        required: true
+        type: string
 
 env:
   RC_IMAGE: ghcr.io/${{ github.repository }}-rc
@@ -276,11 +292,11 @@ jobs:
             "structured_ci_evidence": ${{ env.STRUCTURED_CI_EVIDENCE }},
             "runtime_preflight_evidence": ${{ env.RUNTIME_PREFLIGHT_EVIDENCE }},
             "config_evidence": ${{ env.CONFIG_EVIDENCE }},
-            "schema_evidence": ${{ env.SCHEMA_EVIDENCE }},
+            "schema_evidence": ${{ inputs.schema_evidence }},
             "security_evidence": ${{ env.SECURITY_EVIDENCE }},
-            "secret_evidence": "BLOCKED",
-            "db_evidence": "BLOCKED",
-            "rollback_evidence": "BLOCKED",
+            "secret_evidence": ${{ inputs.secret_evidence }},
+            "db_evidence": ${{ inputs.db_evidence }},
+            "rollback_evidence": ${{ inputs.rollback_evidence }},
             "generated_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           }
           EOF
@@ -289,6 +305,8 @@ jobs:
           jq ". + {\"bundle_digest\": \"$BUNDLE_DIGEST\"}" task8-qualification-evidence.json > tmp.json && mv tmp.json task8-qualification-evidence.json
 
       - name: Run Qualifier
+        env:
+          HERMES_PROVENANCE_KEY: ${{ secrets.HERMES_PROVENANCE_KEY }}
         run: |
           PYTHONPATH=. python3 scripts/hermes_release_qualification.py "${{ inputs.target_sha }}" > qualification-receipt.json
           cat qualification-receipt.json

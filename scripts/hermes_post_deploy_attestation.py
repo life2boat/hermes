@@ -357,6 +357,7 @@ def _container_snapshot(
     allowlist_names: tuple[str, ...],
     protected_secret_names: tuple[str, ...],
     run: Run,
+    enforce_complete_inventory: bool = True,
 ) -> ContainerSnapshot:
     result = run(("docker", "inspect", service), timeout=30)
     if result.returncode != 0:
@@ -386,15 +387,16 @@ def _container_snapshot(
         for name in environment
         if FEATURE_NAME_RE.fullmatch(name) and name not in selected_names
     }
-    if unknown:
-        _fail("UNKNOWN_FEATURE_VARIABLE")
-    if any(name not in environment for name in selected_names):
-        _fail("FEATURE_STATE_MISSING")
+    if enforce_complete_inventory:
+        if unknown:
+            _fail("UNKNOWN_FEATURE_VARIABLE")
+        if any(name not in environment for name in selected_names):
+            _fail("FEATURE_STATE_MISSING")
     feature_gates = tuple(
-        (name, _feature_gate_state(environment[name])) for name in feature_gate_names
+        (name, _feature_gate_state(environment.get(name, "0"))) for name in feature_gate_names
     )
     allowlists = tuple(
-        (name, *_allowlist_state(environment[name])) for name in allowlist_names
+        (name, *_allowlist_state(environment.get(name, ""))) for name in allowlist_names
     )
     secret_fingerprints = tuple(
         (name, hashlib.sha256(environment[name].encode("utf-8")).hexdigest())
@@ -680,6 +682,7 @@ def capture_pre_mutation_baseline(
         allowlist_names=policy.allowlist_names,
         protected_secret_names=protected_secret_names,
         run=run,
+        enforce_complete_inventory=False,
     )
     if hermes.state != "running" or hermes.restart_count != 0:
         _fail("PRE_MUTATION_HERMES_UNHEALTHY")

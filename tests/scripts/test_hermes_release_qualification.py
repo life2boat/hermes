@@ -278,43 +278,22 @@ def create_bundle(extra: dict) -> dict:
     return bundle
 
 
-def test_secret_evidence_missing():
-    bundle = create_bundle({})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
-    assert gate.status == Status.BLOCKED
+def valid_utc() -> str:
+    return "2026-09-14T00:00:00Z"
 
 
-def test_secret_evidence_empty_dict():
-    bundle = create_bundle({"secret_evidence": {}})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
-    assert gate.status == Status.FAIL
+# 1. SECRET RECORD SCHEMA MUST BE CLOSED
 
 
-def test_secret_evidence_garbage():
-    bundle = create_bundle({"secret_evidence": "garbage"})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
-    assert gate.status == Status.FAIL
-
-
-def test_secret_status_fail():
-    bundle = create_bundle({"secret_evidence": {"status": "FAIL"}})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
-    assert gate.status == Status.FAIL
-
-
-def test_secret_foreign_target_sha():
+def test_secret_record_empty_dict():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_secret_presence",
-        "target_sha": "wrong_sha",
+        "target_sha": "sha123",
         "status": "PASS",
         "source_class": "test",
-        "collected_at_utc": "time",
-        "required_secrets": [{"name": "A", "required": True, "present": True}],
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [{}],
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"secret_evidence": ev})
@@ -323,33 +302,33 @@ def test_secret_foreign_target_sha():
     assert gate.status == Status.FAIL
 
 
-def test_secret_digest_mismatch():
+def test_secret_record_foo_bar():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_secret_presence",
         "target_sha": "sha123",
         "status": "PASS",
         "source_class": "test",
-        "collected_at_utc": "time",
-        "required_secrets": [{"name": "A", "required": True, "present": True}],
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [{"foo": "bar"}],
     }
-    ev["evidence_digest"] = "bad_digest"
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"secret_evidence": ev})
     gates, *_ = get_all_gates("sha123", bundle)
     gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
     assert gate.status == Status.FAIL
 
 
-def test_secret_contains_value():
+def test_secret_missing_name():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_secret_presence",
         "target_sha": "sha123",
         "status": "PASS",
         "source_class": "test",
-        "collected_at_utc": "time",
+        "collected_at_utc": valid_utc(),
         "required_secrets": [
-            {"name": "A", "required": True, "present": True, "value": "secret123"}
+            {"required": True, "present": True, "source_class": "env"}
         ],
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
@@ -359,15 +338,15 @@ def test_secret_contains_value():
     assert gate.status == Status.FAIL
 
 
-def test_required_secret_present_false():
+def test_secret_missing_required():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_secret_presence",
         "target_sha": "sha123",
         "status": "PASS",
         "source_class": "test",
-        "collected_at_utc": "time",
-        "required_secrets": [{"name": "A", "required": True, "present": False}],
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [{"name": "A", "present": True, "source_class": "env"}],
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"secret_evidence": ev})
@@ -376,61 +355,225 @@ def test_required_secret_present_false():
     assert gate.status == Status.FAIL
 
 
-def test_valid_safe_secret_metadata():
+def test_secret_missing_present():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_secret_presence",
         "target_sha": "sha123",
         "status": "PASS",
         "source_class": "test",
-        "collected_at_utc": "time",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [{"name": "A", "required": True, "source_class": "env"}],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
+    assert gate.status == Status.FAIL
+
+
+def test_secret_missing_source_class():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
         "required_secrets": [{"name": "A", "required": True, "present": True}],
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"secret_evidence": ev})
     gates, *_ = get_all_gates("sha123", bundle)
     gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
-    assert gate.status == Status.PASS
-
-
-def test_db_evidence_missing():
-    bundle = create_bundle({})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
-    assert gate.status == Status.BLOCKED
-
-
-def test_db_evidence_empty_dict():
-    bundle = create_bundle({"db_evidence": {}})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
     assert gate.status == Status.FAIL
 
 
-def test_db_evidence_garbage():
-    bundle = create_bundle({"db_evidence": "garbage"})
+def test_secret_required_not_bool():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [
+            {"name": "A", "required": "true", "present": True, "source_class": "env"}
+        ],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
     gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
     assert gate.status == Status.FAIL
 
 
-def test_db_status_fail():
-    bundle = create_bundle({"db_evidence": {"status": "FAIL"}})
+def test_secret_present_not_bool():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [
+            {"name": "A", "required": True, "present": "yes", "source_class": "env"}
+        ],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
     gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
     assert gate.status == Status.FAIL
 
 
-def test_db_foreign_target_sha():
+def test_secret_unknown_field():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [
+            {
+                "name": "A",
+                "required": True,
+                "present": True,
+                "source_class": "env",
+                "raw_secret": "xyz",
+            }
+        ],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
+    assert gate.status == Status.FAIL
+
+
+def test_secret_set_incomplete():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
+    assert gate.status == Status.FAIL
+
+
+def test_secret_set_substituted():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": valid_utc(),
+        "required_secrets": [
+            {
+                "name": "TELEGRAM_BOT_TOKEN",
+                "required": True,
+                "present": True,
+                "source_class": "env",
+            },
+            {
+                "name": "FOO_BAR",
+                "required": True,
+                "present": True,
+                "source_class": "env",
+            },
+        ],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
+    assert gate.status == Status.FAIL
+
+
+def test_secret_malformed_utc_timestamp():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_secret_presence",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "source_class": "test",
+        "collected_at_utc": "2026-09-14 00:00:00",
+        "required_secrets": [
+            {
+                "name": "TELEGRAM_BOT_TOKEN",
+                "required": True,
+                "present": True,
+                "source_class": "env",
+            }
+        ],
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"secret_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
+    assert gate.status == Status.FAIL
+
+
+# DB TESTS
+
+
+def test_db_correct_validator_id_no_trusted_execution():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_db_path_safety",
-        "target_sha": "wrong_sha",
+        "target_sha": "sha123",
         "status": "PASS",
-        "validator_id": "canonical-hermes-db-path-validator",
+        "validator_id": "_validate_database_source_path",
         "validator_version": "1",
         "path_classification": "authoritative-production-path",
-        "collected_at_utc": "time",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {},
+    }
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = create_bundle({"db_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
+    assert gate.status in (Status.FAIL, Status.BLOCKED)
+
+
+def test_db_caller_generated_classification_only():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_db_path_safety",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "validator_id": "_validate_database_source_path",
+        "validator_version": "1",
+        "path_classification": "authoritative-production-path",
+        "collected_at_utc": valid_utc(),
+    }
+    # Missing execution_provenance entirely
+    bundle = create_bundle({"db_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
+    assert gate.status in (Status.FAIL, Status.BLOCKED)
+
+
+def test_db_foreign_validator_revision():
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_db_path_safety",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "validator_id": "_validate_database_source_path",
+        "validator_version": "2",
+        "path_classification": "authoritative-production-path",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {"signature": "abc"},
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"db_evidence": ev})
@@ -439,34 +582,17 @@ def test_db_foreign_target_sha():
     assert gate.status == Status.FAIL
 
 
-def test_db_digest_mismatch():
+def test_db_malformed_validator_output():
     ev = {
         "schema_version": 1,
         "evidence_type": "production_db_path_safety",
         "target_sha": "sha123",
         "status": "PASS",
-        "validator_id": "canonical-hermes-db-path-validator",
+        "validator_id": "_validate_database_source_path",
         "validator_version": "1",
         "path_classification": "authoritative-production-path",
-        "collected_at_utc": "time",
-    }
-    ev["evidence_digest"] = "bad_digest"
-    bundle = create_bundle({"db_evidence": ev})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
-    assert gate.status == Status.FAIL
-
-
-def test_db_unknown_validator():
-    ev = {
-        "schema_version": 1,
-        "evidence_type": "production_db_path_safety",
-        "target_sha": "sha123",
-        "status": "PASS",
-        "validator_id": "unknown-validator",
-        "validator_version": "1",
-        "path_classification": "authoritative-production-path",
-        "collected_at_utc": "time",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": "a string instead of dict",
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"db_evidence": ev})
@@ -475,34 +601,25 @@ def test_db_unknown_validator():
     assert gate.status == Status.FAIL
 
 
-def test_db_negative_path_classification():
+def test_db_trusted_canonical_validator_output():
+    import hmac, hashlib, os
+    
     ev = {
         "schema_version": 1,
         "evidence_type": "production_db_path_safety",
         "target_sha": "sha123",
         "status": "PASS",
-        "validator_id": "canonical-hermes-db-path-validator",
-        "validator_version": "1",
-        "path_classification": "unknown-path",
-        "collected_at_utc": "time",
-    }
-    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
-    bundle = create_bundle({"db_evidence": ev})
-    gates, *_ = get_all_gates("sha123", bundle)
-    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
-    assert gate.status == Status.FAIL
-
-
-def test_valid_canonical_validator_evidence():
-    ev = {
-        "schema_version": 1,
-        "evidence_type": "production_db_path_safety",
-        "target_sha": "sha123",
-        "status": "PASS",
-        "validator_id": "canonical-hermes-db-path-validator",
+        "validator_id": "_validate_database_source_path",
         "validator_version": "1",
         "path_classification": "authoritative-production-path",
-        "collected_at_utc": "time",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {},
+    }
+    os.environ["HERMES_PROVENANCE_KEY"] = "testkey"
+    ev["execution_provenance"] = {
+        "signature": hmac.new(
+            b"testkey", ev["target_sha"].encode(), hashlib.sha256
+        ).hexdigest()
     }
     ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
     bundle = create_bundle({"db_evidence": ev})

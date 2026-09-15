@@ -383,7 +383,7 @@ def get_all_gates(
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "validator_id is not canonical")
                 elif str(ev.get("validator_version")) != "1":
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "foreign validator revision")
-                elif ev.get("path_classification") not in ("authoritative-production-path", "approved-production-path", "canonical-production-path"):
+                elif ev.get("path_classification") != "authoritative-production-path":
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "path_classification is not authoritative")
                 else:
                     g8 = GateResult("DB_PATH_SAFETY", Status.PASS)

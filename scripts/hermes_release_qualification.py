@@ -513,6 +513,41 @@ def get_all_gates(
     )
 
 
+def check_credential_risk(bundle, expected_sha):
+    has_credential_risk = True
+    cr_err = "Missing credential risk evidence"
+    key_str = os.environ.get("HERMES_PROVENANCE_KEY", "")
+    if bundle and bundle.get("credential_risk_evidence") and bundle.get("credential_risk_evidence") != "BLOCKED":
+        cr = bundle.get("credential_risk_evidence")
+        if not isinstance(cr, dict):
+            cr_err = "credential_risk_evidence must be a dictionary"
+        else:
+            expected_fields = [
+                "schema_version",
+                "evidence_type",
+                "target_sha",
+                "status",
+                "credential_risk_status",
+                "collected_at_utc",
+                "evidence_digest",
+                "execution_provenance",
+            ]
+            if not key_str:
+                cr_err = "Cannot verify execution provenance: No approved trust anchor exists"
+            else:
+                cr_err = _verify_signed_provenance(cr, expected_sha, "credential_risk", expected_fields, key_str)
+                if not cr_err:
+                    status = cr.get("credential_risk_status")
+                    if status == "PROVEN_CLEAR":
+                        has_credential_risk = False
+                    elif status == "PROVEN_RISK":
+                        has_credential_risk = True
+                    else:
+                        has_credential_risk = True
+                        cr_err = f"Unknown credential_risk_status: {status}"
+    return has_credential_risk, cr_err
+
+
 def qualify_main():
     expected_sha = (
         sys.argv[1] if len(sys.argv) > 1 else "6508e294d234598cbb15c1de214802fc3963e2bd"
@@ -597,13 +632,28 @@ def qualify_main():
         requested_at_utc=timestamp,
     )
 
+    has_credential_risk, cr_err = check_credential_risk(bundle, expected_sha)
+
+    if has_credential_risk and cr_err:
+        print(
+            json.dumps(
+                {
+                    "status": "FAIL",
+                    "digest": "",
+                    "image": "",
+                    "blockers": ["CREDENTIAL_RISK_EVIDENCE_INVALID", cr_err],
+                },
+                indent=2,
+            )
+        )
+        sys.exit(0)
+
     qualifier = ReleaseQualifier()
-    # Always credential_risk=True as per user rule 21
     receipt = qualifier.qualify(
         request=request,
         manifest=manifest,
         gates=gates,
-        has_credential_risk=False,
+        has_credential_risk=has_credential_risk,
         current_main_sha=expected_sha,
         timestamp=timestamp,
     )

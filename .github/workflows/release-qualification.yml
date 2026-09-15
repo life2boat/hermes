@@ -23,6 +23,10 @@ on:
         description: "Signed rollback evidence JSON"
         required: true
         type: string
+      credential_risk_evidence:
+        description: "Signed credential risk evidence JSON"
+        required: true
+        type: string
 
 env:
   RC_IMAGE: ghcr.io/${{ github.repository }}
@@ -282,6 +286,7 @@ jobs:
             "secret_evidence": ${{ inputs.secret_evidence }},
             "db_evidence": ${{ inputs.db_evidence }},
             "rollback_evidence": ${{ inputs.rollback_evidence }},
+            "credential_risk_evidence": ${{ inputs.credential_risk_evidence }},
             "generated_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           }
           EOF

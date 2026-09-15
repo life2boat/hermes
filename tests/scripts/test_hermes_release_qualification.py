@@ -549,3 +549,98 @@ def test_modify_payload_recompute_digest_fails_signature():
     gates, *_ = get_all_gates("sha123", bundle)
     gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
     assert gate.status == Status.FAIL
+
+# Task 8.3.3 specific tests for credential risk
+
+def test_hardcoded_false_cannot_authorize():
+    # Implicitly tested by the fact that the script no longer has has_credential_risk=False hardcoded
+    # and instead requires signed evidence. If we omit credential_risk_evidence, it should block.
+    pass
+
+def test_unknown_credential_state_blocks():
+    # If credential_risk_status is 'UNKNOWN', it should fail
+    pass
+
+def test_proven_risk_blocks():
+    pass
+
+def test_proven_clear_can_proceed():
+    pass
+
+def test_malformed_credential_evidence_blocks():
+    pass
+
+def test_hardcoded_false_cannot_authorize():
+    from scripts.hermes_release_qualification import check_credential_risk
+    # missing evidence blocks
+    bundle = {}
+    has_risk, err = check_credential_risk(bundle, 'sha123')
+    assert has_risk is True
+    assert 'Missing' in err
+
+def test_unknown_credential_state_blocks():
+    from scripts.hermes_release_qualification import check_credential_risk
+    import os
+    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+    ev = {
+        'schema_version': 1,
+        'evidence_type': 'credential_risk',
+        'target_sha': 'sha123',
+        'status': 'PASS',
+        'credential_risk_status': 'UNKNOWN',
+        'collected_at_utc': valid_utc(),
+        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+    }
+    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
+    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
+    bundle = {'credential_risk_evidence': ev}
+    has_risk, err = check_credential_risk(bundle, 'sha123')
+    assert has_risk is True
+    assert 'Unknown credential_risk_status: UNKNOWN' in err
+
+def test_proven_risk_blocks():
+    from scripts.hermes_release_qualification import check_credential_risk
+    import os
+    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+    ev = {
+        'schema_version': 1,
+        'evidence_type': 'credential_risk',
+        'target_sha': 'sha123',
+        'status': 'PASS',
+        'credential_risk_status': 'PROVEN_RISK',
+        'collected_at_utc': valid_utc(),
+        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+    }
+    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
+    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
+    bundle = {'credential_risk_evidence': ev}
+    has_risk, err = check_credential_risk(bundle, 'sha123')
+    assert has_risk is True
+    assert err is None
+
+def test_proven_clear_can_proceed():
+    from scripts.hermes_release_qualification import check_credential_risk
+    import os
+    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+    ev = {
+        'schema_version': 1,
+        'evidence_type': 'credential_risk',
+        'target_sha': 'sha123',
+        'status': 'PASS',
+        'credential_risk_status': 'PROVEN_CLEAR',
+        'collected_at_utc': valid_utc(),
+        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+    }
+    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
+    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
+    bundle = {'credential_risk_evidence': ev}
+    has_risk, err = check_credential_risk(bundle, 'sha123')
+    assert has_risk is False
+    assert err is None
+
+def test_malformed_credential_evidence_blocks():
+    from scripts.hermes_release_qualification import check_credential_risk
+    bundle = {'credential_risk_evidence': 'malformed'}
+    has_risk, err = check_credential_risk(bundle, 'sha123')
+    assert has_risk is True
+    assert 'must be a dictionary' in err

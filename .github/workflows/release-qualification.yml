@@ -25,7 +25,7 @@ on:
         type: string
 
 env:
-  RC_IMAGE: ghcr.io/${{ github.repository }}-rc
+  RC_IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   qualify:
@@ -86,21 +86,6 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Build and Push RC Image
-        id: build-image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          build-contexts: playwright_artifacts=${{ runner.temp }}/playwright-artifacts
-          build-args: |
-            HERMES_GIT_SHA=${{ inputs.target_sha }}
-            PLAYWRIGHT_ARTIFACT_CLOSURE_SHA256=a685b3d071968d5140ce42f8346246b0857167c90eefdde71b6ff011eb97340f
-            REVISION=${{ inputs.target_sha }}
-          tags: ${{ env.RC_IMAGE }}:${{ inputs.target_sha }}
-          labels: |
-            org.opencontainers.image.revision=${{ inputs.target_sha }}
 
       - name: Inspect RC Image
         id: inspect
@@ -312,9 +297,24 @@ jobs:
           cat qualification-receipt.json
 
       - name: Upload Evidence Bundle
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qualification-evidence
           path: |
             task8-qualification-evidence.json
             qualification-receipt.json
+
+
+      - name: Assert Qualification Pass
+        run: |
+          if [ -f qualification-receipt.json ]; then
+            STATUS=$(jq -r .status qualification-receipt.json)
+            if [ "$STATUS" != "PASS" ]; then
+              echo "Qualification failed with status $STATUS"
+              exit 1
+            fi
+          else
+            echo "Receipt missing!"
+            exit 1
+          fi

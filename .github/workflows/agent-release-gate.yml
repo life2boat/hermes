@@ -1,6 +1,8 @@
 name: Agent Release Gate
 
 on:
+  push:
+    branches: [main, "fix/*"]
   pull_request:
     branches: [main]
 
@@ -91,3 +93,4 @@ jobs:
           path: release-gate-report.json
           if-no-files-found: error
           retention-days: 30
+

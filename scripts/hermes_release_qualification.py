@@ -32,9 +32,82 @@ def compute_file_sha256(filepath: str) -> str:
 from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
 
 
+
+MAX_EVIDENCE_AGE_SECONDS = 7200
+MAX_FUTURE_CLOCK_SKEW_SECONDS = 300
+
+def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, expected_fields: list, key: str, current_time_utc=None) -> str:
+    import re
+    import datetime
+    from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
+
+    missing = [k for k in expected_fields if k not in ev]
+    if missing:
+        return f"Missing fields: {missing}"
+    if set(ev.keys()) != set(expected_fields):
+        return "Unknown fields present in evidence"
+
+    if expected_type and ev.get("evidence_type") != expected_type:
+        return "Invalid evidence_type"
+    if expected_sha and ev.get("target_sha") != expected_sha:
+        return "target_sha mismatch"
+    if ev.get("status") != "PASS":
+        return "status not PASS"
+
+    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(ev.get("collected_at_utc", ""))):
+        return "Invalid collected_at_utc timestamp"
+
+    try:
+        dt = datetime.datetime.strptime(str(ev["collected_at_utc"]), "%Y-%m-%dT%H:%M:%SZ")
+        if current_time_utc is None:
+            current_time_utc = datetime.datetime.utcnow()
+        delta = (current_time_utc - dt).total_seconds()
+        if delta < -MAX_FUTURE_CLOCK_SKEW_SECONDS:
+            return "collected_at_utc is too far in the future"
+        if delta > MAX_EVIDENCE_AGE_SECONDS:
+            return f"collected_at_utc is stale (older than {MAX_EVIDENCE_AGE_SECONDS}s)"
+    except ValueError:
+        return "Invalid collected_at_utc timestamp format"
+
+    prov = ev.get("execution_provenance")
+    if not isinstance(prov, dict):
+        return "execution_provenance must be a dictionary"
+    sig = prov.get("signature")
+    if not isinstance(sig, str):
+        return "Missing or invalid signature"
+
+    # Cryptographic check
+    payload = {
+        k: v for k, v in ev.items() if k not in ("evidence_digest", "execution_provenance")
+    }
+    prov_copy = {k: v for k, v in prov.items() if k != "signature"}
+    payload["execution_provenance"] = prov_copy
+    
+    import json, hashlib, hmac
+    payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload_digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+    expected_sig = hmac.new(
+        key.encode("utf-8"),
+        payload_digest.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(sig, expected_sig):
+        return "Cryptographic provenance verification failed"
+
+    ev_copy = dict(ev)
+    provided_digest = ev_copy.pop("evidence_digest")
+    computed_digest = compute_canonical_digest_from_dict(ev_copy)
+    if provided_digest != computed_digest:
+        return "evidence_digest mismatch"
+
+    return None
+
 def get_all_gates(
+
     expected_sha: str, bundle: dict
 ) -> Tuple[List[GateResult], str, str, str, str, str, str, str, str, str, str, str]:
+    key = __import__('os').environ.get('HERMES_PROVENANCE_KEY', '')
     # 1. BUNDLE_DIGEST validation
     if bundle:
         provided_digest = bundle.get("bundle_digest")
@@ -201,29 +274,19 @@ def get_all_gates(
         pass
 
     if expected_secret_set is None:
-        g7 = GateResult(
-            "SECRET_CONTRACT", Status.BLOCKED, "Cannot derive expected secret set"
-        )
+        g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot derive expected secret set")
     elif not bundle or "secret_evidence" not in bundle:
         g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Missing secret evidence")
     else:
         ev = bundle.get("secret_evidence")
         if ev == "BLOCKED":
-            g7 = GateResult(
-                "SECRET_CONTRACT", Status.BLOCKED, "Secret evidence explicitly blocked"
-            )
+            g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Secret evidence explicitly blocked")
         elif isinstance(ev, dict) and ev.get("status") == "BLOCKED":
-            g7 = GateResult(
-                "SECRET_CONTRACT", Status.BLOCKED, "Secret evidence status blocked"
-            )
+            g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Secret evidence status blocked")
         elif isinstance(ev, dict) and ev.get("status") == "FAIL":
-            g7 = GateResult(
-                "SECRET_CONTRACT", Status.FAIL, "Secret evidence explicitly failed"
-            )
+            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Secret evidence explicitly failed")
         elif not isinstance(ev, dict):
-            g7 = GateResult(
-                "SECRET_CONTRACT", Status.FAIL, "secret_evidence must be a dictionary"
-            )
+            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "secret_evidence must be a dictionary")
         else:
             required = [
                 "schema_version",
@@ -236,212 +299,48 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            missing = [k for k in required if k not in ev]
-            if missing:
-                g7 = GateResult(
-                    "SECRET_CONTRACT", Status.FAIL, f"Missing fields: {missing}"
-                )
-            elif set(ev.keys()) != set(required):
-                g7 = GateResult(
-                    "SECRET_CONTRACT",
-                    Status.FAIL,
-                    "Unknown fields present in secret_evidence",
-                )
-            elif ev["evidence_type"] != "production_secret_presence":
-                g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Invalid evidence_type")
-            elif ev["target_sha"] != expected_sha:
-                g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "target_sha mismatch")
-            elif ev["status"] != "PASS":
-                g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "status not PASS")
-            elif (
-                not isinstance(ev.get("required_secrets"), list)
-                or not ev["required_secrets"]
-            ):
-                g7 = GateResult(
-                    "SECRET_CONTRACT",
-                    Status.FAIL,
-                    "required_secrets must be a non-empty list",
-                )
-            elif not __import__("re").match(
-                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(ev["collected_at_utc"])
-            ):
-                g7 = GateResult(
-                    "SECRET_CONTRACT", Status.FAIL, "Invalid collected_at_utc timestamp"
-                )
+            
+            if not key:
+                g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                # Structure checks
-                secret_fail = False
-                observed_secret_set = set()
-                allowed_keys = {"name", "required", "present", "source_class"}
+                err = _verify_signed_provenance(ev, expected_sha, "production_secret_presence", required, key)
+                if err:
+                    g7 = GateResult("SECRET_CONTRACT", Status.FAIL, err)
+                elif not isinstance(ev.get("required_secrets"), list) or not ev["required_secrets"]:
+                    g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "required_secrets must be a non-empty list")
+                else:
+                    secret_fail = False
+                    observed_secret_set = set()
+                    for s in ev["required_secrets"]:
+                        if not isinstance(s, dict) or "name" not in s or "presence" not in s:
+                            secret_fail = True
+                            break
+                        if s["presence"] != "CONFIRMED":
+                            secret_fail = True
+                            break
+                        observed_secret_set.add(s["name"])
 
-                for sec in ev["required_secrets"]:
-                    if not isinstance(sec, dict):
-                        g7 = GateResult(
-                            "SECRET_CONTRACT", Status.FAIL, "Each secret must be a dict"
-                        )
-                        secret_fail = True
-                        break
-                    if set(sec.keys()) != allowed_keys:
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "Secret record has missing or unknown fields",
-                        )
-                        secret_fail = True
-                        break
-                    if not isinstance(sec["name"], str) or not sec["name"]:
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "name must be a non-empty string",
-                        )
-                        secret_fail = True
-                        break
-                    if not isinstance(sec["required"], bool) or not isinstance(
-                        sec["present"], bool
-                    ):
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "required and present must be bools",
-                        )
-                        secret_fail = True
-                        break
-                    if (
-                        not isinstance(sec["source_class"], str)
-                        or not sec["source_class"]
-                    ):
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "source_class must be a non-empty string",
-                        )
-                        secret_fail = True
-                        break
-                    if sec["required"] and not sec["present"]:
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "Required secret is not present",
-                        )
-                        secret_fail = True
-                        break
-                    observed_secret_set.add(sec["name"])
-
-                if not secret_fail:
-                    if expected_secret_set != observed_secret_set:
-                        g7 = GateResult(
-                            "SECRET_CONTRACT",
-                            Status.FAIL,
-                            "Observed secrets do not match expected mandatory secrets exactly",
-                        )
+                    if secret_fail:
+                        g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "All required secrets must be CONFIRMED")
+                    elif expected_secret_set - observed_secret_set:
+                        missing_secrets = expected_secret_set - observed_secret_set
+                        g7 = GateResult("SECRET_CONTRACT", Status.FAIL, f"Missing required secrets in evidence: {missing_secrets}")
                     else:
-                        prov = ev.get("execution_provenance")
-                        if not isinstance(prov, dict):
-                            g7 = GateResult(
-                                "SECRET_CONTRACT",
-                                Status.FAIL,
-                                "malformed execution_provenance",
-                            )
-                        else:
-                            sig = prov.get("signature")
-                            if not sig:
-                                g7 = GateResult(
-                                    "SECRET_CONTRACT",
-                                    Status.BLOCKED,
-                                    "No trusted execution signature",
-                                )
-                            else:
-                                key = __import__("os").environ.get(
-                                    "HERMES_PROVENANCE_KEY", ""
-                                )
-                                if not key:
-                                    g7 = GateResult(
-                                        "SECRET_CONTRACT",
-                                        Status.BLOCKED,
-                                        "Cannot verify execution provenance: No approved trust anchor exists",
-                                    )
-                                else:
-                                    # Cryptographic check
-                                    payload = {
-                                        k: v
-                                        for k, v in ev.items()
-                                        if k
-                                        not in (
-                                            "evidence_digest",
-                                            "execution_provenance",
-                                        )
-                                    }
-                                    prov_copy = {
-                                        k: v
-                                        for k, v in prov.items()
-                                        if k != "signature"
-                                    }
-                                    payload["execution_provenance"] = prov_copy
-                                    payload_str = __import__("json").dumps(
-                                        payload, sort_keys=True, separators=(",", ":")
-                                    )
-                                    payload_digest = (
-                                        __import__("hashlib")
-                                        .sha256(payload_str.encode("utf-8"))
-                                        .hexdigest()
-                                    )
-                                    expected_sig = (
-                                        __import__("hmac")
-                                        .new(
-                                            key.encode("utf-8"),
-                                            payload_digest.encode("utf-8"),
-                                            __import__("hashlib").sha256,
-                                        )
-                                        .hexdigest()
-                                    )
-
-                                    if not __import__("hmac").compare_digest(
-                                        sig, expected_sig
-                                    ):
-                                        g7 = GateResult(
-                                            "SECRET_CONTRACT",
-                                            Status.FAIL,
-                                            "Cryptographic provenance verification failed",
-                                        )
-                                    else:
-                                        ev_copy = dict(ev)
-                                        provided_digest = ev_copy.pop("evidence_digest")
-                                        computed_digest = (
-                                            compute_canonical_digest_from_dict(ev_copy)
-                                        )
-                                        if provided_digest != computed_digest:
-                                            g7 = GateResult(
-                                                "SECRET_CONTRACT",
-                                                Status.FAIL,
-                                                "evidence_digest mismatch",
-                                            )
-                                        else:
-                                            g7 = GateResult(
-                                                "SECRET_CONTRACT", Status.PASS
-                                            )
+                        g7 = GateResult("SECRET_CONTRACT", Status.PASS)
 
     # 8. DB_PATH_SAFETY
     if not bundle or "db_evidence" not in bundle:
-        g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Missing db evidence")
+        g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Missing DB evidence")
     else:
         ev = bundle.get("db_evidence")
         if ev == "BLOCKED":
-            g8 = GateResult(
-                "DB_PATH_SAFETY", Status.BLOCKED, "DB evidence explicitly blocked"
-            )
+            g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "DB evidence explicitly blocked")
         elif isinstance(ev, dict) and ev.get("status") == "BLOCKED":
-            g8 = GateResult(
-                "DB_PATH_SAFETY", Status.BLOCKED, "DB evidence status blocked"
-            )
+            g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "DB evidence status blocked")
         elif isinstance(ev, dict) and ev.get("status") == "FAIL":
-            g8 = GateResult(
-                "DB_PATH_SAFETY", Status.FAIL, "DB evidence explicitly failed"
-            )
+            g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "DB evidence explicitly failed")
         elif not isinstance(ev, dict):
-            g8 = GateResult(
-                "DB_PATH_SAFETY", Status.FAIL, "db_evidence must be a dictionary"
-            )
+            g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "db_evidence must be a dictionary")
         else:
             required = [
                 "schema_version",
@@ -455,116 +354,17 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            missing = [k for k in required if k not in ev]
-            if missing:
-                g8 = GateResult(
-                    "DB_PATH_SAFETY", Status.FAIL, f"Missing fields: {missing}"
-                )
-            elif set(ev.keys()) != set(required):
-                g8 = GateResult(
-                    "DB_PATH_SAFETY", Status.FAIL, "Unknown fields in db_evidence"
-                )
-            elif ev["evidence_type"] != "production_db_path_safety":
-                g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "Invalid evidence_type")
-            elif ev["target_sha"] != expected_sha:
-                g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "target_sha mismatch")
-            elif ev["status"] != "PASS":
-                g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "status not PASS")
-            elif ev["validator_id"] != "_validate_database_source_path":
-                g8 = GateResult(
-                    "DB_PATH_SAFETY", Status.FAIL, "validator_id is not canonical"
-                )
-            elif str(ev["validator_version"]) != "1":
-                g8 = GateResult(
-                    "DB_PATH_SAFETY", Status.FAIL, "foreign validator revision"
-                )
-            elif ev["path_classification"] not in (
-                "authoritative-production-path",
-                "approved-production-path",
-                "canonical-production-path",
-            ):
-                g8 = GateResult(
-                    "DB_PATH_SAFETY",
-                    Status.FAIL,
-                    "path_classification is not authoritative",
-                )
-            elif not __import__("re").match(
-                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(ev["collected_at_utc"])
-            ):
-                g8 = GateResult(
-                    "DB_PATH_SAFETY", Status.FAIL, "Invalid collected_at_utc timestamp"
-                )
+            
+            if not key:
+                g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                prov = ev.get("execution_provenance")
-                if not isinstance(prov, dict):
-                    g8 = GateResult(
-                        "DB_PATH_SAFETY", Status.FAIL, "malformed validator output"
-                    )
+                err = _verify_signed_provenance(ev, expected_sha, "production_db_path_safety", required, key)
+                if err:
+                    g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, err)
+                elif ev.get("path_classification") != "authoritative-production-path":
+                    g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "path_classification is not authoritative")
                 else:
-                    sig = prov.get("signature")
-                    if not sig:
-                        g8 = GateResult(
-                            "DB_PATH_SAFETY",
-                            Status.BLOCKED,
-                            "No trusted execution signature",
-                        )
-                    else:
-                        key = __import__("os").environ.get("HERMES_PROVENANCE_KEY", "")
-                        if not key:
-                            g8 = GateResult(
-                                "DB_PATH_SAFETY",
-                                Status.BLOCKED,
-                                "Cannot verify execution provenance: No approved trust anchor exists",
-                            )
-                        else:
-                            # Cryptographic check
-                            payload = {
-                                k: v
-                                for k, v in ev.items()
-                                if k not in ("evidence_digest", "execution_provenance")
-                            }
-                            prov_copy = {
-                                k: v for k, v in prov.items() if k != "signature"
-                            }
-                            payload["execution_provenance"] = prov_copy
-                            payload_str = __import__("json").dumps(
-                                payload, sort_keys=True, separators=(",", ":")
-                            )
-                            payload_digest = (
-                                __import__("hashlib")
-                                .sha256(payload_str.encode("utf-8"))
-                                .hexdigest()
-                            )
-                            expected_sig = (
-                                __import__("hmac")
-                                .new(
-                                    key.encode("utf-8"),
-                                    payload_digest.encode("utf-8"),
-                                    __import__("hashlib").sha256,
-                                )
-                                .hexdigest()
-                            )
-
-                            if not __import__("hmac").compare_digest(sig, expected_sig):
-                                g8 = GateResult(
-                                    "DB_PATH_SAFETY",
-                                    Status.FAIL,
-                                    "Cryptographic provenance verification failed",
-                                )
-                            else:
-                                ev_copy = dict(ev)
-                                provided_digest = ev_copy.pop("evidence_digest")
-                                computed_digest = compute_canonical_digest_from_dict(
-                                    ev_copy
-                                )
-                                if provided_digest != computed_digest:
-                                    g8 = GateResult(
-                                        "DB_PATH_SAFETY",
-                                        Status.FAIL,
-                                        "evidence_digest mismatch",
-                                    )
-                                else:
-                                    g8 = GateResult("DB_PATH_SAFETY", Status.PASS)
+                    g8 = GateResult("DB_PATH_SAFETY", Status.PASS)
 
     # 9. SCHEMA_COMPATIBILITY
     sch_digest = ""
@@ -577,8 +377,30 @@ def get_all_gates(
                 "Production schema cannot be read under current authority",
             )
         else:
-            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
             sch_digest = sch.get("digest", "")
+            
+            if "evidence_digest" in sch:
+                expected_fields = [
+                    "schema_version",
+                    "evidence_type",
+                    "target_sha",
+                    "status",
+                    "observed_schema",
+                    "digest",
+                    "collected_at_utc",
+                    "evidence_digest",
+                    "execution_provenance",
+                ]
+                if not key:
+                    g9 = GateResult("SCHEMA_COMPATIBILITY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+                else:
+                    err = _verify_signed_provenance(sch, expected_sha, "production_schema_compatibility", expected_fields, key)
+                    if err:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
+                    else:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
+            else:
+                g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
     else:
         g9 = GateResult(
             "SCHEMA_COMPATIBILITY",
@@ -589,8 +411,29 @@ def get_all_gates(
     # 10. ROLLBACK_QUALIFIED
     rb_digest = ""
     if bundle and bundle.get("rollback_evidence") != "BLOCKED":
-        g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
         rb_digest = bundle.get("rollback_evidence_digest", "")
+        
+        rb = bundle.get("rollback_evidence")
+        if isinstance(rb, dict) and "evidence_digest" in rb:
+            expected_fields = [
+                "schema_version",
+                "evidence_type",
+                "target_sha",
+                "status",
+                "collected_at_utc",
+                "evidence_digest",
+                "execution_provenance",
+            ]
+            if not key:
+                g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+            else:
+                err = _verify_signed_provenance(rb, expected_sha, "rollback_ready", expected_fields, key)
+                if err:
+                    g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, err)
+                else:
+                    g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
+        else:
+            g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
     else:
         g10 = GateResult(
             "ROLLBACK_QUALIFIED", Status.BLOCKED, "Missing rollback rehearsal"

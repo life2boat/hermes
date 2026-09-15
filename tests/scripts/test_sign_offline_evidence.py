@@ -3,11 +3,18 @@ import os
 import subprocess
 import tempfile
 import pytest
+from datetime import datetime, timedelta
+import copy
+from scripts.hermes_release_qualification import get_all_gates, Status
+from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
 
 SIGNER_SCRIPT = 'scripts/sign_offline_evidence.py'
 
+def get_utc_offset(seconds: int) -> str:
+    return (datetime.utcnow() + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 @pytest.fixture
-def valid_db_evidence():
+def base_evidence():
     return {
         'schema_version': 1,
         'evidence_type': 'production_db_path_safety',
@@ -15,8 +22,8 @@ def valid_db_evidence():
         'status': 'PASS',
         'validator_id': '_validate_database_source_path',
         'validator_version': '1',
-        'path_classification': 'canonical-production-path',
-        'collected_at_utc': '2026-09-15T00:00:00Z',
+        'path_classification': 'authoritative-production-path',
+        'collected_at_utc': get_utc_offset(0),
         'execution_provenance': {
             'runtime_identity': 'test-runtime',
             'isolation_level': 'docker'
@@ -53,34 +60,132 @@ def run_signer(input_data, key='TEST_KEY_123'):
         
         return proc.returncode, proc.stdout, proc.stderr, output_data
 
-def test_valid_key_untouched_evidence(valid_db_evidence):
-    rc, stdout, stderr, out = run_signer(valid_db_evidence)
-    assert rc == 0
-    assert 'evidence_digest' in out
-    assert 'signature' in out['execution_provenance']
+def evaluate_gate(ev, key='TEST_KEY_123'):
+    from tests.scripts.test_hermes_release_qualification import create_bundle
+    bundle = create_bundle({"db_evidence": ev})
+    env = os.environ.copy()
+    if key is not None:
+        os.environ['HERMES_PROVENANCE_KEY'] = key
+    elif 'HERMES_PROVENANCE_KEY' in os.environ:
+        del os.environ['HERMES_PROVENANCE_KEY']
+        
+    gates, *_ = get_all_gates(ev.get("target_sha", "8b44bb146b31902dc99c53d976e7b20964eb4caa"), bundle)
+    
+    # Restore env
+    os.environ.clear()
+    os.environ.update(env)
+    
+    gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
+    return gate
 
-def test_missing_key(valid_db_evidence):
-    rc, stdout, stderr, out = run_signer(valid_db_evidence, key=None)
+def test_1_valid_untouched_evidence(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    assert rc == 0
+    gate = evaluate_gate(out)
+    assert gate.status == Status.PASS
+
+def test_2_missing_key_in_signer(base_evidence):
+    rc, stdout, _, _ = run_signer(base_evidence, key=None)
     assert rc != 0
     assert 'HERMES_PROVENANCE_KEY environment variable is required' in stdout
 
-def test_tampered_signed_payload_fails_qualifier(valid_db_evidence):
-    # This is handled comprehensively in test_hermes_release_qualification.py,
-    # but we just verify the signer output structure here.
-    rc, stdout, stderr, out = run_signer(valid_db_evidence)
+def test_3_missing_key_in_qualifier(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
     assert rc == 0
-    # Modifying the output simulates tampering, which qualification catches.
-    assert out['target_sha'] == valid_db_evidence['target_sha']
+    gate = evaluate_gate(out, key=None)
+    assert gate.status == Status.BLOCKED
+    assert "No approved trust anchor exists" in gate.reason
 
-def test_unknown_fields_remain_rejected(valid_db_evidence):
-    # Signer must not remove unknown fields, so qualifier can reject them.
-    valid_db_evidence['unknown_field'] = 'hax'
-    rc, stdout, stderr, out = run_signer(valid_db_evidence)
+def test_4_wrong_key_in_qualifier(base_evidence):
+    rc, _, _, out = run_signer(base_evidence, key="KEY_A")
     assert rc == 0
-    assert 'unknown_field' in out
+    gate = evaluate_gate(out, key="KEY_B")
+    assert gate.status == Status.FAIL
+    assert "Cryptographic provenance verification failed" in gate.reason
 
-def test_secret_values_never_appear_in_generated_evidence(valid_db_evidence):
-    rc, stdout, stderr, out = run_signer(valid_db_evidence)
-    out_str = json.dumps(out)
-    assert 'TEST_KEY_123' not in out_str
+def test_5_tamper_target_sha(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["target_sha"] = "0000000000000000000000000000000000000000"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "target_sha mismatch" in gate.reason or "Cryptographic provenance verification failed" in gate.reason
 
+def test_6_tamper_evidence_type(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["evidence_type"] = "fake_type"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Invalid evidence_type" in gate.reason or "Cryptographic provenance verification failed" in gate.reason
+
+def test_7_tamper_path_classification(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["path_classification"] = "fake-path"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Cryptographic provenance verification failed" in gate.reason or "path_classification is not authoritative" in gate.reason
+
+def test_8_missing_required_field(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    del out["validator_id"]
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Missing fields" in gate.reason or "Cryptographic provenance verification failed" in gate.reason
+
+def test_9_extra_unknown_field(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["hacker_field"] = "malicious"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Unknown fields" in gate.reason or "Cryptographic provenance verification failed" in gate.reason
+
+def test_10_invalid_timestamp_regex(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["collected_at_utc"] = "2026/09/15 00:00:00"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Invalid collected_at_utc timestamp" in gate.reason or "Cryptographic provenance verification failed" in gate.reason
+
+def test_11_timestamp_future_clock_skew(base_evidence):
+    base_evidence["collected_at_utc"] = get_utc_offset(600)  # +10 minutes
+    rc, _, _, out = run_signer(base_evidence)
+    assert rc == 0
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "collected_at_utc is too far in the future" in gate.reason
+
+def test_12_timestamp_stale_replay(base_evidence):
+    base_evidence["collected_at_utc"] = get_utc_offset(-8000)  # -133 minutes
+    rc, _, _, out = run_signer(base_evidence)
+    assert rc == 0
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "collected_at_utc is stale" in gate.reason
+
+def test_13_missing_signature_structure(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    del out["execution_provenance"]["signature"]
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "Missing or invalid signature" in gate.reason
+
+def test_14_tamper_evidence_digest(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["evidence_digest"] = "bad_digest"
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "evidence_digest mismatch" in gate.reason
+
+def test_15_status_tampered(base_evidence):
+    rc, _, _, out = run_signer(base_evidence)
+    out["status"] = "FAIL"
+    out["evidence_digest"] = compute_canonical_digest_from_dict({k: v for k, v in out.items() if k != "evidence_digest"})
+    gate = evaluate_gate(out)
+    assert gate.status == Status.FAIL
+    assert "status not PASS" in gate.reason or "Cryptographic provenance verification failed" in gate.reason or "DB evidence explicitly failed" in gate.reason

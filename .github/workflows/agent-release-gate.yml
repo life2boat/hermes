@@ -37,7 +37,7 @@ jobs:
 
       - name: Verify exact candidate identity and ancestry
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || "a76422a2c9f129eb6dabe284e24cd2b238281cdc" }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'a76422a2c9f129eb6dabe284e24cd2b238281cdc' }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -60,7 +60,7 @@ jobs:
 
       - name: Evaluate exact-head merge eligibility
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || "a76422a2c9f129eb6dabe284e24cd2b238281cdc" }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'a76422a2c9f129eb6dabe284e24cd2b238281cdc' }}
           HEAD_SHA: ${{ github.sha }}
           PR_NUMBER: 123
         run: |
@@ -93,6 +93,7 @@ jobs:
           path: release-gate-report.json
           if-no-files-found: error
           retention-days: 30
+
 
 
 

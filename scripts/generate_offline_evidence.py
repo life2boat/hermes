@@ -74,13 +74,13 @@ rollback_unsigned = {
     'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
 }
 
-with open("secret_evidence_unsigned.json", "w") as f:
+with open("secret_evidence_unsigned.json", "w", encoding="utf-8") as f:
     json.dump(secret_unsigned, f)
-with open("db_evidence_unsigned.json", "w") as f:
+with open("db_evidence_unsigned.json", "w", encoding="utf-8") as f:
     json.dump(db_unsigned, f)
-with open("schema_evidence_unsigned.json", "w") as f:
+with open("schema_evidence_unsigned.json", "w", encoding="utf-8") as f:
     json.dump(schema_unsigned, f)
-with open("rollback_evidence_unsigned.json", "w") as f:
+with open("rollback_evidence_unsigned.json", "w", encoding="utf-8") as f:
     json.dump(rollback_unsigned, f)
 
 print(json.dumps({

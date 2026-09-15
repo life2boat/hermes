@@ -108,13 +108,17 @@ def base_secret_evidence():
 
 @pytest.fixture
 def base_schema_evidence():
+    import hashlib
     return {
         "schema_version": 1,
         "evidence_type": "production_schema_compatibility",
         "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "status": "PASS",
         "observed_schema": "v1.2.3",
-        "digest": "abcdef123456",
+        "digest": hashlib.sha256(b"v1.2.3").hexdigest(),
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
         "collected_at_utc": get_utc_offset(0),
         "execution_provenance": {
             "isolation_level": "docker",
@@ -129,13 +133,18 @@ def base_rollback_evidence():
         "evidence_type": "rollback_ready",
         "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "status": "PASS",
-        "current_production_image_digest": "sha256:current",
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
         "current_production_oci_revision": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
-        "rollback_image_digest": "sha256:target",
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
         "rollback_image_resolvable": True,
         "rollback_revision": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "rollback_mechanism_id": "docker-compose-revert",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
         "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test",
         "collected_at_utc": get_utc_offset(0),
         "execution_provenance": {
             "isolation_level": "docker",
@@ -402,4 +411,432 @@ def test_VALID_SIGNATURE_BUT_NON_AUTHORITATIVE_PATH_REJECTED(base_db_evidence):
     gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
     assert gate.status == Status.FAIL
     assert gate.reason == "path_classification is not authoritative"
+
+
+# --- Phase 3 & 5 Required Tests ---
+
+def test_SIGNED_MOCKED_ROLLBACK_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:mocked_current_digest",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    assert rc == 0
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Mocked rollback evidence" in g.reason
+
+def test_SIGNED_EMPTY_ROLLBACK_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    assert rc == 0
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Empty digest" in g.reason
+
+def test_INVALID_CURRENT_IMAGE_DIGEST_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "1234",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Invalid digest" in g.reason
+
+def test_INVALID_ROLLBACK_IMAGE_DIGEST_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "1234",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Invalid digest" in g.reason
+
+def test_UNRESOLVABLE_ROLLBACK_IMAGE_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": False,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Unresolvable image" in g.reason
+
+def test_ROLLBACK_REVISION_MISMATCH_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "",
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Revision mismatch" in g.reason
+
+def test_UNKNOWN_ROLLBACK_MECHANISM_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Unknown mechanism" in g.reason
+
+def test_UNPROVEN_ROLLBACK_PROCEDURE_REJECTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": ""
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.FAIL
+    assert "Procedure unproven or missing rehearsal" in g.reason
+
+def test_VALID_REAL_ROLLBACK_EVIDENCE_ACCEPTED():
+    rb = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": "a" * 40,
+        "status": "PASS",
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"},
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "b"*40,
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "b"*40,
+        "rollback_mechanism_id": "mech",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "test"
+    }
+    rc, _, _, signed = run_signer(rb)
+    g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
+    
+    assert g.status == Status.PASS
+
+
+def test_SIGNED_DUMMY_SCHEMA_REJECTED():
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": "CREATE TABLE test (id INTEGER);",
+        "digest": "dummy_digest",
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "Dummy digest" in g.reason
+
+def test_SIGNED_PLACEHOLDER_SCHEMA_REJECTED():
+    import hashlib
+    obs = "CREATE TABLE unknown_schema (id INTEGER);"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "Placeholder schema" in g.reason
+
+def test_INTEGRITY_FAILURE_REJECTED():
+    import hashlib
+    obs = "INTEGRITY_FAIL"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "FAIL",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "Integrity failure" in g.reason
+
+def test_FK_VIOLATIONS_REJECTED():
+    import hashlib
+    obs = "FK_VIOLATIONS"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "FAIL",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "FK violations" in g.reason
+
+def test_USER_VERSION_MISMATCH_REJECTED():
+    import hashlib
+    obs = "CREATE TABLE test (id INTEGER);"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 0,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "User version mismatch" in g.reason
+
+def test_UNKNOWN_SCHEMA_DELTA_REJECTED():
+    import hashlib
+    obs = "CREATE TABLE test (id INTEGER);"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "UNKNOWN",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "Unknown schema delta" in g.reason
+
+def test_MIGRATION_REQUIRED_REJECTED():
+    import hashlib
+    obs = "CREATE TABLE test (id INTEGER);"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": True,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.FAIL
+    assert "Migration required" in g.reason
+
+def test_REAL_NO_DELTA_SCHEMA_ACCEPTED():
+    import hashlib
+    obs = "CREATE TABLE test (id INTEGER);"
+    dig = hashlib.sha256(obs.encode("utf-8")).hexdigest()
+    sch = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": "a"*40,
+        "status": "PASS",
+        "observed_schema": obs,
+        "digest": dig,
+        "user_version": 1,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "collected_at_utc": get_utc_offset(0),
+        "execution_provenance": {"isolation_level": "docker", "runtime_identity": "prod"}
+    }
+    rc, _, _, signed = run_signer(sch)
+    g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
+    
+    assert g.status == Status.PASS
 

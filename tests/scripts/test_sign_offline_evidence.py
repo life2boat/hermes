@@ -81,6 +81,13 @@ def base_db_evidence():
         "validator_version": 1,
         "path_classification": "authoritative-production-path",
         "collected_at_utc": get_utc_offset(0),
+        "current_production_image_digest": "sha256:abc",
+        "current_production_oci_revision": "abc",
+        "rollback_image_digest": "sha256:abc",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "abc",
+        "rollback_mechanism_id": "abc",
+        "rollback_procedure_proven": True,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "test-runtime"
@@ -100,6 +107,13 @@ def base_secret_evidence():
             
         ],
         "collected_at_utc": get_utc_offset(0),
+        "current_production_image_digest": "sha256:abc",
+        "current_production_oci_revision": "abc",
+        "rollback_image_digest": "sha256:abc",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "abc",
+        "rollback_mechanism_id": "abc",
+        "rollback_procedure_proven": True,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "test-runtime"
@@ -116,6 +130,13 @@ def base_schema_evidence():
         "observed_schema": "v1.2.3",
         "digest": "abcdef123456",
         "collected_at_utc": get_utc_offset(0),
+        "current_production_image_digest": "sha256:abc",
+        "current_production_oci_revision": "abc",
+        "rollback_image_digest": "sha256:abc",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "abc",
+        "rollback_mechanism_id": "abc",
+        "rollback_procedure_proven": True,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "test-runtime"
@@ -130,6 +151,13 @@ def base_rollback_evidence():
         "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "status": "PASS",
         "collected_at_utc": get_utc_offset(0),
+        "current_production_image_digest": "sha256:abc",
+        "current_production_oci_revision": "abc",
+        "rollback_image_digest": "sha256:abc",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "abc",
+        "rollback_mechanism_id": "abc",
+        "rollback_procedure_proven": True,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "test-runtime"
@@ -395,4 +423,5 @@ def test_VALID_SIGNATURE_BUT_NON_AUTHORITATIVE_PATH_REJECTED(base_db_evidence):
     gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
     assert gate.status == Status.FAIL
     assert gate.reason == "path_classification is not authoritative"
+
 

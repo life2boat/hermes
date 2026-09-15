@@ -130,7 +130,12 @@ def base_rollback_evidence():
         "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "status": "PASS",
         "current_production_image_digest": "sha256:current",
-        "rollback_target_image_digest": "sha256:target",
+        "current_production_oci_revision": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
+        "rollback_image_digest": "sha256:target",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
+        "rollback_mechanism_id": "docker-compose-revert",
+        "rollback_procedure_proven": True,
         "collected_at_utc": get_utc_offset(0),
         "execution_provenance": {
             "isolation_level": "docker",

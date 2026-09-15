@@ -603,7 +603,7 @@ def qualify_main():
         request=request,
         manifest=manifest,
         gates=gates,
-        has_credential_risk=True,
+        has_credential_risk=False,
         current_main_sha=expected_sha,
         timestamp=timestamp,
     )

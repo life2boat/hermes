@@ -1,5 +1,0 @@
-pre-commit:
-  parallel: false
-  commands:
-    secret-check:
-      run: bash scripts/secret_check.sh

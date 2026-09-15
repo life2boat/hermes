@@ -2,7 +2,7 @@ name: Nix Lockfile Fix
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/*"]
     paths:
       - 'package-lock.json'
       - 'package.json'

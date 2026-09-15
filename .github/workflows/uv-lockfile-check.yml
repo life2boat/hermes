@@ -45,7 +45,7 @@ name: uv.lock check
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/*"]
     paths:
       - 'pyproject.toml'
       - 'uv.lock'

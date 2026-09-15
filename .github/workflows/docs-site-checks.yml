@@ -1,6 +1,8 @@
 name: Docs Site Checks
 
 on:
+  push:
+    branches: [main, "fix/*"]
   pull_request:
     paths:
       - 'website/**'

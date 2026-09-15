@@ -1,6 +1,8 @@
 name: Supply Chain Audit
 
 on:
+  push:
+    branches: [main, "fix/*"]
   pull_request:
     types: [opened, synchronize, reopened]
   # No paths filter — the jobs must always run so required checks

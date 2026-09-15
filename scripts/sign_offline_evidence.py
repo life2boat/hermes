@@ -4,6 +4,10 @@ import os
 import hashlib
 import hmac
 
+def compute_canonical_digest_from_dict(d: dict) -> str:
+    s = json.dumps(d, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(s.encode('utf-8')).hexdigest()
+
 def main():
     if len(sys.argv) < 3:
         print('Usage: python3 sign_offline_evidence.py <input_payload.json> <output.json>')
@@ -48,6 +52,11 @@ def main():
     prov_out = dict(prov_copy)
     prov_out['signature'] = sig
     final_evidence['execution_provenance'] = prov_out
+    
+    if 'evidence_digest' in final_evidence:
+        del final_evidence['evidence_digest']
+        
+    final_evidence['evidence_digest'] = compute_canonical_digest_from_dict(final_evidence)
     
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(final_evidence, f, indent=2)

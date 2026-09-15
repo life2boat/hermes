@@ -308,3 +308,91 @@ def test_TAMPERED_ROLLBACK_EVIDENCE_REJECTED(base_rollback_evidence):
     out["status"] = "FAIL"
     gate = evaluate_gate(out, "ROLLBACK_QUALIFIED", bundle_kwargs={"rollback_evidence": out})
     assert gate.status == Status.FAIL
+
+# --- DB PATH SAFETY EXACTNESS TESTS ---
+
+import copy
+import pytest
+
+@pytest.fixture
+def base_db_evidence():
+    return {
+        "schema_version": 1,
+        "evidence_type": "production_db_path_safety",
+        "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
+        "status": "PASS",
+        "validator_id": "_validate_database_source_path",
+        "validator_version": 1,
+        "path_classification": "authoritative-production-path",
+        "collected_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "test-runtime"
+        }
+    }
+
+def test_AUTHORITATIVE_PRODUCTION_PATH_ACCEPTED(base_db_evidence):
+    rc, _, _, out = run_signer(base_db_evidence)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.PASS
+
+def test_APPROVED_PRODUCTION_PATH_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["path_classification"] = "approved-production-path"
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_CANONICAL_PRODUCTION_PATH_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["path_classification"] = "canonical-production-path"
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_ARBITRARY_PATH_CLASSIFICATION_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["path_classification"] = "arbitrary-path"
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_MISSING_PATH_CLASSIFICATION_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    del ev["path_classification"]
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_NULL_PATH_CLASSIFICATION_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["path_classification"] = None
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_WRONG_VALIDATOR_ID_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["validator_id"] = "some_other_validator"
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_WRONG_VALIDATOR_VERSION_REJECTED(base_db_evidence):
+    ev = copy.deepcopy(base_db_evidence)
+    ev["validator_version"] = 2
+    rc, _, _, out = run_signer(ev)
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+
+def test_VALID_SIGNATURE_BUT_NON_AUTHORITATIVE_PATH_REJECTED(base_db_evidence):
+    # Already inherently tested by APPROVED/CANONICAL tests, 
+    # but let's test a distinct non-authoritative known path.
+    ev = copy.deepcopy(base_db_evidence)
+    ev["path_classification"] = "approved-production-path"
+    rc, _, _, out = run_signer(ev)
+    
+    gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
+    assert gate.status == Status.FAIL
+    assert gate.reason == "path_classification is not authoritative"
+

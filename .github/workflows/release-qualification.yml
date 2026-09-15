@@ -90,7 +90,7 @@ jobs:
       - name: Inspect RC Image
         id: inspect
         run: |
-          IMAGE="${{ env.RC_IMAGE }}:${{ inputs.target_sha }}"
+          IMAGE="${{ env.RC_IMAGE }}:sha-${{ inputs.target_sha }}"
           docker pull $IMAGE
           INSPECT=$(docker inspect $IMAGE)
           IMAGE_DIGEST=$(echo $INSPECT | jq -r '.[0].RepoDigests[0]' | cut -d'@' -f2)
@@ -113,7 +113,7 @@ jobs:
       - name: Isolated Runtime Preflight
         id: preflight
         run: |
-          IMAGE="${{ env.RC_IMAGE }}:${{ inputs.target_sha }}"
+          IMAGE="${{ env.RC_IMAGE }}:sha-${{ inputs.target_sha }}"
           # Run container in background with temporary network
           docker network create isolated_network
           

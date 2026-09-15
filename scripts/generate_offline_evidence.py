@@ -58,12 +58,13 @@ def check_secret_presence(manifest_secrets):
             status = "BLOCKED"
             credential_risk = "PROVEN_RISK"
             
-        req_secrets.append({
-            "name": name,
-            "required": required,
-            "present": present,
-            "source_class": source_class
-        })
+        if required:
+            req_secrets.append({
+                "name": name,
+                "required": required,
+                "present": present,
+                "source_class": source_class
+            })
         
     return status, req_secrets, credential_risk
 

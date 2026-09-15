@@ -442,6 +442,13 @@ def get_all_gates(
                 "target_sha",
                 "status",
                 "collected_at_utc",
+                "current_production_image_digest",
+                "current_production_oci_revision",
+                "rollback_image_digest",
+                "rollback_image_resolvable",
+                "rollback_revision",
+                "rollback_mechanism_id",
+                "rollback_procedure_proven",
                 "evidence_digest",
                 "execution_provenance",
             ]

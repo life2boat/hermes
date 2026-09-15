@@ -14,6 +14,8 @@ name: History Check
 # the PR head and main to be non-empty.
 
 on:
+  push:
+    branches: [main, "fix/*"]
   pull_request:
     branches: [main]
 

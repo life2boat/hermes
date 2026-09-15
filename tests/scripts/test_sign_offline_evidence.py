@@ -129,6 +129,8 @@ def base_rollback_evidence():
         "evidence_type": "rollback_ready",
         "target_sha": "8b44bb146b31902dc99c53d976e7b20964eb4caa",
         "status": "PASS",
+        "current_production_image_digest": "sha256:current",
+        "rollback_target_image_digest": "sha256:target",
         "collected_at_utc": get_utc_offset(0),
         "execution_provenance": {
             "isolation_level": "docker",

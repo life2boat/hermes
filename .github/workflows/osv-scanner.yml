@@ -32,7 +32,7 @@ on:
       - 'website/package-lock.json'
       - '.github/workflows/osv-scanner.yml'
   push:
-    branches: [main]
+    branches: [main, "fix/*"]
     paths:
       - 'uv.lock'
       - 'pyproject.toml'

@@ -15,7 +15,7 @@ name: History Check
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "fix/*"]
 
 permissions:
   contents: read
@@ -56,3 +56,4 @@ jobs:
             exit 1
           fi
           echo "::notice::Common ancestor with main: $BASE"
+

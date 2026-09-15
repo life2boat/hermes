@@ -10,9 +10,9 @@ name: Lint (ruff + ty)
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/*"]
   pull_request:
-    branches: [main]
+    branches: [main, "fix/*"]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -196,3 +196,4 @@ jobs:
 
       - name: Run footgun checker
         run: python scripts/check-windows-footguns.py --all
+

@@ -2,7 +2,7 @@ name: Contributor Attribution Check
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "fix/*"]
   # No paths filter — the job must always run so the required check
   # reports a status (path-gated workflows leave checks "pending" forever
   # when no matching files change, which blocks merge).
@@ -83,3 +83,4 @@ jobs:
           else
             echo "✅ All contributor emails are mapped in AUTHOR_MAP."
           fi
+

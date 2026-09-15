@@ -3,9 +3,9 @@ name: Typecheck
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/*"]
   pull_request:
-    branches: [main]
+    branches: [main, "fix/*"]
 
 jobs:
   typecheck:
@@ -23,3 +23,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run --prefix ${{ matrix.package }} typecheck
+

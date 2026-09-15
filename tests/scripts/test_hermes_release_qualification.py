@@ -279,7 +279,8 @@ def create_bundle(extra: dict) -> dict:
 
 
 def valid_utc() -> str:
-    return "2026-09-14T00:00:00Z"
+    from datetime import datetime
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # 1. SECRET RECORD SCHEMA MUST BE CLOSED

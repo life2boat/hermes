@@ -290,9 +290,137 @@ Read-only проверки production разрешены без подтверж
 * персональные сообщения;
 * raw correlation identifiers.
 
+### Fast Track and Continuous Execution
+
+Default operating mode for an already authorized task:
+
+```text
+DEFAULT_MODE=FAST_TRACK
+FAST_TRACK=true
+AUDIT_REQUIRED=false
+CONTINUOUS_EXECUTION=true
+FAST_TRACK_DEFAULT=true
+AUDIT_REQUIRED_DEFAULT=false
+CONTINUOUS_EXECUTION_DEFAULT=true
+OPTIONAL_AUDIT_NON_BLOCKING=true
+PRODUCTION_MUTATION_SINGLE_OWNER=true
+PRODUCTION_REQUIRES_EXPLICIT_TASK_AUTHORIZATION=true
+```
+
+Continue across compatible lifecycle stages without artificial administrative
+pauses when the current task explicitly authorizes those stages, all relevant
+technical preconditions pass, and no explicit stop or canary boundary has been
+reached. A typical authorized flow is:
+
+```text
+implementation
+-> validation
+-> PR/CI
+-> Ready
+-> merge
+-> exact-main build
+-> authorized deployment or migration
+-> health
+-> explicit canary or product stop boundary
+```
+
+Independent audit is not mandatory unless `AUDIT_REQUIRED=true` or an
+unresolved technical security, privacy, or data-integrity uncertainty needs
+independent evidence. Do not impose an artificial `Codex -> Antigravity ->
+Codex -> Antigravity` loop.
+
+Progression is normally permitted when applicable focused tests, related
+regressions, `scripts/agent_check.sh`, lint/static checks, `git diff --check`,
+exact-head CI, `MERGEABLE=true`, and `HAS_CONFLICTS=false` all pass. Green CI
+never overrides a proven technical invariant failure.
+
+Governance-only conditions do not block delivery by themselves: disabled branch
+protection, optional PR metadata, or a missing independent review when
+`AUDIT_REQUIRED=false`. Technical safety always overrides Fast Track:
+
+```text
+TECHNICAL_SAFETY_OVERRIDES_FAST_TRACK=true
+```
+
+Technical blockers include canonical provenance or exact-SHA mismatch, dirty or
+untrusted source, relevant test or CI failure, credential drift, unsafe DB
+paths, path-safety failure, missing or unverified fresh backup, DB
+integrity/FK failure, schema incompatibility, new code against an incompatible
+DB, image/revision mismatch, authorization failure, unauthorized Qdrant
+mutation, failed health checks, or unproven rollback.
+
+Production mutations require explicit current-task authorization. Preparatory
+work may run in parallel (repository search, diff analysis, tests, offline
+validation, temporary DB rehearsal, image inspection, and read-only runtime
+inspection), followed by a deterministic barrier and one serialized production
+mutation owner. Concurrent production mutation is forbidden.
+
+An explicitly authorized migration may continuously perform:
+
+```text
+plan and self-validation
+-> maintenance stop
+-> zero writers
+-> fresh verified backup
+-> canonical staged migration
+-> DB validation
+-> atomic publish
+-> exact-image start
+-> health
+```
+
+when `AUDIT_REQUIRED=false`. It must still use the canonical migration path,
+private staged copy where required, preserved path safety, a fresh rollback
+backup after writers stop, no stale rollback state, no incompatible new code
+on an old schema, and DB-plus-image rollback where required.
+
+Status may be `PASS`, `PARTIAL`, `FAIL`, `BLOCKED`, or `ROLLED_BACK`. Never
+force `PASS` or hide a technical failure.
+
+### Canonical HealBite Git Provenance
+
+For release and deployment work, use only:
+
+```text
+CANONICAL_REPOSITORY=https://github.com/life2boat/hermes.git
+CANONICAL_REMOTE=github
+CANONICAL_MAIN_REF=refs/remotes/github/main
+CANONICAL_MAIN_SHA=<40-character SHA>
+```
+
+Never silently substitute `origin/main`, `upstream/main`, local `main`, local
+`HEAD`, or another checkout. A provenance mismatch is `STATUS=BLOCKED`.
+
+### Standard Codex Task Header
+
+Future Codex tasks should start with:
+
+```text
+MODEL RECOMMENDATION
+
+PRIMARY_MODEL=
+ALTERNATIVE_MODEL=
+REASON=
+TASK_CLASS=
+DETERMINISTIC_RUNBOOK_REQUIRED=
+ULTRA_JUSTIFIED=
+
+FAST_TRACK=true
+AUDIT_REQUIRED=false
+CONTINUOUS_EXECUTION=true
+```
+
+A task may explicitly override these defaults with `FAST_TRACK=false`,
+`AUDIT_REQUIRED=true`, or `PRODUCTION_EXECUTION_ALLOWED=false`. No override
+authorizes secret disclosure, hidden failure, fabricated PASS, or a technical
+fail-closed bypass.
+
 ### Точка остановки
 
-Следуй точке остановки, указанной в задаче.
+Следуй явной stop boundary текущей задачи. При `FAST_TRACK=true`, если
+последующие стадии уже авторизованы задачей и все технические preconditions
+PASS, продолжай без дополнительной административной остановки. Не переходи за
+явно заданную stop/canary boundary.
 
 Примеры:
 
@@ -302,7 +430,8 @@ Read-only проверки production разрешены без подтверж
 * «build only» — не recreate production;
 * «deploy и ждать smoke» — не выполнять пользовательский smoke самостоятельно.
 
-Не продолжай на следующий этап только потому, что предыдущий завершился успешно.
+Примеры явной границы сохраняют силу: read-only audit не разрешает mutation,
+stop after Draft PR не разрешает merge, а build only не разрешает deploy.
 
 ### Итоговый отчёт
 
@@ -337,11 +466,11 @@ Next Step
 
 Приоритет:
 
-1. безопасность данных и production;
-2. ограничения текущего задания;
-3. `AGENTS.md` и repository rules;
-4. эта инструкция автономности;
-5. собственные предположения.
+1. technical safety, security, privacy, and data integrity;
+2. explicit current-task instructions and stop boundary;
+3. Fast Track and Continuous Execution;
+4. remaining `AGENTS.md` and repository rules;
+5. assumptions and default judgment.
 
 Работай автономно до указанной точки остановки. Не запрашивай подтверждений для безопасных, обратимых и ожидаемых действий.
 

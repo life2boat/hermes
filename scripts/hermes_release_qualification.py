@@ -338,7 +338,8 @@ def get_all_gates(
                             g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Required secret is not present")
                             secret_fail = True
                             break
-                        observed_secret_set.add(sec["name"])
+                        if sec["required"]:
+                            observed_secret_set.add(sec["name"])
 
                     if not secret_fail:
                         if expected_secret_set != observed_secret_set:
@@ -444,6 +445,13 @@ def get_all_gates(
                 "collected_at_utc",
                 "evidence_digest",
                 "execution_provenance",
+                "current_production_image_digest",
+                "current_production_oci_revision",
+                "rollback_image_digest",
+                "rollback_image_resolvable",
+                "rollback_revision",
+                "rollback_mechanism_id",
+                "rollback_procedure_proven",
             ]
             if not key:
                 g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")

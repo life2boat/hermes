@@ -82,7 +82,7 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
     }
     prov_copy = {k: v for k, v in prov.items() if k != "signature"}
     payload["execution_provenance"] = prov_copy
-    
+
     import json, hashlib, hmac
     payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload_digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
@@ -299,7 +299,7 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            
+
             if not key:
                 g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
@@ -373,7 +373,7 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            
+
             if not key:
                 g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
@@ -401,7 +401,7 @@ def get_all_gates(
             )
         else:
             sch_digest = sch.get("digest", "")
-            
+
             expected_fields = [
                 "schema_version",
                 "evidence_type",
@@ -409,6 +409,9 @@ def get_all_gates(
                 "status",
                 "observed_schema",
                 "digest",
+                "user_version",
+                "schema_delta",
+                "migration_required",
                 "collected_at_utc",
                 "evidence_digest",
                 "execution_provenance",
@@ -432,7 +435,7 @@ def get_all_gates(
     rb_digest = ""
     if bundle and bundle.get("rollback_evidence") != "BLOCKED":
         rb_digest = bundle.get("rollback_evidence_digest", "")
-        
+
         rb = bundle.get("rollback_evidence")
         if not isinstance(rb, dict):
             g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "rollback_evidence must be a dictionary")
@@ -451,7 +454,12 @@ def get_all_gates(
                 "rollback_image_resolvable",
                 "rollback_revision",
                 "rollback_mechanism_id",
+                "same_compose_chain",
+                "database_restore_required",
+                "schema_downgrade_required",
+                "rollback_health_required",
                 "rollback_procedure_proven",
+                "canonical_rehearsal_evidence",
             ]
             if not key:
                 g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
@@ -460,7 +468,42 @@ def get_all_gates(
                 if err:
                     g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, err)
                 else:
-                    g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
+                    curr_digest = rb.get("current_production_image_digest", "")
+                    roll_digest = rb.get("rollback_image_digest", "")
+                    roll_resolv = rb.get("rollback_image_resolvable")
+                    roll_rev    = rb.get("rollback_revision", "")
+                    mech_id     = rb.get("rollback_mechanism_id", "")
+                    same_comp   = rb.get("same_compose_chain")
+                    db_restore  = rb.get("database_restore_required")
+                    sch_down    = rb.get("schema_downgrade_required")
+                    health      = rb.get("rollback_health_required")
+                    proven      = rb.get("rollback_procedure_proven")
+                    rehearsal   = rb.get("canonical_rehearsal_evidence")
+
+                    if "mocked" in curr_digest or "mocked" in roll_digest:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Mocked rollback evidence")
+                    elif not curr_digest or not roll_digest:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Empty digest")
+                    elif not curr_digest.startswith("sha256:") or not roll_digest.startswith("sha256:"):
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Invalid digest")
+                    elif not roll_resolv:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unresolvable image")
+                    elif not roll_rev:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Revision mismatch")
+                    elif not mech_id:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unknown mechanism")
+                    elif same_comp is None:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Same compose chain not proven")
+                    elif db_restore is None:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "DB restore unknown")
+                    elif sch_down is None:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Schema downgrade unknown")
+                    elif not health:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Health not proven")
+                    elif not proven or not rehearsal:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Procedure unproven or missing rehearsal")
+                    else:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
     else:
         g10 = GateResult(
             "ROLLBACK_QUALIFIED", Status.BLOCKED, "Missing rollback rehearsal"

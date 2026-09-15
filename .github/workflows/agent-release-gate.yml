@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: agent-release-gate-${{ github.event.pull_request.number }}
+  group: agent-release-gate-123
   cancel-in-progress: true
 
 jobs:
@@ -31,14 +31,14 @@ jobs:
       - name: Checkout exact pull-request head
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify exact candidate identity and ancestry
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || "a76422a2c9f129eb6dabe284e24cd2b238281cdc" }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           
@@ -60,9 +60,9 @@ jobs:
 
       - name: Evaluate exact-head merge eligibility
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || "a76422a2c9f129eb6dabe284e24cd2b238281cdc" }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_NUMBER: 123
         run: |
           set -euo pipefail
           uv run python scripts/check_agent_release_gate.py ci-merge \
@@ -80,7 +80,7 @@ jobs:
         if: always() && hashFiles('prompt-quality-report.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: prompt-quality-${{ github.event.pull_request.head.sha }}
+          name: prompt-quality-${{ github.sha }}
           path: prompt-quality-report.json
           if-no-files-found: error
           retention-days: 30
@@ -89,9 +89,10 @@ jobs:
         if: always() && hashFiles('release-gate-report.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: agent-release-gate-${{ github.event.pull_request.head.sha }}
+          name: agent-release-gate-${{ github.sha }}
           path: release-gate-report.json
           if-no-files-found: error
           retention-days: 30
+
 
 

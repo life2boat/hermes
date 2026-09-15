@@ -16,12 +16,12 @@ def run_signer(evidence_dict):
         json.dump(evidence_dict, f)
         temp_in = f.name
     temp_out = temp_in + ".out"
-    
+
     proc = subprocess.run(
         ["python3", "scripts/sign_offline_evidence.py", temp_in, temp_out],
         capture_output=True, text=True, env=env
     )
-    
+
     output_data = None
     if proc.returncode == 0:
         try:
@@ -29,19 +29,19 @@ def run_signer(evidence_dict):
                 output_data = json.load(out_f)
         except:
             pass
-            
+
     try:
         os.remove(temp_in)
         os.remove(temp_out)
     except:
         pass
-        
+
     return proc.returncode, proc.stdout, proc.stderr, output_data
 
 def evaluate_gate(ev, gate_name, key='TEST_KEY_123', bundle_kwargs=None):
     if bundle_kwargs is None:
         bundle_kwargs = {}
-    
+
     if gate_name == "DB_PATH_SAFETY":
         bundle_kwargs["db_evidence"] = ev
     elif gate_name == "SECRET_CONTRACT":
@@ -52,7 +52,7 @@ def evaluate_gate(ev, gate_name, key='TEST_KEY_123', bundle_kwargs=None):
         bundle_kwargs["rollback_evidence"] = ev
 
     bundle = create_bundle(bundle_kwargs)
-    
+
     env = os.environ.copy()
     if key is not None:
         os.environ['HERMES_PROVENANCE_KEY'] = key
@@ -97,7 +97,7 @@ def base_secret_evidence():
         "source_class": "docker-secret",
         "required_secrets": [
             {"name": "TELEGRAM_BOT_TOKEN", "required": True, "present": True, "source_class": "env"},
-            
+
         ],
         "collected_at_utc": get_utc_offset(0),
         "execution_provenance": {
@@ -402,12 +402,12 @@ def test_WRONG_VALIDATOR_VERSION_REJECTED(base_db_evidence):
     assert gate.status == Status.FAIL
 
 def test_VALID_SIGNATURE_BUT_NON_AUTHORITATIVE_PATH_REJECTED(base_db_evidence):
-    # Already inherently tested by APPROVED/CANONICAL tests, 
+    # Already inherently tested by APPROVED/CANONICAL tests,
     # but let's test a distinct non-authoritative known path.
     ev = copy.deepcopy(base_db_evidence)
     ev["path_classification"] = "approved-production-path"
     rc, _, _, out = run_signer(ev)
-    
+
     gate = evaluate_gate(out, "DB_PATH_SAFETY", bundle_kwargs={"db_evidence": out})
     assert gate.status == Status.FAIL
     assert gate.reason == "path_classification is not authoritative"
@@ -439,7 +439,7 @@ def test_SIGNED_MOCKED_ROLLBACK_REJECTED():
     rc, _, _, signed = run_signer(rb)
     assert rc == 0
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Mocked rollback evidence" in g.reason
 
@@ -467,7 +467,7 @@ def test_SIGNED_EMPTY_ROLLBACK_REJECTED():
     rc, _, _, signed = run_signer(rb)
     assert rc == 0
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Empty digest" in g.reason
 
@@ -494,7 +494,7 @@ def test_INVALID_CURRENT_IMAGE_DIGEST_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Invalid digest" in g.reason
 
@@ -521,7 +521,7 @@ def test_INVALID_ROLLBACK_IMAGE_DIGEST_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Invalid digest" in g.reason
 
@@ -548,7 +548,7 @@ def test_UNRESOLVABLE_ROLLBACK_IMAGE_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Unresolvable image" in g.reason
 
@@ -575,7 +575,7 @@ def test_ROLLBACK_REVISION_MISMATCH_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Revision mismatch" in g.reason
 
@@ -602,7 +602,7 @@ def test_UNKNOWN_ROLLBACK_MECHANISM_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Unknown mechanism" in g.reason
 
@@ -629,7 +629,7 @@ def test_UNPROVEN_ROLLBACK_PROCEDURE_REJECTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.FAIL
     assert "Procedure unproven or missing rehearsal" in g.reason
 
@@ -656,7 +656,7 @@ def test_VALID_REAL_ROLLBACK_EVIDENCE_ACCEPTED():
     }
     rc, _, _, signed = run_signer(rb)
     g = evaluate_gate(signed, "ROLLBACK_QUALIFIED")
-    
+
     assert g.status == Status.PASS
 
 
@@ -676,7 +676,7 @@ def test_SIGNED_DUMMY_SCHEMA_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "Dummy digest" in g.reason
 
@@ -699,7 +699,7 @@ def test_SIGNED_PLACEHOLDER_SCHEMA_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "Placeholder schema" in g.reason
 
@@ -722,7 +722,7 @@ def test_INTEGRITY_FAILURE_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "Integrity failure" in g.reason
 
@@ -745,7 +745,7 @@ def test_FK_VIOLATIONS_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "FK violations" in g.reason
 
@@ -768,7 +768,7 @@ def test_USER_VERSION_MISMATCH_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "User version mismatch" in g.reason
 
@@ -791,7 +791,7 @@ def test_UNKNOWN_SCHEMA_DELTA_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "Unknown schema delta" in g.reason
 
@@ -814,7 +814,7 @@ def test_MIGRATION_REQUIRED_REJECTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.FAIL
     assert "Migration required" in g.reason
 
@@ -837,6 +837,6 @@ def test_REAL_NO_DELTA_SCHEMA_ACCEPTED():
     }
     rc, _, _, signed = run_signer(sch)
     g = evaluate_gate(signed, "SCHEMA_COMPATIBILITY")
-    
+
     assert g.status == Status.PASS
 

@@ -82,7 +82,7 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
     }
     prov_copy = {k: v for k, v in prov.items() if k != "signature"}
     payload["execution_provenance"] = prov_copy
-    
+
     import json, hashlib, hmac
     payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload_digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
@@ -299,7 +299,7 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            
+
             if not key:
                 g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
@@ -373,7 +373,7 @@ def get_all_gates(
                 "evidence_digest",
                 "execution_provenance",
             ]
-            
+
             if not key:
                 g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
@@ -401,7 +401,7 @@ def get_all_gates(
             )
         else:
             sch_digest = sch.get("digest", "")
-            
+
             expected_fields = [
                 "schema_version",
                 "evidence_type",
@@ -435,7 +435,7 @@ def get_all_gates(
     rb_digest = ""
     if bundle and bundle.get("rollback_evidence") != "BLOCKED":
         rb_digest = bundle.get("rollback_evidence_digest", "")
-        
+
         rb = bundle.get("rollback_evidence")
         if not isinstance(rb, dict):
             g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "rollback_evidence must be a dictionary")

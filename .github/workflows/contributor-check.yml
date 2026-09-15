@@ -1,6 +1,8 @@
 name: Contributor Attribution Check
 
 on:
+  push:
+    branches: [main, "fix/*"]
   pull_request:
     branches: [main, "fix/*"]
   # No paths filter — the job must always run so the required check
@@ -83,4 +85,5 @@ jobs:
           else
             echo "✅ All contributor emails are mapped in AUTHOR_MAP."
           fi
+
 

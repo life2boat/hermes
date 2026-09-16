@@ -83,10 +83,10 @@ class TestFindAgentBrowserCache:
              patch("os.path.isdir", return_value=False), \
              patch.object(Path, "exists", mock_exists):
             with pytest.raises(FileNotFoundError):
-                bt._find_agent_browser()
+                bt._find_agent_browser(allow_install=False)
         # Second call should also raise (from cache)
         with pytest.raises(FileNotFoundError, match="cached"):
-            bt._find_agent_browser()
+            bt._find_agent_browser(allow_install=False)
 
 
 # ---------------------------------------------------------------------------

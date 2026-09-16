@@ -5,10 +5,17 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _memory_contract_text() -> str:
+    skill_dir = ROOT / "skills" / "memory"
+    paths = [skill_dir / "SKILL.md", *sorted((skill_dir / "references").glob("*.md"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def test_memory_skill_keeps_sqlite_authoritative():
     skill_path = ROOT / "skills" / "memory" / "SKILL.md"
     metadata_path = ROOT / "skills" / "memory" / "agents" / "openai.yaml"
     text = skill_path.read_text(encoding="utf-8")
+    contract_text = _memory_contract_text()
     metadata = metadata_path.read_text(encoding="utf-8")
 
     description = re.search(r"^description: (.+)$", text, re.MULTILINE)
@@ -20,7 +27,7 @@ def test_memory_skill_keeps_sqlite_authoritative():
     assert "--dry-run" in text
     assert "upsert-only" in text
     assert "does not prove identity equality" in text
-    normalized = " ".join(text.casefold().split())
+    normalized = " ".join(contract_text.casefold().split())
     required_semantics = {
         "user and household isolation": (
             "scope every memory os fact read and write by normalized `user_id`",

@@ -1,31 +1,36 @@
 ---
 name: deploy
-description: Use for fail-closed HealBite production deployments.
+description: Use for authorized HealBite production deployment work.
 ---
 
-# HealBite Production Deploy Skill
+# HealBite deployment router
 
-Use this skill to prepare, execute, verify, or roll back an authorized HealBite production deployment. It coordinates the repository's canonical deployment wrapper and preserves separate approval gates for image publication, database migration, feature activation, and credential changes.
+Use this skill only for production deploy/readiness, image qualification,
+database migration, backup/restore, rollback, or untrusted-runtime recovery.
+Do not use it for ordinary development, a docs-only PR, registry publication
+alone, or an unapproved restart.
 
 ## When to Use
 
-- The operator explicitly asks for a production deploy, deploy plan, rollback, or deploy-readiness audit.
-- A release must be bound to an exact source SHA and immutable image identity.
-- A production SQLite migration needs backup, rehearsal, publish, and recovery gates.
-- Do not use this skill for ordinary development, a docs-only PR, registry publication alone, or an unapproved restart.
+Use only when the task itself crosses a production, release-readiness, database,
+or rollback boundary. Select the smallest relevant reference set below.
 
-## Prerequisites
+## Select references
 
-- Read `AGENTS.md`, `docs/CURRENT_STATE.md`, and the [production deployment contract](../../docs/runbooks/hermes-production-deployment.md) completely.
-- Use a clean worktree created from the approved project-main SHA. Preserve any dirty canonical checkout.
-- Obtain explicit authorization for every production mutation. A successful plan never authorizes execution.
-- Know the exact 40-character source SHA, immutable image ID or digest, approved secret-source path, live SQLite mount, and rollback image before mutation. Ordinary deploy also requires the rollback image's valid OCI revision; a missing legacy revision is eligible only for the separate one-time bootstrap contract below.
-- Keep backups and evidence outside the repository with restrictive permissions. Never print secret values, database rows, Telegram identities, or Qdrant payloads.
-- Use `terminal` for the repository wrappers, `read_file` for contracts, and `search_files` to locate related migration code and tests.
+| Task | Read |
+| --- | --- |
+| Readiness or image qualification only | [provenance](references/provenance.md), [image attestation](references/image-attestation.md) |
+| Deploy without schema change | provenance, [authority](references/authority.md), [rollback](references/rollback.md), [runtime verification](references/runtime-verification.md) |
+| Migration or schema compatibility | [database safety](references/database-safety.md), [migration](references/migration.md), [backup/restore](references/backup-restore.md), rollback |
+| Rollback or untrusted-runtime recovery | rollback, database safety, runtime verification |
 
-## How to Run
+Read the canonical detail only for the selected operation:
+[`docs/runbooks/hermes-production-deployment.md`](../../docs/runbooks/hermes-production-deployment.md).
+The weekly/shopping migration runbook owns authority-package command sequencing.
 
-Start with repository and plan modes; they are read-only with respect to production:
+## Procedure
+
+Start with the read-only canonical wrapper modes:
 
 ```bash
 scripts/hermes_production_deploy.sh check-repository \
@@ -37,183 +42,19 @@ scripts/hermes_production_deploy.sh plan \
   --revision <exact-40-character-source-sha>
 ```
 
-Run `execute-deploy` or `execute-rollback` only inside a separately authorized rollout task and only after every prerequisite below passes.
-
-## Quick Reference
-
-| Gate | Required evidence | Mutation allowed |
-| --- | --- | --- |
-| Source | exact SHA, trusted remote, clean worktree | No |
-| Image | immutable ID/digest and matching OCI revision | No |
-| Plan | canonical Compose render, capacity, secret metadata | No |
-| Backup | SQLite backup API, checksum, restore test | Backup artifact only |
-| Migration | rehearsed additive change on staging copy | Only with migration approval |
-| Deploy | explicit confirmation and rollback readiness | `hermes-bot` recreate only |
-| Verify | stable runtime, zero unauthorized DB/Qdrant delta | No |
-
-The [trusted-source predeploy contract](../../docs/runbooks/TRUSTED_SOURCE_ENV_VISION_PREDEPLOY.md) defines provenance and environment-precedence checks. The [weekly/shopping rollout runbook](../../docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md#backup-contract-before-first-production-ddl) is the detailed source for SQLite backup, staged migration, and emergency restore constraints.
-
-## Safety Decision Memory
-
-### Canonical source provenance
-
-**Invariant:** Operate only from the canonical repository with the trusted remote, and require clean `HEAD` to equal the exact resolved 40-character `main` SHA.
-
-**Why:** Branch names and worktree contents are mutable. A wrong remote, stale ref, or dirty checkout disconnects the deployed bytes from the source reviewed and tested by CI.
-
-**Evidence:** Record the sanitized canonical remote identity, resolved `main` SHA, `HEAD` equality, clean status, and a passing `check-repository` result.
-
-### Trusted build and immutable release identity
-
-**Invariant:** Build from a verified export of the exact Git tree, never a raw worktree, and deploy only an immutable image ID or digest whose single OCI revision equals the source SHA.
-
-**Why:** Ignored or untracked files can contaminate a raw build context, while mutable tags can move after review. The tree manifest and OCI revision bind source review, build input, and runtime artifact to one identity.
-
-**Evidence:** Retain the exported-context manifest with path, mode, blob, tree, and scanner results; inspect the image digest/ID and require `org.opencontainers.image.revision` to equal the exact SHA.
-
-### Complete built-image secret coverage
-
-**Invariant:** A release image must pass the canonical scanner for configuration, environment metadata, labels, history, every recoverable layer, and the final filesystem. The receipt must bind the immutable local image ID, exact OCI revision, ordered layer identities, and scan-policy hash.
-
-**Why:** Source scanning cannot prove that build tooling or dependencies did not place a credential in the artifact. Scanning only the final filesystem misses secrets copied into an earlier layer and deleted later, because those bytes remain recoverable.
-
-**Evidence:** Require the sanitized `scripts/hermes_image_secret_scan.py` receipt to report zero metadata, layer, final-filesystem, and total findings for the digest-derived exact image. Any malformed, missing, ambiguous, unsafe, or uninspectable archive member is a technical failure, never zero findings.
-
-
-### Quiescent capture and fresh rollback state
-
-**Invariant:** Require active writers to be zero before state capture or migration publication, then create a fresh backup from the exact live SQLite database through the SQLite backup API.
-
-**Why:** Concurrent writers can change the database and WAL between observations, making the baseline or rollback point internally inconsistent. An older backup does not represent the state immediately before the authorized mutation.
-
-**Evidence:** Record the writer lease/process classification, `active_writers=0`, live DB path/device/inode, backup timestamp and SHA-256, plus a successful isolated restore of that backup.
-
-### Database integrity and schema compatibility
-
-**Invariant:** Require SQLite integrity to be `ok`, foreign-key violations to be zero, and the resulting schema to remain compatible with both the candidate image and any approved automatic rollback image.
-
-**Why:** A healthy container cannot compensate for a corrupt database or an incompatible schema. An image-only rollback after a schema-breaking migration may make the previous binary misread or further damage durable state.
-
-**Evidence:** Capture pre/post `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, schema/user-version fingerprints, idempotent migration rehearsal, and compatibility tests for the candidate and rollback images against the rehearsed post-migration schema.
-
-### Exact-image deployment and rollback boundary
-
-**Invariant:** Recreate `hermes-bot` with the exact inspected immutable image without tag re-resolution. Permit automatic image rollback only when the previous image is proven compatible with the post-migration schema.
-
-**Why:** Re-resolving a tag can substitute an unreviewed artifact. If a schema-breaking migration has already published, the previous image is not a valid automatic recovery target.
-
-**Evidence:** Compare the running container image ID and OCI revision with the approved values. Preserve a passing rollback rehearsal and schema-compatibility result; otherwise keep writers stopped and require a separately authorized, rehearsed database-and-image recovery plan.
-
-### One-time legacy provenance bootstrap
-
-**Invariant:** Never relax the ordinary deploy requirement for a valid current-image OCI revision. Use `scripts/hermes_legacy_provenance_bootstrap.py` only when a healthy running legacy image has an exact immutable image ID but a missing or invalid revision; classify it as `LEGACY_BASELINE` with `SOURCE_REVISION=UNKNOWN`.
-
-**Why:** Guessing a legacy source SHA creates false provenance, while rejecting every transition leaves no safe route into the strict chain. A separate one-way bootstrap confines the exception to the rollback identity and makes the successful exact-main candidate the first provenance-valid baseline.
-
-**Evidence:** Require `plan-bootstrap -> rehearse-rollback -> validate-bootstrap -> execute-bootstrap`. The root-private rehearsal independently verifies archive structure and embedded image identity, makes Docker load the exact bound archive, and binds mode-`0600` evidence to the plan SHA, archive SHA, operation ID, and legacy image ID. Validate and execute recheck that evidence before mutation; candidate failure may use only the same bound archive and must report `ROLLED_BACK`.
-
-### Expected and effective migration scope
-
-**Invariant:** Preserve `MIGRATION_COMPONENTS` as the complete ordered canonical registry. Bind operator authority separately to the ordered `EXPECTED_MUTATION_COMPONENTS`, derive `COMPONENT_SCHEMA_STATES` and `EFFECTIVE_MUTATION_COMPONENTS` from the read-only live schema, and require exact expected/effective equality.
-
-**Why:** The full registry is required for deterministic dependency and target-schema validation, but it must not silently broaden permission to mutate components that the operator did not approve. Database drift after planning can otherwise expand the real DDL scope without changing the signed plan.
-
-**Evidence:** Approval, clean-start policy, plan, final authority, and execution evidence must bind the expected scope. Plan must record every component as `ABSENT`, `KNOWN_COMPATIBLE_PARTIAL`, or `CURRENT`; any mismatch fails before plan publication, and execute must recompute the same classification immediately before production authorization and first DDL.
-
-### Governance warnings and technical gates
-
-**Invariant:** Report governance-only warnings without converting a complete technical PASS into a technical failure. Never waive a failed, unknown, or missing technical gate because of urgency, operator preference, or a governance disposition.
-
-**Why:** Advisory ownership or process warnings have different semantics from deterministic safety checks. Technical fail-closed gates protect durable state when the system cannot prove the source, artifact, backup, compatibility, or rollback assumptions needed for a safe mutation.
-
-**Evidence:** Classify advisory findings separately and retain each required technical gate result. Proceed only when every required technical result is explicitly `PASS`; any `FAIL`, `UNKNOWN`, or absent result blocks mutation.
-
-## Procedure
-
-### Authority package lifecycle
-
-**Invariant:** Treat operator authorization as an explicit input, never as an outcome of the generator. Create one non-reusable package per 32-character operation ID in this order: initial approval and clean-start policy, exact read-only plan, externally reviewed companion evidence, plan-bound final authority, package validation, then runtime attestation. `MIGRATION_COMPONENTS` must equal the complete canonical registry; the separately supplied expected mutation subset must be ordered, unique, known, and exact.
-
-**Why:** A producer can prove bindings and file safety but cannot grant permission to mutate production. Creating final authority before the plan, reusing an operation directory, or accepting repository/SHA/image/DB/component/plan drift would allow an approval to authorize a different operation than the reviewer inspected.
-
-**Evidence:** `prepare-authority`, `plan`, `finalize-authority`, and `validate-authority-package` must each return `PASS` for the same operation ID and exact hashes before `attest-runtime` is eligible. Generated files are canonical root-owned mode-`0600` regular files under a new root-owned mode-`0700` operation directory outside Git; collisions, substitution, stale expiry, unknown fields, or any bound-input drift fail closed. See the canonical command sequence in `docs/runbooks/RUNBOOK_WEEKLY_SHOPPING_FEATURE_DISABLED_ROLLOUT.md`.
-1. **Freeze scope and success criteria.** Record the requested source SHA, image, services, database migration, feature flags, and explicit stop point. Treat build, registry publication, migration, deploy, feature activation, secret changes, and smoke tests as separate gates.
-2. **Verify repository provenance.** Fetch the HealBite project remote, resolve its main SHA, and require the worktree HEAD to equal the approved SHA. Require a clean status and a matching trusted remote. Never repair a dirty checkout with reset, clean, stash, rebase, or file copying.
-3. **Run code gates.** Run focused tests through `scripts/run_tests.sh`, then `bash scripts/agent_check.sh`, `git diff --check`, and the full `scripts/run_tests.sh` suite required by repository policy. Stop on any unexplained failure.
-4. **Verify the immutable image.** Require a local immutable image ID or repository digest, its single `org.opencontainers.image.revision` label equal to the exact source SHA, and a passing full-image secret receipt for metadata, every layer, and the final filesystem. Reject tags as provenance.
-5. **Collect a sanitized production baseline.** Confirm service identity, container state and restart count, exact SQLite mount, integrity and foreign-key status, Qdrant health, feature-state fingerprints, and protected-secret key fingerprints. Record only safe classifications, hashes, and counts.
-6. **Prepare rollback before mutation.** Validate the previous immutable image and its revision, canonical Compose render, protected-secret transition, capacity, and the health contract the rollback must satisfy.
-7. **Back up SQLite before first DDL.** Use the SQLite backup API or an approved online equivalent, not a plain copy of an active database. Store a timestamped immutable backup outside the live DB directory and repository, record its SHA-256, verify `PRAGMA integrity_check`, restore it to a separate temporary path, and verify the restored copy.
-8. **Rehearse the migration.** Classify every canonical component, require the derived effective changeset to equal the operator-bound expected subset, then apply the full additive initializer to a production-derived staging copy. Verify schema/index fingerprints, `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, expected safe aggregates, preservation of unrelated tables, and idempotency on a second pass. Do not print rows or identifiers.
-9. **Publish the migration only under its own approval.** Quiesce writers, re-confirm the source database identity, and recompute the expected/effective comparison immediately before DDL. Use the approved staged-copy/atomic-publish mechanism and stop on drift or any uncertain publish state. Retain the backup, manifest, and displaced staging artifact when recovery may be needed. Never perform manual DDL repair in the deploy task.
-10. **Re-run the deploy plan.** The canonical wrapper must independently validate source, image label, secret source, Compose render, DB mount, capacity, baseline, and rollback readiness immediately before mutation.
-11. **Execute the authorized deploy.** Use the canonical `execute-deploy` confirmation. Recreate only `hermes-bot` with the exact inspected image. Do not recreate Qdrant or change feature flags, secrets, or database schema unless those changes were separately authorized.
-12. **Verify the post-state.** Require stable samples, expected revision/image, `restart_count=0`, no traceback, Telegram connectivity without sending user messages, unchanged protected-secret fingerprints, SQLite integrity, expected migration state, no unauthorized DB delta, and Qdrant non-interference.
-13. **Close with evidence.** Report exact source and image identities, safe checks/counts, backup verification, migration classification, deploy/rollback status, and remaining risks. Clean only the canonical ephemeral override through the wrapper's cleanup mode.
-
-## Memory UUID migration and restore qualification
-
-`memory_convergence_v2` is a new additive component, not a checksum change to v1.
-Include it in the full registry and in the operator-bound effective changeset
-when missing. Runtime refuses nonempty legacy Memory without this migration.
-The additive UUID triggers also mean a pre-UUID writer is NOT automatically
-compatible with a migrated DB; the canonical previous-image compatibility probe
-must pass before publication. Never bypass that gate or restore an older DB
-merely to make an old image start.
-
-`prepare-authority` assigns `LEGACY_EPOCH_UUID` once before staged copies and
-pins it in approval v4 → plan v9 → final execution authority v3. Rehearsals,
-validation, prepare and target execution consume that exact value through
-`--legacy-epoch-uuid`; the migrator never generates one. New independent legacy
-restore histories require new epochs/authority. Existing migrated metadata and
-fact UUIDs are preserved, including the NULL marker of a UUID-native fresh DB.
-An authority/DB epoch mismatch must fail before any mutation. Old authority
-packages without the required field/version are not eligible.
-
-Validate multiple staged copies of one source/epoch, idempotent retry, immutable
-fact UUIDs, all outbox identities and reseeded current UPSERTs, preserved Memory
-contents/counters, integrity and FK checks. This source change is not permission
-to run a production migration, change a collection pointer or widen rollout.
-
-After ANY SQLite restore/rollback/replacement, disable conversational-memory
-serving under explicit authorization and distrust the old vector index. Build
-and validate a fresh derived collection from restored authoritative SQLite,
-verify convergence and isolated hydration, then authorize cutover/requalification
-before serving resumes. This is required both before and after UUID deployment;
-UUID hydration is not orphan cleanup. The minimal create-only rebuild primitive
-and separate cutover/retirement boundary are documented in `skills/memory/SKILL.md`.
+Use `execute-deploy`, `execute-rollback`, migration publication, restore, or
+legacy bootstrap only when the task explicitly authorizes that mutation and all
+selected technical gates are `PASS`. A plan never grants execution authority.
 
 ## Failure/Rollback
 
-- Fail closed before mutation when source, image, backup, capacity, secret, Compose, DB mount, migration rehearsal, or rollback readiness is uncertain.
-- Do not route a missing-revision runtime through ordinary deploy. Bootstrap only through its separately authorized entrypoint and private exact-image rollback artifact; a successful bootstrap permanently returns the runtime to ordinary strict deploy semantics.
-- Reject migration planning or execution when expected and effective mutation components differ, including drift discovered after service stop. Do not broaden authority or edit the approved list in place.
-- A failed migration blocks deployment. Do not retry automatically, repair with ad-hoc DDL, drop tables, or delete recovery artifacts.
-- After deploy mutation, let the canonical orchestrator restore the previous protected override and make its single approved recreate attempt with the previous immutable image.
-- Application rollback keeps a successfully applied additive schema. Do not restore the pre-migration database merely to roll back an image.
-- Restore a database only for confirmed corruption, with explicit operator authorization and an accepted data-loss window. Stop writers, preserve the failed DB, atomically restore the verified backup, then verify integrity and foreign keys before starting the approved image.
-- A healthy automatic rollback reports `ROLLED_BACK`, never `PASS`. A failed rollback reports `FAIL` and preserves both the original and rollback failure classifications.
-- If evidence writing fails after mutation, classify the deployment as unverified and invoke the same rollback path.
+Stop before mutation if a required source, image, secret, database, migration,
+capacity, health, or rollback gate is `FAIL`, `UNKNOWN`, missing, or ambiguous.
+The canonical orchestrator owns its one approved rollback attempt; a recovered
+runtime reports `ROLLED_BACK`, never `PASS`.
 
-## Pitfalls
+## Completion
 
-- Treating a mutable tag, abbreviated SHA, or tag text as release provenance.
-- Building from the dirty canonical checkout or copying files from it.
-- Using a plain file copy for an active SQLite database.
-- Combining database migration, application rollback, Qdrant mutation, feature enablement, or secret rotation under one implicit approval.
-- Rendering full Compose output, printing dotenv content, or retaining raw logs as evidence.
-- Declaring `PASS` after a rollback or after any unresolved post-mutation check.
-
-## Verification
-
-- [ ] Worktree HEAD equals the approved 40-character project SHA and status is clean.
-- [ ] Immutable image identity and OCI revision match the source SHA.
-- [ ] Canonical full-image scanning reports zero metadata, layer, final-filesystem, and total secret findings.
-- [ ] Focused checks, `scripts/agent_check.sh`, `git diff --check`, and required full tests passed.
-- [ ] Backup checksum, integrity check, and isolated restore test passed before DDL.
-- [ ] Migration rehearsal passed twice and preserved unrelated state.
-- [ ] Full migration registry is preserved; expected/effective mutation components match at plan time and at the final pre-DDL checkpoint.
-- [ ] Any legacy bootstrap records `SOURCE_REVISION=UNKNOWN`, completes exact archive load rehearsal before validation, binds its root-private evidence, and leaves DB, Qdrant, features, and secrets unchanged.
-- [ ] Previous image, protected secret state, capacity, and rollback health contract were proven before mutation.
-- [ ] Post-deploy container, Telegram, SQLite, and Qdrant checks passed with no unauthorized delta.
-- [ ] Evidence is sanitized and the final status distinguishes `PASS`, `ROLLED_BACK`, `FAIL`, and `BLOCKED`.
+Report exact source/image identities, sanitized evidence, mutation scope,
+post-state, rollback status, and the next authorized action. Never print
+secrets, rows, identifiers, payloads, raw logs, or rendered Compose output.

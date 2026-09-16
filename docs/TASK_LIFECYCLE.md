@@ -1,7 +1,7 @@
 # Hermes / HealBite Task Lifecycle
 
-Status: normative repository workflow
-Scope: every repository, release, or operational task
+Status: normative workflow for complex, release, or operational work
+Scope: use when a task needs lifecycle evidence beyond a bounded local change
 
 This lifecycle turns an idea into a reviewable change without treating a plan,
 chat transcript, or a green local command as authority for a later phase. It
@@ -21,9 +21,11 @@ canonical remote and base, allowed and forbidden mutations, affected
 invariants, required evidence, and its exact stop boundary. If those boundaries
 cannot be stated, the next step is discovery rather than implementation.
 
-## 3. PREPARE TASK CONTEXT
+## 3. PREPARE TASK CONTEXT (WHEN REQUIRED)
 
-Before discovery, design, or editing in the target worktree, run:
+Run context preparation before discovery, design, or editing when the task is
+complex or multi-phase; release/security/production-sensitive; requires
+evidence lineage; or declares `INTENT_CONTROL_PLANE=REQUIRED`:
 
 ```bash
 python scripts/prepare_task.py --output .task_context/task-context.json
@@ -32,14 +34,18 @@ python scripts/prepare_task.py --output .task_context/task-context.json
 Read the generated package. Verify its Git head and branch, review changed
 files, and confirm its tracked-document hashes. The package is local evidence,
 is intentionally ignored by Git, and its pytest-cache classification cannot
-prove a test PASS. If preparation fails or required documentation is absent,
-stop as `BLOCKED`.
+prove a test PASS. If required preparation fails or required documentation is
+absent, stop as `BLOCKED`.
+
+For a typo, formatting-only change, isolated test, narrow refactor, or
+documentation update unrelated to current runtime state, inspect only relevant
+source/tests/docs unless another executable contract requires preparation.
 
 ## 4. AI IMPLEMENTATION
 
 Discover the current entry point, durable boundary, tests, ADRs, skills and
-state records before selecting the least-mutating solution. Work only in a
-clean isolated worktree, implement the smallest coherent change, preserve
+state records that apply to the selected surface before choosing the
+least-mutating solution. Work only in a clean isolated worktree, preserve
 invariants, and update current-state or decision records when confirmed facts
 change. Follow a domain skill for deployment, memory, or Telegram work.
 

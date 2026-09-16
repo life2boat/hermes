@@ -72,23 +72,43 @@ CANONICAL_MAIN_REF=refs/remotes/github/main
 EXPECTED_BASE_SHA=<40-char SHA or CURRENT_CANONICAL_MAIN>
 
 ============================================================
-PREPARE TASK CONTEXT (MANDATORY BEFORE EXECUTION)
+CONTEXT DECISION
 ============================================================
 
-Before discovery or modification, run:
+PREPARE_TASK_REQUIRED=true|false
+PREPARE_TASK_REASON=<complex lifecycle, evidence lineage, release/security-sensitive, INTENT_CONTROL_PLANE=REQUIRED, or not required for a bounded change>
+
+When `PREPARE_TASK_REQUIRED=true`, run before discovery or modification:
 python scripts/prepare_task.py --output .task_context/task-context.json
 
-Or for INTENT_CONTROL_PLANE tasks:
+For `INTENT_CONTROL_PLANE=REQUIRED` tasks:
 python scripts/prepare_task.py --intent <task-intent.json> --output .task_context/task-context.json
 
-Record and review:
+Record and review when preparation is required:
 - PREPARE_TASK_CONTEXT=PASS|FAIL|BLOCKED
 - TASK_CONTEXT_PATH=.task_context/task-context.json
 - CONTEXT_HEAD_SHA=<must match the intended worktree HEAD>
 - CONTEXT_CHANGED_FILES=<reviewed for unrelated changes>
 - CONTEXT_TEST_EVIDENCE=NOT_AVAILABLE|INCONCLUSIVE
 
-If the script fails or required documentation is missing, stop as `BLOCKED`.
+If required preparation fails or required documentation is missing, stop as
+`BLOCKED`. For a small bounded task where preparation is not required, state
+which relevant source/tests/docs were inspected instead.
+
+============================================================
+PROMPT ARCHITECTURE
+============================================================
+
+Task prompts should primarily state: `GOAL`, `SCOPE`, `AUTHORITY`,
+`COMPLETION_BOUNDARY`, task-specific constraints, and an `OUTPUT_CONTRACT`.
+Link to repository/domain policy instead of copying it into the prompt.
+
+For complex model-facing prompts, use the machine-checkable
+`ai_engineering.PromptSpec` contract, select only relevant/current/authoritative
+context blocks, isolate untrusted dynamic input, and run the applicable
+deterministic prompt-quality or behaviour evaluation. Do not persist raw prompt
+payloads, private reasoning, secrets, credentials, or provider responses as
+trace evidence.
 
 ============================================================
 GOAL
@@ -114,9 +134,8 @@ HISTORICAL_OR_UNVERIFIED_CONTEXT:
 
 AUTHORITATIVE_SOURCES:
 - AGENTS.md
-- docs/HERMES_SOURCE_MAP.md
-- docs/HERMES_SYSTEM_MODEL.md
-- docs/HERMES_INVARIANTS.md
+- <CURRENT_STATE.md only when current release/runtime/migration/rollout state matters>
+- <HERMES_SOURCE_MAP/SYSTEM_MODEL/INVARIANTS only when the changed surface needs them>
 - <applicable code, test, ADR, skill, policy or runbook>
 
 ============================================================
@@ -212,7 +231,7 @@ Run only applicable checks and report exact outcomes:
 - PRODUCTION_READINESS_CHECKLIST: PASS|FAIL|BLOCKED|NOT_APPLICABLE|INCONCLUSIVE
 
 REQUIRED_TEST_COMMANDS:
-- python scripts/prepare_task.py --output .task_context/task-context.json
+- <python scripts/prepare_task.py only when PREPARE_TASK_REQUIRED=true>
 - bash scripts/secret_check.sh
 - scripts/run_tests.sh <focused test paths>
 - bash scripts/agent_check.sh

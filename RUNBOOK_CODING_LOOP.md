@@ -2,7 +2,16 @@
 
 ## When To Use /coding-loop
 
-Use `/coding-loop` for bounded coding work in Hermes/HealBite when the task needs a repeatable engineering cycle: plan, edit, test, review, and report. Typical cases: bug fixes, refactors, test additions, migration prep, deploy prep, and checkpoint work.
+Use `/coding-loop` only when a bounded code task needs a repeatable engineering
+cycle: plan, edit, test, review, and report. Typical cases are bug fixes,
+refactors, and test additions. For a tiny localized edit, inspect the relevant
+source and tests directly; do not preload this runbook, a lifecycle, or an
+operational skill by default.
+
+For complex lifecycle, release/security-sensitive, evidence-lineage, or
+`INTENT_CONTROL_PLANE=REQUIRED` work, follow the context router in `AGENTS.md`
+and run `scripts/prepare_task.py`. Deployment, migration, restore, Memory OS,
+and Telegram runtime tasks select their own domain skill before operational work.
 
 ## How To Run scripts/agent_check.sh
 

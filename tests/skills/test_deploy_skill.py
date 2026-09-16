@@ -5,10 +5,17 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _deployment_contract_text() -> str:
+    skill_dir = ROOT / "skills" / "deploy"
+    paths = [skill_dir / "SKILL.md", *sorted((skill_dir / "references").glob("*.md"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def test_deploy_skill_preserves_fail_closed_contract():
     skill_path = ROOT / "skills" / "deploy" / "SKILL.md"
     metadata_path = ROOT / "skills" / "deploy" / "agents" / "openai.yaml"
     text = skill_path.read_text(encoding="utf-8")
+    contract_text = _deployment_contract_text()
     metadata = metadata_path.read_text(encoding="utf-8")
 
     description = re.search(r"^description: (.+)$", text, re.MULTILINE)
@@ -18,11 +25,11 @@ def test_deploy_skill_preserves_fail_closed_contract():
     assert "## When to Use" in text
     assert "## Procedure" in text
     assert "## Failure/Rollback" in text
-    assert "SQLite backup API" in text
-    assert "exact 40-character" in text
+    assert "SQLite backup API" in contract_text
+    assert "exact 40-character" in contract_text
     assert "ROLLED_BACK" in text
     assert "scripts/hermes_production_deploy.sh" in text
-    normalized = " ".join(text.casefold().split())
+    normalized = " ".join(contract_text.casefold().split())
     required_semantics = {
         "canonical provenance": (
             "branch names and worktree contents are mutable",

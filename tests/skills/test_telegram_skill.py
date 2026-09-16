@@ -5,10 +5,17 @@ import re
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _telegram_contract_text() -> str:
+    skill_dir = ROOT / "skills" / "telegram"
+    paths = [skill_dir / "SKILL.md", *sorted((skill_dir / "references").glob("*.md"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 def test_telegram_skill_starts_read_only_and_prevents_duplicate_polling():
     skill_path = ROOT / "skills" / "telegram" / "SKILL.md"
     metadata_path = ROOT / "skills" / "telegram" / "agents" / "openai.yaml"
     text = skill_path.read_text(encoding="utf-8")
+    contract_text = _telegram_contract_text()
     metadata = metadata_path.read_text(encoding="utf-8")
 
     description = re.search(r"^description: (.+)$", text, re.MULTILINE)
@@ -16,12 +23,12 @@ def test_telegram_skill_starts_read_only_and_prevents_duplicate_polling():
     assert len(description.group(1)) <= 60
     assert description.group(1).endswith(".")
     assert "./scripts/healbite status" in text
-    assert "long polling" in text
-    assert "webhook" in text
-    assert "Never start a second polling process" in text
-    assert "bypass both message guards" in text
+    assert "long polling" in contract_text
+    assert "webhook" in contract_text
+    assert "Never start a second polling process" in contract_text
+    assert "bypass both message guards" in contract_text
     assert "explicit approval" in text
-    normalized = " ".join(text.casefold().split())
+    normalized = " ".join(contract_text.casefold().split())
     required_semantics = {
         "runtime and user ownership": (
             "bind the bot token to the intended gateway/profile",

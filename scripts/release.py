@@ -45,6 +45,8 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "lifeboat@yandex.ru": "life2boat",
+    "root@Home.localdomain": "life2boat",
     "root@temporary-copper.ptr.network": "life2boat",
     "life2boat@gmail.com": "life2boat",
     "peterhao@Peters-MacBook-Air.local": "pinguarmy",

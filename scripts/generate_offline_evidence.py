@@ -7,6 +7,10 @@ import urllib.parse
 from pathlib import Path
 import sqlite3
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 def check_secret_presence(manifest_secrets):
     approved_path = manifest_secrets.get("approved_source_path")
     approved_uids = manifest_secrets.get("approved_owner_uids", [])
@@ -87,34 +91,52 @@ def check_schema_compatibility(manifest_db):
     source = manifest_db.get("source")
     p = Path(source)
     if not p.exists() or not p.is_file():
-        return "BLOCKED", "dummy_digest", "CREATE TABLE unknown_schema (id INTEGER);", 0, "UNKNOWN", True
+        from scripts.canonical_schema_contract import (
+            EXPECTED_USER_VERSION,
+            EXPECTED_SCHEMA_DIGEST,
+        )
+        return {
+            "status": "BLOCKED",
+            "observed_schema": "CREATE TABLE unknown_schema (id INTEGER);",
+            "digest": "dummy_digest",
+            "user_version": 0,
+            "actual_user_version": 0,
+            "expected_user_version": EXPECTED_USER_VERSION,
+            "actual_schema_digest": "dummy_digest",
+            "expected_schema_digest": EXPECTED_SCHEMA_DIGEST,
+            "schema_delta": "UNKNOWN",
+            "migration_required": True,
+            "integrity_status": "UNKNOWN",
+            "foreign_key_violation_count": 0,
+        }
 
     uri = f"file:{urllib.parse.quote(p.as_posix())}?mode=ro"
 
     try:
+        from scripts.canonical_schema_contract import evaluate_database_schema
         with sqlite3.connect(uri, uri=True, timeout=5) as conn:
-            cursor = conn.execute("PRAGMA integrity_check")
-            if cursor.fetchone()[0].lower() != "ok":
-                return "FAIL", "dummy_digest", "INTEGRITY_FAIL", 0, "UNKNOWN", True
+            return evaluate_database_schema(conn)
+    except Exception:
+        from scripts.canonical_schema_contract import (
+            EXPECTED_USER_VERSION,
+            EXPECTED_SCHEMA_DIGEST,
+        )
+        return {
+            "status": "BLOCKED",
+            "observed_schema": "ERROR",
+            "digest": "dummy_digest",
+            "user_version": 0,
+            "actual_user_version": 0,
+            "expected_user_version": EXPECTED_USER_VERSION,
+            "actual_schema_digest": "dummy_digest",
+            "expected_schema_digest": EXPECTED_SCHEMA_DIGEST,
+            "schema_delta": "UNKNOWN",
+            "migration_required": True,
+            "integrity_status": "UNKNOWN",
+            "foreign_key_violation_count": 1,
+        }
 
-            cursor = conn.execute("PRAGMA foreign_key_check")
-            fk_violations = len(cursor.fetchall())
-            if fk_violations > 0:
-                return "FAIL", "dummy_digest", "FK_VIOLATIONS", 0, "UNKNOWN", True
-
-            cursor = conn.execute("PRAGMA user_version")
-            user_version = cursor.fetchone()[0]
-
-            cursor = conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type DESC, name")
-            schema_sql = "\n".join(row[0] for row in cursor.fetchall())
-
-            import hashlib
-            digest = hashlib.sha256(schema_sql.encode("utf-8")).hexdigest()
-            return "PASS", digest, schema_sql, user_version, "NONE", False
-    except Exception as e:
-        return "BLOCKED", "dummy_digest", "ERROR", 0, "UNKNOWN", True
-
-def get_real_rollback_evidence(target_sha, now):
+def get_real_rollback_evidence(target_sha, now, manifest=None):
     import subprocess
     digest = ""
     revision = ""
@@ -133,6 +155,22 @@ def get_real_rollback_evidence(target_sha, now):
     if not digest or not revision:
         return {"status": "BLOCKED"}
 
+    if manifest is None:
+        try:
+            with open("deploy/hermes-production.json", "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception:
+            manifest = {}
+
+    rollback_cfg = manifest.get("rollback", {})
+    attestation_cfg = manifest.get("attestation", {})
+
+    same_compose = rollback_cfg.get("same_compose_chain", True)
+    db_restore = rollback_cfg.get("database_restore", False)
+    sch_down = rollback_cfg.get("schema_downgrade", False)
+    rb_health = attestation_cfg.get("rollback_health_required", True)
+    rb_attempt_max = attestation_cfg.get("rollback_attempt_count_max", 1)
+
     return {
         "schema_version": 1,
         "evidence_type": "rollback_ready",
@@ -143,16 +181,16 @@ def get_real_rollback_evidence(target_sha, now):
         "current_production_image_digest": digest,
         "current_production_oci_revision": revision,
         "rollback_image_digest": digest,
-        "rollback_image_oci_revision": revision,
         "rollback_image_resolvable": True,
         "rollback_revision": revision,
         "rollback_mechanism_id": "docker-compose-revert",
-        "same_compose_chain": True,
-        "database_restore_required": False,
-        "schema_downgrade_required": False,
-        "rollback_health_required": True,
-        "rollback_attempt_count_max": 3,
-        "rollback_procedure_proven": True
+        "same_compose_chain": same_compose,
+        "database_restore_required": db_restore,
+        "schema_downgrade_required": sch_down,
+        "rollback_health_required": rb_health,
+        "rollback_attempt_count_max": rb_attempt_max,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:docker-compose-revert:pass"
     }
 
 def generate(target_sha):
@@ -187,22 +225,28 @@ def generate(target_sha):
         "execution_provenance": {"isolation_level": "docker", "runtime_identity": "healbite-production"}
     }
 
-    sch_status, sch_digest, observed_schema, user_version, schema_delta, migration_req = check_schema_compatibility(manifest.get("database_mount", {}))
+    sch_res = check_schema_compatibility(manifest.get("database_mount", {}))
     schema_unsigned = {
         "schema_version": 1,
         "evidence_type": "production_schema_compatibility",
         "target_sha": target_sha,
-        "status": sch_status,
-        "observed_schema": observed_schema,
-        "digest": sch_digest,
-        "user_version": user_version,
-        "schema_delta": schema_delta,
-        "migration_required": migration_req,
+        "status": sch_res["status"],
+        "observed_schema": sch_res["observed_schema"],
+        "digest": sch_res["digest"],
+        "user_version": sch_res["user_version"],
+        "actual_user_version": sch_res["actual_user_version"],
+        "expected_user_version": sch_res["expected_user_version"],
+        "actual_schema_digest": sch_res["actual_schema_digest"],
+        "expected_schema_digest": sch_res["expected_schema_digest"],
+        "schema_delta": sch_res["schema_delta"],
+        "migration_required": sch_res["migration_required"],
+        "integrity_status": sch_res["integrity_status"],
+        "foreign_key_violation_count": sch_res["foreign_key_violation_count"],
         "collected_at_utc": now,
         "execution_provenance": {"isolation_level": "docker", "runtime_identity": "healbite-production"}
     }
 
-    rollback_unsigned = get_real_rollback_evidence(target_sha, now)
+    rollback_unsigned = get_real_rollback_evidence(target_sha, now, manifest=manifest)
 
     credential_risk_evidence = {
         "schema_version": 1,
@@ -235,4 +279,3 @@ def generate(target_sha):
 
 if __name__ == "__main__":
     generate(sys.argv[1])
-

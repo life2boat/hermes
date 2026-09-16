@@ -279,8 +279,8 @@ def create_bundle(extra: dict) -> dict:
 
 
 def valid_utc() -> str:
-    from datetime import datetime
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # 1. SECRET RECORD SCHEMA MUST BE CLOSED
@@ -553,24 +553,6 @@ def test_modify_payload_recompute_digest_fails_signature():
 # Task 8.3.3 specific tests for credential risk
 
 def test_hardcoded_false_cannot_authorize():
-    # Implicitly tested by the fact that the script no longer has has_credential_risk=False hardcoded
-    # and instead requires signed evidence. If we omit credential_risk_evidence, it should block.
-    pass
-
-def test_unknown_credential_state_blocks():
-    # If credential_risk_status is 'UNKNOWN', it should fail
-    pass
-
-def test_proven_risk_blocks():
-    pass
-
-def test_proven_clear_can_proceed():
-    pass
-
-def test_malformed_credential_evidence_blocks():
-    pass
-
-def test_hardcoded_false_cannot_authorize():
     from scripts.hermes_release_qualification import check_credential_risk
     # missing evidence blocks
     bundle = {}
@@ -644,3 +626,321 @@ def test_malformed_credential_evidence_blocks():
     has_risk, err = check_credential_risk(bundle, 'sha123')
     assert has_risk is True
     assert 'must be a dictionary' in err
+
+
+# Task 8.3.5 specific tests for schema compatibility and rollback qualification
+
+from scripts.canonical_schema_contract import EXPECTED_SCHEMA_DIGEST, EXPECTED_USER_VERSION
+
+
+def make_valid_schema_evidence(target_sha="sha123", key="testkey", **overrides):
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "production_schema_compatibility",
+        "target_sha": target_sha,
+        "status": "PASS",
+        "observed_schema": "CREATE TABLE test (id INTEGER);",
+        "digest": EXPECTED_SCHEMA_DIGEST,
+        "user_version": EXPECTED_USER_VERSION,
+        "actual_user_version": EXPECTED_USER_VERSION,
+        "expected_user_version": EXPECTED_USER_VERSION,
+        "actual_schema_digest": EXPECTED_SCHEMA_DIGEST,
+        "expected_schema_digest": EXPECTED_SCHEMA_DIGEST,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "integrity_status": "ok",
+        "foreign_key_violation_count": 0,
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
+    }
+    ev.update(overrides)
+    if key:
+        ev["execution_provenance"]["signature"] = sign_evidence(ev, key)
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    return ev
+
+
+def make_valid_rollback_evidence(target_sha="sha123", key="testkey", **overrides):
+    ev = {
+        "schema_version": 1,
+        "evidence_type": "rollback_ready",
+        "target_sha": target_sha,
+        "status": "PASS",
+        "collected_at_utc": valid_utc(),
+        "current_production_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "current_production_oci_revision": "rev123",
+        "rollback_image_digest": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "rollback_image_resolvable": True,
+        "rollback_revision": "rev123",
+        "rollback_mechanism_id": "docker-compose-revert",
+        "same_compose_chain": True,
+        "database_restore_required": False,
+        "schema_downgrade_required": False,
+        "rollback_health_required": True,
+        "rollback_attempt_count_max": 1,
+        "rollback_procedure_proven": True,
+        "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:docker-compose-revert:pass",
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
+    }
+    ev.update(overrides)
+    if key:
+        ev["execution_provenance"]["signature"] = sign_evidence(ev, key)
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    return ev
+
+
+def test_real_matching_schema_accepted(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence()
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.PASS
+
+
+def test_user_version_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(actual_user_version=1, expected_user_version=0)
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "User version mismatch" in gate.reason
+
+
+def test_table_delta_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(schema_delta="TABLE_DELTA")
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Table delta detected in schema" in gate.reason
+
+
+def test_index_delta_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(schema_delta="INDEX_DELTA")
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Index delta detected in schema" in gate.reason
+
+
+def test_trigger_delta_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(schema_delta="TRIGGER_DELTA")
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Trigger delta detected in schema" in gate.reason
+
+
+def test_unknown_delta_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(schema_delta="CORRUPTED_DELTA")
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Unknown schema delta" in gate.reason
+
+
+def test_migration_required_rejected_for_current_release(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(migration_required=True)
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Migration required" in gate.reason
+
+
+def test_integrity_failure_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(integrity_status="corrupted")
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "Integrity failure in production schema" in gate.reason
+
+
+def test_fk_violations_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_schema_evidence(foreign_key_violation_count=2)
+    bundle = create_bundle({"schema_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate.status == Status.FAIL
+    assert "FK violations in production schema" in gate.reason
+
+
+def test_signed_self_asserted_none_without_comparison_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev1 = make_valid_schema_evidence(actual_schema_digest="dummy_digest")
+    bundle1 = create_bundle({"schema_evidence": ev1})
+    gates1, *_ = get_all_gates("sha123", bundle1)
+    gate1 = next(g for g in gates1 if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate1.status == Status.FAIL
+    assert "Dummy digest in schema evidence" in gate1.reason
+
+    ev2 = make_valid_schema_evidence(
+        actual_schema_digest="0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    bundle2 = create_bundle({"schema_evidence": ev2})
+    gates2, *_ = get_all_gates("sha123", bundle2)
+    gate2 = next(g for g in gates2 if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate2.status == Status.FAIL
+    assert "Schema digest mismatch with canonical contract" in gate2.reason
+
+
+# Rollback tests
+
+
+def test_mocked_digest_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(
+        current_production_image_digest="sha256:mocked1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab"
+    )
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Mocked rollback evidence" in gate.reason
+
+
+def test_empty_digest_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(current_production_image_digest="")
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Empty digest" in gate.reason
+
+
+def test_invalid_sha256_digest_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(current_production_image_digest="not_sha256_prefix")
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Invalid digest" in gate.reason
+
+
+def test_unresolvable_rollback_image_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(rollback_image_resolvable=False)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Unresolvable image" in gate.reason
+
+
+def test_rollback_oci_revision_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(
+        current_production_oci_revision="rev1", rollback_revision="rev2"
+    )
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Revision mismatch" in gate.reason
+
+
+def test_wrong_compose_chain_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(same_compose_chain=False)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Same compose chain not proven" in gate.reason
+
+
+def test_db_restore_requirement_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(database_restore_required=True)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "DB restore requirement mismatch" in gate.reason
+
+
+def test_schema_downgrade_requirement_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(schema_downgrade_required=True)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Schema downgrade requirement mismatch" in gate.reason
+
+
+def test_rollback_health_policy_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(rollback_health_required=False)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Rollback health policy mismatch" in gate.reason
+
+
+def test_rollback_attempt_limit_mismatch_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(rollback_attempt_count_max=2)
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Rollback attempt limit mismatch" in gate.reason
+
+
+def test_missing_rehearsal_evidence_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(canonical_rehearsal_evidence="")
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Missing rehearsal evidence" in gate.reason
+
+    ev2 = make_valid_rollback_evidence(canonical_rehearsal_evidence="self-asserted")
+    bundle2 = create_bundle({"rollback_evidence": ev2})
+    gates2, *_ = get_all_gates("sha123", bundle2)
+    gate2 = next(g for g in gates2 if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate2.status == Status.FAIL
+    assert "Missing rehearsal evidence" in gate2.reason
+
+
+def test_self_asserted_procedure_proven_rejected(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence(rollback_procedure_proven="self-asserted")
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.FAIL
+    assert "Self-asserted procedure unproven" in gate.reason
+
+
+def test_valid_real_rollback_contract_accepted(monkeypatch):
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
+    ev = make_valid_rollback_evidence()
+    bundle = create_bundle({"rollback_evidence": ev})
+    gates, *_ = get_all_gates("sha123", bundle)
+    gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
+    assert gate.status == Status.PASS

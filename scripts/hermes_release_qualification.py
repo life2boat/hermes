@@ -421,9 +421,35 @@ def get_all_gates(
             else:
                 err = _verify_signed_provenance(sch, expected_sha, "production_schema_compatibility", expected_fields, key)
                 if err:
-                    g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
+                    if sch.get("status") == "FAIL":
+                        obs_str = str(sch.get("observed_schema", ""))
+                        if "INTEGRITY_FAIL" in obs_str:
+                            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Integrity failure in production schema")
+                        elif "FK_VIOLATIONS" in obs_str:
+                            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "FK violations in production schema")
+                        else:
+                            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
+                    else:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
                 else:
-                    g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
+                    observed = str(sch.get("observed_schema", ""))
+                    digest = str(sch.get("digest", ""))
+                    user_version = sch.get("user_version")
+                    delta = str(sch.get("schema_delta", ""))
+                    migration_req = sch.get("migration_required")
+
+                    if digest == "dummy_digest" or not digest:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Dummy digest in schema evidence")
+                    elif "unknown_schema" in observed:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Placeholder schema in evidence")
+                    elif user_version is None or user_version != 1:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "User version mismatch")
+                    elif delta != "NONE":
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Unknown schema delta")
+                    elif migration_req is not False:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Migration required: schema mutation not permitted")
+                    else:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
     else:
         g9 = GateResult(
             "SCHEMA_COMPATIBILITY",

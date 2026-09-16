@@ -1,6 +1,6 @@
 ---
 name: coding-loop
-description: Iterative coding loop for Hermes/HealBite: plan, edit, test, review, stop safely, and save reusable lessons.
+description: "Iterative coding loop for Hermes/HealBite: plan, edit, test, review, stop safely, and save reusable lessons."
 version: 1.0.0
 metadata:
   hermes:

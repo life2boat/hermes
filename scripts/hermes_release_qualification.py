@@ -60,7 +60,7 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
     try:
         dt = datetime.datetime.strptime(str(ev["collected_at_utc"]), "%Y-%m-%dT%H:%M:%SZ")
         if current_time_utc is None:
-            current_time_utc = datetime.datetime.utcnow()
+            current_time_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
         delta = (current_time_utc - dt).total_seconds()
         if delta < -MAX_FUTURE_CLOCK_SKEW_SECONDS:
             return "collected_at_utc is too far in the future"
@@ -410,8 +410,14 @@ def get_all_gates(
                 "observed_schema",
                 "digest",
                 "user_version",
+                "actual_user_version",
+                "expected_user_version",
+                "actual_schema_digest",
+                "expected_schema_digest",
                 "schema_delta",
                 "migration_required",
+                "integrity_status",
+                "foreign_key_violation_count",
                 "collected_at_utc",
                 "evidence_digest",
                 "execution_provenance",
@@ -423,9 +429,9 @@ def get_all_gates(
                 if err:
                     if sch.get("status") == "FAIL":
                         obs_str = str(sch.get("observed_schema", ""))
-                        if "INTEGRITY_FAIL" in obs_str:
+                        if "INTEGRITY_FAIL" in obs_str or sch.get("integrity_status") != "ok":
                             g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Integrity failure in production schema")
-                        elif "FK_VIOLATIONS" in obs_str:
+                        elif "FK_VIOLATIONS" in obs_str or (sch.get("foreign_key_violation_count") is not None and sch.get("foreign_key_violation_count") > 0):
                             g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "FK violations in production schema")
                         else:
                             g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
@@ -434,16 +440,34 @@ def get_all_gates(
                 else:
                     observed = str(sch.get("observed_schema", ""))
                     digest = str(sch.get("digest", ""))
+                    actual_digest = str(sch.get("actual_schema_digest", ""))
+                    expected_digest = str(sch.get("expected_schema_digest", ""))
                     user_version = sch.get("user_version")
+                    actual_uv = sch.get("actual_user_version")
+                    expected_uv = sch.get("expected_user_version")
                     delta = str(sch.get("schema_delta", ""))
                     migration_req = sch.get("migration_required")
+                    integrity = str(sch.get("integrity_status", ""))
+                    fk_violations = sch.get("foreign_key_violation_count")
 
-                    if digest == "dummy_digest" or not digest:
+                    if integrity != "ok" or "INTEGRITY_FAIL" in observed:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Integrity failure in production schema")
+                    elif (fk_violations is not None and fk_violations > 0) or "FK_VIOLATIONS" in observed:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "FK violations in production schema")
+                    elif digest == "dummy_digest" or not digest or actual_digest == "dummy_digest" or not actual_digest:
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Dummy digest in schema evidence")
                     elif "unknown_schema" in observed:
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Placeholder schema in evidence")
-                    elif user_version is None or user_version != 1:
+                    elif actual_uv is None or expected_uv is None or actual_uv != expected_uv:
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "User version mismatch")
+                    elif actual_digest != expected_digest:
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Schema digest mismatch with canonical contract")
+                    elif delta == "TABLE_DELTA":
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Table delta detected in schema")
+                    elif delta == "INDEX_DELTA":
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Index delta detected in schema")
+                    elif delta == "TRIGGER_DELTA":
+                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Trigger delta detected in schema")
                     elif delta != "NONE":
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Unknown schema delta")
                     elif migration_req is not False:
@@ -484,6 +508,7 @@ def get_all_gates(
                 "database_restore_required",
                 "schema_downgrade_required",
                 "rollback_health_required",
+                "rollback_attempt_count_max",
                 "rollback_procedure_proven",
                 "canonical_rehearsal_evidence",
             ]
@@ -494,15 +519,17 @@ def get_all_gates(
                 if err:
                     g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, err)
                 else:
-                    curr_digest = rb.get("current_production_image_digest", "")
-                    roll_digest = rb.get("rollback_image_digest", "")
+                    curr_digest = str(rb.get("current_production_image_digest", ""))
+                    roll_digest = str(rb.get("rollback_image_digest", ""))
                     roll_resolv = rb.get("rollback_image_resolvable")
-                    roll_rev    = rb.get("rollback_revision", "")
-                    mech_id     = rb.get("rollback_mechanism_id", "")
+                    roll_rev    = str(rb.get("rollback_revision", ""))
+                    curr_rev    = str(rb.get("current_production_oci_revision", ""))
+                    mech_id     = str(rb.get("rollback_mechanism_id", ""))
                     same_comp   = rb.get("same_compose_chain")
                     db_restore  = rb.get("database_restore_required")
                     sch_down    = rb.get("schema_downgrade_required")
                     health      = rb.get("rollback_health_required")
+                    attempt_max = rb.get("rollback_attempt_count_max")
                     proven      = rb.get("rollback_procedure_proven")
                     rehearsal   = rb.get("canonical_rehearsal_evidence")
 
@@ -514,20 +541,24 @@ def get_all_gates(
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Invalid digest")
                     elif not roll_resolv:
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unresolvable image")
-                    elif not roll_rev:
+                    elif not roll_rev or roll_rev != curr_rev:
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Revision mismatch")
-                    elif not mech_id:
+                    elif not mech_id or mech_id != "docker-compose-revert":
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unknown mechanism")
-                    elif same_comp is None:
+                    elif same_comp is not True:
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Same compose chain not proven")
-                    elif db_restore is None:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "DB restore unknown")
-                    elif sch_down is None:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Schema downgrade unknown")
+                    elif db_restore is not False:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "DB restore requirement mismatch")
+                    elif sch_down is not False:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Schema downgrade requirement mismatch")
                     elif not health:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Health not proven")
-                    elif not proven or not rehearsal:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Procedure unproven or missing rehearsal")
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Rollback health policy mismatch")
+                    elif attempt_max != 1:
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Rollback attempt limit mismatch")
+                    elif not rehearsal or rehearsal == "self-asserted":
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Missing rehearsal evidence")
+                    elif not proven or proven == "self-asserted":
+                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Self-asserted procedure unproven")
                     else:
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
     else:

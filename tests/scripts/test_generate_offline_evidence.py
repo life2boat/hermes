@@ -218,3 +218,46 @@ def test_missing_top_level_source_class_rejected():
     gates, *_ = get_all_gates(target_sha, bundle)
     sec_gate = next(g for g in gates if g.gate_name == "SECRET_CONTRACT")
     assert sec_gate.status == Status.FAIL
+
+def test_db_path_validation_in_offline_evidence(tmp_path):
+    from scripts.generate_offline_evidence import check_db_path
+    from scripts.hermes_deploy_preflight import validate_database_source_path, DeployPreflightError
+    import os
+
+    canonical_db = tmp_path / "canonical.db"
+    canonical_db.write_bytes(b"sqlite")
+
+    status, classification, version = check_db_path({"source": str(canonical_db)})
+    assert status == "PASS"
+    assert classification == "authoritative-production-path"
+
+    missing_db = tmp_path / "missing.db"
+    status, classification, version = check_db_path({"source": str(missing_db)})
+    assert status == "BLOCKED"
+
+    if hasattr(os, "symlink"):
+        symlink_db = tmp_path / "symlink.db"
+        os.symlink(str(canonical_db), str(symlink_db))
+        status, classification, version = check_db_path({"source": str(symlink_db)})
+        assert status == "BLOCKED"
+
+    dir_db = tmp_path / "dir.db"
+    dir_db.mkdir()
+    status, classification, version = check_db_path({"source": str(dir_db)})
+    assert status == "BLOCKED"
+
+    from pathlib import Path
+    relative_db = Path("relative.db")
+    if not relative_db.exists():
+        relative_db.write_bytes(b"")
+    status, classification, version = check_db_path({"source": str(relative_db)})
+    assert status == "BLOCKED"
+    if relative_db.exists():
+        relative_db.unlink()
+
+    try:
+        from scripts._cli_utils import _validate_database_source_path
+        has_old_validator = True
+    except ImportError:
+        has_old_validator = False
+    assert not has_old_validator, "The producer must no longer depend on the nonexistent old validator"

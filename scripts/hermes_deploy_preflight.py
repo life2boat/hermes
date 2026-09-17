@@ -762,3 +762,29 @@ def validate_private_directory(
         _fail("recovery-backup-parent-invalid")
 
     return st.st_ino
+
+def assert_no_symlink_components(path: Path) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            _fail("path-metadata")
+        if stat.S_ISLNK(metadata.st_mode):
+            _fail("symlink-path")
+
+
+def validate_database_source_path(path: Path) -> None:
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        _fail("unsafe-db-source-path")
+    assert_no_symlink_components(path)
+    try:
+        metadata = path.lstat()
+    except OSError:
+        _fail("unsafe-db-source-path")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        _fail("unsafe-db-source-path")

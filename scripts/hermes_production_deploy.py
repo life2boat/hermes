@@ -688,23 +688,9 @@ def validate_rollback_revision(
         _fail("rollback-revision-not-ancestor")
 
 
-def _assert_no_symlink_components(path: Path) -> None:
-    absolute = path.absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            _fail("path-metadata")
-        if stat.S_ISLNK(metadata.st_mode):
-            _fail("symlink-path")
-
 
 def _validate_regular_file(path: Path, *, mode: int, allowed_uids: frozenset[int], code: str) -> os.stat_result:
-    _assert_no_symlink_components(path)
+    preflight.assert_no_symlink_components(path)
     try:
         metadata = path.lstat()
     except OSError:
@@ -809,7 +795,7 @@ def read_required_secrets(contract: DeploymentContract, source: Path) -> dict[st
 
 def _validate_runtime_directory(contract: DeploymentContract, *, create: bool) -> None:
     path = contract.runtime_directory
-    _assert_no_symlink_components(path.parent)
+    preflight.assert_no_symlink_components(path.parent)
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -1309,17 +1295,6 @@ def _compose_environment(image: str, revision: str) -> dict[str, str]:
     return environment
 
 
-def _validate_database_source_path(path: Path) -> None:
-    if not path.is_absolute() or path != Path(os.path.normpath(path)):
-        _fail("unsafe-db-source-path")
-    _assert_no_symlink_components(path)
-    try:
-        metadata = path.lstat()
-    except OSError:
-        _fail("unsafe-db-source-path")
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        _fail("unsafe-db-source-path")
-
 
 def _database_mount_kwargs(contract: DeploymentContract) -> dict[str, object]:
     return {
@@ -1501,7 +1476,7 @@ def _print_plan(
 
 
 def _temporary_render_contract(contract: DeploymentContract, directory: Path) -> DeploymentContract:
-    _assert_no_symlink_components(directory)
+    preflight.assert_no_symlink_components(directory)
     metadata = directory.lstat()
     if (
         stat.S_ISLNK(metadata.st_mode)
@@ -1594,7 +1569,7 @@ def _validate_live_future_mounts(
         future_mounts,
         live_mounts,
         **_database_mount_kwargs(contract),
-        source_path_validator=_validate_database_source_path,
+        source_path_validator=preflight.validate_database_source_path,
     )
 
 

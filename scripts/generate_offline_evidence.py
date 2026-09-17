@@ -78,9 +78,9 @@ def check_db_path(manifest_db):
         return "BLOCKED", "unknown", -1
 
     try:
-        from scripts._cli_utils import _validate_database_source_path
-        if _validate_database_source_path(str(p)) == str(p):
-            return "PASS", "authoritative-production-path", 1
+        from scripts.hermes_deploy_preflight import validate_database_source_path
+        validate_database_source_path(p)
+        return "PASS", "authoritative-production-path", 1
     except Exception:
         pass
 
@@ -218,7 +218,7 @@ def generate(target_sha):
         "evidence_type": "production_db_path_safety",
         "target_sha": target_sha,
         "status": db_status,
-        "validator_id": "_validate_database_source_path",
+        "validator_id": "validate_database_source_path",
         "validator_version": val_version,
         "path_classification": path_class,
         "collected_at_utc": now,

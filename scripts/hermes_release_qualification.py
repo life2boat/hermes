@@ -380,7 +380,7 @@ def get_all_gates(
                 err = _verify_signed_provenance(ev, expected_sha, "production_db_path_safety", required, key)
                 if err:
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, err)
-                elif ev.get("validator_id") != "_validate_database_source_path":
+                elif ev.get("validator_id") != "validate_database_source_path":
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "validator_id is not canonical")
                 elif str(ev.get("validator_version")) != "1":
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "foreign validator revision")
@@ -391,8 +391,8 @@ def get_all_gates(
 
     # 9. SCHEMA_COMPATIBILITY
     sch_digest = ""
-    if bundle and bundle.get("schema_evidence") != "BLOCKED":
-        sch = bundle.get("schema_evidence", {})
+    if bundle and bundle.get("schema_evidence") not in ("BLOCKED", None):
+        sch = bundle.get("schema_evidence") or {}
         if "observed_schema" not in sch:
             g9 = GateResult(
                 "SCHEMA_COMPATIBILITY",

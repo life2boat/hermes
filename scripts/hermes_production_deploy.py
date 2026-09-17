@@ -690,7 +690,7 @@ def validate_rollback_revision(
 
 
 def _validate_regular_file(path: Path, *, mode: int, allowed_uids: frozenset[int], code: str) -> os.stat_result:
-    preflight.assert_no_symlink_components(path)
+    _preflight(preflight.assert_no_symlink_components, path)
     try:
         metadata = path.lstat()
     except OSError:
@@ -795,7 +795,7 @@ def read_required_secrets(contract: DeploymentContract, source: Path) -> dict[st
 
 def _validate_runtime_directory(contract: DeploymentContract, *, create: bool) -> None:
     path = contract.runtime_directory
-    preflight.assert_no_symlink_components(path.parent)
+    _preflight(preflight.assert_no_symlink_components, path.parent)
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -1476,7 +1476,7 @@ def _print_plan(
 
 
 def _temporary_render_contract(contract: DeploymentContract, directory: Path) -> DeploymentContract:
-    preflight.assert_no_symlink_components(directory)
+    _preflight(preflight.assert_no_symlink_components, directory)
     metadata = directory.lstat()
     if (
         stat.S_ISLNK(metadata.st_mode)

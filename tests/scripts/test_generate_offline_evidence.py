@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import subprocess
 import os
 import shutil
@@ -108,6 +109,7 @@ def test_producer_output_accepted_by_real_qualifier():
     target_sha = "abc123sha4567890123456789012345678901234"
     key = "testanchor"
     os.environ["HERMES_PROVENANCE_KEY"] = key
+    fresh_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     from scripts.canonical_schema_contract import (
         EXPECTED_SCHEMA_DIGEST,
@@ -130,7 +132,7 @@ def test_producer_output_accepted_by_real_qualifier():
         "migration_required": False,
         "integrity_status": "ok",
         "foreign_key_violation_count": 0,
-        "collected_at_utc": "2026-09-16T12:00:00Z",
+        "collected_at_utc": fresh_time,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "healbite-production",
@@ -143,7 +145,7 @@ def test_producer_output_accepted_by_real_qualifier():
         "evidence_type": "rollback_ready",
         "target_sha": target_sha,
         "status": "PASS",
-        "collected_at_utc": "2026-09-16T12:00:00Z",
+        "collected_at_utc": fresh_time,
         "execution_provenance": {
             "isolation_level": "docker",
             "runtime_identity": "healbite-production",
@@ -182,6 +184,7 @@ def test_producer_output_accepted_by_real_qualifier():
 def test_missing_top_level_source_class_rejected():
     key = "testanchor"
     os.environ["HERMES_PROVENANCE_KEY"] = key
+    fresh_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     target_sha = "sha123"
 
     secret_ev = {
@@ -190,7 +193,7 @@ def test_missing_top_level_source_class_rejected():
         "target_sha": target_sha,
         "status": "PASS",
         "source_class": "explicit-protected-dotenv",
-        "collected_at_utc": "2026-09-16T12:00:00Z",
+        "collected_at_utc": fresh_time,
         "required_secrets": [
             {
                 "name": "TELEGRAM_BOT_TOKEN",

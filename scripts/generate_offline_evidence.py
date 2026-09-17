@@ -78,9 +78,9 @@ def check_db_path(manifest_db):
         return "BLOCKED", "unknown", -1
 
     try:
-        from scripts._cli_utils import _validate_database_source_path
-        if _validate_database_source_path(str(p)) == str(p):
-            return "PASS", "authoritative-production-path", 1
+        from scripts.hermes_production_deploy import _validate_database_source_path
+        _validate_database_source_path(p)
+        return "PASS", "authoritative-production-path", 1
     except Exception:
         pass
 

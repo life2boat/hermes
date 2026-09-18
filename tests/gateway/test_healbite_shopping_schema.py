@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -286,10 +287,11 @@ def test_unit_helpers_report_family_and_compatibility():
 
 def test_imports_do_not_create_database_or_start_schema(tmp_path):
     db_path = tmp_path / "no-import.db"
-    env = {
+    env = dict(os.environ)
+    env.update({
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
         "HEALBITE_DB_PATH": str(db_path),
-    }
+    })
     result = subprocess.run(
         [
             sys.executable,

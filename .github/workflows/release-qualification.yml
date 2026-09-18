@@ -249,15 +249,46 @@ jobs:
           PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
           PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
           PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+          PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
         run: |
           mkdir -p ~/.ssh
+          # PROD_SSH_KNOWN_HOSTS format note:
+          # When connecting to a non-default port, OpenSSH requires the known_hosts
+          # entry to use the bracket notation: [HOST]:PORT
+          # Example shape (no real credentials in repository):
+          #   [example.invalid]:22222 ssh-ed25519 AAAA...
+          # A plain HOST entry (without port brackets) will only match port 22.
+          # Provision PROD_SSH_KNOWN_HOSTS accordingly when PROD_SSH_PORT != 22.
           echo "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           echo "$PROD_SSH_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          
+
           trap 'rm -f ~/.ssh/id_rsa' EXIT
-          
-          ssh -T -p 22 -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "python3 scripts/hermes_production_evidence_collect.py ${{ inputs.target_sha }}" > unsigned_bundle.json
+
+          # Fail-closed port validation: PROD_SSH_PORT must be present and valid.
+          # Do NOT default to 22 — port 22 may route to the wrong SSH server.
+          if [ -z "${PROD_SSH_PORT}" ]; then
+            echo "PROD_SSH_PORT secret is absent or empty. Cannot proceed — silently defaulting to port 22 is unsafe."
+            exit 1
+          fi
+          # Strip surrounding whitespace for the check only; reject if it contained any.
+          TRIMMED=$(echo "${PROD_SSH_PORT}" | tr -d '[:space:]')
+          if [ "${TRIMMED}" != "${PROD_SSH_PORT}" ]; then
+            echo "PROD_SSH_PORT contains whitespace. Rejecting: '${PROD_SSH_PORT}'"
+            exit 1
+          fi
+          # Must consist entirely of decimal digits.
+          if ! echo "${PROD_SSH_PORT}" | grep -qE '^[0-9]+$'; then
+            echo "PROD_SSH_PORT is not a positive decimal integer: '${PROD_SSH_PORT}'"
+            exit 1
+          fi
+          if [ "${PROD_SSH_PORT}" -eq 0 ] || [ "${PROD_SSH_PORT}" -gt 65535 ]; then
+            echo "PROD_SSH_PORT out of valid range 1-65535: '${PROD_SSH_PORT}'"
+            exit 1
+          fi
+
+          ssh -T -p "${PROD_SSH_PORT}" -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "python3 scripts/hermes_production_evidence_collect.py ${{ inputs.target_sha }}" > unsigned_bundle.json
+
 
       - name: Sign Canonical Production Evidence
         env:

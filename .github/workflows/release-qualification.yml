@@ -7,26 +7,6 @@ on:
         description: "Target canonical main SHA to qualify"
         required: true
         type: string
-      secret_evidence:
-        description: "Signed secret scan evidence JSON"
-        required: true
-        type: string
-      db_evidence:
-        description: "Signed DB evidence JSON"
-        required: true
-        type: string
-      schema_evidence:
-        description: "Signed schema evidence JSON"
-        required: true
-        type: string
-      rollback_evidence:
-        description: "Signed rollback evidence JSON"
-        required: true
-        type: string
-      credential_risk_evidence:
-        description: "Signed credential risk evidence JSON"
-        required: true
-        type: string
 
 env:
   RC_IMAGE: ghcr.io/${{ github.repository }}
@@ -263,6 +243,51 @@ jobs:
           echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
+      - name: Collect Canonical Production Evidence
+        env:
+          HERMES_PROVENANCE_KEY: ${{ secrets.HERMES_PROVENANCE_KEY }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$PROD_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$PROD_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          echo "$HERMES_PROVENANCE_KEY" | ssh -T -p 22 -i ~/.ssh/id_rsa "$PROD_SSH_USER@$PROD_SSH_HOST" "${{ inputs.target_sha }}" > signed_bundle_output.json
+          
+          jq -c '.secret_evidence' signed_bundle_output.json > secret_ev.json
+          jq -c '.db_evidence' signed_bundle_output.json > db_ev.json
+          jq -c '.schema_evidence' signed_bundle_output.json > schema_ev.json
+          jq -c '.rollback_evidence' signed_bundle_output.json > rollback_ev.json
+          jq -c '.credential_risk_evidence' signed_bundle_output.json > credential_ev.json
+          
+          echo "SECRET_EVIDENCE<<EVD" >> $GITHUB_ENV
+          cat secret_ev.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "EVD" >> $GITHUB_ENV
+          
+          echo "DB_EVIDENCE<<EVD" >> $GITHUB_ENV
+          cat db_ev.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "EVD" >> $GITHUB_ENV
+          
+          echo "SCHEMA_EVIDENCE<<EVD" >> $GITHUB_ENV
+          cat schema_ev.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "EVD" >> $GITHUB_ENV
+          
+          echo "ROLLBACK_EVIDENCE<<EVD" >> $GITHUB_ENV
+          cat rollback_ev.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "EVD" >> $GITHUB_ENV
+          
+          echo "CREDENTIAL_RISK_EVIDENCE<<EVD" >> $GITHUB_ENV
+          cat credential_ev.json >> $GITHUB_ENV
+          echo "" >> $GITHUB_ENV
+          echo "EVD" >> $GITHUB_ENV
+
       - name: Generate Evidence Bundle
         run: |
           cat <<EOF > task8-qualification-evidence.json
@@ -281,12 +306,12 @@ jobs:
             "structured_ci_evidence": ${{ env.STRUCTURED_CI_EVIDENCE }},
             "runtime_preflight_evidence": ${{ env.RUNTIME_PREFLIGHT_EVIDENCE }},
             "config_evidence": ${{ env.CONFIG_EVIDENCE }},
-            "schema_evidence": ${{ inputs.schema_evidence }},
+            "schema_evidence": ${{ env.SCHEMA_EVIDENCE }},
             "security_evidence": ${{ env.SECURITY_EVIDENCE }},
-            "secret_evidence": ${{ inputs.secret_evidence }},
-            "db_evidence": ${{ inputs.db_evidence }},
-            "rollback_evidence": ${{ inputs.rollback_evidence }},
-            "credential_risk_evidence": ${{ inputs.credential_risk_evidence }},
+            "secret_evidence": ${{ env.SECRET_EVIDENCE }},
+            "db_evidence": ${{ env.DB_EVIDENCE }},
+            "rollback_evidence": ${{ env.ROLLBACK_EVIDENCE }},
+            "credential_risk_evidence": ${{ env.CREDENTIAL_RISK_EVIDENCE }},
             "generated_at_utc": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           }
           EOF

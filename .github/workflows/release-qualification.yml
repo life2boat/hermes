@@ -245,12 +245,10 @@ jobs:
 
       - name: Collect Canonical Production Evidence
         env:
-          HERMES_PROVENANCE_KEY: ${{ secrets.HERMES_PROVENANCE_KEY }}
           PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
           PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
           PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
           PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
-          PYTHONPATH: .
         run: |
           mkdir -p ~/.ssh
           echo "$PROD_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
@@ -260,9 +258,13 @@ jobs:
           trap 'rm -f ~/.ssh/id_rsa' EXIT
           
           ssh -T -p 22 -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "python3 scripts/hermes_production_evidence_collect.py ${{ inputs.target_sha }}" > unsigned_bundle.json
-          
+
+      - name: Sign Canonical Production Evidence
+        env:
+          HERMES_PROVENANCE_KEY: ${{ secrets.HERMES_PROVENANCE_KEY }}
+          PYTHONPATH: .
+        run: |
           cat unsigned_bundle.json | python3 scripts/hermes_production_evidence_sign.py ${{ inputs.target_sha }} > signed_bundle_output.json
-          
           rm -f unsigned_bundle.json
           
           jq -e -c '.secret_evidence' signed_bundle_output.json > secret_ev.json

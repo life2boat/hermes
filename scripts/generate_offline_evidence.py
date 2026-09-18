@@ -193,7 +193,10 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:docker-compose-revert:pass"
     }
 
-def generate(target_sha):
+def generate(target_sha, output_dir=None):
+    if output_dir is None:
+        output_dir = "."
+
     now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open("deploy/hermes-production.json", "r", encoding="utf-8") as f:
         manifest = json.load(f)
@@ -258,15 +261,16 @@ def generate(target_sha):
         "execution_provenance": {"isolation_level": "docker", "runtime_identity": "healbite-production"}
     }
 
-    with open("secret_evidence_unsigned.json", "w", encoding="utf-8") as f:
+    import os
+    with open(os.path.join(output_dir, "secret_evidence_unsigned.json"), "w", encoding="utf-8") as f:
         json.dump(secret_unsigned, f)
-    with open("db_evidence_unsigned.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "db_evidence_unsigned.json"), "w", encoding="utf-8") as f:
         json.dump(db_unsigned, f)
-    with open("schema_evidence_unsigned.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "schema_evidence_unsigned.json"), "w", encoding="utf-8") as f:
         json.dump(schema_unsigned, f)
-    with open("rollback_evidence_unsigned.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "rollback_evidence_unsigned.json"), "w", encoding="utf-8") as f:
         json.dump(rollback_unsigned, f)
-    with open("credential_risk_evidence_unsigned.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(output_dir, "credential_risk_evidence_unsigned.json"), "w", encoding="utf-8") as f:
         json.dump(credential_risk_evidence, f)
 
     print(json.dumps({
@@ -278,4 +282,5 @@ def generate(target_sha):
     }))
 
 if __name__ == "__main__":
-    generate(sys.argv[1])
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else None
+    generate(sys.argv[1], output_dir=out_dir)

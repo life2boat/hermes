@@ -303,8 +303,8 @@ def get_all_gates(
             if not key:
                 g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                required = ["schema_version", "evidence_type", "target_sha", "status", "source_class", "collected_at_utc", "required_secrets", "evidence_digest", "execution_provenance"]
-                err = _verify_signed_provenance(ev, expected_sha, "production_secret_presence", required, key)
+                required = SECRET_EVIDENCE_FIELDS
+                err = _verify_signed_provenance(ev, expected_sha, SECRET_EVIDENCE_TYPE, required, key)
                 if err:
                     g7 = GateResult("SECRET_CONTRACT", Status.FAIL, err)
                 elif not isinstance(ev.get("required_secrets"), list) or not ev["required_secrets"]:
@@ -377,7 +377,7 @@ def get_all_gates(
             if not key:
                 g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                err = _verify_signed_provenance(ev, expected_sha, "production_db_path_safety", required, key)
+                err = _verify_signed_provenance(ev, expected_sha, DB_EVIDENCE_TYPE, required, key)
                 if err:
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, err)
                 elif ev.get("validator_id") != "validate_database_source_path":
@@ -402,30 +402,11 @@ def get_all_gates(
         else:
             sch_digest = sch.get("digest", "")
 
-            expected_fields = [
-                "schema_version",
-                "evidence_type",
-                "target_sha",
-                "status",
-                "observed_schema",
-                "digest",
-                "user_version",
-                "actual_user_version",
-                "expected_user_version",
-                "actual_schema_digest",
-                "expected_schema_digest",
-                "schema_delta",
-                "migration_required",
-                "integrity_status",
-                "foreign_key_violation_count",
-                "collected_at_utc",
-                "evidence_digest",
-                "execution_provenance",
-            ]
+            expected_fields = SCHEMA_EVIDENCE_FIELDS
             if not key:
                 g9 = GateResult("SCHEMA_COMPATIBILITY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                err = _verify_signed_provenance(sch, expected_sha, "production_schema_compatibility", expected_fields, key)
+                err = _verify_signed_provenance(sch, expected_sha, SCHEMA_EVIDENCE_TYPE, expected_fields, key)
                 if err:
                     if sch.get("status") == "FAIL":
                         obs_str = str(sch.get("observed_schema", ""))
@@ -515,7 +496,7 @@ def get_all_gates(
             if not key:
                 g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:
-                err = _verify_signed_provenance(rb, expected_sha, "rollback_ready", expected_fields, key)
+                err = _verify_signed_provenance(rb, expected_sha, ROLLBACK_EVIDENCE_TYPE, expected_fields, key)
                 if err:
                     g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, err)
                 else:
@@ -630,20 +611,11 @@ def check_credential_risk(bundle, expected_sha):
         if not isinstance(cr, dict):
             cr_err = "credential_risk_evidence must be a dictionary"
         else:
-            expected_fields = [
-                "schema_version",
-                "evidence_type",
-                "target_sha",
-                "status",
-                "credential_risk_status",
-                "collected_at_utc",
-                "evidence_digest",
-                "execution_provenance",
-            ]
+            expected_fields = CREDENTIAL_RISK_EVIDENCE_FIELDS
             if not key_str:
                 cr_err = "Cannot verify execution provenance: No approved trust anchor exists"
             else:
-                cr_err = _verify_signed_provenance(cr, expected_sha, "credential_risk", expected_fields, key_str)
+                cr_err = _verify_signed_provenance(cr, expected_sha, CREDENTIAL_RISK_EVIDENCE_TYPE, expected_fields, key_str)
                 if not cr_err:
                     status = cr.get("credential_risk_status")
                     if status == "PROVEN_CLEAR":

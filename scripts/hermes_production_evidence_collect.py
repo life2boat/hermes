@@ -2,6 +2,8 @@ import sys
 import json
 import os
 import subprocess
+import tempfile
+import shutil
 
 def get_git_provenance():
     def run_git(cmd):
@@ -11,10 +13,17 @@ def get_git_provenance():
     head = run_git(['git', 'rev-parse', 'HEAD'])
     tree = run_git(['git', 'rev-parse', 'HEAD^{tree}'])
     
-    res = subprocess.run(['git', 'diff', '--quiet', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    clean = (res.returncode == 0)
+    status_out = run_git(['git', 'status', '--porcelain=v1'])
+    clean = (status_out == '')
     
-    return head, tree, clean
+    repo_url = run_git(['git', 'remote', 'get-url', 'origin'])
+    # Extract owner/repo
+    if 'life2boat/hermes' in repo_url:
+        repo = 'life2boat/hermes'
+    else:
+        repo = repo_url
+        
+    return head, tree, clean, repo
 
 def main():
     if len(sys.argv) < 2:
@@ -26,7 +35,7 @@ def main():
         print(json.dumps({'error': 'Invalid target SHA'}))
         sys.exit(1)
         
-    head, tree, clean = get_git_provenance()
+    head, tree, clean, repo = get_git_provenance()
     if head != target_sha:
         print(json.dumps({'error': f'COLLECTOR_HEAD_SHA mismatch: {head} != {target_sha}'}))
         sys.exit(1)
@@ -34,10 +43,14 @@ def main():
     if not clean:
         print(json.dumps({'error': 'COLLECTOR_WORKTREE_CLEAN mismatch'}))
         sys.exit(1)
+        
+    if repo != 'life2boat/hermes':
+        print(json.dumps({'error': f'COLLECTOR_REPOSITORY mismatch: {repo}'}))
+        sys.exit(1)
 
     bundle = {
         'collector_provenance': {
-            'COLLECTOR_REPOSITORY': 'life2boat/hermes',
+            'COLLECTOR_REPOSITORY': repo,
             'COLLECTOR_HEAD_SHA': head,
             'COLLECTOR_TREE_SHA': tree,
             'COLLECTOR_WORKTREE_CLEAN': clean
@@ -52,18 +65,22 @@ def main():
         'credential_risk_evidence': 'credential_risk_evidence_unsigned.json'
     }
     
+    tmpdir = tempfile.mkdtemp(prefix='hermes-collect-')
+    os.chmod(tmpdir, 0o700)
+    
     try:
-        # Run it as a subprocess to completely avoid polluting our memory and imports
-        proc = subprocess.run(['python3', 'scripts/generate_offline_evidence.py', target_sha],
+        proc = subprocess.run(['python3', 'scripts/generate_offline_evidence.py', target_sha, tmpdir],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if proc.returncode != 0:
             raise Exception(f'generate_offline_evidence failed: {proc.stderr}')
             
         for k, filename in expected_files.items():
-            if not os.path.exists(filename):
+            full_path = os.path.join(tmpdir, filename)
+            if not os.path.exists(full_path):
                 raise Exception(f'Missing {filename}')
                 
-            with open(filename, 'r', encoding='utf-8') as f:
+            os.chmod(full_path, 0o600)
+            with open(full_path, 'r', encoding='utf-8') as f:
                 ev = json.load(f)
                 bundle[k] = ev
                 
@@ -71,12 +88,7 @@ def main():
         print(json.dumps({'error': str(e)}))
         sys.exit(1)
     finally:
-        for filename in expected_files.values():
-            if os.path.exists(filename):
-                try:
-                    os.remove(filename)
-                except Exception:
-                    pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
                     
     print(json.dumps(bundle, separators=(',', ':')))
 

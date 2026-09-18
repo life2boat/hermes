@@ -10,6 +10,14 @@ import shutil
 VALID_TARGET_SHA = 'a' * 40
 DUMMY_KEY = 'dummykey'
 
+from scripts.hermes_canonical_evidence import (
+    SECRET_EVIDENCE_TYPE, SECRET_EVIDENCE_FIELDS,
+    DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS,
+    SCHEMA_EVIDENCE_TYPE, SCHEMA_EVIDENCE_FIELDS,
+    ROLLBACK_EVIDENCE_TYPE, ROLLBACK_EVIDENCE_FIELDS,
+    CREDENTIAL_RISK_EVIDENCE_TYPE, CREDENTIAL_RISK_EVIDENCE_FIELDS
+)
+
 def get_base_unsigned_bundle():
     now_str = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     prov = {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
@@ -21,30 +29,50 @@ def get_base_unsigned_bundle():
             'COLLECTOR_WORKTREE_CLEAN': True
         }
     }
-    types = {
-        'secret_evidence': 'secret_scan',
-        'db_evidence': 'db_ready',
-        'schema_evidence': 'schema_ready',
-        'rollback_evidence': 'rollback_ready'
-    }
-    for k, v in types.items():
-        bundle[k] = {
-            'schema_version': 1,
-            'evidence_type': v,
-            'target_sha': VALID_TARGET_SHA,
-            'status': 'PASS',
-            'collected_at_utc': now_str,
-            'execution_provenance': prov
-        }
-    bundle['credential_risk_evidence'] = {
-        'schema_version': 1,
-        'evidence_type': 'credential_risk',
-        'target_sha': VALID_TARGET_SHA,
-        'status': 'PASS',
-        'credential_risk_status': 'PROVEN_CLEAR',
-        'collected_at_utc': now_str,
+    bundle['secret_evidence'] = {k: '' for k in SECRET_EVIDENCE_FIELDS if k not in ('evidence_digest', 'execution_provenance')}
+    bundle['secret_evidence'].update({
+        'schema_version': 1, 'evidence_type': SECRET_EVIDENCE_TYPE, 'target_sha': VALID_TARGET_SHA,
+        'status': 'PASS', 'source_class': 'explicit-protected-dotenv', 'collected_at_utc': now_str,
+        'required_secrets': ['foo'], 'execution_provenance': prov
+    })
+
+    bundle['db_evidence'] = {k: '' for k in DB_EVIDENCE_FIELDS if k not in ('evidence_digest', 'execution_provenance')}
+    bundle['db_evidence'].update({
+        'schema_version': 1, 'evidence_type': DB_EVIDENCE_TYPE, 'target_sha': VALID_TARGET_SHA,
+        'status': 'PASS', 'validator_id': 'validate_database_source_path', 'validator_version': 1,
+        'path_classification': 'authoritative-production-path', 'collected_at_utc': now_str, 'execution_provenance': prov
+    })
+
+    bundle['schema_evidence'] = {k: '' for k in SCHEMA_EVIDENCE_FIELDS if k not in ('evidence_digest', 'execution_provenance')}
+    bundle['schema_evidence'].update({
+        'schema_version': 1, 'evidence_type': SCHEMA_EVIDENCE_TYPE, 'target_sha': VALID_TARGET_SHA,
+        'status': 'PASS', 'observed_schema': 'CREATE TABLE', 'digest': '123', 'user_version': 1,
+        'actual_user_version': 1, 'expected_user_version': 1, 'actual_schema_digest': '123',
+        'expected_schema_digest': '123', 'schema_delta': 'none', 'migration_required': False,
+        'integrity_status': 'ok', 'foreign_key_violation_count': 0, 'collected_at_utc': now_str,
         'execution_provenance': prov
-    }
+    })
+
+    bundle['rollback_evidence'] = {k: '' for k in ROLLBACK_EVIDENCE_FIELDS if k not in ('evidence_digest', 'execution_provenance')}
+    bundle['rollback_evidence'].update({
+        'schema_version': 1, 'evidence_type': ROLLBACK_EVIDENCE_TYPE, 'target_sha': VALID_TARGET_SHA,
+        'status': 'PASS', 'current_production_image_digest': 'sha256:123',
+        'current_production_oci_revision': 'rev', 'rollback_image_digest': 'sha256:123',
+        'rollback_image_resolvable': True, 'rollback_revision': 'rev',
+        'rollback_mechanism_id': 'docker-compose-revert', 'same_compose_chain': True,
+        'database_restore_required': False, 'schema_downgrade_required': False,
+        'rollback_health_required': True, 'rollback_attempt_count_max': 1,
+        'rollback_procedure_proven': True, 'canonical_rehearsal_evidence': 'artifact:rollback-rehearsal:docker-compose-revert:pass',
+        'collected_at_utc': now_str, 'execution_provenance': prov
+    })
+
+    bundle['credential_risk_evidence'] = {k: '' for k in CREDENTIAL_RISK_EVIDENCE_FIELDS if k not in ('evidence_digest', 'execution_provenance')}
+    bundle['credential_risk_evidence'].update({
+        'schema_version': 1, 'evidence_type': CREDENTIAL_RISK_EVIDENCE_TYPE, 'target_sha': VALID_TARGET_SHA,
+        'status': 'PASS', 'credential_risk_status': 'PROVEN_CLEAR', 'collected_at_utc': now_str,
+        'execution_provenance': prov
+    })
+    
     return bundle
 
 def run_signer(bundle, target_sha=VALID_TARGET_SHA, env_overrides=None):
@@ -171,8 +199,7 @@ def test_signature_mutation_fails_verifier():
     out['secret_evidence']['execution_provenance']['signature'] = '0' * 64
     
     from scripts.hermes_release_qualification import _verify_signed_provenance
-    fields = ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance']
-    err = _verify_signed_provenance(out['secret_evidence'], VALID_TARGET_SHA, 'secret_scan', fields, DUMMY_KEY)
+    err = _verify_signed_provenance(out['secret_evidence'], VALID_TARGET_SHA, SECRET_EVIDENCE_TYPE, SECRET_EVIDENCE_FIELDS, DUMMY_KEY)
     assert err is not None
 
 def test_evidence_mutation_after_signing_fails_verifier():
@@ -183,13 +210,90 @@ def test_evidence_mutation_after_signing_fails_verifier():
     out['db_evidence']['status'] = 'FAIL'
     
     from scripts.hermes_release_qualification import _verify_signed_provenance
-    fields = ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance']
-    err = _verify_signed_provenance(out['db_evidence'], VALID_TARGET_SHA, 'db_ready', fields, DUMMY_KEY)
+    err = _verify_signed_provenance(out['db_evidence'], VALID_TARGET_SHA, DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS, DUMMY_KEY)
     assert err is not None
 
 def test_unsigned_evidence_sent_directly_fails():
     bundle = get_base_unsigned_bundle()
     from scripts.hermes_release_qualification import _verify_signed_provenance
-    fields = ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance']
-    err = _verify_signed_provenance(bundle['db_evidence'], VALID_TARGET_SHA, 'db_ready', fields, DUMMY_KEY)
+    err = _verify_signed_provenance(bundle['db_evidence'], VALID_TARGET_SHA, DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS, DUMMY_KEY)
     assert err is not None
+
+def test_producer_to_signer_compatibility(monkeypatch, tmp_path):
+    import sys
+    import json
+    
+    manifest = {
+        'secrets': {
+            'source_type': 'explicit-protected-dotenv',
+            'required': ['TEST_SECRET'],
+            'approved_source_path': '/fake/.env'
+        },
+        'database_mount': {
+            'source': '/fake/path/db.sqlite3'
+        },
+        'rollback': {},
+        'attestation': {}
+    }
+    
+    deploy_dir = tmp_path / 'deploy'
+    deploy_dir.mkdir()
+    manifest_path = deploy_dir / 'hermes-production.json'
+    manifest_path.write_text(json.dumps(manifest))
+    
+    import scripts.generate_offline_evidence as gen
+    
+    monkeypatch.chdir(tmp_path)
+    # Important: add the root dir to path so it can import canonical schema contract
+    sys.path.insert(0, os.path.abspath(os.path.join(str(tmp_path), '..', '..')))
+    
+    try:
+        gen.generate(VALID_TARGET_SHA, output_dir=str(tmp_path))
+    finally:
+        sys.path.pop(0)
+    
+    expected_files = {
+        'secret_evidence': 'secret_evidence_unsigned.json',
+        'db_evidence': 'db_evidence_unsigned.json',
+        'schema_evidence': 'schema_evidence_unsigned.json',
+        'rollback_evidence': 'rollback_evidence_unsigned.json',
+        'credential_risk_evidence': 'credential_risk_evidence_unsigned.json'
+    }
+    
+    bundle = {
+        'collector_provenance': {
+            'COLLECTOR_REPOSITORY': 'life2boat/hermes',
+            'COLLECTOR_HEAD_SHA': VALID_TARGET_SHA,
+            'COLLECTOR_TREE_SHA': 'b' * 40,
+            'COLLECTOR_WORKTREE_CLEAN': True
+        }
+    }
+    
+    for k, filename in expected_files.items():
+        with open(tmp_path / filename, 'r') as f:
+            ev = json.load(f)
+            ev['status'] = 'PASS'
+            if k == 'credential_risk_evidence':
+                ev['credential_risk_status'] = 'PROVEN_CLEAR'
+            if k == 'schema_evidence':
+                ev['integrity_status'] = 'ok'
+                ev['migration_required'] = False
+            
+            bundle[k] = ev
+            
+    monkeypatch.undo()
+    proc = run_signer(bundle)
+    assert proc.returncode == 0, f"Signer failed: {proc.stderr} {proc.stdout}"
+    
+    signed_bundle = json.loads(proc.stdout)
+    from scripts.hermes_release_qualification import _verify_signed_provenance
+    
+    for k, expected_type, expected_fields in [
+        ('secret_evidence', SECRET_EVIDENCE_TYPE, SECRET_EVIDENCE_FIELDS),
+        ('db_evidence', DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS),
+        ('schema_evidence', SCHEMA_EVIDENCE_TYPE, SCHEMA_EVIDENCE_FIELDS),
+        ('rollback_evidence', ROLLBACK_EVIDENCE_TYPE, ROLLBACK_EVIDENCE_FIELDS),
+        ('credential_risk_evidence', CREDENTIAL_RISK_EVIDENCE_TYPE, CREDENTIAL_RISK_EVIDENCE_FIELDS),
+    ]:
+        err = _verify_signed_provenance(signed_bundle[k], VALID_TARGET_SHA, expected_type, expected_fields, DUMMY_KEY)
+        assert err is None, f"Verifier rejected {k}: {err}"

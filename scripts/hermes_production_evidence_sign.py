@@ -77,21 +77,9 @@ def main():
         
     signed_bundle = {}
     
-    types_map = {
-        'secret_evidence': 'secret_scan',
-        'db_evidence': 'db_ready',
-        'schema_evidence': 'schema_ready',
-        'rollback_evidence': 'rollback_ready',
-        'credential_risk_evidence': 'credential_risk'
-    }
-    
-    expected_fields_map = {
-        'secret_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
-        'db_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
-        'schema_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
-        'rollback_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
-        'credential_risk_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'credential_risk_status', 'collected_at_utc', 'evidence_digest', 'execution_provenance']
-    }
+    from scripts.hermes_canonical_evidence import TYPES_MAP, EXPECTED_FIELDS_MAP
+    types_map = TYPES_MAP
+    expected_fields_map = EXPECTED_FIELDS_MAP
 
     try:
         for key_name, ev_type in types_map.items():

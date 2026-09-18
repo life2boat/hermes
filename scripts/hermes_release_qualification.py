@@ -1,4 +1,11 @@
 import os
+from scripts.hermes_canonical_evidence import (
+    SECRET_EVIDENCE_TYPE, SECRET_EVIDENCE_FIELDS,
+    DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS,
+    SCHEMA_EVIDENCE_TYPE, SCHEMA_EVIDENCE_FIELDS,
+    ROLLBACK_EVIDENCE_TYPE, ROLLBACK_EVIDENCE_FIELDS,
+    CREDENTIAL_RISK_EVIDENCE_TYPE, CREDENTIAL_RISK_EVIDENCE_FIELDS
+)
 import subprocess
 import json
 import hashlib
@@ -288,17 +295,7 @@ def get_all_gates(
         elif not isinstance(ev, dict):
             g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "secret_evidence must be a dictionary")
         else:
-            required = [
-                "schema_version",
-                "evidence_type",
-                "target_sha",
-                "status",
-                "source_class",
-                "collected_at_utc",
-                "required_secrets",
-                "evidence_digest",
-                "execution_provenance",
-            ]
+            required = SECRET_EVIDENCE_FIELDS
 
             if not key:
                 g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
@@ -361,18 +358,7 @@ def get_all_gates(
         elif not isinstance(ev, dict):
             g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "db_evidence must be a dictionary")
         else:
-            required = [
-                "schema_version",
-                "evidence_type",
-                "target_sha",
-                "status",
-                "validator_id",
-                "validator_version",
-                "path_classification",
-                "collected_at_utc",
-                "evidence_digest",
-                "execution_provenance",
-            ]
+            required = DB_EVIDENCE_FIELDS
 
             if not key:
                 g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
@@ -471,28 +457,7 @@ def get_all_gates(
         if not isinstance(rb, dict):
             g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "rollback_evidence must be a dictionary")
         else:
-            expected_fields = [
-                "schema_version",
-                "evidence_type",
-                "target_sha",
-                "status",
-                "collected_at_utc",
-                "evidence_digest",
-                "execution_provenance",
-                "current_production_image_digest",
-                "current_production_oci_revision",
-                "rollback_image_digest",
-                "rollback_image_resolvable",
-                "rollback_revision",
-                "rollback_mechanism_id",
-                "same_compose_chain",
-                "database_restore_required",
-                "schema_downgrade_required",
-                "rollback_health_required",
-                "rollback_attempt_count_max",
-                "rollback_procedure_proven",
-                "canonical_rehearsal_evidence",
-            ]
+            expected_fields = ROLLBACK_EVIDENCE_FIELDS
             if not key:
                 g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
             else:

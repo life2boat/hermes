@@ -219,6 +219,7 @@ def test_unsigned_evidence_sent_directly_fails():
     err = _verify_signed_provenance(bundle['db_evidence'], VALID_TARGET_SHA, DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS, DUMMY_KEY)
     assert err is not None
 
+
 def test_producer_to_signer_compatibility(monkeypatch, tmp_path):
     import sys
     import json
@@ -242,6 +243,60 @@ def test_producer_to_signer_compatibility(monkeypatch, tmp_path):
     manifest_path.write_text(json.dumps(manifest))
     
     import scripts.generate_offline_evidence as gen
+    from datetime import datetime, timezone
+    
+    now_str = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    prov = {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+    
+    def mock_secret(*args, **kwargs):
+        return "PASS", ["TEST_SECRET"], "PROVEN_CLEAR"
+        
+    def mock_db(*args, **kwargs):
+        return "PASS", "authoritative-production-path", 1
+        
+    def mock_schema(*args, **kwargs):
+        return {
+            "status": "PASS",
+            "observed_schema": "CREATE TABLE mock(id INTEGER);",
+            "digest": "123",
+            "user_version": 1,
+            "actual_user_version": 1,
+            "expected_user_version": 1,
+            "actual_schema_digest": "123",
+            "expected_schema_digest": "123",
+            "schema_delta": "none",
+            "migration_required": False,
+            "integrity_status": "ok",
+            "foreign_key_violation_count": 0,
+        }
+        
+    def mock_rollback(target_sha, now, manifest=None):
+        return {
+            "schema_version": 1,
+            "evidence_type": "rollback_ready",
+            "target_sha": target_sha,
+            "status": "PASS",
+            "collected_at_utc": now,
+            "execution_provenance": prov,
+            "current_production_image_digest": "sha256:123",
+            "current_production_oci_revision": "rev",
+            "rollback_image_digest": "sha256:123",
+            "rollback_image_resolvable": True,
+            "rollback_revision": "rev",
+            "rollback_mechanism_id": "docker-compose-revert",
+            "same_compose_chain": True,
+            "database_restore_required": False,
+            "schema_downgrade_required": False,
+            "rollback_health_required": True,
+            "rollback_attempt_count_max": 1,
+            "rollback_procedure_proven": True,
+            "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:docker-compose-revert:pass"
+        }
+    
+    monkeypatch.setattr(gen, "check_secret_presence", mock_secret)
+    monkeypatch.setattr(gen, "check_db_path", mock_db)
+    monkeypatch.setattr(gen, "check_schema_compatibility", mock_schema)
+    monkeypatch.setattr(gen, "get_real_rollback_evidence", mock_rollback)
     
     monkeypatch.chdir(tmp_path)
     # Important: add the root dir to path so it can import canonical schema contract
@@ -272,13 +327,7 @@ def test_producer_to_signer_compatibility(monkeypatch, tmp_path):
     for k, filename in expected_files.items():
         with open(tmp_path / filename, 'r') as f:
             ev = json.load(f)
-            ev['status'] = 'PASS'
-            if k == 'credential_risk_evidence':
-                ev['credential_risk_status'] = 'PROVEN_CLEAR'
-            if k == 'schema_evidence':
-                ev['integrity_status'] = 'ok'
-                ev['migration_required'] = False
-            
+            # NO MUTATION OF BLOCKED TO PASS HERE
             bundle[k] = ev
             
     monkeypatch.undo()

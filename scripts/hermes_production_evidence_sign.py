@@ -3,11 +3,12 @@ import json
 import os
 import hashlib
 import hmac
-import tempfile
-import shutil
-import time
 from datetime import datetime, timezone
-import subprocess
+
+def _verify_signed_provenance(ev, expected_sha, evidence_type, expected_fields, key_str):
+    # This checks all the exact constraints that hermes_release_qualification uses.
+    from scripts.hermes_release_qualification import _verify_signed_provenance as verify_inner
+    return verify_inner(ev, expected_sha, evidence_type, expected_fields, key_str)
 
 def compute_canonical_digest_from_dict(d: dict) -> str:
     s = json.dumps(d, sort_keys=True, separators=(',', ':'))
@@ -39,120 +40,90 @@ def sign_evidence(ev: dict, key: str) -> dict:
     final_evidence['evidence_digest'] = compute_canonical_digest_from_dict(final_evidence)
     return final_evidence
 
-def verify_evidence(ev: dict, expected_sha: str, key: str) -> bool:
-    if ev.get('target_sha') != expected_sha: return False
-    if ev.get('status') != 'PASS': return False
-    ts_str = ev.get('collected_at_utc', '')
-    try:
-        dt = datetime.strptime(ts_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
-    except:
-        return False
-    now = datetime.now(timezone.utc)
-    age = (now - dt).total_seconds()
-    if age > 7200 or age < -300:
-        return False
-        
-    d_copy = dict(ev)
-    supplied_digest = d_copy.pop('evidence_digest', '')
-    if compute_canonical_digest_from_dict(d_copy) != supplied_digest:
-        return False
-        
-    prov = d_copy.get('execution_provenance', {})
-    supplied_sig = prov.get('signature', '')
-    
-    payload = {k: v for k, v in d_copy.items() if k != 'execution_provenance'}
-    prov_copy = {k: v for k, v in prov.items() if k != 'signature'}
-    payload['execution_provenance'] = prov_copy
-    payload_str = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-    payload_digest = hashlib.sha256(payload_str.encode('utf-8')).hexdigest()
-    
-    expected_sig = hmac.new(
-        key.encode('utf-8'),
-        payload_digest.encode('utf-8'),
-        hashlib.sha256,
-    ).hexdigest()
-    
-    if expected_sig != supplied_sig:
-        return False
-        
-    return True
-
 def main():
-    target_sha = ''
-    if len(sys.argv) > 1:
-        target_sha = sys.argv[1]
-    
-    ssh_cmd = os.environ.get('SSH_ORIGINAL_COMMAND', '')
-    if ssh_cmd and not target_sha:
-        target_sha = ssh_cmd.strip()
-        
-    if not target_sha or not all(c in '0123456789abcdef' for c in target_sha) or len(target_sha) != 40:
-        print(json.dumps({'error': 'Invalid or missing target SHA'}))
+    if len(sys.argv) < 2:
+        print(json.dumps({'error': 'Missing target SHA'}))
         sys.exit(1)
         
+    target_sha = sys.argv[1]
+    if not target_sha or not all(c in '0123456789abcdef' for c in target_sha) or len(target_sha) != 40:
+        print(json.dumps({'error': 'Invalid target SHA'}))
+        sys.exit(1)
+    
     key = os.environ.get('HERMES_PROVENANCE_KEY', '')
-    if not key:
-        key = sys.stdin.read().strip()
-        
     if not key:
         print(json.dumps({'error': 'Missing provenance key'}))
         sys.exit(1)
         
-    tmpdir = tempfile.mkdtemp(prefix='hermes-ev-')
-    os.chmod(tmpdir, 0o700)
-    
-    bundle = {}
     try:
-        from scripts.generate_offline_evidence import generate
-        import builtins
-        original_open = builtins.open
-        def patched_open(file, *args, **kwargs):
-            if isinstance(file, str) and file.endswith('_unsigned.json') and not file.startswith('/'):
-                new_path = os.path.join(tmpdir, file)
-                return original_open(new_path, *args, **kwargs)
-            return original_open(file, *args, **kwargs)
+        input_data = sys.stdin.read().strip()
+        if not input_data:
+            print(json.dumps({'error': 'Missing unsigned evidence'}))
+            sys.exit(1)
             
-        builtins.open = patched_open
-        
-        # Swallow prints from generate
-        import io
-        sys.stdout = io.StringIO()
-        generate(target_sha)
-        sys.stdout = sys.__stdout__
-        
-        builtins.open = original_open
-        
-        expected_files = {
-            'secret_evidence': 'secret_evidence_unsigned.json',
-            'db_evidence': 'db_evidence_unsigned.json',
-            'schema_evidence': 'schema_evidence_unsigned.json',
-            'rollback_evidence': 'rollback_evidence_unsigned.json',
-            'credential_risk_evidence': 'credential_risk_evidence_unsigned.json'
-        }
-        
-        for k, filename in expected_files.items():
-            full_path = os.path.join(tmpdir, filename)
-            if not os.path.exists(full_path):
-                raise Exception(f'Missing {filename}')
-                
-            os.chmod(full_path, 0o600)
-            with open(full_path, 'r', encoding='utf-8') as f:
-                ev = json.load(f)
-                
-            signed_ev = sign_evidence(ev, key)
-            if not verify_evidence(signed_ev, target_sha, key):
-                raise Exception(f'Verification failed for {k}')
-                
-            bundle[k] = signed_ev
+        unsigned_bundle = json.loads(input_data)
+        if 'error' in unsigned_bundle:
+            print(json.dumps({'error': unsigned_bundle['error']}))
+            sys.exit(1)
+            
+        collector_provenance = unsigned_bundle.get('collector_provenance', {})
+        if collector_provenance.get('COLLECTOR_HEAD_SHA') != target_sha:
+            print(json.dumps({'error': 'Target SHA mismatch in collector provenance'}))
+            sys.exit(1)
             
     except Exception as e:
-        sys.stdout = sys.__stdout__
         print(json.dumps({'error': str(e)}))
         sys.exit(1)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
         
-    print(json.dumps(bundle, separators=(',', ':')))
+    signed_bundle = {}
+    
+    types_map = {
+        'secret_evidence': 'secret_scan',
+        'db_evidence': 'db_ready',
+        'schema_evidence': 'schema_ready',
+        'rollback_evidence': 'rollback_ready',
+        'credential_risk_evidence': 'credential_risk'
+    }
+    
+    expected_fields_map = {
+        'secret_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
+        'db_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
+        'schema_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
+        'rollback_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'collected_at_utc', 'evidence_digest', 'execution_provenance'],
+        'credential_risk_evidence': ['schema_version', 'evidence_type', 'target_sha', 'status', 'credential_risk_status', 'collected_at_utc', 'evidence_digest', 'execution_provenance']
+    }
+
+    try:
+        for key_name, ev_type in types_map.items():
+            ev = unsigned_bundle.get(key_name)
+            if not ev:
+                raise Exception(f'Missing {key_name}')
+                
+            signed_ev = sign_evidence(ev, key)
+            
+            # Additional pre-sign validation: check required fields exist in unsigned evidence
+            required_fields = expected_fields_map[key_name]
+            for f in required_fields:
+                if f != 'evidence_digest' and f != 'execution_provenance':
+                    if f not in ev:
+                        raise Exception(f'Missing required field {f} in {key_name}')
+                        
+            # Verify using canonical logic
+            err = _verify_signed_provenance(signed_ev, target_sha, ev_type, required_fields, key)
+            if err:
+                raise Exception(f'Verification failed for {key_name}: {err}')
+                
+            if key_name == 'credential_risk_evidence':
+                if signed_ev.get('credential_risk_status') != 'PROVEN_CLEAR':
+                    raise Exception(f'Credential risk status is not PROVEN_CLEAR')
+                    
+            signed_bundle[key_name] = signed_ev
+            
+    except Exception as e:
+        print(json.dumps({'error': str(e)}))
+        sys.exit(1)
+        
+    print(json.dumps(signed_bundle, separators=(',', ':')))
 
 if __name__ == '__main__':
     main()

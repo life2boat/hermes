@@ -62,6 +62,24 @@ def test_tailscale_workflow_security():
     assert collect_step_index != -1
     assert ts_step_index < collect_step_index
     
+
+    preflight_step_index = -1
+    
+    for i, step in enumerate(steps):
+        if step.get("name") == "Verify Tailscale Production Path":
+            preflight_step_index = i
+            run_script = step.get("run", "")
+            # Path verification uses PROD_SSH_HOST
+            assert "tailscale ping" in run_script
+            assert "${PROD_SSH_HOST}" in run_script
+            assert "100.97.138.4" not in run_script
+            assert "tailscale ssh" not in run_script.lower()
+
+    # Path verification executes after Tailscale Connect
+    assert preflight_step_index > ts_step_index
+    # Path verification executes before production SSH collection
+    assert preflight_step_index < collect_step_index
+
     # canonical signer/verifier flow unchanged
     signer_found = any(step.get("name") == "Sign Canonical Production Evidence" for step in steps)
     verifier_found = any(step.get("name") == "Run Qualifier" for step in steps)

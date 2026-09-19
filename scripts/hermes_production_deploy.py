@@ -1802,6 +1802,7 @@ def _parse_canary_authority(
         _fail("canary-authority-invalid-utf8")
 
     gates: dict[str, str] = {}
+    selected_features: list[str] = []
     for raw_line in text.splitlines():
         if not raw_line or raw_line.startswith("#"):
             continue
@@ -1833,10 +1834,12 @@ def _parse_canary_authority(
         if kind == "enabled" and value not in {"true", "false"}:
             _fail("canary-authority-invalid-boolean")
         gates[key] = value
+        if feature not in selected_features:
+            selected_features.append(feature)
 
     if not gates:
         _fail("canary-authority-empty")
-    for feature in authorized_features:
+    for feature in selected_features:
         enabled_key = f"{feature}_ENABLED"
         allowlist_key = f"{feature}_ALLOWLIST"
         if enabled_key not in gates:

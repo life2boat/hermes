@@ -247,7 +247,10 @@
   "canary_policy": {
     "source_environment_file": "/etc/hermes/hermes-canary.env",
     "authorized_features": [
-      "HEALBITE_INVENTORY_PHOTO"
+      "HEALBITE_INVENTORY_PHOTO",
+      "HEALBITE_HOUSEHOLDS",
+      "HEALBITE_WEEKLY_MENU",
+      "HEALBITE_SHOPPING_LIST"
     ]
   }
 }

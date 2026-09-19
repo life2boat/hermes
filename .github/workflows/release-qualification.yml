@@ -263,7 +263,7 @@ jobs:
             exit 1
           fi
           echo "Pinging ${PROD_SSH_HOST}..."
-          tailscale ping --c 5 --timeout 10s "${PROD_SSH_HOST}"
+          tailscale ping --c 5 --timeout 10s --until-direct=false "${PROD_SSH_HOST}"
 
       - name: Collect Canonical Production Evidence
         env:

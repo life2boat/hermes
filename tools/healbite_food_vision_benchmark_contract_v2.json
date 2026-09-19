@@ -1,0 +1,60 @@
+{
+  "contract_version": "2.0.0",
+  "scorer_version": "scorer_v2_explicit_alias_compound",
+  "normalization": {
+    "unicode_form": "NFKC",
+    "casefold": true,
+    "trim": true,
+    "punctuation_to_space": [
+      "_",
+      "-",
+      "/",
+      "\\",
+      "|",
+      ",",
+      ";",
+      ":",
+      "(",
+      ")",
+      "[",
+      "]",
+      "{",
+      "}"
+    ],
+    "collapse_whitespace": true
+  },
+  "single_component_aliases": [
+    {
+      "canonical_component": "курица",
+      "alias": "запеченная куриная ножка",
+      "evidence": "s71v2-r7f-q2-c-simple-plate-forensics/20260710T054223Z"
+    },
+    {
+      "canonical_component": "салат",
+      "alias": "листья салата",
+      "evidence": "s71v2-r7f-q2-c-simple-plate-forensics/20260710T054223Z"
+    },
+    {
+      "canonical_component": "помидор",
+      "alias": "дольки помидора",
+      "evidence": "s71v2-r7f-q2-c-simple-plate-forensics/20260710T054223Z"
+    }
+  ],
+  "compound_mappings": [
+    {
+      "phrase": "рис с овощами",
+      "canonical_components": [
+        "рис",
+        "овощи"
+      ],
+      "evidence": "s71v2-r7f-q2-c-simple-plate-forensics/20260710T054223Z"
+    }
+  ],
+  "documented_non_matches": [
+    {
+      "phrase": "веточка зелени",
+      "classification": "false_positive_garnish",
+      "reason": "Explicitly retained as an unmatched extra prediction."
+    }
+  ]
+}

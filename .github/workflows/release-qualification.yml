@@ -15,6 +15,7 @@ jobs:
   qualify:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
       packages: write
 
@@ -242,6 +243,15 @@ jobs:
           cat security_evidence.json >> $GITHUB_ENV
           echo "" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
+
+
+      - name: Tailscale Connect
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:hermes-ci
+          version: 1.102.4
 
       - name: Collect Canonical Production Evidence
         env:

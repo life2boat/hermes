@@ -27,6 +27,10 @@ class FeatureGateConfig:
     configuration_valid: bool = True
     public_access: bool = False
 
+    @property
+    def allowlist_valid(self) -> bool:
+        return self.configuration_valid
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureGateDecision:

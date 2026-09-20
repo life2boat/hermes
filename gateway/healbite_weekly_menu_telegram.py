@@ -578,6 +578,20 @@ class HealBiteWeeklyMenuTelegramController:
         except Exception:
             return False
 
+    def _is_weekly_inventory_generation_available(self, actor: int | None) -> bool:
+        if actor is None:
+            return False
+        try:
+            from gateway.healbite_feature_gates import (
+                evaluate_feature_gate,
+                load_feature_gate_config,
+            )
+            cfg = load_feature_gate_config("HEALBITE_WEEKLY_MENU_INVENTORY", env=self._env)
+            decision = evaluate_feature_gate(cfg, actor)
+            return decision.ready
+        except Exception:
+            return False
+
     def _week_start(self) -> str:
         return current_week_start(now=self._now_factory(), timezone_name=self._timezone_name)
 
@@ -725,14 +739,15 @@ class HealBiteWeeklyMenuTelegramController:
         week_start = parsed.week_start or self._week_start()
         if parsed.action == "g":
             inventory_snapshot_id: str | None = None
-            try:
-                scope = self._resolve_inventory_scope(actor)
-                inv_store = self._inventory_store_factory()
-                latest_inv = inv_store.get_latest_confirmed_snapshot(scope)
-                if latest_inv is not None and latest_inv.items:
-                    inventory_snapshot_id = latest_inv.snapshot.id
-            except Exception:
-                inventory_snapshot_id = None
+            if self._is_weekly_inventory_generation_available(actor):
+                try:
+                    scope = self._resolve_inventory_scope(actor)
+                    inv_store = self._inventory_store_factory()
+                    latest_inv = inv_store.get_latest_confirmed_snapshot(scope)
+                    if latest_inv is not None and latest_inv.items:
+                        inventory_snapshot_id = latest_inv.snapshot.id
+                except Exception:
+                    inventory_snapshot_id = None
             gen_key = f"telegram-weekly-gen:{actor}:{week_start}:{callback_query_id or int(monotonic() * 1000)}"
             try:
                 gen_service = self._generation_service_factory()

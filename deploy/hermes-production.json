@@ -241,6 +241,12 @@
     "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": ""
   },
+  "public_gates": {
+    "HEALBITE_HOUSEHOLDS_PUBLIC": false,
+    "HEALBITE_WEEKLY_MENU_PUBLIC": false,
+    "HEALBITE_SHOPPING_LIST_PUBLIC": false,
+    "HEALBITE_PUBLIC_ONBOARDING": false
+  },
   "runtime_bindings": {
     "QDRANT_COLLECTION": "healbite_memory_os_v2"
   },

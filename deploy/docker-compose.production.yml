@@ -47,7 +47,8 @@
         "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
         "HEALBITE_HOUSEHOLDS_PUBLIC": "false",
         "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
-        "HEALBITE_SHOPPING_LIST_PUBLIC": "false"
+        "HEALBITE_SHOPPING_LIST_PUBLIC": "false",
+        "HEALBITE_PUBLIC_ONBOARDING": "false"
       }
     }
   }

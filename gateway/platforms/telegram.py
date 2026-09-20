@@ -5811,6 +5811,123 @@ class TelegramAdapter(BasePlatformAdapter):
             return "incomplete_profile"
         return None
 
+    @staticmethod
+    def _healbite_public_lane_reply(*, has_profile: bool, onboarding_active: bool) -> str:
+        if onboarding_active:
+            return "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+        if not has_profile:
+            return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
+        return (
+            "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, /weight, "
+            "фото еды и ответы Да/Нет для сохранения."
+        )
+
+    def _is_feature_allowlisted(self, feature_name: str, user_id: object) -> bool:
+        if user_id is None:
+            return False
+        try:
+            actor = int(user_id)
+        except (TypeError, ValueError):
+            return False
+        if actor <= 0:
+            return False
+        if feature_name == "HEALBITE_HOUSEHOLDS":
+            fam = getattr(self, "_family_telegram", None)
+            cfg = getattr(fam, "_config", None) if fam is not None else None
+            if cfg is not None:
+                return cfg.enabled and cfg.allowlist_valid and actor in cfg.allowlist
+            from gateway.healbite_households import load_household_feature_config
+            cfg_h = load_household_feature_config()
+            return cfg_h.enabled and cfg_h.allowlist_valid and actor in cfg_h.allowlist
+        elif feature_name == "HEALBITE_WEEKLY_MENU":
+            from gateway.healbite_feature_gates import load_feature_gate_config
+            cfg_m = load_feature_gate_config("HEALBITE_WEEKLY_MENU")
+            return cfg_m.enabled and cfg_m.allowlist_valid and actor in cfg_m.allowlist
+        elif feature_name == "HEALBITE_SHOPPING_LIST":
+            from gateway.healbite_feature_gates import load_feature_gate_config
+            cfg_s = load_feature_gate_config("HEALBITE_SHOPPING_LIST")
+            return cfg_s.enabled and cfg_s.allowlist_valid and actor in cfg_s.allowlist
+        return False
+
+    async def _maybe_block_public_feature_lane(
+        self,
+        msg: Message,
+        *,
+        feature_name: str,
+    ) -> bool:
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if self._is_feature_allowlisted(feature_name, actor_user_id):
+            return False
+        reason = self._healbite_public_lane_block_reason(msg)
+        if reason is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="public_lane_blocked",
+            lane="healbite_public",
+            result=reason,
+        )
+        if reason == "active_onboarding":
+            reply_text = "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+        else:
+            reply_text = "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=reply_text,
+            message_thread_id=thread_id,
+        )
+        return True
+
+    async def _maybe_block_public_feature_callback(
+        self,
+        query: Any,
+        *,
+        feature_name: str,
+    ) -> bool:
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if self._is_feature_allowlisted(feature_name, actor_user_id):
+            return False
+        if not self._healbite_public_onboarding_enabled():
+            return False
+        msg = getattr(query, "message", None)
+        chat = getattr(msg, "chat", None) if msg is not None else None
+        chat_type = str(getattr(chat, "type", "") or "").strip().lower() if chat is not None else "private"
+        if chat_type not in {"private", "dm", "direct"}:
+            return False
+        if actor_user_id is None:
+            return True
+        profile_store = get_default_healbite_user_profile()
+        if profile_store.get_onboarding_state(int(actor_user_id)) is not None:
+            reason = "active_onboarding"
+        else:
+            profile = profile_store.get_user_profile(int(actor_user_id))
+            if profile is None:
+                reason = "missing_profile"
+            elif profile.daily_kcal_target is None:
+                reason = "incomplete_profile"
+            else:
+                reason = None
+        if reason is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="public_lane_blocked",
+            lane="healbite_public",
+            result=reason,
+        )
+        if reason == "active_onboarding":
+            reply_text = "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+        else:
+            reply_text = "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
+        try:
+            await query.answer(text=reply_text, show_alert=True)
+        except Exception:
+            pass
+        return True
+
     _HEALBITE_LOG_FIELD_ALLOWLIST = {
         "action",
         "amount_ml",
@@ -7076,6 +7193,8 @@ class TelegramAdapter(BasePlatformAdapter):
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != FAMILY_COMMAND:
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_HOUSEHOLDS"):
+            return True
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         result = self._family_telegram.home(actor_user_id)
         if emit_route_marker:
@@ -7095,6 +7214,8 @@ class TelegramAdapter(BasePlatformAdapter):
         return True
 
     async def _handle_healbite_family_callback(self, query: Any, data: str) -> None:
+        if await self._maybe_block_public_feature_callback(query, feature_name="HEALBITE_HOUSEHOLDS"):
+            return
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
         result = self._family_telegram.handle_callback(
             actor_user_id,
@@ -7784,6 +7905,8 @@ class TelegramAdapter(BasePlatformAdapter):
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {SHOPPING_COMMAND, SHOPPING_ADD_COMMAND}:
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_SHOPPING_LIST"):
+            return True
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         if command_token == SHOPPING_ADD_COMMAND:
             result = self._shopping_telegram.add_from_command(
@@ -7832,6 +7955,8 @@ class TelegramAdapter(BasePlatformAdapter):
         return message
 
     async def _handle_healbite_shopping_callback(self, query: Any, data: str) -> None:
+        if await self._maybe_block_public_feature_callback(query, feature_name="HEALBITE_SHOPPING_LIST"):
+            return
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
         message = self._healbite_shopping_source_message(query)
         if message is None:
@@ -7965,6 +8090,8 @@ class TelegramAdapter(BasePlatformAdapter):
         return message
 
     async def _handle_healbite_weekly_menu_callback(self, query: Any, data: str) -> None:
+        if await self._maybe_block_public_feature_callback(query, feature_name="HEALBITE_WEEKLY_MENU"):
+            return
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
         message = self._healbite_weekly_menu_source_message(query)
         if message is None:
@@ -8580,6 +8707,8 @@ class TelegramAdapter(BasePlatformAdapter):
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != WEEKLY_MENU_COMMAND:
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_WEEKLY_MENU"):
+            return True
         if emit_route_marker:
             self._log_healbite_route_selected(
                 msg=msg,

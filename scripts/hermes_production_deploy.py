@@ -1383,11 +1383,10 @@ def validate_compose_render(
         if isinstance(name, str)
         and (
             FEATURE_STATE_NAME_RE.fullmatch(name)
-            or name in contract.public_gates
             or (expected_canary_gates and name in expected_canary_gates)
         )
     }
-    expected_state = {**contract.feature_gates, **contract.public_gates}
+    expected_state = dict(contract.feature_gates)
     if expected_canary_gates:
         expected_state.update(expected_canary_gates)
     if rendered_feature_state != expected_state:

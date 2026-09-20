@@ -351,7 +351,7 @@ def test_cross_household_inventory_isolation(tmp_path):
 # =====================================================================
 
 @pytest.mark.asyncio
-async def test_synthetic_temp_db_e2e_full_lifecycle(tmp_path):
+async def test_synthetic_temp_db_e2e_full_lifecycle(tmp_path, monkeypatch):
     """Verifies the four required E2E gates on an isolated temporary DB:
 
     1. TEMP_TEXT_INVENTORY_E2E=PASS
@@ -361,6 +361,10 @@ async def test_synthetic_temp_db_e2e_full_lifecycle(tmp_path):
     """
     db_path = tmp_path / "synthetic_e2e.db"
     current_time = datetime(2026, 7, 8, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "gateway.healbite_inventory._timestamp",
+        lambda: current_time.strftime("%Y-%m-%d %H:%M:%S"),
+    )
     week_start = current_week_start(now=current_time, timezone_name="UTC")
     actor = 101
 

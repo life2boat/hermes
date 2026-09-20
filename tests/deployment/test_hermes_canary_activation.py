@@ -848,6 +848,11 @@ CANARY_AUTHORIZED_FEATURES = (
     "HEALBITE_HOUSEHOLDS",
     "HEALBITE_WEEKLY_MENU",
     "HEALBITE_SHOPPING_LIST",
+    "HEALBITE_INVENTORY_TEXT",
+    "HEALBITE_INVENTORY_TEXT_UI",
+    "HEALBITE_INVENTORY_PHOTO_UI",
+    "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI",
+    "HEALBITE_WEEKLY_MENU_INVENTORY",
 )
 
 TARGET_CANARY_FEATURES = (
@@ -927,7 +932,7 @@ def test_authority_parser_accepts_public_boolean() -> None:
     ("data", "code"),
     [
         (b"UNAUTHORIZED_ENABLED=true\nUNAUTHORIZED_ALLOWLIST=101\n", "canary-feature-unauthorized"),
-        (b"HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC=true\n", "canary-feature-unauthorized"),
+        (b"HEALBITE_UNAUTHORIZED_FEATURE_PUBLIC=true\n", "canary-feature-unauthorized"),
         (b"HEALBITE_HOUSEHOLDS_ALLOWLIST=101\n", "canary-authority-missing-enabled"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\n", "canary-authority-missing-allowlist"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=false\nHEALBITE_HOUSEHOLDS_ALLOWLIST=101\n", "canary-authority-not-enabled"),
@@ -978,10 +983,7 @@ def test_canonical_public_defaults_single_source() -> None:
     bot_env = compose["services"]["hermes-bot"]["environment"]
     assert deploy.CANONICAL_PUBLIC_DEFAULTS_SINGLE_SOURCE is True
     assert manifest["public_gates"] == {
-        "HEALBITE_HOUSEHOLDS_PUBLIC": False,
-        "HEALBITE_WEEKLY_MENU_PUBLIC": False,
-        "HEALBITE_SHOPPING_LIST_PUBLIC": False,
-        "HEALBITE_PUBLIC_ONBOARDING": False,
+        k: (v.lower() == "true") for k, v in deploy.CANONICAL_PUBLIC_DEFAULTS.items()
     }
     for k, v in deploy.CANONICAL_PUBLIC_DEFAULTS.items():
         assert bot_env[k] == v
@@ -989,12 +991,7 @@ def test_canonical_public_defaults_single_source() -> None:
 
 def test_manifest_canary_policy_exact_authorized_features() -> None:
     contract = deploy.load_contract(REPO_ROOT)
-    assert contract.canary_authorized_features == (
-        "HEALBITE_INVENTORY_PHOTO",
-        "HEALBITE_HOUSEHOLDS",
-        "HEALBITE_WEEKLY_MENU",
-        "HEALBITE_SHOPPING_LIST",
-    )
+    assert contract.canary_authorized_features == CANARY_AUTHORIZED_FEATURES
 
 
 def test_manifest_default_feature_gates_remain_false() -> None:

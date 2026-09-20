@@ -599,3 +599,45 @@ def test_provider_success_then_db_write_failure_does_not_regenerate_or_persist(t
     assert weekly_factory.calls == 2
     assert _table_count(db_path, "household_weekly_menus") == 0
     assert _table_count(db_path, "household_weekly_menu_entries") == 0
+
+
+def test_generation_service_fail_closed_when_explicit_inventory_supplied_and_gate_disabled(tmp_path):
+    db_path = tmp_path / "generation.db"
+    _, context = _seed_generation_runtime(db_path)
+    generator = _StaticGenerator(_full_week_response("Test"))
+
+    # 1. Test when inventory gate is DISABLED
+    service_disabled = HealBiteWeeklyMenuGenerationService(
+        generator=generator,
+        member_snapshot_provider=CanonicalWeeklyMenuMemberSnapshotProvider(db_path=db_path),
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({context.actor_user_id}), configuration_valid=True),
+        inventory_config=FeatureGateConfig(enabled=False, allowlist=frozenset(), configuration_valid=True),
+        db_path=db_path,
+    )
+    res_disabled = service_disabled.generate_draft_for_week(
+        context.actor_user_id,
+        "2026-07-06",
+        idempotency_key="sec-disabled",
+        inventory_snapshot_id="synthetic-snapshot-id",
+    )
+    assert res_disabled.success is False
+    assert res_disabled.status is WeeklyMenuGenerationStatus.DISABLED
+    assert generator.calls == 0
+
+    # 2. Test when inventory gate is ENABLED but actor is NOT allowlisted
+    service_not_allowlisted = HealBiteWeeklyMenuGenerationService(
+        generator=generator,
+        member_snapshot_provider=CanonicalWeeklyMenuMemberSnapshotProvider(db_path=db_path),
+        config=FeatureGateConfig(enabled=True, allowlist=frozenset({context.actor_user_id}), configuration_valid=True),
+        inventory_config=FeatureGateConfig(enabled=True, allowlist=frozenset({9999}), configuration_valid=True),
+        db_path=db_path,
+    )
+    res_not_allowlisted = service_not_allowlisted.generate_draft_for_week(
+        context.actor_user_id,
+        "2026-07-06",
+        idempotency_key="sec-not-allowlisted",
+        inventory_snapshot_id="synthetic-snapshot-id",
+    )
+    assert res_not_allowlisted.success is False
+    assert res_not_allowlisted.status is WeeklyMenuGenerationStatus.NOT_ALLOWLISTED
+    assert generator.calls == 0

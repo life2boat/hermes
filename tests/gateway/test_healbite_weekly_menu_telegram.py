@@ -689,3 +689,164 @@ async def test_adapter_handles_weekly_menu_callbacks_locally_without_generic_dis
     query_refresh.answer.assert_awaited_once_with(text="Обновлено.")
     query_refresh.edit_message_text.assert_awaited_once()
     assert "Меню на неделю" in query_refresh.edit_message_text.await_args.kwargs["text"]
+
+
+def _seed_inventory_snapshot(db_path: Path, *, household_id: str) -> str:
+    from gateway.healbite_inventory import (
+        HealBiteInventoryStore,
+        InventoryOwnerScope,
+    )
+    inv_store = HealBiteInventoryStore(db_path=db_path)
+    inv_store.initialize_schema()
+    scope = InventoryOwnerScope(household_id=household_id)
+    snapshot = inv_store.create_text_snapshot(scope, "яблоки 1 кг")
+    confirmed = inv_store.confirm_snapshot(scope, snapshot.snapshot.id)
+    return confirmed.snapshot.id
+
+
+def test_callback_generate_decouples_when_inventory_gate_disabled_and_inventory_exists(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    context = _seed_household(db_path, actor_user_id=101)
+    _seed_inventory_snapshot(db_path, household_id=context.household_id)
+
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+    from gateway.healbite_weekly_menu_generation import (
+        WeeklyMenuGenerationResult,
+        WeeklyMenuGenerationStatus,
+    )
+
+    mock_gen_service = Mock()
+    def _mock_gen(actor, week_start, **kwargs):
+        seeded_store, seeded_context, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        return WeeklyMenuGenerationResult(
+            status=WeeklyMenuGenerationStatus.SUCCESS,
+            revision_view=draft_view,
+        )
+    mock_gen_service.generate_draft_for_week = Mock(side_effect=_mock_gen)
+
+    # Weekly Menu Inventory gate is explicitly DISABLED in env
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+        env={
+            "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+            "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "false",
+        },
+    )
+    controller._generation_service_factory = lambda: mock_gen_service
+
+    # Home screen is empty
+    home_res = controller.home(101)
+    assert home_res.state == "empty"
+    assert home_res.screen.text != WEEKLY_MENU_PLACEHOLDER_REPLY
+
+    # Click callback g
+    gen_res = controller.handle_callback(101, "weekly_menu:v1:g:20260706")
+    assert gen_res.state != "disabled"
+    assert gen_res.screen.text != WEEKLY_MENU_PLACEHOLDER_REPLY
+    assert gen_res.state == "draft"
+
+    # Generation service was invoked WITHOUT inventory_snapshot_id
+    mock_gen_service.generate_draft_for_week.assert_called_once()
+    assert mock_gen_service.generate_draft_for_week.call_args.kwargs["inventory_snapshot_id"] is None
+
+
+def test_callback_generate_attaches_inventory_when_inventory_gate_enabled_and_allowlisted(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    context = _seed_household(db_path, actor_user_id=101)
+    snapshot_id = _seed_inventory_snapshot(db_path, household_id=context.household_id)
+
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+    from gateway.healbite_weekly_menu_generation import (
+        WeeklyMenuGenerationResult,
+        WeeklyMenuGenerationStatus,
+    )
+
+    mock_gen_service = Mock()
+    def _mock_gen(actor, week_start, **kwargs):
+        seeded_store, seeded_context, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        return WeeklyMenuGenerationResult(
+            status=WeeklyMenuGenerationStatus.SUCCESS,
+            revision_view=draft_view,
+        )
+    mock_gen_service.generate_draft_for_week = Mock(side_effect=_mock_gen)
+
+    # Weekly Menu Inventory gate is ENABLED and allowlisted for 101
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+        env={
+            "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+            "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "101",
+        },
+    )
+    controller._generation_service_factory = lambda: mock_gen_service
+
+    gen_res = controller.handle_callback(101, "weekly_menu:v1:g:20260706")
+    assert gen_res.state == "draft"
+
+    # Generation service was invoked WITH inventory_snapshot_id
+    mock_gen_service.generate_draft_for_week.assert_called_once()
+    assert mock_gen_service.generate_draft_for_week.call_args.kwargs["inventory_snapshot_id"] == snapshot_id
+
+
+def test_callback_generate_omits_inventory_when_inventory_enabled_but_actor_not_allowlisted(tmp_path):
+    db_path = tmp_path / "healbite.db"
+    context = _seed_household(db_path, actor_user_id=101)
+    _seed_inventory_snapshot(db_path, household_id=context.household_id)
+
+    store = HealBiteWeeklyMenuStore(db_path=db_path)
+    store.initialize_schema()
+
+    runtime = _runtime(db_path, allowlist={101})
+
+    from gateway.healbite_weekly_menu_telegram import build_weekly_menu_telegram_controller
+    from gateway.healbite_weekly_menu_generation import (
+        WeeklyMenuGenerationResult,
+        WeeklyMenuGenerationStatus,
+    )
+
+    mock_gen_service = Mock()
+    def _mock_gen(actor, week_start, **kwargs):
+        seeded_store, seeded_context, draft_view = _draft_only_week(db_path, actor_user_id=101)
+        return WeeklyMenuGenerationResult(
+            status=WeeklyMenuGenerationStatus.SUCCESS,
+            revision_view=draft_view,
+        )
+    mock_gen_service.generate_draft_for_week = Mock(side_effect=_mock_gen)
+
+    # Weekly Menu Inventory gate is ENABLED, but allowlist is only 999 (101 not allowlisted)
+    controller = build_weekly_menu_telegram_controller(
+        runtime_factory=lambda: runtime,
+        db_path=db_path,
+        now_factory=lambda: datetime(2026, 7, 8, tzinfo=timezone.utc),
+        env={
+            "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+            "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "999",
+        },
+    )
+    controller._generation_service_factory = lambda: mock_gen_service
+
+    gen_res = controller.handle_callback(101, "weekly_menu:v1:g:20260706")
+    assert gen_res.state == "draft"
+
+    # Ordinary generation proceeds WITHOUT inventory
+    mock_gen_service.generate_draft_for_week.assert_called_once()
+    assert mock_gen_service.generate_draft_for_week.call_args.kwargs["inventory_snapshot_id"] is None

@@ -5849,6 +5849,21 @@ class TelegramAdapter(BasePlatformAdapter):
             cfg_s = load_feature_gate_config("HEALBITE_SHOPPING_LIST")
             is_valid = getattr(cfg_s, "allowlist_valid", getattr(cfg_s, "configuration_valid", True))
             return cfg_s.enabled and is_valid and actor in cfg_s.allowlist
+        elif feature_name == "HEALBITE_INVENTORY_HOME":
+            return (
+                self._is_feature_allowlisted("HEALBITE_INVENTORY_TEXT_UI", user_id)
+                or self._is_feature_allowlisted("HEALBITE_INVENTORY_PHOTO_UI", user_id)
+                or self._is_feature_allowlisted("HEALBITE_INVENTORY_TEXT", user_id)
+                or self._is_feature_allowlisted("HEALBITE_INVENTORY_PHOTO", user_id)
+            )
+        elif (
+            feature_name.startswith("HEALBITE_INVENTORY_")
+            or feature_name == "HEALBITE_WEEKLY_MENU_INVENTORY"
+        ):
+            from gateway.healbite_feature_gates import load_feature_gate_config
+            cfg_inv = load_feature_gate_config(feature_name)
+            is_valid = getattr(cfg_inv, "allowlist_valid", getattr(cfg_inv, "configuration_valid", True))
+            return cfg_inv.enabled and is_valid and actor in cfg_inv.allowlist
         return False
 
     async def _maybe_block_public_feature_lane(
@@ -7569,6 +7584,8 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         if command_token != INVENTORY_COMMAND:
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_INVENTORY_HOME"):
+            return True
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         self._fridge_menu_telegram.cancel_pending(actor_user_id)
         result = self._inventory_telegram.home(actor_user_id)
@@ -7613,6 +7630,8 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         if not pending_present:
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_INVENTORY_TEXT"):
+            return True
         result = self._inventory_telegram.handle_text(
             actor_user_id,
             getattr(msg, "text", None) or "",
@@ -7635,6 +7654,8 @@ class TelegramAdapter(BasePlatformAdapter):
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         if self._inventory_telegram.pending_input_kind(actor_user_id) != "photo":
             return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_INVENTORY_PHOTO"):
+            return True
         photo = self._largest_photo_size(msg)
         if photo is None:
             return False
@@ -7772,6 +7793,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.answer(text="Эта кнопка больше недоступна.")
             except Exception:
                 pass
+            return
+        if data.startswith((f"{INVENTORY_CALLBACK_PREFIX}g:", f"{INVENTORY_CALLBACK_PREFIX}rg:", f"{INVENTORY_CALLBACK_PREFIX}ap:")) or data == f"{INVENTORY_CALLBACK_PREFIX}ap":
+            callback_feature = "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI"
+        elif data.startswith(f"{INVENTORY_CALLBACK_PREFIX}t"):
+            callback_feature = "HEALBITE_INVENTORY_TEXT_UI"
+        elif data.startswith(f"{INVENTORY_CALLBACK_PREFIX}p"):
+            callback_feature = "HEALBITE_INVENTORY_PHOTO_UI"
+        else:
+            callback_feature = "HEALBITE_INVENTORY_HOME"
+        if await self._maybe_block_public_feature_callback(query, feature_name=callback_feature):
             return
         generation_requested = data.startswith(
             (

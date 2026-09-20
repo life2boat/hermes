@@ -15,6 +15,7 @@ from gateway.platforms.telegram import (
     SHOPPING_COMMAND,
     TelegramAdapter,
 )
+from gateway.healbite_inventory_telegram import INVENTORY_COMMAND
 from gateway.healbite_user_profile import HealBiteUserProfileStore
 from gateway.healbite_households import HouseholdFeatureConfig
 from gateway.healbite_family_telegram import HealBiteFamilyTelegramController
@@ -60,6 +61,31 @@ def _make_adapter(*, tmp_path: Path, allowlisted_user: int = 101) -> TelegramAda
     adapter._send_healbite_weekly_menu_result = AsyncMock()
     adapter._healbite_weekly_menu_keyboard = Mock(return_value=None)
     adapter._healbite_now_utc = TelegramAdapter._healbite_now_utc
+    adapter._maybe_handle_healbite_inventory_command = TelegramAdapter._maybe_handle_healbite_inventory_command.__get__(
+        adapter, TelegramAdapter
+    )
+    adapter._maybe_handle_healbite_inventory_pending_text = TelegramAdapter._maybe_handle_healbite_inventory_pending_text.__get__(
+        adapter, TelegramAdapter
+    )
+    adapter._maybe_handle_healbite_inventory_photo = TelegramAdapter._maybe_handle_healbite_inventory_photo.__get__(
+        adapter, TelegramAdapter
+    )
+    adapter._handle_healbite_inventory_callback = TelegramAdapter._handle_healbite_inventory_callback.__get__(
+        adapter, TelegramAdapter
+    )
+    adapter._healbite_inventory_source_message = TelegramAdapter._healbite_inventory_source_message
+    adapter._send_healbite_inventory_result = AsyncMock()
+    adapter._healbite_inventory_keyboard = Mock(return_value=None)
+    adapter._fridge_menu_telegram = Mock()
+    adapter._fridge_menu_telegram.cancel_pending = Mock()
+    adapter._inventory_telegram = Mock()
+    adapter._inventory_telegram.pending_input_kind = Mock(return_value=None)
+    adapter._inventory_telegram.home = Mock()
+    adapter._inventory_telegram.handle_text = Mock()
+    adapter._inventory_telegram.handle_callback = Mock()
+    adapter._healbite_inventory_photo_batches = {}
+    adapter._largest_photo_size = Mock(return_value=None)
+    adapter._telegram_media_size_allowed = Mock(return_value=(True, None))
 
     # Wire family controller
     db_path = tmp_path / "healbite_guard.db"
@@ -349,6 +375,80 @@ async def test_phase7_synthetic_temp_db_e2e_flow(tmp_path, monkeypatch):
     adapter._send_healbite_shopping_result.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_inventory_command_blocked_for_uncompleted_user(tmp_path, monkeypatch):
+    adapter = _make_adapter(tmp_path=tmp_path)
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite_guard.db")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    user_id = 910
+    msg = _make_msg(INVENTORY_COMMAND, user_id=user_id)
+    handled = await adapter._maybe_handle_healbite_inventory_command(msg)
+    assert handled is True
+    adapter._send_healbite_inventory_result.assert_not_called()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Чтобы начать пользоваться HealBite, нажми /start" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_pending_text_blocked_for_uncompleted_user(tmp_path, monkeypatch):
+    adapter = _make_adapter(tmp_path=tmp_path)
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite_guard.db")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    user_id = 911
+    adapter._inventory_telegram.pending_input_kind.return_value = "text"
+    msg = _make_msg("Яйца 10 шт", user_id=user_id)
+    handled = await adapter._maybe_handle_healbite_inventory_pending_text(msg)
+    assert handled is True
+    adapter._send_healbite_inventory_result.assert_not_called()
+    adapter._inventory_telegram.handle_text.assert_not_called()
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Чтобы начать пользоваться HealBite, нажми /start" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_photo_blocked_before_download_for_uncompleted_user(tmp_path, monkeypatch):
+    adapter = _make_adapter(tmp_path=tmp_path)
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite_guard.db")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    user_id = 912
+    adapter._inventory_telegram.pending_input_kind.return_value = "photo"
+
+    photo_mock = Mock()
+    photo_mock.get_file = AsyncMock()
+    adapter._largest_photo_size.return_value = photo_mock
+
+    msg = _make_msg("", user_id=user_id)
+    msg.photo = [photo_mock]
+
+    handled = await adapter._maybe_handle_healbite_inventory_photo(msg)
+    assert handled is True
+    # Invariant: ZERO provider calls, ZERO photo downloads before onboarding completes!
+    photo_mock.get_file.assert_not_called()
+    assert len(adapter._healbite_inventory_photo_batches) == 0
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Чтобы начать пользоваться HealBite, нажми /start" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_inventory_callbacks_blocked_for_uncompleted_user(tmp_path, monkeypatch):
+    adapter = _make_adapter(tmp_path=tmp_path)
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite_guard.db")
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    user_id = 913
+
+    for cb_data in ["inv:home", "inv:t", "inv:p", "inv:g:20260706"]:
+        query = _make_callback_query(cb_data, user_id=user_id)
+        await adapter._handle_healbite_inventory_callback(query, cb_data)
+        query.answer.assert_called_once()
+        assert "Чтобы начать пользоваться HealBite, нажми /start" in query.answer.call_args.kwargs["text"]
+        assert query.answer.call_args.kwargs["show_alert"] is True
+        adapter._inventory_telegram.handle_callback.assert_not_called()
+
+
 def test_is_feature_allowlisted_all_feature_types(monkeypatch):
     from gateway.platforms.telegram import TelegramAdapter
     adapter = Mock(spec=TelegramAdapter)
@@ -361,8 +461,31 @@ def test_is_feature_allowlisted_all_feature_types(monkeypatch):
     monkeypatch.setenv("HEALBITE_WEEKLY_MENU_ALLOWLIST", "1001,1002")
     monkeypatch.setenv("HEALBITE_SHOPPING_LIST_ENABLED", "true")
     monkeypatch.setenv("HEALBITE_SHOPPING_LIST_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_INVENTORY_TEXT_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_INVENTORY_TEXT_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_INVENTORY_TEXT_UI_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_INVENTORY_TEXT_UI_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_INVENTORY_PHOTO_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_INVENTORY_PHOTO_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_INVENTORY_PHOTO_UI_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_INVENTORY_PHOTO_UI_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST", "1001,1002")
 
-    for feat in ["HEALBITE_HOUSEHOLDS", "HEALBITE_WEEKLY_MENU", "HEALBITE_SHOPPING_LIST"]:
+    for feat in [
+        "HEALBITE_HOUSEHOLDS",
+        "HEALBITE_WEEKLY_MENU",
+        "HEALBITE_SHOPPING_LIST",
+        "HEALBITE_INVENTORY_HOME",
+        "HEALBITE_INVENTORY_TEXT",
+        "HEALBITE_INVENTORY_TEXT_UI",
+        "HEALBITE_INVENTORY_PHOTO",
+        "HEALBITE_INVENTORY_PHOTO_UI",
+        "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI",
+        "HEALBITE_WEEKLY_MENU_INVENTORY",
+    ]:
         assert adapter._is_feature_allowlisted(feat, 1001) is True
         assert adapter._is_feature_allowlisted(feat, "1002") is True
         assert adapter._is_feature_allowlisted(feat, 9999) is False

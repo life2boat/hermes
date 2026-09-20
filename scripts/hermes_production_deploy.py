@@ -54,6 +54,12 @@ CANONICAL_PUBLIC_DEFAULTS = {
     "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
     "HEALBITE_SHOPPING_LIST_PUBLIC": "false",
     "HEALBITE_PUBLIC_ONBOARDING": "false",
+    "HEALBITE_INVENTORY_TEXT_PUBLIC": "false",
+    "HEALBITE_INVENTORY_TEXT_UI_PUBLIC": "false",
+    "HEALBITE_INVENTORY_PHOTO_PUBLIC": "false",
+    "HEALBITE_INVENTORY_PHOTO_UI_PUBLIC": "false",
+    "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_PUBLIC": "false",
+    "HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC": "false",
 }
 
 
@@ -513,10 +519,7 @@ def load_contract(
         raw.get("public_gates"), code="manifest-public-gates"
     )
     expected_manifest_public_gates = {
-        "HEALBITE_HOUSEHOLDS_PUBLIC": False,
-        "HEALBITE_WEEKLY_MENU_PUBLIC": False,
-        "HEALBITE_SHOPPING_LIST_PUBLIC": False,
-        "HEALBITE_PUBLIC_ONBOARDING": False,
+        k: (v.lower() == "true") for k, v in CANONICAL_PUBLIC_DEFAULTS.items()
     }
     if public_gates_raw != expected_manifest_public_gates:
         _fail("public-gate-policy")

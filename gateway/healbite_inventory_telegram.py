@@ -285,8 +285,14 @@ class HealBiteInventoryTelegramController:
     def __init__(
         self,
         *,
+        text_backend_config: FeatureGateConfig | None = None,
+        text_ui_config: FeatureGateConfig | None = None,
         text_config: FeatureGateConfig | None = None,
+        photo_backend_config: FeatureGateConfig | None = None,
+        photo_ui_config: FeatureGateConfig | None = None,
         photo_config: FeatureGateConfig | None = None,
+        weekly_menu_inventory_config: FeatureGateConfig | None = None,
+        weekly_generation_ui_config: FeatureGateConfig | None = None,
         weekly_generation_config: FeatureGateConfig | None = None,
         db_path: str | Path | None = None,
         vision_analyze_fn: VisionAnalyzeFn | None = None,
@@ -297,15 +303,49 @@ class HealBiteInventoryTelegramController:
         | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
-        self._text_config = text_config or load_feature_gate_config(
+        effective_text_ui = text_ui_config if text_ui_config is not None else text_config
+        self._text_config = effective_text_ui or load_feature_gate_config(
             "HEALBITE_INVENTORY_TEXT_UI"
         )
-        self._photo_config = photo_config or load_feature_gate_config(
+        self._text_backend_config = (
+            text_backend_config
+            if text_backend_config is not None
+            else (
+                effective_text_ui
+                if effective_text_ui is not None
+                else load_feature_gate_config("HEALBITE_INVENTORY_TEXT")
+            )
+        )
+        effective_photo_ui = photo_ui_config if photo_ui_config is not None else photo_config
+        self._photo_config = effective_photo_ui or load_feature_gate_config(
             "HEALBITE_INVENTORY_PHOTO_UI"
         )
+        self._photo_backend_config = (
+            photo_backend_config
+            if photo_backend_config is not None
+            else (
+                effective_photo_ui
+                if effective_photo_ui is not None
+                else load_feature_gate_config("HEALBITE_INVENTORY_PHOTO")
+            )
+        )
+        effective_weekly_ui = (
+            weekly_generation_ui_config
+            if weekly_generation_ui_config is not None
+            else weekly_generation_config
+        )
         self._weekly_generation_config = (
-            weekly_generation_config
+            effective_weekly_ui
             or load_feature_gate_config("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI")
+        )
+        self._weekly_menu_inventory_config = (
+            weekly_menu_inventory_config
+            if weekly_menu_inventory_config is not None
+            else (
+                effective_weekly_ui
+                if effective_weekly_ui is not None
+                else load_feature_gate_config("HEALBITE_WEEKLY_MENU_INVENTORY")
+            )
         )
         self._shopping_config = shopping_config or load_feature_gate_config(
             "HEALBITE_SHOPPING_LIST"
@@ -366,15 +406,26 @@ class HealBiteInventoryTelegramController:
         )
 
     def _gate(self, kind: str, actor: object):
-        return evaluate_feature_gate(
-            {
-                "text": self._text_config,
-                "photo": self._photo_config,
-                "weekly": self._weekly_generation_config,
-                "shopping": self._shopping_config,
-            }[kind],
-            actor,
-        )
+        if kind == "text":
+            backend_decision = evaluate_feature_gate(self._text_backend_config, actor)
+            if not backend_decision.ready:
+                return backend_decision
+            return evaluate_feature_gate(self._text_config, actor)
+        elif kind == "photo":
+            backend_decision = evaluate_feature_gate(self._photo_backend_config, actor)
+            if not backend_decision.ready:
+                return backend_decision
+            return evaluate_feature_gate(self._photo_config, actor)
+        elif kind == "weekly":
+            backend_decision = evaluate_feature_gate(
+                self._weekly_menu_inventory_config, actor
+            )
+            if not backend_decision.ready:
+                return backend_decision
+            return evaluate_feature_gate(self._weekly_generation_config, actor)
+        elif kind == "shopping":
+            return evaluate_feature_gate(self._shopping_config, actor)
+        raise ValueError(f"unknown gate kind: {kind}")
 
     def _resolve_scope(
         self, actor_user_id: object
@@ -1375,8 +1426,13 @@ def build_inventory_telegram_controller(
     *, env: dict[str, str] | None = None, db_path: str | Path | None = None
 ) -> HealBiteInventoryTelegramController:
     return HealBiteInventoryTelegramController(
+        text_backend_config=load_feature_gate_config("HEALBITE_INVENTORY_TEXT", env=env),
         text_config=load_feature_gate_config("HEALBITE_INVENTORY_TEXT_UI", env=env),
+        photo_backend_config=load_feature_gate_config("HEALBITE_INVENTORY_PHOTO", env=env),
         photo_config=load_feature_gate_config("HEALBITE_INVENTORY_PHOTO_UI", env=env),
+        weekly_menu_inventory_config=load_feature_gate_config(
+            "HEALBITE_WEEKLY_MENU_INVENTORY", env=env
+        ),
         weekly_generation_config=load_feature_gate_config(
             "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI", env=env
         ),

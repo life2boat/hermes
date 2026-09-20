@@ -25,6 +25,7 @@ class FeatureGateConfig:
     enabled: bool = False
     allowlist: frozenset[int] = frozenset()
     configuration_valid: bool = True
+    public_access: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,13 +35,14 @@ class FeatureGateDecision:
     allowlist_count: int = 0
     configuration_valid: bool = True
     actor_user_id: int | None = field(default=None, repr=False)
+    public_access: bool = False
 
     @property
     def ready(self) -> bool:
         return self.status is FeatureAvailabilityStatus.READY
 
 
-def _parse_enabled(value: str | None) -> tuple[bool, bool]:
+def _parse_bool(value: str | None) -> tuple[bool, bool]:
     token = str(value or "").strip().lower()
     if token == "":
         return False, True
@@ -49,6 +51,10 @@ def _parse_enabled(value: str | None) -> tuple[bool, bool]:
     if token in _FALSE_TOKENS:
         return False, True
     return False, False
+
+
+def _parse_enabled(value: str | None) -> tuple[bool, bool]:
+    return _parse_bool(value)
 
 
 def _parse_allowlist(value: str | None) -> tuple[frozenset[int], bool]:
@@ -80,11 +86,22 @@ def normalize_actor_user_id(value: object) -> int | None:
 
 def load_feature_gate_config(prefix: str, env: Mapping[str, str] | None = None) -> FeatureGateConfig:
     source = env if env is not None else os.environ
-    enabled, enabled_valid = _parse_enabled(source.get(f"{prefix}_ENABLED"))
+    enabled, enabled_valid = _parse_bool(source.get(f"{prefix}_ENABLED"))
     allowlist, allowlist_valid = _parse_allowlist(source.get(f"{prefix}_ALLOWLIST"))
-    if not enabled_valid or not allowlist_valid:
-        return FeatureGateConfig(enabled=False, allowlist=frozenset(), configuration_valid=False)
-    return FeatureGateConfig(enabled=enabled, allowlist=allowlist, configuration_valid=True)
+    public_access, public_valid = _parse_bool(source.get(f"{prefix}_PUBLIC"))
+    if not enabled_valid or not allowlist_valid or not public_valid:
+        return FeatureGateConfig(
+            enabled=False,
+            allowlist=frozenset(),
+            configuration_valid=False,
+            public_access=False,
+        )
+    return FeatureGateConfig(
+        enabled=enabled,
+        allowlist=allowlist,
+        configuration_valid=True,
+        public_access=public_access,
+    )
 
 
 def evaluate_feature_gate(config: FeatureGateConfig, actor_user_id: object) -> FeatureGateDecision:
@@ -94,6 +111,7 @@ def evaluate_feature_gate(config: FeatureGateConfig, actor_user_id: object) -> F
             enabled=False,
             allowlist_count=0,
             configuration_valid=False,
+            public_access=config.public_access,
         )
     if not config.enabled:
         return FeatureGateDecision(
@@ -101,6 +119,7 @@ def evaluate_feature_gate(config: FeatureGateConfig, actor_user_id: object) -> F
             enabled=False,
             allowlist_count=len(config.allowlist),
             configuration_valid=True,
+            public_access=config.public_access,
         )
     actor = normalize_actor_user_id(actor_user_id)
     if actor is None:
@@ -109,14 +128,16 @@ def evaluate_feature_gate(config: FeatureGateConfig, actor_user_id: object) -> F
             enabled=True,
             allowlist_count=len(config.allowlist),
             configuration_valid=True,
+            public_access=config.public_access,
         )
-    if actor not in config.allowlist:
+    if not (config.public_access or actor in config.allowlist):
         return FeatureGateDecision(
             status=FeatureAvailabilityStatus.NOT_ALLOWLISTED,
             enabled=True,
             allowlist_count=len(config.allowlist),
             configuration_valid=True,
             actor_user_id=actor,
+            public_access=config.public_access,
         )
     return FeatureGateDecision(
         status=FeatureAvailabilityStatus.READY,
@@ -124,4 +145,5 @@ def evaluate_feature_gate(config: FeatureGateConfig, actor_user_id: object) -> F
         allowlist_count=len(config.allowlist),
         configuration_valid=True,
         actor_user_id=actor,
+        public_access=config.public_access,
     )

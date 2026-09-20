@@ -43,6 +43,7 @@ class HouseholdRuntimeFeatureState:
     enabled: bool = False
     allowlist_count: int = 0
     configuration_valid: bool = True
+    public_access: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +90,8 @@ class HouseholdRuntimeBridge:
             "HouseholdRuntimeBridge("
             f"enabled={state.enabled!r}, "
             f"allowlist_count={state.allowlist_count!r}, "
-            f"configuration_valid={state.configuration_valid!r})"
+            f"configuration_valid={state.configuration_valid!r}, "
+            f"public_access={state.public_access!r})"
         )
 
     @property
@@ -98,6 +100,7 @@ class HouseholdRuntimeBridge:
             enabled=bool(self._config.enabled),
             allowlist_count=len(self._config.allowlist),
             configuration_valid=bool(self._config.allowlist_valid),
+            public_access=bool(getattr(self._config, "public_access", False)),
         )
 
     def _default_store_factory(self) -> HealBiteHouseholdStore:
@@ -111,7 +114,7 @@ class HouseholdRuntimeBridge:
             return actor, HouseholdRuntimeStatus.INVALID_CONFIG
         if not self._config.enabled:
             return actor, HouseholdRuntimeStatus.DISABLED
-        if actor not in self._config.allowlist:
+        if not (getattr(self._config, "public_access", False) or actor in self._config.allowlist):
             return actor, HouseholdRuntimeStatus.NOT_ALLOWLISTED
         return actor, None
 

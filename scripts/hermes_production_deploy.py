@@ -637,6 +637,9 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
     expected_environment = {
         **contract.runtime_bindings,
         **contract.feature_gates,
+        "HEALBITE_HOUSEHOLDS_PUBLIC": "false",
+        "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
+        "HEALBITE_SHOPPING_LIST_PUBLIC": "false",
     }
     if environment != expected_environment:
         _fail("production-feature-gates")
@@ -1357,7 +1360,11 @@ def validate_compose_render(
     rendered_feature_state = {
         name: value
         for name, value in rendered_environment.items()
-        if isinstance(name, str) and FEATURE_STATE_NAME_RE.fullmatch(name)
+        if isinstance(name, str)
+        and (
+            FEATURE_STATE_NAME_RE.fullmatch(name)
+            or (expected_canary_gates and name in expected_canary_gates)
+        )
     }
     expected_state = dict(contract.feature_gates)
     if expected_canary_gates:
@@ -1819,6 +1826,9 @@ def _parse_canary_authority(
         elif key.endswith("_ALLOWLIST"):
             feature = key.removesuffix("_ALLOWLIST")
             kind = "allowlist"
+        elif key.endswith("_PUBLIC"):
+            feature = key.removesuffix("_PUBLIC")
+            kind = "public"
         else:
             _fail("canary-authority-unknown-variable")
         if feature not in authorized_features:
@@ -1831,7 +1841,7 @@ def _parse_canary_authority(
             value = value[1:-1]
         elif value[-1:] in {'"', "'"}:
             _fail("canary-authority-malformed-line")
-        if kind == "enabled" and value not in {"true", "false"}:
+        if kind in {"enabled", "public"} and value not in {"true", "false"}:
             _fail("canary-authority-invalid-boolean")
         gates[key] = value
         if feature not in selected_features:

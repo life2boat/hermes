@@ -199,6 +199,7 @@ class HouseholdFeatureConfig:
     enabled: bool = False
     allowlist: frozenset[int] = frozenset()
     allowlist_valid: bool = True
+    public_access: bool = False
 
 
 def _sqlite_timestamp(value: datetime | None = None) -> str:
@@ -289,6 +290,21 @@ def _parse_allowlist(value: str | None) -> tuple[frozenset[int], bool]:
     return frozenset(result), True
 
 
+_TRUE_TOKENS = {"1", "true", "yes", "on"}
+_FALSE_TOKENS = {"0", "false", "no", "off"}
+
+
+def _parse_bool(value: str | None) -> tuple[bool, bool]:
+    token = str(value or "").strip().lower()
+    if token == "":
+        return False, True
+    if token in _TRUE_TOKENS:
+        return True, True
+    if token in _FALSE_TOKENS:
+        return False, True
+    return False, False
+
+
 def resolve_users_identity_column(conn: sqlite3.Connection) -> str:
     columns = HealBiteHouseholdStore._table_columns(conn, "users")
     if "user_id" in columns:
@@ -363,12 +379,22 @@ def has_blocking_household_relation(conn: sqlite3.Connection, user_id: int) -> b
 
 def load_household_feature_config(env: Mapping[str, str] | None = None) -> HouseholdFeatureConfig:
     source = env if env is not None else os.environ
-    enabled_raw = str(source.get("HEALBITE_HOUSEHOLDS_ENABLED", "")).strip().lower()
-    enabled = enabled_raw in {"1", "true", "yes", "on"}
-    allowlist, valid = _parse_allowlist(source.get("HEALBITE_HOUSEHOLDS_ALLOWLIST", ""))
-    if not valid:
-        return HouseholdFeatureConfig(enabled=False, allowlist=frozenset(), allowlist_valid=False)
-    return HouseholdFeatureConfig(enabled=enabled, allowlist=allowlist, allowlist_valid=True)
+    enabled, enabled_valid = _parse_bool(source.get("HEALBITE_HOUSEHOLDS_ENABLED"))
+    allowlist, allowlist_valid = _parse_allowlist(source.get("HEALBITE_HOUSEHOLDS_ALLOWLIST"))
+    public_access, public_valid = _parse_bool(source.get("HEALBITE_HOUSEHOLDS_PUBLIC"))
+    if not enabled_valid or not allowlist_valid or not public_valid:
+        return HouseholdFeatureConfig(
+            enabled=False,
+            allowlist=frozenset(),
+            allowlist_valid=False,
+            public_access=False,
+        )
+    return HouseholdFeatureConfig(
+        enabled=enabled,
+        allowlist=allowlist,
+        allowlist_valid=True,
+        public_access=public_access,
+    )
 
 
 class HealBiteHouseholdStore:

@@ -104,6 +104,73 @@ def test_normalize_actor_user_id_rejects_bool_zero_and_oversized():
     assert normalize_actor_user_id(9223372036854775808) is None
 
 
+def test_load_feature_gate_config_accepts_public_boolean():
+    config = load_feature_gate_config(
+        "HEALBITE_WEEKLY_MENU",
+        {
+            "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+            "HEALBITE_WEEKLY_MENU_PUBLIC": "true",
+        },
+    )
+    assert config.enabled is True
+    assert config.allowlist == frozenset({101})
+    assert config.configuration_valid is True
+    assert config.public_access is True
+
+
+def test_load_feature_gate_config_fails_closed_for_malformed_public_boolean():
+    config = load_feature_gate_config(
+        "HEALBITE_WEEKLY_MENU",
+        {
+            "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+            "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+            "HEALBITE_WEEKLY_MENU_PUBLIC": "not-a-bool",
+        },
+    )
+    assert config.enabled is False
+    assert config.configuration_valid is False
+    assert config.public_access is False
+
+
+def test_evaluate_feature_gate_ready_for_unlisted_actor_when_public():
+    decision = evaluate_feature_gate(
+        FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True, public_access=True),
+        "999",
+    )
+    assert decision.status is FeatureAvailabilityStatus.READY
+    assert decision.actor_user_id == 999
+    assert decision.ready is True
+    assert decision.public_access is True
+
+
+def test_evaluate_feature_gate_rejects_invalid_actor_even_when_public():
+    decision = evaluate_feature_gate(
+        FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=True, public_access=True),
+        "invalid-id",
+    )
+    assert decision.status is FeatureAvailabilityStatus.INVALID_ACTOR
+    assert decision.ready is False
+
+
+def test_evaluate_feature_gate_disabled_precedes_public():
+    decision = evaluate_feature_gate(
+        FeatureGateConfig(enabled=False, allowlist=frozenset({101}), configuration_valid=True, public_access=True),
+        101,
+    )
+    assert decision.status is FeatureAvailabilityStatus.DISABLED
+    assert decision.ready is False
+
+
+def test_evaluate_feature_gate_misconfigured_precedes_public():
+    decision = evaluate_feature_gate(
+        FeatureGateConfig(enabled=True, allowlist=frozenset({101}), configuration_valid=False, public_access=True),
+        101,
+    )
+    assert decision.status is FeatureAvailabilityStatus.MISCONFIGURED
+    assert decision.ready is False
+
+
 
 def test_runtime_modules_import_without_side_effects(tmp_path):
     import os

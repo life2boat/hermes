@@ -166,7 +166,7 @@ class HealBiteFamilyTelegramController:
             actor is None
             or not self._config.enabled
             or not self._config.allowlist_valid
-            or actor not in self._config.allowlist
+            or not (getattr(self._config, "public_access", False) or actor in self._config.allowlist)
         ):
             return None
         return actor

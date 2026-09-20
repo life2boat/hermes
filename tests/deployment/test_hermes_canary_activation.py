@@ -899,10 +899,35 @@ def test_authority_parser_accepts_single_selected_feature() -> None:
     }
 
 
+def test_authority_parser_accepts_public_boolean() -> None:
+    authority = (
+        "HEALBITE_HOUSEHOLDS_ENABLED=true\n"
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST=101\n"
+        "HEALBITE_HOUSEHOLDS_PUBLIC=true\n"
+        "HEALBITE_WEEKLY_MENU_ENABLED=true\n"
+        "HEALBITE_WEEKLY_MENU_ALLOWLIST=101\n"
+        "HEALBITE_WEEKLY_MENU_PUBLIC=false\n"
+    ).encode("utf-8")
+
+    result = deploy._parse_canary_authority(
+        authority,
+        authorized_features=CANARY_AUTHORIZED_FEATURES,
+    )
+    assert result == {
+        "HEALBITE_HOUSEHOLDS_ENABLED": "true",
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "101",
+        "HEALBITE_HOUSEHOLDS_PUBLIC": "true",
+        "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+        "HEALBITE_WEEKLY_MENU_ALLOWLIST": "101",
+        "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
+    }
+
+
 @pytest.mark.parametrize(
     ("data", "code"),
     [
         (b"UNAUTHORIZED_ENABLED=true\nUNAUTHORIZED_ALLOWLIST=101\n", "canary-feature-unauthorized"),
+        (b"HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC=true\n", "canary-feature-unauthorized"),
         (b"HEALBITE_HOUSEHOLDS_ALLOWLIST=101\n", "canary-authority-missing-enabled"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\n", "canary-authority-missing-allowlist"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=false\nHEALBITE_HOUSEHOLDS_ALLOWLIST=101\n", "canary-authority-not-enabled"),
@@ -913,6 +938,7 @@ def test_authority_parser_accepts_single_selected_feature() -> None:
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=101,101\n", "canary-allowlist-duplicate"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=not-a-number\n", "canary-allowlist-invalid-member"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=1,2,3,4,5,6\n", "canary-allowlist-too-large"),
+        (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=101\nHEALBITE_HOUSEHOLDS_PUBLIC=maybe\n", "canary-authority-invalid-boolean"),
     ],
 )
 def test_authority_parser_subset_semantics_failures(data: bytes, code: str) -> None:
@@ -1006,3 +1032,58 @@ def test_runtime_allowlist_behavior_target_features(tmp_path: Path) -> None:
     assert shop_enabled.home(operator_id).state != "disabled"
     assert shop_enabled.home(non_allowlisted_id).state == "disabled"
 
+
+def test_runtime_public_behavior_target_features(tmp_path: Path) -> None:
+    from gateway.healbite_family_telegram import HealBiteFamilyTelegramController
+    from gateway.healbite_households import HouseholdFeatureConfig
+    from gateway.healbite_weekly_menu_telegram import HealBiteWeeklyMenuTelegramController
+    from gateway.healbite_weekly_menu_runtime import build_weekly_menu_runtime_service
+    from gateway.healbite_shopping_telegram import HealBiteShoppingTelegramController
+    from gateway.healbite_shopping_runtime import build_shopping_runtime_service
+
+    db_path = tmp_path / "runtime_public_gating_test.db"
+    operator_id = 101
+    unlisted_user_id = 999
+
+    # 1. HEALBITE_HOUSEHOLDS in public mode
+    fam_public = HealBiteFamilyTelegramController(
+        db_path=db_path,
+        config=HouseholdFeatureConfig(
+            enabled=True,
+            allowlist=frozenset({operator_id}),
+            allowlist_valid=True,
+            public_access=True,
+        ),
+    )
+    assert fam_public.home(operator_id).state != "disabled"
+    assert fam_public.home(unlisted_user_id).state != "disabled"
+    assert fam_public.home("not-a-number").state == "disabled"
+
+    # 2. HEALBITE_WEEKLY_MENU in public mode
+    menu_public = HealBiteWeeklyMenuTelegramController(
+        db_path=db_path,
+        runtime_factory=lambda: build_weekly_menu_runtime_service(
+            db_path=db_path,
+            env={
+                "HEALBITE_WEEKLY_MENU_ENABLED": "true",
+                "HEALBITE_WEEKLY_MENU_ALLOWLIST": str(operator_id),
+                "HEALBITE_WEEKLY_MENU_PUBLIC": "true",
+            },
+        ),
+    )
+    assert menu_public.home(operator_id).state != "disabled"
+    assert menu_public.home(unlisted_user_id).state != "disabled"
+
+    # 3. HEALBITE_SHOPPING_LIST in public mode
+    shop_public = HealBiteShoppingTelegramController(
+        runtime_factory=lambda: build_shopping_runtime_service(
+            db_path=db_path,
+            env={
+                "HEALBITE_SHOPPING_LIST_ENABLED": "true",
+                "HEALBITE_SHOPPING_LIST_ALLOWLIST": str(operator_id),
+                "HEALBITE_SHOPPING_LIST_PUBLIC": "true",
+            },
+        ),
+    )
+    assert shop_public.home(operator_id).state != "disabled"
+    assert shop_public.home(unlisted_user_id).state != "disabled"

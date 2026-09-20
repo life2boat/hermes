@@ -5842,11 +5842,13 @@ class TelegramAdapter(BasePlatformAdapter):
         elif feature_name == "HEALBITE_WEEKLY_MENU":
             from gateway.healbite_feature_gates import load_feature_gate_config
             cfg_m = load_feature_gate_config("HEALBITE_WEEKLY_MENU")
-            return cfg_m.enabled and cfg_m.allowlist_valid and actor in cfg_m.allowlist
+            is_valid = getattr(cfg_m, "allowlist_valid", getattr(cfg_m, "configuration_valid", True))
+            return cfg_m.enabled and is_valid and actor in cfg_m.allowlist
         elif feature_name == "HEALBITE_SHOPPING_LIST":
             from gateway.healbite_feature_gates import load_feature_gate_config
             cfg_s = load_feature_gate_config("HEALBITE_SHOPPING_LIST")
-            return cfg_s.enabled and cfg_s.allowlist_valid and actor in cfg_s.allowlist
+            is_valid = getattr(cfg_s, "allowlist_valid", getattr(cfg_s, "configuration_valid", True))
+            return cfg_s.enabled and is_valid and actor in cfg_s.allowlist
         return False
 
     async def _maybe_block_public_feature_lane(

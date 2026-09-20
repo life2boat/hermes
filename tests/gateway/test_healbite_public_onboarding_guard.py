@@ -347,3 +347,24 @@ async def test_phase7_synthetic_temp_db_e2e_flow(tmp_path, monkeypatch):
     handled_shop_ok = await adapter._maybe_handle_healbite_shopping_command(msg_shop)
     assert handled_shop_ok is True
     adapter._send_healbite_shopping_result.assert_called_once()
+
+
+def test_is_feature_allowlisted_all_feature_types(monkeypatch):
+    from gateway.platforms.telegram import TelegramAdapter
+    adapter = Mock(spec=TelegramAdapter)
+    adapter._family_telegram = None
+    adapter._is_feature_allowlisted = TelegramAdapter._is_feature_allowlisted.__get__(adapter, TelegramAdapter)
+
+    monkeypatch.setenv("HEALBITE_HOUSEHOLDS_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_HOUSEHOLDS_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_WEEKLY_MENU_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_WEEKLY_MENU_ALLOWLIST", "1001,1002")
+    monkeypatch.setenv("HEALBITE_SHOPPING_LIST_ENABLED", "true")
+    monkeypatch.setenv("HEALBITE_SHOPPING_LIST_ALLOWLIST", "1001,1002")
+
+    for feat in ["HEALBITE_HOUSEHOLDS", "HEALBITE_WEEKLY_MENU", "HEALBITE_SHOPPING_LIST"]:
+        assert adapter._is_feature_allowlisted(feat, 1001) is True
+        assert adapter._is_feature_allowlisted(feat, "1002") is True
+        assert adapter._is_feature_allowlisted(feat, 9999) is False
+        assert adapter._is_feature_allowlisted(feat, None) is False
+        assert adapter._is_feature_allowlisted(feat, "invalid") is False

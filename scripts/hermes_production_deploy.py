@@ -48,6 +48,14 @@ LEGACY_REFERENCES = (
     "healbite-s71v2-" "r6-deploy",
 )
 
+CANONICAL_PUBLIC_DEFAULTS_SINGLE_SOURCE = True
+CANONICAL_PUBLIC_DEFAULTS = {
+    "HEALBITE_HOUSEHOLDS_PUBLIC": "false",
+    "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
+    "HEALBITE_SHOPPING_LIST_PUBLIC": "false",
+    "HEALBITE_PUBLIC_ONBOARDING": "false",
+}
+
 
 class DeploymentContractError(RuntimeError):
     """A fail-closed deployment contract check failed."""
@@ -124,6 +132,7 @@ class DeploymentContract:
     image_revision_label: str
     allowed_revision_ref: str
     feature_gates: dict[str, str]
+    public_gates: dict[str, str]
     runtime_bindings: dict[str, str]
     attestation_policy: attestation.RuntimeAttestationPolicy
     canary_source_file: str
@@ -253,7 +262,7 @@ def load_contract(
     if set(raw) != {
         "version", "provenance", "compose", "runtime", "database_mount",
         "capacity", "secrets", "deployment", "rollback", "feature_gates",
-        "attestation", "runtime_bindings", "canary_policy",
+        "attestation", "runtime_bindings", "canary_policy", "public_gates",
     }:
         _fail("manifest-fields")
     if raw["version"] != 2:
@@ -500,6 +509,18 @@ def load_contract(
     if runtime_bindings_raw != expected_runtime_bindings:
         _fail("runtime-binding-policy")
     normalized_runtime_bindings = dict(expected_runtime_bindings)
+    public_gates_raw = _mapping(
+        raw.get("public_gates"), code="manifest-public-gates"
+    )
+    expected_manifest_public_gates = {
+        "HEALBITE_HOUSEHOLDS_PUBLIC": False,
+        "HEALBITE_WEEKLY_MENU_PUBLIC": False,
+        "HEALBITE_SHOPPING_LIST_PUBLIC": False,
+        "HEALBITE_PUBLIC_ONBOARDING": False,
+    }
+    if public_gates_raw != expected_manifest_public_gates:
+        _fail("public-gate-policy")
+    normalized_public_gates = dict(CANONICAL_PUBLIC_DEFAULTS)
     try:
         attestation_policy = attestation.parse_policy(raw["attestation"])
     except attestation.RuntimeAttestationError as exc:
@@ -550,6 +571,7 @@ def load_contract(
         image_revision_label="org.opencontainers.image.revision",
         allowed_revision_ref=canonical_main_ref,
         feature_gates=normalized_feature_gates,
+        public_gates=normalized_public_gates,
         runtime_bindings=normalized_runtime_bindings,
         attestation_policy=attestation_policy,
         canary_source_file=canary_source_file,
@@ -637,9 +659,7 @@ def validate_repository(contract: DeploymentContract, expected_sha: str) -> None
     expected_environment = {
         **contract.runtime_bindings,
         **contract.feature_gates,
-        "HEALBITE_HOUSEHOLDS_PUBLIC": "false",
-        "HEALBITE_WEEKLY_MENU_PUBLIC": "false",
-        "HEALBITE_SHOPPING_LIST_PUBLIC": "false",
+        **contract.public_gates,
     }
     if environment != expected_environment:
         _fail("production-feature-gates")
@@ -1810,6 +1830,7 @@ def _parse_canary_authority(
 
     gates: dict[str, str] = {}
     selected_features: list[str] = []
+    has_public_onboarding = False
     for raw_line in text.splitlines():
         if not raw_line or raw_line.startswith("#"):
             continue
@@ -1820,6 +1841,22 @@ def _parse_canary_authority(
             _fail("canary-authority-malformed-key")
         if key in gates:
             _fail("canary-authority-duplicate-key")
+
+        value = raw_value.strip()
+        if value[:1] in {'"', "'"}:
+            if len(value) < 2 or value[-1] != value[0]:
+                _fail("canary-authority-malformed-line")
+            value = value[1:-1]
+        elif value[-1:] in {'"', "'"}:
+            _fail("canary-authority-malformed-line")
+
+        if key == "HEALBITE_PUBLIC_ONBOARDING":
+            if value not in {"true", "false"}:
+                _fail("canary-authority-invalid-boolean")
+            gates[key] = value
+            has_public_onboarding = True
+            continue
+
         if key.endswith("_ENABLED"):
             feature = key.removesuffix("_ENABLED")
             kind = "enabled"
@@ -1834,13 +1871,6 @@ def _parse_canary_authority(
         if feature not in authorized_features:
             _fail("canary-feature-unauthorized")
 
-        value = raw_value.strip()
-        if value[:1] in {'"', "'"}:
-            if len(value) < 2 or value[-1] != value[0]:
-                _fail("canary-authority-malformed-line")
-            value = value[1:-1]
-        elif value[-1:] in {'"', "'"}:
-            _fail("canary-authority-malformed-line")
         if kind in {"enabled", "public"} and value not in {"true", "false"}:
             _fail("canary-authority-invalid-boolean")
         gates[key] = value

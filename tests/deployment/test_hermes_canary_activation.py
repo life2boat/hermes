@@ -939,6 +939,8 @@ def test_authority_parser_accepts_public_boolean() -> None:
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=not-a-number\n", "canary-allowlist-invalid-member"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=1,2,3,4,5,6\n", "canary-allowlist-too-large"),
         (b"HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=101\nHEALBITE_HOUSEHOLDS_PUBLIC=maybe\n", "canary-authority-invalid-boolean"),
+        (b"HEALBITE_PUBLIC_ONBOARDING=maybe\n", "canary-authority-invalid-boolean"),
+        (b"HEALBITE_PUBLIC_ONBOARDING=true\nHEALBITE_PUBLIC_ONBOARDING=false\n", "canary-authority-duplicate-key"),
     ],
 )
 def test_authority_parser_subset_semantics_failures(data: bytes, code: str) -> None:
@@ -948,6 +950,41 @@ def test_authority_parser_subset_semantics_failures(data: bytes, code: str) -> N
             authorized_features=CANARY_AUTHORIZED_FEATURES,
         )
     assert error.value.code == code
+
+
+def test_authority_parser_accepts_public_onboarding_boolean() -> None:
+    authority = (
+        "HEALBITE_HOUSEHOLDS_ENABLED=true\n"
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST=101\n"
+        "HEALBITE_HOUSEHOLDS_PUBLIC=true\n"
+        "HEALBITE_PUBLIC_ONBOARDING=true\n"
+    ).encode("utf-8")
+
+    result = deploy._parse_canary_authority(
+        authority,
+        authorized_features=CANARY_AUTHORIZED_FEATURES,
+    )
+    assert result == {
+        "HEALBITE_HOUSEHOLDS_ENABLED": "true",
+        "HEALBITE_HOUSEHOLDS_ALLOWLIST": "101",
+        "HEALBITE_HOUSEHOLDS_PUBLIC": "true",
+        "HEALBITE_PUBLIC_ONBOARDING": "true",
+    }
+
+
+def test_canonical_public_defaults_single_source() -> None:
+    manifest = json.loads((REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8"))
+    compose = json.loads((REPO_ROOT / "deploy" / "docker-compose.production.yml").read_text(encoding="utf-8"))
+    bot_env = compose["services"]["hermes-bot"]["environment"]
+    assert deploy.CANONICAL_PUBLIC_DEFAULTS_SINGLE_SOURCE is True
+    assert manifest["public_gates"] == {
+        "HEALBITE_HOUSEHOLDS_PUBLIC": False,
+        "HEALBITE_WEEKLY_MENU_PUBLIC": False,
+        "HEALBITE_SHOPPING_LIST_PUBLIC": False,
+        "HEALBITE_PUBLIC_ONBOARDING": False,
+    }
+    for k, v in deploy.CANONICAL_PUBLIC_DEFAULTS.items():
+        assert bot_env[k] == v
 
 
 def test_manifest_canary_policy_exact_authorized_features() -> None:

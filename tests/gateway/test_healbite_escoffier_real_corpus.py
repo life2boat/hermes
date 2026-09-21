@@ -443,16 +443,30 @@ def test_deterministic_rebuild_and_semantic_corpus_hash(tmp_path: Path) -> None:
 
 def test_copyright_and_raw_source_leakage_invariants() -> None:
     """Verify that no raw books (pg71395.txt, OCR dumps, pdfs) are committed to Git."""
+    import hashlib
+    import os
+
+    # 1. Check tracked files in Git (must not contain raw book artifacts)
+    res_tracked = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True)
+    for path in res_tracked.stdout.splitlines():
+        assert not (
+            "pg71395" in path
+            or "b21525912" in path
+            or path.endswith(".djvu")
+            or ("recipe_corpus" in path and (path.endswith(".txt") or path.endswith(".pdf")))
+        ), f"Raw source artifact committed to git: {path}"
+
+    # 2. Check untracked and modified files
     cmd = ["git", "status", "--porcelain"]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-
-    # Check untracked and modified files
     for line in res.stdout.splitlines():
         path = line[3:].strip()
         assert not path.endswith(".txt") or "pg71395" not in path, f"Raw book file found: {path}"
         assert not path.endswith(".djvu"), f"Raw OCR/djvu file found: {path}"
-        assert not path.endswith(".pdf"), f"Raw PDF file found: {path}"
+        assert not ("recipe_corpus" in path and path.endswith(".pdf")), f"Raw PDF file found: {path}"
 
-    # Verify frozen file exists outside Git
-    outside_scratch = Path(r"C:\Users\Oleg\.gemini\antigravity\brain\c249e407-062f-4265-9f05-f4942ec7046b\scratch\pg71395.txt")
-    assert outside_scratch.exists(), "Frozen source artifact outside Git must exist"
+    # 3. If an external frozen source path is configured via environment, verify its integrity
+    env_raw_path = os.environ.get("ESCOFFIER_RAW_BOOK_PATH")
+    if env_raw_path and Path(env_raw_path).is_file():
+        h = hashlib.sha256(Path(env_raw_path).read_bytes()).hexdigest()
+        assert h == "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993"

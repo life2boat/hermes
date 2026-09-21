@@ -23,9 +23,7 @@ from gateway.healbite_recipe_catalog_domain import (
 )
 
 EXPECTED_GUTENBERG_SHA256 = "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993"
-DEFAULT_FROZEN_SOURCE = Path(
-    r"C:\Users\Oleg\.gemini\antigravity\brain\c249e407-062f-4265-9f05-f4942ec7046b\scratch\pg71395.txt"
-)
+DEFAULT_FROZEN_SOURCE = Path(os.environ.get("ESCOFFIER_RAW_BOOK_PATH", "scratch/pg71395.txt"))
 DEFAULT_OUTPUT_JSON = Path("recipe_corpus/authorized_inputs/escoffier_recipes.json")
 DEFAULT_REPORT_JSON = Path("recipe_corpus/reports/ingredient_normalization_report.json")
 
@@ -1031,7 +1029,7 @@ def main() -> int:
 
     extracted_recipes: list[dict[str, Any]] = []
     normalization_audit: dict[str, Any] = {
-        "source_file": str(args.source_file),
+        "source_file": Path(args.source_file).name,
         "source_sha256": source_sha256,
         "total_recipes": len(RECIPES_SPEC),
         "recipes": [],

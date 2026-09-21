@@ -140,3 +140,6 @@ scripts/out/
 RELEASE_v*.md
 backups/
 memory_capsules/
+*.db
+*.sqlite3
+recipe_corpus/reports/*.db

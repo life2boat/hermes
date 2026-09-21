@@ -3,17 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from gateway.healbite_recipe_catalog_domain import (
+    ContentScope,
     MealType,
     Recipe,
     RecipeAuthor,
     RecipeIngredient,
     RecipeInstruction,
     RecipeSource,
+    RightsEvidenceType,
     RightsStatus,
     SourceType,
     VerificationStatus,
@@ -24,6 +27,7 @@ from gateway.healbite_recipe_catalog_domain import (
 )
 from gateway.healbite_recipe_catalog_store import (
     CATALOG_SCHEMA_VERSION,
+    HealBiteRecipeCatalogStore,
     compute_catalog_content_hash,
     initialize_empty_catalog,
 )
@@ -39,6 +43,68 @@ class RightsPolicyViolationError(IngestionError):
 
 class IngestionValidationError(IngestionError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReport:
+    exact_duplicates: tuple[str, ...]
+    normalized_duplicates: tuple[str, ...]
+    conflicting_variants: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorCoverage:
+    author_id: str
+    display_name: str
+    metadata_sources: int
+    structured_authorized_sources: int
+    verified_recipes: int
+    blocked_sources: int
+    block_reasons: tuple[str, ...]
+    breakfast_verified: int
+    lunch_verified: int
+    dinner_verified: int
+    unique_verified_recipes: int
+    can_form_21_meal_week: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogReadinessReport:
+    schema_version: int
+    build_id: str
+    content_hash: str
+    recipe_count: int
+    verified_recipe_count: int
+    real_verified_recipes: int
+    test_fixture_recipes: int
+    breakfast_verified: int
+    lunch_verified: int
+    dinner_verified: int
+    unique_verified_recipes: int
+    can_form_21_meal_week: bool
+    author_coverages: dict[str, AuthorCoverage]
+
+
+DEFAULT_BLOCKED_REASONS: dict[str, str] = {
+    "AUTHOR_POKHLEBKIN": (
+        "Copyright protected under Russian Civil Code Art. 1281 (term expires 2071); "
+        "LINK_ONLY metadata citation only; no structured recipe content license."
+    ),
+    "AUTHOR_JAMIE_OLIVER": (
+        "Copyright protected under UK CDPA 1988 (living author); "
+        "LINK_ONLY metadata citation only; no structured recipe content license."
+    ),
+    "AUTHOR_ESCOFFIER": (
+        "PUBLIC_DOMAIN requires authenticated source edition digital scan/text and verified "
+        "cryptographic hash; structured recipe content pending digitization/clearing; currently METADATA_ONLY."
+    ),
+}
+
+PROTECTED_REAL_AUTHORS: frozenset[str] = frozenset({
+    "AUTHOR_POKHLEBKIN",
+    "AUTHOR_ESCOFFIER",
+    "AUTHOR_JAMIE_OLIVER",
+})
 
 
 def compute_recipe_content_hash(
@@ -67,6 +133,9 @@ class RecipeIngestionPipeline:
             initialize_empty_catalog(self._path, build_id=build_id)
         self._conn = sqlite3.connect(str(self._path))
         self._conn.row_factory = sqlite3.Row
+        self._exact_duplicates: list[str] = []
+        self._normalized_duplicates: list[str] = []
+        self._conflicting_variants: list[str] = []
 
     def close(self) -> None:
         self._conn.close()
@@ -81,14 +150,32 @@ class RecipeIngestionPipeline:
         self._conn.commit()
 
     def ingest_source(self, source: RecipeSource) -> None:
+        # 1. Reject UNKNOWN rights status
         if source.rights_status is RightsStatus.UNKNOWN:
             raise RightsPolicyViolationError(f"Cannot ingest source '{source.source_id}' with UNKNOWN rights status")
+
+        # 2. PUBLIC_DOMAIN requires recorded evidence type and locator
+        if source.rights_status is RightsStatus.PUBLIC_DOMAIN:
+            if not source.rights_evidence_locator or source.rights_evidence_type is RightsEvidenceType.NONE:
+                raise RightsPolicyViolationError(
+                    f"PUBLIC_DOMAIN source '{source.source_id}' requires recorded rights evidence type and locator"
+                )
+
+        # 3. LICENSED requires recorded evidence type and locator
+        if source.rights_status is RightsStatus.LICENSED:
+            if not source.rights_evidence_locator or source.rights_evidence_type is RightsEvidenceType.NONE:
+                raise RightsPolicyViolationError(
+                    f"LICENSED source '{source.source_id}' requires recorded license evidence locator and type"
+                )
+
         cur = self._conn.cursor()
         cur.execute(
             "INSERT OR REPLACE INTO recipe_sources "
             "(source_id, author_id, title, source_type, source_locator, publication_year, "
-            "language, rights_status, source_content_hash, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "edition, language, rights_status, rights_evidence_type, rights_evidence_locator, "
+            "rights_evidence_note, source_content_hash, ingestion_timestamp, ingestion_tool_version, "
+            "content_scope, verification_status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source.source_id,
                 source.author_id,
@@ -96,16 +183,24 @@ class RecipeIngestionPipeline:
                 source.source_type.value,
                 source.source_locator,
                 source.publication_year,
+                source.edition,
                 source.language,
                 source.rights_status.value,
+                source.rights_evidence_type.value,
+                source.rights_evidence_locator,
+                source.rights_evidence_note,
                 source.source_content_hash,
+                source.ingestion_timestamp or "2026-09-21 00:00:00",
+                source.ingestion_tool_version,
+                source.content_scope.value,
+                source.verification_status.value,
                 source.created_at or "2026-09-21 00:00:00",
             ),
         )
         self._conn.commit()
 
     def ingest_recipe(self, raw: Mapping[str, Any]) -> str:
-        # Validate rights status
+        # 1. Validate recipe rights status
         rights_raw = raw.get("rights_status", RightsStatus.UNKNOWN.value)
         try:
             rights = RightsStatus(rights_raw)
@@ -114,10 +209,10 @@ class RecipeIngestionPipeline:
 
         if rights is RightsStatus.UNKNOWN:
             raise RightsPolicyViolationError(
-                f"Recipe '{raw.get('title')}' rejected: source rights status is UNKNOWN"
+                f"Recipe '{raw.get('title')}' rejected: rights status is UNKNOWN"
             )
 
-        # Validate verification status
+        # 2. Validate recipe verification status
         verified = bool(raw.get("verified", False))
         verif_raw = raw.get("verification_status", VerificationStatus.REVIEW_REQUIRED.value)
         if not verified or verif_raw != VerificationStatus.VERIFIED.value:
@@ -125,11 +220,65 @@ class RecipeIngestionPipeline:
                 f"Recipe '{raw.get('title')}' rejected: unverified recipes cannot be ingested"
             )
 
+        # 3. Reject synthetic recipes attributed to real authors
         author_id = str(raw["author_id"]).strip()
-        source_id = str(raw["source_id"]).strip()
-        title = str(raw["title"]).strip()
-        norm_title = normalize_title(title)
+        if author_id in PROTECTED_REAL_AUTHORS:
+            if (
+                raw.get("is_synthetic", False)
+                or "TEST" in str(raw.get("source_id", ""))
+                or rights is RightsStatus.USER_PROVIDED_AUTHORIZED
+            ):
+                raise RightsPolicyViolationError(
+                    f"Synthetic recipes cannot be attributed to {author_id}"
+                )
+
+        # 4. Source lookup and rights validation
+        source_id = str(raw.get("source_id", "")).strip()
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM recipe_sources WHERE source_id = ?", (source_id,))
+        source_row = cur.fetchone()
+        if not source_row:
+            raise IngestionValidationError(
+                f"Recipe '{raw.get('title')}' rejected: source '{source_id}' not found in catalog"
+            )
+
+        source_rights = RightsStatus(source_row["rights_status"])
+        if source_rights is RightsStatus.UNKNOWN:
+            raise RightsPolicyViolationError(
+                f"Recipe '{raw.get('title')}' rejected: source '{source_id}' has UNKNOWN rights status"
+            )
+
+        source_keys = set(source_row.keys())
+        content_scope = source_row["content_scope"] if "content_scope" in source_keys else "METADATA_ONLY"
+        if source_rights is RightsStatus.LINK_ONLY or content_scope == ContentScope.METADATA_ONLY.value:
+            raise RightsPolicyViolationError(
+                f"Recipe '{raw.get('title')}' rejected: source '{source_id}' is LINK_ONLY / METADATA_ONLY and cannot contain recipe content"
+            )
+
+        # 5. Recipe author != source author check
+        if source_row["author_id"] != author_id:
+            raise IngestionValidationError(
+                f"Recipe author '{author_id}' does not match source author '{source_row['author_id']}'"
+            )
+
+        # 6. Missing source locator check
         source_locator = raw.get("source_locator")
+        source_type_val = source_row["source_type"]
+        if source_type_val == SourceType.BOOK.value and (source_locator is None or not str(source_locator).strip()):
+            raise IngestionValidationError(
+                f"Recipe '{raw.get('title')}' requires explicit source_locator (page, chapter, or section citation)"
+            )
+
+        # 7. Source content hash verification if supplied
+        if raw.get("source_content_hash") and raw["source_content_hash"] != source_row["source_content_hash"]:
+            raise IngestionValidationError(
+                f"Source content hash mismatch: source modified after recorded provenance "
+                f"(expected {source_row['source_content_hash']}, got {raw.get('source_content_hash')})"
+            )
+
+        title = str(raw["title"]).strip()
+        source_recipe_title = str(raw.get("source_recipe_title", title)).strip()
+        norm_title = normalize_title(title)
 
         recipe_id = generate_recipe_id(author_id, source_id, source_locator, norm_title)
 
@@ -170,42 +319,56 @@ class RecipeIngestionPipeline:
                     "timing_minutes": ins.get("timing_minutes"),
                 })
 
-        content_hash = compute_recipe_content_hash(
+        normalized_hash = compute_recipe_content_hash(
             author_id, source_id, norm_title, normalized_ingredients, normalized_instructions
         )
+        source_hash = raw.get("source_content_hash") or normalized_hash
 
-        cur = self._conn.cursor()
-
-        # Check existing versions
+        # Check existing versions & duplicate contract
         cur.execute(
-            "SELECT recipe_version, source_content_hash FROM recipes WHERE recipe_id = ? ORDER BY recipe_version DESC LIMIT 1",
+            "SELECT recipe_version, source_content_hash, normalized_content_hash, title "
+            "FROM recipes WHERE recipe_id = ? ORDER BY recipe_version DESC LIMIT 1",
             (recipe_id,),
         )
         existing = cur.fetchone()
         version = 1
         if existing:
             existing_ver = existing["recipe_version"]
-            existing_hash = existing["source_content_hash"]
-            if existing_hash == content_hash:
-                # Idempotent re-ingestion: exact duplicate, no change needed
+            existing_hash = existing["normalized_content_hash"] or existing["source_content_hash"]
+            if existing_hash == normalized_hash:
+                if existing["title"] == title:
+                    self._exact_duplicates.append(f"{recipe_id}:{title}")
+                else:
+                    self._normalized_duplicates.append(f"{recipe_id}:{title}")
+                # Idempotent re-ingestion: exact/normalized duplicate
                 return recipe_id
+
+            if raw.get("is_conflicting_variant", False):
+                self._conflicting_variants.append(f"{recipe_id}:{title}")
+                raise IngestionValidationError(
+                    f"Conflicting variant detected for recipe '{title}' ({recipe_id}); explicit resolution required"
+                )
+
             version = existing_ver + 1
 
         # Meal types
-        meal_types = [t.value if isinstance(t, MealType) else str(t) for t in raw.get("meal_types", [MealType.LUNCH.value])]
+        meal_types = [
+            t.value if isinstance(t, MealType) else str(t)
+            for t in raw.get("meal_types", [MealType.LUNCH.value])
+        ]
         tags = list(raw.get("tags", []))
         servings = str(Decimal(str(raw.get("servings", 4))))
-        verified = bool(raw.get("verified", True))
         ver_status = raw.get("verification_status", VerificationStatus.VERIFIED.value)
         created_at = raw.get("created_at", "2026-09-21 00:00:00")
 
         cur.execute(
             "INSERT INTO recipes "
             "(recipe_id, recipe_version, author_id, source_id, title, normalized_title, "
-            "meal_types_json, cuisine, servings, prep_minutes, cook_minutes, total_minutes, "
-            "difficulty, tags_json, source_locator, source_content_hash, rights_status, "
-            "verified, verification_status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_recipe_title, meal_types_json, cuisine, servings, prep_minutes, "
+            "cook_minutes, total_minutes, difficulty, tags_json, source_locator, "
+            "source_content_hash, normalized_content_hash, rights_status, verified, "
+            "verification_status, ingestion_build_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 recipe_id,
                 version,
@@ -213,6 +376,7 @@ class RecipeIngestionPipeline:
                 source_id,
                 title,
                 norm_title,
+                source_recipe_title,
                 json.dumps(meal_types),
                 raw.get("cuisine"),
                 servings,
@@ -222,10 +386,12 @@ class RecipeIngestionPipeline:
                 raw.get("difficulty"),
                 json.dumps(tags),
                 source_locator,
-                content_hash,
+                source_hash,
+                normalized_hash,
                 rights.value,
                 1 if verified else 0,
                 ver_status,
+                self._build_id,
                 created_at,
             ),
         )
@@ -276,6 +442,13 @@ class RecipeIngestionPipeline:
         self._conn.commit()
         return recipe_id
 
+    def get_duplicate_report(self) -> DuplicateReport:
+        return DuplicateReport(
+            exact_duplicates=tuple(self._exact_duplicates),
+            normalized_duplicates=tuple(self._normalized_duplicates),
+            conflicting_variants=tuple(self._conflicting_variants),
+        )
+
     def finalize_catalog(self) -> str:
         """Compute final content hash and update metadata."""
         cur = self._conn.cursor()
@@ -297,3 +470,91 @@ class RecipeIngestionPipeline:
         cur.executemany("INSERT OR REPLACE INTO catalog_metadata(key, value) VALUES (?, ?)", meta)
         self._conn.commit()
         return final_hash
+
+
+def calculate_author_coverage(
+    store: HealBiteRecipeCatalogStore,
+    author_id: str,
+    *,
+    blocked_reasons_map: Mapping[str, str] | None = None,
+) -> AuthorCoverage:
+    author = store.get_author(author_id)
+    display_name = author.display_name if author else author_id
+
+    sources = store.list_sources_by_author(author_id)
+    metadata_sources = len(sources)
+    structured_sources = sum(
+        1 for s in sources if s.content_scope == ContentScope.STRUCTURED_RECIPE_CONTENT
+    )
+    blocked_sources = metadata_sources - structured_sources
+
+    reasons_map = blocked_reasons_map or DEFAULT_BLOCKED_REASONS
+    block_reasons = (reasons_map.get(author_id, "Source scope is METADATA_ONLY"),) if blocked_sources > 0 else ()
+
+    recipes = store.list_recipes_by_author(author_id, verified_only=True)
+    planning_recipes = [r for r in recipes if r.is_verified_for_planning]
+    verified_count = len(planning_recipes)
+
+    breakfast = sum(1 for r in planning_recipes if MealType.BREAKFAST in r.meal_types)
+    lunch = sum(1 for r in planning_recipes if MealType.LUNCH in r.meal_types)
+    dinner = sum(1 for r in planning_recipes if MealType.DINNER in r.meal_types)
+    unique_recipes = len({r.recipe_id for r in planning_recipes})
+    can_form = (breakfast >= 7 and lunch >= 7 and dinner >= 7 and unique_recipes >= 21)
+
+    return AuthorCoverage(
+        author_id=author_id,
+        display_name=display_name,
+        metadata_sources=metadata_sources,
+        structured_authorized_sources=structured_sources,
+        verified_recipes=verified_count,
+        blocked_sources=blocked_sources,
+        block_reasons=block_reasons,
+        breakfast_verified=breakfast,
+        lunch_verified=lunch,
+        dinner_verified=dinner,
+        unique_verified_recipes=unique_recipes,
+        can_form_21_meal_week=can_form,
+    )
+
+
+def calculate_catalog_readiness(
+    store: HealBiteRecipeCatalogStore,
+    author_ids: Sequence[str] = (
+        "AUTHOR_POKHLEBKIN",
+        "AUTHOR_ESCOFFIER",
+        "AUTHOR_JAMIE_OLIVER",
+    ),
+) -> CatalogReadinessReport:
+    meta = store.get_metadata()
+    all_recipes = store.get_all_recipes(verified_only=True)
+    verified_planning = [r for r in all_recipes if r.is_verified_for_planning]
+
+    real_verified = sum(1 for r in verified_planning if not r.author_id.startswith("TEST_"))
+    test_fixture = sum(1 for r in verified_planning if r.author_id.startswith("TEST_"))
+
+    breakfast = sum(1 for r in verified_planning if MealType.BREAKFAST in r.meal_types)
+    lunch = sum(1 for r in verified_planning if MealType.LUNCH in r.meal_types)
+    dinner = sum(1 for r in verified_planning if MealType.DINNER in r.meal_types)
+    unique_recipes = len({r.recipe_id for r in verified_planning})
+    can_form = (breakfast >= 7 and lunch >= 7 and dinner >= 7 and unique_recipes >= 21)
+
+    coverages = {
+        aid: calculate_author_coverage(store, aid)
+        for aid in author_ids
+    }
+
+    return CatalogReadinessReport(
+        schema_version=meta.schema_version,
+        build_id=meta.build_id,
+        content_hash=meta.content_hash,
+        recipe_count=meta.recipe_count,
+        verified_recipe_count=meta.verified_recipe_count,
+        real_verified_recipes=real_verified,
+        test_fixture_recipes=test_fixture,
+        breakfast_verified=breakfast,
+        lunch_verified=lunch,
+        dinner_verified=dinner,
+        unique_verified_recipes=unique_recipes,
+        can_form_21_meal_week=can_form,
+        author_coverages=coverages,
+    )

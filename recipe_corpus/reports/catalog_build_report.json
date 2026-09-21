@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "build_id": "pilot-v1",
+  "content_hash": "fef9d4785a522526bbd0cc329c1b7defd7f259d73a77fe390d83ea5827176f31",
+  "recipe_count": 27,
+  "verified_recipe_count": 27,
+  "real_verified_recipes": 0,
+  "test_fixture_recipes": 27,
+  "breakfast_verified": 9,
+  "lunch_verified": 9,
+  "dinner_verified": 9,
+  "unique_verified_recipes": 27,
+  "can_form_21_meal_week": true
+}

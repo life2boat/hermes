@@ -1,0 +1,3508 @@
+[
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs sur le plat (Eggs on the Dish)",
+    "source_recipe_title": "EGGS ON THE DISH",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=395",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "a06a5d7ab52b481bb727b32b1845c618522350d83abfda2790aa40fe091d5559",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 2,
+    "cook_minutes": 5,
+    "total_minutes": 7,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "escoffier",
+      "classic"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 1,
+        "unit": "oz",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Heat butter in an egg dish until melted and covering the bottom.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 2,
+        "text": "Carefully break the eggs into the dish without bursting the yolks.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Baste the yolks with a little hot melted butter and salt slightly.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 4,
+        "text": "Push into a moderate oven until the whites are milky-white and set; serve immediately.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs Bercy (Bercy Eggs)",
+    "source_recipe_title": "BERCY EGGS",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=396",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "a2b0b8151e72d95193e31e1ae41621fd794f64d898195e2bf6b2382b709bfef4",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 5,
+    "cook_minutes": 7,
+    "total_minutes": 12,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "sausage",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 1,
+        "unit": "oz",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "sausage",
+        "ingredient_id": "SAUSAGE",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "small grilled sausages"
+      },
+      {
+        "display_name": "tomato",
+        "ingredient_id": "TOMATO",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": "tomato sauce"
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Melt half of the butter in the dish, break the eggs without bursting the yolks, and baste with remaining butter.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 2,
+        "text": "Cook until the whites are quite done and the yolks remain soft and glossy.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 3,
+        "text": "Garnish with a small grilled sausage between the yolks and surround with a thread of tomato sauce.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs au beurre noir (Eggs with Brown Butter)",
+    "source_recipe_title": "EGGS WITH BROWN BUTTER",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=397",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "7a953f1bb76d95454b737244bab3e9f54b73a7ccff962237f31666bcbce62f99",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 3,
+    "cook_minutes": 5,
+    "total_minutes": 8,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "brown-butter",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 1,
+        "unit": "oz",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "vinegar",
+        "ingredient_id": "VINEGAR",
+        "quantity": 1,
+        "unit": "tsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      },
+      {
+        "display_name": "black pepper",
+        "ingredient_id": "BLACK_PEPPER",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cook the eggs in a dish in the usual way until the whites are set.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 2,
+        "text": "Heat butter in an omelet-pan until browned and fragrant, and pour over the cooked eggs.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Rinse the pan with drops of vinegar and besprinkle over the eggs.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs à la Florentine (Florentine Eggs)",
+    "source_recipe_title": "EGGS A LA FLORENTINE",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=400",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "725ea25ede1302c3168ba1758a2af26b9e2c8c7fbdbd97fe6dc223ad995c0ba7",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 10,
+    "cook_minutes": 8,
+    "total_minutes": 18,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "spinach",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "spinach",
+        "ingredient_id": "SPINACH",
+        "quantity": 200,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "stewed in butter"
+      },
+      {
+        "display_name": "cheese",
+        "ingredient_id": "CHEESE",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": "grated Gruyère or Parmesan"
+      },
+      {
+        "display_name": "mornay sauce",
+        "ingredient_id": "SAUCE_MORNAY",
+        "quantity": 4,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 15,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Garnish the bottom of a dish with spinach leaves stewed in butter.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 2,
+        "text": "Sprinkle thereon two pinches of grated cheese.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Break the eggs upon this garnish and cover them with Mornay sauce.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 4,
+        "text": "Glaze quickly in a fierce oven or under the salamander.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs pochés (Poached Eggs)",
+    "source_recipe_title": "PROCEDURE FOR POACHED EGGS",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=411",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "2ef8819468b4597e850570d1de8fea69ff58e288ac203eda887d44424d1be3d5",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 3,
+    "cook_minutes": 5,
+    "total_minutes": 8,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "poached",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "vinegar",
+        "ingredient_id": "VINEGAR",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Fill a sauté-pan with salted and acidulated boiling water (one tablespoon of vinegar per quart).",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 2,
+        "text": "Break the fresh eggs into the water one by one and keep at a gentle simmer for 3 minutes.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 3,
+        "text": "Lift the eggs with a skimmer and transfer to cold water to stop cooking.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 4,
+        "text": "Trim edges neatly and drain before dishing.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs mollets (Soft-Boiled Eggs)",
+    "source_recipe_title": "THE COOKING OF SOFT-BOILED EGGS",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=412",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "428d79e5c8c85df87e4a3d613f0725a62a3a8dbcb1daf2a854d87a0b4774f9bd",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 2,
+    "cook_minutes": 6,
+    "total_minutes": 8,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "soft-boiled",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Plunge fresh eggs into boiling water and boil gently for 5 to 6 minutes according to size.",
+        "timing_minutes": 6
+      },
+      {
+        "step_number": 2,
+        "text": "Immediately immerse in cold water to arrest cooking.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Shell the eggs carefully while submerged in cold water.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs durs (Hard-Boiled Eggs)",
+    "source_recipe_title": "HARD-BOILED EGGS",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=433",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "94ad94216f5952dcd6d9b0229f3ce2fd636d6a9b2ef237c380828c49ff4d406b",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 2,
+    "cook_minutes": 9,
+    "total_minutes": 11,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "hard-boiled",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Plunge eggs into boiling water and keep boiling gently for 8 to 9 minutes.",
+        "timing_minutes": 9
+      },
+      {
+        "step_number": 2,
+        "text": "Cool immediately in cold water to prevent yolks from discolouring.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Shell carefully and serve or prepare for garnishes.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs brouillés aux champignons (Scrambled Eggs with Mushrooms)",
+    "source_recipe_title": "SCRAMBLED EGGS WITH MUSHROOMS",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=462",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "b0504821603edf849720b282b3b0ff3819ef9f10298e06f3f9dcc691d8f13e35",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 8,
+    "cook_minutes": 8,
+    "total_minutes": 16,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "mushrooms",
+      "scrambled",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "mushroom",
+        "ingredient_id": "MUSHROOM",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "minced and sautéd in butter"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Mince fresh mushrooms and sauté in butter until tender.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 2,
+        "text": "Beat eggs with salt, melt butter in a thick-bottomed stewpan over gentle heat.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 3,
+        "text": "Cook eggs slowly while stirring continuously until creamy, finishing with cream and butter off the fire.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Fold in the cooked mushrooms and serve immediately in a warm timbale.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs brouillés au fromage (Scrambled Eggs with Cheese)",
+    "source_recipe_title": "SCRAMBLED EGGS WITH CHEESE",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=467",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "85e8fd6b38ef9c3f0bdf1d09f12143008ec3dc0345da8c62b1bd15f3cb9a35de",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 5,
+    "cook_minutes": 7,
+    "total_minutes": 12,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "cheese",
+      "scrambled",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cheese",
+        "ingredient_id": "CHEESE",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "grated Gruyère and Parmesan"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Beat eggs with seasoning and fold in freshly grated Gruyère and Parmesan cheese.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 2,
+        "text": "Cook in a thick saucepan with butter over very moderate heat, stirring constantly.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "text": "Finish with cream and fresh butter off the heat; dish immediately.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Oeufs brouillés aux truffes (Scrambled Eggs with Truffles)",
+    "source_recipe_title": "SCRAMBLED EGGS WITH TRUFFLES",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=481",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "4995bddacfee166bd7fc4debaab68699418cfd3a84e360dd1f60b9da097c6abc",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 6,
+    "cook_minutes": 8,
+    "total_minutes": 14,
+    "tags": [
+      "eggs",
+      "breakfast",
+      "truffles",
+      "scrambled",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "truffle",
+        "ingredient_id": "TRUFFLE",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "cut into dice and cooked in Madeira"
+      },
+      {
+        "display_name": "madeira",
+        "ingredient_id": "WINE_MADEIRA",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Simmer diced truffles in Madeira until fragrant.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 2,
+        "text": "Scramble the seasoned eggs with butter over gentle heat, stirring constantly.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "text": "Fold in the diced truffles and finish with cream and butter.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 4,
+        "text": "Garnish with fine slices of truffle and serve in a warm timbale.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Omelette aux épinards (Omelet with Spinach)",
+    "source_recipe_title": "OMELET WITH SPINACH",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=500",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "7b286a78b497566453c4c570b7ae77fd09ae669ed4b632863e116e0d9f8dd0df",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 6,
+    "cook_minutes": 6,
+    "total_minutes": 12,
+    "tags": [
+      "eggs",
+      "omelet",
+      "spinach",
+      "breakfast",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "spinach",
+        "ingredient_id": "SPINACH",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "cooked and blended with cream"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 25,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Warm the cooked chopped spinach with cream and butter; season to taste.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 2,
+        "text": "Beat eggs with salt, melt butter in the omelet pan until foaming.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Pour in eggs, stir and shake vigorously until soft and scrambled.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 4,
+        "text": "Spread creamed spinach in the centre, fold the omelet, and turn out onto a hot platter.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Omelette aux fines herbes (Herb Omelet)",
+    "source_recipe_title": "OMELET AUX FINES HERBES",
+    "source_locator": "Heinemann:1907:chapter=XII:recipe=502",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "9dd643ca52d63cbac1b04c65d808ccd07b91a203f4329b8cd18755c0c389148f",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "breakfast"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 5,
+    "cook_minutes": 5,
+    "total_minutes": 10,
+    "tags": [
+      "eggs",
+      "omelet",
+      "herbs",
+      "breakfast",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "eggs",
+        "ingredient_id": "EGG",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": "finely chopped"
+      },
+      {
+        "display_name": "chives",
+        "ingredient_id": "CHIVES",
+        "quantity": 1,
+        "unit": "tsp",
+        "optional": false,
+        "preparation_note": "finely chopped"
+      },
+      {
+        "display_name": "tarragon",
+        "ingredient_id": "TARRAGON",
+        "quantity": 1,
+        "unit": "tsp",
+        "optional": false,
+        "preparation_note": "finely chopped"
+      },
+      {
+        "display_name": "chervil",
+        "ingredient_id": "CHERVIL",
+        "quantity": 1,
+        "unit": "tsp",
+        "optional": false,
+        "preparation_note": "finely chopped"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 25,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Finely chop parsley, chervil, chives, and tarragon leaves in equal proportions.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 2,
+        "text": "Add chopped herbs to the beaten eggs with salt.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Heat butter in the omelet pan, pour in mixture, shake and stir rapidly until cooked but soft.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 4,
+        "text": "Roll the omelet and transfer to an oval serving dish.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Bortsch (Bortsch Soup Escoffier)",
+    "source_recipe_title": "POTAGE BORTSCH",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=547",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "7726bf750e1c695f07291890f4bc3c495da524aafaa6f922f77346396dcbf663",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 20,
+    "cook_minutes": 45,
+    "total_minutes": 65,
+    "tags": [
+      "soup",
+      "lunch",
+      "vegetables",
+      "beetroot",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cabbage",
+        "ingredient_id": "CABBAGE",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "beetroot",
+        "ingredient_id": "BEETROOT",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "celery",
+        "ingredient_id": "CELERY",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1.5,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": "beef and duck consommé"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cut leeks, carrot, onion, cabbage, parsley root, celery, and beetroot into julienne strips.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "text": "Stew the vegetables gently in butter without colouring.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "text": "Moisten with hot beef and duck consommé, bring to a gentle boil, and simmer for 40 minutes.",
+        "timing_minutes": 40
+      },
+      {
+        "step_number": 4,
+        "text": "Skim carefully and serve hot with beetroot infusion.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Consommé Brunoise (Brunoise Soup)",
+    "source_recipe_title": "CONSOMMÉ BRUNOISE",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=548",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "57c105df59560899855799c315d3280e7806fa367e882accd4690ace3a8f71a9",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 30,
+    "total_minutes": 45,
+    "tags": [
+      "soup",
+      "consommé",
+      "lunch",
+      "vegetables",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "red part cut into small dice"
+      },
+      {
+        "display_name": "turnip",
+        "ingredient_id": "TURNIP",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "small dice"
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "small dice"
+      },
+      {
+        "display_name": "celery",
+        "ingredient_id": "CELERY",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "small dice"
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "small dice"
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1.5,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cut carrots, turnip, leeks, celery, and onion into small regular dice.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "text": "Stew gently in butter with a pinch of salt and sugar until tender.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "text": "Moisten with clear boiling consommé and simmer gently for 25 minutes.",
+        "timing_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "text": "Skim off any fat and serve clear with chervil leaves.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Croûte au Pot",
+    "source_recipe_title": "CROÛTE AU POT",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=556",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "1e4affdb8a6e74cfbd95223e982cdf65ed11f7fdba951b2c8f6e9d2e47afd20b",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 40,
+    "total_minutes": 55,
+    "tags": [
+      "soup",
+      "lunch",
+      "beef",
+      "escoffier",
+      "traditional"
+    ],
+    "ingredients": [
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1.5,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": "rich beef broth"
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "turnip",
+        "ingredient_id": "TURNIP",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cabbage",
+        "ingredient_id": "CABBAGE",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "braised separately"
+      },
+      {
+        "display_name": "bread",
+        "ingredient_id": "BREAD",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "toasted crusts"
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Prepare vegetables cut in olive shapes or thick rounds and cook gently in consommé.",
+        "timing_minutes": 30
+      },
+      {
+        "step_number": 2,
+        "text": "Braise cabbage separately in stock and drain well.",
+        "timing_minutes": 20
+      },
+      {
+        "step_number": 3,
+        "text": "Dry bread crusts in the oven with a drop of broth until crisp.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 4,
+        "text": "Combine vegetables in boiling consommé and serve accompanied by toasted crusts.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "La Petite Marmite",
+    "source_recipe_title": "LA PETITE MARMITE",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=598",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "bf8aff3e678f8f2c24b1b7336a839ad6c80347937f9b7308ff8c4899db8ca606",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "hard",
+    "servings": 4,
+    "prep_minutes": 25,
+    "cook_minutes": 180,
+    "total_minutes": 205,
+    "tags": [
+      "soup",
+      "lunch",
+      "beef",
+      "chicken",
+      "escoffier",
+      "classic"
+    ],
+    "ingredients": [
+      {
+        "display_name": "beef",
+        "ingredient_id": "BEEF",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "lean beef and marrow bone"
+      },
+      {
+        "display_name": "chicken",
+        "ingredient_id": "CHICKEN",
+        "quantity": 250,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "giblets and chicken meat"
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "turnip",
+        "ingredient_id": "TURNIP",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "celery",
+        "ingredient_id": "CELERY",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cabbage",
+        "ingredient_id": "CABBAGE",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Put beef, marrow bone, and chicken in an earthenware pot with cold water and salt.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 2,
+        "text": "Bring slowly to the boil, skim thoroughly, and add carrots, turnips, leeks, and celery.",
+        "timing_minutes": 20
+      },
+      {
+        "step_number": 3,
+        "text": "Simmer very gently for three hours, skimming frequently.",
+        "timing_minutes": 150
+      },
+      {
+        "step_number": 4,
+        "text": "Add separately parboiled cabbage during the last hour and serve directly from the pot.",
+        "timing_minutes": 30
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Crécy (Carrot Purée Soup)",
+    "source_recipe_title": "PURÉE DE CAROTTES, otherwise CRÉCY",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=630",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "8ed94f3ff6d0007b030669ccfeec11961ff34e056c205fd572bf735a34b9d9d5",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 50,
+    "total_minutes": 65,
+    "tags": [
+      "soup",
+      "purée",
+      "carrot",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced"
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "rice",
+        "ingredient_id": "RICE",
+        "quantity": 80,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "thyme",
+        "ingredient_id": "THYME",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Stew sliced carrots and chopped onion in butter with thyme for 20 minutes without colouring.",
+        "timing_minutes": 20
+      },
+      {
+        "step_number": 2,
+        "text": "Add white consommé and rice, bring to a boil, and cook gently for 40 minutes.",
+        "timing_minutes": 40
+      },
+      {
+        "step_number": 3,
+        "text": "Rub through a fine sieve or purée until completely smooth.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Reheat, whisk in remaining fresh butter off the heat, and serve with small croutons.",
+        "timing_minutes": 3
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Velours (Carrot Tapioca Soup)",
+    "source_recipe_title": "PURÉE DE CAROTTES AU TAPIOCA, otherwise VELOURS",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=631",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "d0bac062b47dc161eb9e354773c06532742849f418f2b50dab75765890820796",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 10,
+    "cook_minutes": 25,
+    "total_minutes": 35,
+    "tags": [
+      "soup",
+      "carrot",
+      "tapioca",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 400,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "tapioca",
+        "ingredient_id": "TAPIOCA",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Prepare Crécy carrot purée and thin slightly with white consommé.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "text": "Sprinkle in tapioca and cook at a gentle simmer for 15 minutes while stirring.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "text": "Finish off the fire with fresh butter and cream, and serve warm.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Conti (Lentil Purée Soup)",
+    "source_recipe_title": "PURÉE DE LENTILLES, otherwise CONTI",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=640",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "e93351c1d8a2b6f3e8d0c5bd972522e91b28bd1bc8829025bdbe44bed49e3094",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 60,
+    "total_minutes": 75,
+    "tags": [
+      "soup",
+      "purée",
+      "lentils",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "lentils",
+        "ingredient_id": "LENTILS",
+        "quantity": 300,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "bacon",
+        "ingredient_id": "BACON",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cook lentils with bacon, sliced carrot, onion, and broth until completely tender.",
+        "timing_minutes": 55
+      },
+      {
+        "step_number": 2,
+        "text": "Rub the lentils through a sieve to produce a smooth purée.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "text": "Dilute to proper soup consistency with hot consommé.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Simmer for 10 minutes, finish with butter, and garnish with chervil.",
+        "timing_minutes": 10
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Saint-Germain (Green Pea Purée Soup)",
+    "source_recipe_title": "PURÉE DE POIS FRAIS, otherwise SAINT-GERMAIN",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=648",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "243d5b0275cacbbef3ac778016eee7c586bdff456614d21022819d91c126151c",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 35,
+    "total_minutes": 50,
+    "tags": [
+      "soup",
+      "purée",
+      "peas",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "peas",
+        "ingredient_id": "PEAS",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "fresh green peas"
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "chervil",
+        "ingredient_id": "CHERVIL",
+        "quantity": 1,
+        "unit": "tsp",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cook fresh peas quickly in salted boiling water and drain immediately.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "text": "Melt butter in a saucepan, sweat sliced white of leek, and combine with peas.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "text": "Pound in a mortar and rub through a fine sieve with white consommé.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Reheat without boiling, finish with fresh butter, and serve with chervil.",
+        "timing_minutes": 5
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Parmentier (Potato and Leek Soup)",
+    "source_recipe_title": "PURÉE DE POMMES DE TERRE, otherwise PARMENTIER",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=658",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "315224d72889ff25dfa9a97d33d9f850184efb5eefa8447b150b4321d8bebb39",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 30,
+    "total_minutes": 45,
+    "tags": [
+      "soup",
+      "potato",
+      "leek",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "potato",
+        "ingredient_id": "POTATO",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "peeled and quartered"
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "white part finely minced"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "chervil",
+        "ingredient_id": "CHERVIL",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Finely mince the white of leeks and fry gently in butter without colouring.",
+        "timing_minutes": 8
+      },
+      {
+        "step_number": 2,
+        "text": "Add peeled quartered potatoes and white consommé; cook quickly until potatoes are soft.",
+        "timing_minutes": 25
+      },
+      {
+        "step_number": 3,
+        "text": "Rub through a fine sieve, return to heat, and adjust consistency.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Finish with butter off the fire and sprinkle with chervil leaves.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Potage Waldèze (Tomato and Tapioca Soup)",
+    "source_recipe_title": "PURÉE DE TOMATES AU TAPIOCA, otherwise WALDÈZE",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=660",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "310837f23b43980a2cf4ce956e92507fa6d7c2dd3a9939a517535d7e20769954",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 10,
+    "cook_minutes": 25,
+    "total_minutes": 35,
+    "tags": [
+      "soup",
+      "tomato",
+      "tapioca",
+      "lunch",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "tomato",
+        "ingredient_id": "TOMATO",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "crushed ripe tomatoes or purée"
+      },
+      {
+        "display_name": "tapioca",
+        "ingredient_id": "TAPIOCA",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cook tomato purée with white consommé until well amalgamated.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "text": "Rain in the tapioca and cook at a gentle simmer for 15 minutes, stirring occasionally.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "text": "Finish off the heat with pieces of fresh butter until smooth and glossy.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Soupe Julienne Darblay",
+    "source_recipe_title": "SOUPE JULIENNE DARBLAY",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=745",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "0394d4ff6b95052a3ad88dc937c054796e2df0a4752150e2b0c951f6d4024626",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 35,
+    "total_minutes": 50,
+    "tags": [
+      "soup",
+      "lunch",
+      "julienne",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "potato",
+        "ingredient_id": "POTATO",
+        "quantity": 300,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "leek",
+        "ingredient_id": "LEEK",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "turnip",
+        "ingredient_id": "TURNIP",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Prepare a fine Parmentier potato-leek soup base.",
+        "timing_minutes": 25
+      },
+      {
+        "step_number": 2,
+        "text": "Cut carrots, turnips, and leeks into fine julienne strips and stew in butter until tender.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "text": "Combine the tender julienne vegetables into the hot Parmentier soup.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Simmer for 5 minutes and serve hot.",
+        "timing_minutes": 5
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Minestrone à l'Italienne",
+    "source_recipe_title": "MINESTRONE",
+    "source_locator": "Heinemann:1907:chapter=XIII:recipe=746",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "f858dc03cc3f60b1b1f8294c4a43bbc2b3421d3ac44e4ba317a04917b30709ff",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "lunch"
+    ],
+    "cuisine": "italian",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 20,
+    "cook_minutes": 45,
+    "total_minutes": 65,
+    "tags": [
+      "soup",
+      "lunch",
+      "minestrone",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "bacon",
+        "ingredient_id": "BACON",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "carrot",
+        "ingredient_id": "CARROT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "celery",
+        "ingredient_id": "CELERY",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cabbage",
+        "ingredient_id": "CABBAGE",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "potato",
+        "ingredient_id": "POTATO",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "peas",
+        "ingredient_id": "PEAS",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "french beans",
+        "ingredient_id": "GREEN_BEANS",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "rice",
+        "ingredient_id": "RICE",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "tomato",
+        "ingredient_id": "TOMATO",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 1.5,
+        "unit": "qt",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cheese",
+        "ingredient_id": "CHEESE",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "grated Parmesan"
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Brown diced bacon and onion in a saucepan, add diced carrots, celery, and cabbage.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "text": "Moisten with consommé and bring to a boil; add tomatoes and diced potatoes.",
+        "timing_minutes": 20
+      },
+      {
+        "step_number": 3,
+        "text": "Add rice, peas, and cut french beans; simmer until rice and vegetables are cooked.",
+        "timing_minutes": 25
+      },
+      {
+        "step_number": 4,
+        "text": "Serve accompanied by grated Parmesan cheese.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Sole Meunière Doria",
+    "source_recipe_title": "SOLE MEUNIÈRE AUX CONCOMBRES, otherwise DORIA",
+    "source_locator": "Heinemann:1907:chapter=XIV:recipe=843",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "3a111cd73d67586e4d2ced25953f314db7257feffa5002fa611a6ada9c31104f",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 15,
+    "total_minutes": 30,
+    "tags": [
+      "fish",
+      "sole",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "sole",
+        "ingredient_id": "FISH_SOLE",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "fillets of sole"
+      },
+      {
+        "display_name": "cucumber",
+        "ingredient_id": "CUCUMBER",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "turned into olive shapes and stewed in butter"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "lemon",
+        "ingredient_id": "LEMON",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "flour",
+        "ingredient_id": "FLOUR",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Shape cucumbers into olive forms and stew gently in butter until tender.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 2,
+        "text": "Dredge sole fillets in flour and fry in hot foaming butter until golden on both sides.",
+        "timing_minutes": 8
+      },
+      {
+        "step_number": 3,
+        "text": "Dish fish, surround with stewed cucumbers, sprinkle with lemon juice and chopped parsley.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 4,
+        "text": "Pour hot brown butter over the fish and serve immediately.",
+        "timing_minutes": 1
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Sole au Vin Blanc (Sole in White Wine)",
+    "source_recipe_title": "SOLE AU VIN BLANC",
+    "source_locator": "Heinemann:1907:chapter=XIV:recipe=859",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "e4b558da29b304b9d26495aed937b2177e51cd1c1e6c84bd64693f3843d69eb7",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 15,
+    "total_minutes": 30,
+    "tags": [
+      "fish",
+      "sole",
+      "white-wine",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "sole",
+        "ingredient_id": "FISH_SOLE",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "fillets of sole"
+      },
+      {
+        "display_name": "white wine",
+        "ingredient_id": "WHITE_WINE",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "fish",
+        "ingredient_id": "FISH",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": "fish stock"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 60,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "shallot",
+        "ingredient_id": "SHALLOT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "minced"
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Butter an oven dish, scatter with minced shallots, and arrange the sole fillets.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 2,
+        "text": "Moisten with white wine and fish stock, cover with buttered paper, and poach gently in oven for 10 minutes.",
+        "timing_minutes": 10
+      },
+      {
+        "step_number": 3,
+        "text": "Drain poaching liquor into a saucepan and reduce by half.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Whisk in pieces of cold butter off the heat until creamy, coat fillets, and glaze lightly.",
+        "timing_minutes": 3
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Cabillaud Bouilli (Boiled Fresh Cod)",
+    "source_recipe_title": "CABILLAUD BOUILLI",
+    "source_locator": "Heinemann:1907:chapter=XIV:recipe=990",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "f7e4bc074a817e610fd8cea1bd7029c168ec6ddba0dc4b3276642d7ab7e51a10",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 10,
+    "cook_minutes": 15,
+    "total_minutes": 25,
+    "tags": [
+      "fish",
+      "cod",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "cod",
+        "ingredient_id": "COD",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "fresh cod steaks or cuts"
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "potato",
+        "ingredient_id": "POTATO",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "steamed potatoes"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "melted butter"
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Place fresh cod in cold salted water and bring gently to a boil.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 2,
+        "text": "Simmer very gently for 10 to 12 minutes without boiling fiercely.",
+        "timing_minutes": 12
+      },
+      {
+        "step_number": 3,
+        "text": "Drain carefully and transfer to a serving dish on a napkin.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 4,
+        "text": "Surround with freshly steamed potatoes and serve with melted butter and chopped parsley.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Cabillaud Grillé (Grilled Fresh Cod)",
+    "source_recipe_title": "CABILLAUD GRILLÉ",
+    "source_locator": "Heinemann:1907:chapter=XIV:recipe=991",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "ace2f503b13a02119ee1cff4531537b44fe378a90ce8c0aa72ddfe0887daf13a",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "easy",
+    "servings": 4,
+    "prep_minutes": 5,
+    "cook_minutes": 15,
+    "total_minutes": 20,
+    "tags": [
+      "fish",
+      "cod",
+      "grilled",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "cod",
+        "ingredient_id": "COD",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "thick cod slices"
+      },
+      {
+        "display_name": "vegetable oil",
+        "ingredient_id": "VEGETABLE_OIL",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "lemon",
+        "ingredient_id": "LEMON",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      },
+      {
+        "display_name": "black pepper",
+        "ingredient_id": "BLACK_PEPPER",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Season cod slices with salt and pepper, and brush generously with oil.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 2,
+        "text": "Cook on a moderate grill for 12 to 15 minutes, turning carefully once.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 3,
+        "text": "Dish on a warm platter, top with fresh butter, and garnish with lemon wedges.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Tournedos Grillés (Grilled Tournedos)",
+    "source_recipe_title": "CHÂTEAUBRIAND, FILLET STEAK, TOURNEDOS",
+    "source_locator": "Heinemann:1907:chapter=XV:recipe=1076",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "c8941edcd8696d8d10448c4b5f553833880b409e380e94cea6bb84bf7b28d115",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 10,
+    "cook_minutes": 8,
+    "total_minutes": 18,
+    "tags": [
+      "meat",
+      "beef",
+      "tournedos",
+      "grilled",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "beef",
+        "ingredient_id": "BEEF",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "beef tournedos steaks"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "vegetable oil",
+        "ingredient_id": "VEGETABLE_OIL",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "salt",
+        "ingredient_id": "SALT",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "black pepper",
+        "ingredient_id": "BLACK_PEPPER",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Trim beef tournedos into round noisettes and season with salt and pepper.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 2,
+        "text": "Brush lightly with oil or melted butter.",
+        "timing_minutes": 1
+      },
+      {
+        "step_number": 3,
+        "text": "Grill over a fierce, clear fire for 3 minutes on each side to keep interior juicy.",
+        "timing_minutes": 6
+      },
+      {
+        "step_number": 4,
+        "text": "Transfer to a hot dish, top with fresh butter, and serve with watercress.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Tournedos Chasseur",
+    "source_recipe_title": "TOURNEDOS CHASSEUR",
+    "source_locator": "Heinemann:1907:chapter=XV:recipe=1089",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "98b69fb2e0a045978eca6ca7a5434c7815128dae84f19b1c7c29341ef91c8443",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 15,
+    "total_minutes": 30,
+    "tags": [
+      "meat",
+      "beef",
+      "tournedos",
+      "chasseur",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "beef",
+        "ingredient_id": "BEEF",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "tournedos steaks"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "mushroom",
+        "ingredient_id": "MUSHROOM",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "shallot",
+        "ingredient_id": "SHALLOT",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "white wine",
+        "ingredient_id": "WHITE_WINE",
+        "quantity": 50,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "demi-glace",
+        "ingredient_id": "DEMI_GLACE",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "tomato",
+        "ingredient_id": "TOMATO",
+        "quantity": 50,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": "tomato sauce"
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Sauté the tournedos in hot butter until browned on both sides and medium-rare.",
+        "timing_minutes": 6
+      },
+      {
+        "step_number": 2,
+        "text": "Remove tournedos and keep warm; in same pan, fry minced shallots and sliced mushrooms.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 3,
+        "text": "Deglaze with white wine, reduce, and add demi-glace and tomato sauce.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 4,
+        "text": "Simmer for 3 minutes, coat tournedos with sauce, and serve immediately.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Tournedos Rossini",
+    "source_recipe_title": "TOURNEDOS ROSSINI",
+    "source_locator": "Heinemann:1907:chapter=XV:recipe=1126",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "0331229860bcd86765805d498f5d687958ebd9efb7d7760481c2172db6abf0a1",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "hard",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 12,
+    "total_minutes": 27,
+    "tags": [
+      "meat",
+      "beef",
+      "tournedos",
+      "rossini",
+      "truffles",
+      "foie-gras",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "beef",
+        "ingredient_id": "BEEF",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "tournedos steaks"
+      },
+      {
+        "display_name": "foie gras",
+        "ingredient_id": "FOIE_GRAS",
+        "quantity": 150,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "round slices"
+      },
+      {
+        "display_name": "truffle",
+        "ingredient_id": "TRUFFLE",
+        "quantity": 20,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced truffles"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 50,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "bread",
+        "ingredient_id": "BREAD",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "round fried bread crusts"
+      },
+      {
+        "display_name": "madeira",
+        "ingredient_id": "WINE_MADEIRA",
+        "quantity": 50,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "demi-glace",
+        "ingredient_id": "DEMI_GLACE",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Fry round bread crusts in butter until golden and crisp.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 2,
+        "text": "Fry tournedos in butter quickly, keeping them medium-rare, and set on the croutons.",
+        "timing_minutes": 6
+      },
+      {
+        "step_number": 3,
+        "text": "Briefly sear slices of foie gras in butter and place one atop each tournedos.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 4,
+        "text": "Crown with hot sliced truffles and coat with Madeira demi-glace reduction.",
+        "timing_minutes": 2
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Sauté de Veau Chasseur (Veal Sauté Chasseur)",
+    "source_recipe_title": "SAUTÉ DE VEAU CHASSEUR",
+    "source_locator": "Heinemann:1907:chapter=XV:recipe=1281",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "89d5116a9ae5967f0c91c691b7b22770e3d2c166341daf4b7f11912812a0bd9b",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 40,
+    "total_minutes": 55,
+    "tags": [
+      "meat",
+      "veal",
+      "chasseur",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "veal",
+        "ingredient_id": "VEAL",
+        "quantity": 600,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "veal shoulder or cutlets diced"
+      },
+      {
+        "display_name": "mushroom",
+        "ingredient_id": "MUSHROOM",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "shallot",
+        "ingredient_id": "SHALLOT",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "white wine",
+        "ingredient_id": "WHITE_WINE",
+        "quantity": 60,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "tomato",
+        "ingredient_id": "TOMATO",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "demi-glace",
+        "ingredient_id": "DEMI_GLACE",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Cut veal into even pieces and brown briskly in butter in a sauté pan.",
+        "timing_minutes": 8
+      },
+      {
+        "step_number": 2,
+        "text": "Add sliced mushrooms and minced shallots, cooking until golden.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "text": "Swill saucepan with white wine, reduce, then add tomato sauce and demi-glace.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 4,
+        "text": "Cover and simmer gently for 30 minutes until meat is tender; sprinkle with parsley.",
+        "timing_minutes": 30
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Côtelettes à la Champvallon (Lamb Cutlets Champvallon)",
+    "source_recipe_title": "CÔTELETTES A LA CHAMPVALLON (10 Cutlets)",
+    "source_locator": "Heinemann:1907:chapter=XV:recipe=1312",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "e6fd4eac6c7516530530405b7c05155fd216a33580bb6c068d154c90b3f24389",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 20,
+    "cook_minutes": 65,
+    "total_minutes": 85,
+    "tags": [
+      "meat",
+      "lamb",
+      "potatoes",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "lamb",
+        "ingredient_id": "LAMB",
+        "quantity": 8,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "trimmed lamb cutlets"
+      },
+      {
+        "display_name": "onion",
+        "ingredient_id": "ONION",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "sliced"
+      },
+      {
+        "display_name": "potato",
+        "ingredient_id": "POTATO",
+        "quantity": 500,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "consomme",
+        "ingredient_id": "CONSOMME",
+        "quantity": 300,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": "white stock"
+      },
+      {
+        "display_name": "thyme",
+        "ingredient_id": "THYME",
+        "quantity": 1,
+        "unit": "pinch",
+        "optional": true,
+        "preparation_note": null
+      },
+      {
+        "display_name": "garlic",
+        "ingredient_id": "GARLIC",
+        "quantity": 1,
+        "unit": "unknown",
+        "optional": true,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Brown lamb cutlets quickly in butter on both sides without cooking through.",
+        "timing_minutes": 6
+      },
+      {
+        "step_number": 2,
+        "text": "Stew sliced onions in butter until tender and transparent.",
+        "timing_minutes": 8
+      },
+      {
+        "step_number": 3,
+        "text": "In a baking dish, arrange alternating layers of sliced potatoes, onions, and cutlets.",
+        "timing_minutes": 8
+      },
+      {
+        "step_number": 4,
+        "text": "Moisten with boiling stock flavoured with garlic and thyme; bake for 1 hour until browned.",
+        "timing_minutes": 60
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Poulet Sauté Chasseur (Chicken Sauté Chasseur)",
+    "source_recipe_title": "POULET SAUTÉ CHASSEUR",
+    "source_locator": "Heinemann:1907:chapter=XVI:recipe=1543",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "317bc13e17d7ec1f0c5876db8c767d5f5b66db0acc610b2c1aa4d8f40f68c162",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 35,
+    "total_minutes": 50,
+    "tags": [
+      "poultry",
+      "chicken",
+      "chasseur",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "chicken",
+        "ingredient_id": "CHICKEN",
+        "quantity": 1000,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "cut into pieces"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "vegetable oil",
+        "ingredient_id": "VEGETABLE_OIL",
+        "quantity": 2,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "mushroom",
+        "ingredient_id": "MUSHROOM",
+        "quantity": 120,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced"
+      },
+      {
+        "display_name": "shallot",
+        "ingredient_id": "SHALLOT",
+        "quantity": 2,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "minced"
+      },
+      {
+        "display_name": "white wine",
+        "ingredient_id": "WHITE_WINE",
+        "quantity": 80,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "chasseur sauce",
+        "ingredient_id": "SAUCE_CHASSEUR",
+        "quantity": 150,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "parsley",
+        "ingredient_id": "PARSLEY",
+        "quantity": 1,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Sauté chicken pieces in equal parts butter and oil until golden on all sides.",
+        "timing_minutes": 15
+      },
+      {
+        "step_number": 2,
+        "text": "Add sliced mushrooms and minced shallots; cook until softened.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 3,
+        "text": "Pour off excess fat, deglaze the pan with white wine, and reduce by half.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 4,
+        "text": "Add Chasseur sauce, simmer gently for 10 minutes until chicken is tender; finish with chopped herbs.",
+        "timing_minutes": 10
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Suprêmes de Volaille Agnès Sorel",
+    "source_recipe_title": "SUPRÊMES DE VOLAILLE AGNÈS SOREL",
+    "source_locator": "Heinemann:1907:chapter=XVI:recipe=1584",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "6784435ec5b83da0037c13c33cc980f71741f9ed1a0d98003eea8b2cbd573bf3",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 20,
+    "total_minutes": 35,
+    "tags": [
+      "poultry",
+      "chicken",
+      "suprême",
+      "mushrooms",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "chicken",
+        "ingredient_id": "CHICKEN",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "chicken breast suprêmes"
+      },
+      {
+        "display_name": "mushroom",
+        "ingredient_id": "MUSHROOM",
+        "quantity": 100,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced and tossed in butter"
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 40,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "cream",
+        "ingredient_id": "CREAM",
+        "quantity": 4,
+        "unit": "tbsp",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "chicken consomme",
+        "ingredient_id": "CHICKEN_CONSOMME",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Season chicken suprêmes and arrange in buttered moulds or baking pan.",
+        "timing_minutes": 5
+      },
+      {
+        "step_number": 2,
+        "text": "Surround with raw sliced mushrooms tossed lightly in butter.",
+        "timing_minutes": 4
+      },
+      {
+        "step_number": 3,
+        "text": "Poach gently under buttered paper with chicken consommé and cream for 12 minutes.",
+        "timing_minutes": 12
+      },
+      {
+        "step_number": 4,
+        "text": "Arrange on a platter, reduce cooking juices with cream, and coat the suprêmes.",
+        "timing_minutes": 4
+      }
+    ]
+  },
+  {
+    "author_id": "AUTHOR_ESCOFFIER",
+    "source_id": "SRC_ESCOFFIER_1907_EN",
+    "title": "Suprêmes de Volaille Alexandra",
+    "source_recipe_title": "SUPRÊMES DE VOLAILLE ALEXANDRA",
+    "source_locator": "Heinemann:1907:chapter=XVI:recipe=1585",
+    "source_content_hash": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    "source_slice_hash": "6190843e98c16626bf4d94dbfa9b6e973dce733858fba4f04ba39bc2515d8b13",
+    "rights_status": "PUBLIC_DOMAIN",
+    "verified": true,
+    "verification_status": "VERIFIED",
+    "production_eligible": false,
+    "meal_types": [
+      "dinner"
+    ],
+    "cuisine": "french",
+    "difficulty": "medium",
+    "servings": 4,
+    "prep_minutes": 15,
+    "cook_minutes": 20,
+    "total_minutes": 35,
+    "tags": [
+      "poultry",
+      "chicken",
+      "suprême",
+      "truffles",
+      "asparagus",
+      "dinner",
+      "escoffier"
+    ],
+    "ingredients": [
+      {
+        "display_name": "chicken",
+        "ingredient_id": "CHICKEN",
+        "quantity": 4,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "chicken breast suprêmes"
+      },
+      {
+        "display_name": "truffle",
+        "ingredient_id": "TRUFFLE",
+        "quantity": 15,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": "sliced truffles"
+      },
+      {
+        "display_name": "mornay sauce",
+        "ingredient_id": "SAUCE_MORNAY",
+        "quantity": 100,
+        "unit": "ml",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "butter",
+        "ingredient_id": "BUTTER",
+        "quantity": 30,
+        "unit": "g",
+        "optional": false,
+        "preparation_note": null
+      },
+      {
+        "display_name": "asparagus",
+        "ingredient_id": "ASPARAGUS",
+        "quantity": 8,
+        "unit": "unknown",
+        "optional": false,
+        "preparation_note": "green asparagus tips"
+      }
+    ],
+    "instructions": [
+      {
+        "step_number": 1,
+        "text": "Poach chicken suprêmes in a buttered pan with a tight lid until tender.",
+        "timing_minutes": 12
+      },
+      {
+        "step_number": 2,
+        "text": "Dish suprêmes and lay fine slices of black truffle upon each.",
+        "timing_minutes": 2
+      },
+      {
+        "step_number": 3,
+        "text": "Coat with Mornay sauce flavoured with chicken essence and glaze quickly.",
+        "timing_minutes": 3
+      },
+      {
+        "step_number": 4,
+        "text": "Garnish with clusters of buttered green asparagus tips and serve.",
+        "timing_minutes": 2
+      }
+    ]
+  }
+]

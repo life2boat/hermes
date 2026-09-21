@@ -13,23 +13,25 @@
     "lunch_verified": 0,
     "dinner_verified": 0,
     "unique_verified_recipes": 0,
-    "can_form_21_meal_week": false
+    "can_form_21_meal_week": false,
+    "production_canary_eligible": false
   },
   "AUTHOR_ESCOFFIER": {
     "author_id": "AUTHOR_ESCOFFIER",
     "display_name": "Огюст Эскофье",
-    "metadata_sources": 1,
-    "structured_authorized_sources": 0,
-    "verified_recipes": 0,
+    "metadata_sources": 2,
+    "structured_authorized_sources": 1,
+    "verified_recipes": 36,
     "blocked_sources": 1,
     "block_reasons": [
       "PUBLIC_DOMAIN requires authenticated source edition digital scan/text and verified cryptographic hash; structured recipe content pending digitization/clearing; currently METADATA_ONLY."
     ],
-    "breakfast_verified": 0,
-    "lunch_verified": 0,
-    "dinner_verified": 0,
-    "unique_verified_recipes": 0,
-    "can_form_21_meal_week": false
+    "breakfast_verified": 12,
+    "lunch_verified": 12,
+    "dinner_verified": 12,
+    "unique_verified_recipes": 36,
+    "can_form_21_meal_week": true,
+    "production_canary_eligible": false
   },
   "AUTHOR_JAMIE_OLIVER": {
     "author_id": "AUTHOR_JAMIE_OLIVER",
@@ -45,6 +47,7 @@
     "lunch_verified": 0,
     "dinner_verified": 0,
     "unique_verified_recipes": 0,
-    "can_form_21_meal_week": false
+    "can_form_21_meal_week": false,
+    "production_canary_eligible": false
   }
 }

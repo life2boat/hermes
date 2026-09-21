@@ -479,21 +479,30 @@ def render_author_selection_screen(authors: list[dict[str, str]]) -> WeeklyMenuT
     return WeeklyMenuTelegramScreen(text=text, rows=tuple(rows), parse_mode=WEEKLY_MENU_PARSE_MODE)
 
 
-def render_recipe_detail_screen(recipe: object, source: object | None) -> WeeklyMenuTelegramScreen:
+def render_recipe_detail_screen(
+    recipe: object,
+    source: object | None = None,
+    author: object | None = None,
+) -> WeeklyMenuTelegramScreen:
     title = getattr(recipe, "title", "Рецепт")
-    author_id = getattr(recipe, "author_id", "")
-    servings = getattr(recipe, "servings", "")
-    prep_min = getattr(recipe, "prep_time_minutes", None)
-    cook_min = getattr(recipe, "cook_time_minutes", None)
-    source_locator = getattr(recipe, "source_locator", "")
+    author_display = (
+        getattr(author, "display_name", None)
+        or getattr(recipe, "author_id", "")
+    )
+    servings = getattr(recipe, "servings", None)
+    prep_min = getattr(recipe, "prep_minutes", None)
+    cook_min = getattr(recipe, "cook_minutes", None)
+    source_locator = getattr(recipe, "source_locator", None) or (
+        getattr(source, "source_locator", None) if source else None
+    )
     ingredients = getattr(recipe, "ingredients", ())
 
     lines = [
         f"<b>🍲 {escape(title)}</b>",
-        f"👨‍🍳 <b>Автор:</b> {escape(author_id)}",
+        f"👨‍🍳 <b>Автор:</b> {escape(str(author_display))}",
     ]
     if source_locator:
-        lines.append(f"📖 <b>Источник:</b> {escape(source_locator)}")
+        lines.append(f"📖 <b>Источник:</b> {escape(str(source_locator))}")
     if servings:
         lines.append(f"🍽 <b>Порций в базе:</b> {escape(str(servings))}")
     time_parts = []
@@ -507,8 +516,10 @@ def render_recipe_detail_screen(recipe: object, source: object | None) -> Weekly
     if ingredients:
         lines.append("\n<b>Ингредиенты:</b>")
         for ing in ingredients[:8]:
-            q_str = f" — {ing.quantity} {ing.unit}" if getattr(ing, "quantity", None) else ""
-            lines.append(f"• {escape(ing.display_name)}{escape(q_str)}")
+            q_val = getattr(ing, "quantity", None)
+            u_val = getattr(ing, "unit", "")
+            q_str = f" — {q_val} {u_val}" if q_val is not None else ""
+            lines.append(f"• {escape(getattr(ing, 'display_name', ''))}{escape(q_str)}")
         if len(ingredients) > 8:
             lines.append(f"<i>...и ещё {len(ingredients) - 8} ингредиентов</i>")
 
@@ -521,27 +532,31 @@ def render_recipe_detail_screen(recipe: object, source: object | None) -> Weekly
     return WeeklyMenuTelegramScreen(text="\n".join(lines), rows=tuple(rows), parse_mode=WEEKLY_MENU_PARSE_MODE)
 
 
-def render_source_detail_screen(source: object) -> WeeklyMenuTelegramScreen:
-    work_title = getattr(source, "work_title", "Источник")
-    author_id = getattr(source, "author_id", "")
-    publisher = getattr(source, "publisher", "")
-    pub_year = getattr(source, "publication_year", "")
-    rights_status = getattr(source, "rights_status", "")
+def render_source_detail_screen(
+    source: object,
+    author: object | None = None,
+) -> WeeklyMenuTelegramScreen:
+    title = getattr(source, "title", "Источник")
+    author_display = (
+        getattr(author, "display_name", None)
+        or getattr(source, "author_id", "")
+    )
+    pub_year = getattr(source, "publication_year", None)
+    source_locator = getattr(source, "source_locator", None)
+    rights_status = getattr(source, "rights_status", None)
     if hasattr(rights_status, "value"):
         rights_status = rights_status.value
-    attribution = getattr(source, "attribution_text", "")
 
     lines = [
-        f"<b>📚 {escape(work_title)}</b>",
-        f"👨‍🍳 <b>Автор:</b> {escape(author_id)}",
+        f"<b>📚 {escape(title)}</b>",
+        f"👨‍🍳 <b>Автор:</b> {escape(str(author_display))}",
     ]
-    if publisher or pub_year:
-        pub_info = ", ".join(filter(None, [str(publisher), str(pub_year) if pub_year else ""]))
-        lines.append(f"🏛 <b>Издание:</b> {escape(pub_info)}")
+    if pub_year:
+        lines.append(f"📅 <b>Год издания:</b> {escape(str(pub_year))}")
+    if source_locator:
+        lines.append(f"📖 <b>Указатель / страница:</b> {escape(str(source_locator))}")
     if rights_status:
         lines.append(f"⚖️ <b>Правовой статус:</b> {escape(str(rights_status))}")
-    if attribution:
-        lines.append(f"\n<b>Атрибуция:</b>\n<i>{escape(str(attribution))}</i>")
 
     rows = ((("⬅️ Назад к меню", _callback("r")),),)
     return WeeklyMenuTelegramScreen(text="\n".join(lines), rows=rows, parse_mode=WEEKLY_MENU_PARSE_MODE)
@@ -619,6 +634,7 @@ class HealBiteWeeklyMenuTelegramController:
         return HealBiteInventoryStore(db_path=self._db_path)
 
     def _default_recipe_grounded_service(self):
+        from gateway.healbite_feature_gates import load_feature_gate_config
         from gateway.healbite_households import HealBiteHouseholdService, HealBiteHouseholdStore
         from gateway.healbite_recipe_grounded_service import HealBiteRecipeGroundedService
         from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
@@ -627,8 +643,7 @@ class HealBiteWeeklyMenuTelegramController:
         hh_store = HealBiteHouseholdStore(db_path=self._db_path, ensure_schema_on_init=False)
         hh_service = HealBiteHouseholdService(hh_store)
         inv_store = self._inventory_store_factory()
-        runtime = self._runtime_factory()
-        cfg = getattr(runtime, "_config", None)
+        cfg = load_feature_gate_config("HEALBITE_RECIPE_GROUNDED_MENU", env=self._env)
 
         return HealBiteRecipeGroundedService(
             catalog_store_factory=self._catalog_store_factory,
@@ -636,6 +651,7 @@ class HealBiteWeeklyMenuTelegramController:
             household_service=hh_service,
             inventory_store=inv_store,
             config=cfg,
+            env=self._env,
         )
 
     def _default_catalog_store(self):
@@ -890,9 +906,15 @@ class HealBiteWeeklyMenuTelegramController:
                 screen=WeeklyMenuTelegramScreen("", parse_mode=None),
             )
 
-        if parsed.action == "rcp":
+        # Gate check for ALL recipe callback actions (rcp, rcp_gen, rcp_t, rcp_v, rcp_s, rcp_x)
+        if parsed.action in {"rcp", "rcp_gen", "rcp_t", "rcp_v", "rcp_s", "rcp_x"}:
             if not self._is_recipe_grounded_menu_available(actor):
                 return self._placeholder()
+
+        if parsed.action in {"rcp_t", "rcp_x"}:
+            return self.home(actor, notice="Действие пока недоступно.")
+
+        if parsed.action == "rcp":
             authors = []
             try:
                 cat = self._catalog_store_factory()
@@ -913,8 +935,6 @@ class HealBiteWeeklyMenuTelegramController:
             )
 
         if parsed.action == "rcp_gen":
-            if not self._is_recipe_grounded_menu_available(actor):
-                return self._placeholder()
             selected_author = parsed.target_id
             try:
                 cat = self._catalog_store_factory()
@@ -994,7 +1014,8 @@ class HealBiteWeeklyMenuTelegramController:
                     if recipe is None:
                         return self.home(actor, notice="Рецепт не найден в каталоге.")
                     source = cat.get_source(recipe.source_id) if recipe.source_id else None
-                    screen = render_recipe_detail_screen(recipe, source)
+                    author = cat.get_author(recipe.author_id) if recipe.author_id else None
+                    screen = render_recipe_detail_screen(recipe, source, author=author)
                     return WeeklyMenuTelegramResult(
                         state="recipe_detail",
                         screen=screen,
@@ -1009,7 +1030,8 @@ class HealBiteWeeklyMenuTelegramController:
                 source = cat.get_source(source_id)
                 if source is None:
                     return self.home(actor, notice="Источник не найден в каталоге.")
-                screen = render_source_detail_screen(source)
+                author = cat.get_author(source.author_id) if source.author_id else None
+                screen = render_source_detail_screen(source, author=author)
                 return WeeklyMenuTelegramResult(
                     state="source_detail",
                     screen=screen,

@@ -112,7 +112,7 @@ def aggregate_recipe_ingredients(
 
 def derive_shopping_list_from_recipes(
     meals: Sequence[ValidatedMealEntry],
-    confirmed_inventory: Mapping[str, tuple[Decimal, str]] | None = None,
+    confirmed_inventory: Mapping[str, tuple[Decimal | None, str]] | None = None,
 ) -> list[DerivedShoppingItem]:
     """
     Subtracts confirmed inventory from aggregated recipe requirements deterministically.
@@ -129,13 +129,14 @@ def derive_shopping_list_from_recipes(
 
         if ing_id in inv and required is not None and required > Decimal("0"):
             avail_qty, avail_unit = inv[ing_id]
-            # Convert available quantity to required unit if compatible
-            converted_avail = convert_unit_quantity(avail_qty, avail_unit, unit)
-            if converted_avail is not None:
-                used = min(converted_avail, required)
-                remaining = max(Decimal("0"), required - converted_avail)
-                if remaining > Decimal("0"):
-                    shopping_items.append(
+            if avail_qty is not None and avail_qty > Decimal("0"):
+                # Convert available quantity to required unit if compatible
+                converted_avail = convert_unit_quantity(avail_qty, avail_unit, unit)
+                if converted_avail is not None:
+                    used = min(converted_avail, required)
+                    remaining = max(Decimal("0"), required - converted_avail)
+                    if remaining > Decimal("0"):
+                        shopping_items.append(
                         DerivedShoppingItem(
                             ingredient_id=ing_id,
                             display_name=req.display_name,

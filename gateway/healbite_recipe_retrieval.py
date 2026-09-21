@@ -49,7 +49,7 @@ class RecipeRetriever:
         *,
         meal_slot: MealType | str,
         authors: Sequence[str],
-        available_ingredients: Mapping[str, Decimal] | None = None,
+        available_ingredients: Mapping[str, Decimal | None] | None = None,
         excluded_ingredients: Sequence[str] | None = None,
         dietary_constraints: Sequence[str] | None = None,
         max_time_minutes: int | None = None,
@@ -94,7 +94,7 @@ class RecipeRetriever:
             missing_count = 0
             for ing in recipe.ingredients:
                 ing_id = ing.ingredient_id.upper()
-                if ing_id in inv_map and inv_map[ing_id] > 0:
+                if ing_id in inv_map and (inv_map[ing_id] is None or inv_map[ing_id] > 0):
                     overlap_count += 1
                 else:
                     if not ing.optional:

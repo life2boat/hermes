@@ -63,8 +63,7 @@ No copyrighted cookbook PDFs, scans, or raw verbatim corpora are checked into Gi
 - Provenance linkage in HealBite SQLite is additive via `household_weekly_menu_entry_recipe_refs` (`entry_id`, `recipe_id`, `recipe_version`, `source_id`, `author_id`, `target_servings`, `created_at`).
 - Existing weekly menu generation, inventory-based menus, and shopping flows remain fully functional when recipe-grounded feature flags are disabled.
 - Feature flags default to `false`:
-  - `HEALBITE_RECIPE_CATALOG_ENABLED=false`
-  - `HEALBITE_RECIPE_GROUNDED_MENU_ENABLED=false`
+  - `HEALBITE_RECIPE_GROUNDED_MENU_ENABLED=false` (canonical gate controlling recipe catalog access, UI screens, and grounded menu generation)
   - `HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC=false`
   - `HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST=""`
   - `HEALBITE_RECIPE_VECTOR_RETRIEVAL_ENABLED=false`

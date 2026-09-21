@@ -15,7 +15,11 @@ from gateway.healbite_feature_gates import (
 from gateway.healbite_household_schema import HouseholdRole
 from gateway.healbite_households import HealBiteHouseholdService
 from gateway.healbite_inventory import HealBiteInventoryStore, InventoryOwnerScope
-from gateway.healbite_recipe_catalog_domain import MealType
+from gateway.healbite_recipe_catalog_domain import (
+    MealType,
+    normalize_ingredient_id,
+    normalize_unit,
+)
 from gateway.healbite_recipe_catalog_store import (
     CatalogIntegrityError,
     CatalogNotFoundError,
@@ -36,6 +40,7 @@ from gateway.healbite_recipe_grounding_validator import (
 from gateway.healbite_recipe_retrieval import RecipeCandidate, RecipeRetriever
 from gateway.healbite_recipe_servings_shopping import (
     DerivedShoppingItem,
+    convert_unit_quantity,
     derive_shopping_list_from_recipes,
 )
 from gateway.healbite_weekly_menu_schema import (
@@ -92,6 +97,7 @@ class HealBiteRecipeGroundedService:
         inventory_store: HealBiteInventoryStore | None = None,
         planner: RecipeGroundedWeeklyPlanner | None = None,
         config: FeatureGateConfig | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self._catalog_factory = catalog_store_factory
         self._catalog_path = catalog_path
@@ -99,7 +105,10 @@ class HealBiteRecipeGroundedService:
         self._household_service = household_service
         self._inventory_store = inventory_store
         self._planner = planner or RecipeGroundedWeeklyPlanner()
-        self._config = config or load_feature_gate_config("HEALBITE_RECIPE_GROUNDED_MENU")
+        if config is not None:
+            self._config = config
+        else:
+            self._config = load_feature_gate_config("HEALBITE_RECIPE_GROUNDED_MENU", env=env)
 
     def _get_catalog(self) -> HealBiteRecipeCatalogStore:
         if self._catalog_factory:
@@ -152,18 +161,54 @@ class HealBiteRecipeGroundedService:
             )
 
         # 4. Read confirmed inventory if available
-        available_inv: dict[str, Decimal] = {}
-        confirmed_inv_tuples: dict[str, tuple[Decimal, str]] = {}
+        available_inv: dict[str, Decimal | None] = {}
+        confirmed_inv_tuples: dict[str, tuple[Decimal | None, str]] = {}
         if self._inventory_store:
             try:
                 scope = InventoryOwnerScope(household_id=context.household_id)
                 snapshot_view = self._inventory_store.get_current_snapshot(scope)
                 if snapshot_view and snapshot_view.snapshot.status.value == "confirmed":
                     for item in snapshot_view.items:
-                        qty = item.quantity if item.quantity is not None else Decimal(1)
-                        ing_id = item.normalized_name.upper()
-                        available_inv[ing_id] = available_inv.get(ing_id, Decimal(0)) + qty
-                        confirmed_inv_tuples[ing_id] = (qty, item.unit)
+                        name_to_normalize = (
+                            getattr(item, "display_name", None)
+                            or getattr(item, "normalized_name", "")
+                            or ""
+                        ).strip()
+                        ing_id = normalize_ingredient_id(name_to_normalize)
+
+                        raw_qty = getattr(item, "quantity_value", None)
+                        parsed_qty: Decimal | None = None
+                        if raw_qty is not None and str(raw_qty).strip():
+                            try:
+                                parsed_qty = Decimal(str(raw_qty).strip())
+                            except Exception:
+                                parsed_qty = None
+
+                        raw_unit = getattr(item, "unit", "unknown")
+                        unit_val = raw_unit.value if hasattr(raw_unit, "value") else str(raw_unit)
+                        canonical_unit = normalize_unit(unit_val)
+
+                        # Track available ingredients for retrieval ranking
+                        if parsed_qty is not None and parsed_qty > Decimal("0"):
+                            if ing_id in available_inv and available_inv[ing_id] is not None:
+                                available_inv[ing_id] = available_inv[ing_id] + parsed_qty
+                            else:
+                                available_inv[ing_id] = parsed_qty
+                        elif ing_id not in available_inv:
+                            # Preserve unknown quantity conservatively
+                            available_inv[ing_id] = None
+
+                        # Track confirmed inventory tuples for shopping subtraction
+                        if ing_id in confirmed_inv_tuples:
+                            prev_qty, prev_unit = confirmed_inv_tuples[ing_id]
+                            if prev_qty is not None and parsed_qty is not None:
+                                converted = convert_unit_quantity(parsed_qty, canonical_unit, prev_unit)
+                                if converted is not None:
+                                    confirmed_inv_tuples[ing_id] = (prev_qty + converted, prev_unit)
+                            elif prev_qty is None and parsed_qty is not None:
+                                confirmed_inv_tuples[ing_id] = (parsed_qty, canonical_unit)
+                        else:
+                            confirmed_inv_tuples[ing_id] = (parsed_qty, canonical_unit)
             except Exception as exc:
                 logger.warning("[RecipeGroundedService] Inventory lookup failed: %s", exc)
 

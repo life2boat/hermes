@@ -949,3 +949,36 @@ def is_valid_local_date(value: str) -> bool:
 
 def validate_weekly_menu_audit_row_ids(*values: str) -> bool:
     return all(is_canonical_uuid4(value) for value in values)
+
+
+WEEKLY_MENU_RECIPE_REFS_TABLE = "household_weekly_menu_entry_recipe_refs"
+
+WEEKLY_MENU_RECIPE_REFS_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {WEEKLY_MENU_RECIPE_REFS_TABLE} (
+    id TEXT PRIMARY KEY CHECK (length(id) = 36 AND lower(id) = id),
+    entry_id TEXT NOT NULL,
+    household_id TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    recipe_version INTEGER NOT NULL DEFAULT 1 CHECK (recipe_version >= 1),
+    source_id TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    target_servings TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (entry_id) REFERENCES {WEEKLY_MENU_ENTRIES_TABLE}(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_weekly_menu_recipe_refs_entry ON {WEEKLY_MENU_RECIPE_REFS_TABLE}(entry_id);
+CREATE INDEX IF NOT EXISTS idx_weekly_menu_recipe_refs_household ON {WEEKLY_MENU_RECIPE_REFS_TABLE}(household_id);
+"""
+
+
+def ensure_weekly_menu_recipe_refs_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(WEEKLY_MENU_RECIPE_REFS_SCHEMA_SQL)
+
+
+def has_weekly_menu_recipe_refs_schema(conn: sqlite3.Connection) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (WEEKLY_MENU_RECIPE_REFS_TABLE,),
+    )
+    return bool(cur.fetchone())

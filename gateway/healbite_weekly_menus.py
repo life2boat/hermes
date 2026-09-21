@@ -42,6 +42,8 @@ from gateway.healbite_weekly_menu_schema import (
     WeeklyMenuRevisionStatus,
     WeeklyMenuSchemaState,
     detect_weekly_menu_schema_state,
+    ensure_weekly_menu_recipe_refs_schema,
+    has_weekly_menu_recipe_refs_schema,
     is_valid_local_date,
     is_valid_week_start,
     is_legacy_weekly_menu_schema_without_ingredients,
@@ -57,7 +59,9 @@ from gateway.healbite_weekly_menu_schema import (
     require_weekly_menu_revision_id,
     require_weekly_menu_series_id,
     week_dates,
+    WEEKLY_MENU_RECIPE_REFS_TABLE,
 )
+
 
 _SQLITE_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 _MAX_ID_REGENERATION_ATTEMPTS = 5
@@ -182,6 +186,19 @@ class WeeklyMenuEntryInput:
     servings: str | None = None
     origin: WeeklyMenuEntryOrigin | str = WeeklyMenuEntryOrigin.MANUAL
     ingredients: tuple[WeeklyMenuIngredientInput, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class WeeklyMenuEntryRecipeRef:
+    id: str
+    entry_id: str
+    household_id: str
+    recipe_id: str
+    recipe_version: int
+    source_id: str
+    author_id: str
+    target_servings: str
+    created_at: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -1758,3 +1775,90 @@ class HealBiteWeeklyMenuStore:
             updated_at=str(row["updated_at"]),
             version=_validated_version(row["version"]),
         )
+
+    def save_entry_recipe_refs(
+        self,
+        refs: Sequence[WeeklyMenuEntryRecipeRef],
+    ) -> None:
+        if not refs:
+            return
+        with self._connect() as conn:
+            ensure_weekly_menu_recipe_refs_schema(conn)
+            cur = conn.cursor()
+            for ref in refs:
+                cur.execute(
+                    f"INSERT OR REPLACE INTO {WEEKLY_MENU_RECIPE_REFS_TABLE} "
+                    "(id, entry_id, household_id, recipe_id, recipe_version, source_id, author_id, target_servings, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ref.id,
+                        ref.entry_id,
+                        ref.household_id,
+                        ref.recipe_id,
+                        ref.recipe_version,
+                        ref.source_id,
+                        ref.author_id,
+                        ref.target_servings,
+                        ref.created_at,
+                    ),
+                )
+            conn.commit()
+
+    def get_entry_recipe_ref(
+        self,
+        entry_id: str,
+    ) -> WeeklyMenuEntryRecipeRef | None:
+        with self._connect() as conn:
+            if not has_weekly_menu_recipe_refs_schema(conn):
+                return None
+            cur = conn.cursor()
+            cur.execute(
+                f"SELECT * FROM {WEEKLY_MENU_RECIPE_REFS_TABLE} WHERE entry_id = ?",
+                (entry_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return WeeklyMenuEntryRecipeRef(
+                id=row["id"],
+                entry_id=row["entry_id"],
+                household_id=row["household_id"],
+                recipe_id=row["recipe_id"],
+                recipe_version=int(row["recipe_version"]),
+                source_id=row["source_id"],
+                author_id=row["author_id"],
+                target_servings=str(row["target_servings"]),
+                created_at=str(row["created_at"]),
+            )
+
+    def get_revision_recipe_refs(
+        self,
+        revision_id: str,
+    ) -> dict[str, WeeklyMenuEntryRecipeRef]:
+        with self._connect() as conn:
+            if not has_weekly_menu_recipe_refs_schema(conn):
+                return {}
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT r.* FROM {WEEKLY_MENU_RECIPE_REFS_TABLE} r
+                JOIN {WEEKLY_MENU_ENTRIES_TABLE} e ON r.entry_id = e.id
+                WHERE e.menu_id = ?
+                """,
+                (revision_id,),
+            )
+            result = {}
+            for row in cur.fetchall():
+                ref = WeeklyMenuEntryRecipeRef(
+                    id=row["id"],
+                    entry_id=row["entry_id"],
+                    household_id=row["household_id"],
+                    recipe_id=row["recipe_id"],
+                    recipe_version=int(row["recipe_version"]),
+                    source_id=row["source_id"],
+                    author_id=row["author_id"],
+                    target_servings=str(row["target_servings"]),
+                    created_at=str(row["created_at"]),
+                )
+                result[ref.entry_id] = ref
+            return result

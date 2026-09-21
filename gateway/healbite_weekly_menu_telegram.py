@@ -106,6 +106,8 @@ class WeeklyMenuCallback:
     week_start: str | None = None
     series_version: int | None = None
     revision_version: int | None = None
+    target_id: str | None = None
+
 
 
 def _normalize_now(value: datetime | None) -> datetime:
@@ -373,8 +375,15 @@ def parse_weekly_menu_callback(data: object) -> WeeklyMenuCallback | None:
         return None
     parts = data[len(WEEKLY_MENU_CALLBACK_PREFIX) :].split(":")
     action = parts[0] if parts else ""
-    if action in {"b", "r", "sh", "inv"} and len(parts) == 1:
+    if action in {"b", "r", "sh", "inv", "rcp"} and len(parts) == 1:
         return WeeklyMenuCallback(action=action)
+    if action == "rcp_gen" and len(parts) in (1, 2):
+        return WeeklyMenuCallback(
+            action="rcp_gen", target_id=parts[1] if len(parts) == 2 else None
+        )
+    if action in {"rcp_t", "rcp_v", "rcp_s", "rcp_x"} and len(parts) == 2:
+        return WeeklyMenuCallback(action=action, target_id=parts[1])
+
     if action == "g" and len(parts) == 2:
         week_start = _parse_week_token(parts[1])
         if week_start is None:
@@ -453,6 +462,91 @@ def render_empty_weekly_menu(
     return "\n".join(lines)
 
 
+def render_author_selection_screen(authors: list[dict[str, str]]) -> WeeklyMenuTelegramScreen:
+    text = (
+        "<b>📚 Меню по проверенным рецептам</b>\n\n"
+        "Выберите автора или составьте меню из всех доступных рецептов каталога.\n"
+        "Каждое блюдо строго привязано к первоисточнику, а ингредиенты автоматически масштабируются."
+    )
+    rows: list[tuple[tuple[str, str], ...]] = [
+        (("✨ Все авторы (сбалансированно)", _callback("rcp_gen")),)
+    ]
+    for author in authors:
+        a_id = author.get("id", "")
+        name = author.get("name", a_id)
+        rows.append(((f"👨‍🍳 {name}", _callback("rcp_gen", a_id)),))
+    rows.append((("⬅️ Назад к меню", _callback("r")),))
+    return WeeklyMenuTelegramScreen(text=text, rows=tuple(rows), parse_mode=WEEKLY_MENU_PARSE_MODE)
+
+
+def render_recipe_detail_screen(recipe: object, source: object | None) -> WeeklyMenuTelegramScreen:
+    title = getattr(recipe, "title", "Рецепт")
+    author_id = getattr(recipe, "author_id", "")
+    servings = getattr(recipe, "servings", "")
+    prep_min = getattr(recipe, "prep_time_minutes", None)
+    cook_min = getattr(recipe, "cook_time_minutes", None)
+    source_locator = getattr(recipe, "source_locator", "")
+    ingredients = getattr(recipe, "ingredients", ())
+
+    lines = [
+        f"<b>🍲 {escape(title)}</b>",
+        f"👨‍🍳 <b>Автор:</b> {escape(author_id)}",
+    ]
+    if source_locator:
+        lines.append(f"📖 <b>Источник:</b> {escape(source_locator)}")
+    if servings:
+        lines.append(f"🍽 <b>Порций в базе:</b> {escape(str(servings))}")
+    time_parts = []
+    if prep_min:
+        time_parts.append(f"подготовка {prep_min} мин")
+    if cook_min:
+        time_parts.append(f"готовка {cook_min} мин")
+    if time_parts:
+        lines.append(f"⏱ <b>Время:</b> {', '.join(time_parts)}")
+
+    if ingredients:
+        lines.append("\n<b>Ингредиенты:</b>")
+        for ing in ingredients[:8]:
+            q_str = f" — {ing.quantity} {ing.unit}" if getattr(ing, "quantity", None) else ""
+            lines.append(f"• {escape(ing.display_name)}{escape(q_str)}")
+        if len(ingredients) > 8:
+            lines.append(f"<i>...и ещё {len(ingredients) - 8} ингредиентов</i>")
+
+    rows: list[tuple[tuple[str, str], ...]] = []
+    source_id = getattr(recipe, "source_id", None)
+    if source_id:
+        rows.append((("📖 Подробнее об источнике", _callback("rcp_s", source_id)),))
+    rows.append((("⬅️ Назад к меню", _callback("r")),))
+
+    return WeeklyMenuTelegramScreen(text="\n".join(lines), rows=tuple(rows), parse_mode=WEEKLY_MENU_PARSE_MODE)
+
+
+def render_source_detail_screen(source: object) -> WeeklyMenuTelegramScreen:
+    work_title = getattr(source, "work_title", "Источник")
+    author_id = getattr(source, "author_id", "")
+    publisher = getattr(source, "publisher", "")
+    pub_year = getattr(source, "publication_year", "")
+    rights_status = getattr(source, "rights_status", "")
+    if hasattr(rights_status, "value"):
+        rights_status = rights_status.value
+    attribution = getattr(source, "attribution_text", "")
+
+    lines = [
+        f"<b>📚 {escape(work_title)}</b>",
+        f"👨‍🍳 <b>Автор:</b> {escape(author_id)}",
+    ]
+    if publisher or pub_year:
+        pub_info = ", ".join(filter(None, [str(publisher), str(pub_year) if pub_year else ""]))
+        lines.append(f"🏛 <b>Издание:</b> {escape(pub_info)}")
+    if rights_status:
+        lines.append(f"⚖️ <b>Правовой статус:</b> {escape(str(rights_status))}")
+    if attribution:
+        lines.append(f"\n<b>Атрибуция:</b>\n<i>{escape(str(attribution))}</i>")
+
+    rows = ((("⬅️ Назад к меню", _callback("r")),),)
+    return WeeklyMenuTelegramScreen(text="\n".join(lines), rows=rows, parse_mode=WEEKLY_MENU_PARSE_MODE)
+
+
 class HealBiteWeeklyMenuTelegramController:
     def __init__(
         self,
@@ -462,6 +556,8 @@ class HealBiteWeeklyMenuTelegramController:
         generation_service_factory: Callable[[], object] | None = None,
         shopping_runtime_factory: Callable[[], object] | None = None,
         inventory_store_factory: Callable[[], object] | None = None,
+        recipe_grounded_service_factory: Callable[[], object] | None = None,
+        catalog_store_factory: Callable[[], object] | None = None,
         now_factory: Callable[[], datetime] | None = None,
         timezone_name: str = WEEKLY_MENU_DEFAULT_TIMEZONE,
         db_path: str | Path | None = None,
@@ -478,6 +574,10 @@ class HealBiteWeeklyMenuTelegramController:
         )
         self._shopping_runtime_factory = shopping_runtime_factory or self._default_shopping_runtime
         self._inventory_store_factory = inventory_store_factory or self._default_inventory_store
+        self._recipe_grounded_service_factory = (
+            recipe_grounded_service_factory or self._default_recipe_grounded_service
+        )
+        self._catalog_store_factory = catalog_store_factory or self._default_catalog_store
         self._now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._timezone_name = timezone_name
 
@@ -517,6 +617,35 @@ class HealBiteWeeklyMenuTelegramController:
         from gateway.healbite_inventory import HealBiteInventoryStore
 
         return HealBiteInventoryStore(db_path=self._db_path)
+
+    def _default_recipe_grounded_service(self):
+        from gateway.healbite_households import HealBiteHouseholdService, HealBiteHouseholdStore
+        from gateway.healbite_recipe_grounded_service import HealBiteRecipeGroundedService
+        from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
+
+        weekly_store = HealBiteWeeklyMenuStore(db_path=self._db_path)
+        hh_store = HealBiteHouseholdStore(db_path=self._db_path, ensure_schema_on_init=False)
+        hh_service = HealBiteHouseholdService(hh_store)
+        inv_store = self._inventory_store_factory()
+        runtime = self._runtime_factory()
+        cfg = getattr(runtime, "_config", None)
+
+        return HealBiteRecipeGroundedService(
+            catalog_store_factory=self._catalog_store_factory,
+            weekly_menu_store=weekly_store,
+            household_service=hh_service,
+            inventory_store=inv_store,
+            config=cfg,
+        )
+
+    def _default_catalog_store(self):
+        import os
+        from gateway.healbite_recipe_catalog_store import HealBiteRecipeCatalogStore
+
+        catalog_path = (self._env or {}).get("HEALBITE_RECIPE_CATALOG_PATH") or os.environ.get(
+            "HEALBITE_RECIPE_CATALOG_PATH", "data/recipe_catalog.db"
+        )
+        return HealBiteRecipeCatalogStore(catalog_path, read_only=True)
 
     def _resolve_inventory_scope(self, actor: int):
         from gateway.healbite_households import (
@@ -592,6 +721,20 @@ class HealBiteWeeklyMenuTelegramController:
         except Exception:
             return False
 
+    def _is_recipe_grounded_menu_available(self, actor: int | None) -> bool:
+        if actor is None:
+            return False
+        try:
+            from gateway.healbite_feature_gates import (
+                evaluate_feature_gate,
+                load_feature_gate_config,
+            )
+            cfg = load_feature_gate_config("HEALBITE_RECIPE_GROUNDED_MENU", env=self._env)
+            decision = evaluate_feature_gate(cfg, actor)
+            return decision.ready
+        except Exception:
+            return False
+
     def _week_start(self) -> str:
         return current_week_start(now=self._now_factory(), timezone_name=self._timezone_name)
 
@@ -622,6 +765,8 @@ class HealBiteWeeklyMenuTelegramController:
         except Exception:
             return self._unavailable(error_class="internal_error")
 
+        rcp_available = self._is_recipe_grounded_menu_available(actor)
+
         if published_view is not None:
             text = render_published_weekly_menu(published_view, notice=notice)
             pub_rows: list[tuple[tuple[str, str], ...]] = []
@@ -630,6 +775,9 @@ class HealBiteWeeklyMenuTelegramController:
                 pub_rows.append((("⚡ Создать заново", _callback("g", _week_token(week_start))),))
             else:
                 pub_rows.append((("🔄 Создать заново", _callback("g", _week_token(week_start))),))
+            if rcp_available:
+                pub_rows.append((("📚 Меню по рецептам", _callback("rcp")),))
+                pub_rows.append((("🔍 Рецепты меню", _callback("rcp_v", "week")),))
             pub_rows.append((("🛒 Список покупок", _callback("sh")),))
             pub_rows.append((("⬅️ Назад", _callback("b")),))
             return WeeklyMenuTelegramResult(
@@ -669,6 +817,9 @@ class HealBiteWeeklyMenuTelegramController:
                         draft_rows.append((("⚡ Пересоздать", _callback("g", _week_token(week_start))),))
                     else:
                         draft_rows.append((("🔄 Пересоздать", _callback("g", _week_token(week_start))),))
+                    if rcp_available:
+                        draft_rows.append((("📚 Меню по рецептам", _callback("rcp")),))
+                        draft_rows.append((("🔍 Рецепты черновика", _callback("rcp_v", "week")),))
                     draft_rows.append((("⬅️ Назад", _callback("b")),))
                     return WeeklyMenuTelegramResult(
                         state="draft",
@@ -682,6 +833,8 @@ class HealBiteWeeklyMenuTelegramController:
         inv_available = self._is_inventory_available(actor)
         text = render_empty_weekly_menu(week_start, notice=notice, show_options=inv_available)
         empty_rows: list[tuple[tuple[str, str], ...]] = []
+        if rcp_available:
+            empty_rows.append((("📚 Меню по проверенным рецептам", _callback("rcp")),))
         if inv_available:
             empty_rows.append((("🥕 Меню из продуктов дома", _callback("inv")),))
             empty_rows.append((("⚡ Быстрое меню", _callback("g", _week_token(week_start))),))
@@ -736,6 +889,134 @@ class HealBiteWeeklyMenuTelegramController:
                 state="open_inventory",
                 screen=WeeklyMenuTelegramScreen("", parse_mode=None),
             )
+
+        if parsed.action == "rcp":
+            if not self._is_recipe_grounded_menu_available(actor):
+                return self._placeholder()
+            authors = []
+            try:
+                cat = self._catalog_store_factory()
+                for a in cat.list_authors():
+                    authors.append({"id": a.author_id, "name": a.display_name})
+            except Exception:
+                pass
+            if not authors:
+                authors = [
+                    {"id": "pokhlebkin", "name": "В.В. Похлёбкин"},
+                    {"id": "escoffier", "name": "Огюст Эскофье"},
+                    {"id": "jamie_oliver", "name": "Джейми Оливер"},
+                ]
+            screen = render_author_selection_screen(authors)
+            return WeeklyMenuTelegramResult(
+                state="recipe_author_select",
+                screen=screen,
+            )
+
+        if parsed.action == "rcp_gen":
+            if not self._is_recipe_grounded_menu_available(actor):
+                return self._placeholder()
+            selected_author = parsed.target_id
+            try:
+                cat = self._catalog_store_factory()
+                if selected_author:
+                    authors = [selected_author]
+                else:
+                    all_authors = cat.list_authors()
+                    authors = [a.author_id for a in all_authors] if all_authors else ["pokhlebkin", "escoffier", "jamie_oliver"]
+            except Exception:
+                authors = [selected_author] if selected_author else ["pokhlebkin", "escoffier", "jamie_oliver"]
+
+            week_start = parsed.week_start or self._week_start()
+            try:
+                grounded_service = self._recipe_grounded_service_factory()
+                from gateway.healbite_recipe_grounded_service import RecipeGroundedStatus
+
+                gen_result = grounded_service.generate_menu(
+                    actor,
+                    week_start=week_start,
+                    authors=authors,
+                )
+                if gen_result.status == RecipeGroundedStatus.INSUFFICIENT_GROUNDED_RECIPES:
+                    return self.home(
+                        actor,
+                        notice="Недостаточно проверенных рецептов в каталоге для составления полного меню (требуется 21).",
+                    )
+                if not gen_result.success:
+                    return self.home(
+                        actor,
+                        notice=f"Не удалось составить меню: {gen_result.error_message or 'ошибка планирования'}",
+                    )
+                return self.home(actor, notice="Черновик меню по проверенным рецептам создан!")
+            except Exception as exc:
+                return self.home(actor, notice=f"Ошибка генерации меню: {exc}")
+
+        if parsed.action == "rcp_v":
+            target = parsed.target_id or ""
+            if target == "week":
+                week_start = self._week_start()
+                try:
+                    from gateway.healbite_weekly_menus import HealBiteWeeklyMenuStore
+                    week_store = HealBiteWeeklyMenuStore(db_path=self._db_path)
+                    published = runtime.get_active_published_weekly_menu_for_week(actor, week_start)
+                    target_rev = published.revision if published else None
+                    if target_rev is None:
+                        week_view = runtime.get_weekly_menu_for_week(actor, week_start)
+                        if week_view:
+                            target_rev = next((r for r in week_view.revisions if r.status is WeeklyMenuRevisionStatus.DRAFT), None)
+                    if target_rev is None:
+                        return self.home(actor, notice="Меню не найдено.")
+
+                    refs = week_store.get_revision_recipe_refs(target_rev.id)
+                    if not refs:
+                        return self.home(actor, notice="В текущем меню нет привязанных проверенных рецептов.")
+
+                    lines = ["<b>📚 Рецепты меню на неделю</b>\n"]
+                    cat = self._catalog_store_factory()
+                    rows: list[tuple[tuple[str, str], ...]] = []
+                    for entry_id, ref in list(refs.items())[:10]:
+                        recipe = cat.get_recipe(ref.recipe_id)
+                        if recipe:
+                            lines.append(f"• <b>{escape(recipe.title)}</b> ({escape(ref.author_id)})")
+                            rows.append(((f"🔍 {recipe.title[:30]}", _callback("rcp_v", recipe.recipe_id)),))
+                    if len(refs) > 10:
+                        lines.append(f"\n<i>...всего {len(refs)} рецептов</i>")
+                    rows.append((("⬅️ Назад к меню", _callback("r")),))
+                    return WeeklyMenuTelegramResult(
+                        state="recipe_list",
+                        screen=WeeklyMenuTelegramScreen(text="\n".join(lines), rows=tuple(rows), parse_mode=WEEKLY_MENU_PARSE_MODE),
+                    )
+                except Exception:
+                    return self.home(actor, notice="Не удалось загрузить список рецептов.")
+            else:
+                try:
+                    cat = self._catalog_store_factory()
+                    recipe = cat.get_recipe(target)
+                    if recipe is None:
+                        return self.home(actor, notice="Рецепт не найден в каталоге.")
+                    source = cat.get_source(recipe.source_id) if recipe.source_id else None
+                    screen = render_recipe_detail_screen(recipe, source)
+                    return WeeklyMenuTelegramResult(
+                        state="recipe_detail",
+                        screen=screen,
+                    )
+                except Exception:
+                    return self.home(actor, notice="Не удалось загрузить данные рецепта.")
+
+        if parsed.action == "rcp_s":
+            source_id = parsed.target_id or ""
+            try:
+                cat = self._catalog_store_factory()
+                source = cat.get_source(source_id)
+                if source is None:
+                    return self.home(actor, notice="Источник не найден в каталоге.")
+                screen = render_source_detail_screen(source)
+                return WeeklyMenuTelegramResult(
+                    state="source_detail",
+                    screen=screen,
+                )
+            except Exception:
+                return self.home(actor, notice="Не удалось загрузить данные источника.")
+
         week_start = parsed.week_start or self._week_start()
         if parsed.action == "g":
             inventory_snapshot_id: str | None = None
@@ -845,6 +1126,8 @@ def build_weekly_menu_telegram_controller(
     generation_service_factory: Callable[[], object] | None = None,
     shopping_runtime_factory: Callable[[], object] | None = None,
     inventory_store_factory: Callable[[], object] | None = None,
+    recipe_grounded_service_factory: Callable[[], object] | None = None,
+    catalog_store_factory: Callable[[], object] | None = None,
     db_path: str | Path | None = None,
     now_factory: Callable[[], datetime] | None = None,
     timezone_name: str = WEEKLY_MENU_DEFAULT_TIMEZONE,
@@ -860,6 +1143,8 @@ def build_weekly_menu_telegram_controller(
         generation_service_factory=generation_service_factory,
         shopping_runtime_factory=shopping_runtime_factory,
         inventory_store_factory=inventory_store_factory,
+        recipe_grounded_service_factory=recipe_grounded_service_factory,
+        catalog_store_factory=catalog_store_factory,
         db_path=db_path,
         now_factory=now_factory,
         timezone_name=timezone_name,

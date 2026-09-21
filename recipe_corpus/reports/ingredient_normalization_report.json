@@ -1,0 +1,411 @@
+{
+  "source_file": "C:\\Users\\Oleg\\.gemini\\antigravity\\brain\\c249e407-062f-4265-9f05-f4942ec7046b\\scratch\\pg71395.txt",
+  "source_sha256": "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+  "total_recipes_extracted": 36,
+  "total_unique_raw_ingredients": 54,
+  "unique_raw_ingredients": [
+    "asparagus",
+    "bacon",
+    "beef",
+    "beetroot",
+    "black pepper",
+    "bread",
+    "butter",
+    "cabbage",
+    "carrot",
+    "celery",
+    "chasseur sauce",
+    "cheese",
+    "chervil",
+    "chicken",
+    "chicken consomme",
+    "chives",
+    "cod",
+    "consomme",
+    "cream",
+    "cucumber",
+    "demi-glace",
+    "eggs",
+    "fish",
+    "flour",
+    "foie gras",
+    "french beans",
+    "garlic",
+    "lamb",
+    "leek",
+    "lemon",
+    "lentils",
+    "madeira",
+    "mornay sauce",
+    "mushroom",
+    "onion",
+    "parsley",
+    "peas",
+    "potato",
+    "rice",
+    "salt",
+    "sausage",
+    "shallot",
+    "sole",
+    "spinach",
+    "tapioca",
+    "tarragon",
+    "thyme",
+    "tomato",
+    "truffle",
+    "turnip",
+    "veal",
+    "vegetable oil",
+    "vinegar",
+    "white wine"
+  ],
+  "total_canonical_ingredient_ids": 54,
+  "canonical_ingredient_ids": [
+    "ASPARAGUS",
+    "BACON",
+    "BEEF",
+    "BEETROOT",
+    "BLACK_PEPPER",
+    "BREAD",
+    "BUTTER",
+    "CABBAGE",
+    "CARROT",
+    "CELERY",
+    "CHEESE",
+    "CHERVIL",
+    "CHICKEN",
+    "CHICKEN_CONSOMME",
+    "CHIVES",
+    "COD",
+    "CONSOMME",
+    "CREAM",
+    "CUCUMBER",
+    "DEMI_GLACE",
+    "EGG",
+    "FISH",
+    "FISH_SOLE",
+    "FLOUR",
+    "FOIE_GRAS",
+    "GARLIC",
+    "GREEN_BEANS",
+    "LAMB",
+    "LEEK",
+    "LEMON",
+    "LENTILS",
+    "MUSHROOM",
+    "ONION",
+    "PARSLEY",
+    "PEAS",
+    "POTATO",
+    "RICE",
+    "SALT",
+    "SAUCE_CHASSEUR",
+    "SAUCE_MORNAY",
+    "SAUSAGE",
+    "SHALLOT",
+    "SPINACH",
+    "TAPIOCA",
+    "TARRAGON",
+    "THYME",
+    "TOMATO",
+    "TRUFFLE",
+    "TURNIP",
+    "VEAL",
+    "VEGETABLE_OIL",
+    "VINEGAR",
+    "WHITE_WINE",
+    "WINE_MADEIRA"
+  ],
+  "unmapped_ingredient_count": 0,
+  "unmapped_ingredients": [],
+  "recipe_index": [
+    {
+      "num": "395",
+      "title": "Oeufs sur le plat (Eggs on the Dish)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=395",
+      "raw_slice_hash": "a06a5d7ab52b481bb727b32b1845c618522350d83abfda2790aa40fe091d5559",
+      "ingredient_count": 3,
+      "step_count": 4
+    },
+    {
+      "num": "396",
+      "title": "Oeufs Bercy (Bercy Eggs)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=396",
+      "raw_slice_hash": "a2b0b8151e72d95193e31e1ae41621fd794f64d898195e2bf6b2382b709bfef4",
+      "ingredient_count": 5,
+      "step_count": 3
+    },
+    {
+      "num": "397",
+      "title": "Oeufs au beurre noir (Eggs with Brown Butter)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=397",
+      "raw_slice_hash": "7a953f1bb76d95454b737244bab3e9f54b73a7ccff962237f31666bcbce62f99",
+      "ingredient_count": 5,
+      "step_count": 3
+    },
+    {
+      "num": "400",
+      "title": "Oeufs à la Florentine (Florentine Eggs)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=400",
+      "raw_slice_hash": "725ea25ede1302c3168ba1758a2af26b9e2c8c7fbdbd97fe6dc223ad995c0ba7",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "411",
+      "title": "Oeufs pochés (Poached Eggs)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=411",
+      "raw_slice_hash": "2ef8819468b4597e850570d1de8fea69ff58e288ac203eda887d44424d1be3d5",
+      "ingredient_count": 3,
+      "step_count": 4
+    },
+    {
+      "num": "412",
+      "title": "Oeufs mollets (Soft-Boiled Eggs)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=412",
+      "raw_slice_hash": "428d79e5c8c85df87e4a3d613f0725a62a3a8dbcb1daf2a854d87a0b4774f9bd",
+      "ingredient_count": 2,
+      "step_count": 3
+    },
+    {
+      "num": "433",
+      "title": "Oeufs durs (Hard-Boiled Eggs)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=433",
+      "raw_slice_hash": "94ad94216f5952dcd6d9b0229f3ce2fd636d6a9b2ef237c380828c49ff4d406b",
+      "ingredient_count": 2,
+      "step_count": 3
+    },
+    {
+      "num": "462",
+      "title": "Oeufs brouillés aux champignons (Scrambled Eggs with Mushrooms)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=462",
+      "raw_slice_hash": "b0504821603edf849720b282b3b0ff3819ef9f10298e06f3f9dcc691d8f13e35",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "467",
+      "title": "Oeufs brouillés au fromage (Scrambled Eggs with Cheese)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=467",
+      "raw_slice_hash": "85e8fd6b38ef9c3f0bdf1d09f12143008ec3dc0345da8c62b1bd15f3cb9a35de",
+      "ingredient_count": 5,
+      "step_count": 3
+    },
+    {
+      "num": "481",
+      "title": "Oeufs brouillés aux truffes (Scrambled Eggs with Truffles)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=481",
+      "raw_slice_hash": "4995bddacfee166bd7fc4debaab68699418cfd3a84e360dd1f60b9da097c6abc",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "500",
+      "title": "Omelette aux épinards (Omelet with Spinach)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=500",
+      "raw_slice_hash": "7b286a78b497566453c4c570b7ae77fd09ae669ed4b632863e116e0d9f8dd0df",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "502",
+      "title": "Omelette aux fines herbes (Herb Omelet)",
+      "locator": "Heinemann:1907:chapter=XII:recipe=502",
+      "raw_slice_hash": "9dd643ca52d63cbac1b04c65d808ccd07b91a203f4329b8cd18755c0c389148f",
+      "ingredient_count": 7,
+      "step_count": 4
+    },
+    {
+      "num": "547",
+      "title": "Potage Bortsch (Bortsch Soup Escoffier)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=547",
+      "raw_slice_hash": "7726bf750e1c695f07291890f4bc3c495da524aafaa6f922f77346396dcbf663",
+      "ingredient_count": 9,
+      "step_count": 4
+    },
+    {
+      "num": "548",
+      "title": "Consommé Brunoise (Brunoise Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=548",
+      "raw_slice_hash": "57c105df59560899855799c315d3280e7806fa367e882accd4690ace3a8f71a9",
+      "ingredient_count": 7,
+      "step_count": 4
+    },
+    {
+      "num": "556",
+      "title": "Croûte au Pot",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=556",
+      "raw_slice_hash": "1e4affdb8a6e74cfbd95223e982cdf65ed11f7fdba951b2c8f6e9d2e47afd20b",
+      "ingredient_count": 6,
+      "step_count": 4
+    },
+    {
+      "num": "598",
+      "title": "La Petite Marmite",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=598",
+      "raw_slice_hash": "bf8aff3e678f8f2c24b1b7336a839ad6c80347937f9b7308ff8c4899db8ca606",
+      "ingredient_count": 8,
+      "step_count": 4
+    },
+    {
+      "num": "630",
+      "title": "Potage Crécy (Carrot Purée Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=630",
+      "raw_slice_hash": "8ed94f3ff6d0007b030669ccfeec11961ff34e056c205fd572bf735a34b9d9d5",
+      "ingredient_count": 6,
+      "step_count": 4
+    },
+    {
+      "num": "631",
+      "title": "Potage Velours (Carrot Tapioca Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=631",
+      "raw_slice_hash": "d0bac062b47dc161eb9e354773c06532742849f418f2b50dab75765890820796",
+      "ingredient_count": 5,
+      "step_count": 3
+    },
+    {
+      "num": "640",
+      "title": "Potage Conti (Lentil Purée Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=640",
+      "raw_slice_hash": "e93351c1d8a2b6f3e8d0c5bd972522e91b28bd1bc8829025bdbe44bed49e3094",
+      "ingredient_count": 6,
+      "step_count": 4
+    },
+    {
+      "num": "648",
+      "title": "Potage Saint-Germain (Green Pea Purée Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=648",
+      "raw_slice_hash": "243d5b0275cacbbef3ac778016eee7c586bdff456614d21022819d91c126151c",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "658",
+      "title": "Potage Parmentier (Potato and Leek Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=658",
+      "raw_slice_hash": "315224d72889ff25dfa9a97d33d9f850184efb5eefa8447b150b4321d8bebb39",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "660",
+      "title": "Potage Waldèze (Tomato and Tapioca Soup)",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=660",
+      "raw_slice_hash": "310837f23b43980a2cf4ce956e92507fa6d7c2dd3a9939a517535d7e20769954",
+      "ingredient_count": 4,
+      "step_count": 3
+    },
+    {
+      "num": "745",
+      "title": "Soupe Julienne Darblay",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=745",
+      "raw_slice_hash": "0394d4ff6b95052a3ad88dc937c054796e2df0a4752150e2b0c951f6d4024626",
+      "ingredient_count": 6,
+      "step_count": 4
+    },
+    {
+      "num": "746",
+      "title": "Minestrone à l'Italienne",
+      "locator": "Heinemann:1907:chapter=XIII:recipe=746",
+      "raw_slice_hash": "f858dc03cc3f60b1b1f8294c4a43bbc2b3421d3ac44e4ba317a04917b30709ff",
+      "ingredient_count": 12,
+      "step_count": 4
+    },
+    {
+      "num": "843",
+      "title": "Sole Meunière Doria",
+      "locator": "Heinemann:1907:chapter=XIV:recipe=843",
+      "raw_slice_hash": "3a111cd73d67586e4d2ced25953f314db7257feffa5002fa611a6ada9c31104f",
+      "ingredient_count": 6,
+      "step_count": 4
+    },
+    {
+      "num": "859",
+      "title": "Sole au Vin Blanc (Sole in White Wine)",
+      "locator": "Heinemann:1907:chapter=XIV:recipe=859",
+      "raw_slice_hash": "e4b558da29b304b9d26495aed937b2177e51cd1c1e6c84bd64693f3843d69eb7",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "990",
+      "title": "Cabillaud Bouilli (Boiled Fresh Cod)",
+      "locator": "Heinemann:1907:chapter=XIV:recipe=990",
+      "raw_slice_hash": "f7e4bc074a817e610fd8cea1bd7029c168ec6ddba0dc4b3276642d7ab7e51a10",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "991",
+      "title": "Cabillaud Grillé (Grilled Fresh Cod)",
+      "locator": "Heinemann:1907:chapter=XIV:recipe=991",
+      "raw_slice_hash": "ace2f503b13a02119ee1cff4531537b44fe378a90ce8c0aa72ddfe0887daf13a",
+      "ingredient_count": 6,
+      "step_count": 3
+    },
+    {
+      "num": "1076",
+      "title": "Tournedos Grillés (Grilled Tournedos)",
+      "locator": "Heinemann:1907:chapter=XV:recipe=1076",
+      "raw_slice_hash": "c8941edcd8696d8d10448c4b5f553833880b409e380e94cea6bb84bf7b28d115",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "1089",
+      "title": "Tournedos Chasseur",
+      "locator": "Heinemann:1907:chapter=XV:recipe=1089",
+      "raw_slice_hash": "98b69fb2e0a045978eca6ca7a5434c7815128dae84f19b1c7c29341ef91c8443",
+      "ingredient_count": 7,
+      "step_count": 4
+    },
+    {
+      "num": "1126",
+      "title": "Tournedos Rossini",
+      "locator": "Heinemann:1907:chapter=XV:recipe=1126",
+      "raw_slice_hash": "0331229860bcd86765805d498f5d687958ebd9efb7d7760481c2172db6abf0a1",
+      "ingredient_count": 7,
+      "step_count": 4
+    },
+    {
+      "num": "1281",
+      "title": "Sauté de Veau Chasseur (Veal Sauté Chasseur)",
+      "locator": "Heinemann:1907:chapter=XV:recipe=1281",
+      "raw_slice_hash": "89d5116a9ae5967f0c91c691b7b22770e3d2c166341daf4b7f11912812a0bd9b",
+      "ingredient_count": 8,
+      "step_count": 4
+    },
+    {
+      "num": "1312",
+      "title": "Côtelettes à la Champvallon (Lamb Cutlets Champvallon)",
+      "locator": "Heinemann:1907:chapter=XV:recipe=1312",
+      "raw_slice_hash": "e6fd4eac6c7516530530405b7c05155fd216a33580bb6c068d154c90b3f24389",
+      "ingredient_count": 7,
+      "step_count": 4
+    },
+    {
+      "num": "1543",
+      "title": "Poulet Sauté Chasseur (Chicken Sauté Chasseur)",
+      "locator": "Heinemann:1907:chapter=XVI:recipe=1543",
+      "raw_slice_hash": "317bc13e17d7ec1f0c5876db8c767d5f5b66db0acc610b2c1aa4d8f40f68c162",
+      "ingredient_count": 8,
+      "step_count": 4
+    },
+    {
+      "num": "1584",
+      "title": "Suprêmes de Volaille Agnès Sorel",
+      "locator": "Heinemann:1907:chapter=XVI:recipe=1584",
+      "raw_slice_hash": "6784435ec5b83da0037c13c33cc980f71741f9ed1a0d98003eea8b2cbd573bf3",
+      "ingredient_count": 5,
+      "step_count": 4
+    },
+    {
+      "num": "1585",
+      "title": "Suprêmes de Volaille Alexandra",
+      "locator": "Heinemann:1907:chapter=XVI:recipe=1585",
+      "raw_slice_hash": "6190843e98c16626bf4d94dbfa9b6e973dce733858fba4f04ba39bc2515d8b13",
+      "ingredient_count": 5,
+      "step_count": 4
+    }
+  ]
+}

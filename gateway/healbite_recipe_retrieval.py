@@ -54,6 +54,7 @@ class RecipeRetriever:
         dietary_constraints: Sequence[str] | None = None,
         max_time_minutes: int | None = None,
         limit: int = 12,
+        production_only: bool = False,
     ) -> list[RecipeCandidate]:
         """
         Applies strict hard filters (verified, author, exclusions, meal slot)
@@ -70,6 +71,9 @@ class RecipeRetriever:
         for recipe in all_recipes:
             # 1. Hard filter: verified for planning
             if not recipe.is_verified_for_planning:
+                continue
+
+            if production_only and not recipe.is_production_cleared:
                 continue
 
             # 2. Hard filter: author selection

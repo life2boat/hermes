@@ -10,6 +10,7 @@ from typing import Iterator, Sequence
 
 from gateway.healbite_recipe_catalog_domain import (
     CatalogMetadata,
+    CommercialReuseStatus,
     ContentScope,
     MealType,
     Recipe,
@@ -21,6 +22,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TranslationRightsStatus,
     VerificationStatus,
 )
 
@@ -58,6 +60,16 @@ CREATE TABLE IF NOT EXISTS recipe_sources (
     content_scope TEXT NOT NULL DEFAULT 'METADATA_ONLY',
     verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
     created_at TEXT NOT NULL,
+    underlying_work_rights TEXT DEFAULT 'PUBLIC_DOMAIN',
+    digital_reproduction_reuse_terms TEXT DEFAULT '',
+    commercial_reuse_status TEXT DEFAULT 'UNKNOWN',
+    partner_institution_terms TEXT DEFAULT '',
+    target_jurisdiction_status TEXT DEFAULT '',
+    translation_status TEXT DEFAULT 'ORIGINAL_LANGUAGE',
+    jurisdiction_basis TEXT,
+    edition_basis TEXT,
+    canonical_url TEXT,
+    production_rights_approved INTEGER DEFAULT 0,
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id)
 );
 
@@ -84,6 +96,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     verified INTEGER NOT NULL DEFAULT 0,
     verification_status TEXT NOT NULL,
     ingestion_build_id TEXT,
+    production_eligible INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     PRIMARY KEY (recipe_id, recipe_version),
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id),
@@ -325,6 +338,28 @@ class HealBiteRecipeCatalogStore:
             if "verification_status" in keys and row["verification_status"]
             else VerificationStatus.VERIFIED,
             created_at=row["created_at"],
+            underlying_work_rights=row["underlying_work_rights"]
+            if "underlying_work_rights" in keys and row["underlying_work_rights"]
+            else "PUBLIC_DOMAIN",
+            digital_reproduction_reuse_terms=row["digital_reproduction_reuse_terms"]
+            if "digital_reproduction_reuse_terms" in keys and row["digital_reproduction_reuse_terms"]
+            else "",
+            commercial_reuse_status=CommercialReuseStatus(row["commercial_reuse_status"])
+            if "commercial_reuse_status" in keys and row["commercial_reuse_status"]
+            else CommercialReuseStatus.UNKNOWN,
+            partner_institution_terms=row["partner_institution_terms"]
+            if "partner_institution_terms" in keys and row["partner_institution_terms"]
+            else "",
+            target_jurisdiction_status=row["target_jurisdiction_status"]
+            if "target_jurisdiction_status" in keys and row["target_jurisdiction_status"]
+            else "",
+            translation_status=TranslationRightsStatus(row["translation_status"])
+            if "translation_status" in keys and row["translation_status"]
+            else TranslationRightsStatus.ORIGINAL_LANGUAGE,
+            jurisdiction_basis=row["jurisdiction_basis"] if "jurisdiction_basis" in keys else None,
+            edition_basis=row["edition_basis"] if "edition_basis" in keys else None,
+            canonical_url=row["canonical_url"] if "canonical_url" in keys else None,
+            production_rights_approved=bool(row["production_rights_approved"]) if "production_rights_approved" in keys else False,
         )
 
     def get_source(self, source_id: str) -> RecipeSource | None:
@@ -480,6 +515,7 @@ class HealBiteRecipeCatalogStore:
             source_recipe_title=row["source_recipe_title"] if "source_recipe_title" in keys else None,
             normalized_content_hash=row["normalized_content_hash"] if "normalized_content_hash" in keys else None,
             ingestion_build_id=row["ingestion_build_id"] if "ingestion_build_id" in keys else None,
+            production_eligible=bool(row["production_eligible"]) if "production_eligible" in keys else True,
         )
 
 

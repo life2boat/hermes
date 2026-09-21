@@ -31,6 +31,23 @@ class RightsStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class CommercialReuseStatus(str, Enum):
+    PUBLIC_DOMAIN = "PUBLIC_DOMAIN"
+    PERMITTED = "PERMITTED"
+    LICENSE_REQUIRED = "LICENSE_REQUIRED"
+    NON_COMMERCIAL_ONLY = "NON_COMMERCIAL_ONLY"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    UNKNOWN = "UNKNOWN"
+
+
+class TranslationRightsStatus(str, Enum):
+    ORIGINAL_LANGUAGE = "ORIGINAL_LANGUAGE"
+    PUBLIC_DOMAIN = "PUBLIC_DOMAIN"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    COPYRIGHT_PROTECTED = "COPYRIGHT_PROTECTED"
+    UNKNOWN = "UNKNOWN"
+
+
 class VerificationStatus(str, Enum):
     VERIFIED = "VERIFIED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
@@ -76,6 +93,12 @@ CANONICAL_UNITS = {
     "tbsp": "tbsp",
     "tsp": "tsp",
     "pinch": "pinch",
+    "oz": "oz",
+    "lb": "lb",
+    "pt": "pt",
+    "qt": "qt",
+    "gill": "gill",
+    "drop": "drop",
     "unknown": "unknown",
 }
 
@@ -118,12 +141,41 @@ UNIT_ALIASES = {
     "ст. ложка": "tbsp",
     "столовая ложка": "tbsp",
     "tbsp": "tbsp",
+    "tablespoon": "tbsp",
+    "tablespoons": "tbsp",
+    "tablespoonful": "tbsp",
+    "tablespoonfuls": "tbsp",
     "ч.л.": "tsp",
     "ч. ложка": "tsp",
     "чайная ложка": "tsp",
     "tsp": "tsp",
+    "teaspoon": "tsp",
+    "teaspoons": "tsp",
+    "teaspoonful": "tsp",
+    "teaspoonfuls": "tsp",
     "щепотка": "pinch",
     "pinch": "pinch",
+    "pinches": "pinch",
+    "oz": "oz",
+    "oz.": "oz",
+    "ounce": "oz",
+    "ounces": "oz",
+    "lb": "lb",
+    "lb.": "lb",
+    "pound": "lb",
+    "pounds": "lb",
+    "pt": "pt",
+    "pt.": "pt",
+    "pint": "pt",
+    "pints": "pt",
+    "qt": "qt",
+    "qt.": "qt",
+    "quart": "qt",
+    "quarts": "qt",
+    "gill": "gill",
+    "gills": "gill",
+    "drop": "drop",
+    "drops": "drop",
 }
 
 
@@ -216,6 +268,108 @@ INGREDIENT_ALIAS_MAP: dict[str, str] = {
     "мука": "FLOUR",
     "пшеничная мука": "FLOUR",
     "мука пшеничная": "FLOUR",
+    # English culinary terms for Escoffier catalog
+    "egg": "EGG",
+    "eggs": "EGG",
+    "butter": "BUTTER",
+    "brown butter": "BUTTER",
+    "onion": "ONION",
+    "onions": "ONION",
+    "carrot": "CARROT",
+    "carrots": "CARROT",
+    "chicken": "CHICKEN",
+    "chicken fillet": "CHICKEN_BREAST",
+    "chicken fillets": "CHICKEN_BREAST",
+    "chicken suprême": "CHICKEN_BREAST",
+    "chicken suprêmes": "CHICKEN_BREAST",
+    "chicken liver": "CHICKEN_LIVER",
+    "beef": "BEEF",
+    "beef tournedos": "BEEF",
+    "tournedos": "BEEF",
+    "sole": "FISH_SOLE",
+    "cod": "COD",
+    "fish": "FISH",
+    "truffle": "TRUFFLE",
+    "truffles": "TRUFFLE",
+    "mushroom": "MUSHROOM",
+    "mushrooms": "MUSHROOM",
+    "cheese": "CHEESE",
+    "grated cheese": "CHEESE",
+    "spinach": "SPINACH",
+    "spinach-leaves": "SPINACH",
+    "flour": "FLOUR",
+    "salt": "SALT",
+    "pepper": "BLACK_PEPPER",
+    "black pepper": "BLACK_PEPPER",
+    "milk": "MILK",
+    "cream": "CREAM",
+    "rice": "RICE",
+    "tapioca": "TAPIOCA",
+    "potato": "POTATO",
+    "potatoes": "POTATO",
+    "celery": "CELERY",
+    "leek": "LEEK",
+    "leeks": "LEEK",
+    "parsley": "PARSLEY",
+    "sorrel": "SORREL",
+    "turnip": "TURNIP",
+    "turnips": "TURNIP",
+    "bacon": "BACON",
+    "ham": "HAM",
+    "sausage": "SAUSAGE",
+    "vinegar": "VINEGAR",
+    "lemon": "LEMON",
+    "vegetable oil": "VEGETABLE_OIL",
+    "olive oil": "OLIVE_OIL",
+    "oil": "VEGETABLE_OIL",
+    "shallot": "SHALLOT",
+    "shallots": "SHALLOT",
+    "white wine": "WHITE_WINE",
+    "wine": "WHITE_WINE",
+    "consommé": "CONSOMME",
+    "consomme": "CONSOMME",
+    "chicken consommé": "CHICKEN_CONSOMME",
+    "chicken consomme": "CHICKEN_CONSOMME",
+    "foie gras": "FOIE_GRAS",
+    "foie-gras": "FOIE_GRAS",
+    "demi-glace": "DEMI_GLACE",
+    "mornay sauce": "SAUCE_MORNAY",
+    "chasseur sauce": "SAUCE_CHASSEUR",
+    "béarnaise sauce": "SAUCE_BEARNAISE",
+    "bearnaise sauce": "SAUCE_BEARNAISE",
+    "madeira": "WINE_MADEIRA",
+    "madeira sauce": "SAUCE_MADEIRA",
+    "tomato": "TOMATO",
+    "tomatoes": "TOMATO",
+    "tomato purée": "TOMATO",
+    "tomato puree": "TOMATO",
+    "french beans": "GREEN_BEANS",
+    "asparagus": "ASPARAGUS",
+    "peas": "PEAS",
+    "split peas": "PEAS",
+    "beetroot": "BEETROOT",
+    "cabbage": "CABBAGE",
+    "toast": "BREAD",
+    "bread": "BREAD",
+    "crusts": "BREAD",
+    "breadcrumbs": "BREADCRUMBS",
+    "veal": "VEAL",
+    "veal cutlet": "VEAL",
+    "veal cutlets": "VEAL",
+    "lamb": "LAMB",
+    "lamb cutlet": "LAMB",
+    "lamb cutlets": "LAMB",
+    "thyme": "THYME",
+    "garlic": "GARLIC",
+    "chive": "CHIVES",
+    "chives": "CHIVES",
+    "tarragon": "TARRAGON",
+    "chervil": "CHERVIL",
+    "cucumber": "CUCUMBER",
+    "cucumbers": "CUCUMBER",
+    "lentils": "LENTILS",
+    "duck": "DUCK",
+    "watercress": "WATERCRESS",
 }
 
 
@@ -276,6 +430,16 @@ class RecipeSource:
     content_scope: ContentScope = ContentScope.METADATA_ONLY
     verification_status: VerificationStatus = VerificationStatus.VERIFIED
     created_at: str = ""
+    underlying_work_rights: str = "PUBLIC_DOMAIN"
+    digital_reproduction_reuse_terms: str = ""
+    commercial_reuse_status: CommercialReuseStatus = CommercialReuseStatus.UNKNOWN
+    partner_institution_terms: str = ""
+    target_jurisdiction_status: str = ""
+    translation_status: TranslationRightsStatus = TranslationRightsStatus.ORIGINAL_LANGUAGE
+    jurisdiction_basis: str | None = None
+    edition_basis: str | None = None
+    canonical_url: str | None = None
+    production_rights_approved: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +500,7 @@ class Recipe:
     source_recipe_title: str | None = None
     normalized_content_hash: str | None = None
     ingestion_build_id: str | None = None
+    production_eligible: bool = True
 
     @property
     def is_verified_for_planning(self) -> bool:
@@ -345,6 +510,10 @@ class Recipe:
             and self.rights_status not in (RightsStatus.UNKNOWN, RightsStatus.LINK_ONLY)
             and bool(self.source_content_hash)
         )
+
+    @property
+    def is_production_cleared(self) -> bool:
+        return self.is_verified_for_planning and self.production_eligible
 
 
 @dataclass(frozen=True, slots=True)

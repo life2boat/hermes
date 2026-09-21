@@ -8,6 +8,7 @@ from gateway.healbite_recipe_catalog_domain import (
     AUTHOR_ESCOFFIER,
     AUTHOR_JAMIE_OLIVER,
     AUTHOR_POKHLEBKIN,
+    CommercialReuseStatus,
     ContentScope,
     MealType,
     RecipeAuthor,
@@ -15,6 +16,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TranslationRightsStatus,
     VerificationStatus,
 )
 from gateway.healbite_recipe_catalog_store import HealBiteRecipeCatalogStore
@@ -23,6 +25,8 @@ from gateway.healbite_recipe_ingestion import (
     RecipeIngestionPipeline,
     calculate_catalog_readiness,
 )
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Neutral Test Authors for Automated Tests
 TEST_AUTHOR_A = "TEST_AUTHOR_A"
@@ -86,14 +90,30 @@ PRODUCTION_MANIFESTS = [
                 language="fr",
                 rights_status=RightsStatus.PUBLIC_DOMAIN,
                 rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
-                rights_evidence_locator="Bibliothèque nationale de France (BnF) ark:/12148/bpt6k5835263v",
-                rights_evidence_note="Published in France 1903 (author d. 1935); in public domain in US (pre-1929) and France (70y pma + wartime extensions elapsed); structured content pending verified digital text ingestion; currently METADATA_ONLY.",
+                rights_evidence_locator="Bibliothèque nationale de France (BnF) ark:/12148/bpt6k65768837",
+                rights_evidence_note=(
+                    "Published in France 1903 (author d. 1935); in public domain in US (pre-1929) "
+                    "and France (70y pma + wartime extensions elapsed); BnF CGU requires separate commercial licensing; currently METADATA_ONLY."
+                ),
                 source_content_hash="meta_only_escoffier_1903",
                 ingestion_timestamp="2026-09-21 00:00:00",
                 ingestion_tool_version="1.0.0",
                 content_scope=ContentScope.METADATA_ONLY,
                 verification_status=VerificationStatus.VERIFIED,
                 created_at="2026-09-21 00:00:00",
+                underlying_work_rights="PUBLIC_DOMAIN",
+                digital_reproduction_reuse_terms=(
+                    "BnF Gallica Conditions Générales d'Utilisation (CGU): Free for non-commercial/academic use; "
+                    "commercial reuse requires prior licence agreement and royalty fee."
+                ),
+                commercial_reuse_status=CommercialReuseStatus.LICENSE_REQUIRED,
+                partner_institution_terms="BnF Gallica / Wellcome Library digital scan b21525912",
+                target_jurisdiction_status="France CPI Art. L.123-1 (expired); USA 17 U.S.C. § 304 (pre-1929 public domain)",
+                translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                jurisdiction_basis="FR / USA",
+                edition_basis="Paris 1903 first edition (French)",
+                canonical_url="https://gallica.bnf.fr/ark:/12148/bpt6k65768837",
+                production_rights_approved=False,
             ),
         ],
     },
@@ -128,6 +148,46 @@ PRODUCTION_MANIFESTS = [
         ],
     },
 ]
+
+SRC_ESCOFFIER_1907_EN_SOURCE = RecipeSource(
+    source_id="SRC_ESCOFFIER_1907_EN",
+    author_id=AUTHOR_ESCOFFIER,
+    title="A Guide to Modern Cookery (1907 English Edition)",
+    source_type=SourceType.BOOK,
+    source_locator="William Heinemann, London, 1907 / Project Gutenberg eBook #71395",
+    publication_year=1907,
+    edition="First English translation, William Heinemann, London",
+    language="en",
+    rights_status=RightsStatus.PUBLIC_DOMAIN,
+    rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+    rights_evidence_locator="Project Gutenberg eBook #71395 (pg71395.txt)",
+    rights_evidence_note=(
+        "Underlying work public domain; 1907 Heinemann English translation anonymous "
+        "(UK CDPA 1988 s.12(3) expired 1978; US 17 U.S.C. § 304 pre-1929); "
+        "Project Gutenberg eBook #71395 is public domain in the USA. "
+        "Commercial reuse outside USA and under Project Gutenberg trademark requires legal review; "
+        "offline pilot only; not approved for production deployment."
+    ),
+    source_content_hash="e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993",
+    ingestion_timestamp="2026-09-21 00:00:00",
+    ingestion_tool_version="1.0.0",
+    content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+    verification_status=VerificationStatus.VERIFIED,
+    created_at="2026-09-21 00:00:00",
+    underlying_work_rights="PUBLIC_DOMAIN",
+    digital_reproduction_reuse_terms=(
+        "Project Gutenberg License: public domain in USA; "
+        "non-US distribution and commercial reuse require local law verification."
+    ),
+    commercial_reuse_status=CommercialReuseStatus.REVIEW_REQUIRED,
+    partner_institution_terms="Project Gutenberg Literary Archive Foundation",
+    target_jurisdiction_status="USA: Public domain (17 U.S.C. § 304); UK: Translation expired (CDPA 1988 s.12(3)); Other jurisdictions: Review required",
+    translation_status=TranslationRightsStatus.PUBLIC_DOMAIN,
+    jurisdiction_basis="USA / UK",
+    edition_basis="William Heinemann, London, 1907",
+    canonical_url="https://www.gutenberg.org/ebooks/71395",
+    production_rights_approved=False,
+)
 
 # Synthetic Public-Domain / Authorized Recipe Fixtures for Tests
 # Contains 27 diverse recipes (9 breakfast, 9 lunch, 9 dinner) across 3 authors
@@ -815,6 +875,142 @@ def build_pilot_recipe_catalog(
             "can_form_21_meal_week": readiness.can_form_21_meal_week,
         }
         (r_path / "catalog_build_report.json").write_text(
+            json.dumps(build_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    return content_hash, readiness
+
+
+def build_escoffier_real_catalog(
+    db_path: str | Path,
+    *,
+    build_id: str = "escoffier-real-corpus-v1",
+    reports_dir: str | Path | None = None,
+    recipes_json_path: str | Path = "recipe_corpus/authorized_inputs/escoffier_recipes.json",
+    include_test_fixtures: bool = False,
+) -> tuple[str, CatalogReadinessReport]:
+    pipeline = RecipeIngestionPipeline(db_path, build_id=build_id)
+
+    # 1. Ingest production manifests (authors and metadata-only sources)
+    for manifest in PRODUCTION_MANIFESTS:
+        pipeline.ingest_author(manifest["author"])
+        for source in manifest["sources"]:
+            pipeline.ingest_source(source)
+
+    # 2. Ingest authorized Escoffier 1907 English source
+    pipeline.ingest_source(SRC_ESCOFFIER_1907_EN_SOURCE)
+
+    # 3. Optionally ingest test fixtures (for hybrid testing)
+    if include_test_fixtures:
+        for author_id, name in TEST_AUTHORS.items():
+            pipeline.ingest_author(
+                RecipeAuthor(author_id=author_id, display_name=name, created_at="2026-09-21 00:00:00")
+            )
+            src_id = f"SRC_{author_id.replace('AUTHOR_', '')}"
+            pipeline.ingest_source(
+                RecipeSource(
+                    source_id=src_id,
+                    author_id=author_id,
+                    title=f"Открытый сборник проверенных домашних блюд ({name})",
+                    source_type=SourceType.USER_DOCUMENT,
+                    source_locator="Тестовый набор HealBite v1, p. 1",
+                    publication_year=2026,
+                    edition="1-е издание",
+                    language="ru",
+                    rights_status=RightsStatus.USER_PROVIDED_AUTHORIZED,
+                    rights_evidence_type=RightsEvidenceType.OPERATOR_USER_GRANT,
+                    rights_evidence_locator="internal://tests/fixtures/synthetic_recipes_v1",
+                    rights_evidence_note="Synthetic test recipes granted by repository operator for test validation only.",
+                    source_content_hash=f"hash_{src_id}",
+                    ingestion_timestamp="2026-09-21 00:00:00",
+                    ingestion_tool_version="1.0.0",
+                    content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+                    verification_status=VerificationStatus.VERIFIED,
+                    created_at="2026-09-21 00:00:00",
+                )
+            )
+        for recipe_data in _TEST_RECIPES_RAW:
+            data = dict(recipe_data)
+            data["rights_status"] = RightsStatus.USER_PROVIDED_AUTHORIZED.value
+            data["verified"] = True
+            data["verification_status"] = VerificationStatus.VERIFIED.value
+            data.setdefault("source_locator", "Тестовый набор HealBite v1, p. 1")
+            pipeline.ingest_recipe(data)
+
+    # 4. Ingest real Escoffier recipes from JSON
+    r_path = Path(recipes_json_path)
+    if not r_path.is_absolute():
+        r_path = REPO_ROOT / r_path
+    if r_path.exists():
+        raw_recipes = json.loads(r_path.read_text(encoding="utf-8"))
+        for item in raw_recipes:
+            pipeline.ingest_recipe(item)
+
+    dup_report = pipeline.get_duplicate_report()
+    content_hash = pipeline.finalize_catalog()
+    pipeline.close()
+
+    # Reopen and validate
+    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
+    readiness = calculate_catalog_readiness(store)
+
+    if reports_dir is not None:
+        rep_dir = Path(reports_dir)
+        rep_dir.mkdir(parents=True, exist_ok=True)
+
+        dup_dict = {
+            "exact_duplicates": list(dup_report.exact_duplicates),
+            "normalized_duplicates": list(dup_report.normalized_duplicates),
+            "conflicting_variants": list(dup_report.conflicting_variants),
+        }
+        (rep_dir / "duplicates_report.json").write_text(
+            json.dumps(dup_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        cov_dict = {
+            aid: {
+                "author_id": cov.author_id,
+                "display_name": cov.display_name,
+                "metadata_sources": cov.metadata_sources,
+                "structured_authorized_sources": cov.structured_authorized_sources,
+                "verified_recipes": cov.verified_recipes,
+                "blocked_sources": cov.blocked_sources,
+                "block_reasons": list(cov.block_reasons),
+                "breakfast_verified": cov.breakfast_verified,
+                "lunch_verified": cov.lunch_verified,
+                "dinner_verified": cov.dinner_verified,
+                "unique_verified_recipes": cov.unique_verified_recipes,
+                "can_form_21_meal_week": cov.can_form_21_meal_week,
+                "production_canary_eligible": cov.production_canary_eligible,
+            }
+            for aid, cov in readiness.author_coverages.items()
+        }
+        (rep_dir / "author_coverage_report.json").write_text(
+            json.dumps(cov_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        build_dict = {
+            "schema_version": readiness.schema_version,
+            "build_id": readiness.build_id,
+            "content_hash": readiness.content_hash,
+            "recipe_count": readiness.recipe_count,
+            "verified_recipe_count": readiness.verified_recipe_count,
+            "real_verified_recipes": readiness.real_verified_recipes,
+            "test_fixture_recipes": readiness.test_fixture_recipes,
+            "breakfast_verified": readiness.breakfast_verified,
+            "lunch_verified": readiness.lunch_verified,
+            "dinner_verified": readiness.dinner_verified,
+            "unique_verified_recipes": readiness.unique_verified_recipes,
+            "can_form_21_meal_week": readiness.can_form_21_meal_week,
+            "production_canary_eligible": readiness.production_canary_eligible,
+        }
+        (rep_dir / "catalog_build_report.json").write_text(
             json.dumps(build_dict, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
             newline="\n",

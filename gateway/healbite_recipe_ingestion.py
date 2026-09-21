@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from gateway.healbite_recipe_catalog_domain import (
+    CommercialReuseStatus,
     ContentScope,
     MealType,
     Recipe,
@@ -19,6 +20,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TranslationRightsStatus,
     VerificationStatus,
     generate_recipe_id,
     normalize_ingredient_id,
@@ -66,6 +68,7 @@ class AuthorCoverage:
     dinner_verified: int
     unique_verified_recipes: int
     can_form_21_meal_week: bool
+    production_canary_eligible: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +86,7 @@ class CatalogReadinessReport:
     unique_verified_recipes: int
     can_form_21_meal_week: bool
     author_coverages: dict[str, AuthorCoverage]
+    production_canary_eligible: bool = False
 
 
 DEFAULT_BLOCKED_REASONS: dict[str, str] = {
@@ -122,6 +126,37 @@ def compute_recipe_content_hash(
     for ins in instructions:
         ins_repr = f"{ins.get('step_number')}:{ins.get('text')}"
         hasher.update(ins_repr.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def compute_semantic_corpus_hash(recipes: Sequence[Mapping[str, Any]]) -> str:
+    """Deterministically compute SHA-256 over normalized recipe representations for reproducibility."""
+    hasher = hashlib.sha256()
+    sorted_recipes = sorted(
+        recipes,
+        key=lambda r: (
+            str(r.get("author_id", "")),
+            str(r.get("source_id", "")),
+            str(r.get("source_locator", "")),
+            str(r.get("title", "")),
+        ),
+    )
+    for r in sorted_recipes:
+        author_id = str(r.get("author_id", "")).strip()
+        source_id = str(r.get("source_id", "")).strip()
+        source_locator = str(r.get("source_locator", "")).strip()
+        title = str(r.get("title", "")).strip()
+        norm_title = normalize_title(title)
+        hasher.update(f"{author_id}|{source_id}|{source_locator}|{norm_title}".encode("utf-8"))
+        for ing in r.get("ingredients", []):
+            d_name = str(ing.get("display_name", "")).strip()
+            i_id = ing.get("ingredient_id") or normalize_ingredient_id(d_name)
+            qty = str(ing.get("quantity", ""))
+            unit = normalize_unit(ing.get("unit"))
+            hasher.update(f"{i_id}|{qty}|{unit}".encode("utf-8"))
+        for step in r.get("instructions", []):
+            text = step if isinstance(step, str) else step.get("text", "")
+            hasher.update(text.strip().encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -168,14 +203,48 @@ class RecipeIngestionPipeline:
                     f"LICENSED source '{source.source_id}' requires recorded license evidence locator and type"
                 )
 
+        # 4. Check commercial reuse terms and production rights
+        if source.commercial_reuse_status is CommercialReuseStatus.LICENSE_REQUIRED:
+            if source.production_rights_approved:
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' requires commercial license; cannot have production_rights_approved=True without verified commercial license"
+                )
+
+        if source.production_rights_approved:
+            if source.rights_status not in (
+                RightsStatus.PUBLIC_DOMAIN,
+                RightsStatus.LICENSED,
+                RightsStatus.USER_PROVIDED_AUTHORIZED,
+            ):
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' cannot have production rights approved with rights status '{source.rights_status.value}'"
+                )
+            if source.translation_status not in (
+                TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                TranslationRightsStatus.PUBLIC_DOMAIN,
+            ):
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' translation rights must be cleared (ORIGINAL_LANGUAGE or PUBLIC_DOMAIN) for production approval"
+                )
+            if source.commercial_reuse_status not in (
+                CommercialReuseStatus.PUBLIC_DOMAIN,
+                CommercialReuseStatus.PERMITTED,
+            ):
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' commercial reuse terms must be PUBLIC_DOMAIN or PERMITTED for production approval"
+                )
+
         cur = self._conn.cursor()
         cur.execute(
             "INSERT OR REPLACE INTO recipe_sources "
             "(source_id, author_id, title, source_type, source_locator, publication_year, "
             "edition, language, rights_status, rights_evidence_type, rights_evidence_locator, "
             "rights_evidence_note, source_content_hash, ingestion_timestamp, ingestion_tool_version, "
-            "content_scope, verification_status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "content_scope, verification_status, created_at, "
+            "underlying_work_rights, digital_reproduction_reuse_terms, commercial_reuse_status, "
+            "partner_institution_terms, target_jurisdiction_status, translation_status, "
+            "jurisdiction_basis, edition_basis, canonical_url, production_rights_approved) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source.source_id,
                 source.author_id,
@@ -195,6 +264,16 @@ class RecipeIngestionPipeline:
                 source.content_scope.value,
                 source.verification_status.value,
                 source.created_at or "2026-09-21 00:00:00",
+                source.underlying_work_rights,
+                source.digital_reproduction_reuse_terms,
+                source.commercial_reuse_status.value,
+                source.partner_institution_terms,
+                source.target_jurisdiction_status,
+                source.translation_status.value,
+                source.jurisdiction_basis,
+                source.edition_basis,
+                source.canonical_url,
+                1 if source.production_rights_approved else 0,
             ),
         )
         self._conn.commit()
@@ -253,6 +332,20 @@ class RecipeIngestionPipeline:
         if source_rights is RightsStatus.LINK_ONLY or content_scope == ContentScope.METADATA_ONLY.value:
             raise RightsPolicyViolationError(
                 f"Recipe '{raw.get('title')}' rejected: source '{source_id}' is LINK_ONLY / METADATA_ONLY and cannot contain recipe content"
+            )
+
+        source_ver_status = source_row["verification_status"] if "verification_status" in source_keys else VerificationStatus.VERIFIED.value
+        source_trans_status = source_row["translation_status"] if "translation_status" in source_keys else TranslationRightsStatus.UNKNOWN.value
+        source_comm_status = source_row["commercial_reuse_status"] if "commercial_reuse_status" in source_keys else CommercialReuseStatus.UNKNOWN.value
+        source_prod_approved = bool(source_row["production_rights_approved"]) if "production_rights_approved" in source_keys else False
+
+        if source_ver_status == VerificationStatus.REVIEW_REQUIRED.value:
+            raise RightsPolicyViolationError(
+                f"Recipe '{raw.get('title')}' rejected: source '{source_id}' is REVIEW_REQUIRED; structured content is not planning-eligible"
+            )
+        if source_trans_status == TranslationRightsStatus.UNKNOWN.value:
+            raise RightsPolicyViolationError(
+                f"Recipe '{raw.get('title')}' rejected: source '{source_id}' has UNKNOWN translation rights; structured content is not planning-eligible"
             )
 
         # 5. Recipe author != source author check
@@ -361,14 +454,22 @@ class RecipeIngestionPipeline:
         ver_status = raw.get("verification_status", VerificationStatus.VERIFIED.value)
         created_at = raw.get("created_at", "2026-09-21 00:00:00")
 
+        production_eligible = (
+            source_prod_approved
+            and source_comm_status in (CommercialReuseStatus.PUBLIC_DOMAIN.value, CommercialReuseStatus.PERMITTED.value)
+            and source_trans_status in (TranslationRightsStatus.ORIGINAL_LANGUAGE.value, TranslationRightsStatus.PUBLIC_DOMAIN.value)
+            and source_ver_status == VerificationStatus.VERIFIED.value
+            and bool(raw.get("production_eligible", True))
+        )
+
         cur.execute(
             "INSERT INTO recipes "
             "(recipe_id, recipe_version, author_id, source_id, title, normalized_title, "
             "source_recipe_title, meal_types_json, cuisine, servings, prep_minutes, "
             "cook_minutes, total_minutes, difficulty, tags_json, source_locator, "
             "source_content_hash, normalized_content_hash, rights_status, verified, "
-            "verification_status, ingestion_build_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "verification_status, ingestion_build_id, created_at, production_eligible) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 recipe_id,
                 version,
@@ -393,6 +494,7 @@ class RecipeIngestionPipeline:
                 ver_status,
                 self._build_id,
                 created_at,
+                1 if production_eligible else 0,
             ),
         )
 
@@ -500,6 +602,11 @@ def calculate_author_coverage(
     dinner = sum(1 for r in planning_recipes if MealType.DINNER in r.meal_types)
     unique_recipes = len({r.recipe_id for r in planning_recipes})
     can_form = (breakfast >= 7 and lunch >= 7 and dinner >= 7 and unique_recipes >= 21)
+    production_canary = (
+        verified_count > 0
+        and can_form
+        and all(r.is_production_cleared for r in planning_recipes)
+    )
 
     return AuthorCoverage(
         author_id=author_id,
@@ -514,6 +621,7 @@ def calculate_author_coverage(
         dinner_verified=dinner,
         unique_verified_recipes=unique_recipes,
         can_form_21_meal_week=can_form,
+        production_canary_eligible=production_canary,
     )
 
 
@@ -537,6 +645,11 @@ def calculate_catalog_readiness(
     dinner = sum(1 for r in verified_planning if MealType.DINNER in r.meal_types)
     unique_recipes = len({r.recipe_id for r in verified_planning})
     can_form = (breakfast >= 7 and lunch >= 7 and dinner >= 7 and unique_recipes >= 21)
+    catalog_production_canary = (
+        len(verified_planning) > 0
+        and can_form
+        and all(r.is_production_cleared for r in verified_planning)
+    )
 
     coverages = {
         aid: calculate_author_coverage(store, aid)
@@ -557,4 +670,5 @@ def calculate_catalog_readiness(
         unique_verified_recipes=unique_recipes,
         can_form_21_meal_week=can_form,
         author_coverages=coverages,
+        production_canary_eligible=catalog_production_canary,
     )

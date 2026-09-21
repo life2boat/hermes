@@ -37,6 +37,19 @@ class VerificationStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ContentScope(str, Enum):
+    METADATA_ONLY = "METADATA_ONLY"
+    STRUCTURED_RECIPE_CONTENT = "STRUCTURED_RECIPE_CONTENT"
+
+
+class RightsEvidenceType(str, Enum):
+    PUBLIC_DOMAIN_STATUTE = "PUBLIC_DOMAIN_STATUTE"
+    PUBLISHER_LICENSE = "PUBLISHER_LICENSE"
+    OPERATOR_USER_GRANT = "OPERATOR_USER_GRANT"
+    LINK_ONLY_CITATION = "LINK_ONLY_CITATION"
+    NONE = "NONE"
+
+
 class SourceType(str, Enum):
     BOOK = "BOOK"
     WEBSITE = "WEBSITE"
@@ -251,9 +264,17 @@ class RecipeSource:
     source_type: SourceType = SourceType.BOOK
     source_locator: str | None = None
     publication_year: int | None = None
+    edition: str | None = None
     language: str = "ru"
     rights_status: RightsStatus = RightsStatus.UNKNOWN
+    rights_evidence_type: RightsEvidenceType = RightsEvidenceType.NONE
+    rights_evidence_locator: str | None = None
+    rights_evidence_note: str | None = None
     source_content_hash: str = ""
+    ingestion_timestamp: str = ""
+    ingestion_tool_version: str = "1.0.0"
+    content_scope: ContentScope = ContentScope.METADATA_ONLY
+    verification_status: VerificationStatus = VerificationStatus.VERIFIED
     created_at: str = ""
 
 
@@ -312,6 +333,9 @@ class Recipe:
     verified: bool
     verification_status: VerificationStatus
     created_at: str
+    source_recipe_title: str | None = None
+    normalized_content_hash: str | None = None
+    ingestion_build_id: str | None = None
 
     @property
     def is_verified_for_planning(self) -> bool:
@@ -319,6 +343,7 @@ class Recipe:
             self.verified
             and self.verification_status is VerificationStatus.VERIFIED
             and self.rights_status not in (RightsStatus.UNKNOWN, RightsStatus.LINK_ONLY)
+            and bool(self.source_content_hash)
         )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -7,14 +8,21 @@ from gateway.healbite_recipe_catalog_domain import (
     AUTHOR_ESCOFFIER,
     AUTHOR_JAMIE_OLIVER,
     AUTHOR_POKHLEBKIN,
+    ContentScope,
     MealType,
     RecipeAuthor,
     RecipeSource,
+    RightsEvidenceType,
     RightsStatus,
     SourceType,
     VerificationStatus,
 )
-from gateway.healbite_recipe_ingestion import RecipeIngestionPipeline
+from gateway.healbite_recipe_catalog_store import HealBiteRecipeCatalogStore
+from gateway.healbite_recipe_ingestion import (
+    CatalogReadinessReport,
+    RecipeIngestionPipeline,
+    calculate_catalog_readiness,
+)
 
 # Neutral Test Authors for Automated Tests
 TEST_AUTHOR_A = "TEST_AUTHOR_A"
@@ -44,9 +52,17 @@ PRODUCTION_MANIFESTS = [
                 source_type=SourceType.BOOK,
                 source_locator="Издание Центрполиграф, 2004",
                 publication_year=2004,
+                edition="1-е изд., Центрполиграф",
                 language="ru",
                 rights_status=RightsStatus.LINK_ONLY,
+                rights_evidence_type=RightsEvidenceType.LINK_ONLY_CITATION,
+                rights_evidence_locator="ISBN 5-9524-0718-4",
+                rights_evidence_note="Copyright protected under Russian Civil Code Art. 1281 (author died 2000; term expires 2071); LINK_ONLY metadata citation only; no structured recipe content license.",
                 source_content_hash="meta_only_pokhlebkin_beka",
+                ingestion_timestamp="2026-09-21 00:00:00",
+                ingestion_tool_version="1.0.0",
+                content_scope=ContentScope.METADATA_ONLY,
+                verification_status=VerificationStatus.VERIFIED,
                 created_at="2026-09-21 00:00:00",
             ),
         ],
@@ -66,9 +82,17 @@ PRODUCTION_MANIFESTS = [
                 source_type=SourceType.BOOK,
                 source_locator="First edition, Paris, 1903",
                 publication_year=1903,
+                edition="1re édition, Paris, Aux bureaux de L'Art culinaire",
                 language="fr",
                 rights_status=RightsStatus.PUBLIC_DOMAIN,
+                rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+                rights_evidence_locator="Bibliothèque nationale de France (BnF) ark:/12148/bpt6k5835263v",
+                rights_evidence_note="Published in France 1903 (author d. 1935); in public domain in US (pre-1929) and France (70y pma + wartime extensions elapsed); structured content pending verified digital text ingestion; currently METADATA_ONLY.",
                 source_content_hash="meta_only_escoffier_1903",
+                ingestion_timestamp="2026-09-21 00:00:00",
+                ingestion_tool_version="1.0.0",
+                content_scope=ContentScope.METADATA_ONLY,
+                verification_status=VerificationStatus.VERIFIED,
                 created_at="2026-09-21 00:00:00",
             ),
         ],
@@ -88,9 +112,17 @@ PRODUCTION_MANIFESTS = [
                 source_type=SourceType.BOOK,
                 source_locator="Michael Joseph, 2012",
                 publication_year=2012,
+                edition="1st edition, Michael Joseph / Penguin Books",
                 language="en",
                 rights_status=RightsStatus.LINK_ONLY,
+                rights_evidence_type=RightsEvidenceType.LINK_ONLY_CITATION,
+                rights_evidence_locator="ISBN 978-0718157807",
+                rights_evidence_note="Copyright protected under UK CDPA 1988 (living author); LINK_ONLY metadata citation only; no structured recipe content license.",
                 source_content_hash="meta_only_jamie_15min",
+                ingestion_timestamp="2026-09-21 00:00:00",
+                ingestion_tool_version="1.0.0",
+                content_scope=ContentScope.METADATA_ONLY,
+                verification_status=VerificationStatus.VERIFIED,
                 created_at="2026-09-21 00:00:00",
             ),
         ],
@@ -658,15 +690,30 @@ _TEST_RECIPES_RAW = [
 
 def build_test_recipe_catalog(db_path: str | Path, *, build_id: str = "test-catalog-v1") -> str:
     """Builds a verified test catalog with 27 safe recipes across 3 neutral test authors."""
-    pipeline = RecipeIngestionPipeline(db_path, build_id=build_id)
+    content_hash, _ = build_pilot_recipe_catalog(db_path, build_id=build_id)
+    return content_hash
 
-    # Ingest production metadata authors
+
+def build_pilot_recipe_catalog(
+    db_path: str | Path,
+    *,
+    build_id: str = "pilot-v1",
+    reports_dir: str | Path | None = None,
+    overwrite: bool = True,
+) -> tuple[str, CatalogReadinessReport]:
+    """Builds the canonical offline pilot catalog and computes deterministic readiness."""
+    path = Path(db_path)
+    if overwrite and path.exists():
+        path.unlink()
+    pipeline = RecipeIngestionPipeline(path, build_id=build_id)
+
+    # 1. Ingest production metadata authors and sources
     for manifest in PRODUCTION_MANIFESTS:
         pipeline.ingest_author(manifest["author"])
         for src in manifest["sources"]:
             pipeline.ingest_source(src)
 
-    # Ingest test authors and sources
+    # 2. Ingest test authors and sources
     for author_id, name in TEST_AUTHORS.items():
         pipeline.ingest_author(
             RecipeAuthor(author_id=author_id, display_name=name, created_at="2026-09-21 00:00:00")
@@ -678,23 +725,99 @@ def build_test_recipe_catalog(db_path: str | Path, *, build_id: str = "test-cata
                 author_id=author_id,
                 title=f"Открытый сборник проверенных домашних блюд ({name})",
                 source_type=SourceType.USER_DOCUMENT,
-                source_locator="Тестовый набор HealBite v1",
+                source_locator="Тестовый набор HealBite v1, p. 1",
                 publication_year=2026,
+                edition="1-е издание",
                 language="ru",
                 rights_status=RightsStatus.USER_PROVIDED_AUTHORIZED,
+                rights_evidence_type=RightsEvidenceType.OPERATOR_USER_GRANT,
+                rights_evidence_locator="internal://tests/fixtures/synthetic_recipes_v1",
+                rights_evidence_note="Synthetic test recipes granted by repository operator for test validation only.",
                 source_content_hash=f"hash_{src_id}",
+                ingestion_timestamp="2026-09-21 00:00:00",
+                ingestion_tool_version="1.0.0",
+                content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+                verification_status=VerificationStatus.VERIFIED,
                 created_at="2026-09-21 00:00:00",
             )
         )
 
-    # Ingest recipes
+    # 3. Ingest recipes
     for recipe_data in _TEST_RECIPES_RAW:
         data = dict(recipe_data)
         data["rights_status"] = RightsStatus.USER_PROVIDED_AUTHORIZED.value
         data["verified"] = True
         data["verification_status"] = VerificationStatus.VERIFIED.value
+        data.setdefault("source_locator", "Тестовый набор HealBite v1, p. 1")
         pipeline.ingest_recipe(data)
 
+    dup_report = pipeline.get_duplicate_report()
     content_hash = pipeline.finalize_catalog()
     pipeline.close()
-    return content_hash
+
+    # Reopen and validate
+    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
+    readiness = calculate_catalog_readiness(store)
+
+    if reports_dir is not None:
+        r_path = Path(reports_dir)
+        r_path.mkdir(parents=True, exist_ok=True)
+
+        # Write duplicates report
+        dup_dict = {
+            "exact_duplicates": list(dup_report.exact_duplicates),
+            "normalized_duplicates": list(dup_report.normalized_duplicates),
+            "conflicting_variants": list(dup_report.conflicting_variants),
+        }
+        (r_path / "duplicates_report.json").write_text(
+            json.dumps(dup_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        # Write author coverage report
+        cov_dict = {
+            aid: {
+                "author_id": cov.author_id,
+                "display_name": cov.display_name,
+                "metadata_sources": cov.metadata_sources,
+                "structured_authorized_sources": cov.structured_authorized_sources,
+                "verified_recipes": cov.verified_recipes,
+                "blocked_sources": cov.blocked_sources,
+                "block_reasons": list(cov.block_reasons),
+                "breakfast_verified": cov.breakfast_verified,
+                "lunch_verified": cov.lunch_verified,
+                "dinner_verified": cov.dinner_verified,
+                "unique_verified_recipes": cov.unique_verified_recipes,
+                "can_form_21_meal_week": cov.can_form_21_meal_week,
+            }
+            for aid, cov in readiness.author_coverages.items()
+        }
+        (r_path / "author_coverage_report.json").write_text(
+            json.dumps(cov_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        # Write catalog build report
+        build_dict = {
+            "schema_version": readiness.schema_version,
+            "build_id": readiness.build_id,
+            "content_hash": readiness.content_hash,
+            "recipe_count": readiness.recipe_count,
+            "verified_recipe_count": readiness.verified_recipe_count,
+            "real_verified_recipes": readiness.real_verified_recipes,
+            "test_fixture_recipes": readiness.test_fixture_recipes,
+            "breakfast_verified": readiness.breakfast_verified,
+            "lunch_verified": readiness.lunch_verified,
+            "dinner_verified": readiness.dinner_verified,
+            "unique_verified_recipes": readiness.unique_verified_recipes,
+            "can_form_21_meal_week": readiness.can_form_21_meal_week,
+        }
+        (r_path / "catalog_build_report.json").write_text(
+            json.dumps(build_dict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    return content_hash, readiness

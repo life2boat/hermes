@@ -10,6 +10,7 @@ from typing import Iterator, Sequence
 
 from gateway.healbite_recipe_catalog_domain import (
     CatalogMetadata,
+    ContentScope,
     MealType,
     Recipe,
     RecipeAdaptation,
@@ -17,6 +18,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RecipeIngredient,
     RecipeInstruction,
     RecipeSource,
+    RightsEvidenceType,
     RightsStatus,
     SourceType,
     VerificationStatus,
@@ -44,9 +46,17 @@ CREATE TABLE IF NOT EXISTS recipe_sources (
     source_type TEXT NOT NULL,
     source_locator TEXT,
     publication_year INTEGER,
+    edition TEXT,
     language TEXT NOT NULL DEFAULT 'ru',
     rights_status TEXT NOT NULL,
+    rights_evidence_type TEXT,
+    rights_evidence_locator TEXT,
+    rights_evidence_note TEXT,
     source_content_hash TEXT NOT NULL,
+    ingestion_timestamp TEXT,
+    ingestion_tool_version TEXT,
+    content_scope TEXT NOT NULL DEFAULT 'METADATA_ONLY',
+    verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
     created_at TEXT NOT NULL,
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id)
 );
@@ -58,6 +68,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     source_id TEXT NOT NULL,
     title TEXT NOT NULL,
     normalized_title TEXT NOT NULL,
+    source_recipe_title TEXT,
     meal_types_json TEXT NOT NULL,
     cuisine TEXT,
     servings TEXT NOT NULL,
@@ -68,9 +79,11 @@ CREATE TABLE IF NOT EXISTS recipes (
     tags_json TEXT NOT NULL,
     source_locator TEXT,
     source_content_hash TEXT NOT NULL,
+    normalized_content_hash TEXT,
     rights_status TEXT NOT NULL,
     verified INTEGER NOT NULL DEFAULT 0,
     verification_status TEXT NOT NULL,
+    ingestion_build_id TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (recipe_id, recipe_version),
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id),
@@ -285,6 +298,35 @@ class HealBiteRecipeCatalogStore:
                 for row in cur.fetchall()
             ]
 
+    def _build_source_from_row(self, row: sqlite3.Row) -> RecipeSource:
+        keys = set(row.keys())
+        return RecipeSource(
+            source_id=row["source_id"],
+            author_id=row["author_id"],
+            title=row["title"],
+            source_type=SourceType(row["source_type"]),
+            source_locator=row["source_locator"],
+            publication_year=row["publication_year"],
+            edition=row["edition"] if "edition" in keys else None,
+            language=row["language"],
+            rights_status=RightsStatus(row["rights_status"]),
+            rights_evidence_type=RightsEvidenceType(row["rights_evidence_type"])
+            if "rights_evidence_type" in keys and row["rights_evidence_type"]
+            else RightsEvidenceType.NONE,
+            rights_evidence_locator=row["rights_evidence_locator"] if "rights_evidence_locator" in keys else None,
+            rights_evidence_note=row["rights_evidence_note"] if "rights_evidence_note" in keys else None,
+            source_content_hash=row["source_content_hash"],
+            ingestion_timestamp=row["ingestion_timestamp"] if "ingestion_timestamp" in keys else "",
+            ingestion_tool_version=row["ingestion_tool_version"] if "ingestion_tool_version" in keys else "1.0.0",
+            content_scope=ContentScope(row["content_scope"])
+            if "content_scope" in keys and row["content_scope"]
+            else ContentScope.METADATA_ONLY,
+            verification_status=VerificationStatus(row["verification_status"])
+            if "verification_status" in keys and row["verification_status"]
+            else VerificationStatus.VERIFIED,
+            created_at=row["created_at"],
+        )
+
     def get_source(self, source_id: str) -> RecipeSource | None:
         with self._connection() as conn:
             cur = conn.cursor()
@@ -292,18 +334,19 @@ class HealBiteRecipeCatalogStore:
             row = cur.fetchone()
             if not row:
                 return None
-            return RecipeSource(
-                source_id=row["source_id"],
-                author_id=row["author_id"],
-                title=row["title"],
-                source_type=SourceType(row["source_type"]),
-                source_locator=row["source_locator"],
-                publication_year=row["publication_year"],
-                language=row["language"],
-                rights_status=RightsStatus(row["rights_status"]),
-                source_content_hash=row["source_content_hash"],
-                created_at=row["created_at"],
-            )
+            return self._build_source_from_row(row)
+
+    def list_sources_by_author(self, author_id: str) -> list[RecipeSource]:
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM recipe_sources WHERE author_id = ? ORDER BY title", (author_id,))
+            return [self._build_source_from_row(row) for row in cur.fetchall()]
+
+    def list_all_sources(self) -> list[RecipeSource]:
+        with self._connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM recipe_sources ORDER BY author_id, title")
+            return [self._build_source_from_row(row) for row in cur.fetchall()]
 
     def get_recipe(self, recipe_id: str, version: int | None = None) -> Recipe | None:
         with self._connection() as conn:
@@ -410,6 +453,7 @@ class HealBiteRecipeCatalogStore:
         meal_types = tuple(MealType(t) for t in json.loads(row["meal_types_json"]))
         tags = tuple(json.loads(row["tags_json"]))
 
+        keys = set(row.keys())
         return Recipe(
             recipe_id=recipe_id,
             recipe_version=version,
@@ -433,6 +477,9 @@ class HealBiteRecipeCatalogStore:
             verified=bool(row["verified"]),
             verification_status=VerificationStatus(row["verification_status"]),
             created_at=row["created_at"],
+            source_recipe_title=row["source_recipe_title"] if "source_recipe_title" in keys else None,
+            normalized_content_hash=row["normalized_content_hash"] if "normalized_content_hash" in keys else None,
+            ingestion_build_id=row["ingestion_build_id"] if "ingestion_build_id" in keys else None,
         )
 
 

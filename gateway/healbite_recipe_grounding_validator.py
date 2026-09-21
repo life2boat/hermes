@@ -139,7 +139,7 @@ class RecipeGroundingValidator:
                 ValidatedMealEntry(
                     date=m.date,
                     slot=m.slot,
-                    position=slot_positions.get(m.slot, 1),
+                    position=1,
                     recipe=recipe,
                     target_servings=m.target_servings,
                     author_display_name=author_name,

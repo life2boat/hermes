@@ -213,7 +213,7 @@ def test_real_inventory_item_integration(tmp_path: Path) -> None:
     )
 
     mock_inv_store = MagicMock()
-    mock_inv_store.get_current_snapshot.return_value = snapshot_view
+    mock_inv_store.get_latest_confirmed_snapshot.return_value = snapshot_view
 
     cat_path = tmp_path / "catalog.db"
     build_test_recipe_catalog(cat_path)

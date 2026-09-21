@@ -155,7 +155,7 @@ def test_insufficient_candidate_pool_fail_closed(catalog_store: HealBiteRecipeCa
     # LLM planner must NEVER have been called
     mock_planner.plan.assert_not_called()
     # Weekly store must NEVER have created a draft
-    mock_weekly_store.create_draft_revision.assert_not_called()
+    mock_weekly_store.apply_generated_draft_entries.assert_not_called()
 
 
 def test_zero_hallucinated_recipe_accepted_invariable() -> None:

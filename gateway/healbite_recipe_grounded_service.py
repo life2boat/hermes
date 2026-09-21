@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -14,7 +17,11 @@ from gateway.healbite_feature_gates import (
 )
 from gateway.healbite_household_schema import HouseholdRole
 from gateway.healbite_households import HealBiteHouseholdService
-from gateway.healbite_inventory import HealBiteInventoryStore, InventoryOwnerScope
+from gateway.healbite_inventory import (
+    HealBiteInventoryStore,
+    InventoryOwnerScope,
+    InventoryStatus,
+)
 from gateway.healbite_recipe_catalog_domain import (
     MealType,
     normalize_ingredient_id,
@@ -51,6 +58,7 @@ from gateway.healbite_weekly_menu_schema import (
 from gateway.healbite_weekly_menus import (
     HealBiteWeeklyMenuStore,
     HouseholdAuthorizationContext,
+    WeeklyMenuConflictError,
     WeeklyMenuEntryInput,
     WeeklyMenuEntryRecipeRef,
     WeeklyMenuIngredientInput,
@@ -84,6 +92,19 @@ class RecipeGroundedGenerationResult:
     @property
     def success(self) -> bool:
         return self.status == RecipeGroundedStatus.SUCCESS and self.revision_view is not None
+
+
+def _normalize_weekly_menu_ingredient_unit(raw_unit: str) -> str:
+    canon = normalize_unit(raw_unit)
+    if canon in ("g", "kg", "ml", "l", "piece", "package", "unitless"):
+        return canon
+    return "unitless"
+
+
+def _normalize_weekly_menu_ingredient_qty(qty: Decimal | None) -> str:
+    if qty is not None and qty > Decimal("0"):
+        return str(qty)
+    return "1"
 
 
 class HealBiteRecipeGroundedService:
@@ -126,6 +147,8 @@ class HealBiteRecipeGroundedService:
         target_servings: Decimal = Decimal("2"),
         dietary_constraints: Sequence[str] | None = None,
         excluded_ingredients: Sequence[str] | None = None,
+        idempotency_key: str | None = None,
+        expected_series_version: int | None = None,
     ) -> RecipeGroundedGenerationResult:
         # 1. Feature gate check
         decision = evaluate_feature_gate(self._config, actor_user_id)
@@ -166,8 +189,8 @@ class HealBiteRecipeGroundedService:
         if self._inventory_store:
             try:
                 scope = InventoryOwnerScope(household_id=context.household_id)
-                snapshot_view = self._inventory_store.get_current_snapshot(scope)
-                if snapshot_view and snapshot_view.snapshot.status.value == "confirmed":
+                snapshot_view = self._inventory_store.get_latest_confirmed_snapshot(scope)
+                if snapshot_view and snapshot_view.snapshot.status is InventoryStatus.CONFIRMED:
                     for item in snapshot_view.items:
                         name_to_normalize = (
                             getattr(item, "display_name", None)
@@ -209,7 +232,7 @@ class HealBiteRecipeGroundedService:
                                 confirmed_inv_tuples[ing_id] = (parsed_qty, canonical_unit)
                         else:
                             confirmed_inv_tuples[ing_id] = (parsed_qty, canonical_unit)
-            except Exception as exc:
+            except sqlite3.Error as exc:
                 logger.warning("[RecipeGroundedService] Inventory lookup failed: %s", exc)
 
         # 5. Retrieve candidates
@@ -301,7 +324,6 @@ class HealBiteRecipeGroundedService:
             grounding_result.resolved_meals,
             confirmed_inventory=confirmed_inv_tuples,
         )
-
         # 9. Storage translation
         entry_inputs: list[WeeklyMenuEntryInput] = []
         entry_refs_to_save: list[tuple[str, ValidatedMealEntry]] = []
@@ -310,13 +332,23 @@ class HealBiteRecipeGroundedService:
             ing_inputs = tuple(
                 WeeklyMenuIngredientInput(
                     display_name=ing.display_name,
-                    quantity_value=str(ing.quantity) if ing.quantity is not None else "",
-                    quantity_unit=ing.unit,
+                    quantity_value=_normalize_weekly_menu_ingredient_qty(ing.quantity),
+                    quantity_unit=_normalize_weekly_menu_ingredient_unit(ing.unit),
                     recipe_base_servings=str(meal.recipe.servings),
                     position=ing.position,
                 )
                 for ing in meal.recipe.ingredients
             )
+            if not ing_inputs:
+                ing_inputs = (
+                    WeeklyMenuIngredientInput(
+                        display_name=meal.recipe.title,
+                        quantity_value="1",
+                        quantity_unit="piece",
+                        recipe_base_servings=str(meal.recipe.servings),
+                        position=1,
+                    ),
+                )
 
             desc = f"Автор: {meal.author_display_name}"
             if meal.source_title:
@@ -327,7 +359,7 @@ class HealBiteRecipeGroundedService:
             entry_input = WeeklyMenuEntryInput(
                 local_date=meal.date,
                 meal_slot=meal.slot.value,
-                position=meal.position,
+                position=1,
                 title=meal.recipe.title,
                 description=desc,
                 servings=str(meal.target_servings),
@@ -337,28 +369,86 @@ class HealBiteRecipeGroundedService:
             entry_inputs.append(entry_input)
             entry_refs_to_save.append((meal.date, meal))
 
-        # Save draft revision
+        # Save draft revision via canonical storage flow
         try:
-            idempotency_key = f"recipe_grounded:{context.household_id}:{week_start}:{uuid.uuid4().hex[:8]}"
-            rev_view = self._weekly_menu_store.create_draft_revision(
+            # Deterministic plan identity for payload_hash
+            catalog_hash = getattr(catalog, "get_content_hash", lambda: "unknown")()
+            plan_identity = [
+                f"{m.date}:{m.slot.value}:{m.recipe.recipe_id}:{m.recipe.recipe_version}:{m.target_servings}"
+                for m in grounding_result.resolved_meals
+            ]
+            raw_payload = json.dumps(
+                {
+                    "household_id": context.household_id,
+                    "week_start": week_start,
+                    "authors": sorted(authors),
+                    "target_servings": str(target_servings),
+                    "catalog_hash": catalog_hash,
+                    "meals": plan_identity,
+                },
+                sort_keys=True,
+            )
+            payload_hash = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
+
+            # Deterministic idempotency key if not provided
+            key = idempotency_key or f"rcp_gen:{context.household_id}:{week_start}:{payload_hash[:16]}"
+
+            # 1. Lookup replay
+            replay = self._weekly_menu_store.lookup_generated_draft_replay(
+                context,
+                idempotency_key=key,
+                payload_hash=payload_hash,
+            )
+            if replay is not None:
+                return RecipeGroundedGenerationResult(
+                    status=RecipeGroundedStatus.SUCCESS,
+                    revision_view=replay,
+                    grounding_result=grounding_result,
+                    shopping_items=tuple(shopping_items),
+                )
+
+            # 2. Resolve expected versions
+            series = self._weekly_menu_store.get_weekly_menu_series(context, context.household_id, week_start)
+            if series is None:
+                if expected_series_version is not None:
+                    raise WeeklyMenuConflictError("weekly menu series version mismatch")
+                exp_series_ver = None
+                exp_draft_rev_id = None
+                exp_draft_rev_ver = None
+            else:
+                if expected_series_version is not None and series.version != int(expected_series_version):
+                    raise WeeklyMenuConflictError("weekly menu series version mismatch")
+                revisions = self._weekly_menu_store.list_weekly_menu_revisions(context, series.id)
+                current_draft = next((r for r in revisions if r.status is WeeklyMenuRevisionStatus.DRAFT), None)
+                exp_series_ver = series.version
+                exp_draft_rev_id = current_draft.id if current_draft else None
+                exp_draft_rev_ver = current_draft.version if current_draft else None
+
+            # 3. Apply generated draft entries
+            rev_view = self._weekly_menu_store.apply_generated_draft_entries(
                 context,
                 week_start=week_start,
                 entries=entry_inputs,
-                idempotency_key=idempotency_key,
+                expected_series_version=exp_series_ver,
+                expected_draft_revision_id=exp_draft_rev_id,
+                expected_draft_revision_version=exp_draft_rev_ver,
+                idempotency_key=key,
+                payload_hash=payload_hash,
             )
 
-            # Link recipe refs to the created entry IDs
+            # 4. Link recipe refs to created entries (atomic with success)
             recipe_refs: list[WeeklyMenuEntryRecipeRef] = []
             for entry in rev_view.entries:
-                # match by date and slot
+                slot_val = entry.meal_slot.value if hasattr(entry.meal_slot, "value") else str(entry.meal_slot)
                 matching_meal = next(
-                    (m for m in grounding_result.resolved_meals if m.date == entry.local_date and m.slot.value == entry.meal_slot.value),
+                    (m for m in grounding_result.resolved_meals if m.date == entry.local_date and m.slot.value == slot_val),
                     None,
                 )
                 if matching_meal:
+                    ref_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{entry.id}:{matching_meal.recipe.recipe_id}"))
                     recipe_refs.append(
                         WeeklyMenuEntryRecipeRef(
-                            id=str(uuid.uuid4()),
+                            id=ref_id,
                             entry_id=entry.id,
                             household_id=context.household_id,
                             recipe_id=matching_meal.recipe.recipe_id,
@@ -377,6 +467,12 @@ class HealBiteRecipeGroundedService:
                 revision_view=rev_view,
                 grounding_result=grounding_result,
                 shopping_items=tuple(shopping_items),
+            )
+        except WeeklyMenuConflictError as exc:
+            logger.warning("[RecipeGroundedService] Weekly menu conflict: %s", exc)
+            return RecipeGroundedGenerationResult(
+                status=RecipeGroundedStatus.STORAGE_FAILURE,
+                error_message=f"Conflict: {exc}",
             )
         except Exception as exc:
             logger.exception("[RecipeGroundedService] Storage failure: %s", exc)

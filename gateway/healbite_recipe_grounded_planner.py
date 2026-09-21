@@ -129,8 +129,8 @@ class RecipeGroundedWeeklyPlanner:
 
             try:
                 response = self._llm_caller(
-                    messages,
-                    policy=WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
+                    messages=messages,
+                    call_policy=WEEKLY_SINGLE_REQUEST_LLM_CALL_POLICY,
                 )
                 if isinstance(response, str):
                     raw_text = response

@@ -1,0 +1,179 @@
+{
+  "manifest_images": [
+    {
+      "id": "mixed_plate",
+      "expected_major_components": [
+        ["вафля", "вафли"],
+        ["мясо", "нарезанное мясо", "говядина", "свинина"],
+        ["огурец", "огурцы"]
+      ],
+      "expected_sauces": [
+        ["майонез"],
+        ["горчица", "желтый соус", "жёлтый соус"]
+      ]
+    },
+    {
+      "id": "simple_plate",
+      "expected_major_components": [
+        ["курица", "куриное мясо", "куриная ножка", "куриный окорочок"],
+        ["рис"],
+        ["овощи", "овощная смесь"],
+        ["салат", "лист салата", "латук"],
+        ["помидор", "помидоры", "томат", "томаты"]
+      ],
+      "expected_sauces": []
+    },
+    {
+      "id": "ambiguous_plate",
+      "expected_major_components": [],
+      "expected_sauces": []
+    }
+  ],
+  "models": {
+    "qwen3.6-plus": {
+      "confirmation_correctness": 1.0,
+      "ambiguity_gate": true,
+      "aggregate_nutrition_violations": 0,
+      "invalid_staging": 0,
+      "responses": [
+        {
+          "asset_id": "mixed_plate",
+          "major_component_precision": 0.666667,
+          "major_component_recall": 0.666667,
+          "sauce_recall": 0.5,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Вафля", "normalized_name": "вафля", "is_sauce": false},
+            {"visible_name": "Нарезанное мясо", "normalized_name": "мясо отварное или запеченное", "is_sauce": false},
+            {"visible_name": "Соленые огурцы", "normalized_name": "огурцы маринованные", "is_sauce": false},
+            {"visible_name": "Белый соус", "normalized_name": "соус белый (майонез или сметана)", "is_sauce": true},
+            {"visible_name": "Желтый соус", "normalized_name": "соус желтый (горчица или сырный)", "is_sauce": true}
+          ]
+        },
+        {
+          "asset_id": "simple_plate",
+          "major_component_precision": 0.0,
+          "major_component_recall": 0.0,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Запеченная куриная ножка", "normalized_name": "chicken_leg_quarter_roasted", "is_sauce": false},
+            {"visible_name": "Рис с овощами", "normalized_name": "rice_with_vegetables", "is_sauce": false},
+            {"visible_name": "Листья салата", "normalized_name": "lettuce_leaves", "is_sauce": false},
+            {"visible_name": "Дольки помидора", "normalized_name": "tomato_wedges", "is_sauce": false},
+            {"visible_name": "Веточка зелени", "normalized_name": "fresh_herb_sprig", "is_sauce": false}
+          ]
+        },
+        {
+          "asset_id": "ambiguous_plate",
+          "major_component_precision": 0.0,
+          "major_component_recall": 1.0,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Слоеный пирог или штрудель", "normalized_name": "слоеная выпечка", "is_sauce": false}
+          ]
+        }
+      ]
+    },
+    "qwen3.7-plus": {
+      "confirmation_correctness": 1.0,
+      "ambiguity_result": true,
+      "aggregate_nutrition_violations": 0,
+      "invalid_staging": 0,
+      "responses": [
+        {
+          "asset_id": "mixed_plate",
+          "major_component_precision": 0.333333,
+          "major_component_recall": 0.333333,
+          "sauce_recall": 0.5,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Вафля прямоугольная", "normalized_name": "Вафля", "is_sauce": false},
+            {"visible_name": "Нарезанное мясо (говядина или свинина)", "normalized_name": "Отварное/Запеченное мясо", "is_sauce": false},
+            {"visible_name": "Свежий огурец брусочками", "normalized_name": "Огурец свежий", "is_sauce": false},
+            {"visible_name": "Белый соус (майонез или сметана)", "normalized_name": "Соус белый (майонез/сметана)", "is_sauce": true},
+            {"visible_name": "Желтый соус (горчица)", "normalized_name": "Горчица", "is_sauce": true}
+          ]
+        },
+        {
+          "asset_id": "simple_plate",
+          "major_component_precision": 0.0,
+          "major_component_recall": 0.0,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Жареная куриная ножка", "normalized_name": "Куриная голень жареная", "is_sauce": false},
+            {"visible_name": "Рис с овощами", "normalized_name": "Рис отварной с овощами", "is_sauce": false},
+            {"visible_name": "Дольки помидора", "normalized_name": "Помидор свежий", "is_sauce": false},
+            {"visible_name": "Листья салата", "normalized_name": "Салат листовой", "is_sauce": false},
+            {"visible_name": "Веточка тимьяна", "normalized_name": "Тимьян свежий", "is_sauce": false}
+          ]
+        },
+        {
+          "asset_id": "ambiguous_plate",
+          "major_component_precision": 0.0,
+          "major_component_recall": 1.0,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Слой теста", "normalized_name": "Выпечка из слоеного теста", "is_sauce": false}
+          ]
+        }
+      ]
+    },
+    "qwen3-vl-8b-instruct": {
+      "confirmation_correctness": 1.0,
+      "ambiguity_result": true,
+      "aggregate_nutrition_violations": 0,
+      "invalid_staging": 0,
+      "responses": [
+        {
+          "asset_id": "mixed_plate",
+          "major_component_precision": 1.0,
+          "major_component_recall": 1.0,
+          "sauce_recall": 0.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Вафельное блюдо", "normalized_name": "вафля", "is_sauce": false},
+            {"visible_name": "Куски мяса", "normalized_name": "мясо", "is_sauce": false},
+            {"visible_name": "Огурцы с зеленью", "normalized_name": "огурцы", "is_sauce": false},
+            {"visible_name": "Соус с кусочками сыра", "normalized_name": "соус", "is_sauce": true}
+          ]
+        },
+        {
+          "asset_id": "simple_plate",
+          "major_component_precision": 0.25,
+          "major_component_recall": 0.2,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Фрикаделька из курицы", "normalized_name": "курица", "is_sauce": false},
+            {"visible_name": "Рис с овощами", "normalized_name": "рис с овощами", "is_sauce": false},
+            {"visible_name": "Салат из помидоров и листьев салата", "normalized_name": "салат из помидоров и салата", "is_sauce": false},
+            {"visible_name": "Зелень (тимьян)", "normalized_name": "тимьян", "is_sauce": false}
+          ]
+        },
+        {
+          "asset_id": "ambiguous_plate",
+          "major_component_precision": 0.0,
+          "major_component_recall": 1.0,
+          "sauce_recall": 1.0,
+          "final_confirmation_requirement": true,
+          "validation_status": "NEEDS_CLARIFICATION",
+          "recognized_items": [
+            {"visible_name": "Пирожное с пышной корочкой", "normalized_name": "пирожное", "is_sauce": false}
+          ]
+        }
+      ]
+    }
+  }
+}

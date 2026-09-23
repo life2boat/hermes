@@ -99,8 +99,8 @@ DEFAULT_BLOCKED_REASONS: dict[str, str] = {
         "LINK_ONLY metadata citation only; no structured recipe content license."
     ),
     "AUTHOR_ESCOFFIER": (
-        "PUBLIC_DOMAIN requires authenticated source edition digital scan/text and verified "
-        "cryptographic hash; structured recipe content pending digitization/clearing; currently METADATA_ONLY."
+        "BnF Gallica scan ark:/12148/bpt6k65768837 commercial reuse requires separate licensing agreement; "
+        "retained as METADATA_ONLY citation; structured recipes cleared via SRC_ESCOFFIER_1903_COMMONS."
     ),
 }
 
@@ -228,10 +228,11 @@ class RecipeIngestionPipeline:
                 )
             if source.commercial_reuse_status not in (
                 CommercialReuseStatus.PUBLIC_DOMAIN,
+                CommercialReuseStatus.COMMERCIAL_ALLOWED,
                 CommercialReuseStatus.PERMITTED,
             ):
                 raise RightsPolicyViolationError(
-                    f"Source '{source.source_id}' commercial reuse terms must be PUBLIC_DOMAIN or PERMITTED for production approval"
+                    f"Source '{source.source_id}' commercial reuse terms must be PUBLIC_DOMAIN, COMMERCIAL_ALLOWED, or PERMITTED for production approval"
                 )
 
         cur = self._conn.cursor()
@@ -241,10 +242,10 @@ class RecipeIngestionPipeline:
             "edition, language, rights_status, rights_evidence_type, rights_evidence_locator, "
             "rights_evidence_note, source_content_hash, ingestion_timestamp, ingestion_tool_version, "
             "content_scope, verification_status, created_at, "
-            "underlying_work_rights, digital_reproduction_reuse_terms, commercial_reuse_status, "
-            "partner_institution_terms, target_jurisdiction_status, translation_status, "
+            "underlying_work_rights, digital_reproduction_rights, digital_reproduction_reuse_terms, commercial_reuse_status, "
+            "transcription_source, transcription_rights, partner_institution_terms, target_jurisdiction_status, translation_status, "
             "jurisdiction_basis, edition_basis, canonical_url, production_rights_approved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source.source_id,
                 source.author_id,
@@ -265,8 +266,11 @@ class RecipeIngestionPipeline:
                 source.verification_status.value,
                 source.created_at or "2026-09-21 00:00:00",
                 source.underlying_work_rights,
+                source.digital_reproduction_rights,
                 source.digital_reproduction_reuse_terms,
                 source.commercial_reuse_status.value,
+                source.transcription_source,
+                source.transcription_rights,
                 source.partner_institution_terms,
                 source.target_jurisdiction_status,
                 source.translation_status.value,
@@ -456,7 +460,11 @@ class RecipeIngestionPipeline:
 
         production_eligible = (
             source_prod_approved
-            and source_comm_status in (CommercialReuseStatus.PUBLIC_DOMAIN.value, CommercialReuseStatus.PERMITTED.value)
+            and source_comm_status in (
+                CommercialReuseStatus.PUBLIC_DOMAIN.value,
+                CommercialReuseStatus.COMMERCIAL_ALLOWED.value,
+                CommercialReuseStatus.PERMITTED.value,
+            )
             and source_trans_status in (TranslationRightsStatus.ORIGINAL_LANGUAGE.value, TranslationRightsStatus.PUBLIC_DOMAIN.value)
             and source_ver_status == VerificationStatus.VERIFIED.value
             and bool(raw.get("production_eligible", True))
@@ -468,8 +476,9 @@ class RecipeIngestionPipeline:
             "source_recipe_title, meal_types_json, cuisine, servings, prep_minutes, "
             "cook_minutes, total_minutes, difficulty, tags_json, source_locator, "
             "source_content_hash, normalized_content_hash, rights_status, verified, "
-            "verification_status, ingestion_build_id, created_at, production_eligible) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "verification_status, ingestion_build_id, created_at, production_eligible, "
+            "classification_source, classification_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 recipe_id,
                 version,
@@ -495,6 +504,8 @@ class RecipeIngestionPipeline:
                 self._build_id,
                 created_at,
                 1 if production_eligible else 0,
+                raw.get("classification_source"),
+                raw.get("classification_reason"),
             ),
         )
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "build_id": "escoffier-real-corpus-v1",
-  "content_hash": "a8f544a07fde575fc1c303540f9b21d89fb279a0d3b2fdd68139e2a303748403",
+  "build_id": "escoffier-commons-v1",
+  "content_hash": "d31d71658258270f562c444f4469cceceaccf83d309424355fa21db379dd085e",
   "recipe_count": 36,
   "verified_recipe_count": 36,
   "real_verified_recipes": 36,
@@ -11,5 +11,5 @@
   "dinner_verified": 12,
   "unique_verified_recipes": 36,
   "can_form_21_meal_week": true,
-  "production_canary_eligible": false
+  "production_canary_eligible": true
 }

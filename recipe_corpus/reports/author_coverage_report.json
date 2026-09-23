@@ -24,14 +24,14 @@
     "verified_recipes": 36,
     "blocked_sources": 1,
     "block_reasons": [
-      "PUBLIC_DOMAIN requires authenticated source edition digital scan/text and verified cryptographic hash; structured recipe content pending digitization/clearing; currently METADATA_ONLY."
+      "BnF Gallica scan ark:/12148/bpt6k65768837 commercial reuse requires separate licensing agreement; retained as METADATA_ONLY citation; structured recipes cleared via SRC_ESCOFFIER_1903_COMMONS."
     ],
     "breakfast_verified": 12,
     "lunch_verified": 12,
     "dinner_verified": 12,
     "unique_verified_recipes": 36,
     "can_form_21_meal_week": true,
-    "production_canary_eligible": false
+    "production_canary_eligible": true
   },
   "AUTHOR_JAMIE_OLIVER": {
     "author_id": "AUTHOR_JAMIE_OLIVER",

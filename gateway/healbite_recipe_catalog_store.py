@@ -61,8 +61,11 @@ CREATE TABLE IF NOT EXISTS recipe_sources (
     verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
     created_at TEXT NOT NULL,
     underlying_work_rights TEXT DEFAULT 'PUBLIC_DOMAIN',
+    digital_reproduction_rights TEXT DEFAULT 'PUBLIC_DOMAIN_MARKED',
     digital_reproduction_reuse_terms TEXT DEFAULT '',
     commercial_reuse_status TEXT DEFAULT 'UNKNOWN',
+    transcription_source TEXT DEFAULT 'OWN_EXTRACTION',
+    transcription_rights TEXT DEFAULT 'NOT_APPLICABLE',
     partner_institution_terms TEXT DEFAULT '',
     target_jurisdiction_status TEXT DEFAULT '',
     translation_status TEXT DEFAULT 'ORIGINAL_LANGUAGE',
@@ -97,6 +100,8 @@ CREATE TABLE IF NOT EXISTS recipes (
     verification_status TEXT NOT NULL,
     ingestion_build_id TEXT,
     production_eligible INTEGER NOT NULL DEFAULT 1,
+    classification_source TEXT,
+    classification_reason TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (recipe_id, recipe_version),
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id),
@@ -341,12 +346,21 @@ class HealBiteRecipeCatalogStore:
             underlying_work_rights=row["underlying_work_rights"]
             if "underlying_work_rights" in keys and row["underlying_work_rights"]
             else "PUBLIC_DOMAIN",
+            digital_reproduction_rights=row["digital_reproduction_rights"]
+            if "digital_reproduction_rights" in keys and row["digital_reproduction_rights"]
+            else "PUBLIC_DOMAIN_MARKED",
             digital_reproduction_reuse_terms=row["digital_reproduction_reuse_terms"]
             if "digital_reproduction_reuse_terms" in keys and row["digital_reproduction_reuse_terms"]
             else "",
             commercial_reuse_status=CommercialReuseStatus(row["commercial_reuse_status"])
             if "commercial_reuse_status" in keys and row["commercial_reuse_status"]
             else CommercialReuseStatus.UNKNOWN,
+            transcription_source=row["transcription_source"]
+            if "transcription_source" in keys and row["transcription_source"]
+            else "OWN_EXTRACTION",
+            transcription_rights=row["transcription_rights"]
+            if "transcription_rights" in keys and row["transcription_rights"]
+            else "NOT_APPLICABLE",
             partner_institution_terms=row["partner_institution_terms"]
             if "partner_institution_terms" in keys and row["partner_institution_terms"]
             else "",
@@ -489,6 +503,34 @@ class HealBiteRecipeCatalogStore:
         tags = tuple(json.loads(row["tags_json"]))
 
         keys = set(row.keys())
+        source_id = row["source_id"]
+        cur.execute(
+            "SELECT verification_status, content_scope, production_rights_approved FROM recipe_sources WHERE source_id = ?",
+            (source_id,),
+        )
+        src_row = cur.fetchone()
+        if src_row:
+            src_keys = set(src_row.keys())
+            src_ver_status = (
+                VerificationStatus(src_row["verification_status"])
+                if "verification_status" in src_keys and src_row["verification_status"]
+                else VerificationStatus.VERIFIED
+            )
+            src_content_scope = (
+                ContentScope(src_row["content_scope"])
+                if "content_scope" in src_keys and src_row["content_scope"]
+                else ContentScope.STRUCTURED_RECIPE_CONTENT
+            )
+            src_prod_approved = (
+                bool(src_row["production_rights_approved"])
+                if "production_rights_approved" in src_keys
+                else False
+            )
+        else:
+            src_ver_status = None
+            src_content_scope = None
+            src_prod_approved = False
+
         return Recipe(
             recipe_id=recipe_id,
             recipe_version=version,
@@ -516,6 +558,11 @@ class HealBiteRecipeCatalogStore:
             normalized_content_hash=row["normalized_content_hash"] if "normalized_content_hash" in keys else None,
             ingestion_build_id=row["ingestion_build_id"] if "ingestion_build_id" in keys else None,
             production_eligible=bool(row["production_eligible"]) if "production_eligible" in keys else True,
+            source_verification_status=src_ver_status,
+            source_content_scope=src_content_scope,
+            source_production_rights_approved=src_prod_approved,
+            classification_source=row["classification_source"] if "classification_source" in keys else None,
+            classification_reason=row["classification_reason"] if "classification_reason" in keys else None,
         )
 
 

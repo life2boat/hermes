@@ -1,0 +1,51 @@
+{
+  "source_scan": "File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu",
+  "internet_archive_id": "b21525912",
+  "sample_size": 6,
+  "pagination_offset": "DjVu page = printed page + 20",
+  "samples": [
+    {
+      "recipe": "Œufs sur le plat",
+      "printed_page": 330,
+      "djvu_page": 350,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    },
+    {
+      "recipe": "Œufs Bercy",
+      "printed_page": 339,
+      "djvu_page": 359,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    },
+    {
+      "recipe": "Consommé Alexandra",
+      "printed_page": 149,
+      "djvu_page": 169,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    },
+    {
+      "recipe": "Petite Marmite",
+      "printed_page": 166,
+      "djvu_page": 186,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    },
+    {
+      "recipe": "Sole Meunière Doria",
+      "printed_page": 483,
+      "djvu_page": 503,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    },
+    {
+      "recipe": "Poulet Sauté Chasseur",
+      "printed_page": 810,
+      "djvu_page": 830,
+      "wikisource_quality": "4 (proofread / D Che7)",
+      "match_rate": 1.0
+    }
+  ],
+  "overall_status": "MATCH_CONFIRMED"
+}

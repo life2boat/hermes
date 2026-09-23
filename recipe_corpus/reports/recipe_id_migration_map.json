@@ -1,0 +1,372 @@
+{
+  "total_mapped": 36,
+  "unmapped_count": 0,
+  "conflicts_count": 0,
+  "source_migration": {
+    "from_source_id": "SRC_ESCOFFIER_1907_EN",
+    "to_source_id": "SRC_ESCOFFIER_1903_COMMONS",
+    "provenance": "Wikimedia Commons / Internet Archive b21525912"
+  },
+  "mappings": [
+    {
+      "index": 1,
+      "legacy_recipe_id": "66e46f08-8528-5123-bbe1-bdf4f60e09bd",
+      "canonical_recipe_id": "66e46f08-8528-5123-bbe1-bdf4f60e09bd",
+      "title_legacy_en": "Œufs sur le plat",
+      "title_canonical_fr": "Œufs sur le plat",
+      "legacy_source_locator": "Commons:1903:p.330:oeufs_sur_le_plat",
+      "canonical_source_locator": "Commons:1903:p.330:oeufs_sur_le_plat",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 2,
+      "legacy_recipe_id": "4a2d3e26-81e2-59ac-a748-8860f45b5163",
+      "canonical_recipe_id": "4a2d3e26-81e2-59ac-a748-8860f45b5163",
+      "title_legacy_en": "Œufs Bercy",
+      "title_canonical_fr": "Œufs Bercy",
+      "legacy_source_locator": "Commons:1903:p.339:oeufs_bercy",
+      "canonical_source_locator": "Commons:1903:p.339:oeufs_bercy",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 3,
+      "legacy_recipe_id": "39e04822-b863-5672-ac1c-bd6c3bfa11b7",
+      "canonical_recipe_id": "39e04822-b863-5672-ac1c-bd6c3bfa11b7",
+      "title_legacy_en": "Œufs au beurre noir",
+      "title_canonical_fr": "Œufs au beurre noir",
+      "legacy_source_locator": "Commons:1903:p.340:oeufs_au_beurre_noir",
+      "canonical_source_locator": "Commons:1903:p.340:oeufs_au_beurre_noir",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 4,
+      "legacy_recipe_id": "ead5bd0b-eecd-5c3f-861a-c4fd16b15e2d",
+      "canonical_recipe_id": "ead5bd0b-eecd-5c3f-861a-c4fd16b15e2d",
+      "title_legacy_en": "Œufs à la Florentine",
+      "title_canonical_fr": "Œufs à la Florentine",
+      "legacy_source_locator": "Commons:1903:p.350:oeufs_florentine",
+      "canonical_source_locator": "Commons:1903:p.350:oeufs_florentine",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 5,
+      "legacy_recipe_id": "48142452-5f06-52d8-92e8-200d658680c6",
+      "canonical_recipe_id": "48142452-5f06-52d8-92e8-200d658680c6",
+      "title_legacy_en": "Œufs pochés",
+      "title_canonical_fr": "Œufs pochés",
+      "legacy_source_locator": "Commons:1903:p.331:oeufs_poches",
+      "canonical_source_locator": "Commons:1903:p.331:oeufs_poches",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 6,
+      "legacy_recipe_id": "595a3093-2c50-5848-852c-21afc6570e93",
+      "canonical_recipe_id": "595a3093-2c50-5848-852c-21afc6570e93",
+      "title_legacy_en": "Œufs mollets",
+      "title_canonical_fr": "Œufs mollets",
+      "legacy_source_locator": "Commons:1903:p.332:oeufs_mollets",
+      "canonical_source_locator": "Commons:1903:p.332:oeufs_mollets",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 7,
+      "legacy_recipe_id": "40685950-705d-51ce-8485-a0d375fca380",
+      "canonical_recipe_id": "40685950-705d-51ce-8485-a0d375fca380",
+      "title_legacy_en": "Œufs durs",
+      "title_canonical_fr": "Œufs durs",
+      "legacy_source_locator": "Commons:1903:p.333:oeufs_durs",
+      "canonical_source_locator": "Commons:1903:p.333:oeufs_durs",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 8,
+      "legacy_recipe_id": "a1029555-99ee-5cb3-8999-380761a591e2",
+      "canonical_recipe_id": "a1029555-99ee-5cb3-8999-380761a591e2",
+      "title_legacy_en": "Œufs brouillés aux champignons",
+      "title_canonical_fr": "Œufs brouillés aux champignons",
+      "legacy_source_locator": "Commons:1903:p.372:oeufs_brouilles_champignons",
+      "canonical_source_locator": "Commons:1903:p.372:oeufs_brouilles_champignons",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 9,
+      "legacy_recipe_id": "180a7e99-c592-5346-9ba9-4d5e0f35656a",
+      "canonical_recipe_id": "180a7e99-c592-5346-9ba9-4d5e0f35656a",
+      "title_legacy_en": "Œufs brouillés au fromage",
+      "title_canonical_fr": "Œufs brouillés au fromage",
+      "legacy_source_locator": "Commons:1903:p.372:oeufs_brouilles_fromage",
+      "canonical_source_locator": "Commons:1903:p.372:oeufs_brouilles_fromage",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 10,
+      "legacy_recipe_id": "45bd3b78-b96a-5b67-8631-493343d242c5",
+      "canonical_recipe_id": "45bd3b78-b96a-5b67-8631-493343d242c5",
+      "title_legacy_en": "Œufs brouillés aux truffes",
+      "title_canonical_fr": "Œufs brouillés aux truffes",
+      "legacy_source_locator": "Commons:1903:p.373:oeufs_brouilles_truffes",
+      "canonical_source_locator": "Commons:1903:p.373:oeufs_brouilles_truffes",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 11,
+      "legacy_recipe_id": "f3ea22db-d86c-5eea-bc0e-7393673d7b50",
+      "canonical_recipe_id": "f3ea22db-d86c-5eea-bc0e-7393673d7b50",
+      "title_legacy_en": "Omelette aux épinards",
+      "title_canonical_fr": "Omelette aux épinards",
+      "legacy_source_locator": "Commons:1903:p.377:omelette_aux_epinards",
+      "canonical_source_locator": "Commons:1903:p.377:omelette_aux_epinards",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 12,
+      "legacy_recipe_id": "694f60c9-4174-58b3-beed-d9cba38bc274",
+      "canonical_recipe_id": "694f60c9-4174-58b3-beed-d9cba38bc274",
+      "title_legacy_en": "Omelette aux fines herbes",
+      "title_canonical_fr": "Omelette aux fines herbes",
+      "legacy_source_locator": "Commons:1903:p.376:omelette_aux_fines_herbes",
+      "canonical_source_locator": "Commons:1903:p.376:omelette_aux_fines_herbes",
+      "meal_type": "breakfast"
+    },
+    {
+      "index": 13,
+      "legacy_recipe_id": "b9884112-75c8-5f1d-b9e9-87f9f09fbc85",
+      "canonical_recipe_id": "b9884112-75c8-5f1d-b9e9-87f9f09fbc85",
+      "title_legacy_en": "Potage Bortsch Polonais",
+      "title_canonical_fr": "Potage Bortsch Polonais",
+      "legacy_source_locator": "Commons:1903:p.239:potage_bortsch",
+      "canonical_source_locator": "Commons:1903:p.239:potage_bortsch",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 14,
+      "legacy_recipe_id": "527dc7a0-e3a4-5f1d-8a44-9210bb4ee879",
+      "canonical_recipe_id": "527dc7a0-e3a4-5f1d-8a44-9210bb4ee879",
+      "title_legacy_en": "Consommé Brunoise",
+      "title_canonical_fr": "Consommé Brunoise",
+      "legacy_source_locator": "Commons:1903:p.153:consomme_brunoise",
+      "canonical_source_locator": "Commons:1903:p.153:consomme_brunoise",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 15,
+      "legacy_recipe_id": "52d7f4d4-6bb4-5647-a3a5-a694f78ec523",
+      "canonical_recipe_id": "52d7f4d4-6bb4-5647-a3a5-a694f78ec523",
+      "title_legacy_en": "Croûte au Pot",
+      "title_canonical_fr": "Croûte au Pot",
+      "legacy_source_locator": "Commons:1903:p.158:croute_au_pot",
+      "canonical_source_locator": "Commons:1903:p.158:croute_au_pot",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 16,
+      "legacy_recipe_id": "3af863b6-1a4f-5415-9f88-88d694b43287",
+      "canonical_recipe_id": "3af863b6-1a4f-5415-9f88-88d694b43287",
+      "title_legacy_en": "Petite Marmite",
+      "title_canonical_fr": "Petite Marmite",
+      "legacy_source_locator": "Commons:1903:p.166:petite_marmite",
+      "canonical_source_locator": "Commons:1903:p.166:petite_marmite",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 17,
+      "legacy_recipe_id": "c398c02d-6a32-5f19-bd7c-bea401e63f68",
+      "canonical_recipe_id": "c398c02d-6a32-5f19-bd7c-bea401e63f68",
+      "title_legacy_en": "Potage Crécy",
+      "title_canonical_fr": "Potage Crécy",
+      "legacy_source_locator": "Commons:1903:p.184:potage_crecy",
+      "canonical_source_locator": "Commons:1903:p.184:potage_crecy",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 18,
+      "legacy_recipe_id": "53b95425-d942-5193-93ad-79daf3eb35c6",
+      "canonical_recipe_id": "53b95425-d942-5193-93ad-79daf3eb35c6",
+      "title_legacy_en": "Potage Velours",
+      "title_canonical_fr": "Potage Velours",
+      "legacy_source_locator": "Commons:1903:p.224:potage_velours",
+      "canonical_source_locator": "Commons:1903:p.224:potage_velours",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 19,
+      "legacy_recipe_id": "255f61b3-50d7-5134-9b54-db1089a4f5df",
+      "canonical_recipe_id": "255f61b3-50d7-5134-9b54-db1089a4f5df",
+      "title_legacy_en": "Potage Conti",
+      "title_canonical_fr": "Potage Conti",
+      "legacy_source_locator": "Commons:1903:p.185:potage_conti",
+      "canonical_source_locator": "Commons:1903:p.185:potage_conti",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 20,
+      "legacy_recipe_id": "a51e87c0-09db-5c83-a712-4679b5c6082f",
+      "canonical_recipe_id": "a51e87c0-09db-5c83-a712-4679b5c6082f",
+      "title_legacy_en": "Potage Saint-Germain",
+      "title_canonical_fr": "Potage Saint-Germain",
+      "legacy_source_locator": "Commons:1903:p.192:potage_saint_germain",
+      "canonical_source_locator": "Commons:1903:p.192:potage_saint_germain",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 21,
+      "legacy_recipe_id": "a6ae5074-5f59-5275-a682-a305a2e55cd6",
+      "canonical_recipe_id": "a6ae5074-5f59-5275-a682-a305a2e55cd6",
+      "title_legacy_en": "Potage Parmentier",
+      "title_canonical_fr": "Potage Parmentier",
+      "legacy_source_locator": "Commons:1903:p.191:potage_parmentier",
+      "canonical_source_locator": "Commons:1903:p.191:potage_parmentier",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 22,
+      "legacy_recipe_id": "aab8f440-03e6-5b44-a341-1deeeae01203",
+      "canonical_recipe_id": "aab8f440-03e6-5b44-a341-1deeeae01203",
+      "title_legacy_en": "Potage Waldèze",
+      "title_canonical_fr": "Potage Waldèze",
+      "legacy_source_locator": "Commons:1903:p.224:potage_waldeze",
+      "canonical_source_locator": "Commons:1903:p.224:potage_waldeze",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 23,
+      "legacy_recipe_id": "46fdd97e-4eb1-572c-9dc5-8dc09acbcc10",
+      "canonical_recipe_id": "46fdd97e-4eb1-572c-9dc5-8dc09acbcc10",
+      "title_legacy_en": "Soupe Julienne Darblay",
+      "title_canonical_fr": "Soupe Julienne Darblay",
+      "legacy_source_locator": "Commons:1903:p.230:soupe_julienne_darblay",
+      "canonical_source_locator": "Commons:1903:p.230:soupe_julienne_darblay",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 24,
+      "legacy_recipe_id": "0c39af36-430b-5ef2-a0a5-6bd2b33d8f40",
+      "canonical_recipe_id": "0c39af36-430b-5ef2-a0a5-6bd2b33d8f40",
+      "title_legacy_en": "Minestrone à l'Italienne",
+      "title_canonical_fr": "Minestrone à l'Italienne",
+      "legacy_source_locator": "Commons:1903:p.242:minestrone_italienne",
+      "canonical_source_locator": "Commons:1903:p.242:minestrone_italienne",
+      "meal_type": "lunch"
+    },
+    {
+      "index": 25,
+      "legacy_recipe_id": "01a102af-db52-5b75-9c3f-9e8137c08e58",
+      "canonical_recipe_id": "01a102af-db52-5b75-9c3f-9e8137c08e58",
+      "title_legacy_en": "Sole Meunière Doria",
+      "title_canonical_fr": "Sole Meunière Doria",
+      "legacy_source_locator": "Commons:1903:p.483:sole_meuniere_doria",
+      "canonical_source_locator": "Commons:1903:p.483:sole_meuniere_doria",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 26,
+      "legacy_recipe_id": "d831bf52-a584-56e5-833b-82447fac70dd",
+      "canonical_recipe_id": "d831bf52-a584-56e5-833b-82447fac70dd",
+      "title_legacy_en": "Sole au Vin Blanc",
+      "title_canonical_fr": "Sole au Vin Blanc",
+      "legacy_source_locator": "Commons:1903:p.477:sole_au_vin_blanc",
+      "canonical_source_locator": "Commons:1903:p.477:sole_au_vin_blanc",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 27,
+      "legacy_recipe_id": "9daf9e1c-b1df-548c-81ce-11253ecb35ab",
+      "canonical_recipe_id": "9daf9e1c-b1df-548c-81ce-11253ecb35ab",
+      "title_legacy_en": "Cabillaud Bouilli",
+      "title_canonical_fr": "Cabillaud Bouilli",
+      "legacy_source_locator": "Commons:1903:p.443:cabillaud_bouilli",
+      "canonical_source_locator": "Commons:1903:p.443:cabillaud_bouilli",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 28,
+      "legacy_recipe_id": "ca12ab08-f9ca-590b-9f72-0b008e1b54b8",
+      "canonical_recipe_id": "ca12ab08-f9ca-590b-9f72-0b008e1b54b8",
+      "title_legacy_en": "Cabillaud Grillé",
+      "title_canonical_fr": "Cabillaud Grillé",
+      "legacy_source_locator": "Commons:1903:p.443:cabillaud_grille",
+      "canonical_source_locator": "Commons:1903:p.443:cabillaud_grille",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 29,
+      "legacy_recipe_id": "a966d464-6c46-5fc0-a771-34ee0cee8e32",
+      "canonical_recipe_id": "a966d464-6c46-5fc0-a771-34ee0cee8e32",
+      "title_legacy_en": "Tournedos Grillés",
+      "title_canonical_fr": "Tournedos Grillés",
+      "legacy_source_locator": "Commons:1903:p.599:tournedos_grilles",
+      "canonical_source_locator": "Commons:1903:p.599:tournedos_grilles",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 30,
+      "legacy_recipe_id": "f13548af-11c6-5a99-be55-4a2d33dc1c0e",
+      "canonical_recipe_id": "f13548af-11c6-5a99-be55-4a2d33dc1c0e",
+      "title_legacy_en": "Tournedos Chasseur",
+      "title_canonical_fr": "Tournedos Chasseur",
+      "legacy_source_locator": "Commons:1903:p.602:tournedos_chasseur",
+      "canonical_source_locator": "Commons:1903:p.602:tournedos_chasseur",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 31,
+      "legacy_recipe_id": "67a148d8-63e5-5e42-b3d0-f1123bf9566b",
+      "canonical_recipe_id": "67a148d8-63e5-5e42-b3d0-f1123bf9566b",
+      "title_legacy_en": "Tournedos Rossini",
+      "title_canonical_fr": "Tournedos Rossini",
+      "legacy_source_locator": "Commons:1903:p.606:tournedos_rossini",
+      "canonical_source_locator": "Commons:1903:p.606:tournedos_rossini",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 32,
+      "legacy_recipe_id": "40385bed-3a72-51a2-a700-83495c1e82d9",
+      "canonical_recipe_id": "40385bed-3a72-51a2-a700-83495c1e82d9",
+      "title_legacy_en": "Sauté de Veau Chasseur",
+      "title_canonical_fr": "Sauté de Veau Chasseur",
+      "legacy_source_locator": "Commons:1903:p.656:saute_veau_chasseur",
+      "canonical_source_locator": "Commons:1903:p.656:saute_veau_chasseur",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 33,
+      "legacy_recipe_id": "ad7dc642-939e-5da3-b8a1-dda1dbf1b0c8",
+      "canonical_recipe_id": "ad7dc642-939e-5da3-b8a1-dda1dbf1b0c8",
+      "title_legacy_en": "Côtelettes à la Champvallon",
+      "title_canonical_fr": "Côtelettes à la Champvallon",
+      "legacy_source_locator": "Commons:1903:p.704:cotelettes_champvallon",
+      "canonical_source_locator": "Commons:1903:p.704:cotelettes_champvallon",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 34,
+      "legacy_recipe_id": "aa989c70-cab6-56e7-b390-127e23d9e8e7",
+      "canonical_recipe_id": "aa989c70-cab6-56e7-b390-127e23d9e8e7",
+      "title_legacy_en": "Poulet Sauté Chasseur",
+      "title_canonical_fr": "Poulet Sauté Chasseur",
+      "legacy_source_locator": "Commons:1903:p.810:poulet_saute_chasseur",
+      "canonical_source_locator": "Commons:1903:p.810:poulet_saute_chasseur",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 35,
+      "legacy_recipe_id": "15f1b452-6749-57b5-8ee6-3d4ebd4479da",
+      "canonical_recipe_id": "15f1b452-6749-57b5-8ee6-3d4ebd4479da",
+      "title_legacy_en": "Suprêmes de Volaille Agnès Sorel",
+      "title_canonical_fr": "Suprêmes de Volaille Agnès Sorel",
+      "legacy_source_locator": "Commons:1903:p.796:supremes_agnes_sorel",
+      "canonical_source_locator": "Commons:1903:p.796:supremes_agnes_sorel",
+      "meal_type": "dinner"
+    },
+    {
+      "index": 36,
+      "legacy_recipe_id": "b1a0ca01-35f8-57a7-95d8-1b3d8feba365",
+      "canonical_recipe_id": "b1a0ca01-35f8-57a7-95d8-1b3d8feba365",
+      "title_legacy_en": "Suprêmes de Volaille Alexandra",
+      "title_canonical_fr": "Suprêmes de Volaille Alexandra",
+      "legacy_source_locator": "Commons:1903:p.796:supremes_alexandra",
+      "canonical_source_locator": "Commons:1903:p.796:supremes_alexandra",
+      "meal_type": "dinner"
+    }
+  ]
+}

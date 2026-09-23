@@ -284,7 +284,7 @@ def test_real_escoffier_corpus_acceptance(tmp_path: Path) -> None:
     assert readiness.dinner_verified == 12
     assert readiness.unique_verified_recipes == 36
     assert readiness.can_form_21_meal_week is True
-    assert readiness.production_canary_eligible is False
+    assert readiness.production_canary_eligible is True
 
     # Check store directly
     store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
@@ -293,12 +293,12 @@ def test_real_escoffier_corpus_acceptance(tmp_path: Path) -> None:
 
     for r in recipes:
         assert r.author_id == AUTHOR_ESCOFFIER
-        assert r.source_id == "SRC_ESCOFFIER_1907_EN"
-        assert r.source_locator and r.source_locator.startswith("Heinemann:1907:chapter=")
-        assert r.source_content_hash == "e0850c1d4589b8e03a7832258f911c447fb3dc0d9e706403822a7477c8615993"
+        assert r.source_id == "SRC_ESCOFFIER_1903_COMMONS"
+        assert r.source_locator and r.source_locator.startswith("Commons:1903:p.")
+        assert r.source_content_hash == "e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9"
         assert r.is_verified_for_planning is True
-        assert r.production_eligible is False
-        assert r.is_production_cleared is False
+        assert r.production_eligible is True
+        assert r.is_production_cleared is True
         assert len(r.ingredients) >= 2
         assert len(r.instructions) >= 2
 
@@ -348,9 +348,10 @@ def test_retrieval_acceptance_real_corpus(tmp_path: Path) -> None:
     assert len(breakfast_cands) == 10
     for cand in breakfast_cands:
         assert cand.recipe.author_id == AUTHOR_ESCOFFIER
-        assert cand.recipe.source_id == "SRC_ESCOFFIER_1907_EN"
+        assert cand.recipe.source_id == "SRC_ESCOFFIER_1903_COMMONS"
         assert cand.recipe.is_verified_for_planning is True
-        assert cand.recipe.production_eligible is False
+        assert cand.recipe.production_eligible is True
+        assert cand.recipe.is_production_cleared is True
         assert MealType.BREAKFAST in cand.recipe.meal_types
 
     # 2. Retrieve lunch candidates
@@ -375,13 +376,16 @@ def test_retrieval_acceptance_real_corpus(tmp_path: Path) -> None:
         assert cand.recipe.author_id == AUTHOR_ESCOFFIER
         assert MealType.DINNER in cand.recipe.meal_types
 
-    # 4. Production-cleared retrieval filter returns zero (not cleared for production)
+    # 4. Production-cleared retrieval filter returns verified candidates (now cleared for production via Commons)
     prod_cands = retriever.retrieve_candidates_for_slot(
         meal_slot=MealType.DINNER,
         authors=[AUTHOR_ESCOFFIER],
+        limit=10,
         production_only=True,
     )
-    assert len(prod_cands) == 0
+    assert len(prod_cands) == 10
+    for cand in prod_cands:
+        assert cand.recipe.is_production_cleared is True
 
     # 5. Metadata-only authors return ZERO candidates
     assert len(retriever.retrieve_candidates_for_slot(meal_slot=MealType.LUNCH, authors=[AUTHOR_POKHLEBKIN])) == 0
@@ -393,7 +397,7 @@ def test_retrieval_acceptance_real_corpus(tmp_path: Path) -> None:
 # ==============================================================================
 
 def test_escoffier_21_readiness_calculation(tmp_path: Path) -> None:
-    """Assert 12/12/12 coverage satisfies can_form_21_meal_week but fails closed for production_canary_eligible."""
+    """Assert 12/12/12 coverage satisfies can_form_21_meal_week and production_canary_eligible is True with Commons source."""
     db_path = tmp_path / "readiness_21.db"
     _, readiness = build_escoffier_real_catalog(db_path, build_id="readiness-test")
 
@@ -403,10 +407,10 @@ def test_escoffier_21_readiness_calculation(tmp_path: Path) -> None:
     assert escoffier_cov.dinner_verified == 12
     assert escoffier_cov.unique_verified_recipes == 36
     assert escoffier_cov.can_form_21_meal_week is True
-    assert escoffier_cov.production_canary_eligible is False
+    assert escoffier_cov.production_canary_eligible is True
 
     assert readiness.can_form_21_meal_week is True
-    assert readiness.production_canary_eligible is False
+    assert readiness.production_canary_eligible is True
 
 
 # ==============================================================================

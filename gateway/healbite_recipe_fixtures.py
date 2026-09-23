@@ -189,6 +189,44 @@ SRC_ESCOFFIER_1907_EN_SOURCE = RecipeSource(
     production_rights_approved=False,
 )
 
+SRC_ESCOFFIER_1903_COMMONS_SOURCE = RecipeSource(
+    source_id="SRC_ESCOFFIER_1903_COMMONS",
+    author_id=AUTHOR_ESCOFFIER,
+    title="Le Guide Culinaire (1903/1907 Second Edition, French Original)",
+    source_type=SourceType.BOOK,
+    source_locator="Deuxième édition, Paris, 1907 / Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
+    publication_year=1903,
+    edition="Deuxième édition (1907) / Première édition (1903)",
+    language="fr",
+    rights_status=RightsStatus.PUBLIC_DOMAIN,
+    rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+    rights_evidence_locator="Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
+    rights_evidence_note=(
+        "Underlying work public domain worldwide (author Auguste Escoffier d. 1935, collaborator Philéas Gilbert d. 1942; "
+        "published pre-1928, >70y pma expired). Digital scan published by Leeds University Library / Wellcome under Public Domain Mark 1.0; "
+        "own extraction from digital image/text layer (transcription rights not applicable); commercial reuse permitted; approved for production."
+    ),
+    source_content_hash="e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9",
+    ingestion_timestamp="2026-09-24 00:00:00",
+    ingestion_tool_version="1.0.0",
+    content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+    verification_status=VerificationStatus.VERIFIED,
+    created_at="2026-09-24 00:00:00",
+    underlying_work_rights="PUBLIC_DOMAIN",
+    digital_reproduction_rights="PUBLIC_DOMAIN_MARKED",
+    digital_reproduction_reuse_terms="Public Domain Mark 1.0; scan published by Leeds University Library / Wellcome on Wikimedia Commons and Internet Archive",
+    commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+    transcription_source="OWN_EXTRACTION",
+    transcription_rights="NOT_APPLICABLE",
+    partner_institution_terms="Leeds University Library / Wellcome Collection (digital scan b21525912)",
+    target_jurisdiction_status="Worldwide Public Domain (author d. 1935, collaborator d. 1942, published 1903/1907)",
+    translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+    jurisdiction_basis="Worldwide / FR / US / UK",
+    edition_basis="Paris 1903/1907 French second edition",
+    canonical_url="https://commons.wikimedia.org/wiki/File:Auguste_Escoffier_-_Le_Guide_Culinaire_-_Aide-m%C3%A9moire_de_cuisine_pratique,_1903.djvu",
+    production_rights_approved=True,
+)
+
 # Synthetic Public-Domain / Authorized Recipe Fixtures for Tests
 # Contains 27 diverse recipes (9 breakfast, 9 lunch, 9 dinner) across 3 authors
 _TEST_RECIPES_RAW = [
@@ -886,12 +924,15 @@ def build_pilot_recipe_catalog(
 def build_escoffier_real_catalog(
     db_path: str | Path,
     *,
-    build_id: str = "escoffier-real-corpus-v1",
+    build_id: str = "escoffier-commons-v1",
     reports_dir: str | Path | None = None,
     recipes_json_path: str | Path = "recipe_corpus/authorized_inputs/escoffier_recipes.json",
     include_test_fixtures: bool = False,
 ) -> tuple[str, CatalogReadinessReport]:
-    pipeline = RecipeIngestionPipeline(db_path, build_id=build_id)
+    p_path = Path(db_path)
+    if p_path.exists():
+        p_path.unlink()
+    pipeline = RecipeIngestionPipeline(p_path, build_id=build_id)
 
     # 1. Ingest production manifests (authors and metadata-only sources)
     for manifest in PRODUCTION_MANIFESTS:
@@ -899,8 +940,8 @@ def build_escoffier_real_catalog(
         for source in manifest["sources"]:
             pipeline.ingest_source(source)
 
-    # 2. Ingest authorized Escoffier 1907 English source
-    pipeline.ingest_source(SRC_ESCOFFIER_1907_EN_SOURCE)
+    # 2. Ingest authorized Escoffier 1903 Commons French source
+    pipeline.ingest_source(SRC_ESCOFFIER_1903_COMMONS_SOURCE)
 
     # 3. Optionally ingest test fixtures (for hybrid testing)
     if include_test_fixtures:

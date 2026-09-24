@@ -947,6 +947,11 @@ class HealBiteWeeklyMenuTelegramController:
                 authors = [selected_author] if selected_author else ["pokhlebkin", "escoffier", "jamie_oliver"]
 
             week_start = parsed.week_start or self._week_start()
+            idempotency_key = None
+            if callback_query_id is not None:
+                cb_query_id_str = str(callback_query_id).strip()
+                if cb_query_id_str:
+                    idempotency_key = f"telegram-rcp-gen:{actor}:{week_start}:{cb_query_id_str}"
             try:
                 grounded_service = self._recipe_grounded_service_factory()
                 from gateway.healbite_recipe_grounded_service import RecipeGroundedStatus
@@ -955,7 +960,18 @@ class HealBiteWeeklyMenuTelegramController:
                     actor,
                     week_start=week_start,
                     authors=authors,
+                    idempotency_key=idempotency_key,
                 )
+                if gen_result.status == RecipeGroundedStatus.CONCURRENT_GENERATION_IN_FLIGHT:
+                    return self.home(
+                        actor,
+                        notice="Генерация меню уже выполняется. Пожалуйста, подождите завершения.",
+                    )
+                if gen_result.status == RecipeGroundedStatus.RATE_LIMITED:
+                    return self.home(
+                        actor,
+                        notice="Превышен лимит запросов на составление меню. Попробуйте позже.",
+                    )
                 if gen_result.status == RecipeGroundedStatus.INSUFFICIENT_GROUNDED_RECIPES:
                     return self.home(
                         actor,

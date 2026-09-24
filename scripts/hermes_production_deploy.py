@@ -60,6 +60,7 @@ CANONICAL_PUBLIC_DEFAULTS = {
     "HEALBITE_INVENTORY_PHOTO_UI_PUBLIC": "false",
     "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_PUBLIC": "false",
     "HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC": "false",
+    "HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC": "false",
 }
 
 
@@ -125,6 +126,10 @@ class DeploymentContract:
     database_mount_type: str
     database_read_only: bool
     legacy_database_sources: tuple[Path, ...]
+    recipe_catalog_source: Path
+    recipe_catalog_target: Path
+    recipe_catalog_mount_type: str
+    recipe_catalog_read_only: bool
     lease_path: Path
     lease_owner_uids: frozenset[int]
     lease_timeout_seconds: int
@@ -267,6 +272,7 @@ def load_contract(
     )
     if set(raw) != {
         "version", "provenance", "compose", "runtime", "database_mount",
+        "recipe_catalog_mount",
         "capacity", "secrets", "deployment", "rollback", "feature_gates",
         "attestation", "runtime_bindings", "canary_policy", "public_gates",
     }:
@@ -341,6 +347,17 @@ def load_contract(
         or legacy_database_sources != (Path("/home/hermes/healbite.db"),)
     ):
         _fail("database-mount-policy")
+
+    catalog_mount = _mapping(raw["recipe_catalog_mount"], code="manifest-recipe-catalog-mount")
+    recipe_catalog_source = Path(_string(catalog_mount.get("source"), code="recipe-catalog-source"))
+    recipe_catalog_target = Path(_string(catalog_mount.get("target"), code="recipe-catalog-target"))
+    if (
+        recipe_catalog_source != Path("/var/lib/hermes/recipe-catalog/recipe_catalog.db")
+        or recipe_catalog_target != Path("/home/hermes/recipe_catalog.db")
+        or catalog_mount.get("type") != "bind"
+        or catalog_mount.get("read_write") is not False
+    ):
+        _fail("recipe-catalog-mount-policy")
 
     capacity = _mapping(raw["capacity"], code="manifest-capacity")
     capacity_filesystem = Path(_string(capacity.get("filesystem"), code="capacity-filesystem"))
@@ -483,6 +500,8 @@ def load_contract(
         "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
         "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": False,
         "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
+        "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED": False,
+        "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST": "",
     }
     if feature_gates != expected_manifest_gates:
         _fail("feature-gate-policy")
@@ -505,12 +524,15 @@ def load_contract(
         "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
         "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "false",
         "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
+        "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED": "false",
+        "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST": "",
     }
     runtime_bindings_raw = _mapping(
         raw.get("runtime_bindings"), code="manifest-runtime-bindings"
     )
     expected_runtime_bindings = {
         "QDRANT_COLLECTION": "healbite_memory_os_v2",
+        "HEALBITE_RECIPE_CATALOG_PATH": "/home/hermes/recipe_catalog.db",
     }
     if runtime_bindings_raw != expected_runtime_bindings:
         _fail("runtime-binding-policy")
@@ -561,6 +583,10 @@ def load_contract(
         database_mount_type="bind",
         database_read_only=False,
         legacy_database_sources=legacy_database_sources,
+        recipe_catalog_source=recipe_catalog_source,
+        recipe_catalog_target=recipe_catalog_target,
+        recipe_catalog_mount_type="bind",
+        recipe_catalog_read_only=True,
         lease_path=lease_path,
         lease_owner_uids=frozenset({0}),
         lease_timeout_seconds=lease_timeout_seconds,
@@ -1332,6 +1358,15 @@ def _database_mount_kwargs(contract: DeploymentContract) -> dict[str, object]:
     }
 
 
+def _recipe_catalog_mount_kwargs(contract: DeploymentContract) -> dict[str, object]:
+    return {
+        "expected_source": str(contract.recipe_catalog_source),
+        "expected_target": str(contract.recipe_catalog_target),
+        "expected_type": contract.recipe_catalog_mount_type,
+        "expected_read_only": contract.recipe_catalog_read_only,
+    }
+
+
 def validate_compose_render(
     contract: DeploymentContract,
     image: str,
@@ -1411,6 +1446,12 @@ def validate_compose_render(
         preflight.validate_database_mounts,
         mounts,
         **_database_mount_kwargs(contract),
+        source_path_validator=None,
+    )
+    _preflight(
+        preflight.validate_recipe_catalog_mounts,
+        mounts,
+        **_recipe_catalog_mount_kwargs(contract),
         source_path_validator=None,
     )
     return mounts
@@ -1594,13 +1635,21 @@ def _validate_live_future_mounts(
     future_mounts: tuple[preflight.MountRecord, ...],
 ) -> preflight.DatabaseMountAssessment:
     live_mounts = inspect_live_database_mounts(contract)
-    return _preflight(
+    assessment = _preflight(
         preflight.validate_live_future_database_mounts,
         future_mounts,
         live_mounts,
         **_database_mount_kwargs(contract),
         source_path_validator=preflight.validate_database_source_path,
     )
+    _preflight(
+        preflight.validate_live_future_recipe_catalog_mounts,
+        future_mounts,
+        live_mounts,
+        **_recipe_catalog_mount_kwargs(contract),
+        source_path_validator=None,
+    )
+    return assessment
 
 
 def _canary_override_path(contract: DeploymentContract) -> Path:
@@ -1860,6 +1909,18 @@ def _parse_canary_authority(
             has_public_onboarding = True
             continue
 
+        if key == "HEALBITE_TARGET_RIGHTS_SCOPE":
+            tokens = [t.strip() for t in value.split(",")]
+            if (
+                not tokens
+                or any(t not in {"FR", "US"} for t in tokens)
+                or len(set(tokens)) != len(tokens)
+                or value != ",".join(tokens)
+            ):
+                _fail("canary-target-rights-scope-invalid")
+            gates[key] = ",".join(tokens)
+            continue
+
         if key.endswith("_ENABLED"):
             feature = key.removesuffix("_ENABLED")
             kind = "enabled"
@@ -1906,6 +1967,11 @@ def _parse_canary_authority(
         ):
             _fail("canary-allowlist-invalid-member")
         gates[allowlist_key] = ",".join(members)
+    if "HEALBITE_RECIPE_GROUNDED_MENU" in selected_features:
+        if gates.get("HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC", "false") == "true":
+            _fail("canary-recipe-grounded-public-forbidden")
+        if "HEALBITE_TARGET_RIGHTS_SCOPE" not in gates:
+            _fail("canary-recipe-grounded-missing-target-rights-scope")
     return gates
 
 
@@ -1978,6 +2044,14 @@ def execute_canary_activation(
 
     try:
         canary_gates = _read_canary_authority(contract, source)
+        if canary_gates.get("HEALBITE_RECIPE_GROUNDED_MENU_ENABLED") == "true":
+            _preflight(
+                preflight.validate_recipe_catalog_source_path,
+                contract.recipe_catalog_source,
+                allowed_owner_uids=contract.approved_source_owner_uids,
+                expected_hash="d31d71658258270f562c444f4469cceceaccf83d309424355fa21db379dd085e",
+                check_content=True,
+            )
         secrets = read_required_secrets(contract, contract.approved_secret_source)
         with tempfile.TemporaryDirectory(prefix="hermes-canary-plan-") as raw_directory:
             temporary = _temporary_render_contract(contract, Path(raw_directory))
@@ -1985,7 +2059,7 @@ def execute_canary_activation(
             _write_canary_override(temporary, canary_gates)
             try:
                 future_mounts = validate_compose_render(
-                    temporary, target.image_id, revision, 
+                    temporary, target.image_id, revision,
                     canary_override=True, expected_canary_gates=canary_gates
                 )
             finally:
@@ -2305,6 +2379,8 @@ def _post_deploy_attestation(
         expected_qdrant_collection=contract.runtime_bindings.get(
             "QDRANT_COLLECTION", "healbite_memory_os_v2"
         ),
+        expected_recipe_catalog_source=contract.recipe_catalog_source,
+        expected_recipe_catalog_target=contract.recipe_catalog_target,
         image_declared_volume_destinations=image_declared_volume_destinations,
         run=_run,
     )

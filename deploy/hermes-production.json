@@ -43,6 +43,12 @@
       "/home/hermes/healbite.db"
     ]
   },
+  "recipe_catalog_mount": {
+    "source": "/var/lib/hermes/recipe-catalog/recipe_catalog.db",
+    "target": "/home/hermes/recipe_catalog.db",
+    "type": "bind",
+    "read_write": false
+  },
   "capacity": {
     "filesystem": "/",
     "minimum_free_basis_points": 1000,
@@ -193,7 +199,8 @@
       "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED",
       "HEALBITE_SHOPPING_LIST_ENABLED",
       "HEALBITE_WEEKLY_MENU_ENABLED",
-      "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED"
+      "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED",
+      "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED"
     ],
     "allowlist_names": [
       "HEALBITE_HOUSEHOLDS_ALLOWLIST",
@@ -204,7 +211,8 @@
       "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST",
       "HEALBITE_SHOPPING_LIST_ALLOWLIST",
       "HEALBITE_WEEKLY_MENU_ALLOWLIST",
-      "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST"
+      "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST",
+      "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST"
     ],
     "qdrant_non_interference_fields": [
       "container_id",
@@ -239,7 +247,9 @@
     "HEALBITE_INVENTORY_TEXT_UI_ALLOWLIST": "",
     "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ALLOWLIST": "",
     "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
-    "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": ""
+    "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
+    "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED": false,
+    "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST": ""
   },
   "public_gates": {
     "HEALBITE_HOUSEHOLDS_PUBLIC": false,
@@ -251,10 +261,12 @@
     "HEALBITE_INVENTORY_PHOTO_PUBLIC": false,
     "HEALBITE_INVENTORY_PHOTO_UI_PUBLIC": false,
     "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_PUBLIC": false,
-    "HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC": false
+    "HEALBITE_WEEKLY_MENU_INVENTORY_PUBLIC": false,
+    "HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC": false
   },
   "runtime_bindings": {
-    "QDRANT_COLLECTION": "healbite_memory_os_v2"
+    "QDRANT_COLLECTION": "healbite_memory_os_v2",
+    "HEALBITE_RECIPE_CATALOG_PATH": "/home/hermes/recipe_catalog.db"
   },
   "canary_policy": {
     "source_environment_file": "/etc/hermes/hermes-canary.env",
@@ -267,7 +279,8 @@
       "HEALBITE_INVENTORY_TEXT_UI",
       "HEALBITE_INVENTORY_PHOTO_UI",
       "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI",
-      "HEALBITE_WEEKLY_MENU_INVENTORY"
+      "HEALBITE_WEEKLY_MENU_INVENTORY",
+      "HEALBITE_RECIPE_GROUNDED_MENU"
     ]
   }
 }

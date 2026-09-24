@@ -21,6 +21,7 @@ services:
     volumes:
       - /home/hermes/.hermes:/home/hermes/.hermes
       - /var/lib/hermes/production-db/healbite.db:/home/hermes/healbite.db
+      - /var/lib/hermes/recipe-catalog/recipe_catalog.db:/home/hermes/recipe_catalog.db:ro
       - /home/hermes/backups:/home/hermes/backups
       - /home/hermes/.cache/huggingface:/home/hermes/.cache/huggingface
     command: ["hermes", "gateway"]

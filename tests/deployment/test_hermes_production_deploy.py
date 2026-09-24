@@ -38,6 +38,10 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
     database_source.parent.mkdir(mode=0o700)
     database_source.write_bytes(b"synthetic-db")
     database_source.chmod(0o600)
+    recipe_catalog_source = tmp_path / "recipe-catalog" / "recipe_catalog.db"
+    recipe_catalog_source.parent.mkdir(mode=0o700)
+    recipe_catalog_source.write_bytes(b"synthetic-catalog")
+    recipe_catalog_source.chmod(0o600)
     contract = replace(
         deploy.load_contract(),
         runtime_directory=runtime,
@@ -47,6 +51,7 @@ def protected_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]
         approved_secret_source=source,
         approved_source_owner_uids=frozenset({deploy._effective_uid()}),
         database_source=database_source,
+        recipe_catalog_source=recipe_catalog_source,
         capacity_filesystem=tmp_path,
         minimum_free_basis_points=1,
         estimated_peak_incremental_build_bytes=1,
@@ -106,7 +111,13 @@ def _safe_docker_runner(
                         "source": str(contract.database_source),
                         "target": str(contract.database_target),
                         "read_only": contract.database_read_only,
-                    }
+                    },
+                    {
+                        "type": contract.recipe_catalog_mount_type,
+                        "source": str(contract.recipe_catalog_source),
+                        "target": str(contract.recipe_catalog_target),
+                        "read_only": contract.recipe_catalog_read_only,
+                    },
                 ]
             }
         }
@@ -117,7 +128,13 @@ def _safe_docker_runner(
             "Source": str(contract.database_source),
             "Destination": str(contract.database_target),
             "RW": not contract.database_read_only,
-        }
+        },
+        {
+            "Type": contract.recipe_catalog_mount_type,
+            "Source": str(contract.recipe_catalog_source),
+            "Destination": str(contract.recipe_catalog_target),
+            "RW": not contract.recipe_catalog_read_only,
+        },
     ]
 
     def runner(argv, **_kwargs):
@@ -156,7 +173,13 @@ def _with_preflight_documents(contract: deploy.DeploymentContract, runner):
                         "source": str(contract.database_source),
                         "target": str(contract.database_target),
                         "read_only": contract.database_read_only,
-                    }
+                    },
+                    {
+                        "type": contract.recipe_catalog_mount_type,
+                        "source": str(contract.recipe_catalog_source),
+                        "target": str(contract.recipe_catalog_target),
+                        "read_only": contract.recipe_catalog_read_only,
+                    },
                 ]
             }
         }
@@ -167,7 +190,13 @@ def _with_preflight_documents(contract: deploy.DeploymentContract, runner):
             "Source": str(contract.database_source),
             "Destination": str(contract.database_target),
             "RW": not contract.database_read_only,
-        }
+        },
+        {
+            "Type": contract.recipe_catalog_mount_type,
+            "Source": str(contract.recipe_catalog_source),
+            "Destination": str(contract.recipe_catalog_target),
+            "RW": not contract.recipe_catalog_read_only,
+        },
     ]
 
     def wrapped(argv, **kwargs):
@@ -357,7 +386,16 @@ def test_manifest_is_canonical_and_secret_free() -> None:
     assert contract.required_ci_workflows == ("Tests", "Lint (ruff + ty)", "Typecheck", "Nix")
     assert contract.database_source == Path("/var/lib/hermes/production-db/healbite.db")
     assert contract.lease_path == Path("/run/hermes/hermes-deployment-operation.json")
-    assert contract.runtime_bindings == {"QDRANT_COLLECTION": "healbite_memory_os_v2"}
+    assert contract.runtime_bindings == {
+        "QDRANT_COLLECTION": "healbite_memory_os_v2",
+        "HEALBITE_RECIPE_CATALOG_PATH": "/home/hermes/recipe_catalog.db",
+    }
+    assert contract.recipe_catalog_source == Path(
+        "/var/lib/hermes/recipe-catalog/recipe_catalog.db"
+    )
+    assert contract.recipe_catalog_target == Path("/home/hermes/recipe_catalog.db")
+    assert contract.recipe_catalog_mount_type == "bind"
+    assert contract.recipe_catalog_read_only is True
     assert FAKE_SECRET not in text
 
 
@@ -791,6 +829,10 @@ services:
       - type: bind
         source: {contract.database_source}
         target: /home/hermes/healbite.db
+      - type: bind
+        source: {contract.recipe_catalog_source}
+        target: /home/hermes/recipe_catalog.db
+        read_only: true
   qdrant:
     image: qdrant/qdrant:v1.15.4
 """.lstrip(),
@@ -1420,8 +1462,8 @@ def test_feature_flags_remain_disabled() -> None:
         override["x-hermes-feature-state-inventory"]
         == expected_inventory
     )
-    assert len(expected_inventory["feature_gate_names"]) == 9
-    assert len(expected_inventory["allowlist_names"]) == 9
+    assert len(expected_inventory["feature_gate_names"]) == 10
+    assert len(expected_inventory["allowlist_names"]) == 10
 
 
 def test_canonical_tooling_has_no_active_legacy_paths() -> None:

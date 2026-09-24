@@ -345,6 +345,66 @@ def validate_live_future_database_mounts(
     return future
 
 
+def validate_recipe_catalog_mounts(
+    mounts: Sequence[MountRecord],
+    *,
+    expected_source: str,
+    expected_target: str,
+    expected_type: str,
+    expected_read_only: bool,
+    source_path_validator: Callable[[Path], None] | None = None,
+) -> MountRecord:
+    source_path = _absolute(expected_source, code="unsafe-recipe-catalog-source-path")
+    target_path = PurePosixPath(
+        _absolute(expected_target, code="unsafe-recipe-catalog-target-path")
+    )
+    at_target = [mount for mount in mounts if mount.target == expected_target]
+    if len(at_target) > 1:
+        _fail("duplicate-recipe-catalog-target")
+    if any(
+        mount.source == expected_source and mount.target != expected_target
+        for mount in mounts
+    ):
+        _fail("wrong-recipe-catalog-target")
+    if not at_target:
+        _fail("missing-canonical-recipe-catalog-mount")
+    canonical = at_target[0]
+    if canonical.source != expected_source:
+        _fail("wrong-recipe-catalog-source")
+    if canonical.mount_type != expected_type:
+        _fail("wrong-recipe-catalog-mount-type")
+    if canonical.read_only != expected_read_only:
+        _fail("wrong-recipe-catalog-mount-mode")
+    for mount in mounts:
+        other = PurePosixPath(mount.target)
+        if mount is canonical or not other.is_absolute():
+            continue
+        if (
+            mount.source == expected_source
+            or target_path.is_relative_to(other)
+            or other.is_relative_to(target_path)
+        ):
+            _fail("conflicting-recipe-catalog-mount")
+    if source_path_validator is not None:
+        source_path_validator(source_path)
+    return canonical
+
+
+def validate_live_future_recipe_catalog_mounts(
+    future_mounts: Sequence[MountRecord],
+    live_mounts: Sequence[MountRecord],
+    **kwargs,
+) -> MountRecord:
+    future = validate_recipe_catalog_mounts(future_mounts, **kwargs)
+    expected_target = kwargs.get("expected_target")
+    live_has_target = any(mount.target == expected_target for mount in live_mounts)
+    if live_has_target:
+        live = validate_recipe_catalog_mounts(live_mounts, **kwargs)
+        if future != live:
+            _fail("live-future-recipe-catalog-mount-mismatch")
+    return future
+
+
 def validate_capacity(
     *,
     phase: str,
@@ -788,3 +848,98 @@ def validate_database_source_path(path: Path) -> None:
         _fail("unsafe-db-source-path")
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         _fail("unsafe-db-source-path")
+
+
+def validate_recipe_catalog_source_path(
+    path: Path,
+    *,
+    allowed_owner_uids: frozenset[int] | None = None,
+    expected_hash: str | None = None,
+    check_content: bool = True,
+) -> None:
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        _fail("unsafe-recipe-catalog-source-path")
+    assert_no_symlink_components(path)
+    try:
+        metadata = path.lstat()
+    except OSError:
+        _fail("recipe-catalog-missing")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        _fail("unsafe-recipe-catalog-file")
+    if allowed_owner_uids is not None and hasattr(os, "getuid"):
+        if metadata.st_uid not in allowed_owner_uids:
+            _fail("unsafe-recipe-catalog-owner")
+    if hasattr(os, "getuid"):
+        mode = stat.S_IMODE(metadata.st_mode)
+        if mode & 0o002 or mode not in {0o644, 0o640, 0o600, 0o444, 0o440, 0o400}:
+            _fail("unsafe-recipe-catalog-permissions")
+    if check_content:
+        import sqlite3
+
+        try:
+            uri = f"file:{path.resolve().as_posix()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        except Exception:
+            _fail("invalid-recipe-catalog-database")
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute("PRAGMA integrity_check")
+                rows = cur.fetchall()
+                if rows != [("ok",)]:
+                    _fail("invalid-recipe-catalog-database")
+            except sqlite3.Error:
+                _fail("invalid-recipe-catalog-database")
+
+            try:
+                cur.execute("SELECT key, value FROM catalog_metadata")
+                meta = dict(cur.fetchall())
+            except sqlite3.Error:
+                _fail("invalid-recipe-catalog-schema")
+
+            if meta.get("schema_version") != "1":
+                _fail("invalid-recipe-catalog-schema")
+
+            try:
+                cur.execute("SELECT COUNT(*) FROM recipe_authors WHERE author_id LIKE 'AUTHOR_TEST%'")
+                test_authors = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM recipe_sources WHERE rights_evidence_locator LIKE '%synthetic%'")
+                synthetic_sources = cur.fetchone()[0]
+            except sqlite3.Error:
+                _fail("invalid-recipe-catalog-schema")
+
+            if test_authors > 0 or synthetic_sources > 0:
+                _fail("recipe-catalog-fixtures-present")
+
+            recipe_count = int(meta.get("recipe_count", "0"))
+            verified_count = int(meta.get("verified_recipe_count", "0"))
+            if recipe_count == 0 or verified_count == 0:
+                _fail("empty-recipe-catalog")
+
+            stored_hash = meta.get("content_hash", "")
+            if expected_hash is not None and stored_hash != expected_hash:
+                _fail("recipe-catalog-hash-mismatch")
+
+            cur.execute(
+                "SELECT recipe_id, recipe_version, author_id, source_id, title, "
+                "meal_types_json, servings, rights_status, verified, verification_status "
+                "FROM recipes ORDER BY recipe_id, recipe_version"
+            )
+            recipe_rows = cur.fetchall()
+            hasher = hashlib.sha256()
+            for r in recipe_rows:
+                hasher.update("|".join(str(val) for val in r).encode("utf-8"))
+                cur.execute(
+                    "SELECT ingredient_id, display_name, quantity_value, quantity_unit, optional, position "
+                    "FROM recipe_ingredients WHERE recipe_id = ? AND recipe_version = ? ORDER BY position",
+                    (r[0], r[1]),
+                )
+                for ing in cur.fetchall():
+                    hasher.update("|".join(str(v) for v in ing).encode("utf-8"))
+            computed_hash = hasher.hexdigest()
+            if computed_hash != stored_hash:
+                _fail("recipe-catalog-hash-mismatch")
+            if expected_hash is not None and computed_hash != expected_hash:
+                _fail("recipe-catalog-hash-mismatch")
+        finally:
+            conn.close()

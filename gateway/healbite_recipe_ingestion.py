@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
@@ -249,6 +250,22 @@ class RecipeIngestionPipeline:
                 raise RightsPolicyViolationError(
                     f"Source '{source.source_id}' cannot have production rights approved when rights_clearance_scope.commercial_use_allowed is False"
                 )
+            # Exact edition provenance closure
+            edition_str = (source.edition or "").strip()
+            if not edition_str:
+                raise RightsPolicyViolationError(
+                    f"Production approved source '{source.source_id}' must specify an explicit edition statement"
+                )
+            if "/" in edition_str or "1903/1907" in edition_str or "1903/1907" in (source.edition_basis or ""):
+                raise RightsPolicyViolationError(
+                    f"Production approved source '{source.source_id}' cannot have composite or ambiguous edition '{source.edition}'"
+                )
+            if source.publication_year and "(" in edition_str and ")" in edition_str:
+                year_match = re.search(r"\((\d{4})\)", edition_str)
+                if year_match and int(year_match.group(1)) != source.publication_year:
+                    raise RightsPolicyViolationError(
+                        f"Production approved source '{source.source_id}' publication year {source.publication_year} contradicts edition year {year_match.group(1)}"
+                    )
 
         scope_json = (
             json.dumps(source.rights_clearance_scope.to_dict())

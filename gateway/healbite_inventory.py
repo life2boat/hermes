@@ -514,6 +514,27 @@ class HealBiteInventoryStore:
                 return None
             return self._load_snapshot(conn, str(row["id"]), scope)
 
+    def get_latest_pending_snapshot(
+        self,
+        scope: InventoryOwnerScope,
+    ) -> InventorySnapshotView | None:
+        owner_column = "owner_user_id" if scope.user_id is not None else "household_id"
+        owner_value = scope.user_id if scope.user_id is not None else scope.household_id
+        with self._connection_scope() as conn:
+            row = conn.execute(
+                f"""
+                SELECT id
+                FROM {INVENTORY_SNAPSHOTS_TABLE}
+                WHERE {owner_column} = ? AND status = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (owner_value, InventoryStatus.PENDING.value),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._load_snapshot(conn, str(row["id"]), scope)
+
     def replace_pending_items(
         self,
         scope: InventoryOwnerScope,

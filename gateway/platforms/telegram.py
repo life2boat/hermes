@@ -241,6 +241,92 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "⚙️ Ограничения": "__placeholder__:restrictions",
     "❓ Помощь": "__placeholder__:help",
 }
+_HEALBITE_NORMALIZED_COMMAND_MAP = {
+    "список покупок": SHOPPING_COMMAND,
+    "покупки": SHOPPING_COMMAND,
+    "меню на неделю": WEEKLY_MENU_COMMAND,
+    "продукты дома": INVENTORY_COMMAND,
+    "из холодильника в меню": FRIDGE_MENU_COMMAND,
+    "мой профиль": "/profile",
+    "профиль": "/profile",
+    "дневник еды": "/diary",
+    "дневник": "/diary",
+    "трекер веса": "/weight",
+    "вес": "/weight",
+    "трекер воды": "/water",
+    "вода": "/water",
+    "семья": FAMILY_COMMAND,
+    "отчет за неделю": "/stats 7d",
+    "отчёт за неделю": "/stats 7d",
+    "ограничения": "__placeholder__:restrictions",
+    "помощь": "__placeholder__:help",
+}
+_WEEKLY_MENU_INTENT_PATTERNS = (
+    re.compile(r"\bсоставить\s+меню\b", re.IGNORECASE),
+    re.compile(r"\bсобрать\s+меню\b", re.IGNORECASE),
+    re.compile(r"\bсоставь\s+.*меню\b", re.IGNORECASE),
+    re.compile(r"\bсобери\s+.*меню\b", re.IGNORECASE),
+    re.compile(r"\bменю\s+на\s+неделю\b", re.IGNORECASE),
+    re.compile(r"\bнедельное\s+меню\b", re.IGNORECASE),
+    re.compile(r"\bиз\s+этих\s+продуктов\b", re.IGNORECASE),
+    re.compile(r"\bчто\s+приготовить\s+.*на\s+неделю\b", re.IGNORECASE),
+    re.compile(r"\bменю\s+из\s+продуктов\s+дома\b", re.IGNORECASE),
+)
+_SHOPPING_INTENT_PATTERNS = (
+    re.compile(r"\bсписок\s+покупок\b", re.IGNORECASE),
+    re.compile(r"\bчто\s+купить\b", re.IGNORECASE),
+    re.compile(r"\bсписок\s+в\s+магазин\b", re.IGNORECASE),
+    re.compile(r"\bкупить\s+продукты\b", re.IGNORECASE),
+)
+
+
+def _is_weekly_menu_intent(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return False
+    return any(pattern.search(raw) for pattern in _WEEKLY_MENU_INTENT_PATTERNS)
+
+
+def _is_shopping_intent(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return False
+    return any(pattern.search(raw) for pattern in _SHOPPING_INTENT_PATTERNS)
+
+
+def _is_structured_inventory_input(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return False
+    if _is_weekly_menu_intent(raw):
+        return False
+    from gateway.healbite_inventory import (
+        _PREFIX_QUANTITY_RE,
+        _SUFFIX_QUANTITY_RE,
+        _COUNT_PREFIX_RE,
+    )
+    chunks = [" ".join(chunk.split()) for chunk in re.split(r"[,\n;]+", raw) if chunk.strip()]
+    if not chunks:
+        return False
+    matches = 0
+    for chunk in chunks:
+        if _PREFIX_QUANTITY_RE.match(chunk) or _SUFFIX_QUANTITY_RE.match(chunk) or _COUNT_PREFIX_RE.match(chunk):
+            matches += 1
+
+    if len(chunks) >= 2 and matches >= 2 and (matches / len(chunks) >= 0.5):
+        return True
+    if len(chunks) == 1 and matches == 1:
+        conversational_words = {
+            "привет", "здравствуй", "подскажи", "как", "сколько",
+            "почему", "зачем", "что", "рецепт", "какая", "какой",
+            "я", "ел", "съел", "поел", "выпил",
+        }
+        tokens = set(re.findall(r"\b\w+\b", raw.lower()))
+        if not (tokens & conversational_words):
+            return True
+    return False
+
+
 HEALBITE_PLACEHOLDER_REPLY = "В разработке"
 HEALBITE_SINGLE_ACTION_REPLY = "Отправьте одну команду или нажмите одну кнопку за раз."
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
@@ -5734,7 +5820,12 @@ class TelegramAdapter(BasePlatformAdapter):
         if stripped.startswith("/"):
             command_token = stripped.split(maxsplit=1)[0].split("@", 1)[0].lower()
             return command_token if command_token.startswith("/") else f"/{command_token}"
-        return HEALBITE_REPLY_KEYBOARD_ACTIONS.get(stripped, "")
+        action = HEALBITE_REPLY_KEYBOARD_ACTIONS.get(stripped, "")
+        if action:
+            return action
+        cleaned = re.sub(r"[^\w\s]", "", stripped, flags=re.UNICODE)
+        normalized = re.sub(r"\s+", " ", cleaned).strip().lower()
+        return _HEALBITE_NORMALIZED_COMMAND_MAP.get(normalized, "")
 
     @staticmethod
     def _healbite_nonempty_lines(text: str) -> list[str]:
@@ -7647,6 +7738,31 @@ class TelegramAdapter(BasePlatformAdapter):
         await self._send_healbite_inventory_result(msg, result)
         return True
 
+    async def _maybe_handle_healbite_unprompted_inventory_text(
+        self,
+        msg: Message,
+    ) -> bool:
+        text = getattr(msg, "text", None) or ""
+        if not _is_structured_inventory_input(text):
+            return False
+        if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_INVENTORY_TEXT"):
+            return True
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        handle_fn = getattr(self._inventory_telegram, "handle_unprompted_text", None)
+        if not callable(handle_fn):
+            return False
+        result = handle_fn(actor_user_id, text)
+        if result is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="inventory_input",
+            action="unprompted_text",
+            result=result.state,
+        )
+        await self._send_healbite_inventory_result(msg, result)
+        return True
+
     async def _maybe_handle_healbite_inventory_photo(
         self,
         msg: Message,
@@ -7935,7 +8051,8 @@ class TelegramAdapter(BasePlatformAdapter):
             if text_override is not None
             else getattr(msg, "text", None) or ""
         ).strip()
-        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        command = self._healbite_command_from_text(text)
+        command_token = (command or text).split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token not in {SHOPPING_COMMAND, SHOPPING_ADD_COMMAND}:
             return False
         if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_SHOPPING_LIST"):
@@ -8409,6 +8526,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if await self._maybe_handle_healbite_profile_update(msg):
             return
+        if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
+            return
+        if await self._maybe_handle_healbite_explicit_intent(msg):
+            return
         await self._ensure_forum_commands(update.message)
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
@@ -8815,6 +8936,80 @@ class TelegramAdapter(BasePlatformAdapter):
             content_type="text",
         )
         return True
+
+    async def _maybe_handle_healbite_explicit_intent(
+        self,
+        msg: Message,
+    ) -> bool:
+        text = getattr(msg, "text", None) or ""
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+
+        if _is_weekly_menu_intent(text):
+            parts = re.split(r"[.;\n]+", text)
+            inv_parts = [p.strip() for p in parts if p.strip() and not _is_weekly_menu_intent(p)]
+            if inv_parts:
+                inv_text = ", ".join(inv_parts)
+                if _is_structured_inventory_input(inv_text):
+                    if not await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_INVENTORY_TEXT"):
+                        handle_fn = getattr(self._inventory_telegram, "handle_unprompted_text", None)
+                        if callable(handle_fn):
+                            inv_res = handle_fn(actor_user_id, inv_text)
+                            if inv_res is not None:
+                                self._log_healbite_route_selected(
+                                    msg=msg,
+                                    route="inventory_input",
+                                    action="unprompted_text_with_menu_intent",
+                                    result=inv_res.state,
+                                )
+                                await self._send_healbite_inventory_result(msg, inv_res)
+                                return True
+
+            if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_WEEKLY_MENU"):
+                return True
+
+            get_confirmed = getattr(self._inventory_telegram, "get_latest_confirmed_snapshot", None)
+            get_pending = getattr(self._inventory_telegram, "get_latest_pending_snapshot", None)
+            confirmed_snapshot = get_confirmed(actor_user_id) if callable(get_confirmed) else None
+            pending_snapshot = get_pending(actor_user_id) if callable(get_pending) else None
+
+            if pending_snapshot is not None and (
+                confirmed_snapshot is None
+                or pending_snapshot.snapshot.created_at > (confirmed_snapshot.snapshot.confirmed_at or "")
+            ):
+                review_fn = getattr(self._inventory_telegram, "_review", None)
+                if callable(review_fn):
+                    self._log_healbite_route_selected(
+                        msg=msg,
+                        route="weekly_menu_intent",
+                        action="awaiting_inventory_confirmation",
+                        result="review",
+                    )
+                    review_res = review_fn(pending_snapshot)
+                    await self._send_healbite_inventory_result(msg, review_res)
+                    return True
+
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="weekly_menu_intent",
+                action="open_weekly_menu",
+            )
+            return await self._maybe_handle_healbite_weekly_menu_command(
+                msg, text_override=WEEKLY_MENU_COMMAND
+            )
+
+        if _is_shopping_intent(text):
+            if await self._maybe_block_public_feature_lane(msg, feature_name="HEALBITE_SHOPPING_LIST"):
+                return True
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="shopping_intent",
+                action="open_shopping",
+            )
+            return await self._maybe_handle_healbite_shopping_command(
+                msg, text_override=SHOPPING_COMMAND
+            )
+
+        return False
 
     async def _maybe_handle_nutrition_diary_undo_command(
         self,

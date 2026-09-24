@@ -1683,6 +1683,7 @@ _TELEGRAM_DIARY_CONTEXT_HINTS = (
     "калор",
     "ккал",
     "кбжу",
+    "бжу",
     "белк",
     "жир",
     "углев",
@@ -1702,7 +1703,17 @@ _TELEGRAM_DIARY_SUMMARY_HINTS = (
     "за неделю",
     "7d",
     "7 д",
-    "недел",
+)
+_WEEKLY_MENU_INTENT_HINTS = (
+    "составить меню",
+    "собрать меню",
+    "меню на неделю",
+    "недельное меню",
+    "из продуктов дома",
+    "что приготовить на неделю",
+    "меню из продуктов",
+    "составь меню",
+    "собери меню",
 )
 _TELEGRAM_DIARY_CORRECTION_HINTS = (
     "исправ",
@@ -1784,6 +1795,10 @@ def _classify_telegram_diary_turn(
     first_token = text.split()[0]
     if first_token in _TELEGRAM_DIARY_SLASH_COMMANDS:
         return "slash"
+
+    # Weekly menu and recipe intents take precedence over diary classification
+    if any(hint in text for hint in _WEEKLY_MENU_INTENT_HINTS) or "меню" in text:
+        return "none"
 
     recent_diary_context = _history_has_recent_diary_context(history)
     diary_context = recent_diary_context or any(hint in text for hint in _TELEGRAM_DIARY_CONTEXT_HINTS)

@@ -1218,6 +1218,51 @@ class HealBiteInventoryTelegramController:
         )
         return review
 
+    def handle_unprompted_text(
+        self, actor_user_id: object, text: str
+    ) -> InventoryTelegramResult:
+        actor = _positive_actor(actor_user_id)
+        if actor is None or not self._gate("text", actor).ready:
+            return self._result(
+                "disabled", INVENTORY_PLACEHOLDER_REPLY, error_class="disabled"
+            )
+        self._pending[actor] = _PendingInput("text")
+        result = self.handle_text(actor, text)
+        if result is None:
+            self._pending.pop(actor, None)
+            return self._result(
+                "unavailable", INVENTORY_UNAVAILABLE_REPLY, error_class="unavailable"
+            )
+        if result.state in {"invalid_input", "unavailable", "disabled"}:
+            self._pending.pop(actor, None)
+        return result
+
+    def get_latest_confirmed_snapshot(
+        self, actor_user_id: object
+    ) -> InventorySnapshotView | None:
+        actor = _positive_actor(actor_user_id)
+        if actor is None or not self._gate("text", actor).ready:
+            return None
+        try:
+            _actor, scope, _context = self._resolve_scope(actor)
+            store = self._store()
+            return store.get_latest_confirmed_snapshot(scope)
+        except Exception:
+            return None
+
+    def get_latest_pending_snapshot(
+        self, actor_user_id: object
+    ) -> InventorySnapshotView | None:
+        actor = _positive_actor(actor_user_id)
+        if actor is None or not self._gate("text", actor).ready:
+            return None
+        try:
+            _actor, scope, _context = self._resolve_scope(actor)
+            store = self._store()
+            return store.get_latest_pending_snapshot(scope)
+        except Exception:
+            return None
+
     async def handle_photo_batch_bytes(
         self, actor_user_id: object, images: Sequence[bytes]
     ) -> InventoryTelegramResult | None:
@@ -1423,7 +1468,10 @@ class HealBiteInventoryTelegramController:
 
 
 def build_inventory_telegram_controller(
-    *, env: dict[str, str] | None = None, db_path: str | Path | None = None
+    *,
+    env: dict[str, str] | None = None,
+    db_path: str | Path | None = None,
+    now_factory: Callable[[], datetime] | None = None,
 ) -> HealBiteInventoryTelegramController:
     return HealBiteInventoryTelegramController(
         text_backend_config=load_feature_gate_config("HEALBITE_INVENTORY_TEXT", env=env),
@@ -1438,4 +1486,5 @@ def build_inventory_telegram_controller(
         ),
         shopping_config=load_feature_gate_config("HEALBITE_SHOPPING_LIST", env=env),
         db_path=db_path,
+        now_factory=now_factory,
     )

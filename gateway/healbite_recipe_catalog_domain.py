@@ -4,10 +4,12 @@ import hashlib
 import re
 import unicodedata
 import uuid
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Sequence
+from typing import Any, Mapping, Sequence
+
 
 RECIPE_CATALOG_NAMESPACE = uuid.UUID("3d4b6c8e-5b12-4c28-98e1-0c5a3d7e8b9f")
 
@@ -571,6 +573,93 @@ def generate_recipe_id(
 
 
 @dataclass(frozen=True, slots=True)
+class RightsClearanceScope:
+    source_country_status: str = "UNKNOWN"
+    us_status: str = "UNKNOWN"
+    approved_jurisdictions: tuple[str, ...] = ()
+    reviewed_jurisdictions: tuple[str, ...] = ()
+    unresolved_jurisdictions: tuple[str, ...] = ()
+    commercial_use_allowed: bool = False
+    evidence_revision: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_country_status": self.source_country_status,
+            "us_status": self.us_status,
+            "approved_jurisdictions": list(self.approved_jurisdictions),
+            "reviewed_jurisdictions": list(self.reviewed_jurisdictions),
+            "unresolved_jurisdictions": list(self.unresolved_jurisdictions),
+            "commercial_use_allowed": self.commercial_use_allowed,
+            "evidence_revision": self.evidence_revision,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "RightsClearanceScope":
+        if not data:
+            return cls()
+        return cls(
+            source_country_status=str(data.get("source_country_status", "UNKNOWN")),
+            us_status=str(data.get("us_status", "UNKNOWN")),
+            approved_jurisdictions=tuple(
+                str(j).strip().upper() for j in data.get("approved_jurisdictions", ()) if str(j).strip()
+            ),
+            reviewed_jurisdictions=tuple(
+                str(j).strip().upper() for j in data.get("reviewed_jurisdictions", ()) if str(j).strip()
+            ),
+            unresolved_jurisdictions=tuple(
+                str(j).strip().upper() for j in data.get("unresolved_jurisdictions", ()) if str(j).strip()
+            ),
+            commercial_use_allowed=bool(data.get("commercial_use_allowed", False)),
+            evidence_revision=str(data.get("evidence_revision", "")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TargetRightsScope:
+    jurisdictions: tuple[str, ...]
+    requires_commercial_use: bool = True
+
+    @classmethod
+    def from_value(
+        cls,
+        val: Any,
+        *,
+        requires_commercial_use: bool = True,
+    ) -> "TargetRightsScope | None":
+        if val is None:
+            return None
+        if isinstance(val, TargetRightsScope):
+            return val
+        if isinstance(val, str):
+            parts = tuple(p.strip().upper() for p in val.split(",") if p.strip())
+            return cls(jurisdictions=parts, requires_commercial_use=requires_commercial_use) if parts else None
+        if isinstance(val, (list, tuple, set, frozenset)):
+            parts = tuple(str(p).strip().upper() for p in val if str(p).strip())
+            return cls(jurisdictions=parts, requires_commercial_use=requires_commercial_use) if parts else None
+        return None
+
+
+def load_target_rights_scope(
+    target: Any = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    requires_commercial_use: bool = True,
+) -> TargetRightsScope | None:
+    """
+    Load target rights scope explicitly from caller or from HEALBITE_TARGET_RIGHTS_SCOPE environment.
+    Never infers jurisdiction from IP, Telegram account, user profile, or server location.
+    If no target scope is configured, returns None (caller must fail closed).
+    """
+    if target is not None:
+        return TargetRightsScope.from_value(target, requires_commercial_use=requires_commercial_use)
+    source_env = env if env is not None else os.environ
+    raw = source_env.get("HEALBITE_TARGET_RIGHTS_SCOPE")
+    if not raw or not raw.strip():
+        return None
+    return TargetRightsScope.from_value(raw.strip(), requires_commercial_use=requires_commercial_use)
+
+
+@dataclass(frozen=True, slots=True)
 class RecipeAuthor:
     author_id: str
     display_name: str
@@ -598,19 +687,20 @@ class RecipeSource:
     content_scope: ContentScope = ContentScope.METADATA_ONLY
     verification_status: VerificationStatus = VerificationStatus.VERIFIED
     created_at: str = ""
-    underlying_work_rights: str = "PUBLIC_DOMAIN"
-    digital_reproduction_rights: str = "PUBLIC_DOMAIN_MARKED"
+    underlying_work_rights: str = "UNKNOWN"
+    digital_reproduction_rights: str = "UNKNOWN"
     digital_reproduction_reuse_terms: str = ""
     commercial_reuse_status: CommercialReuseStatus = CommercialReuseStatus.UNKNOWN
-    transcription_source: str = "OWN_EXTRACTION"
-    transcription_rights: str = "NOT_APPLICABLE"
+    transcription_source: str = "UNKNOWN"
+    transcription_rights: str = "UNKNOWN"
     partner_institution_terms: str = ""
     target_jurisdiction_status: str = ""
-    translation_status: TranslationRightsStatus = TranslationRightsStatus.ORIGINAL_LANGUAGE
+    translation_status: TranslationRightsStatus = TranslationRightsStatus.UNKNOWN
     jurisdiction_basis: str | None = None
     edition_basis: str | None = None
     canonical_url: str | None = None
     production_rights_approved: bool = False
+    rights_clearance_scope: RightsClearanceScope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +765,8 @@ class Recipe:
     source_verification_status: VerificationStatus | None = None
     source_content_scope: ContentScope | None = None
     source_production_rights_approved: bool = False
+    source_rights_clearance_scope: RightsClearanceScope | None = None
+    target_rights_scope: TargetRightsScope | None = None
     classification_source: str | None = None
     classification_reason: str | None = None
 
@@ -687,15 +779,57 @@ class Recipe:
             and bool(self.source_content_hash)
         )
 
-    @property
-    def is_production_cleared(self) -> bool:
+    def is_production_cleared_for_scope(
+        self,
+        target_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> bool:
+        """
+        Evaluate production clearance against an explicit target rights scope.
+        FAIL CLOSED if no target scope is configured or passed.
+        """
+        scope = (
+            TargetRightsScope.from_value(target_scope)
+            if target_scope is not None
+            else self.target_rights_scope
+        )
+        if scope is None or not scope.jurisdictions:
+            return False
+
         if not (self.is_verified_for_planning and self.production_eligible):
             return False
-        return (
-            self.source_verification_status is VerificationStatus.VERIFIED
-            and self.source_content_scope is ContentScope.STRUCTURED_RECIPE_CONTENT
-            and self.source_production_rights_approved is True
-        )
+
+        if self.source_verification_status is not VerificationStatus.VERIFIED:
+            return False
+
+        if self.source_content_scope is not ContentScope.STRUCTURED_RECIPE_CONTENT:
+            return False
+
+        if not self.source_production_rights_approved:
+            return False
+
+        if self.source_rights_clearance_scope is None:
+            return False
+
+        approved_set = set(self.source_rights_clearance_scope.approved_jurisdictions)
+        for j in scope.jurisdictions:
+            if j not in approved_set:
+                return False
+
+        if scope.requires_commercial_use and not self.source_rights_clearance_scope.commercial_use_allowed:
+            return False
+
+        return True
+
+    @property
+    def is_production_cleared(self) -> bool:
+        """
+        Evaluate production clearance against configured target_rights_scope.
+        Falls back to environment-configured target scope if target_rights_scope is None.
+        Returns False (fails closed) if no target scope is configured.
+        """
+        scope = self.target_rights_scope or load_target_rights_scope()
+        return self.is_production_cleared_for_scope(scope)
+
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,9 @@ from gateway.healbite_recipe_catalog_domain import (
     MealType,
     Recipe,
     RightsStatus,
+    TargetRightsScope,
     VerificationStatus,
+    load_target_rights_scope,
 )
 from gateway.healbite_recipe_catalog_store import HealBiteRecipeCatalogStore
 
@@ -40,9 +42,15 @@ class RecipeRetriever:
         catalog_store: HealBiteRecipeCatalogStore,
         *,
         vector_index: RecipeVectorIndexProtocol | None = None,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self._catalog = catalog_store
         self._vector_index = vector_index
+        self._target_rights_scope = (
+            load_target_rights_scope(target_rights_scope, env=env)
+            or catalog_store.target_rights_scope
+        )
 
     def retrieve_candidates_for_slot(
         self,
@@ -55,6 +63,7 @@ class RecipeRetriever:
         max_time_minutes: int | None = None,
         limit: int = 12,
         production_only: bool = False,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
     ) -> list[RecipeCandidate]:
         """
         Applies strict hard filters (verified, author, exclusions, meal slot)
@@ -65,7 +74,15 @@ class RecipeRetriever:
         excluded_set = {ing.strip().upper() for ing in (excluded_ingredients or ())}
         inv_map = available_ingredients or {}
 
-        all_recipes = self._catalog.get_all_recipes(verified_only=True)
+        effective_scope = (
+            load_target_rights_scope(target_rights_scope)
+            or self._target_rights_scope
+        )
+
+        all_recipes = self._catalog.get_all_recipes(
+            verified_only=True,
+            target_rights_scope=effective_scope,
+        )
         candidates: list[RecipeCandidate] = []
 
         for recipe in all_recipes:
@@ -73,8 +90,9 @@ class RecipeRetriever:
             if not recipe.is_verified_for_planning:
                 continue
 
-            if production_only and not recipe.is_production_cleared:
+            if production_only and not recipe.is_production_cleared_for_scope(effective_scope):
                 continue
+
 
             # 2. Hard filter: author selection
             if selected_authors and recipe.author_id not in selected_authors:

@@ -17,12 +17,15 @@ from gateway.healbite_recipe_catalog_domain import (
     RecipeIngredient,
     RecipeInstruction,
     RecipeSource,
+    RightsClearanceScope,
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TargetRightsScope,
     TranslationRightsStatus,
     VerificationStatus,
     generate_recipe_id,
+    load_target_rights_scope,
     normalize_ingredient_id,
     normalize_title,
     normalize_unit,
@@ -234,6 +237,24 @@ class RecipeIngestionPipeline:
                 raise RightsPolicyViolationError(
                     f"Source '{source.source_id}' commercial reuse terms must be PUBLIC_DOMAIN, COMMERCIAL_ALLOWED, or PERMITTED for production approval"
                 )
+            if source.rights_clearance_scope is None:
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' cannot have production rights approved without explicit rights_clearance_scope"
+                )
+            if not source.rights_clearance_scope.approved_jurisdictions:
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' cannot have production rights approved with empty approved_jurisdictions in rights_clearance_scope"
+                )
+            if not source.rights_clearance_scope.commercial_use_allowed:
+                raise RightsPolicyViolationError(
+                    f"Source '{source.source_id}' cannot have production rights approved when rights_clearance_scope.commercial_use_allowed is False"
+                )
+
+        scope_json = (
+            json.dumps(source.rights_clearance_scope.to_dict())
+            if source.rights_clearance_scope is not None
+            else None
+        )
 
         cur = self._conn.cursor()
         cur.execute(
@@ -244,8 +265,8 @@ class RecipeIngestionPipeline:
             "content_scope, verification_status, created_at, "
             "underlying_work_rights, digital_reproduction_rights, digital_reproduction_reuse_terms, commercial_reuse_status, "
             "transcription_source, transcription_rights, partner_institution_terms, target_jurisdiction_status, translation_status, "
-            "jurisdiction_basis, edition_basis, canonical_url, production_rights_approved) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "jurisdiction_basis, edition_basis, canonical_url, production_rights_approved, rights_clearance_scope_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 source.source_id,
                 source.author_id,
@@ -278,9 +299,11 @@ class RecipeIngestionPipeline:
                 source.edition_basis,
                 source.canonical_url,
                 1 if source.production_rights_approved else 0,
+                scope_json,
             ),
         )
         self._conn.commit()
+
 
     def ingest_recipe(self, raw: Mapping[str, Any]) -> str:
         # 1. Validate recipe rights status
@@ -458,8 +481,22 @@ class RecipeIngestionPipeline:
         ver_status = raw.get("verification_status", VerificationStatus.VERIFIED.value)
         created_at = raw.get("created_at", "2026-09-21 00:00:00")
 
+        source_scope_raw = (
+            source_row["rights_clearance_scope_json"]
+            if "rights_clearance_scope_json" in source_keys
+            else None
+        )
+        try:
+            source_scope_data = json.loads(source_scope_raw) if source_scope_raw else None
+        except Exception:
+            source_scope_data = None
+        source_scope = RightsClearanceScope.from_dict(source_scope_data) if source_scope_data else None
+
         production_eligible = (
             source_prod_approved
+            and source_scope is not None
+            and bool(source_scope.approved_jurisdictions)
+            and source_scope.commercial_use_allowed
             and source_comm_status in (
                 CommercialReuseStatus.PUBLIC_DOMAIN.value,
                 CommercialReuseStatus.COMMERCIAL_ALLOWED.value,
@@ -590,6 +627,7 @@ def calculate_author_coverage(
     author_id: str,
     *,
     blocked_reasons_map: Mapping[str, str] | None = None,
+    target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
 ) -> AuthorCoverage:
     author = store.get_author(author_id)
     display_name = author.display_name if author else author_id
@@ -604,7 +642,11 @@ def calculate_author_coverage(
     reasons_map = blocked_reasons_map or DEFAULT_BLOCKED_REASONS
     block_reasons = (reasons_map.get(author_id, "Source scope is METADATA_ONLY"),) if blocked_sources > 0 else ()
 
-    recipes = store.list_recipes_by_author(author_id, verified_only=True)
+    scope = (
+        load_target_rights_scope(target_rights_scope)
+        or store.target_rights_scope
+    )
+    recipes = store.list_recipes_by_author(author_id, verified_only=True, target_rights_scope=scope)
     planning_recipes = [r for r in recipes if r.is_verified_for_planning]
     verified_count = len(planning_recipes)
 
@@ -616,7 +658,8 @@ def calculate_author_coverage(
     production_canary = (
         verified_count > 0
         and can_form
-        and all(r.is_production_cleared for r in planning_recipes)
+        and (scope is not None)
+        and all(r.is_production_cleared_for_scope(scope) for r in planning_recipes)
     )
 
     return AuthorCoverage(
@@ -643,9 +686,15 @@ def calculate_catalog_readiness(
         "AUTHOR_ESCOFFIER",
         "AUTHOR_JAMIE_OLIVER",
     ),
+    *,
+    target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
 ) -> CatalogReadinessReport:
     meta = store.get_metadata()
-    all_recipes = store.get_all_recipes(verified_only=True)
+    scope = (
+        load_target_rights_scope(target_rights_scope)
+        or store.target_rights_scope
+    )
+    all_recipes = store.get_all_recipes(verified_only=True, target_rights_scope=scope)
     verified_planning = [r for r in all_recipes if r.is_verified_for_planning]
 
     real_verified = sum(1 for r in verified_planning if not r.author_id.startswith("TEST_"))
@@ -659,11 +708,12 @@ def calculate_catalog_readiness(
     catalog_production_canary = (
         len(verified_planning) > 0
         and can_form
-        and all(r.is_production_cleared for r in verified_planning)
+        and (scope is not None)
+        and all(r.is_production_cleared_for_scope(scope) for r in verified_planning)
     )
 
     coverages = {
-        aid: calculate_author_coverage(store, aid)
+        aid: calculate_author_coverage(store, aid, target_rights_scope=scope)
         for aid in author_ids
     }
 

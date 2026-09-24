@@ -24,6 +24,8 @@ from gateway.healbite_inventory import (
 )
 from gateway.healbite_recipe_catalog_domain import (
     MealType,
+    TargetRightsScope,
+    load_target_rights_scope,
     normalize_ingredient_id,
     normalize_unit,
 )
@@ -118,6 +120,7 @@ class HealBiteRecipeGroundedService:
         inventory_store: HealBiteInventoryStore | None = None,
         planner: RecipeGroundedWeeklyPlanner | None = None,
         config: FeatureGateConfig | None = None,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
         self._catalog_factory = catalog_store_factory
@@ -126,6 +129,7 @@ class HealBiteRecipeGroundedService:
         self._household_service = household_service
         self._inventory_store = inventory_store
         self._planner = planner or RecipeGroundedWeeklyPlanner()
+        self._target_rights_scope = load_target_rights_scope(target_rights_scope, env=env)
         if config is not None:
             self._config = config
         else:
@@ -136,7 +140,12 @@ class HealBiteRecipeGroundedService:
             return self._catalog_factory()
         if not self._catalog_path:
             raise CatalogNotFoundError("Recipe catalog path not configured")
-        return HealBiteRecipeCatalogStore(self._catalog_path, read_only=True, validate_hash=True)
+        return HealBiteRecipeCatalogStore(
+            self._catalog_path,
+            read_only=True,
+            validate_hash=True,
+            target_rights_scope=self._target_rights_scope,
+        )
 
     def generate_menu(
         self,
@@ -236,7 +245,7 @@ class HealBiteRecipeGroundedService:
                 logger.warning("[RecipeGroundedService] Inventory lookup failed: %s", exc)
 
         # 5. Retrieve candidates
-        retriever = RecipeRetriever(catalog)
+        retriever = RecipeRetriever(catalog, target_rights_scope=self._target_rights_scope)
         slot_candidates: dict[MealType, list[RecipeCandidate]] = {}
 
         logger.info(

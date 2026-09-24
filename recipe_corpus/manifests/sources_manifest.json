@@ -17,7 +17,20 @@
     "ingestion_tool_version": "1.0.0",
     "content_scope": "METADATA_ONLY",
     "verification_status": "VERIFIED",
-    "created_at": "2026-09-21 00:00:00"
+    "created_at": "2026-09-21 00:00:00",
+    "rights_clearance_scope": {
+      "source_country_status": "COPYRIGHT_PROTECTED",
+      "us_status": "COPYRIGHT_PROTECTED",
+      "approved_jurisdictions": [],
+      "reviewed_jurisdictions": [
+        "RU"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "isbn-5-9524-0718-4"
+    }
   },
   {
     "source_id": "SRC_ESCOFFIER_LGC",
@@ -47,7 +60,21 @@
     "jurisdiction_basis": "FR / USA",
     "edition_basis": "Paris 1903 first edition (French)",
     "canonical_url": "https://gallica.bnf.fr/ark:/12148/bpt6k65768837",
-    "production_rights_approved": false
+    "production_rights_approved": false,
+    "rights_clearance_scope": {
+      "source_country_status": "PUBLIC_DOMAIN",
+      "us_status": "PUBLIC_DOMAIN",
+      "approved_jurisdictions": [],
+      "reviewed_jurisdictions": [
+        "FR",
+        "US"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "gallica-bpt6k65768837"
+    }
   },
   {
     "source_id": "SRC_ESCOFFIER_1907_EN",
@@ -77,7 +104,21 @@
     "jurisdiction_basis": "USA / UK",
     "edition_basis": "William Heinemann, London, 1907",
     "canonical_url": "https://www.gutenberg.org/ebooks/71395",
-    "production_rights_approved": false
+    "production_rights_approved": false,
+    "rights_clearance_scope": {
+      "source_country_status": "REVIEW_REQUIRED",
+      "us_status": "PUBLIC_DOMAIN",
+      "approved_jurisdictions": [],
+      "reviewed_jurisdictions": [
+        "US",
+        "UK"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "gutenberg-71395"
+    }
   },
   {
     "source_id": "SRC_ESCOFFIER_1903_COMMONS",
@@ -91,7 +132,7 @@
     "rights_status": "PUBLIC_DOMAIN",
     "rights_evidence_type": "PUBLIC_DOMAIN_STATUTE",
     "rights_evidence_locator": "Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
-    "rights_evidence_note": "Underlying work public domain worldwide (author Auguste Escoffier d. 1935, collaborator Philéas Gilbert d. 1942; published pre-1928, >70y pma expired). Digital scan published by Leeds University Library / Wellcome under Public Domain Mark 1.0; own extraction from digital image/text layer (transcription rights not applicable); commercial reuse permitted; approved for production.",
+    "rights_evidence_note": "Underlying work public domain in source country (France) and US (author Auguste Escoffier d. 1935, collaborator Philéas Gilbert d. 1942; published pre-1928, >70y pma expired). Digital scan published by Leeds University Library / Wellcome under Public Domain Mark 1.0; own extraction from digital image/text layer (transcription rights not applicable); commercial reuse permitted; approved for production.",
     "source_content_hash": "e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9",
     "ingestion_timestamp": "2026-09-24 00:00:00",
     "ingestion_tool_version": "1.0.0",
@@ -105,12 +146,29 @@
     "transcription_source": "OWN_EXTRACTION",
     "transcription_rights": "NOT_APPLICABLE",
     "partner_institution_terms": "Leeds University Library / Wellcome Collection (digital scan b21525912)",
-    "target_jurisdiction_status": "Worldwide Public Domain (author d. 1935, collaborator d. 1942, published 1903/1907)",
+    "target_jurisdiction_status": "Source country (France): Public domain (CPI Art. L.123-1); USA: Public domain (17 U.S.C. § 304); jurisdictions with 70y pma rule",
     "translation_status": "ORIGINAL_LANGUAGE",
-    "jurisdiction_basis": "Worldwide / FR / US / UK",
+    "jurisdiction_basis": "FR / US",
     "edition_basis": "Paris 1903/1907 French second edition",
     "canonical_url": "https://commons.wikimedia.org/wiki/File:Auguste_Escoffier_-_Le_Guide_Culinaire_-_Aide-m%C3%A9moire_de_cuisine_pratique,_1903.djvu",
-    "production_rights_approved": true
+    "production_rights_approved": true,
+    "rights_clearance_scope": {
+      "source_country_status": "PUBLIC_DOMAIN",
+      "us_status": "PUBLIC_DOMAIN",
+      "approved_jurisdictions": [
+        "FR",
+        "US"
+      ],
+      "reviewed_jurisdictions": [
+        "FR",
+        "US"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": true,
+      "evidence_revision": "commons-rev-1103588593"
+    }
   },
   {
     "source_id": "SRC_JAMIE_OLIVER_15MIN",
@@ -130,7 +188,20 @@
     "ingestion_tool_version": "1.0.0",
     "content_scope": "METADATA_ONLY",
     "verification_status": "VERIFIED",
-    "created_at": "2026-09-21 00:00:00"
+    "created_at": "2026-09-21 00:00:00",
+    "rights_clearance_scope": {
+      "source_country_status": "COPYRIGHT_PROTECTED",
+      "us_status": "COPYRIGHT_PROTECTED",
+      "approved_jurisdictions": [],
+      "reviewed_jurisdictions": [
+        "GB"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "isbn-978-0718157807"
+    }
   },
   {
     "source_id": "SRC_TEST_A",
@@ -150,7 +221,22 @@
     "ingestion_tool_version": "1.0.0",
     "content_scope": "STRUCTURED_RECIPE_CONTENT",
     "verification_status": "VERIFIED",
-    "created_at": "2026-09-21 00:00:00"
+    "created_at": "2026-09-21 00:00:00",
+    "rights_clearance_scope": {
+      "source_country_status": "USER_PROVIDED_AUTHORIZED",
+      "us_status": "USER_PROVIDED_AUTHORIZED",
+      "approved_jurisdictions": [
+        "TEST"
+      ],
+      "reviewed_jurisdictions": [
+        "TEST"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "synthetic-v1"
+    }
   },
   {
     "source_id": "SRC_TEST_B",
@@ -170,7 +256,22 @@
     "ingestion_tool_version": "1.0.0",
     "content_scope": "STRUCTURED_RECIPE_CONTENT",
     "verification_status": "VERIFIED",
-    "created_at": "2026-09-21 00:00:00"
+    "created_at": "2026-09-21 00:00:00",
+    "rights_clearance_scope": {
+      "source_country_status": "USER_PROVIDED_AUTHORIZED",
+      "us_status": "USER_PROVIDED_AUTHORIZED",
+      "approved_jurisdictions": [
+        "TEST"
+      ],
+      "reviewed_jurisdictions": [
+        "TEST"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "synthetic-v1"
+    }
   },
   {
     "source_id": "SRC_TEST_C",
@@ -190,6 +291,21 @@
     "ingestion_tool_version": "1.0.0",
     "content_scope": "STRUCTURED_RECIPE_CONTENT",
     "verification_status": "VERIFIED",
-    "created_at": "2026-09-21 00:00:00"
+    "created_at": "2026-09-21 00:00:00",
+    "rights_clearance_scope": {
+      "source_country_status": "USER_PROVIDED_AUTHORIZED",
+      "us_status": "USER_PROVIDED_AUTHORIZED",
+      "approved_jurisdictions": [
+        "TEST"
+      ],
+      "reviewed_jurisdictions": [
+        "TEST"
+      ],
+      "unresolved_jurisdictions": [
+        "OTHER"
+      ],
+      "commercial_use_allowed": false,
+      "evidence_revision": "synthetic-v1"
+    }
   }
 ]

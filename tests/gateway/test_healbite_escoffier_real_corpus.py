@@ -39,6 +39,11 @@ from gateway.healbite_recipe_ingestion import (
 from gateway.healbite_recipe_retrieval import RecipeRetriever
 
 
+@pytest.fixture(autouse=True)
+def configure_target_rights_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HEALBITE_TARGET_RIGHTS_SCOPE", "FR,US")
+
+
 # ==============================================================================
 # 1. RIGHTS EVIDENCE COMPLETENESS (Gallica & Gutenberg)
 # ==============================================================================

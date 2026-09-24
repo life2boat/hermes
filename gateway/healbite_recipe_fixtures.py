@@ -13,9 +13,11 @@ from gateway.healbite_recipe_catalog_domain import (
     MealType,
     RecipeAuthor,
     RecipeSource,
+    RightsClearanceScope,
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TargetRightsScope,
     TranslationRightsStatus,
     VerificationStatus,
 )
@@ -113,6 +115,15 @@ PRODUCTION_MANIFESTS = [
                 jurisdiction_basis="FR / USA",
                 edition_basis="Paris 1903 first edition (French)",
                 canonical_url="https://gallica.bnf.fr/ark:/12148/bpt6k65768837",
+                rights_clearance_scope=RightsClearanceScope(
+                    source_country_status="PUBLIC_DOMAIN",
+                    us_status="PUBLIC_DOMAIN",
+                    approved_jurisdictions=(),
+                    reviewed_jurisdictions=("FR", "US"),
+                    unresolved_jurisdictions=(),
+                    commercial_use_allowed=False,
+                    evidence_revision="bnf-cgu-2026-09",
+                ),
                 production_rights_approved=False,
             ),
         ],
@@ -186,6 +197,15 @@ SRC_ESCOFFIER_1907_EN_SOURCE = RecipeSource(
     jurisdiction_basis="USA / UK",
     edition_basis="William Heinemann, London, 1907",
     canonical_url="https://www.gutenberg.org/ebooks/71395",
+    rights_clearance_scope=RightsClearanceScope(
+        source_country_status="PUBLIC_DOMAIN",
+        us_status="PUBLIC_DOMAIN",
+        approved_jurisdictions=(),
+        reviewed_jurisdictions=("US", "UK"),
+        unresolved_jurisdictions=("WORLD",),
+        commercial_use_allowed=False,
+        evidence_revision="gutenberg-pilot-2026-09",
+    ),
     production_rights_approved=False,
 )
 
@@ -202,9 +222,9 @@ SRC_ESCOFFIER_1903_COMMONS_SOURCE = RecipeSource(
     rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
     rights_evidence_locator="Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
     rights_evidence_note=(
-        "Underlying work public domain worldwide (author Auguste Escoffier d. 1935, collaborator Philéas Gilbert d. 1942; "
-        "published pre-1928, >70y pma expired). Digital scan published by Leeds University Library / Wellcome under Public Domain Mark 1.0; "
-        "own extraction from digital image/text layer (transcription rights not applicable); commercial reuse permitted; approved for production."
+        "Underlying work public domain in France (CPI Art. L.123-1, author d. 1935, collaborator Philéas Gilbert d. 1942, >70y pma) "
+        "and United States (17 U.S.C. § 304, published pre-1929). Digital scan published by Leeds University Library / Wellcome "
+        "under Public Domain Mark 1.0; own extraction from digital image/text layer; commercial reuse permitted within approved jurisdictions; approved for production."
     ),
     source_content_hash="e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9",
     ingestion_timestamp="2026-09-24 00:00:00",
@@ -219,11 +239,20 @@ SRC_ESCOFFIER_1903_COMMONS_SOURCE = RecipeSource(
     transcription_source="OWN_EXTRACTION",
     transcription_rights="NOT_APPLICABLE",
     partner_institution_terms="Leeds University Library / Wellcome Collection (digital scan b21525912)",
-    target_jurisdiction_status="Worldwide Public Domain (author d. 1935, collaborator d. 1942, published 1903/1907)",
+    target_jurisdiction_status="Public domain in France (CPI Art. L.123-1) and USA (17 U.S.C. § 304)",
     translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
-    jurisdiction_basis="Worldwide / FR / US / UK",
+    jurisdiction_basis="FR / US",
     edition_basis="Paris 1903/1907 French second edition",
     canonical_url="https://commons.wikimedia.org/wiki/File:Auguste_Escoffier_-_Le_Guide_Culinaire_-_Aide-m%C3%A9moire_de_cuisine_pratique,_1903.djvu",
+    rights_clearance_scope=RightsClearanceScope(
+        source_country_status="PUBLIC_DOMAIN",
+        us_status="PUBLIC_DOMAIN",
+        approved_jurisdictions=("FR", "US"),
+        reviewed_jurisdictions=("FR", "US"),
+        unresolved_jurisdictions=(),
+        commercial_use_allowed=True,
+        evidence_revision="wikimedia-commons-2026-09",
+    ),
     production_rights_approved=True,
 )
 
@@ -836,6 +865,8 @@ def build_pilot_recipe_catalog(
                 ingestion_tool_version="1.0.0",
                 content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
                 verification_status=VerificationStatus.VERIFIED,
+                translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
                 created_at="2026-09-21 00:00:00",
             )
         )
@@ -928,6 +959,7 @@ def build_escoffier_real_catalog(
     reports_dir: str | Path | None = None,
     recipes_json_path: str | Path = "recipe_corpus/authorized_inputs/escoffier_recipes.json",
     include_test_fixtures: bool = False,
+    target_rights_scope: TargetRightsScope | tuple[str, ...] | list[str] | str | None = ("FR", "US"),
 ) -> tuple[str, CatalogReadinessReport]:
     p_path = Path(db_path)
     if p_path.exists():
@@ -969,6 +1001,8 @@ def build_escoffier_real_catalog(
                     ingestion_tool_version="1.0.0",
                     content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
                     verification_status=VerificationStatus.VERIFIED,
+                    translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                    commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
                     created_at="2026-09-21 00:00:00",
                 )
             )
@@ -994,8 +1028,13 @@ def build_escoffier_real_catalog(
     pipeline.close()
 
     # Reopen and validate
-    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
-    readiness = calculate_catalog_readiness(store)
+    store = HealBiteRecipeCatalogStore(
+        db_path,
+        read_only=True,
+        validate_hash=True,
+        target_rights_scope=target_rights_scope,
+    )
+    readiness = calculate_catalog_readiness(store, target_rights_scope=target_rights_scope)
 
     if reports_dir is not None:
         rep_dir = Path(reports_dir)

@@ -31,7 +31,13 @@ from gateway.healbite_recipe_catalog_domain import (
     CommercialReuseStatus,
     ContentScope,
     MealType,
+    Recipe,
+    RecipeAuthor,
+    RecipeSource,
+    RightsClearanceScope,
+    RightsEvidenceType,
     RightsStatus,
+    TargetRightsScope,
     TranslationRightsStatus,
     VerificationStatus,
 )
@@ -43,6 +49,11 @@ from gateway.healbite_recipe_fixtures import (
     SRC_ESCOFFIER_1903_COMMONS_SOURCE,
     SRC_ESCOFFIER_1907_EN_SOURCE,
     build_escoffier_real_catalog,
+)
+from gateway.healbite_recipe_ingestion import (
+    RecipeIngestionPipeline,
+    RightsPolicyViolationError,
+    calculate_catalog_readiness,
 )
 from gateway.healbite_recipe_retrieval import RecipeRetriever
 
@@ -67,7 +78,19 @@ def test_escoffier_commons_10_rights_dimensions() -> None:
     assert src.transcription_source == "OWN_EXTRACTION"
     assert src.transcription_rights == "NOT_APPLICABLE"
     assert "Leeds University Library" in src.partner_institution_terms
-    assert "Worldwide Public Domain" in src.target_jurisdiction_status
+    assert "France" in src.target_jurisdiction_status and "USA" in src.target_jurisdiction_status
+    assert "worldwide" not in src.target_jurisdiction_status.lower()
+    assert "worldwide" not in src.jurisdiction_basis.lower()
+    assert "worldwide" not in src.rights_evidence_note.lower()
+    assert src.jurisdiction_basis == "FR / US"
+    assert src.rights_clearance_scope is not None
+    assert src.rights_clearance_scope.approved_jurisdictions == ("FR", "US")
+    assert src.rights_clearance_scope.reviewed_jurisdictions == ("FR", "US")
+    assert src.rights_clearance_scope.unresolved_jurisdictions == ()
+    assert src.rights_clearance_scope.source_country_status == "PUBLIC_DOMAIN"
+    assert src.rights_clearance_scope.us_status == "PUBLIC_DOMAIN"
+    assert src.rights_clearance_scope.commercial_use_allowed is True
+    assert src.rights_clearance_scope.evidence_revision == "wikimedia-commons-2026-09"
     assert src.translation_status == TranslationRightsStatus.ORIGINAL_LANGUAGE
     assert src.content_scope == ContentScope.STRUCTURED_RECIPE_CONTENT
     assert src.verification_status == VerificationStatus.VERIFIED
@@ -98,9 +121,9 @@ def test_gutenberg_and_gallica_sources_not_production_approved() -> None:
 def test_zero_production_recipes_from_gutenberg_or_gallica(tmp_path: Path) -> None:
     """Verify production candidate catalog has exactly ZERO recipes backed by Gutenberg or Gallica."""
     db_path = tmp_path / "zero_leak.db"
-    build_escoffier_real_catalog(db_path, build_id="zero-leak-test")
+    build_escoffier_real_catalog(db_path, build_id="zero-leak-test", target_rights_scope=("FR", "US"))
 
-    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
+    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True, target_rights_scope=("FR", "US"))
     all_recipes = store.get_all_recipes(verified_only=True)
 
     gutenberg_recipes = [r for r in all_recipes if r.source_id == "SRC_ESCOFFIER_1907_EN"]
@@ -111,10 +134,15 @@ def test_zero_production_recipes_from_gutenberg_or_gallica(tmp_path: Path) -> No
     assert len(gallica_recipes) == 0
     assert len(commons_recipes) == 36
 
-    # All production-cleared recipes come exclusively from Commons
+    # All production-cleared recipes come exclusively from Commons when target scope is set
     prod_cleared = [r for r in all_recipes if r.is_production_cleared]
     assert len(prod_cleared) == 36
     assert all(r.source_id == "SRC_ESCOFFIER_1903_COMMONS" for r in prod_cleared)
+
+    # Fail closed: when target scope is NOT provided, ZERO recipes are production-cleared
+    store_unscoped = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True, target_rights_scope=None)
+    unscoped_recipes = store_unscoped.get_all_recipes(verified_only=True)
+    assert sum(1 for r in unscoped_recipes if r.is_production_cleared) == 0
 
 
 # ==============================================================================
@@ -130,6 +158,7 @@ def test_commons_escoffier_catalog_acceptance(tmp_path: Path) -> None:
         build_id="acceptance-test-1",
         reports_dir=rep_dir,
         include_test_fixtures=False,
+        target_rights_scope=("FR", "US"),
     )
 
     assert len(content_hash) == 64
@@ -157,6 +186,12 @@ def test_commons_escoffier_catalog_acceptance(tmp_path: Path) -> None:
     jamie_cov = readiness.author_coverages[AUTHOR_JAMIE_OLIVER]
     assert jamie_cov.verified_recipes == 0
     assert jamie_cov.production_canary_eligible is False
+
+    # Fail closed check: if target scope is None, production_canary_eligible MUST be False
+    store_unscoped = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True, target_rights_scope=None)
+    unscoped_readiness = calculate_catalog_readiness(store_unscoped, target_rights_scope=None)
+    assert unscoped_readiness.production_canary_eligible is False
+    assert unscoped_readiness.author_coverages[AUTHOR_ESCOFFIER].production_canary_eligible is False
 
 
 # ==============================================================================
@@ -214,11 +249,11 @@ def test_catalog_tamper_detection_fail_closed(tmp_path: Path) -> None:
 # ==============================================================================
 
 def test_production_retriever_filter_behavior(tmp_path: Path) -> None:
-    """RecipeRetriever retrieves production candidates only when production_rights_approved is True."""
+    """RecipeRetriever retrieves production candidates only when target scope matches approved jurisdictions."""
     db_path = tmp_path / "retrieval_suite.db"
-    build_escoffier_real_catalog(db_path, build_id="retriever-test")
+    build_escoffier_real_catalog(db_path, build_id="retriever-test", target_rights_scope=("FR", "US"))
 
-    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True)
+    store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True, target_rights_scope=("FR", "US"))
     retriever = RecipeRetriever(store)
 
     # 1. Retrieve production-only breakfast
@@ -255,6 +290,17 @@ def test_production_retriever_filter_behavior(tmp_path: Path) -> None:
     # 4. Blocked authors return 0 candidates
     assert len(retriever.retrieve_candidates_for_slot(meal_slot=MealType.LUNCH, authors=[AUTHOR_POKHLEBKIN], production_only=True)) == 0
     assert len(retriever.retrieve_candidates_for_slot(meal_slot=MealType.DINNER, authors=[AUTHOR_JAMIE_OLIVER], production_only=True)) == 0
+
+    # 5. Fail closed: Unscoped retriever returns 0 candidates when production_only=True
+    unscoped_store = HealBiteRecipeCatalogStore(db_path, read_only=True, validate_hash=True, target_rights_scope=None)
+    unscoped_retriever = RecipeRetriever(unscoped_store)
+    assert len(unscoped_retriever.retrieve_candidates_for_slot(meal_slot=MealType.BREAKFAST, authors=[AUTHOR_ESCOFFIER], production_only=True)) == 0
+    assert len(unscoped_retriever.retrieve_candidates_for_slot(meal_slot=MealType.LUNCH, authors=[AUTHOR_ESCOFFIER], production_only=True)) == 0
+    assert len(unscoped_retriever.retrieve_candidates_for_slot(meal_slot=MealType.DINNER, authors=[AUTHOR_ESCOFFIER], production_only=True)) == 0
+
+    # 6. Fail closed: Unapproved target jurisdiction returns 0 candidates
+    de_retriever = RecipeRetriever(store, target_rights_scope="DE")
+    assert len(de_retriever.retrieve_candidates_for_slot(meal_slot=MealType.BREAKFAST, authors=[AUTHOR_ESCOFFIER], production_only=True)) == 0
 
 
 # ==============================================================================
@@ -329,3 +375,158 @@ def test_raw_book_and_text_layer_not_tracked_in_git() -> None:
         assert not p_lower.endswith(".djvu"), f"Raw DjVu binary tracked in git: {path}"
         assert not ("b21525912" in p_lower and p_lower.endswith(".txt")), f"Raw text layer tracked in git: {path}"
         assert not ("pg71395" in p_lower and p_lower.endswith(".txt")), f"Raw text layer tracked in git: {path}"
+
+
+# ==============================================================================
+# 10. FAIL-CLOSED DEFAULTS & INGESTION GATES
+# ==============================================================================
+
+def test_recipe_source_fail_closed_defaults() -> None:
+    """RecipeSource must default to fail-closed UNKNOWN values, not positive assertions."""
+    s = RecipeSource(
+        source_id="SRC_TEST_UNKNOWN",
+        author_id="AUTHOR_TEST",
+        title="Test Unknown Source",
+    )
+    assert s.rights_status == RightsStatus.UNKNOWN
+    assert s.commercial_reuse_status == CommercialReuseStatus.UNKNOWN
+    assert s.digital_reproduction_rights == "UNKNOWN"
+    assert s.transcription_source == "UNKNOWN"
+    assert s.transcription_rights == "UNKNOWN"
+    assert s.production_rights_approved is False
+    assert s.rights_clearance_scope is None
+
+
+def test_ingest_source_validation_gates(tmp_path: Path) -> None:
+    """Ingestion pipeline rejects production_rights_approved=True without complete clearance scope."""
+    db_path = tmp_path / "gate_test.db"
+    pipeline = RecipeIngestionPipeline(db_path)
+    pipeline.ingest_author(RecipeAuthor(author_id="AUTH_TEST", display_name="Test Author"))
+
+    # Missing rights_clearance_scope
+    with pytest.raises(RightsPolicyViolationError, match="without explicit rights_clearance_scope"):
+        pipeline.ingest_source(
+            RecipeSource(
+                source_id="S_BAD_1",
+                author_id="AUTH_TEST",
+                title="Bad Source 1",
+                rights_status=RightsStatus.PUBLIC_DOMAIN,
+                rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+                rights_evidence_locator="https://example.com/pd",
+                translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+                production_rights_approved=True,
+                rights_clearance_scope=None,
+            )
+        )
+
+    # Empty approved_jurisdictions
+    with pytest.raises(RightsPolicyViolationError, match="with empty approved_jurisdictions"):
+        pipeline.ingest_source(
+            RecipeSource(
+                source_id="S_BAD_2",
+                author_id="AUTH_TEST",
+                title="Bad Source 2",
+                rights_status=RightsStatus.PUBLIC_DOMAIN,
+                rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+                rights_evidence_locator="https://example.com/pd",
+                translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+                production_rights_approved=True,
+                rights_clearance_scope=RightsClearanceScope(
+                    source_country_status="PUBLIC_DOMAIN",
+                    us_status="PUBLIC_DOMAIN",
+                    approved_jurisdictions=(),
+                    commercial_use_allowed=True,
+                ),
+            )
+        )
+
+    # commercial_use_allowed=False
+    with pytest.raises(RightsPolicyViolationError, match="commercial_use_allowed is False"):
+        pipeline.ingest_source(
+            RecipeSource(
+                source_id="S_BAD_3",
+                author_id="AUTH_TEST",
+                title="Bad Source 3",
+                rights_status=RightsStatus.PUBLIC_DOMAIN,
+                rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+                rights_evidence_locator="https://example.com/pd",
+                translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+                commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+                production_rights_approved=True,
+                rights_clearance_scope=RightsClearanceScope(
+                    source_country_status="PUBLIC_DOMAIN",
+                    us_status="PUBLIC_DOMAIN",
+                    approved_jurisdictions=("FR",),
+                    commercial_use_allowed=False,
+                ),
+            )
+        )
+    pipeline.close()
+
+
+def test_target_rights_scope_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate target scope evaluation logic on Recipe."""
+    from decimal import Decimal
+
+    monkeypatch.delenv("HEALBITE_TARGET_RIGHTS_SCOPE", raising=False)
+
+    scope = RightsClearanceScope(
+        source_country_status="PUBLIC_DOMAIN",
+        us_status="PUBLIC_DOMAIN",
+        approved_jurisdictions=("FR", "US"),
+        commercial_use_allowed=True,
+    )
+    recipe = Recipe(
+        recipe_id="REC_TEST",
+        recipe_version=1,
+        author_id=AUTHOR_ESCOFFIER,
+        source_id="SRC_COMMONS",
+        title="Test Recipe",
+        normalized_title="test recipe",
+        meal_types=(MealType.BREAKFAST,),
+        cuisine="French",
+        servings=Decimal("2"),
+        prep_minutes=5,
+        cook_minutes=10,
+        total_minutes=15,
+        difficulty="easy",
+        ingredients=(),
+        instructions=(),
+        tags=(),
+        source_locator="Commons:p.100",
+        source_content_hash="test_hash_123",
+        rights_status=RightsStatus.PUBLIC_DOMAIN,
+        verified=True,
+        verification_status=VerificationStatus.VERIFIED,
+        created_at="2026-09-24 00:00:00",
+        production_eligible=True,
+        source_verification_status=VerificationStatus.VERIFIED,
+        source_content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+        source_production_rights_approved=True,
+        source_rights_clearance_scope=scope,
+    )
+
+    # No target scope configured => fail closed False
+    assert recipe.is_production_cleared_for_scope(None) is False
+    assert recipe.is_production_cleared is False
+
+    # Approved jurisdictions => True
+    assert recipe.is_production_cleared_for_scope("FR") is True
+    assert recipe.is_production_cleared_for_scope("US") is True
+    assert recipe.is_production_cleared_for_scope(("FR", "US")) is True
+    assert recipe.is_production_cleared_for_scope(["fr", "us"]) is True
+
+    # Unapproved jurisdiction => False
+    assert recipe.is_production_cleared_for_scope("DE") is False
+    assert recipe.is_production_cleared_for_scope("RU") is False
+    assert recipe.is_production_cleared_for_scope(("FR", "DE")) is False
+
+    # TargetRightsScope object
+    assert recipe.is_production_cleared_for_scope(TargetRightsScope(jurisdictions=("FR",))) is True
+    assert recipe.is_production_cleared_for_scope(TargetRightsScope(jurisdictions=("FR", "GB"))) is False
+
+    # With environment variable configured
+    monkeypatch.setenv("HEALBITE_TARGET_RIGHTS_SCOPE", "FR,US")
+    assert recipe.is_production_cleared is True

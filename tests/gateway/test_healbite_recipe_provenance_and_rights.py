@@ -15,6 +15,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TranslationRightsStatus,
     VerificationStatus,
 )
 from gateway.healbite_recipe_catalog_store import (
@@ -191,6 +192,7 @@ def test_adversarial_5_recipe_author_mismatch_rejects(tmp_path: Path) -> None:
             rights_evidence_type=RightsEvidenceType.OPERATOR_USER_GRANT,
             rights_evidence_locator="internal://tests",
             content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+            translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
         )
     )
 
@@ -231,6 +233,7 @@ def test_adversarial_6_missing_source_locator_rejects(tmp_path: Path) -> None:
             rights_evidence_type=RightsEvidenceType.OPERATOR_USER_GRANT,
             rights_evidence_locator="internal://tests",
             content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+            translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
         )
     )
 
@@ -273,6 +276,7 @@ def test_adversarial_7_modified_source_hash_rejects(tmp_path: Path) -> None:
             rights_evidence_locator="internal://tests",
             content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
             source_content_hash="canonical_recorded_hash_12345",
+            translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
         )
     )
 
@@ -405,6 +409,7 @@ def test_duplicate_contract_exact_and_conflicting(tmp_path: Path) -> None:
             rights_evidence_type=RightsEvidenceType.OPERATOR_USER_GRANT,
             rights_evidence_locator="internal://tests",
             content_scope=ContentScope.STRUCTURED_RECIPE_CONTENT,
+            translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
         )
     )
 

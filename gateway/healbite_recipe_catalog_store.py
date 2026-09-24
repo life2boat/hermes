@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from gateway.healbite_recipe_catalog_domain import (
     CatalogMetadata,
@@ -19,12 +19,16 @@ from gateway.healbite_recipe_catalog_domain import (
     RecipeIngredient,
     RecipeInstruction,
     RecipeSource,
+    RightsClearanceScope,
     RightsEvidenceType,
     RightsStatus,
     SourceType,
+    TargetRightsScope,
     TranslationRightsStatus,
     VerificationStatus,
+    load_target_rights_scope,
 )
+
 
 CATALOG_SCHEMA_VERSION = 1
 
@@ -60,19 +64,20 @@ CREATE TABLE IF NOT EXISTS recipe_sources (
     content_scope TEXT NOT NULL DEFAULT 'METADATA_ONLY',
     verification_status TEXT NOT NULL DEFAULT 'VERIFIED',
     created_at TEXT NOT NULL,
-    underlying_work_rights TEXT DEFAULT 'PUBLIC_DOMAIN',
-    digital_reproduction_rights TEXT DEFAULT 'PUBLIC_DOMAIN_MARKED',
+    underlying_work_rights TEXT DEFAULT 'UNKNOWN',
+    digital_reproduction_rights TEXT DEFAULT 'UNKNOWN',
     digital_reproduction_reuse_terms TEXT DEFAULT '',
     commercial_reuse_status TEXT DEFAULT 'UNKNOWN',
-    transcription_source TEXT DEFAULT 'OWN_EXTRACTION',
-    transcription_rights TEXT DEFAULT 'NOT_APPLICABLE',
+    transcription_source TEXT DEFAULT 'UNKNOWN',
+    transcription_rights TEXT DEFAULT 'UNKNOWN',
     partner_institution_terms TEXT DEFAULT '',
     target_jurisdiction_status TEXT DEFAULT '',
-    translation_status TEXT DEFAULT 'ORIGINAL_LANGUAGE',
+    translation_status TEXT DEFAULT 'UNKNOWN',
     jurisdiction_basis TEXT,
     edition_basis TEXT,
     canonical_url TEXT,
     production_rights_approved INTEGER DEFAULT 0,
+    rights_clearance_scope_json TEXT DEFAULT NULL,
     FOREIGN KEY (author_id) REFERENCES recipe_authors(author_id)
 );
 
@@ -212,13 +217,21 @@ class HealBiteRecipeCatalogStore:
         *,
         read_only: bool = True,
         validate_hash: bool = True,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self._path = Path(db_path)
         self._read_only = read_only
         self._validate_hash = validate_hash
+        self._target_rights_scope = load_target_rights_scope(target_rights_scope, env=env)
         self._metadata: CatalogMetadata | None = None
         if read_only:
             self._verify_read_only_catalog()
+
+    @property
+    def target_rights_scope(self) -> TargetRightsScope | None:
+        return self._target_rights_scope
+
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -345,10 +358,10 @@ class HealBiteRecipeCatalogStore:
             created_at=row["created_at"],
             underlying_work_rights=row["underlying_work_rights"]
             if "underlying_work_rights" in keys and row["underlying_work_rights"]
-            else "PUBLIC_DOMAIN",
+            else "UNKNOWN",
             digital_reproduction_rights=row["digital_reproduction_rights"]
             if "digital_reproduction_rights" in keys and row["digital_reproduction_rights"]
-            else "PUBLIC_DOMAIN_MARKED",
+            else "UNKNOWN",
             digital_reproduction_reuse_terms=row["digital_reproduction_reuse_terms"]
             if "digital_reproduction_reuse_terms" in keys and row["digital_reproduction_reuse_terms"]
             else "",
@@ -357,10 +370,10 @@ class HealBiteRecipeCatalogStore:
             else CommercialReuseStatus.UNKNOWN,
             transcription_source=row["transcription_source"]
             if "transcription_source" in keys and row["transcription_source"]
-            else "OWN_EXTRACTION",
+            else "UNKNOWN",
             transcription_rights=row["transcription_rights"]
             if "transcription_rights" in keys and row["transcription_rights"]
-            else "NOT_APPLICABLE",
+            else "UNKNOWN",
             partner_institution_terms=row["partner_institution_terms"]
             if "partner_institution_terms" in keys and row["partner_institution_terms"]
             else "",
@@ -369,11 +382,16 @@ class HealBiteRecipeCatalogStore:
             else "",
             translation_status=TranslationRightsStatus(row["translation_status"])
             if "translation_status" in keys and row["translation_status"]
-            else TranslationRightsStatus.ORIGINAL_LANGUAGE,
+            else TranslationRightsStatus.UNKNOWN,
             jurisdiction_basis=row["jurisdiction_basis"] if "jurisdiction_basis" in keys else None,
             edition_basis=row["edition_basis"] if "edition_basis" in keys else None,
             canonical_url=row["canonical_url"] if "canonical_url" in keys else None,
             production_rights_approved=bool(row["production_rights_approved"]) if "production_rights_approved" in keys else False,
+            rights_clearance_scope=RightsClearanceScope.from_dict(
+                json.loads(row["rights_clearance_scope_json"])
+            )
+            if "rights_clearance_scope_json" in keys and row["rights_clearance_scope_json"]
+            else None,
         )
 
     def get_source(self, source_id: str) -> RecipeSource | None:
@@ -397,7 +415,13 @@ class HealBiteRecipeCatalogStore:
             cur.execute("SELECT * FROM recipe_sources ORDER BY author_id, title")
             return [self._build_source_from_row(row) for row in cur.fetchall()]
 
-    def get_recipe(self, recipe_id: str, version: int | None = None) -> Recipe | None:
+    def get_recipe(
+        self,
+        recipe_id: str,
+        version: int | None = None,
+        *,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> Recipe | None:
         with self._connection() as conn:
             cur = conn.cursor()
             if version is not None:
@@ -413,9 +437,14 @@ class HealBiteRecipeCatalogStore:
             row = cur.fetchone()
             if not row:
                 return None
-            return self._build_recipe_from_row(conn, row)
+            return self._build_recipe_from_row(conn, row, target_rights_scope=target_rights_scope)
 
-    def get_recipes_by_ids(self, recipe_ids: Sequence[str]) -> dict[str, Recipe]:
+    def get_recipes_by_ids(
+        self,
+        recipe_ids: Sequence[str],
+        *,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> dict[str, Recipe]:
         if not recipe_ids:
             return {}
         with self._connection() as conn:
@@ -429,10 +458,15 @@ class HealBiteRecipeCatalogStore:
             for row in cur.fetchall():
                 rid = row["recipe_id"]
                 if rid not in result:
-                    result[rid] = self._build_recipe_from_row(conn, row)
+                    result[rid] = self._build_recipe_from_row(conn, row, target_rights_scope=target_rights_scope)
             return result
 
-    def get_all_recipes(self, *, verified_only: bool = True) -> list[Recipe]:
+    def get_all_recipes(
+        self,
+        *,
+        verified_only: bool = True,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> list[Recipe]:
         with self._connection() as conn:
             cur = conn.cursor()
             if verified_only:
@@ -444,10 +478,16 @@ class HealBiteRecipeCatalogStore:
                 cur.execute("SELECT * FROM recipes ORDER BY author_id, title")
             recipes = []
             for row in cur.fetchall():
-                recipes.append(self._build_recipe_from_row(conn, row))
+                recipes.append(self._build_recipe_from_row(conn, row, target_rights_scope=target_rights_scope))
             return recipes
 
-    def list_recipes_by_author(self, author_id: str, *, verified_only: bool = True) -> list[Recipe]:
+    def list_recipes_by_author(
+        self,
+        author_id: str,
+        *,
+        verified_only: bool = True,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> list[Recipe]:
         with self._connection() as conn:
             cur = conn.cursor()
             if verified_only:
@@ -458,9 +498,18 @@ class HealBiteRecipeCatalogStore:
                 )
             else:
                 cur.execute("SELECT * FROM recipes WHERE author_id = ? ORDER BY title", (author_id,))
-            return [self._build_recipe_from_row(conn, row) for row in cur.fetchall()]
+            return [
+                self._build_recipe_from_row(conn, row, target_rights_scope=target_rights_scope)
+                for row in cur.fetchall()
+            ]
 
-    def _build_recipe_from_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> Recipe:
+    def _build_recipe_from_row(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        target_rights_scope: str | Sequence[str] | TargetRightsScope | None = None,
+    ) -> Recipe:
         recipe_id = row["recipe_id"]
         version = row["recipe_version"]
         cur = conn.cursor()
@@ -505,7 +554,7 @@ class HealBiteRecipeCatalogStore:
         keys = set(row.keys())
         source_id = row["source_id"]
         cur.execute(
-            "SELECT verification_status, content_scope, production_rights_approved FROM recipe_sources WHERE source_id = ?",
+            "SELECT verification_status, content_scope, production_rights_approved, rights_clearance_scope_json FROM recipe_sources WHERE source_id = ?",
             (source_id,),
         )
         src_row = cur.fetchone()
@@ -526,10 +575,27 @@ class HealBiteRecipeCatalogStore:
                 if "production_rights_approved" in src_keys
                 else False
             )
+            src_scope_json = (
+                src_row["rights_clearance_scope_json"]
+                if "rights_clearance_scope_json" in src_keys
+                else None
+            )
+            try:
+                src_scope_data = json.loads(src_scope_json) if src_scope_json else None
+            except Exception:
+                src_scope_data = None
+            src_scope = RightsClearanceScope.from_dict(src_scope_data) if src_scope_data else None
         else:
             src_ver_status = None
             src_content_scope = None
             src_prod_approved = False
+            src_scope = None
+
+        effective_scope = (
+            TargetRightsScope.from_value(target_rights_scope)
+            if target_rights_scope is not None
+            else self._target_rights_scope
+        )
 
         return Recipe(
             recipe_id=recipe_id,
@@ -561,6 +627,8 @@ class HealBiteRecipeCatalogStore:
             source_verification_status=src_ver_status,
             source_content_scope=src_content_scope,
             source_production_rights_approved=src_prod_approved,
+            source_rights_clearance_scope=src_scope,
+            target_rights_scope=effective_scope,
             classification_source=row["classification_source"] if "classification_source" in keys else None,
             classification_reason=row["classification_reason"] if "classification_reason" in keys else None,
         )

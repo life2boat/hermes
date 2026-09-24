@@ -21,7 +21,10 @@ if str(SCRIPTS) not in sys.path:
 import hermes_deploy_preflight as preflight
 import hermes_post_deploy_attestation as attestation
 import hermes_production_deploy as deploy
-from build_production_recipe_catalog import build_production_catalog, EXPECTED_CONTENT_HASH
+from build_production_recipe_catalog import (
+    build_production_catalog,
+    EXPECTED_CONTENT_HASH,
+)
 from test_hermes_production_deploy import protected_contract
 
 REVISION = "9e7b6a67890db6b6acbe94f2bb7fba35f1426a7f"
@@ -36,14 +39,20 @@ RECIPE_ALLOWLIST = f"{RECIPE_FEATURE}_ALLOWLIST"
 # 1. CANONICAL CONTRACT DECLARATION & MANIFEST POLICY
 # ============================================================
 
+
 def test_manifest_declares_canonical_recipe_catalog_mount() -> None:
     contract = deploy.load_contract(REPO_ROOT)
-    assert contract.recipe_catalog_source == Path("/var/lib/hermes/recipe-catalog/recipe_catalog.db")
+    assert contract.recipe_catalog_source == Path(
+        "/var/lib/hermes/recipe-catalog/recipe_catalog.db"
+    )
     assert contract.recipe_catalog_target == Path("/home/hermes/recipe_catalog.db")
     assert contract.recipe_catalog_mount_type == "bind"
     assert contract.recipe_catalog_read_only is True
 
-    assert contract.runtime_bindings["HEALBITE_RECIPE_CATALOG_PATH"] == "/home/hermes/recipe_catalog.db"
+    assert (
+        contract.runtime_bindings["HEALBITE_RECIPE_CATALOG_PATH"]
+        == "/home/hermes/recipe_catalog.db"
+    )
     assert contract.public_gates["HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC"] == "false"
     assert contract.feature_gates[RECIPE_ENABLED] == "false"
     assert contract.feature_gates[RECIPE_ALLOWLIST] == ""
@@ -51,29 +60,40 @@ def test_manifest_declares_canonical_recipe_catalog_mount() -> None:
 
 
 def test_manifest_rejects_missing_recipe_catalog_mount() -> None:
-    raw = json.loads((REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8"))
+    raw = json.loads(
+        (REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8")
+    )
     del raw["recipe_catalog_mount"]
     with pytest.raises(deploy.DeploymentContractError, match="manifest-fields"):
         deploy.load_contract(REPO_ROOT, manifest_bytes=json.dumps(raw).encode("utf-8"))
 
 
 def test_manifest_rejects_writable_recipe_catalog_mount() -> None:
-    raw = json.loads((REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8"))
+    raw = json.loads(
+        (REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8")
+    )
     raw["recipe_catalog_mount"]["read_write"] = True
-    with pytest.raises(deploy.DeploymentContractError, match="recipe-catalog-mount-policy"):
+    with pytest.raises(
+        deploy.DeploymentContractError, match="recipe-catalog-mount-policy"
+    ):
         deploy.load_contract(REPO_ROOT, manifest_bytes=json.dumps(raw).encode("utf-8"))
 
 
 def test_manifest_rejects_wrong_type_recipe_catalog_mount() -> None:
-    raw = json.loads((REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8"))
+    raw = json.loads(
+        (REPO_ROOT / "deploy" / "hermes-production.json").read_text(encoding="utf-8")
+    )
     raw["recipe_catalog_mount"]["type"] = "volume"
-    with pytest.raises(deploy.DeploymentContractError, match="recipe-catalog-mount-policy"):
+    with pytest.raises(
+        deploy.DeploymentContractError, match="recipe-catalog-mount-policy"
+    ):
         deploy.load_contract(REPO_ROOT, manifest_bytes=json.dumps(raw).encode("utf-8"))
 
 
 # ============================================================
 # 2. COMPOSE PREFLIGHT MOUNT VALIDATION
 # ============================================================
+
 
 def test_compose_preflight_mount_validation_passes() -> None:
     mount = preflight.MountRecord(
@@ -93,7 +113,9 @@ def test_compose_preflight_mount_validation_passes() -> None:
 
 
 def test_compose_preflight_mount_validation_fails_on_missing() -> None:
-    with pytest.raises(preflight.DeployPreflightError, match="missing-canonical-recipe-catalog-mount"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="missing-canonical-recipe-catalog-mount"
+    ):
         preflight.validate_recipe_catalog_mounts(
             [],
             expected_source="/var/lib/hermes/recipe-catalog/recipe_catalog.db",
@@ -110,7 +132,9 @@ def test_compose_preflight_mount_validation_fails_on_wrong_source() -> None:
         mount_type="bind",
         read_only=True,
     )
-    with pytest.raises(preflight.DeployPreflightError, match="wrong-recipe-catalog-source"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="wrong-recipe-catalog-source"
+    ):
         preflight.validate_recipe_catalog_mounts(
             [mount],
             expected_source="/var/lib/hermes/recipe-catalog/recipe_catalog.db",
@@ -127,7 +151,9 @@ def test_compose_preflight_mount_validation_fails_on_wrong_target() -> None:
         mount_type="bind",
         read_only=True,
     )
-    with pytest.raises(preflight.DeployPreflightError, match="wrong-recipe-catalog-target"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="wrong-recipe-catalog-target"
+    ):
         preflight.validate_recipe_catalog_mounts(
             [mount],
             expected_source="/var/lib/hermes/recipe-catalog/recipe_catalog.db",
@@ -144,7 +170,9 @@ def test_compose_preflight_mount_validation_fails_on_writable() -> None:
         mount_type="bind",
         read_only=False,  # RW
     )
-    with pytest.raises(preflight.DeployPreflightError, match="wrong-recipe-catalog-mount-mode"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="wrong-recipe-catalog-mount-mode"
+    ):
         preflight.validate_recipe_catalog_mounts(
             [mount],
             expected_source="/var/lib/hermes/recipe-catalog/recipe_catalog.db",
@@ -167,7 +195,9 @@ def test_compose_preflight_mount_validation_fails_on_duplicate_target() -> None:
         mount_type="bind",
         read_only=True,
     )
-    with pytest.raises(preflight.DeployPreflightError, match="duplicate-recipe-catalog-target"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="duplicate-recipe-catalog-target"
+    ):
         preflight.validate_recipe_catalog_mounts(
             [m1, m2],
             expected_source="/var/lib/hermes/recipe-catalog/recipe_catalog.db",
@@ -181,6 +211,7 @@ def test_compose_preflight_mount_validation_fails_on_duplicate_target() -> None:
 # 3. RECIPE CATALOG SOURCE PATH VALIDATION
 # ============================================================
 
+
 def test_recipe_catalog_source_path_missing(tmp_path: Path) -> None:
     missing = tmp_path / "nonexistent.db"
     with pytest.raises(preflight.DeployPreflightError, match="recipe-catalog-missing"):
@@ -190,7 +221,9 @@ def test_recipe_catalog_source_path_missing(tmp_path: Path) -> None:
 def test_recipe_catalog_source_path_directory(tmp_path: Path) -> None:
     dir_path = tmp_path / "catalog_dir"
     dir_path.mkdir()
-    with pytest.raises(preflight.DeployPreflightError, match="unsafe-recipe-catalog-file"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="unsafe-recipe-catalog-file"
+    ):
         preflight.validate_recipe_catalog_source_path(dir_path)
 
 
@@ -215,7 +248,9 @@ def test_recipe_catalog_source_path_insecure_mode(tmp_path: Path) -> None:
         pytest.skip("Chmod not supported")
     current_mode = stat.S_IMODE(catalog.stat().st_mode)
     if current_mode & 0o002:
-        with pytest.raises(preflight.DeployPreflightError, match="unsafe-recipe-catalog-permissions"):
+        with pytest.raises(
+            preflight.DeployPreflightError, match="unsafe-recipe-catalog-permissions"
+        ):
             preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -223,7 +258,9 @@ def test_recipe_catalog_source_path_corrupt_sqlite(tmp_path: Path) -> None:
     catalog = tmp_path / "corrupt.db"
     catalog.write_bytes(b"not an sqlite database file")
     catalog.chmod(0o600)
-    with pytest.raises(preflight.DeployPreflightError, match="invalid-recipe-catalog-database"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="invalid-recipe-catalog-database"
+    ):
         preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -234,7 +271,9 @@ def test_recipe_catalog_source_path_missing_metadata_table(tmp_path: Path) -> No
     conn.commit()
     conn.close()
     catalog.chmod(0o600)
-    with pytest.raises(preflight.DeployPreflightError, match="invalid-recipe-catalog-schema"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="invalid-recipe-catalog-schema"
+    ):
         preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -242,11 +281,15 @@ def test_recipe_catalog_source_path_unsupported_schema(tmp_path: Path) -> None:
     catalog = tmp_path / "wrong_schema.db"
     build_production_catalog(catalog)
     conn = sqlite3.connect(catalog)
-    conn.execute("UPDATE catalog_metadata SET value = '99' WHERE key = 'schema_version';")
+    conn.execute(
+        "UPDATE catalog_metadata SET value = '99' WHERE key = 'schema_version';"
+    )
     conn.commit()
     conn.close()
     catalog.chmod(0o600)
-    with pytest.raises(preflight.DeployPreflightError, match="invalid-recipe-catalog-schema"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="invalid-recipe-catalog-schema"
+    ):
         preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -254,11 +297,15 @@ def test_recipe_catalog_source_path_fixtures_present(tmp_path: Path) -> None:
     catalog = tmp_path / "fixtures.db"
     build_production_catalog(catalog)
     conn = sqlite3.connect(catalog)
-    conn.execute("INSERT INTO recipe_authors (author_id, display_name, created_at) VALUES ('AUTHOR_TEST_01', 'Test Author', '2026-01-01');")
+    conn.execute(
+        "INSERT INTO recipe_authors (author_id, display_name, created_at) VALUES ('AUTHOR_TEST_01', 'Test Author', '2026-01-01');"
+    )
     conn.commit()
     conn.close()
     catalog.chmod(0o600)
-    with pytest.raises(preflight.DeployPreflightError, match="recipe-catalog-fixtures-present"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="recipe-catalog-fixtures-present"
+    ):
         preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -278,11 +325,15 @@ def test_recipe_catalog_source_path_hash_mismatch(tmp_path: Path) -> None:
     catalog = tmp_path / "tampered.db"
     build_production_catalog(catalog)
     conn = sqlite3.connect(catalog)
-    conn.execute("UPDATE catalog_metadata SET value = '0000000000000000000000000000000000000000000000000000000000000000' WHERE key = 'content_hash';")
+    conn.execute(
+        "UPDATE catalog_metadata SET value = '0000000000000000000000000000000000000000000000000000000000000000' WHERE key = 'content_hash';"
+    )
     conn.commit()
     conn.close()
     catalog.chmod(0o600)
-    with pytest.raises(preflight.DeployPreflightError, match="recipe-catalog-hash-mismatch"):
+    with pytest.raises(
+        preflight.DeployPreflightError, match="recipe-catalog-hash-mismatch"
+    ):
         preflight.validate_recipe_catalog_source_path(catalog)
 
 
@@ -293,12 +344,15 @@ def test_recipe_catalog_real_build_passes_all_validations(tmp_path: Path) -> Non
     catalog.chmod(0o600)
 
     # Validate passes cleanly
-    preflight.validate_recipe_catalog_source_path(catalog, expected_hash=EXPECTED_CONTENT_HASH)
+    preflight.validate_recipe_catalog_source_path(
+        catalog, expected_hash=EXPECTED_CONTENT_HASH
+    )
 
 
 # ============================================================
 # 4. CANARY AUTHORITY & TARGET RIGHTS SCOPE VALIDATION
 # ============================================================
+
 
 def test_canary_authority_recipe_grounded_valid() -> None:
     raw = (
@@ -331,11 +385,11 @@ def test_canary_authority_recipe_grounded_rights_scopes() -> None:
 
 
 def test_canary_authority_recipe_missing_rights_scope_fails() -> None:
-    raw = (
-        f"{RECIPE_ENABLED}=true\n"
-        f"{RECIPE_ALLOWLIST}=1001\n"
-    ).encode("utf-8")
-    with pytest.raises(deploy.DeploymentContractError, match="canary-recipe-grounded-missing-target-rights-scope"):
+    raw = (f"{RECIPE_ENABLED}=true\n{RECIPE_ALLOWLIST}=1001\n").encode("utf-8")
+    with pytest.raises(
+        deploy.DeploymentContractError,
+        match="canary-recipe-grounded-missing-target-rights-scope",
+    ):
         deploy._parse_canary_authority(
             raw,
             authorized_features=(RECIPE_FEATURE,),
@@ -349,7 +403,9 @@ def test_canary_authority_recipe_invalid_rights_scope_fails() -> None:
             f"{RECIPE_ALLOWLIST}=1001\n"
             f"HEALBITE_TARGET_RIGHTS_SCOPE={invalid}\n"
         ).encode("utf-8")
-        with pytest.raises(deploy.DeploymentContractError, match="canary-target-rights-scope-invalid"):
+        with pytest.raises(
+            deploy.DeploymentContractError, match="canary-target-rights-scope-invalid"
+        ):
             deploy._parse_canary_authority(
                 raw,
                 authorized_features=(RECIPE_FEATURE,),
@@ -363,7 +419,9 @@ def test_canary_authority_recipe_public_gate_forbidden_in_stage_a() -> None:
         f"HEALBITE_TARGET_RIGHTS_SCOPE=FR\n"
         f"HEALBITE_RECIPE_GROUNDED_MENU_PUBLIC=true\n"
     ).encode("utf-8")
-    with pytest.raises(deploy.DeploymentContractError, match="canary-recipe-grounded-public-forbidden"):
+    with pytest.raises(
+        deploy.DeploymentContractError, match="canary-recipe-grounded-public-forbidden"
+    ):
         deploy._parse_canary_authority(
             raw,
             authorized_features=(RECIPE_FEATURE,),
@@ -372,10 +430,11 @@ def test_canary_authority_recipe_public_gate_forbidden_in_stage_a() -> None:
 
 def test_canary_authority_recipe_unauthorized_feature_fails() -> None:
     raw = (
-        f"UNAUTHORIZED_FEATURE_ENABLED=true\n"
-        f"UNAUTHORIZED_FEATURE_ALLOWLIST=1001\n"
+        f"UNAUTHORIZED_FEATURE_ENABLED=true\nUNAUTHORIZED_FEATURE_ALLOWLIST=1001\n"
     ).encode("utf-8")
-    with pytest.raises(deploy.DeploymentContractError, match="canary-feature-unauthorized"):
+    with pytest.raises(
+        deploy.DeploymentContractError, match="canary-feature-unauthorized"
+    ):
         deploy._parse_canary_authority(
             raw,
             authorized_features=(RECIPE_FEATURE,),
@@ -384,9 +443,7 @@ def test_canary_authority_recipe_unauthorized_feature_fails() -> None:
 
 def test_canary_authority_recipe_empty_allowlist_fails() -> None:
     raw = (
-        f"{RECIPE_ENABLED}=true\n"
-        f"{RECIPE_ALLOWLIST}=\n"
-        f"HEALBITE_TARGET_RIGHTS_SCOPE=FR\n"
+        f"{RECIPE_ENABLED}=true\n{RECIPE_ALLOWLIST}=\nHEALBITE_TARGET_RIGHTS_SCOPE=FR\n"
     ).encode("utf-8")
     with pytest.raises(deploy.DeploymentContractError, match="canary-allowlist-empty"):
         deploy._parse_canary_authority(
@@ -397,8 +454,7 @@ def test_canary_authority_recipe_empty_allowlist_fails() -> None:
 
 def test_non_recipe_canary_does_not_require_rights_scope() -> None:
     raw = (
-        "HEALBITE_HOUSEHOLDS_ENABLED=true\n"
-        "HEALBITE_HOUSEHOLDS_ALLOWLIST=1001\n"
+        "HEALBITE_HOUSEHOLDS_ENABLED=true\nHEALBITE_HOUSEHOLDS_ALLOWLIST=1001\n"
     ).encode("utf-8")
     result = deploy._parse_canary_authority(
         raw,
@@ -411,6 +467,7 @@ def test_non_recipe_canary_does_not_require_rights_scope() -> None:
 # ============================================================
 # 5. EXECUTE CANARY ACTIVATION PRECONDITIONS
 # ============================================================
+
 
 def test_execute_canary_activation_checks_catalog_on_disk(
     protected_contract,
@@ -432,14 +489,25 @@ def test_execute_canary_activation_checks_catalog_on_disk(
     authority_file.chmod(0o600)
 
     monkeypatch.setattr(deploy, "validate_repository", lambda *_args: None)
-    monkeypatch.setattr(deploy, "_effective_uid", lambda: 0)
+    monkeypatch.setattr(
+        deploy, "_validate_runtime_directory", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        deploy.preflight,
+        "validate_deployment_lease_owner",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         deploy,
         "_validate_operation_identity",
         lambda *_args, **_kwargs: (SimpleNamespace(image_id=IMAGE_ID), REVISION),
     )
-    monkeypatch.setattr(preflight, "acquire_deployment_lease", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(preflight, "release_deployment_lease", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        deploy.preflight, "acquire_deployment_lease", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        deploy.preflight, "release_deployment_lease", lambda *_args, **_kwargs: None
+    )
 
     monkeypatch.setattr(
         deploy,

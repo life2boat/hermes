@@ -91,6 +91,8 @@ EXPECTED_FEATURE_FLAGS = {
     "HEALBITE_WEEKLY_MENU_ALLOWLIST": "",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "false",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "",
+    "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED": "false",
+    "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST": "",
 }
 OPERATIONS_ROOT_APPROVAL_FIELDS = frozenset({
     "LEGACY_EPOCH_UUID",
@@ -1006,16 +1008,10 @@ def _component_schema_states_from_connection(
         classified = schema_migration._preflight_all_schemas(connection)
     except schema_migration.MigrationError as exc:
         raise ProductionGateError("COMPONENT_SCHEMA_CLASSIFICATION_FAILED") from exc
-    components = [
-        str(item["component"])
-        for item in _target_migration_registry()
-    ]
+    components = [str(item["component"]) for item in _target_migration_registry()]
     if set(classified) != set(components):
         raise ProductionGateError("COMPONENT_SCHEMA_REGISTRY_MISMATCH")
-    return {
-        component: classified[component].value
-        for component in components
-    }
+    return {component: classified[component].value for component in components}
 
 
 def _read_component_schema_states(path: Path) -> dict[str, str]:
@@ -1068,8 +1064,7 @@ def _assert_effective_mutation_contract(
     expected_source_sha256: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     migration_components = [
-        str(item["component"])
-        for item in _target_migration_registry()
+        str(item["component"]) for item in _target_migration_registry()
     ]
     expected = _validate_expected_mutation_components(
         expected_mutation_components,
@@ -1086,9 +1081,7 @@ def _assert_effective_mutation_contract(
             or integrity != "ok"
             or foreign_keys != 0
         ):
-            raise ProductionGateError(
-                "SOURCE_DRIFT_DURING_COMPONENT_CLASSIFICATION"
-            )
+            raise ProductionGateError("SOURCE_DRIFT_DURING_COMPONENT_CLASSIFICATION")
     return states, effective
 
 
@@ -1646,6 +1639,7 @@ def create_plan(args: argparse.Namespace) -> int:
         )
         legacy_epoch_uuid = operations_root_approval.payload["LEGACY_EPOCH_UUID"]
         from scripts.hermes_memory_identity_authority import verify_memory_epoch
+
         verify_memory_epoch(db_path, legacy_epoch_uuid)
         if not isinstance(raw_expected, list):
             raise ProductionGateError("EXPECTED_MUTATION_COMPONENTS_INVALID")
@@ -2195,6 +2189,7 @@ def _revalidate_plan(
         ))
         identity, source_schema, integrity, foreign_keys = _read_only_source(db_path)
         from scripts.hermes_memory_identity_authority import verify_memory_epoch
+
         verify_memory_epoch(db_path, plan["LEGACY_EPOCH_UUID"])
         for name in (
             "SOURCE_DEVICE",
@@ -3024,6 +3019,7 @@ def _execute_plan_outcome(
         if prepared.source_lease is None:
             raise ProductionGateError("SOURCE_SQLITE_LEASE_MISSING")
         from gateway.memory.identity import validate_epoch
+
         validate_epoch(prepared.source_lease.connection, plan["LEGACY_EPOCH_UUID"])
         locked_pre_ddl_states = _component_schema_states_from_connection(
             prepared.source_lease.connection
@@ -3037,9 +3033,7 @@ def _execute_plan_outcome(
             or locked_pre_ddl_effective != plan["EFFECTIVE_MUTATION_COMPONENTS"]
             or locked_pre_ddl_effective != plan["EXPECTED_MUTATION_COMPONENTS"]
         ):
-            raise ProductionGateError(
-                "EFFECTIVE_MUTATION_COMPONENTS_DRIFT_UNDER_LEASE"
-            )
+            raise ProductionGateError("EFFECTIVE_MUTATION_COMPONENTS_DRIFT_UNDER_LEASE")
         _final_mutation_checkpoint(
             pinned,
             validated,
@@ -3059,12 +3053,8 @@ def _execute_plan_outcome(
                 "MIGRATION_IMAGE_ID": plan["MIGRATION_IMAGE_ID"],
                 "MIGRATION_IMAGE_REVISION": plan["MIGRATION_IMAGE_REVISION"],
                 "PREVIOUS_IMAGE_ID": plan["PREVIOUS_IMAGE_ID"],
-                "EXPECTED_MUTATION_COMPONENTS": plan[
-                    "EXPECTED_MUTATION_COMPONENTS"
-                ],
-                "EFFECTIVE_MUTATION_COMPONENTS": plan[
-                    "EFFECTIVE_MUTATION_COMPONENTS"
-                ],
+                "EXPECTED_MUTATION_COMPONENTS": plan["EXPECTED_MUTATION_COMPONENTS"],
+                "EFFECTIVE_MUTATION_COMPONENTS": plan["EFFECTIVE_MUTATION_COMPONENTS"],
                 "OPERATIONS_ROOT_APPROVAL_SHA256": plan[
                     "OPERATIONS_ROOT_APPROVAL_SHA256"
                 ],

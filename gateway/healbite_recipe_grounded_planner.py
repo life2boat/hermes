@@ -36,6 +36,8 @@ class PlannedMealSlot:
 class RecipeGroundedPlan:
     week_start: str
     meals: tuple[PlannedMealSlot, ...]
+    attempts: int = 1
+    repairs: int = 0
 
 
 PLANNER_SYSTEM_PROMPT = """Вы — строгий планировщик меню HealBite.
@@ -93,6 +95,7 @@ class RecipeGroundedWeeklyPlanner:
                     "slot": slot.value,
                     "author_id": c.author_id,
                     "title": c.title,
+                    "tags": list(c.recipe.tags) if hasattr(c, "recipe") and c.recipe else [],
                     "servings": str(c.servings),
                     "overlap_count": c.ingredient_overlap_count,
                 })
@@ -146,7 +149,12 @@ class RecipeGroundedWeeklyPlanner:
                     all_candidates=all_candidates,
                     default_servings=target_servings,
                 )
-                return plan
+                return RecipeGroundedPlan(
+                    week_start=plan.week_start,
+                    meals=plan.meals,
+                    attempts=repair_attempts + 1,
+                    repairs=repair_attempts,
+                )
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning(

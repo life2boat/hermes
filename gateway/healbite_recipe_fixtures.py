@@ -212,18 +212,18 @@ SRC_ESCOFFIER_1907_EN_SOURCE = RecipeSource(
 SRC_ESCOFFIER_1903_COMMONS_SOURCE = RecipeSource(
     source_id="SRC_ESCOFFIER_1903_COMMONS",
     author_id=AUTHOR_ESCOFFIER,
-    title="Le Guide Culinaire (1903/1907 Second Edition, French Original)",
+    title="Le Guide Culinaire (Deuxième édition, 1907, French Original)",
     source_type=SourceType.BOOK,
     source_locator="Deuxième édition, Paris, 1907 / Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
-    publication_year=1903,
-    edition="Deuxième édition (1907) / Première édition (1903)",
+    publication_year=1907,
+    edition="Deuxième édition",
     language="fr",
     rights_status=RightsStatus.PUBLIC_DOMAIN,
     rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
     rights_evidence_locator="Wikimedia Commons File:Auguste Escoffier - Le Guide Culinaire - Aide-mémoire de cuisine pratique, 1903.djvu / Internet Archive b21525912",
     rights_evidence_note=(
         "Underlying work public domain in France (CPI Art. L.123-1, author d. 1935, collaborator Philéas Gilbert d. 1942, >70y pma) "
-        "and United States (17 U.S.C. § 304, published pre-1929). Digital scan published by Leeds University Library / Wellcome "
+        "and United States (17 U.S.C. § 304, published pre-1929, 1907). Digital scan published by Leeds University Library / Wellcome "
         "under Public Domain Mark 1.0; own extraction from digital image/text layer; commercial reuse permitted within approved jurisdictions; approved for production."
     ),
     source_content_hash="e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9",
@@ -239,10 +239,10 @@ SRC_ESCOFFIER_1903_COMMONS_SOURCE = RecipeSource(
     transcription_source="OWN_EXTRACTION",
     transcription_rights="NOT_APPLICABLE",
     partner_institution_terms="Leeds University Library / Wellcome Collection (digital scan b21525912)",
-    target_jurisdiction_status="Public domain in France (CPI Art. L.123-1) and USA (17 U.S.C. § 304)",
+    target_jurisdiction_status="Public domain in France (CPI Art. L.123-1) and USA (17 U.S.C. § 304 pre-1929)",
     translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
     jurisdiction_basis="FR / US",
-    edition_basis="Paris 1903/1907 French second edition",
+    edition_basis="Paris 1907 French second edition",
     canonical_url="https://commons.wikimedia.org/wiki/File:Auguste_Escoffier_-_Le_Guide_Culinaire_-_Aide-m%C3%A9moire_de_cuisine_pratique,_1903.djvu",
     rights_clearance_scope=RightsClearanceScope(
         source_country_status="PUBLIC_DOMAIN",

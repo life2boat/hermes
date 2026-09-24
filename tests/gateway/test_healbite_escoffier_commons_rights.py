@@ -37,6 +37,7 @@ from gateway.healbite_recipe_catalog_domain import (
     RightsClearanceScope,
     RightsEvidenceType,
     RightsStatus,
+    SourceType,
     TargetRightsScope,
     TranslationRightsStatus,
     VerificationStatus,
@@ -96,6 +97,9 @@ def test_escoffier_commons_10_rights_dimensions() -> None:
     assert src.verification_status == VerificationStatus.VERIFIED
     assert src.production_rights_approved is True
     assert src.source_content_hash == "e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9"
+    assert src.publication_year == 1907
+    assert src.edition == "Deuxième édition"
+    assert src.edition_basis == "Paris 1907 French second edition"
 
 
 # ==============================================================================
@@ -530,3 +534,138 @@ def test_target_rights_scope_evaluation(monkeypatch: pytest.MonkeyPatch) -> None
     # With environment variable configured
     monkeypatch.setenv("HEALBITE_TARGET_RIGHTS_SCOPE", "FR,US")
     assert recipe.is_production_cleared is True
+
+
+# ==============================================================================
+# 11. EXACT EDITION AND SOURCE PROVENANCE CLOSURE
+# ==============================================================================
+
+def test_exact_edition_identity_and_consistency() -> None:
+    """Validate exact edition consistency and fail closed on contradictory/composite metadata."""
+    manifest_path = REPO_ROOT / "recipe_corpus" / "manifests" / "sources_manifest.json"
+    manifests = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source_map = {s["source_id"]: s for s in manifests}
+
+    src = source_map["SRC_ESCOFFIER_1903_COMMONS"]
+    fixture_src = SRC_ESCOFFIER_1903_COMMONS_SOURCE
+
+    # 1. Exact edition statement and publication year consistency (Deuxième édition, 1907)
+    assert src["publication_year"] == 1907
+    assert fixture_src.publication_year == 1907
+    assert src["edition"] == "Deuxième édition"
+    assert fixture_src.edition == "Deuxième édition"
+    assert src["edition_basis"] == "Paris 1907 French second edition"
+    assert fixture_src.edition_basis == "Paris 1907 French second edition"
+
+    # 2. No composite 1903/1907 or contradictory placeholders
+    assert "1903/1907" not in src["title"]
+    assert "1903/1907" not in src["edition"]
+    assert "1903/1907" not in src["edition_basis"]
+    assert "Première édition" not in src["edition"]
+
+    assert "1903/1907" not in fixture_src.title
+    assert "1903/1907" not in fixture_src.edition
+    assert "1903/1907" not in (fixture_src.edition_basis or "")
+    assert "Première édition" not in fixture_src.edition
+
+    # 3. Source artifact identity and frozen hash validation
+    assert "b21525912" in src["rights_evidence_locator"]
+    assert "b21525912" in src["partner_institution_terms"]
+    assert src["source_content_hash"] == "e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9"
+    assert fixture_src.source_content_hash == "e030f727e3e28102a02b46a2dc60a8ba342bc150deafbc02fd0d130d52e0dab9"
+
+
+def test_exact_edition_fail_closed_on_contradiction(tmp_path: Path) -> None:
+    """Ingestion pipeline rejects production source where publication year contradicts edition year."""
+    db_path = tmp_path / "bad_edition.db"
+    pipeline = RecipeIngestionPipeline(db_path)
+
+    bad_source = RecipeSource(
+        source_id="SRC_CONTRADICTORY_YEAR",
+        author_id=AUTHOR_ESCOFFIER,
+        title="Contradictory Edition Book",
+        source_type=SourceType.BOOK,
+        publication_year=1903,
+        edition="Deuxième édition (1907)",
+        edition_basis="Paris 1907 French second edition",
+        rights_status=RightsStatus.PUBLIC_DOMAIN,
+        rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+        rights_evidence_locator="b21525912",
+        translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+        commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+        rights_clearance_scope=RightsClearanceScope(
+            source_country_status="PUBLIC_DOMAIN",
+            us_status="PUBLIC_DOMAIN",
+            approved_jurisdictions=("FR", "US"),
+            commercial_use_allowed=True,
+        ),
+        production_rights_approved=True,
+    )
+    with pytest.raises(RightsPolicyViolationError, match="publication year 1903 contradicts edition year 1907"):
+        pipeline.ingest_source(bad_source)
+
+    pipeline.close()
+
+
+def test_exact_edition_fail_closed_on_composite_placeholder(tmp_path: Path) -> None:
+    """Ingestion pipeline rejects production source with composite 1903/1907 or slash placeholders."""
+    db_path = tmp_path / "composite_edition.db"
+    pipeline = RecipeIngestionPipeline(db_path)
+
+    composite_source = RecipeSource(
+        source_id="SRC_COMPOSITE_EDITION",
+        author_id=AUTHOR_ESCOFFIER,
+        title="Composite Edition Book",
+        source_type=SourceType.BOOK,
+        publication_year=1903,
+        edition="Deuxième édition (1907) / Première édition (1903)",
+        edition_basis="Paris 1903/1907 French second edition",
+        rights_status=RightsStatus.PUBLIC_DOMAIN,
+        rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+        rights_evidence_locator="b21525912",
+        translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+        commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+        rights_clearance_scope=RightsClearanceScope(
+            source_country_status="PUBLIC_DOMAIN",
+            us_status="PUBLIC_DOMAIN",
+            approved_jurisdictions=("FR", "US"),
+            commercial_use_allowed=True,
+        ),
+        production_rights_approved=True,
+    )
+    with pytest.raises(RightsPolicyViolationError, match="composite or ambiguous edition"):
+        pipeline.ingest_source(composite_source)
+
+    pipeline.close()
+
+
+def test_exact_edition_fail_closed_on_missing_edition_statement(tmp_path: Path) -> None:
+    """Ingestion pipeline rejects production source with missing/empty edition statement."""
+    db_path = tmp_path / "missing_edition.db"
+    pipeline = RecipeIngestionPipeline(db_path)
+
+    missing_edition_source = RecipeSource(
+        source_id="SRC_MISSING_EDITION",
+        author_id=AUTHOR_ESCOFFIER,
+        title="Missing Edition Book",
+        source_type=SourceType.BOOK,
+        publication_year=1907,
+        edition="",
+        edition_basis="",
+        rights_status=RightsStatus.PUBLIC_DOMAIN,
+        rights_evidence_type=RightsEvidenceType.PUBLIC_DOMAIN_STATUTE,
+        rights_evidence_locator="b21525912",
+        translation_status=TranslationRightsStatus.ORIGINAL_LANGUAGE,
+        commercial_reuse_status=CommercialReuseStatus.COMMERCIAL_ALLOWED,
+        rights_clearance_scope=RightsClearanceScope(
+            source_country_status="PUBLIC_DOMAIN",
+            us_status="PUBLIC_DOMAIN",
+            approved_jurisdictions=("FR", "US"),
+            commercial_use_allowed=True,
+        ),
+        production_rights_approved=True,
+    )
+    with pytest.raises(RightsPolicyViolationError, match="must specify an explicit edition statement"):
+        pipeline.ingest_source(missing_edition_source)
+
+    pipeline.close()

@@ -45,6 +45,10 @@ def base_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]:
     database_source.parent.mkdir(parents=True, mode=0o700)
     database_source.write_bytes(b"synthetic-db")
     database_source.chmod(0o600)
+    recipe_catalog_source = tmp_path / "recipe-catalog" / "recipe_catalog.db"
+    recipe_catalog_source.parent.mkdir(parents=True, mode=0o700)
+    recipe_catalog_source.write_bytes(b"synthetic-catalog")
+    recipe_catalog_source.chmod(0o600)
     contract = replace(
         deploy.load_contract(),
         runtime_directory=runtime_dir,
@@ -54,6 +58,7 @@ def base_contract(tmp_path: Path) -> tuple[deploy.DeploymentContract, Path]:
         approved_secret_source=source,
         approved_source_owner_uids=frozenset({deploy._effective_uid()}),
         database_source=database_source,
+        recipe_catalog_source=recipe_catalog_source,
         capacity_filesystem=tmp_path,
         minimum_free_basis_points=1,
         estimated_peak_incremental_build_bytes=1,
@@ -86,7 +91,13 @@ def _mock_compose_runner(
                         "source": str(contract.database_source),
                         "target": str(contract.database_target),
                         "read_only": contract.database_read_only,
-                    }
+                    },
+                    {
+                        "type": contract.recipe_catalog_mount_type,
+                        "source": str(contract.recipe_catalog_source),
+                        "target": str(contract.recipe_catalog_target),
+                        "read_only": contract.recipe_catalog_read_only,
+                    },
                 ],
             }
         }
@@ -159,12 +170,13 @@ def _mock_container_snapshot(
 # ============================================================
 def test_canonical_production_contract_declares_qdrant_v2() -> None:
     contract = deploy.load_contract()
-    assert contract.runtime_bindings == {"QDRANT_COLLECTION": CANONICAL_COLLECTION}
+    assert contract.runtime_bindings["QDRANT_COLLECTION"] == CANONICAL_COLLECTION
 
     manifest_raw = json.loads(contract.manifest_path.read_text(encoding="utf-8"))
-    assert manifest_raw.get("runtime_bindings") == {
-        "QDRANT_COLLECTION": CANONICAL_COLLECTION
-    }
+    assert (
+        manifest_raw.get("runtime_bindings", {})["QDRANT_COLLECTION"]
+        == CANONICAL_COLLECTION
+    )
 
     override_raw = json.loads(
         contract.production_override.read_text(encoding="utf-8")
@@ -270,7 +282,13 @@ def test_legacy_binding_fails_closed(base_contract, monkeypatch) -> None:
                         "source": str(contract.database_source),
                         "target": str(contract.database_target),
                         "read_only": contract.database_read_only,
-                    }
+                    },
+                    {
+                        "type": contract.recipe_catalog_mount_type,
+                        "source": str(contract.recipe_catalog_source),
+                        "target": str(contract.recipe_catalog_target),
+                        "read_only": contract.recipe_catalog_read_only,
+                    },
                 ],
             }
         }
@@ -403,8 +421,9 @@ def test_rendered_compose_value_is_exact_v2(base_contract, monkeypatch) -> None:
     monkeypatch.setattr(deploy, "_run", runner)
 
     mounts = deploy.validate_compose_render(contract, image=IMAGE_ID, revision=REVISION)
-    assert len(mounts) == 1
+    assert len(mounts) == 2
     assert mounts[0].target == str(contract.database_target)
+    assert mounts[1].target == str(contract.recipe_catalog_target)
 
 
 # ============================================================
@@ -541,7 +560,13 @@ def test_incident_reproduction(base_contract, monkeypatch) -> None:
                         "source": str(contract.database_source),
                         "target": str(contract.database_target),
                         "read_only": contract.database_read_only,
-                    }
+                    },
+                    {
+                        "type": contract.recipe_catalog_mount_type,
+                        "source": str(contract.recipe_catalog_source),
+                        "target": str(contract.recipe_catalog_target),
+                        "read_only": contract.recipe_catalog_read_only,
+                    },
                 ],
             }
         }
@@ -594,4 +619,4 @@ def test_incident_reproduction(base_contract, monkeypatch) -> None:
         image=IMAGE_ID,
         revision=REVISION,
     )
-    assert len(mounts) == 1
+    assert len(mounts) == 2

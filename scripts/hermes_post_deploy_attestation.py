@@ -35,6 +35,7 @@ CANONICAL_FEATURE_GATE_PREFIXES = (
     "HEALBITE_SHOPPING_LIST",
     "HEALBITE_WEEKLY_MENU",
     "HEALBITE_WEEKLY_MENU_INVENTORY",
+    "HEALBITE_RECIPE_GROUNDED_MENU",
 )
 CANONICAL_FEATURE_GATE_NAMES = tuple(
     f"{prefix}_ENABLED" for prefix in CANONICAL_FEATURE_GATE_PREFIXES
@@ -831,11 +832,28 @@ def post_deploy_attestation(
     target_revision: str,
     protected_secret_names: tuple[str, ...],
     expected_qdrant_collection: str = "healbite_memory_os_v2",
+    expected_recipe_catalog_source: Path | None = None,
+    expected_recipe_catalog_target: Path | None = None,
     image_declared_volume_destinations: frozenset[str] = frozenset(),
     run: Run = _default_run,
     sleep: Sleep = time.sleep,
 ) -> PostDeployAttestation:
     previous_sample: ContainerSnapshot | None = None
+    expected_mounts = baseline.hermes.mounts
+    if expected_recipe_catalog_source is not None and expected_recipe_catalog_target is not None:
+        catalog_mount = MountSnapshot(
+            mount_type="bind",
+            source=os.path.normpath(str(expected_recipe_catalog_source)),
+            target=os.path.normpath(str(expected_recipe_catalog_target)),
+            read_only=True,
+        )
+        if catalog_mount not in expected_mounts:
+            expected_mounts = tuple(
+                sorted(
+                    (*expected_mounts, catalog_mount),
+                    key=lambda item: (item.target, item.source, item.mount_type),
+                )
+            )
     for index in range(policy.stability_sample_count):
         if index:
             sleep(policy.stability_interval_seconds)
@@ -851,7 +869,7 @@ def post_deploy_attestation(
             sample,
             expected_image_id=target_image_id,
             expected_revision=target_revision,
-            expected_mounts=baseline.hermes.mounts,
+            expected_mounts=expected_mounts,
             expected_feature_gates=baseline.hermes.feature_gates,
             expected_allowlists=baseline.hermes.allowlists,
             expected_secret_fingerprints=baseline.hermes.secret_fingerprints,

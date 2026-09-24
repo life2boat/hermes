@@ -46,6 +46,8 @@ FEATURES = {
     "HEALBITE_WEEKLY_MENU_ALLOWLIST": "1001",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED": "true",
     "HEALBITE_WEEKLY_MENU_INVENTORY_ALLOWLIST": "1001",
+    "HEALBITE_RECIPE_GROUNDED_MENU_ENABLED": "false",
+    "HEALBITE_RECIPE_GROUNDED_MENU_ALLOWLIST": "",
 }
 
 
@@ -501,8 +503,8 @@ def test_rollback_attestation_uses_the_same_complete_inventory(
         sleep=lambda _seconds: None,
     )
     assert result.feature_gate_delta == "UNCHANGED"
-    assert len(baseline.hermes.feature_gates) == 9
-    assert len(baseline.hermes.allowlists) == 9
+    assert len(baseline.hermes.feature_gates) == 10
+    assert len(baseline.hermes.allowlists) == 10
 
 
 def test_late_crash_is_detected_across_multiple_samples(
@@ -1116,18 +1118,8 @@ def _make_cs(
     """Minimal ContainerSnapshot for _require_expected_runtime tests."""
     import hashlib
 
-    gate_names = (
-        "HEALBITE_HOUSEHOLDS_ENABLED",
-        "HEALBITE_INVENTORY_PHOTO_ENABLED",
-        "HEALBITE_INVENTORY_PHOTO_UI_ENABLED",
-        "HEALBITE_INVENTORY_TEXT_ENABLED",
-        "HEALBITE_INVENTORY_TEXT_UI_ENABLED",
-        "HEALBITE_INVENTORY_WEEKLY_GENERATION_UI_ENABLED",
-        "HEALBITE_SHOPPING_LIST_ENABLED",
-        "HEALBITE_WEEKLY_MENU_ENABLED",
-        "HEALBITE_WEEKLY_MENU_INVENTORY_ENABLED",
-    )
-    allowlist_names = tuple(n.replace("_ENABLED", "_ALLOWLIST") for n in gate_names)
+    gate_names = tuple(n for n in FEATURES if n.endswith("_ENABLED"))
+    allowlist_names = tuple(n for n in FEATURES if n.endswith("_ALLOWLIST"))
     feature_gates = tuple((n, FEATURES[n]) for n in gate_names)
     allowlists: tuple[tuple[str, str, int], ...] = tuple(
         (n, FEATURES[n], len([m for m in FEATURES[n].split(",") if m]))

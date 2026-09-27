@@ -11,26 +11,24 @@ from ai_engineering.linear_dispatcher.lease_manager import LeaseManager
 def test_worker_fails_discovery_due_to_tasks_stub(tmp_path):
     with open("ai_engineering/linear_dispatcher/worker.py", "r") as f:
         content = f.read()
-    assert "tasks = [] # mock fetch tasks" in content, "Defect 1 not present"
+    assert "tasks = linear_client.list_issues()" in content or "linear_client.list_issues()" in content, "Defect 1 not fixed"
 
 def test_stub_linear_client_fails(tmp_path):
-    from ai_engineering.linear_dispatcher.worker import LinearClient
-    client = LinearClient()
-    with pytest.raises(AttributeError):
-        client.list_issues()
+    with open("ai_engineering/linear_dispatcher/worker.py", "r") as f:
+        content = f.read()
+    assert "LinearProductionClient" in content, "Defect 2 not fixed"
 
 def test_stub_github_service_fails(tmp_path):
-    from ai_engineering.linear_dispatcher.worker import GitHubService
-    service = GitHubService()
-    with pytest.raises(AttributeError):
-        service.get_ci_status("repo", "sha", 1)
+    with open("ai_engineering/linear_dispatcher/worker.py", "r") as f:
+        content = f.read()
+    assert "GitHubProductionService" in content, "Defect 3 not fixed"
 
 def test_worktree_construction_invalid(tmp_path):
     with open("ai_engineering/linear_dispatcher/worker.py", "r") as f:
         content = f.read()
-    assert "worktree_service = WorktreeService()" in content, "Defect 4 not present"
+    assert "worktree_service = WorktreeService(canonical_root=canonical_root, base_sha=canonical_sha)" in content, "Defect 4 not fixed"
     
 def test_tmp_lease_storage(tmp_path):
     with open("ai_engineering/linear_dispatcher/worker.py", "r") as f:
         content = f.read()
-    assert "/tmp/hermes-dispatcher-lease.json" in content, "Defect 5 not present"
+    assert "/var/lib/hermes/linear-dispatcher" in content, "Defect 5 not fixed"

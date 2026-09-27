@@ -108,7 +108,14 @@ class DispatcherWorker:
         try:
             linear_client = LinearProductionClient()
             lease_manager = LeaseManager(persistence_path=lease_path)
-            worktree_service = WorktreeService()
+            
+            canonical_root = Path(os.environ.get("HERMES_CANONICAL_ROOT", "/home/runner/work/hermes/hermes")).resolve()
+            canonical_sha = self._resolve_canonical_main_sha()
+            if not canonical_sha:
+                logger.error("Could not resolve canonical main SHA at startup. BLOCKED.")
+                sys.exit(1)
+                
+            worktree_service = WorktreeService(canonical_root=canonical_root, base_sha=canonical_sha)
             github_service = GitHubProductionService()
             ledger = ExecutionLedger(ledger_path)
 

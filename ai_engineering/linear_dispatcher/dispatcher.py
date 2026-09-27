@@ -174,6 +174,10 @@ class AutonomousDispatcher:
                     transitions=sm.history,
                 )
 
+            # Git stage changes
+            import subprocess
+            subprocess.run(["git", "add", "-A"], cwd=str(wt_path), check=True)
+
             # Phase 6: Local validation
             sm.transition(TaskState.VALIDATING, now_iso=now_iso)
             val_ok, val_details = LocalValidator.run_validation(wt_path)
@@ -190,9 +194,6 @@ class AutonomousDispatcher:
                     transitions=sm.history,
                 )
 
-            # Git commit in worktree
-            import subprocess
-            subprocess.run(["git", "add", "-A"], cwd=str(wt_path), check=True)
             commit_msg = f"feat({task.id.lower()}): {task.title}"
             subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(wt_path), check=True)
             head_sha_proc = subprocess.run(

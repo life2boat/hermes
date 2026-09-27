@@ -52,6 +52,7 @@ class AutonomousDispatcher:
         worktree_service: WorktreeService,
         github_service: IGitHubService,
         worktree_base_dir: Path | str,
+        canonical_main_sha: str,
     ) -> None:
         self._config = config
         self._linear_client = linear_client
@@ -60,6 +61,7 @@ class AutonomousDispatcher:
         self._github_service = github_service
         self._worktree_base_dir = Path(worktree_base_dir).resolve()
         self._writeback_service = WritebackService(linear_client)
+        self._canonical_main_sha = canonical_main_sha
 
     def dispatch_one_task(
         self,
@@ -217,7 +219,7 @@ class AutonomousDispatcher:
             pr_ok, pr_result, pr_err = self._github_service.create_draft_pr(
                 task,
                 branch_name,
-                self._config.canonical_main_sha,
+                self._canonical_main_sha,
                 head_sha,
                 wt_path,
             )
@@ -291,7 +293,7 @@ class AutonomousDispatcher:
                 branch=branch_name,
                 pr_number=pr_result.pr_number,
                 pr_url=pr_result.pr_url,
-                base_sha=self._config.canonical_main_sha,
+                base_sha=self._canonical_main_sha,
                 head_sha=head_sha,
                 validation_status="PASS",
                 ci_status="PASS",

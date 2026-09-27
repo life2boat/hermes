@@ -58,8 +58,13 @@ class LeaseManager:
             }
             for k, v in self._leases.items()
         }
-        with open(self._persistence_path, "w", encoding="utf-8") as f:
+        tmp_path = self._persistence_path.with_suffix('.tmp')
+        import os
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._persistence_path)
 
     def is_held_by_foreign_worker(
         self,

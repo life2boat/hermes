@@ -53,6 +53,7 @@ class AutonomousDispatcher:
         github_service: IGitHubService,
         worktree_base_dir: Path | str,
         canonical_main_sha: str,
+        execution_ledger: Any = None,
     ) -> None:
         self._config = config
         self._linear_client = linear_client
@@ -62,6 +63,7 @@ class AutonomousDispatcher:
         self._worktree_base_dir = Path(worktree_base_dir).resolve()
         self._writeback_service = WritebackService(linear_client)
         self._canonical_main_sha = canonical_main_sha
+        self._ledger = execution_ledger
 
     def dispatch_one_task(
         self,
@@ -113,6 +115,11 @@ class AutonomousDispatcher:
             )
 
         sm.transition(TaskState.CLAIMED, evidence={"claim_token": claim_record.claim_token}, now_iso=now_iso)
+        if self._ledger:
+            from ai_engineering.linear_dispatcher.execution_ledger import ExecutionState
+            self._ledger.write_state(ExecutionState(
+                task_id=task.id, state=TaskState.CLAIMED.value, claim_owner=self._config.worker_id, claim_token=claim_record.claim_token
+            ))
 
         # Phase 3: Setup isolated worktree
         wt_path, branch_name, wt_err = self._worktree_service.create_worktree(
@@ -139,6 +146,11 @@ class AutonomousDispatcher:
             evidence={"worktree_path": str(wt_path), "branch": branch_name},
             now_iso=now_iso,
         )
+        if self._ledger:
+            self._ledger.write_state(ExecutionState(
+                task_id=task.id, state=TaskState.WORKTREE_READY.value, claim_owner=self._config.worker_id, claim_token=claim_record.claim_token,
+                worktree_path=str(wt_path), branch=branch_name
+            ))
 
         try:
             # Stale worker / lost lease check before applying mutations
@@ -207,6 +219,27 @@ class AutonomousDispatcher:
             )
             head_sha = head_sha_proc.stdout.strip()
 
+            # Phase 7: Main Drift Barrier
+            drift_proc = subprocess.run(
+                ["git", "ls-remote", "https://github.com/life2boat/hermes.git", "refs/heads/main"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            current_main_sha = drift_proc.stdout.split()[0] if drift_proc.stdout.strip() else ""
+            if current_main_sha != self._canonical_main_sha:
+                sm.transition(TaskState.BLOCKED, reason="CANONICAL_MAIN_DRIFT", now_iso=now_iso)
+                return DispatchResult(
+                    task_id=task.id,
+                    final_state=TaskState.BLOCKED,
+                    branch=branch_name,
+                    pr_number=None,
+                    pr_url=None,
+                    head_sha=head_sha,
+                    block_reason="CANONICAL_MAIN_DRIFT",
+                    transitions=sm.history,
+                )
+
             # Push branch
             subprocess.run(
                 ["git", "push", self._config.canonical_remote, branch_name],
@@ -241,9 +274,19 @@ class AutonomousDispatcher:
                 evidence={"pr_number": pr_result.pr_number, "pr_url": pr_result.pr_url, "head_sha": head_sha},
                 now_iso=now_iso,
             )
+            if self._ledger:
+                self._ledger.write_state(ExecutionState(
+                    task_id=task.id, state=TaskState.PR_OPEN.value, claim_owner=self._config.worker_id, claim_token=claim_record.claim_token,
+                    worktree_path=str(wt_path), branch=branch_name, head_sha=head_sha, pr_number=pr_result.pr_number, pr_url=pr_result.pr_url, base_sha=self._canonical_main_sha
+                ))
 
             # Phase 8: CI Check (Exact-head)
             sm.transition(TaskState.CI_PENDING, now_iso=now_iso)
+            if self._ledger:
+                self._ledger.write_state(ExecutionState(
+                    task_id=task.id, state=TaskState.CI_PENDING.value, claim_owner=self._config.worker_id, claim_token=claim_record.claim_token,
+                    worktree_path=str(wt_path), branch=branch_name, head_sha=head_sha, pr_number=pr_result.pr_number, pr_url=pr_result.pr_url, base_sha=self._canonical_main_sha
+                ))
             import time
             start_wait = time.time()
             ci_ok = False
@@ -262,6 +305,15 @@ class AutonomousDispatcher:
                 if (time.time() - start_wait) >= self._config.ci_max_wait_sec:
                     ci_reason = BlockReasonCode.CI_FAILED
                     break
+                
+                # Phase 15: Heartbeat
+                renewed, _, _ = self._lease_manager.claim(
+                    task.id, self._config.worker_id, self._config.lease_duration_sec, now_iso=now_iso
+                )
+                if not renewed:
+                    ci_reason = BlockReasonCode.LOST_LEASE
+                    break
+
                 time.sleep(self._config.ci_poll_interval_sec)
 
             if not ci_ok or not ci_result or ci_result.overall_status != "PASS":
@@ -315,6 +367,11 @@ class AutonomousDispatcher:
                 )
 
             sm.transition(TaskState.WRITEBACK_DONE, now_iso=now_iso)
+            if self._ledger:
+                self._ledger.write_state(ExecutionState(
+                    task_id=task.id, state=TaskState.WRITEBACK_DONE.value, claim_owner=self._config.worker_id, claim_token=claim_record.claim_token,
+                    worktree_path=str(wt_path), branch=branch_name, head_sha=head_sha, pr_number=pr_result.pr_number, pr_url=pr_result.pr_url, base_sha=self._canonical_main_sha
+                ))
             sm.transition(TaskState.DONE, now_iso=now_iso)
 
             # Cleanup

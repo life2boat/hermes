@@ -81,6 +81,16 @@ class WritebackService:
         """Write evidence comment and verify by re-reading from Linear."""
         md_text = evidence.to_markdown()
 
+        # Step 0: Idempotency check
+        comments = self._client.get_issue_comments(task.id)
+        refetched_task = self._client.get_issue(task.id)
+        if refetched_task and (
+            any(evidence.head_sha in c for c in comments) or 
+            (evidence.head_sha in refetched_task.description)
+        ):
+            # Already written
+            return True, None
+
         # Step 1: Add comment with evidence
         ok = self._client.add_comment(task.id, md_text)
         if not ok:

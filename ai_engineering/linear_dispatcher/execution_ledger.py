@@ -57,7 +57,7 @@ class SingleWorkerLock:
 
     def acquire(self) -> bool:
         try:
-            self.fd = open(self.lock_path, 'w')
+            self.fd = open(self.lock_path, 'w', encoding='utf-8')
             if os.name == 'nt':
                 import msvcrt
                 msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)

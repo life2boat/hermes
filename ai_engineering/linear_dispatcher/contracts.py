@@ -102,7 +102,6 @@ class DispatcherConfig:
     canonical_repo: str = "life2boat/hermes"
     canonical_remote: str = "github"
     canonical_main_ref: str = "refs/remotes/github/main"
-    canonical_main_sha: str = "61dfa808ab35b71cd5136b2f20a5050009325a15"
     worker_id: str = "hermes-autonomous-dispatcher-v1"
     lease_duration_sec: int = 1800
     require_auto_label: bool = True
@@ -111,3 +110,5 @@ class DispatcherConfig:
     production_mutation_allowed: bool = False
     ci_poll_interval_sec: int = 15
     ci_max_wait_sec: int = 600
+    enabled: bool = False
+    mode: str = "shadow"

@@ -168,7 +168,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                     details=details,
                 ), None
 
-            if conclusion != "success":
+            if conclusion not in ("success", "skipped", "neutral"):
                 details[name] = f"failed ({conclusion})"
                 return False, CIStatusResult(
                     overall_status="FAIL",
@@ -177,7 +177,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                     details=details,
                 ), BlockReasonCode.CI_FAILED
 
-            details[name] = "success"
+            details[name] = conclusion or "success"
 
         return True, CIStatusResult(
             overall_status="PASS",

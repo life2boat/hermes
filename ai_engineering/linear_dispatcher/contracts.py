@@ -109,3 +109,5 @@ class DispatcherConfig:
     require_shadow_label: bool = True
     auto_merge_allowed: bool = False
     production_mutation_allowed: bool = False
+    ci_poll_interval_sec: int = 15
+    ci_max_wait_sec: int = 600

@@ -241,11 +241,26 @@ class AutonomousDispatcher:
 
             # Phase 8: CI Check (Exact-head)
             sm.transition(TaskState.CI_PENDING, now_iso=now_iso)
-            ci_ok, ci_result, ci_reason = self._github_service.get_ci_status(
-                self._config.canonical_repo,
-                head_sha,
-                pr_result.pr_number,
-            )
+            import time
+            start_wait = time.time()
+            ci_ok = False
+            ci_result = None
+            ci_reason = None
+            while True:
+                ci_ok, ci_result, ci_reason = self._github_service.get_ci_status(
+                    self._config.canonical_repo,
+                    head_sha,
+                    pr_result.pr_number,
+                )
+                if ci_ok and ci_result and ci_result.overall_status == "PASS":
+                    break
+                if ci_reason == BlockReasonCode.CI_SHA_MISMATCH or (ci_result and ci_result.overall_status == "FAIL"):
+                    break
+                if (time.time() - start_wait) >= self._config.ci_max_wait_sec:
+                    ci_reason = BlockReasonCode.CI_FAILED
+                    break
+                time.sleep(self._config.ci_poll_interval_sec)
+
             if not ci_ok or not ci_result or ci_result.overall_status != "PASS":
                 reason_code = ci_reason.value if ci_reason else "CI_INCOMPLETE_OR_FAILED"
                 target_state = TaskState.BLOCKED if ci_reason == BlockReasonCode.CI_SHA_MISMATCH else TaskState.FAILED

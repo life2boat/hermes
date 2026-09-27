@@ -30,6 +30,7 @@ from ai_engineering.linear_dispatcher.worktree_service import (
     WorktreeService,
     compute_branch_name,
 )
+from ai_engineering.linear_dispatcher.linear_client import LinearCodexClient
 from ai_engineering.linear_dispatcher.writeback import (
     ExecutionEvidence,
     ILinearClient,
@@ -47,6 +48,7 @@ __all__ = [
     "InvalidStateTransitionError",
     "LeaseError",
     "LeaseManager",
+    "LinearCodexClient",
     "LinearTask",
     "ScopeGate",
     "StateTransitionRecord",

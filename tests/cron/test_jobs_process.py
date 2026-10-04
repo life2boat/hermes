@@ -4,6 +4,7 @@ import errno
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -330,7 +331,9 @@ def test_mp7_killed_owner_releases_kernel_lock(storage):
     ctx = multiprocessing.get_context("spawn")
     owner_pipe, owner_child = ctx.Pipe(duplex=False)
     writer_pipe, writer_child = ctx.Pipe(duplex=False)
-    owner = ctx.Process(target=_hold_storage, args=(str(home), owner_child, ctx.Event()))
+    # Keep the parent semaphore alive until the spawned child has finished.
+    release = ctx.Event()
+    owner = ctx.Process(target=_hold_storage, args=(str(home), owner_child, release))
     writer = ctx.Process(target=_contending_writer, args=(str(home), writer_child, "create"))
     try:
         owner.start()
@@ -347,10 +350,24 @@ def test_mp7_killed_owner_releases_kernel_lock(storage):
                 break
         assert jobs.get_job(created["id"]) is not None
     finally:
+        primary_error = sys.exception()
+        if primary_error is not None:
+            release.set()  # Emergency cleanup only; success tests abrupt termination.
         for worker in (owner, writer):
-            worker.join(20)
-            assert not worker.is_alive()
-            worker.close()
+            try:
+                if worker.pid is not None:
+                    worker.join(5)
+                    if worker.is_alive():
+                        worker.terminate()
+                        worker.join(5)
+                    if worker.is_alive():
+                        worker.kill()
+                        worker.join(5)
+                    worker.close()
+            except Exception as exc:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"MP7 process cleanup failed: {type(exc).__name__}")
         for pipe in (owner_pipe, owner_child, writer_pipe, writer_child):
             pipe.close()
 

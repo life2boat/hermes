@@ -240,6 +240,12 @@ def cron_create(args):
 
 
 def cron_edit(args):
+    from cron.jobs import jobs_transaction
+    with jobs_transaction():
+        return _cron_edit_locked(args)
+
+
+def _cron_edit_locked(args):
     from cron.jobs import AmbiguousJobReference, resolve_job_ref
 
     try:

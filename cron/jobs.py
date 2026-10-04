@@ -6,6 +6,9 @@ Output is saved to ~/.hermes/cron/output/{job_id}/{timestamp}.md
 """
 
 import copy
+from contextlib import contextmanager
+import errno
+import time
 import json
 import logging
 import shutil
@@ -39,9 +42,71 @@ CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
-# Required when tick() runs jobs in parallel threads — without this,
-# concurrent mark_job_run / advance_next_run calls can clobber each other.
-_jobs_file_lock = threading.Lock()
+# Shared by scheduler and CRUD writers so neither overwrites a stale snapshot.
+# Reentrant because load_jobs() can repair storage inside an existing writer.
+_jobs_file_lock = threading.RLock()
+_jobs_transaction_state = threading.local()
+
+
+@contextmanager
+def jobs_transaction(jobs_file: Optional[Path] = None):
+    """Serialize a complete storage read/modify/write across threads/processes.
+
+    The stable sidecar belongs to the canonical replacement target, not to the
+    jobs.json inode (which atomic_replace changes). Never unlink the sidecar.
+    Nested calls on the same path reuse the outer kernel lock; different-path
+    nesting is rejected to avoid cross-profile lock-order cycles.
+    """
+    with _jobs_file_lock:
+        requested = Path(jobs_file) if jobs_file is not None else JOBS_FILE
+        target = requested.parent.resolve() / requested.name
+        key = os.path.normcase(str(target))
+        held = getattr(_jobs_transaction_state, "path", None)
+        if held is not None:
+            if held != key:
+                raise RuntimeError("Cannot nest cron transactions for different storage paths")
+            yield target
+            return
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = target.with_name(target.name + ".lock")
+        with lock_path.open("a+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+                # Append-mode initialization cannot truncate an existing lock.
+                if os.fstat(handle.fileno()).st_size == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                def acquire():
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                def release():
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                def acquire():
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                def release():
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+            while True:
+                try:
+                    acquire()
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise  # Fail closed on unsupported/broken locking.
+                    time.sleep(0.01)
+            _jobs_transaction_state.path = key
+            try:
+                yield target
+            finally:
+                del _jobs_transaction_state.path
+                # Closing the descriptor also releases ownership if unlock fails.
+                release()
+
+
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
 
@@ -422,6 +487,12 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
+    with jobs_transaction():
+        return _load_jobs_locked()
+
+
+def _load_jobs_locked() -> List[Dict[str, Any]]:
+    """Read and optionally repair storage with the jobs transaction held."""
     ensure_dirs()
     if not JOBS_FILE.exists():
         return []
@@ -469,7 +540,15 @@ def load_jobs() -> List[Dict[str, Any]]:
 
 
 def save_jobs(jobs: List[Dict[str, Any]]):
-    """Save all jobs to storage."""
+    """Authoritatively replace jobs; RMW callers must enter jobs_transaction
+    before loading their snapshot. Locking only this save cannot merge stale data.
+    """
+    with jobs_transaction():
+        _save_jobs_locked(jobs)
+
+
+def _save_jobs_locked(jobs: List[Dict[str, Any]]):
+    """Atomic replacement with the storage transaction held."""
     ensure_dirs()
     fd, tmp_path = tempfile.mkstemp(dir=str(JOBS_FILE.parent), suffix='.tmp', prefix='.jobs_')
     try:
@@ -485,6 +564,29 @@ def save_jobs(jobs: List[Dict[str, Any]]):
         except OSError:
             pass
         raise
+
+
+def replace_jobs_file(data: bytes, jobs_file: Path):
+    """Atomically restore authoritative bytes under the destination's lock.
+
+    Intended for backup replacement, not mutation of a snapshot read before
+    acquisition. A conditional restore must hold jobs_transaction for its check.
+    """
+    with jobs_transaction(jobs_file) as target:
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".jobs_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            atomic_replace(tmp_path, target)
+            _secure_file(target)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
@@ -670,9 +772,10 @@ def create_job(
         "workdir": normalized_workdir,
     }
 
-    jobs = load_jobs()
-    jobs.append(job)
-    save_jobs(jobs)
+    with jobs_transaction():
+        jobs = load_jobs()
+        jobs.append(job)
+        save_jobs(jobs)
 
     return job
 
@@ -734,6 +837,12 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
 
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
+    with jobs_transaction():
+        return _update_job_locked(job_id, updates)
+
+
+def _update_job_locked(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Apply an update with the jobs transaction held across read and write."""
     # Block mutation of immutable fields. ``id`` in particular is a filesystem
     # path component under OUTPUT_DIR — letting an update change it leaks
     # path-escape values into output writes/deletes.
@@ -791,58 +900,67 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Pause a job without deleting it. Accepts a job ID or name."""
-    job = resolve_job_ref(job_id)
-    if not job:
-        return None
-    return update_job(
-        job["id"],
-        {
-            "enabled": False,
-            "state": "paused",
-            "paused_at": _hermes_now().isoformat(),
-            "paused_reason": reason,
-        },
-    )
+    with jobs_transaction():
+        job = resolve_job_ref(job_id)
+        if not job:
+            return None
+        return update_job(
+            job["id"],
+            {
+                "enabled": False,
+                "state": "paused",
+                "paused_at": _hermes_now().isoformat(),
+                "paused_reason": reason,
+            },
+        )
 
 
 def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Resume a paused job and compute the next future run from now. Accepts a job ID or name."""
-    job = resolve_job_ref(job_id)
-    if not job:
-        return None
+    with jobs_transaction():
+        job = resolve_job_ref(job_id)
+        if not job:
+            return None
 
-    next_run_at = compute_next_run(job["schedule"])
-    return update_job(
-        job["id"],
-        {
-            "enabled": True,
-            "state": "scheduled",
-            "paused_at": None,
-            "paused_reason": None,
-            "next_run_at": next_run_at,
-        },
-    )
+        next_run_at = compute_next_run(job["schedule"])
+        return update_job(
+            job["id"],
+            {
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "next_run_at": next_run_at,
+            },
+        )
 
 
 def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     """Schedule a job to run on the next scheduler tick. Accepts a job ID or name."""
-    job = resolve_job_ref(job_id)
-    if not job:
-        return None
-    return update_job(
-        job["id"],
-        {
-            "enabled": True,
-            "state": "scheduled",
-            "paused_at": None,
-            "paused_reason": None,
-            "next_run_at": _hermes_now().isoformat(),
-        },
-    )
+    with jobs_transaction():
+        job = resolve_job_ref(job_id)
+        if not job:
+            return None
+        return update_job(
+            job["id"],
+            {
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "next_run_at": _hermes_now().isoformat(),
+            },
+        )
 
 
 def remove_job(job_id: str) -> bool:
     """Remove a job by ID or name."""
+    with jobs_transaction():
+        return _remove_job_locked(job_id)
+
+
+def _remove_job_locked(job_id: str) -> bool:
+    """Resolve and remove a job with the jobs transaction held."""
     job = resolve_job_ref(job_id)
     if not job:
         return False
@@ -874,7 +992,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
     """
-    with _jobs_file_lock:
+    with jobs_transaction():
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
@@ -948,7 +1066,7 @@ def advance_next_run(job_id: str) -> bool:
 
     Returns True if next_run_at was advanced, False otherwise.
     """
-    with _jobs_file_lock:
+    with jobs_transaction():
         jobs = load_jobs()
         for job in jobs:
             if job["id"] == job_id:
@@ -973,12 +1091,12 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     the job is fast-forwarded to the next future run instead of firing
     immediately.  This prevents a burst of missed jobs on gateway restart.
     """
-    with _jobs_file_lock:
+    with jobs_transaction():
         return _get_due_jobs_locked()
 
 
 def _get_due_jobs_locked() -> List[Dict[str, Any]]:
-    """Inner implementation of get_due_jobs(); must be called with _jobs_file_lock held."""
+    """Inner implementation of get_due_jobs(); must be called with the jobs transaction held."""
     now = _hermes_now()
     raw_jobs = load_jobs()
     jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
@@ -1158,7 +1276,7 @@ def rewrite_skill_refs(
     if not consolidated and not pruned_set:
         return {"rewrites": [], "jobs_updated": 0, "jobs_scanned": 0}
 
-    with _jobs_file_lock:
+    with jobs_transaction():
         jobs = load_jobs()
         rewrites: List[Dict[str, Any]] = []
         changed = False

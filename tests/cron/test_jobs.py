@@ -972,6 +972,232 @@ class TestMarkJobRunConcurrency:
             )
 
 
+class TestCRUDConcurrentWithScheduler:
+    @pytest.mark.parametrize("success", [True, False])
+    def test_late_completion_after_removal_does_not_recreate_job(self, tmp_cron_dir, success):
+        removed = create_job(prompt="removed", schedule="every 1h")
+        retained = create_job(prompt="retained", schedule="every 2h")
+        assert remove_job(removed["id"]) is True
+        mark_job_run(removed["id"], success=success, error=None if success else "failed")
+        assert load_jobs() == [retained]
+        assert remove_job(removed["id"]) is False
+        assert update_job(removed["id"], {"name": "late"}) is None
+
+    def test_legacy_read_repair_does_not_erase_created_job(self, tmp_cron_dir, monkeypatch):
+        import json
+        import cron.jobs as jobs_module
+
+        existing = create_job(prompt="existing", schedule="every 1h")
+        jobs_module.JOBS_FILE.write_text(json.dumps([existing]), encoding="utf-8")
+        repair_ready = threading.Event()
+        release_repair = threading.Event()
+        contender_reached = threading.Event()
+        repair_owns_lock = threading.Event()
+        original_save = jobs_module.save_jobs
+        original_lock = jobs_module._jobs_file_lock
+        errors = []
+        created = []
+
+        class ObservedLock:
+            def __enter__(self):
+                if threading.current_thread().name == "creator":
+                    contender_reached.set()
+                original_lock.acquire()
+                if threading.current_thread().name == "repair":
+                    repair_owns_lock.set()
+                return self
+
+            def __exit__(self, *exc_info):
+                original_lock.release()
+
+        def controlled_save(snapshot):
+            if threading.current_thread().name == "repair":
+                repair_ready.set()
+                assert release_repair.wait(5)
+            original_save(snapshot)
+
+        def run(fn):
+            try:
+                fn()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                if threading.current_thread().name == "creator":
+                    contender_reached.set()
+
+        monkeypatch.setattr(jobs_module, "save_jobs", controlled_save)
+        monkeypatch.setattr(jobs_module, "_jobs_file_lock", ObservedLock())
+        reader = threading.Thread(target=run, args=(load_jobs,), name="repair")
+        writer = threading.Thread(
+            target=run,
+            args=(lambda: created.append(create_job(prompt="new", schedule="every 2h")),),
+            name="creator",
+        )
+        try:
+            reader.start()
+            assert repair_ready.wait(5)
+            writer.start()
+            assert contender_reached.wait(5)
+            # If the reader owns no lock, let creation finish before repair writes.
+            if not repair_owns_lock.is_set():
+                writer.join(5)
+                assert not writer.is_alive()
+        finally:
+            release_repair.set()
+            reader.join(5)
+            if writer.ident is not None:
+                writer.join(5)
+            assert not reader.is_alive() and not writer.is_alive()
+        assert not errors
+        assert {job["id"] for job in load_jobs()} == {existing["id"], created[0]["id"]}
+
+    @pytest.mark.parametrize("action", ["create", "update", "remove"])
+    def test_failed_replace_releases_lock_and_can_retry(self, tmp_cron_dir, monkeypatch, action):
+        import cron.jobs as jobs_module
+
+        existing = create_job(prompt="existing", schedule="every 1h")
+        original_replace = jobs_module.atomic_replace
+
+        def fail_replace(*args):
+            raise OSError("synthetic replace failure")
+
+        def mutate():
+            if action == "create":
+                return create_job(prompt="new", schedule="every 2h")
+            if action == "update":
+                return update_job(existing["id"], {"name": "changed"})
+            return remove_job(existing["id"])
+
+        monkeypatch.setattr(jobs_module, "atomic_replace", fail_replace)
+        with pytest.raises(OSError, match="synthetic replace failure"):
+            mutate()
+        assert load_jobs() == [existing]
+        assert list(jobs_module.CRON_DIR.glob(".jobs_*.tmp")) == []
+        # Check from another thread: acquiring an RLock on its owner proves nothing.
+        acquired = []
+
+        def check_released():
+            if jobs_module._jobs_file_lock.acquire(blocking=False):
+                acquired.append(True)
+                jobs_module._jobs_file_lock.release()
+
+        checker = threading.Thread(target=check_released)
+        checker.start()
+        checker.join(5)
+        assert not checker.is_alive() and acquired == [True]
+        monkeypatch.setattr(jobs_module, "atomic_replace", original_replace)
+        result = mutate()
+        if action == "create":
+            assert get_job(result["id"]) is not None
+        elif action == "update":
+            assert get_job(existing["id"])["name"] == "changed"
+        else:
+            assert result is True and get_job(existing["id"]) is None
+
+    @pytest.mark.parametrize("action", ["create", "update", "pause", "remove"])
+    @pytest.mark.parametrize("first_writer", ["scheduler", "editor"])
+    @pytest.mark.parametrize("success", [True, False])
+    def test_preserves_both_writes(
+        self, tmp_cron_dir, monkeypatch, action, first_writer, success
+    ):
+        """Force a stale snapshot; atomic file replacement alone cannot save it."""
+        import cron.jobs as jobs_module
+
+        running = create_job(prompt="running", schedule="every 1h")
+        edited = create_job(prompt="edited", schedule="every 2h")
+        snapshot_read = threading.Event()
+        release_snapshot = threading.Event()
+        contender_reached = threading.Event()
+        original_load = jobs_module.load_jobs
+        original_lock = jobs_module._jobs_file_lock
+        errors = []
+        results = {}
+        reads = 0
+
+        # pause/remove resolve a reference before reading their write snapshot.
+        snapshot_read_number = (
+            2 if first_writer == "editor" and action in {"pause", "remove"} else 1
+        )
+
+        class ObservedLock:
+            def __enter__(self):
+                if threading.current_thread().name != first_writer:
+                    contender_reached.set()
+                original_lock.acquire()
+                return self
+
+            def __exit__(self, *exc_info):
+                original_lock.release()
+
+        def controlled_load():
+            nonlocal reads
+            snapshot = original_load()
+            if threading.current_thread().name == first_writer:
+                reads += 1
+                if reads == snapshot_read_number:
+                    snapshot_read.set()
+                    assert release_snapshot.wait(5), "snapshot release timed out"
+            return snapshot
+
+        def scheduler():
+            mark_job_run(running["id"], success=success, error=None if success else "failed")
+
+        def editor():
+            if action == "create":
+                results["created"] = create_job(prompt="new", schedule="every 3h")
+            elif action == "update":
+                results["updated"] = update_job(edited["id"], {"name": "changed"})
+            elif action == "pause":
+                results["updated"] = pause_job(edited["id"], reason="test")
+            else:
+                results["removed"] = remove_job(edited["id"])
+
+        def run(name, fn):
+            try:
+                fn()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                # Unpatched CRUD skips the lock and finishes instead of blocking.
+                if name != first_writer:
+                    contender_reached.set()
+
+        monkeypatch.setattr(jobs_module, "load_jobs", controlled_load)
+        monkeypatch.setattr(jobs_module, "_jobs_file_lock", ObservedLock())
+        workers = {
+            name: threading.Thread(target=run, args=(name, fn), name=name)
+            for name, fn in [("scheduler", scheduler), ("editor", editor)]
+        }
+        second_writer = "editor" if first_writer == "scheduler" else "scheduler"
+        try:
+            workers[first_writer].start()
+            assert snapshot_read.wait(5), "first writer did not read its snapshot"
+            workers[second_writer].start()
+            assert contender_reached.wait(5), "second writer did not reach its write"
+        finally:
+            release_snapshot.set()
+            for worker in workers.values():
+                if worker.ident is not None:
+                    worker.join(5)
+            assert not any(worker.is_alive() for worker in workers.values())
+        assert not errors
+
+        persisted = {job["id"]: job for job in load_jobs()}
+        assert persisted[running["id"]]["repeat"]["completed"] == 1
+        assert persisted[running["id"]]["last_status"] == ("ok" if success else "error")
+        assert persisted[running["id"]]["last_error"] == (None if success else "failed")
+        if action == "create":
+            assert results["created"]["id"] in persisted
+        elif action == "update":
+            assert persisted[edited["id"]]["name"] == "changed"
+        elif action == "pause":
+            assert persisted[edited["id"]]["state"] == "paused"
+            assert persisted[edited["id"]]["enabled"] is False
+        else:
+            assert results["removed"] is True
+            assert edited["id"] not in persisted
+
+
 class TestSaveJobOutput:
     def test_creates_output_file(self, tmp_cron_dir):
         output_file = save_job_output("test123", "# Results\nEverything ok.")

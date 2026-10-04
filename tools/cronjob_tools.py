@@ -6,6 +6,7 @@ Compatibility wrappers remain for direct Python callers and legacy tests.
 """
 
 import json
+from functools import wraps
 import logging
 import re
 import sys
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import (
     AmbiguousJobReference,
+    jobs_transaction,
     create_job,
     list_jobs,
     parse_schedule,
@@ -462,6 +464,22 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _serialize_cronjob_mutation(function):
+    @wraps(function)
+    def guarded(action, *args, **kwargs):
+        try:
+            if (action or "").strip().lower() == "list":
+                return function(action, *args, **kwargs)
+            # Includes resolution and derived repeat/skill validation, not just
+            # update_job's save. A stale repeat dict can erase completed counts.
+            with jobs_transaction():
+                return function(action, *args, **kwargs)
+        except Exception as exc:
+            return tool_error(str(exc), success=False)
+    return guarded
+
+
+@_serialize_cronjob_mutation
 def cronjob(
     action: str,
     job_id: Optional[str] = None,

@@ -6,12 +6,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+
 try:
     from enum import StrEnum
 except ImportError:
     from enum import Enum
+
     class StrEnum(str, Enum):
         pass
+
+
 from typing import Any, Mapping, Sequence
 
 
@@ -49,6 +53,11 @@ class BlockReasonCode(StrEnum):
     CI_SHA_MISMATCH = "CI_SHA_MISMATCH"
     CI_FAILED = "CI_FAILED"
     REREAD_VERIFICATION_FAILED = "REREAD_VERIFICATION_FAILED"
+    NO_CHANGES_PRODUCED = "NO_CHANGES_PRODUCED"
+    CANONICAL_MAIN_DRIFT = "CANONICAL_MAIN_DRIFT"
+    RECOVERY_BLOCKED = "RECOVERY_BLOCKED"
+    NO_SUPPORTED_TASK_EXECUTION_BACKEND = "NO_SUPPORTED_TASK_EXECUTION_BACKEND"
+    CANONICAL_ROOT_INVALID = "CANONICAL_ROOT_INVALID"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +92,9 @@ class ClaimRecord:
             now_dt = datetime.now(timezone.utc)
         else:
             now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
-        expires_dt = datetime.fromisoformat(self.lease_expires_at.replace("Z", "+00:00"))
+        expires_dt = datetime.fromisoformat(
+            self.lease_expires_at.replace("Z", "+00:00")
+        )
         return now_dt < expires_dt
 
 

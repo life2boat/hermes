@@ -11,7 +11,7 @@ def test_worker_fails_closed_missing_deps(tmp_path):
     # without env vars set it should fail
     os.environ.pop("GITHUB_TOKEN", None)
     os.environ.pop("LINEAR_API_KEY", None)
-    assert not worker.validate_dependencies(config, tmp_path)
+    assert not worker.validate_dependencies(config, tmp_path, tmp_path / "lease.json")
 
 def test_worker_mode_live_fails_closed(monkeypatch):
     monkeypatch.setenv("HEALBITE_LINEAR_DISPATCHER_ENABLED", "true")

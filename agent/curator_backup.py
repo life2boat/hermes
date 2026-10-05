@@ -456,14 +456,14 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
 
     # Load and rewrite the live jobs under the scheduler's lock.
     try:
-        from cron.jobs import load_jobs, save_jobs, _jobs_file_lock
+        from cron.jobs import load_jobs, save_jobs, jobs_transaction
     except ImportError as e:
         report["error"] = f"cron module unavailable: {e}"
         return report
 
     report["attempted"] = True
     try:
-        with _jobs_file_lock:
+        with jobs_transaction():
             live_jobs = load_jobs()
             changed = False
 

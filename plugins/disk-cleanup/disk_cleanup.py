@@ -156,7 +156,7 @@ def _is_protected_cron_path(p: Path) -> bool:
     never be deleted.
 
     This only matches the directory itself and known control-plane files
-    (``jobs.json``, ``.tick.lock``) — it does NOT blanket-protect
+    (``jobs.json``, ``jobs.json.lock``, ``.tick.lock``) — it does NOT blanket-protect
     everything under ``cron/`` because ``cron/output/`` is disposable.
     """
     # Lazily build the set once per process so HERMES_HOME is resolved
@@ -167,6 +167,7 @@ def _is_protected_cron_path(p: Path) -> bool:
             base = hermes_home / parent
             _PROTECTED_CRON_PATHS.add(str(base))
             _PROTECTED_CRON_PATHS.add(str(base / "jobs.json"))
+            _PROTECTED_CRON_PATHS.add(str(base / "jobs.json.lock"))
             _PROTECTED_CRON_PATHS.add(str(base / ".tick.lock"))
     resolved = str(p.resolve())
     return resolved in _PROTECTED_CRON_PATHS

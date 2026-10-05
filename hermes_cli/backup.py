@@ -62,6 +62,7 @@ _EXCLUDED_SUFFIXES = (
 _EXCLUDED_NAMES = {
     "gateway.pid",
     "cron.pid",
+    "jobs.json.lock",  # Stable live coordination inode; never snapshot/restore.
 }
 
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
@@ -330,6 +331,15 @@ def _detect_prefix(zf: zipfile.ZipFile) -> str:
     return ""
 
 
+def _is_cron_jobs_path(path: Path, home: Path) -> bool:
+    """Recognize default/profile cron storage during authoritative restore."""
+    rel = (path.parent.resolve() / path.name).relative_to(home.resolve())
+    parts = tuple(os.path.normcase(part) for part in rel.parts)
+    return parts == ("cron", "jobs.json") or (
+        len(parts) == 4 and parts[0] == "profiles" and parts[2:] == ("cron", "jobs.json")
+    )
+
+
 def run_import(args) -> None:
     """Restore a Hermes backup from a zip file."""
     zip_path = Path(args.zipfile).expanduser().resolve()
@@ -408,8 +418,15 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
+                if os.path.normcase(target.name) == "jobs.json.lock" and _is_cron_jobs_path(target.with_name("jobs.json"), hermes_root):
+                    continue  # Never truncate/replace a live coordination file.
+                with zf.open(member) as src:
+                    if _is_cron_jobs_path(target, hermes_root):
+                        from cron.jobs import replace_jobs_file
+                        replace_jobs_file(src.read(), target)
+                    else:
+                        with open(target, "wb") as dst:
+                            dst.write(src.read())
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -671,12 +688,17 @@ def restore_quick_snapshot(
         dst.parent.mkdir(parents=True, exist_ok=True)
 
         try:
+            if os.path.normcase(dst.name) == "jobs.json.lock" and _is_cron_jobs_path(dst.with_name("jobs.json"), home):
+                continue
             if dst.suffix == ".db":
                 # Atomic-ish replace for databases
                 tmp = dst.parent / f".{dst.name}.snap_restore"
                 shutil.copy2(src, tmp)
                 dst.unlink(missing_ok=True)
                 shutil.move(str(tmp), str(dst))
+            elif _is_cron_jobs_path(dst, home):
+                from cron.jobs import replace_jobs_file
+                replace_jobs_file(src.read_bytes(), dst)
             else:
                 shutil.copy2(src, dst)
             restored += 1
@@ -756,21 +778,21 @@ def restore_cron_jobs_if_emptied(
     home = hermes_home or get_hermes_home()
     live_path = home / _CRON_JOBS_REL
 
-    live_count = _count_cron_jobs(live_path)
-    # Only act when the live file is readable AND empty. ``None`` (missing or
-    # unparseable) is intentionally left alone — that's a different failure
-    # mode the user should see rather than have papered over.
-    if live_count is None or live_count > 0:
-        return None
-
-    snap_path = _quick_snapshot_root(home) / snapshot_id / _CRON_JOBS_REL
-    snap_count = _count_cron_jobs(snap_path)
-    if not snap_count:  # None or 0 — nothing worth restoring
-        return None
+    from cron.jobs import jobs_transaction, replace_jobs_file
 
     try:
-        live_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(snap_path, live_path)
+        with jobs_transaction(live_path):
+            live_count = _count_cron_jobs(live_path)
+            # The empty check and restore must be one transaction: a concurrent
+            # creator must not disappear between this check and replacement.
+            if live_count is None or live_count > 0:
+                return None
+
+            snap_path = _quick_snapshot_root(home) / snapshot_id / _CRON_JOBS_REL
+            snap_count = _count_cron_jobs(snap_path)
+            if not snap_count:
+                return None
+            replace_jobs_file(snap_path.read_bytes(), live_path)
     except (OSError, PermissionError) as exc:
         logger.error(
             "Cron jobs were emptied during update but auto-restore failed: %s", exc

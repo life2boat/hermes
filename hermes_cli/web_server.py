@@ -6701,18 +6701,19 @@ def _call_cron_for_profile(profile: Optional[str], func_name: str, *args, **kwar
     with _CRON_PROFILE_LOCK:
         from cron import jobs as cron_jobs
 
-        old_cron_dir = cron_jobs.CRON_DIR
-        old_jobs_file = cron_jobs.JOBS_FILE
-        old_output_dir = cron_jobs.OUTPUT_DIR
-        cron_jobs.CRON_DIR = home / "cron"
-        cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
-        cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
-        try:
-            result = getattr(cron_jobs, func_name)(*args, **kwargs)
-        finally:
-            cron_jobs.CRON_DIR = old_cron_dir
-            cron_jobs.JOBS_FILE = old_jobs_file
-            cron_jobs.OUTPUT_DIR = old_output_dir
+        with cron_jobs._jobs_file_lock:
+            old_cron_dir = cron_jobs.CRON_DIR
+            old_jobs_file = cron_jobs.JOBS_FILE
+            old_output_dir = cron_jobs.OUTPUT_DIR
+            cron_jobs.CRON_DIR = home / "cron"
+            cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
+            cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
+            try:
+                result = getattr(cron_jobs, func_name)(*args, **kwargs)
+            finally:
+                cron_jobs.CRON_DIR = old_cron_dir
+                cron_jobs.JOBS_FILE = old_jobs_file
+                cron_jobs.OUTPUT_DIR = old_output_dir
 
     if isinstance(result, list):
         return [_annotate_cron_job(j, profile_name, home) for j in result]

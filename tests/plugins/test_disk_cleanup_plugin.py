@@ -582,3 +582,13 @@ class TestBundledDiscovery:
         mgr.discover_and_load()
         assert "memory" not in mgr._plugins
         assert "context_engine" not in mgr._plugins
+
+
+
+def test_jobs_process_lock_is_protected_from_stale_cleanup_tracking(_isolate_env):
+    dg = _load_lib()
+    lock = _isolate_env / "cron" / "jobs.json.lock"
+    lock.parent.mkdir()
+    lock.write_bytes(b"\0")
+    assert dg._is_protected_cron_path(lock)
+    assert dg.guess_category(lock) is None

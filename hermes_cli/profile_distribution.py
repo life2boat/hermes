@@ -61,6 +61,7 @@ Update semantics:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -542,6 +543,46 @@ def plan_install(
     )
 
 
+def _copy_cron_payload(source: Path, destination: Path) -> None:
+    """Replace distribution cron state without replacing live lock inodes.
+
+    Distribution updates are authoritative, including absence of jobs.json.
+    Only the jobs replacement/deletion holds its transaction. Staging, network
+    retrieval and unrelated cron payload copying remain outside that lock.
+    """
+    from cron.jobs import jobs_transaction, replace_jobs_file
+
+    source_jobs = source / "jobs.json"
+    payload = source_jobs.read_bytes() if source_jobs.is_file() else None
+    target_jobs = destination / "jobs.json"
+    with jobs_transaction(target_jobs):
+        if payload is None:
+            target_jobs.unlink(missing_ok=True)
+        else:
+            replace_jobs_file(payload, target_jobs)
+
+    control_files = {"jobs.json", "jobs.json.lock", ".tick.lock"}
+    def protected(name):
+        canonical = os.path.normcase(name)
+        return canonical in control_files or (canonical.startswith(".jobs_") and canonical.endswith(".tmp"))
+
+    for entry in destination.iterdir():
+        if protected(entry.name):
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    for entry in source.iterdir():
+        if protected(entry.name):
+            continue
+        dest = destination / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(entry, dest)
+
+
 def _copy_dist_payload(
     staged: Path,
     target: Path,
@@ -571,6 +612,9 @@ def _copy_dist_payload(
 
         dest = target / name
         if entry.is_dir():
+            if os.path.normcase(name) == "cron":
+                _copy_cron_payload(entry, dest)
+                continue
             if dest.exists():
                 shutil.rmtree(dest)
             staged_resolved = staged.resolve()

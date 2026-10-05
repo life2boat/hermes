@@ -206,17 +206,18 @@ def test_bwrap_command_construction():
     cmd = executor.build_bwrap_command("/var/tmp/wt")
     assert "/usr/bin/bwrap" in cmd
     assert "--ro-bind" in cmd
-    assert "/" in cmd
+    assert "/usr" in cmd
+    assert "/bin" in cmd
+    assert "/etc/ssl" in cmd
     assert "--tmpfs" in cmd
-    assert "/mnt" in cmd
     assert "/run" in cmd
     assert "/tmp" in cmd
     assert "--dir" in cmd
     assert "/tmp/codex-home" in cmd
-    assert "/var/lib/hermes/codex-credentials/auth.json" in cmd
-    assert "/tmp/codex-home/auth.json" in cmd
+    assert "/var/lib/hermes/codex-credentials/auth.json" not in cmd
     assert "--bind" in cmd
     assert "/var/tmp/wt" in cmd
+    assert "--clearenv" in cmd
     assert "CODEX_HOME" in cmd
     assert "/usr/bin/codex" in cmd
     assert "exec" in cmd
@@ -226,6 +227,7 @@ def test_bwrap_command_construction():
     assert "-m" in cmd
     assert "gpt-5" in cmd
     assert cmd[-1] == "-"
+    assert not any(cmd[i] == "--ro-bind" and cmd[i + 1] == "/" and cmd[i + 2] == "/" for i in range(len(cmd) - 2))
 
 
 # Test 8: WSL command wrapping on Windows
@@ -415,3 +417,200 @@ def test_dispatcher_integration_with_linux_codex_executor(tmp_path):
     assert len(gh.created_prs) == 1
     assert len(linear.comments[task.id]) == 1
     assert len(list(wt_base.glob("*"))) == 0
+
+
+# ==============================================================================
+# Phase 8: Credential & Secret Read Isolation Regression Tests
+# ==============================================================================
+
+
+def test_executor_does_not_ro_bind_entire_host_root():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # Entire host root must never be ro-bound
+    for i in range(len(cmd) - 2):
+        assert not (cmd[i] == "--ro-bind" and cmd[i + 1] == "/" and cmd[i + 2] == "/")
+
+
+def test_executor_host_home_not_visible():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # /home must not be mounted
+    for i in range(len(cmd) - 1):
+        if cmd[i] in ("--bind", "--ro-bind"):
+            assert cmd[i + 1] != "/home"
+
+
+def test_executor_root_home_not_visible():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # /root must not be mounted
+    for i in range(len(cmd) - 1):
+        if cmd[i] in ("--bind", "--ro-bind"):
+            assert cmd[i + 1] != "/root"
+
+
+def test_executor_persistent_auth_file_not_shell_readable():
+    cred_path = "/var/lib/hermes/codex-credentials/auth.json"
+    executor = LinuxCodexTaskExecutor(credentials_path=cred_path, is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # Persistent credentials must NEVER be directly mounted in the command
+    assert cred_path not in cmd
+
+
+def test_executor_fake_secret_file_not_readable():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # /var must not be mounted
+    for i in range(len(cmd) - 1):
+        if cmd[i] in ("--bind", "--ro-bind"):
+            assert cmd[i + 1] != "/var"
+
+
+def test_executor_fake_secret_env_not_inherited():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # Environment must be cleared to prevent secret inheritance
+    assert "--clearenv" in cmd
+
+
+def test_executor_docker_socket_hidden():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # /run must be an isolated tmpfs, not host bind
+    assert "--tmpfs" in cmd
+    run_idx = cmd.index("/run")
+    assert cmd[run_idx - 1] == "--tmpfs"
+
+
+def test_executor_windows_drives_hidden():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # /mnt or /mnt/c must not be mounted
+    for i in range(len(cmd) - 1):
+        if cmd[i] in ("--bind", "--ro-bind"):
+            assert not cmd[i + 1].startswith(("/mnt/c", "/mnt/d"))
+
+
+def test_executor_unrelated_repo_not_readable():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    wt = "/var/tmp/authorized-wt"
+    cmd = executor.build_bwrap_command(wt)
+    # Only the authorized worktree is bound read-write
+    bind_targets = [cmd[i + 2] for i in range(len(cmd) - 2) if cmd[i] == "--bind"]
+    assert wt in bind_targets
+    for target in bind_targets:
+        assert target == wt or target == "/tmp/codex-home"
+
+
+def test_executor_worktree_read_write_allowed():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    wt = "/var/tmp/my-task-worktree"
+    cmd = executor.build_bwrap_command(wt)
+    assert "--bind" in cmd
+    wt_idx = cmd.index(wt)
+    assert cmd[wt_idx - 1] == "--bind"
+    assert cmd[wt_idx + 1] == wt
+
+
+def test_executor_outside_write_blocked():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    # System directories must be mounted read-only (--ro-bind)
+    assert cmd[cmd.index("/usr") - 1] == "--ro-bind"
+    assert cmd[cmd.index("/etc/ssl") - 1] == "--ro-bind"
+
+
+def test_windows_executor_remains_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    executor = CodexTaskExecutor(allow_windows_unsandboxed=False)
+    res = executor.execute(make_linear_task(), wt, "base_sha")
+    assert res.status == "FAILED"
+    assert res.error_reason == "WINDOWS_CODEX_UNSUPPORTED"
+
+
+def test_worker_not_ready_without_secret_isolation_health(tmp_path, monkeypatch):
+    from ai_engineering.linear_dispatcher.worker import DispatcherWorker
+
+    monkeypatch.setenv("GITHUB_TOKEN", "fake_gh")
+    monkeypatch.setenv("LINEAR_API_KEY", "fake_linear")
+
+    class BrokenIsolationExecutor(LinuxCodexTaskExecutor):
+        def validate_isolation(self):
+            return False, "ROOT_FILESYSTEM_EXPOSED"
+
+    worker = DispatcherWorker(
+        task_executor=BrokenIsolationExecutor(),
+    )
+    config = DispatcherConfig(worker_id="test-worker")
+    ready = worker.validate_dependencies(
+        config=config,
+        wt_base=tmp_path / "wt_base",
+        lease_path=tmp_path / "leases.json",
+    )
+    assert ready is False
+
+
+def test_executor_validate_isolation_success():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    ok, err = executor.validate_isolation()
+    assert ok is True
+    assert err is None
+
+
+def test_executor_validate_isolation_detects_root_mount():
+    class BadExecutor(LinuxCodexTaskExecutor):
+        def build_bwrap_command(self, worktree_linux_path, ephemeral_home_path="/tmp/codex-home"):
+            cmd = super().build_bwrap_command(worktree_linux_path, ephemeral_home_path)
+            return ["--ro-bind", "/", "/"] + cmd
+
+    executor = BadExecutor(is_windows=True)
+    ok, err = executor.validate_isolation()
+    assert ok is False
+    assert err == "ROOT_FILESYSTEM_EXPOSED"
+
+
+def test_executor_validate_isolation_detects_missing_clearenv():
+    class BadExecutor(LinuxCodexTaskExecutor):
+        def build_bwrap_command(self, worktree_linux_path, ephemeral_home_path="/tmp/codex-home"):
+            cmd = super().build_bwrap_command(worktree_linux_path, ephemeral_home_path)
+            return [c for c in cmd if c != "--clearenv"]
+
+    executor = BadExecutor(is_windows=True)
+    ok, err = executor.validate_isolation()
+    assert ok is False
+    assert err == "CLEARENV_MISSING"
+
+
+def test_executor_validate_isolation_detects_persistent_cred_mount():
+    cred_file = "/var/lib/hermes/codex-credentials/auth.json"
+
+    class BadExecutor(LinuxCodexTaskExecutor):
+        def build_bwrap_command(self, worktree_linux_path, ephemeral_home_path="/tmp/codex-home"):
+            cmd = super().build_bwrap_command(worktree_linux_path, ephemeral_home_path)
+            return cmd + ["--ro-bind", cred_file, "/tmp/codex-home/auth.json"]
+
+    executor = BadExecutor(credentials_path=cred_file, is_windows=True)
+    ok, err = executor.validate_isolation()
+    assert ok is False
+    assert err == "PERSISTENT_CREDENTIALS_DIRECTLY_MOUNTED"
+
+
+def test_executor_unshares_pid_namespace():
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    cmd = executor.build_bwrap_command("/var/tmp/wt")
+    assert "--unshare-pid" in cmd
+
+
+def test_executor_validate_isolation_detects_missing_unshare_pid():
+    class BadExecutor(LinuxCodexTaskExecutor):
+        def build_bwrap_command(self, worktree_linux_path, ephemeral_home_path="/tmp/codex-home"):
+            cmd = super().build_bwrap_command(worktree_linux_path, ephemeral_home_path)
+            return [c for c in cmd if c != "--unshare-pid"]
+
+    executor = BadExecutor(is_windows=True)
+    ok, err = executor.validate_isolation()
+    assert ok is False
+    assert err == "PID_NAMESPACE_NOT_UNSHARED"

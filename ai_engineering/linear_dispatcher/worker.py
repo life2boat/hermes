@@ -136,13 +136,21 @@ class DispatcherWorker:
                 logger.error(f"Canonical root validation failed: {root_err}")
                 return False
 
-        # Validate executor backend
+        # Validate executor backend and isolation invariants
         executor = self._get_executor()
         if not executor or not executor.health():
             logger.error(
-                "Configured task execution backend is not available or unhealthy. NOT_READY."
+                "Configured task execution backend is not available or failed isolation health check. NOT_READY."
             )
             return False
+
+        if hasattr(executor, "validate_isolation"):
+            iso_ok, iso_err = executor.validate_isolation()
+            if not iso_ok:
+                logger.error(
+                    f"Configured task execution backend failed isolation validation: {iso_err}. NOT_READY."
+                )
+                return False
 
         return True
 

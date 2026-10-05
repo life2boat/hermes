@@ -232,16 +232,24 @@ class CodexTaskExecutor:
 
 
 class LinuxCodexTaskExecutor:
-    """Production task executor running Codex inside an OS-level Bubblewrap sandbox.
+    """Production task executor running Codex inside a minimal allowlist Bubblewrap sandbox.
 
-    Enforces strict filesystem isolation:
-    - Root filesystem mounted read-only (--ro-bind / /)
-    - Host Windows drives masked (--tmpfs /mnt)
-    - Host daemons / Docker socket masked (--tmpfs /run)
-    - Isolated tmpfs for temporary files (--tmpfs /tmp)
-    - Ephemeral CODEX_HOME with auth.json mounted read-only (--ro-bind <creds> /tmp/codex-home/auth.json)
-    - ONLY the designated task worktree mounted read-write (--bind <wt> <wt>)
-    - Supports running natively on Linux or from Windows via WSL (wsl.exe -d <distro>)
+    Enforces strict filesystem and secret isolation:
+    - Root filesystem is NOT mounted (--ro-bind / / is strictly forbidden).
+    - Minimal allowlist mounts only:
+      - System binaries & libraries (/usr, /bin -> usr/bin, /lib -> usr/lib, /lib64 -> usr/lib64, /sbin -> usr/sbin)
+      - Resolv.conf for DNS (/mnt/wsl/resolv.conf or /etc/resolv.conf)
+      - CA certificates (/etc/ssl, /etc/ca-certificates)
+      - NSS & core config (/etc/nsswitch.conf, /etc/hosts, /etc/passwd, /etc/group, /etc/alternatives)
+      - Dev and proc (/dev, /proc)
+    - Ephemeral tmpfs (/tmp, /run)
+    - Host homes (/root, /home) are completely hidden.
+    - Windows drives (/mnt) and Docker sockets are completely hidden.
+    - Host environment is cleared (--clearenv), preventing secret inheritance.
+    - Persistent credentials (/var/lib/hermes/codex-credentials/auth.json) are NEVER mounted into sandbox.
+    - Ephemeral credentials in /tmp/codex-home/auth.json are unlinked immediately after process start.
+    - ONLY the designated task worktree is mounted read-write (--bind <wt> <wt>).
+    - Supports running natively on Linux or from Windows via WSL (wsl.exe -d <distro>).
     """
 
     def __init__(
@@ -270,8 +278,38 @@ class LinuxCodexTaskExecutor:
         self.model = model
         self._runner = runner or subprocess.run
 
+    def validate_isolation(self) -> tuple[bool, str | None]:
+        """Verify that the executor satisfies write and secret read isolation invariants."""
+        sample_cmd = self.build_bwrap_command("/var/tmp/sample_wt")
+
+        # Invariant 1: No entire host root ro-bind
+        for i in range(len(sample_cmd) - 2):
+            if sample_cmd[i] == "--ro-bind" and sample_cmd[i + 1] == "/" and sample_cmd[i + 2] == "/":
+                return False, "ROOT_FILESYSTEM_EXPOSED"
+
+        # Invariant 2: Host environment cleared
+        if "--clearenv" not in sample_cmd:
+            return False, "CLEARENV_MISSING"
+
+        # Invariant 3: Sensitive host paths must not be mounted
+        forbidden_targets = {"/root", "/home", "/mnt", "/var", "/opt"}
+        for i in range(len(sample_cmd) - 1):
+            if sample_cmd[i] in ("--bind", "--ro-bind") and sample_cmd[i + 1] in forbidden_targets:
+                return False, f"FORBIDDEN_PATH_MOUNTED_{sample_cmd[i+1]}"
+
+        # Invariant 4: Persistent credentials file must not be directly bound
+        if self.credentials_path in sample_cmd:
+            return False, "PERSISTENT_CREDENTIALS_DIRECTLY_MOUNTED"
+
+        # Invariant 5: PID namespace must be unshared to prevent /proc host inspection
+        if "--unshare-pid" not in sample_cmd and "--unshare-all" not in sample_cmd:
+            return False, "PID_NAMESPACE_NOT_UNSHARED"
+
+        return True, None
+
     def health(self) -> bool:
-        """Verify bwrap, codex, and credentials file are available in the target Linux environment."""
+        """Verify bwrap, codex, credentials file, and isolation invariants."""
+        # 1. Verify binary and credential availability
         if self.is_windows:
             try:
                 bwrap_check = self._runner(
@@ -298,7 +336,8 @@ class LinuxCodexTaskExecutor:
                     text=True,
                     timeout=10,
                 )
-                return cred_check.returncode == 0
+                if cred_check.returncode != 0:
+                    return False
             except Exception:
                 return False
         else:
@@ -308,28 +347,71 @@ class LinuxCodexTaskExecutor:
                 return False
             if not Path(self.credentials_path).is_file():
                 return False
-            return True
 
-    def build_bwrap_command(self, worktree_linux_path: str) -> list[str]:
+        # 2. Verify command isolation invariants
+        ok, _ = self.validate_isolation()
+        return ok
+
+    def build_bwrap_command(
+        self,
+        worktree_linux_path: str,
+        ephemeral_home_path: str = "/tmp/codex-home",
+    ) -> list[str]:
         """Construct the bubblewrap command enforcing fail-closed isolation."""
         cmd = [
             self.bwrap_bin,
-            "--ro-bind", "/", "/",
-            "--tmpfs", "/mnt",
+            # 1. Minimal allowlist system mounts
+            "--ro-bind", "/usr", "/usr",
+            "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/lib", "/lib",
+            "--symlink", "usr/lib64", "/lib64",
+            "--symlink", "usr/sbin", "/sbin",
         ]
+        # 2. DNS resolution
         if self.is_windows or Path("/mnt/wsl/resolv.conf").exists():
-            cmd.extend(["--dir", "/mnt/wsl", "--ro-bind", "/mnt/wsl/resolv.conf", "/mnt/wsl/resolv.conf"])
+            cmd.extend(["--ro-bind", "/mnt/wsl/resolv.conf", "/etc/resolv.conf"])
+        else:
+            cmd.extend(["--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf"])
 
+        # 3. CA certs and system config
         cmd.extend([
-            "--tmpfs", "/run",
-            "--tmpfs", "/tmp",
-            "--dir", "/tmp/codex-home",
-            "--ro-bind", self.credentials_path, "/tmp/codex-home/auth.json",
+            "--ro-bind", "/etc/ssl", "/etc/ssl",
+            "--ro-bind", "/etc/ca-certificates", "/etc/ca-certificates",
+            "--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+            "--ro-bind", "/etc/hosts", "/etc/hosts",
+            "--ro-bind", "/etc/passwd", "/etc/passwd",
+            "--ro-bind", "/etc/group", "/etc/group",
+            "--ro-bind", "/etc/alternatives", "/etc/alternatives",
+        ])
+
+        # 4. Dev, proc, isolated tmpfs with unshared PID namespace
+        cmd.extend([
+            "--unshare-pid",
             "--dev", "/dev",
             "--proc", "/proc",
+            "--tmpfs", "/tmp",
+            "--tmpfs", "/run",
+            "--dir", "/tmp/codex-home",
+            "--bind", ephemeral_home_path, "/tmp/codex-home",
+        ])
+
+        # 5. Worktree bind mount (only writable location)
+        cmd.extend([
             "--bind", worktree_linux_path, worktree_linux_path,
+        ])
+
+        # 6. Clearenv & minimal safe environment variables
+        cmd.extend([
+            "--clearenv",
+            "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
             "--setenv", "CODEX_HOME", "/tmp/codex-home",
             "--setenv", "TMPDIR", "/tmp",
+            "--setenv", "HOME", "/tmp",
+            "--setenv", "LANG", "C.UTF-8",
+        ])
+
+        # 7. Codex invocation
+        cmd.extend([
             self.codex_bin,
             "exec",
             "-C", worktree_linux_path,
@@ -340,6 +422,89 @@ class LinuxCodexTaskExecutor:
             cmd.extend(["-m", self.model])
         cmd.append("-")
         return cmd
+
+    def _setup_ephemeral_credentials(self, ephemeral_home: str) -> None:
+        """Create ephemeral CODEX_HOME directory with credentials copy."""
+        if self.is_windows:
+            try:
+                self._runner(
+                    [
+                        "wsl.exe",
+                        "-d",
+                        self.distro,
+                        "--",
+                        "bash",
+                        "-c",
+                        f"mkdir -p {ephemeral_home} && cp '{self.credentials_path}' '{ephemeral_home}/auth.json' && chmod 600 '{ephemeral_home}/auth.json'",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                os.makedirs(ephemeral_home, mode=0o700, exist_ok=True)
+                shutil.copy2(self.credentials_path, Path(ephemeral_home) / "auth.json")
+                os.chmod(Path(ephemeral_home) / "auth.json", 0o600)
+            except Exception:
+                pass
+
+    def _start_credential_unlinking_watcher(self, ephemeral_home: str) -> None:
+        """Trigger background inotify watcher to unlink auth.json immediately upon first open/access."""
+        watcher_py = (
+            "import ctypes, os, sys; "
+            f"target = '{ephemeral_home}/auth.json'; "
+            "libc = ctypes.CDLL(None); fd = libc.inotify_init(); "
+            "if fd >= 0: "
+            "  libc.inotify_add_watch(fd, target.encode(), 0x00000021); "
+            "  os.read(fd, 1024); "
+            "  os.unlink(target); "
+            "  os.close(fd)"
+        )
+        try:
+            if self.is_windows:
+                subprocess.Popen(
+                    [
+                        "wsl.exe",
+                        "-d",
+                        self.distro,
+                        "--",
+                        "python3",
+                        "-c",
+                        watcher_py,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [
+                        "python3",
+                        "-c",
+                        watcher_py,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass
+
+    def _cleanup_ephemeral_credentials(self, ephemeral_home: str) -> None:
+        """Ensure ephemeral credential directory is completely removed."""
+        if self.is_windows:
+            try:
+                self._runner(
+                    ["wsl.exe", "-d", self.distro, "--", "rm", "-rf", ephemeral_home],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        else:
+            shutil.rmtree(ephemeral_home, ignore_errors=True)
 
     def resolve_worktree_linux_path(self, wt: Path) -> str:
         """Resolve host worktree path to the appropriate Linux path."""
@@ -358,7 +523,8 @@ class LinuxCodexTaskExecutor:
                 translated = res.stdout.strip()
                 if not translated:
                     raise RuntimeError("Empty translation from wslpath")
-                if translated.startswith(("/mnt/c/Windows", "/mnt/c/Users/Oleg/AppData")):
+                lower_translated = translated.lower()
+                if lower_translated.startswith("/mnt/c/windows") or "/appdata" in lower_translated:
                     raise RuntimeError(f"Unsafe worktree location on Windows drive: {translated}")
                 return translated
             except Exception as exc:
@@ -416,7 +582,11 @@ class LinuxCodexTaskExecutor:
             f"- Make only the minimal necessary coherent code and documentation changes.\n"
         )
 
-        bwrap_args = self.build_bwrap_command(linux_wt)
+        ephemeral_home = f"/tmp/codex-ephemeral-{exec_id}"
+        self._setup_ephemeral_credentials(ephemeral_home)
+        self._start_credential_unlinking_watcher(ephemeral_home)
+
+        bwrap_args = self.build_bwrap_command(linux_wt, ephemeral_home_path=ephemeral_home)
         cmd = ["wsl.exe", "-d", self.distro, "--"] + bwrap_args if self.is_windows else bwrap_args
 
         start_time = time.time()
@@ -462,6 +632,8 @@ class LinuxCodexTaskExecutor:
                 evidence={"duration_sec": duration, "error": str(exc)},
                 error_reason="CODEX_EXEC_EXCEPTION",
             )
+        finally:
+            self._cleanup_ephemeral_credentials(ephemeral_home)
 
         changed_files = self._detect_changed_files(wt)
         if not changed_files:

@@ -77,15 +77,6 @@ class CodexTaskExecutor:
         canonical_base_sha: str,
     ) -> ExecutionResult:
         exec_id = f"exec-{uuid.uuid4().hex[:12]}"
-        if not self.health():
-            return ExecutionResult(
-                status="FAILED",
-                changed_files=(),
-                execution_id=exec_id,
-                executor_name="CodexTaskExecutor",
-                error_reason="CODEX_EXECUTOR_UNAVAILABLE",
-            )
-
         wt = Path(worktree_path).resolve()
         if not wt.exists() or not wt.is_dir():
             return ExecutionResult(
@@ -94,6 +85,15 @@ class CodexTaskExecutor:
                 execution_id=exec_id,
                 executor_name="CodexTaskExecutor",
                 error_reason="INVALID_WORKTREE_PATH",
+            )
+
+        if not self.health():
+            return ExecutionResult(
+                status="FAILED",
+                changed_files=(),
+                execution_id=exec_id,
+                executor_name="CodexTaskExecutor",
+                error_reason="CODEX_EXECUTOR_UNAVAILABLE",
             )
 
         # Build English task prompt

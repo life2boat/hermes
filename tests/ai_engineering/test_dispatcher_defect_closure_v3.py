@@ -174,11 +174,11 @@ def make_linear_task(task_id: str = "HER-100", title: str = "Test Task") -> Line
 # ---------------------------------------------------------------------------
 
 
-def test_codex_executor_disabled_when_unproven(monkeypatch):
+def test_codex_executor_disabled_when_unproven(tmp_path):
     """When codex binary is unavailable, CodexTaskExecutor fails closed."""
     executor = CodexTaskExecutor(codex_bin="non_existent_binary_xyz_123")
     assert executor.health() is False
-    res = executor.execute(make_linear_task(), Path("/tmp"), "base_sha")
+    res = executor.execute(make_linear_task(), tmp_path, "base_sha")
     assert res.status == "FAILED"
     assert res.error_reason == "CODEX_EXECUTOR_UNAVAILABLE"
 

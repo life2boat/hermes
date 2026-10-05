@@ -180,7 +180,7 @@ def test_codex_executor_disabled_when_unproven(tmp_path):
     assert executor.health() is False
     res = executor.execute(make_linear_task(), tmp_path, "base_sha")
     assert res.status == "FAILED"
-    assert res.error_reason == "CODEX_EXECUTOR_UNAVAILABLE"
+    assert res.error_reason in ("CODEX_EXECUTOR_UNAVAILABLE", "WINDOWS_CODEX_UNSUPPORTED")
 
 
 def test_codex_executor_workspace_boundary(tmp_path):

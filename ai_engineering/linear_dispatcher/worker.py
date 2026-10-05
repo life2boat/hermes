@@ -28,6 +28,7 @@ from ai_engineering.linear_dispatcher.linear_client_production import (
 from ai_engineering.linear_dispatcher.task_executor import (
     CodexTaskExecutor,
     ITaskExecutor,
+    LinuxCodexTaskExecutor,
     SimulatedTaskExecutor,
 )
 from ai_engineering.linear_dispatcher.worktree_service import WorktreeService
@@ -150,8 +151,8 @@ class DispatcherWorker:
             return self._task_executor
 
         backend = os.environ.get("DISPATCHER_EXECUTOR_BACKEND", "codex").lower()
-        if backend == "codex":
-            return CodexTaskExecutor()
+        if backend in ("codex", "linux_codex"):
+            return LinuxCodexTaskExecutor()
         elif backend in ("simulated", "offline"):
             return SimulatedTaskExecutor()
         return None

@@ -33,7 +33,13 @@ class LeaseManager:
         try:
             with open(self._persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise LeaseError(
+                    f"Malformed lease store: root must be dict, got {type(data)}"
+                )
             for k, v in data.items():
+                if not isinstance(v, dict):
+                    raise LeaseError(f"Malformed lease record for key {k}")
                 self._leases[k] = ClaimRecord(
                     task_id=v["task_id"],
                     claim_owner=v["claim_owner"],
@@ -58,8 +64,9 @@ class LeaseManager:
             }
             for k, v in self._leases.items()
         }
-        tmp_path = self._persistence_path.with_suffix('.tmp')
+        tmp_path = self._persistence_path.with_suffix(".tmp")
         import os
+
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.flush()

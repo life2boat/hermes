@@ -1,27 +1,47 @@
 """Hermes Linear Autonomous Dispatcher - Production Worker Entrypoint."""
 
+from __future__ import annotations
+
+import logging
 import os
+from pathlib import Path
 import signal
+import subprocess
 import sys
 import time
-import logging
-from pathlib import Path
 from typing import Any
 
 from ai_engineering.linear_dispatcher.contracts import DispatcherConfig
 from ai_engineering.linear_dispatcher.dispatcher import AutonomousDispatcher
+from ai_engineering.linear_dispatcher.execution_ledger import (
+    ExecutionLedger,
+    ExecutionState,
+    SingleWorkerLock,
+)
+from ai_engineering.linear_dispatcher.github_service_production import (
+    GitHubProductionService,
+)
 from ai_engineering.linear_dispatcher.lease_manager import LeaseManager
+from ai_engineering.linear_dispatcher.linear_client_production import (
+    LinearProductionClient,
+)
+from ai_engineering.linear_dispatcher.task_executor import (
+    CodexTaskExecutor,
+    ITaskExecutor,
+    SimulatedTaskExecutor,
+)
 from ai_engineering.linear_dispatcher.worktree_service import WorktreeService
-from ai_engineering.linear_dispatcher.linear_client_production import LinearProductionClient
-from ai_engineering.linear_dispatcher.github_service_production import GitHubProductionService
-from ai_engineering.linear_dispatcher.execution_ledger import ExecutionLedger, ExecutionState, SingleWorkerLock
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger("hermes.dispatcher.worker")
 
+
 class DispatcherWorker:
-    def __init__(self) -> None:
+    def __init__(self, task_executor: ITaskExecutor | None = None) -> None:
         self.shutdown_requested = False
+        self._task_executor = task_executor
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigterm)
 
@@ -29,14 +49,68 @@ class DispatcherWorker:
         logger.info("Graceful shutdown requested...")
         self.shutdown_requested = True
 
-    def validate_dependencies(self, config: DispatcherConfig, wt_base: Path, lease_path: Path) -> bool:
+    def validate_canonical_root(self, canonical_root: Path) -> tuple[bool, str | None]:
+        """Validate that canonical root is a valid git repository pointing to life2boat/hermes."""
+        c_root = Path(canonical_root).resolve()
+        if not c_root.exists() or not c_root.is_dir():
+            return False, f"CANONICAL_ROOT_NOT_FOUND: {c_root}"
+
+        try:
+            # Check git repository
+            res_git = subprocess.run(
+                ["git", "-C", str(c_root), "rev-parse", "--git-dir"],
+                capture_output=True,
+                text=True,
+            )
+            if res_git.returncode != 0:
+                return False, f"NOT_A_GIT_REPOSITORY: {c_root}"
+
+            # Check github remote
+            res_remote = subprocess.run(
+                ["git", "-C", str(c_root), "remote", "get-url", "github"],
+                capture_output=True,
+                text=True,
+            )
+            if (
+                res_remote.returncode != 0
+                or "life2boat/hermes" not in res_remote.stdout
+            ):
+                return False, f"INVALID_CANONICAL_REMOTE: {res_remote.stdout.strip()}"
+
+            # Check github/main ref exists
+            res_ref = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(c_root),
+                    "rev-parse",
+                    "--verify",
+                    "refs/remotes/github/main",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if res_ref.returncode != 0:
+                return False, "MISSING_GITHUB_MAIN_REF"
+
+            return True, None
+        except Exception as e:
+            return False, f"CANONICAL_ROOT_VALIDATION_ERROR: {e}"
+
+    def validate_dependencies(
+        self,
+        config: DispatcherConfig,
+        wt_base: Path,
+        lease_path: Path,
+        canonical_root: Path | None = None,
+    ) -> bool:
         if not os.environ.get("GITHUB_TOKEN"):
             logger.error("Missing GITHUB_TOKEN")
             return False
         if not os.environ.get("LINEAR_API_KEY"):
             logger.error("Missing LINEAR_API_KEY")
             return False
-        
+
         try:
             wt_base.mkdir(parents=True, exist_ok=True)
             test_file = wt_base / ".write_test"
@@ -54,15 +128,46 @@ class DispatcherWorker:
         except Exception as e:
             logger.error(f"Cannot write to lease directory {lease_path.parent}: {e}")
             return False
-            
+
+        if canonical_root:
+            ok, root_err = self.validate_canonical_root(canonical_root)
+            if not ok:
+                logger.error(f"Canonical root validation failed: {root_err}")
+                return False
+
+        # Validate executor backend
+        executor = self._get_executor()
+        if not executor or not executor.health():
+            logger.error(
+                "Configured task execution backend is not available or unhealthy. NOT_READY."
+            )
+            return False
+
         return True
 
+    def _get_executor(self) -> ITaskExecutor | None:
+        if self._task_executor:
+            return self._task_executor
+
+        backend = os.environ.get("DISPATCHER_EXECUTOR_BACKEND", "codex").lower()
+        if backend == "codex":
+            return CodexTaskExecutor()
+        elif backend in ("simulated", "offline"):
+            return SimulatedTaskExecutor()
+        return None
+
     def _resolve_canonical_main_sha(self) -> str:
-        import subprocess
         try:
             result = subprocess.run(
-                ["git", "ls-remote", "https://github.com/life2boat/hermes.git", "refs/heads/main"],
-                capture_output=True, text=True, check=True
+                [
+                    "git",
+                    "ls-remote",
+                    "https://github.com/life2boat/hermes.git",
+                    "refs/heads/main",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
             )
             if not result.stdout.strip():
                 raise RuntimeError("Empty response from ls-remote")
@@ -76,82 +181,130 @@ class DispatcherWorker:
 
     def run(self) -> None:
         logger.info("Starting Dispatcher Worker...")
-        enabled = os.environ.get("HEALBITE_LINEAR_DISPATCHER_ENABLED", "false").lower() == "true"
+        enabled = (
+            os.environ.get("HEALBITE_LINEAR_DISPATCHER_ENABLED", "false").lower()
+            == "true"
+        )
         mode = os.environ.get("HEALBITE_LINEAR_DISPATCHER_MODE", "shadow")
-        
+
         if not enabled:
-            logger.info("Dispatcher is disabled (HEALBITE_LINEAR_DISPATCHER_ENABLED=false). Exiting gracefully.")
+            logger.info(
+                "Dispatcher is disabled (HEALBITE_LINEAR_DISPATCHER_ENABLED=false). Exiting gracefully."
+            )
             sys.exit(0)
-            
+
         if mode != "shadow":
-            logger.error(f"LIVE mode unsupported or fail-closed for v1. Found mode: {mode}")
+            logger.error(
+                f"LIVE mode unsupported or fail-closed for v1. Found mode: {mode}"
+            )
             sys.exit(1)
 
         config = DispatcherConfig(enabled=enabled, mode=mode)
-        
+
         # Production Paths
-        base_run_dir = Path(os.environ.get("DISPATCHER_RUNTIME_DIR", "/var/lib/hermes/linear-dispatcher")).resolve()
+        base_run_dir = Path(
+            os.environ.get(
+                "DISPATCHER_RUNTIME_DIR", "/var/lib/hermes/linear-dispatcher"
+            )
+        ).resolve()
         wt_base = (base_run_dir / "worktrees").resolve()
         lease_path = (base_run_dir / "leases.json").resolve()
         ledger_path = (base_run_dir / "execution_state.json").resolve()
         lock_path = (base_run_dir / "worker.lock").resolve()
+        canonical_root = Path(
+            os.environ.get("HERMES_CANONICAL_ROOT", "/home/runner/work/hermes/hermes")
+        ).resolve()
 
-        if not self.validate_dependencies(config, wt_base, lease_path):
+        if not self.validate_dependencies(config, wt_base, lease_path, canonical_root):
             logger.error("Dependency validation failed. NOT_READY.")
             sys.exit(1)
 
         lock = SingleWorkerLock(lock_path)
         if not lock.acquire():
-            logger.error("Failed to acquire single-worker lock. Another instance is running. BLOCKED.")
+            logger.error(
+                "Failed to acquire single-worker lock. Another instance is running. BLOCKED."
+            )
             sys.exit(1)
 
         try:
             linear_client = LinearProductionClient()
             lease_manager = LeaseManager(persistence_path=lease_path)
-            
-            canonical_root = Path(os.environ.get("HERMES_CANONICAL_ROOT", "/home/runner/work/hermes/hermes")).resolve()
-            canonical_sha = self._resolve_canonical_main_sha()
-            if not canonical_sha:
-                logger.error("Could not resolve canonical main SHA at startup. BLOCKED.")
-                sys.exit(1)
-                
-            worktree_service = WorktreeService(canonical_root=canonical_root, base_sha=canonical_sha)
             github_service = GitHubProductionService()
             ledger = ExecutionLedger(ledger_path)
+            executor = self._get_executor()
 
-            logger.info("Dispatcher Worker READY. Mode: shadow")
+            canonical_sha = self._resolve_canonical_main_sha()
+            if not canonical_sha:
+                logger.error(
+                    "Could not resolve canonical main SHA at startup. BLOCKED."
+                )
+                sys.exit(1)
 
-            # Check recovery
+            # Check recovery state
             state = ledger.read_state()
             if state:
-                logger.info(f"Found recovery state for task {state.task_id} at {state.state}")
-                if lease_manager.is_held_by_foreign_worker(state.task_id, config.worker_id):
-                    logger.error("Recovery blocked: lease held by foreign worker.")
-                else:
-                    # In V1, we abort the recovered task safely to start fresh (idempotent restart)
-                    # unless we want to fully support state machine injection.
-                    # Since we don't have full injection, we release lease and start fresh.
-                    # The prompt says: "If same-worker recovery can be proven unambiguously: resume from a safe idempotent boundary. If state is ambiguous: RECOVERY_BLOCKED."
-                    # Aborting and letting the next poll cycle claim it if still open is a safe idempotent boundary.
-                    lease_manager.release(state.task_id, state.claim_owner, state.claim_token)
-                ledger.clear()
+                logger.info(
+                    f"Found recovery state for task {state.task_id} at state: {state.state}"
+                )
+                if lease_manager.is_held_by_foreign_worker(
+                    state.task_id, config.worker_id
+                ):
+                    logger.error(
+                        "CRITICAL: Recovery blocked: lease held by foreign worker. BLOCKED."
+                    )
+                    sys.exit(1)
+
+                # Initialize dispatcher for recovery
+                worktree_service = WorktreeService(
+                    canonical_root=canonical_root,
+                    base_sha=state.base_sha or canonical_sha,
+                )
+                dispatcher = AutonomousDispatcher(
+                    config=config,
+                    linear_client=linear_client,
+                    lease_manager=lease_manager,
+                    worktree_service=worktree_service,
+                    github_service=github_service,
+                    worktree_base_dir=wt_base,
+                    canonical_main_sha=state.base_sha or canonical_sha,
+                    execution_ledger=ledger,
+                    task_executor=executor,
+                )
+                rec_result = dispatcher.recover_task(state)
+                if rec_result and rec_result.final_state in (
+                    TaskState.BLOCKED,
+                    TaskState.FAILED,
+                ):
+                    logger.error(
+                        f"Task recovery failed: {rec_result.block_reason}. BLOCKED."
+                    )
+                    sys.exit(1)
+
+            logger.info("Dispatcher Worker READY. Mode: shadow")
 
             while not self.shutdown_requested:
                 try:
                     tasks = linear_client.list_issues()
-                    eligible = [t for t in tasks if "agent:auto" in t.labels and "agent:shadow" in t.labels]
-                    
+                    eligible = [
+                        t
+                        for t in tasks
+                        if "agent:auto" in t.labels and "agent:shadow" in t.labels
+                    ]
+
                     if not eligible:
                         time.sleep(15)
                         continue
 
+                    # Fresh canonical SHA and fresh WorktreeService per dispatch cycle
                     canonical_sha = self._resolve_canonical_main_sha()
                     if not canonical_sha:
-                        logger.error("Could not resolve canonical main SHA. Skipping poll.")
+                        logger.error(
+                            "Could not resolve canonical main SHA. Skipping poll."
+                        )
                         time.sleep(15)
                         continue
 
-                    # Only process one
+                    worktree_service = WorktreeService(canonical_root=canonical_root, base_sha=canonical_sha)
                     dispatcher = AutonomousDispatcher(
                         config=config,
                         linear_client=linear_client,
@@ -161,17 +314,15 @@ class DispatcherWorker:
                         worktree_base_dir=wt_base,
                         canonical_main_sha=canonical_sha,
                         execution_ledger=ledger,
+                        task_executor=executor,
                     )
 
-                    # Wrap dispatcher execution to record ledger state
-                    # We can't inject ledger natively without altering dispatcher's whole inner structure,
-                    # so we will just run it. The task handles atomic operations.
-                    # Wait, the prompt wants us to track states in the ledger!
                     result = dispatcher.dispatch_one_task(eligible)
                     if result:
-                        logger.info(f"Task {result.task_id} processed. Final state: {result.final_state}. Block reason: {result.block_reason}")
-                        ledger.clear()
-                    
+                        logger.info(
+                            f"Task {result.task_id} processed. Final state: {result.final_state}. Reason: {result.block_reason}"
+                        )
+
                     time.sleep(15)
                 except Exception as e:
                     logger.error(f"Unexpected error in poll loop: {e}", exc_info=True)
@@ -180,6 +331,7 @@ class DispatcherWorker:
             logger.info("Dispatcher Worker STOPPING...")
         finally:
             lock.release()
+
 
 if __name__ == "__main__":
     worker = DispatcherWorker()

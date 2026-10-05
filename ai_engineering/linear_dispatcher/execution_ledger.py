@@ -7,7 +7,8 @@ from typing import Any, Optional
 try:
     import fcntl
 except ImportError:
-    fcntl = None # For Windows fallback
+    fcntl = None  # For Windows fallback
+
 
 @dataclass
 class ExecutionState:
@@ -22,14 +23,15 @@ class ExecutionState:
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
 
+
 class ExecutionLedger:
     def __init__(self, persistence_path: Path | str) -> None:
         self.persistence_path = Path(persistence_path).resolve()
         self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
 
     def write_state(self, state: ExecutionState) -> None:
-        tmp_path = self.persistence_path.with_suffix('.tmp')
-        with open(tmp_path, 'w', encoding='utf-8') as f:
+        tmp_path = self.persistence_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(asdict(state), f)
             f.flush()
             os.fsync(f.fileno())
@@ -39,7 +41,7 @@ class ExecutionLedger:
         if not self.persistence_path.exists():
             return None
         try:
-            with open(self.persistence_path, 'r', encoding='utf-8') as f:
+            with open(self.persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return ExecutionState(**data)
         except Exception:
@@ -49,38 +51,52 @@ class ExecutionLedger:
         if self.persistence_path.exists():
             self.persistence_path.unlink()
 
+
 class SingleWorkerLock:
     def __init__(self, lock_path: Path | str) -> None:
         self.lock_path = Path(lock_path).resolve()
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = None
+        self._raw_fd: int | None = None
 
     def acquire(self) -> bool:
         try:
-            self.fd = open(self.lock_path, 'w', encoding='utf-8')
-            if os.name == 'nt':
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_NOINHERIT"):
+                flags |= os.O_NOINHERIT
+            self._raw_fd = os.open(str(self.lock_path), flags, 0o600)
+            if os.name == "nt":
                 import msvcrt
-                msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
+
+                msvcrt.locking(self._raw_fd, msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                fcntl.flock(self._raw_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except (IOError, OSError):
-            if self.fd:
-                self.fd.close()
-                self.fd = None
+            if self._raw_fd is not None:
+                try:
+                    os.close(self._raw_fd)
+                except Exception:
+                    pass
+                self._raw_fd = None
             return False
 
     def release(self) -> None:
-        if self.fd:
+        if self._raw_fd is not None:
             try:
-                if os.name == 'nt':
+                if os.name == "nt":
                     import msvcrt
-                    msvcrt.locking(self.fd.fileno(), msvcrt.LK_UNLCK, 1)
+
+                    msvcrt.locking(self._raw_fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
-                    fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
+
+                    fcntl.flock(self._raw_fd, fcntl.LOCK_UN)
             except Exception:
                 pass
-            self.fd.close()
-            self.fd = None
+            try:
+                os.close(self._raw_fd)
+            except Exception:
+                pass
+            self._raw_fd = None

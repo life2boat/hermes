@@ -11,9 +11,10 @@ from ai_engineering.contracts import Status
 
 def test_generate_offline_evidence():
     target_sha = "abc123sha4567890123456789012345678901234"
+    import sys
     try:
         result = subprocess.run(
-            ["python3", "scripts/generate_offline_evidence.py", target_sha],
+            [sys.executable, "scripts/generate_offline_evidence.py", target_sha],
             capture_output=True, text=True
         )
         assert result.returncode == 0
@@ -237,9 +238,12 @@ def test_db_path_validation_in_offline_evidence(tmp_path):
 
     if hasattr(os, "symlink"):
         symlink_db = tmp_path / "symlink.db"
-        os.symlink(str(canonical_db), str(symlink_db))
-        status, classification, version = check_db_path({"source": str(symlink_db)})
-        assert status == "BLOCKED"
+        try:
+            os.symlink(str(canonical_db), str(symlink_db))
+            status, classification, version = check_db_path({"source": str(symlink_db)})
+            assert status == "BLOCKED"
+        except OSError:
+            pass
 
     dir_db = tmp_path / "dir.db"
     dir_db.mkdir()

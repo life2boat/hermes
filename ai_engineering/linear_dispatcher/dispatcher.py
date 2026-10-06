@@ -29,7 +29,12 @@ from ai_engineering.linear_dispatcher.task_filter import (
     select_next_task,
 )
 from ai_engineering.linear_dispatcher.validator import LocalValidator
-from ai_engineering.linear_dispatcher.worktree_service import WorktreeService
+from ai_engineering.linear_dispatcher.worktree_service import (
+    SAFE_GIT_OPTS,
+    WorktreeService,
+    get_clean_git_env,
+    is_canonical_remote_url,
+)
 from ai_engineering.linear_dispatcher.writeback import (
     ExecutionEvidence,
     ILinearClient,
@@ -80,21 +85,13 @@ class AutonomousDispatcher:
     def _safe_git_run(
         args: list[str], cwd: Path | str, **kwargs
     ) -> subprocess.CompletedProcess:
-        safe_opts = [
-            "-c", "core.fsmonitor=",
-            "-c", "core.hooksPath=/dev/null",
+        extra_opts = [
             "-c", "core.whitespace=cr-at-eol",
-            "-c", "core.autocrlf=false",
-            "-c", "filter.lfs.smudge=",
-            "-c", "filter.lfs.clean=",
-            "-c", "filter.lfs.process=",
-            "-c", "filter.lfs.required=false",
+            "-c", "core.autocrlf=input",
+            "-c", "core.safecrlf=false",
         ]
-        env = dict(kwargs.pop("env", os.environ))
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
-        env["GIT_CONFIG_GLOBAL"] = os.devnull
-        env["GIT_CONFIG_SYSTEM"] = os.devnull
-        cmd = ["git"] + safe_opts + ["-C", str(cwd)] + args
+        env = get_clean_git_env(kwargs.pop("env", None))
+        cmd = ["git"] + SAFE_GIT_OPTS + extra_opts + ["-C", str(cwd)] + args
         return subprocess.run(cmd, env=env, **kwargs)
 
     def dispatch_one_task(
@@ -217,9 +214,6 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.LOST_LEASE.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            if self._ledger:
-                self._ledger.clear()
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -261,6 +255,7 @@ class AutonomousDispatcher:
             )
 
         exec_res = executor.execute(task, wt_path, self._canonical_main_sha)
+        current_exec_id = exec_res.execution_id
         if exec_res.status != "SUCCESS":
             target_state = (
                 TaskState.BLOCKED if exec_res.status == "BLOCKED" else TaskState.FAILED
@@ -293,9 +288,6 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.LOST_LEASE.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            if self._ledger:
-                self._ledger.clear()
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -447,6 +439,7 @@ class AutonomousDispatcher:
                     branch=branch_name,
                     head_sha=head_sha,
                     base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
             )
 
@@ -506,9 +499,6 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.LOST_LEASE.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            if self._ledger:
-                self._ledger.clear()
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -528,6 +518,31 @@ class AutonomousDispatcher:
             text=True,
         )
         if chk_remote.returncode == 0:
+            if chk_remote.stdout.strip() and not is_canonical_remote_url(
+                chk_remote.stdout.strip(), self._config.canonical_repo, self._canonical_root
+            ):
+                sm.transition(
+                    TaskState.BLOCKED,
+                    reason="CANONICAL_REMOTE_URL_INVALID",
+                    now_iso=now_iso,
+                )
+                self._worktree_service.remove_worktree(wt_path, branch_name)
+                self._lease_manager.release(
+                    task.id, self._config.worker_id, claim_record.claim_token
+                )
+                if self._ledger:
+                    self._ledger.clear()
+                return DispatchResult(
+                    task_id=task.id,
+                    final_state=TaskState.BLOCKED,
+                    branch=branch_name,
+                    pr_number=None,
+                    pr_url=None,
+                    head_sha=head_sha,
+                    block_reason="CANONICAL_REMOTE_URL_INVALID",
+                    transitions=sm.history,
+                )
+
             push_res = self._safe_git_run(
                 ["push", self._config.canonical_remote, branch_name],
                 cwd=wt_path,
@@ -558,24 +573,25 @@ class AutonomousDispatcher:
                     transitions=sm.history,
                 )
 
-            sm.transition(
-                TaskState.BRANCH_PUSHED,
-                evidence={"branch": branch_name, "head_sha": head_sha},
-                now_iso=now_iso,
-            )
-            if self._ledger:
-                self._ledger.write_state(
-                    ExecutionState(
-                        task_id=task.id,
-                        state=TaskState.BRANCH_PUSHED.value,
-                        claim_owner=self._config.worker_id,
-                        claim_token=claim_record.claim_token,
-                        worktree_path=str(wt_path),
-                        branch=branch_name,
-                        head_sha=head_sha,
-                        base_sha=self._canonical_main_sha,
-                    )
+        sm.transition(
+            TaskState.BRANCH_PUSHED,
+            evidence={"branch": branch_name, "head_sha": head_sha},
+            now_iso=now_iso,
+        )
+        if self._ledger:
+            self._ledger.write_state(
+                ExecutionState(
+                    task_id=task.id,
+                    state=TaskState.BRANCH_PUSHED.value,
+                    claim_owner=self._config.worker_id,
+                    claim_token=claim_record.claim_token,
+                    worktree_path=str(wt_path),
+                    branch=branch_name,
+                    head_sha=head_sha,
+                    base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
+            )
 
         # Heartbeat check 4: Before PR creation
         if not self._lease_manager.verify_lease(
@@ -586,9 +602,6 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.LOST_LEASE.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            if self._ledger:
-                self._ledger.clear()
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -616,8 +629,8 @@ class AutonomousDispatcher:
             self._lease_manager.release(
                 task.id, self._config.worker_id, claim_record.claim_token
             )
-            if self._ledger:
-                self._ledger.clear()
+            # Invariant H05: Do NOT clear ledger on PR creation failure.
+            # Branch was pushed; durable state is retained for recovery.
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.FAILED,
@@ -651,6 +664,7 @@ class AutonomousDispatcher:
                     pr_number=pr_result.pr_number,
                     pr_url=pr_result.pr_url,
                     base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
             )
 
@@ -669,6 +683,7 @@ class AutonomousDispatcher:
                     pr_number=pr_result.pr_number,
                     pr_url=pr_result.pr_url,
                     base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
             )
 
@@ -688,6 +703,17 @@ class AutonomousDispatcher:
                 else TaskState.FAILED
             )
             sm.transition(target_state, reason=reason_code, now_iso=now_iso)
+            if ci_reason == BlockReasonCode.LOST_LEASE:
+                return DispatchResult(
+                    task_id=task.id,
+                    final_state=target_state,
+                    branch=branch_name,
+                    pr_number=pr_result.pr_number,
+                    pr_url=pr_result.pr_url,
+                    head_sha=head_sha,
+                    block_reason=reason_code,
+                    transitions=sm.history,
+                )
             self._worktree_service.remove_worktree(wt_path, branch_name)
             self._lease_manager.release(
                 task.id, self._config.worker_id, claim_record.claim_token
@@ -723,6 +749,7 @@ class AutonomousDispatcher:
                     pr_number=pr_result.pr_number,
                     pr_url=pr_result.pr_url,
                     base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
             )
 
@@ -735,9 +762,6 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.LOST_LEASE.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            if self._ledger:
-                self._ledger.clear()
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -763,6 +787,7 @@ class AutonomousDispatcher:
             ci_status="PASS",
             ci_head_sha=ci_result.head_sha,
             sha_match="YES",
+            execution_id=current_exec_id,
         )
         wb_ok, wb_reason = self._writeback_service.writeback_and_verify(task, evidence)
         if not wb_ok:
@@ -798,6 +823,7 @@ class AutonomousDispatcher:
                     pr_number=pr_result.pr_number,
                     pr_url=pr_result.pr_url,
                     base_sha=self._canonical_main_sha,
+                    execution_id=current_exec_id,
                 )
             )
         sm.transition(TaskState.DONE, now_iso=now_iso)
@@ -830,8 +856,33 @@ class AutonomousDispatcher:
         token = recovery_state.claim_token
         state_val = recovery_state.state
 
-        # Invariant H06: Exclusive lease fencing MUST precede all effects and cleanup
-        if not self._lease_manager.verify_lease(task_id, owner, token, now_iso=now_iso):
+        # Invariant H06: Foreign worker lease barrier
+        is_foreign = False
+        if hasattr(self._lease_manager, "is_held_by_foreign_worker"):
+            val = self._lease_manager.is_held_by_foreign_worker(task_id, self._config.worker_id)
+            if not isinstance(val, bool):
+                is_foreign = (owner != self._config.worker_id)
+            else:
+                is_foreign = val
+        if is_foreign or (
+            owner != self._config.worker_id
+            and self._lease_manager.verify_lease(task_id, owner, token, now_iso=now_iso)
+        ):
+            return DispatchResult(
+                task_id=task_id,
+                final_state=TaskState.BLOCKED,
+                branch=recovery_state.branch,
+                pr_number=recovery_state.pr_number,
+                pr_url=recovery_state.pr_url,
+                head_sha=recovery_state.head_sha,
+                block_reason=BlockReasonCode.ACTIVE_FOREIGN_LEASE.value,
+                transitions=(),
+            )
+
+        # Invariant H06: Verify current worker ownership
+        if owner != self._config.worker_id or not self._lease_manager.verify_lease(
+            task_id, self._config.worker_id, token, now_iso=now_iso
+        ):
             claim_ok, claim_record, claim_reason = self._lease_manager.claim(
                 task_id, self._config.worker_id, self._config.lease_duration_sec, now_iso=now_iso
             )
@@ -915,6 +966,45 @@ class AutonomousDispatcher:
                     transitions=(),
                 )
 
+            # Re-read and re-validate PR identity with GitHub
+            if hasattr(self._github_service, "get_pr"):
+                res = self._github_service.get_pr(recovery_state.pr_number)
+                if isinstance(res, tuple) and len(res) == 3:
+                    pr_ok, pr_info, pr_err = res
+                    if not pr_ok or not pr_info:
+                        return DispatchResult(
+                            task_id=task_id,
+                            final_state=TaskState.BLOCKED,
+                            branch=recovery_state.branch,
+                            pr_number=recovery_state.pr_number,
+                            pr_url=recovery_state.pr_url,
+                            head_sha=recovery_state.head_sha,
+                            block_reason=f"PR_REVALIDATION_FAILED: {pr_err}",
+                            transitions=(),
+                        )
+                    if not pr_info.is_draft:
+                        return DispatchResult(
+                            task_id=task_id,
+                            final_state=TaskState.BLOCKED,
+                            branch=recovery_state.branch,
+                            pr_number=recovery_state.pr_number,
+                            pr_url=recovery_state.pr_url,
+                            head_sha=recovery_state.head_sha,
+                            block_reason="EXISTING_PR_NOT_DRAFT",
+                            transitions=(),
+                        )
+                    if pr_info.head_sha != recovery_state.head_sha:
+                        return DispatchResult(
+                            task_id=task_id,
+                            final_state=TaskState.BLOCKED,
+                            branch=recovery_state.branch,
+                            pr_number=recovery_state.pr_number,
+                            pr_url=recovery_state.pr_url,
+                            head_sha=recovery_state.head_sha,
+                            block_reason=f"PR_HEAD_MISMATCH_{pr_info.head_sha}_VS_{recovery_state.head_sha}",
+                            transitions=(),
+                        )
+
             # If CI was pending, resume CI waiting
             if state_val in (TaskState.PR_OPEN.value, TaskState.CI_PENDING.value):
                 ci_ok, ci_result, ci_reason = self._wait_for_ci(
@@ -923,12 +1013,28 @@ class AutonomousDispatcher:
                     recovery_state.pr_number,
                     now_iso=now_iso,
                 )
-                if not ci_ok or not ci_result or ci_result.overall_status != "PASS":
+                if (
+                    not ci_ok
+                    or not ci_result
+                    or ci_result.overall_status != "PASS"
+                    or getattr(ci_result, "head_sha", None) != recovery_state.head_sha
+                ):
                     reason = (
                         ci_reason.value
                         if hasattr(ci_reason, "value")
-                        else str(ci_reason)
+                        else str(ci_reason or "CI_SHA_MISMATCH")
                     )
+                    if ci_reason == BlockReasonCode.LOST_LEASE:
+                        return DispatchResult(
+                            task_id=task_id,
+                            final_state=TaskState.BLOCKED,
+                            branch=recovery_state.branch,
+                            pr_number=recovery_state.pr_number,
+                            pr_url=recovery_state.pr_url,
+                            head_sha=recovery_state.head_sha,
+                            block_reason=reason,
+                            transitions=(),
+                        )
                     if recovery_state.worktree_path:
                         self._worktree_service.remove_worktree(
                             recovery_state.worktree_path, recovery_state.branch
@@ -947,7 +1053,7 @@ class AutonomousDispatcher:
                         transitions=(),
                     )
 
-            # Invariant H06: For CI_PASS recovery, re-verify with GitHub that CI is actually PASS
+            # Invariant H06: For CI_PASS recovery, re-verify with GitHub that CI is actually PASS for exact head SHA
             if state_val == TaskState.CI_PASS.value:
                 if not self._github_service:
                     return DispatchResult(
@@ -1007,9 +1113,9 @@ class AutonomousDispatcher:
                 head_sha=recovery_state.head_sha or "",
                 validation_status="PASS",
                 ci_status="PASS",
-                ci_head_sha=recovery_state.head_sha or "",
+                ci_head_sha=ci_result.head_sha if ci_result else (recovery_state.head_sha or ""),
                 sha_match="YES",
-                execution_id=recovery_state.head_sha or task_id,
+                execution_id=recovery_state.execution_id or recovery_state.head_sha or task_id,
             )
             wb_ok, wb_reason = self._writeback_service.writeback_and_verify(
                 task, evidence
@@ -1064,11 +1170,13 @@ class AutonomousDispatcher:
 
             has_receipt = (
                 any(
-                    WritebackService.is_authentic_receipt(c, recovery_state.head_sha)
+                    WritebackService.is_authentic_receipt(
+                        c, recovery_state.head_sha, recovery_state.execution_id
+                    )
                     for c in comments
                 )
                 or WritebackService.is_authentic_receipt(
-                    refetched.description, recovery_state.head_sha
+                    refetched.description, recovery_state.head_sha, recovery_state.execution_id
                 )
             )
 
@@ -1132,18 +1240,16 @@ class AutonomousDispatcher:
                 transitions=(),
             )
 
-            return DispatchResult(
-                task_id=task_id,
-                final_state=TaskState.BLOCKED,
-                branch=recovery_state.branch,
-                pr_number=recovery_state.pr_number,
-                pr_url=recovery_state.pr_url,
-                head_sha=recovery_state.head_sha,
-                block_reason=BlockReasonCode.RECOVERY_BLOCKED.value,
-                transitions=(),
-            )
-
-        return None
+        return DispatchResult(
+            task_id=task_id,
+            final_state=TaskState.BLOCKED,
+            branch=recovery_state.branch,
+            pr_number=recovery_state.pr_number,
+            pr_url=recovery_state.pr_url,
+            head_sha=recovery_state.head_sha,
+            block_reason=BlockReasonCode.RECOVERY_BLOCKED.value,
+            transitions=(),
+        )
 
     def _wait_for_ci(
         self,
@@ -1163,6 +1269,9 @@ class AutonomousDispatcher:
                 pr_number,
             )
             if ci_ok and ci_result and ci_result.overall_status == "PASS":
+                if getattr(ci_result, "head_sha", None) != head_sha:
+                    ci_ok = False
+                    ci_reason = BlockReasonCode.CI_SHA_MISMATCH
                 break
             if ci_reason == BlockReasonCode.CI_SHA_MISMATCH or (
                 ci_result and ci_result.overall_status == "FAIL"
@@ -1201,6 +1310,11 @@ class AutonomousDispatcher:
             )
             if chk_remote.returncode != 0:
                 # Canonical remote must be configured; fail closed if missing
+                return ""
+            if not is_canonical_remote_url(
+                chk_remote.stdout.strip(), self._config.canonical_repo, self._canonical_root
+            ):
+                # Remote URL must match canonical repository
                 return ""
 
             drift_proc = self._safe_git_run(

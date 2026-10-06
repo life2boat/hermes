@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import json
-import sys
 import datetime
+import hashlib
+import json
 import os
+import sqlite3
+import sys
 import urllib.parse
 from pathlib import Path
-import sqlite3
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -187,6 +188,32 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         import re
         sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
 
+        executed_at_str = rehearsal_data.get("executed_at", "")
+        if not executed_at_str:
+            return {"status": "BLOCKED"}
+        try:
+            datetime.datetime.fromisoformat(executed_at_str.replace("Z", "+00:00"))
+        except Exception:
+            return {"status": "BLOCKED"}
+
+        health_path = (
+            rehearsal_data.get("health_evidence_path")
+            or os.environ.get("HERMES_ROLLBACK_HEALTH_PATH")
+            or str(Path(rehearsal_path).parent / "rollback-health.json")
+        )
+        if not os.path.isfile(health_path):
+            return {"status": "BLOCKED"}
+        health_bytes = Path(health_path).read_bytes()
+        if hashlib.sha256(health_bytes).hexdigest() != health_hash:
+            return {"status": "BLOCKED"}
+        health_json = json.loads(health_bytes.decode("utf-8"))
+        if health_json.get("status") != "PASS" and health_json.get("health_status") != "PASS":
+            return {"status": "BLOCKED"}
+
+        prov = rehearsal_data.get("execution_provenance")
+        if not isinstance(prov, dict) or not prov.get("runtime_identity") or not prov.get("isolation_level"):
+            return {"status": "BLOCKED"}
+
         if (
             rehearsal_data.get("status") != "PASS"
             or not receipt_id
@@ -198,7 +225,7 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             or rehearsal_type not in ("live-container-rollback", "docker-compose-revert", "isolated-rollback-drill")
             or not health_hash
             or not sha256_pattern.match(health_hash)
-            or not rehearsal_data.get("executed_at")
+            or not rehearsal_data.get("rollback_procedure_proven")
         ):
             return {"status": "BLOCKED"}
 
@@ -236,7 +263,7 @@ def generate(target_sha, output_dir=None):
     if output_dir is None:
         output_dir = "."
 
-    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open("deploy/hermes-production.json", "r", encoding="utf-8") as f:
         manifest = json.load(f)
 

@@ -325,6 +325,11 @@ class LinuxCodexTaskExecutor:
         except SyntaxError as exc:
             return False, f"CREDENTIAL_WATCHER_SYNTAX_INVALID: {exc}"
 
+        # Invariant 7: /tmp/codex-home must NOT be writable (must use --ro-bind)
+        for i in range(len(sample_cmd) - 2):
+            if sample_cmd[i] == "--bind" and sample_cmd[i + 2] == "/tmp/codex-home":
+                return False, "CODEX_HOME_WRITABLE_IN_SANDBOX"
+
         return True, None
 
     def health(self) -> bool:
@@ -412,7 +417,7 @@ class LinuxCodexTaskExecutor:
             "--tmpfs", "/tmp",
             "--tmpfs", "/run",
             "--dir", "/tmp/codex-home",
-            "--bind", ephemeral_home_path, "/tmp/codex-home",
+            "--ro-bind", ephemeral_home_path, "/tmp/codex-home",
         ])
 
         # 5. Worktree bind mount (only writable location)
@@ -628,10 +633,21 @@ class LinuxCodexTaskExecutor:
                     text=True,
                     timeout=10,
                 )
-            except Exception:
-                pass
+                chk = self._runner(
+                    ["wsl.exe", "-d", self.distro, "--", "sh", "-c", f"[ ! -e '{ephemeral_home}' ]"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if chk.returncode != 0:
+                    raise RuntimeError(f"EPHEMERAL_CREDENTIAL_CLEANUP_FAILED: {ephemeral_home} still exists")
+            except Exception as exc:
+                if "EPHEMERAL_CREDENTIAL_CLEANUP_FAILED" in str(exc):
+                    raise
         else:
-            shutil.rmtree(ephemeral_home, ignore_errors=True)
+            if Path(ephemeral_home).exists():
+                shutil.rmtree(ephemeral_home, ignore_errors=False)
+            if Path(ephemeral_home).exists():
+                raise RuntimeError(f"EPHEMERAL_CREDENTIAL_CLEANUP_FAILED: {ephemeral_home} still exists")
 
     def resolve_worktree_linux_path(self, wt: Path) -> str:
         """Resolve host worktree path to the appropriate Linux path."""
@@ -776,7 +792,21 @@ class LinuxCodexTaskExecutor:
                 error_reason=err_reason,
             )
         finally:
-            self._cleanup_ephemeral_credentials(ephemeral_home)
+            cleanup_err = None
+            try:
+                self._cleanup_ephemeral_credentials(ephemeral_home)
+            except Exception as exc:
+                cleanup_err = str(exc)
+
+        if cleanup_err:
+            return ExecutionResult(
+                status="FAILED",
+                changed_files=(),
+                execution_id=exec_id,
+                executor_name="LinuxCodexTaskExecutor",
+                evidence={"duration_sec": duration if "duration" in locals() else 0.0, "error": cleanup_err},
+                error_reason="EPHEMERAL_CREDENTIAL_CLEANUP_FAILED",
+            )
 
         changed_files = self._detect_changed_files(wt)
         if not changed_files:

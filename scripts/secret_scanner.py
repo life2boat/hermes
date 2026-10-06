@@ -399,25 +399,43 @@ def main(argv: list[str] | None = None) -> int:
     error_count = 0
 
     for target_str in args.paths:
-        target_path = Path(target_str).resolve()
-        if not target_path.exists():
-            print(f"ERROR: Specified path does not exist: {target_str}", file=sys.stderr)
+        try:
+            target_path = Path(target_str).resolve()
+            if not target_path.exists():
+                print(f"ERROR: Specified path does not exist: {target_str}", file=sys.stderr)
+                error_count += 1
+                continue
+
+            if target_path.is_file():
+                is_explicit_file = True
+                files = [target_path]
+            else:
+                is_explicit_file = False
+                files = [
+                    p
+                    for p in target_path.rglob("*")
+                    if p.is_file() and ".git" not in p.parts
+                ]
+        except Exception as exc:
+            print(f"ERROR resolving or enumerating path {target_str}: {exc}", file=sys.stderr)
             error_count += 1
             continue
-
-        if target_path.is_file():
-            files = [target_path]
-        else:
-            files = [
-                p
-                for p in target_path.rglob("*")
-                if p.is_file() and ".git" not in p.parts
-            ]
 
         for file_path in files:
             try:
                 data = file_path.read_bytes()
-                if b"\x00" in data or len(data) > 5 * 1024 * 1024:
+                if b"\x00" in data:
+                    if is_explicit_file:
+                        print(f"ERROR: Explicitly targeted file is binary: {file_path}", file=sys.stderr)
+                        error_count += 1
+                        continue
+                    skipped_count += 1
+                    continue
+                if len(data) > 5 * 1024 * 1024:
+                    if is_explicit_file:
+                        print(f"ERROR: Explicitly targeted file exceeds size limit (5MB): {file_path}", file=sys.stderr)
+                        error_count += 1
+                        continue
                     skipped_count += 1
                     continue
                 findings = scan_secret_bytes(data)
@@ -441,6 +459,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if findings_count > 0 or error_count > 0:
         print(f"FAIL: {findings_count} findings, {error_count} errors.")
+        return 1
+    if inspected_count == 0:
+        print("FAIL: No files inspected (fail-closed).", file=sys.stderr)
         return 1
     print("PASS: 0 secret findings and 0 errors.")
     return 0

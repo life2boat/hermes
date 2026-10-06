@@ -295,12 +295,10 @@ class DispatcherWorker:
                     task_executor=executor,
                 )
                 rec_result = dispatcher.recover_task(state)
-                if rec_result and rec_result.final_state in (
-                    TaskState.BLOCKED,
-                    TaskState.FAILED,
-                ):
+                if rec_result is not None and rec_result.final_state != TaskState.DONE:
+                    reason = rec_result.block_reason or "UNRESOLVED_RECOVERY_STATE"
                     logger.error(
-                        f"Task recovery failed: {rec_result.block_reason}. BLOCKED."
+                        f"Task recovery failed: {reason}. BLOCKED."
                     )
                     sys.exit(1)
 
@@ -354,12 +352,10 @@ class DispatcherWorker:
                         surviving_state = ledger.read_state()
                         if surviving_state and "dispatcher" in locals():
                             rec_res = dispatcher.recover_task(surviving_state)
-                            if rec_res and rec_res.final_state in (
-                                TaskState.BLOCKED,
-                                TaskState.FAILED,
-                            ):
+                            if rec_res is not None and rec_res.final_state != TaskState.DONE:
+                                reason = rec_res.block_reason or "UNRESOLVED_RECOVERY_STATE"
                                 logger.error(
-                                    f"CRITICAL: Post-exception recovery failed: {rec_res.block_reason}. BLOCKED."
+                                    f"CRITICAL: Post-exception recovery failed: {reason}. BLOCKED."
                                 )
                                 sys.exit(1)
                     except Exception as rec_err:

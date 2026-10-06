@@ -10,6 +10,25 @@ except ImportError:
     fcntl = None  # For Windows fallback
 
 
+VALID_TASK_STATES = {
+    "DISCOVERED",
+    "CLAIMED",
+    "WORKTREE_READY",
+    "BRANCH_CREATED",
+    "RUNNING",
+    "VALIDATED",
+    "COMMITTED",
+    "BRANCH_PUSHED",
+    "PR_OPEN",
+    "CI_PENDING",
+    "CI_PASS",
+    "WRITEBACK_DONE",
+    "DONE",
+    "BLOCKED",
+    "FAILED",
+}
+
+
 @dataclass
 class ExecutionState:
     task_id: str
@@ -22,6 +41,7 @@ class ExecutionState:
     head_sha: Optional[str] = None
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
+    execution_id: Optional[str] = None
 
 
 class CorruptedLedgerError(RuntimeError):
@@ -54,6 +74,50 @@ class ExecutionLedger:
             for req in required_fields:
                 if req not in data or not isinstance(data[req], str) or not data[req].strip():
                     raise ValueError(f"Missing or invalid required field '{req}'")
+
+            if data["state"] not in VALID_TASK_STATES:
+                raise ValueError(f"Invalid state '{data['state']}'")
+
+            import re
+            hex_40_pattern = re.compile(r"^[0-9a-fA-F]{40}$")
+
+            if "head_sha" in data and data["head_sha"] is not None:
+                if not isinstance(data["head_sha"], str) or not data["head_sha"].strip():
+                    raise ValueError(f"Invalid head_sha: {data['head_sha']}")
+
+            if "base_sha" in data and data["base_sha"] is not None:
+                if not isinstance(data["base_sha"], str):
+                    raise ValueError(f"Invalid base_sha: {data['base_sha']}")
+
+            if "pr_number" in data and data["pr_number"] is not None:
+                if not isinstance(data["pr_number"], int) or isinstance(data["pr_number"], bool):
+                    raise ValueError(f"Invalid pr_number: {data['pr_number']}")
+
+            if "pr_url" in data and data["pr_url"] is not None:
+                if not isinstance(data["pr_url"], str):
+                    raise ValueError(f"Invalid pr_url: {data['pr_url']}")
+
+            if "branch" in data and data["branch"] is not None:
+                if not isinstance(data["branch"], str):
+                    raise ValueError(f"Invalid branch: {data['branch']}")
+
+            if "worktree_path" in data and data["worktree_path"] is not None:
+                if not isinstance(data["worktree_path"], str):
+                    raise ValueError(f"Invalid worktree_path: {data['worktree_path']}")
+
+            if "execution_id" in data and data["execution_id"] is not None:
+                if not isinstance(data["execution_id"], str):
+                    raise ValueError(f"Invalid execution_id: {data['execution_id']}")
+
+            allowed_fields = {
+                "task_id", "state", "claim_owner", "claim_token",
+                "branch", "worktree_path", "base_sha", "head_sha",
+                "pr_number", "pr_url", "execution_id"
+            }
+            extra_fields = set(data.keys()) - allowed_fields
+            if extra_fields:
+                raise ValueError(f"Unrecognized fields in ledger: {extra_fields}")
+
             return ExecutionState(**data)
         except Exception as exc:
             raise CorruptedLedgerError(f"MALFORMED_LEDGER_STATE: {exc}") from exc

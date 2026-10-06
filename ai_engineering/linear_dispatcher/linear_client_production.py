@@ -14,6 +14,7 @@ class LinearProductionClient:
         if not self.api_key:
             raise ValueError("LINEAR_API_KEY environment variable is required")
         self.base_url = "https://api.linear.app/graphql"
+        self._issue_teams: dict[str, str] = {}
 
     def _graphql_request(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         req = urllib.request.Request(
@@ -38,6 +39,15 @@ class LinearProductionClient:
         label_names = tuple(l.get("name", "") for l in labels_node)
         assignee_node = node.get("assignee")
         assignee_name = assignee_node.get("name") if assignee_node else None
+
+        team_info = node.get("team")
+        if isinstance(team_info, dict):
+            t_id = team_info.get("id") or team_info.get("key")
+            if t_id:
+                if node.get("id"):
+                    self._issue_teams[node["id"]] = t_id
+                if node.get("identifier"):
+                    self._issue_teams[node["identifier"]] = t_id
 
         return LinearTask(
             id=node.get("identifier", ""),
@@ -92,6 +102,11 @@ class LinearProductionClient:
             state { name }
             assignee { name }
             labels { nodes { name } }
+            team {
+              id
+              name
+              key
+            }
           }
         }
         """
@@ -142,6 +157,7 @@ class LinearProductionClient:
             state_val = payload_fields.pop("state")
             # If state name provided, resolve to workflow state id scoped to team
             try:
+                issue_team_id = self._issue_teams.get(issue_id) or self._issue_teams.get(issue.uuid) or self._issue_teams.get(issue.id)
                 states_query = """
                 query {
                   workflowStates {
@@ -164,10 +180,19 @@ class LinearProductionClient:
                     .get("workflowStates", {})
                     .get("nodes", [])
                 )
+                if issue_team_id:
+                    team_nodes = [
+                        n for n in nodes
+                        if n.get("team", {}).get("id") == issue_team_id
+                        or n.get("team", {}).get("key") == issue_team_id
+                    ]
+                else:
+                    team_nodes = nodes
+
                 match = next(
                     (
                         n["id"]
-                        for n in nodes
+                        for n in team_nodes
                         if n.get("name", "").lower() == str(state_val).lower()
                         or (
                             str(state_val).lower() in ("done", "completed")

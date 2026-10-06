@@ -6,6 +6,7 @@ import sqlite3
 import zipfile
 from argparse import Namespace
 from pathlib import Path
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -606,12 +607,17 @@ class TestImport:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+        init_db = tmp_path / "init.db"
+        with sqlite3.connect(str(init_db)) as conn:
+            conn.execute("CREATE TABLE t (id INT)")
+        state_bytes = init_db.read_bytes()
+
         zip_path = tmp_path / "backup.zip"
         self._make_backup_zip(zip_path, {
             "config.yaml": "model: openrouter\n",
             ".env": "OPENROUTER_API_KEY=sk-secret\n",
             "auth.json": '{"providers": {"nous": "token"}}',
-            "state.db": b"SQLite format 3\x00",
+            "state.db": state_bytes,
             "profiles/coder/.env": "ANTHROPIC_API_KEY=sk-ant-secret\n",
         })
 
@@ -1077,11 +1083,12 @@ class TestProfileRestoration:
         assert (hermes_home / "profiles" / "researcher" / "config.yaml").exists()
 
         # Wrapper scripts should be created
-        assert (wrapper_dir / "coder").exists()
-        assert (wrapper_dir / "researcher").exists()
+        wrapper_ext = ".bat" if sys.platform == "win32" else ""
+        assert (wrapper_dir / f"coder{wrapper_ext}").exists()
+        assert (wrapper_dir / f"researcher{wrapper_ext}").exists()
 
         # Wrappers should contain the right content
-        coder_wrapper = (wrapper_dir / "coder").read_text()
+        coder_wrapper = (wrapper_dir / f"coder{wrapper_ext}").read_text()
         assert "hermes -p coder" in coder_wrapper
 
     def test_import_skips_profile_dirs_without_config(self, tmp_path, monkeypatch):
@@ -1107,8 +1114,9 @@ class TestProfileRestoration:
         run_import(args)
 
         # Only valid profile should get a wrapper
-        assert (wrapper_dir / "valid").exists()
-        assert not (wrapper_dir / "empty").exists()
+        wrapper_ext = ".bat" if sys.platform == "win32" else ""
+        assert (wrapper_dir / f"valid{wrapper_ext}").exists()
+        assert not (wrapper_dir / f"empty{wrapper_ext}").exists()
 
     def test_import_without_profiles_module(self, tmp_path, monkeypatch):
         """Import gracefully handles missing profiles module (fresh install)."""
@@ -1244,7 +1252,7 @@ class TestQuickSnapshot:
     def test_missing_files_skipped(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot
         snap_id = create_quick_snapshot(hermes_home=hermes_home)
-        with open(hermes_home / "state-snapshots" / snap_id / "manifest.json") as f:
+        with open(hermes_home / "state-snapshots" / snap_id / "manifest.json", encoding="utf-8") as f:
             meta = json.load(f)
         # gateway_state.json etc. don't exist in fixture
         assert "gateway_state.json" not in meta["files"]
@@ -1351,7 +1359,7 @@ class TestQuickSnapshot:
         assert (snap_dir / "pairing" / "matrix-approved.json").exists()
         assert (snap_dir / "feishu_comment_pairing.json").exists()
 
-        with open(snap_dir / "manifest.json") as f:
+        with open(snap_dir / "manifest.json", encoding="utf-8") as f:
             meta = json.load(f)
         files = meta["files"]
         assert "platforms/pairing/telegram-approved.json" in files

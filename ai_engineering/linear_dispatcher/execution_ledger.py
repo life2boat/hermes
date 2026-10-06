@@ -48,6 +48,12 @@ class ExecutionLedger:
         try:
             with open(self.persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Ledger payload is not a dictionary")
+            required_fields = ("task_id", "state", "claim_owner", "claim_token")
+            for req in required_fields:
+                if req not in data or not isinstance(data[req], str) or not data[req].strip():
+                    raise ValueError(f"Missing or invalid required field '{req}'")
             return ExecutionState(**data)
         except Exception as exc:
             raise CorruptedLedgerError(f"MALFORMED_LEDGER_STATE: {exc}") from exc

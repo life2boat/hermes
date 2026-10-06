@@ -2,9 +2,32 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any
+
+SAFE_GIT_OPTS = [
+    "-c", "core.fsmonitor=",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.whitespace=cr-at-eol",
+    "-c", "core.autocrlf=false",
+    "-c", "filter.lfs.smudge=",
+    "-c", "filter.lfs.clean=",
+    "-c", "filter.lfs.process=",
+    "-c", "filter.lfs.required=false",
+]
+
+SAFE_GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+    "PATH": os.environ.get("PATH", ""),
+    "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+    "TEMP": os.environ.get("TEMP", ""),
+    "TMP": os.environ.get("TMP", ""),
+}
 
 
 class LocalValidator:
@@ -12,23 +35,26 @@ class LocalValidator:
 
     @staticmethod
     def run_diff_check(cwd: Path | str) -> tuple[bool, str]:
-        """Run git diff --check on unstaged and staged changes."""
+        """Run git diff --check on unstaged and staged changes safely."""
+        env = dict(os.environ)
+        env.update(SAFE_GIT_ENV)
+
         res_unstaged = subprocess.run(
-            ["git", "diff", "--check"],
-            cwd=str(cwd),
+            ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd), "diff", "--check"],
             capture_output=True,
             text=True,
             timeout=30,
+            env=env,
         )
         if res_unstaged.returncode != 0:
             return False, res_unstaged.stdout or res_unstaged.stderr
 
         res_staged = subprocess.run(
-            ["git", "diff", "--check", "--cached"],
-            cwd=str(cwd),
+            ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd), "diff", "--check", "--cached"],
             capture_output=True,
             text=True,
             timeout=30,
+            env=env,
         )
         if res_staged.returncode != 0:
             return False, res_staged.stdout or res_staged.stderr
@@ -48,10 +74,6 @@ class LocalValidator:
         if not diff_ok:
             return False, results
 
-        # Invariant: Trusted validator code must be resolved from immutable canonical root
-        import os
-        import sys
-
         trusted_dir = (
             Path(trusted_root).resolve()
             if trusted_root
@@ -65,14 +87,18 @@ class LocalValidator:
             "TEMP": os.environ.get("TEMP", ""),
             "TMP": os.environ.get("TMP", ""),
             "PYTHONPATH": str(trusted_dir),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
         }
 
-        # Footgun check executed strictly from trusted root
+        candidate_data_path = str(Path(cwd).resolve())
+
+        # Footgun check executed strictly from trusted root with candidate as data only
         footguns_script = trusted_dir / "scripts" / "check-windows-footguns.py"
         if footguns_script.exists():
             fg_res = subprocess.run(
-                [sys.executable, str(footguns_script), str(cwd)],
-                cwd=str(cwd),
+                [sys.executable, "-I", str(footguns_script), candidate_data_path],
+                cwd=str(trusted_dir),
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -86,12 +112,12 @@ class LocalValidator:
             if fg_res.returncode != 0:
                 return False, results
 
-        # Secret scanner executed strictly from trusted root
+        # Secret scanner executed strictly from trusted root with candidate as data only
         secret_script = trusted_dir / "scripts" / "secret_scanner.py"
         if secret_script.exists():
             sec_res = subprocess.run(
-                [sys.executable, str(secret_script), str(cwd)],
-                cwd=str(cwd),
+                [sys.executable, "-I", str(secret_script), candidate_data_path],
+                cwd=str(trusted_dir),
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -106,18 +132,8 @@ class LocalValidator:
                 return False, results
 
         if run_tests:
-            test_res = subprocess.run(
-                [sys.executable, "-m", "pytest", "-q"],
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=clean_env,
-            )
-            results["pytest"] = (
-                "PASS" if test_res.returncode == 0 else f"FAIL: {test_res.stdout}"
-            )
-            if test_res.returncode != 0:
-                return False, results
+            # Candidate code cannot be executed with host privileges outside sandbox
+            results["pytest"] = "FAIL: host pytest execution in untrusted candidate worktree is forbidden"
+            return False, results
 
         return True, results

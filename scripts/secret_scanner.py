@@ -393,9 +393,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     findings_count = 0
-    scanned_files = 0
+    inspected_count = 0
+    clean_count = 0
+    skipped_count = 0
+    error_count = 0
+
     for target_str in args.paths:
         target_path = Path(target_str).resolve()
+        if not target_path.exists():
+            print(f"ERROR: Specified path does not exist: {target_str}", file=sys.stderr)
+            error_count += 1
+            continue
+
         if target_path.is_file():
             files = [target_path]
         else:
@@ -409,22 +418,31 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 data = file_path.read_bytes()
                 if b"\x00" in data or len(data) > 5 * 1024 * 1024:
+                    skipped_count += 1
                     continue
                 findings = scan_secret_bytes(data)
-                scanned_files += 1
+                inspected_count += 1
                 if findings:
                     findings_count += len(findings)
                     for f in findings:
                         print(
                             f"SECRET FINDING in {file_path}: {f.rule_id} ({f.match_class})"
                         )
-            except Exception:
-                continue
+                else:
+                    clean_count += 1
+            except Exception as exc:
+                print(f"ERROR reading {file_path}: {exc}", file=sys.stderr)
+                error_count += 1
 
-    if findings_count > 0:
-        print(f"FAIL: {findings_count} secret findings across {scanned_files} files.")
+    print(
+        f"SCAN SUMMARY: inspected={inspected_count}, clean={clean_count}, "
+        f"findings={findings_count}, skipped={skipped_count}, errors={error_count}"
+    )
+
+    if findings_count > 0 or error_count > 0:
+        print(f"FAIL: {findings_count} findings, {error_count} errors.")
         return 1
-    print(f"PASS: 0 secret findings across {scanned_files} files.")
+    print("PASS: 0 secret findings and 0 errors.")
     return 0
 
 

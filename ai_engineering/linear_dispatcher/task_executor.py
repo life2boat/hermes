@@ -453,6 +453,7 @@ class LinuxCodexTaskExecutor:
             "import sys\n"
             f"target = '{ephemeral_home}/auth.json'\n"
             f"ready_marker = '{ephemeral_home}/.watcher_ready'\n"
+            f"unlinked_marker = '{ephemeral_home}/.watcher_unlinked'\n"
             "try:\n"
             "    libc = ctypes.CDLL(None)\n"
             "    fd = libc.inotify_init()\n"
@@ -465,15 +466,44 @@ class LinuxCodexTaskExecutor:
             "        f.write('READY')\n"
             "    r, _, _ = select.select([fd], [], [], 30.0)\n"
             "    if r:\n"
-            "        os.read(fd, 1024)\n"
+            "        try:\n"
+            "            os.read(fd, 1024)\n"
+            "        except Exception:\n"
+            "            pass\n"
             "    if os.path.exists(target):\n"
             "        os.unlink(target)\n"
+            "    with open(unlinked_marker, 'w', encoding='utf-8') as f:\n"
+            "        f.write('UNLINKED')\n"
             "    libc.inotify_rm_watch(fd, wd)\n"
             "    os.close(fd)\n"
             "    sys.exit(0)\n"
             "except Exception:\n"
             "    sys.exit(1)\n"
         )
+
+    def _verify_credential_unlinked(self, ephemeral_home: str) -> bool:
+        """Verify that the watcher unlinked auth.json and recorded the unlinked marker."""
+        if self.is_windows:
+            try:
+                res = self._runner(
+                    [
+                        "wsl.exe",
+                        "-d",
+                        self.distro,
+                        "--",
+                        "bash",
+                        "-c",
+                        f"test -f '{ephemeral_home}/.watcher_unlinked' && ! test -f '{ephemeral_home}/auth.json'",
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                )
+                return res.returncode == 0
+            except Exception:
+                return False
+        else:
+            p = Path(ephemeral_home)
+            return (p / ".watcher_unlinked").exists() and not (p / "auth.json").exists()
 
     def _setup_ephemeral_credentials(self, ephemeral_home: str) -> None:
         """Create ephemeral CODEX_HOME directory with credentials copy, failing closed on error."""
@@ -683,22 +713,15 @@ class LinuxCodexTaskExecutor:
         try:
             self._setup_ephemeral_credentials(ephemeral_home)
             self._start_credential_unlinking_watcher(ephemeral_home)
-        except Exception as exc:
-            self._cleanup_ephemeral_credentials(ephemeral_home)
-            return ExecutionResult(
-                status="FAILED",
-                changed_files=(),
-                execution_id=exec_id,
-                executor_name="LinuxCodexTaskExecutor",
-                evidence={"error": str(exc)},
-                error_reason="CREDENTIAL_ISOLATION_FAILED",
-            )
+            bwrap_args = self.build_bwrap_command(linux_wt, ephemeral_home_path=ephemeral_home)
+            cmd = ["wsl.exe", "-d", self.distro, "--"] + bwrap_args if self.is_windows else bwrap_args
 
-        bwrap_args = self.build_bwrap_command(linux_wt, ephemeral_home_path=ephemeral_home)
-        cmd = ["wsl.exe", "-d", self.distro, "--"] + bwrap_args if self.is_windows else bwrap_args
+            # Verify watcher is alive before launching execution
+            if hasattr(self, "_watcher_proc") and self._watcher_proc is not None:
+                if self._watcher_proc.poll() is not None:
+                    raise RuntimeError("CREDENTIAL_WATCHER_DIED_BEFORE_EXECUTION")
 
-        start_time = time.time()
-        try:
+            start_time = time.time()
             proc = self._runner(
                 cmd,
                 input=prompt,
@@ -720,8 +743,19 @@ class LinuxCodexTaskExecutor:
                     },
                     error_reason=f"CODEX_EXEC_FAILED_EXIT_{proc.returncode}",
                 )
+
+            # Verification barrier: auth.json must have been unlinked and verified
+            if not self._verify_credential_unlinked(ephemeral_home):
+                return ExecutionResult(
+                    status="FAILED",
+                    changed_files=(),
+                    execution_id=exec_id,
+                    executor_name="LinuxCodexTaskExecutor",
+                    evidence={"duration_sec": duration, "error": "CREDENTIAL_UNLINK_VERIFICATION_FAILED"},
+                    error_reason="CREDENTIAL_UNLINK_VERIFICATION_FAILED",
+                )
         except subprocess.TimeoutExpired:
-            duration = time.time() - start_time
+            duration = time.time() - start_time if "start_time" in locals() else 0.0
             return ExecutionResult(
                 status="FAILED",
                 changed_files=(),
@@ -731,14 +765,15 @@ class LinuxCodexTaskExecutor:
                 error_reason="CODEX_EXEC_TIMEOUT",
             )
         except Exception as exc:
-            duration = time.time() - start_time
+            duration = time.time() - start_time if "start_time" in locals() else 0.0
+            err_reason = "CREDENTIAL_ISOLATION_FAILED" if "CREDENTIAL" in str(exc) else "CODEX_EXEC_EXCEPTION"
             return ExecutionResult(
                 status="FAILED",
                 changed_files=(),
                 execution_id=exec_id,
                 executor_name="LinuxCodexTaskExecutor",
                 evidence={"duration_sec": duration, "error": str(exc)},
-                error_reason="CODEX_EXEC_EXCEPTION",
+                error_reason=err_reason,
             )
         finally:
             self._cleanup_ephemeral_credentials(ephemeral_home)
@@ -769,8 +804,20 @@ class LinuxCodexTaskExecutor:
     def _detect_changed_files(self, worktree_path: Path) -> tuple[str, ...]:
         """Detect actual modified, added, or untracked files relative to worktree."""
         try:
+            cmd = [
+                "git",
+                "-c", "core.fsmonitor=",
+                "-c", "core.hooksPath=/dev/null",
+                "-c", "filter.lfs.smudge=",
+                "-c", "filter.lfs.clean=",
+                "-c", "filter.lfs.process=",
+                "-c", "filter.lfs.required=false",
+                "-C", str(worktree_path),
+                "status",
+                "--porcelain",
+            ]
             res = self._runner(
-                ["git", "-C", str(worktree_path), "status", "--porcelain"],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=True,

@@ -90,21 +90,14 @@ class WritebackService:
         exec_id = getattr(evidence, "execution_id", "") or evidence.task_id
         receipt_marker = f"EXECUTION_ID:** `{exec_id}`"
         sha_marker = f"HEAD_SHA:** `{evidence.head_sha}`"
+        header_marker = "### Hermes Autonomous Loop Execution Evidence"
+
+        def is_authentic_receipt(text: str) -> bool:
+            return header_marker in text and receipt_marker in text and sha_marker in text
+
         already_has_receipt = (
-            any(
-                (receipt_marker in c or sha_marker in c or (evidence.head_sha in c and "evidence" in c.lower()))
-                for c in comments
-            )
-            or (
-                refetched_task
-                and (
-                    receipt_marker in refetched_task.description
-                    or sha_marker in refetched_task.description
-                    or (evidence.head_sha in refetched_task.description and "evidence" in refetched_task.description.lower())
-                )
-            )
-            if refetched_task
-            else False
+            any(is_authentic_receipt(c) for c in comments)
+            or (refetched_task and is_authentic_receipt(refetched_task.description))
         )
         if refetched_task and already_has_receipt:
             if refetched_task.state.lower() in ("done", "completed", "closed"):
@@ -138,15 +131,9 @@ class WritebackService:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
 
         comments = self._client.get_issue_comments(task.id)
-        persisted = any(
-            (receipt_marker in c or sha_marker in c) and "Execution Evidence" in c
-            for c in comments
-        ) or (
-            (
-                receipt_marker in refetched_task.description
-                or sha_marker in refetched_task.description
-            )
-            and "Execution Evidence" in refetched_task.description
+        persisted = (
+            any(is_authentic_receipt(c) for c in comments)
+            or is_authentic_receipt(refetched_task.description)
         )
         if not persisted:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED

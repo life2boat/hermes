@@ -353,11 +353,20 @@ class DispatcherWorker:
                     try:
                         surviving_state = ledger.read_state()
                         if surviving_state and "dispatcher" in locals():
-                            dispatcher.recover_task(surviving_state)
+                            rec_res = dispatcher.recover_task(surviving_state)
+                            if rec_res and rec_res.final_state in (
+                                TaskState.BLOCKED,
+                                TaskState.FAILED,
+                            ):
+                                logger.error(
+                                    f"CRITICAL: Post-exception recovery failed: {rec_res.block_reason}. BLOCKED."
+                                )
+                                sys.exit(1)
                     except Exception as rec_err:
                         logger.error(
-                            f"Reconciliation error after unexpected exception: {rec_err}"
+                            f"CRITICAL: Reconciliation error after unexpected exception: {rec_err}. BLOCKED."
                         )
+                        sys.exit(1)
                     time.sleep(15)
 
             logger.info("Dispatcher Worker STOPPING...")

@@ -45,7 +45,9 @@ class WorktreeService:
             capture_output=True,
             text=True,
         )
-        # Check tracked modified/deleted/renamed files
+        if res.returncode != 0:
+            # If status check fails, fail closed
+            return True
         lines = res.stdout.strip().splitlines()
         tracked_changes = [
             l for l in lines
@@ -70,8 +72,38 @@ class WorktreeService:
         safe_dir_name = branch_name.replace("/", "-") + "-wt"
         worktree_path = (Path(worktree_base_dir) / safe_dir_name).resolve()
 
+        # Ensure base_sha object is available in local object store
+        chk_obj = subprocess.run(
+            ["git", "-C", str(self._canonical_root), "cat-file", "-e", f"{self._base_sha}^{{commit}}"],
+            capture_output=True,
+        )
+        if chk_obj.returncode != 0:
+            # Fetch base object from remote
+            fetch_res = subprocess.run(
+                ["git", "-C", str(self._canonical_root), "fetch", "github", self._base_sha],
+                capture_output=True,
+            )
+            if fetch_res.returncode != 0:
+                return None, None, BlockReasonCode.UNKNOWN_BASE_COMMIT
+
         if worktree_path.exists():
-            # If already exists, verify clean
+            # If already exists, verify it is a valid, clean git worktree matching expected base
+            chk_git = subprocess.run(
+                ["git", "-C", str(worktree_path), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+            )
+            if chk_git.returncode != 0 or chk_git.stdout.strip():
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+
+            chk_head = subprocess.run(
+                ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+            )
+            if chk_head.returncode != 0 or chk_head.stdout.strip() != self._base_sha:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+
             return worktree_path, branch_name, None
 
         cmd = [
@@ -87,19 +119,27 @@ class WorktreeService:
         ]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
-            # If branch already exists, checkout without -b
-            cmd_existing = [
-                "git",
-                "-C",
-                str(self._canonical_root),
-                "worktree",
-                "add",
-                str(worktree_path),
-                branch_name,
-            ]
-            res_existing = subprocess.run(cmd_existing, capture_output=True, text=True)
-            if res_existing.returncode != 0:
-                return None, None, BlockReasonCode.DIRTY_CANONICAL_CHECKOUT
+            # Check if branch already exists pointing to exact base_sha
+            branch_head = subprocess.run(
+                ["git", "-C", str(self._canonical_root), "rev-parse", branch_name],
+                capture_output=True,
+                text=True,
+            )
+            if branch_head.returncode == 0 and branch_head.stdout.strip() == self._base_sha:
+                cmd_existing = [
+                    "git",
+                    "-C",
+                    str(self._canonical_root),
+                    "worktree",
+                    "add",
+                    str(worktree_path),
+                    branch_name,
+                ]
+                res_existing = subprocess.run(cmd_existing, capture_output=True, text=True)
+                if res_existing.returncode != 0:
+                    return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+            else:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
         return worktree_path, branch_name, None
 

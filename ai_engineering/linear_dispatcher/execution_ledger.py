@@ -24,6 +24,11 @@ class ExecutionState:
     pr_url: Optional[str] = None
 
 
+class CorruptedLedgerError(RuntimeError):
+    """Raised when durable ledger state file is corrupt or invalid."""
+    pass
+
+
 class ExecutionLedger:
     def __init__(self, persistence_path: Path | str) -> None:
         self.persistence_path = Path(persistence_path).resolve()
@@ -44,8 +49,8 @@ class ExecutionLedger:
             with open(self.persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return ExecutionState(**data)
-        except Exception:
-            return None
+        except Exception as exc:
+            raise CorruptedLedgerError(f"MALFORMED_LEDGER_STATE: {exc}") from exc
 
     def clear(self) -> None:
         if self.persistence_path.exists():

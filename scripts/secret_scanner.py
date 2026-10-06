@@ -375,3 +375,60 @@ def scan_secret_blob(
         for value in data
     )
     return scan_secret_text(text, protected_names=protected_names)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="Scan files for secret patterns.")
+    parser.add_argument("paths", nargs="*", default=["."], help="Paths or files to scan")
+    parser.add_argument(
+        "--fail-on-findings",
+        action="store_true",
+        default=True,
+        help="Exit with code 1 if findings exist",
+    )
+    args = parser.parse_args(argv)
+
+    findings_count = 0
+    scanned_files = 0
+    for target_str in args.paths:
+        target_path = Path(target_str).resolve()
+        if target_path.is_file():
+            files = [target_path]
+        else:
+            files = [
+                p
+                for p in target_path.rglob("*")
+                if p.is_file() and ".git" not in p.parts
+            ]
+
+        for file_path in files:
+            try:
+                data = file_path.read_bytes()
+                if b"\x00" in data or len(data) > 5 * 1024 * 1024:
+                    continue
+                findings = scan_secret_bytes(data)
+                scanned_files += 1
+                if findings:
+                    findings_count += len(findings)
+                    for f in findings:
+                        print(
+                            f"SECRET FINDING in {file_path}: {f.rule_id} ({f.match_class})"
+                        )
+            except Exception:
+                continue
+
+    if findings_count > 0:
+        print(f"FAIL: {findings_count} secret findings across {scanned_files} files.")
+        return 1
+    print(f"PASS: 0 secret findings across {scanned_files} files.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

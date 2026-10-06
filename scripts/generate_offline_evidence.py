@@ -171,6 +171,29 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
     rb_health = attestation_cfg.get("rollback_health_required", True)
     rb_attempt_max = attestation_cfg.get("rollback_attempt_count_max", 1)
 
+    # Finding H11: Return BLOCKED when a real rehearsal receipt is absent.
+    # Bind verified receipt, digest, and health results rather than promoting docker inspect.
+    rehearsal_path = os.environ.get("HERMES_ROLLBACK_REHEARSAL_PATH", "deploy/rollback-rehearsal.json")
+    if not os.path.isfile(rehearsal_path):
+        return {"status": "BLOCKED"}
+
+    try:
+        with open(rehearsal_path, "r", encoding="utf-8") as f:
+            rehearsal_data = json.load(f)
+        if (
+            rehearsal_data.get("status") != "PASS"
+            or not rehearsal_data.get("receipt_id")
+            or rehearsal_data.get("rollback_image_digest") != digest
+            or rehearsal_data.get("health_check_status") != "PASS"
+        ):
+            return {"status": "BLOCKED"}
+        canonical_rehearsal = rehearsal_data.get(
+            "canonical_rehearsal_evidence",
+            f"artifact:rollback-rehearsal:{rehearsal_data['receipt_id']}:pass"
+        )
+    except Exception:
+        return {"status": "BLOCKED"}
+
     return {
         "schema_version": 1,
         "evidence_type": "rollback_ready",
@@ -190,7 +213,7 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         "rollback_health_required": rb_health,
         "rollback_attempt_count_max": rb_attempt_max,
         "rollback_procedure_proven": True,
-        "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:docker-compose-revert:pass"
+        "canonical_rehearsal_evidence": canonical_rehearsal
     }
 
 def generate(target_sha, output_dir=None):

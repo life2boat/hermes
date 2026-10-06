@@ -427,6 +427,8 @@ def test_agent_release_workflow_is_exact_head_read_only_and_pinned() -> None:
     assert "fetch-depth: 0" in workflow
     assert "persist-credentials: false" in workflow
     assert "check_agent_release_gate.py ci-merge" in workflow
+    assert "echo '{\"status\": \"PASS\"}'" not in workflow
+    assert "echo \"{\\\"status\\\": \\\"PASS\\\"}\"" not in workflow
     assert "deploy" not in "\n".join(
         line for line in workflow.splitlines() if not line.lstrip().startswith("#")
     ).casefold()

@@ -30,10 +30,13 @@ class ExecutionEvidence:
     qdrant_changes: int = 0
     deployment: int = 0
     merge: int = 0
+    execution_id: str = ""
 
     def to_markdown(self) -> str:
+        exec_id = self.execution_id or self.task_id
         return f"""### Hermes Autonomous Loop Execution Evidence
 
+- **EXECUTION_ID:** `{exec_id}`
 - **EXECUTION_STATUS:** `{self.execution_status}`
 - **CLAIM_OWNER:** `{self.claim_owner}`
 - **BRANCH:** `{self.branch}`
@@ -81,14 +84,41 @@ class WritebackService:
         """Write evidence comment and verify by re-reading from Linear."""
         md_text = evidence.to_markdown()
 
-        # Step 0: Idempotency check
+        # Step 0: Idempotency check with structured receipt verification
         comments = self._client.get_issue_comments(task.id)
         refetched_task = self._client.get_issue(task.id)
-        if refetched_task and (
-            any(evidence.head_sha in c for c in comments) or 
-            (evidence.head_sha in refetched_task.description)
-        ):
-            # Already written
+        exec_id = getattr(evidence, "execution_id", "") or evidence.task_id
+        receipt_marker = f"EXECUTION_ID:** `{exec_id}`"
+        sha_marker = f"HEAD_SHA:** `{evidence.head_sha}`"
+        already_has_receipt = (
+            any(
+                (receipt_marker in c or sha_marker in c or (evidence.head_sha in c and "evidence" in c.lower()))
+                for c in comments
+            )
+            or (
+                refetched_task
+                and (
+                    receipt_marker in refetched_task.description
+                    or sha_marker in refetched_task.description
+                    or (evidence.head_sha in refetched_task.description and "evidence" in refetched_task.description.lower())
+                )
+            )
+            if refetched_task
+            else False
+        )
+        if refetched_task and already_has_receipt:
+            if refetched_task.state.lower() in ("done", "completed", "closed"):
+                return True, None
+            # Receipt present but not terminal: transition to Done and reread
+            ok = self._client.update_issue(task.id, {"state": "Done"})
+            if not ok:
+                return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
+            refetched_task = self._client.get_issue(task.id)
+            if (
+                not refetched_task
+                or refetched_task.state.lower() not in ("done", "completed", "closed")
+            ):
+                return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
             return True, None
 
         # Step 1: Add comment with evidence
@@ -98,7 +128,9 @@ class WritebackService:
 
         # Step 2: Also update description to ensure evidence is prominently visible
         new_desc = f"{task.description}\n\n{md_text}"
-        self._client.update_issue(task.id, {"description": new_desc})
+        ok_desc = self._client.update_issue(task.id, {"description": new_desc})
+        if not ok_desc:
+            return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
 
         # Step 3: Re-read issue and comments to confirm persistence
         refetched_task = self._client.get_issue(task.id)
@@ -106,11 +138,29 @@ class WritebackService:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
 
         comments = self._client.get_issue_comments(task.id)
-        # Verify evidence signature exists in comments or description
-        persisted = any(evidence.head_sha in c for c in comments) or (evidence.head_sha in refetched_task.description)
+        persisted = any(
+            (receipt_marker in c or sha_marker in c) and "Execution Evidence" in c
+            for c in comments
+        ) or (
+            (
+                receipt_marker in refetched_task.description
+                or sha_marker in refetched_task.description
+            )
+            and "Execution Evidence" in refetched_task.description
+        )
         if not persisted:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
 
-        # Step 4: After persistence is strictly confirmed, transition issue to Done
-        self._client.update_issue(task.id, {"state": "Done"})
+        # Step 4: After persistence is strictly confirmed, transition issue to Done and verify
+        ok_done = self._client.update_issue(task.id, {"state": "Done"})
+        if not ok_done:
+            return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
+
+        refetched_final = self._client.get_issue(task.id)
+        if (
+            not refetched_final
+            or refetched_final.state.lower() not in ("done", "completed", "closed")
+        ):
+            return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
+
         return True, None

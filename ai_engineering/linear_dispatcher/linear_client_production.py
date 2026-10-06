@@ -133,6 +133,51 @@ class LinearProductionClient:
         return res.get("data", {}).get("commentCreate", {}).get("success", False)
 
     def update_issue(self, issue_id: str, fields: dict[str, Any]) -> bool:
+        issue = self.get_issue(issue_id)
+        if not issue:
+            return False
+
+        payload_fields = dict(fields)
+        if "state" in payload_fields and "stateId" not in payload_fields:
+            state_val = payload_fields.pop("state")
+            # If state name provided, resolve to workflow state id if possible
+            try:
+                states_query = """
+                query {
+                  workflowStates {
+                    nodes {
+                      id
+                      name
+                      type
+                    }
+                  }
+                }
+                """
+                s_res = self._graphql_request(states_query)
+                nodes = (
+                    s_res.get("data", {})
+                    .get("workflowStates", {})
+                    .get("nodes", [])
+                )
+                match = next(
+                    (
+                        n["id"]
+                        for n in nodes
+                        if n.get("name", "").lower() == str(state_val).lower()
+                        or (
+                            str(state_val).lower() in ("done", "completed")
+                            and n.get("type", "").lower() in ("completed", "done")
+                        )
+                    ),
+                    None,
+                )
+                if match:
+                    payload_fields["stateId"] = match
+                else:
+                    payload_fields["stateId"] = str(state_val)
+            except Exception:
+                payload_fields["stateId"] = str(state_val)
+
         query = """
         mutation($id: String!, $input: IssueUpdateInput!) {
           issueUpdate(id: $id, input: $input) {
@@ -140,9 +185,7 @@ class LinearProductionClient:
           }
         }
         """
-        issue = self.get_issue(issue_id)
-        if not issue:
+        res = self._graphql_request(query, {"id": issue.uuid, "input": payload_fields})
+        if "errors" in res:
             return False
-            
-        res = self._graphql_request(query, {"id": issue.uuid, "input": fields})
         return res.get("data", {}).get("issueUpdate", {}).get("success", False)

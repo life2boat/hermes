@@ -11,9 +11,10 @@ import sys
 import time
 from typing import Any
 
-from ai_engineering.linear_dispatcher.contracts import DispatcherConfig
+from ai_engineering.linear_dispatcher.contracts import DispatcherConfig, TaskState
 from ai_engineering.linear_dispatcher.dispatcher import AutonomousDispatcher
 from ai_engineering.linear_dispatcher.execution_ledger import (
+    CorruptedLedgerError,
     ExecutionLedger,
     ExecutionState,
     SingleWorkerLock,
@@ -72,11 +73,19 @@ class DispatcherWorker:
                 capture_output=True,
                 text=True,
             )
-            if (
-                res_remote.returncode != 0
-                or "life2boat/hermes" not in res_remote.stdout
-            ):
-                return False, f"INVALID_CANONICAL_REMOTE: {res_remote.stdout.strip()}"
+            if res_remote.returncode != 0:
+                return False, f"INVALID_CANONICAL_REMOTE: {res_remote.stderr.strip() or 'failed to get url'}"
+            remote_url = res_remote.stdout.strip()
+            norm_url = remote_url.rstrip("/")
+            if norm_url.endswith(".git"):
+                norm_url = norm_url[:-4]
+            valid_canonical_urls = {
+                "https://github.com/life2boat/hermes",
+                "git@github.com:life2boat/hermes",
+                "ssh://git@github.com/life2boat/hermes",
+            }
+            if norm_url not in valid_canonical_urls:
+                return False, f"INVALID_CANONICAL_REMOTE: {remote_url}"
 
             # Check github/main ref exists
             res_ref = subprocess.run(
@@ -250,7 +259,13 @@ class DispatcherWorker:
                 sys.exit(1)
 
             # Check recovery state
-            state = ledger.read_state()
+            try:
+                state = ledger.read_state()
+            except CorruptedLedgerError as e:
+                logger.error(
+                    f"CRITICAL: Recovery ledger corrupted: {e}. BLOCKED."
+                )
+                sys.exit(1)
             if state:
                 logger.info(
                     f"Found recovery state for task {state.task_id} at state: {state.state}"
@@ -335,6 +350,14 @@ class DispatcherWorker:
                     time.sleep(15)
                 except Exception as e:
                     logger.error(f"Unexpected error in poll loop: {e}", exc_info=True)
+                    try:
+                        surviving_state = ledger.read_state()
+                        if surviving_state and "dispatcher" in locals():
+                            dispatcher.recover_task(surviving_state)
+                    except Exception as rec_err:
+                        logger.error(
+                            f"Reconciliation error after unexpected exception: {rec_err}"
+                        )
                     time.sleep(15)
 
             logger.info("Dispatcher Worker STOPPING...")

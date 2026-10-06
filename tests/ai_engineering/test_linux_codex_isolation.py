@@ -65,6 +65,13 @@ class MockLinearClient:
         return True
 
     def update_issue(self, issue_id: str, fields: dict[str, Any]) -> bool:
+        t = self.tasks.get(issue_id)
+        if not t:
+            return False
+        from dataclasses import replace
+        new_state = fields.get("state", t.state)
+        new_desc = fields.get("description", t.description)
+        self.tasks[issue_id] = replace(t, state=new_state, description=new_desc)
         return True
 
 
@@ -280,6 +287,9 @@ def test_native_linux_command_execution(tmp_path, monkeypatch):
         runner=mock_runner,
     )
     monkeypatch.setattr(executor, "health", lambda: True)
+    monkeypatch.setattr(executor, "_setup_ephemeral_credentials", lambda home: None)
+    monkeypatch.setattr(executor, "_start_credential_unlinking_watcher", lambda home: None)
+    monkeypatch.setattr(executor, "_cleanup_ephemeral_credentials", lambda home: None)
     res = executor.execute(make_linear_task(), wt, "base_sha")
 
     assert res.status == "SUCCESS"
@@ -301,7 +311,7 @@ def test_worktree_must_exist(tmp_path):
 # Test 11: Timeout handling
 def test_timeout_handling(tmp_path, monkeypatch):
     def timeout_runner(cmd, **kwargs):
-        if "which" in cmd or "test" in cmd:
+        if "which" in cmd or "test" in cmd or "bash" in cmd or "rm" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0)
         if "wslpath" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="/tmp/wt\n")
@@ -319,7 +329,7 @@ def test_timeout_handling(tmp_path, monkeypatch):
 # Test 12: Non-zero exit code handling
 def test_nonzero_exit_code_handling(tmp_path):
     def fail_runner(cmd, **kwargs):
-        if "which" in cmd or "test" in cmd:
+        if "which" in cmd or "test" in cmd or "bash" in cmd or "rm" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0)
         if "wslpath" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="/tmp/wt\n")

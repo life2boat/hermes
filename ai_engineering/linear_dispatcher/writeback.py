@@ -76,6 +76,23 @@ class WritebackService:
     def __init__(self, linear_client: ILinearClient) -> None:
         self._client = linear_client
 
+    @staticmethod
+    def is_authentic_receipt(
+        text: str | None,
+        head_sha: str | None = None,
+        exec_id: str | None = None,
+    ) -> bool:
+        if not text:
+            return False
+        header_marker = "### Hermes Autonomous Loop Execution Evidence"
+        if header_marker not in text:
+            return False
+        if head_sha and f"HEAD_SHA:** `{head_sha}`" not in text:
+            return False
+        if exec_id and f"EXECUTION_ID:** `{exec_id}`" not in text:
+            return False
+        return True
+
     def writeback_and_verify(
         self,
         task: LinearTask,
@@ -88,16 +105,10 @@ class WritebackService:
         comments = self._client.get_issue_comments(task.id)
         refetched_task = self._client.get_issue(task.id)
         exec_id = getattr(evidence, "execution_id", "") or evidence.task_id
-        receipt_marker = f"EXECUTION_ID:** `{exec_id}`"
-        sha_marker = f"HEAD_SHA:** `{evidence.head_sha}`"
-        header_marker = "### Hermes Autonomous Loop Execution Evidence"
-
-        def is_authentic_receipt(text: str) -> bool:
-            return header_marker in text and receipt_marker in text and sha_marker in text
 
         already_has_receipt = (
-            any(is_authentic_receipt(c) for c in comments)
-            or (refetched_task and is_authentic_receipt(refetched_task.description))
+            any(self.is_authentic_receipt(c, evidence.head_sha, exec_id) for c in comments)
+            or (refetched_task and self.is_authentic_receipt(refetched_task.description, evidence.head_sha, exec_id))
         )
         if refetched_task and already_has_receipt:
             if refetched_task.state.lower() in ("done", "completed", "closed"):
@@ -132,8 +143,8 @@ class WritebackService:
 
         comments = self._client.get_issue_comments(task.id)
         persisted = (
-            any(is_authentic_receipt(c) for c in comments)
-            or is_authentic_receipt(refetched_task.description)
+            any(self.is_authentic_receipt(c, evidence.head_sha, exec_id) for c in comments)
+            or self.is_authentic_receipt(refetched_task.description, evidence.head_sha, exec_id)
         )
         if not persisted:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED

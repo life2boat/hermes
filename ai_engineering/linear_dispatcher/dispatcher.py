@@ -1060,7 +1060,19 @@ class AutonomousDispatcher:
                     transitions=(),
                 )
 
-            if refetched.state.lower() not in ("done", "completed", "closed"):
+            from ai_engineering.linear_dispatcher.writeback import WritebackService
+
+            has_receipt = (
+                any(
+                    WritebackService.is_authentic_receipt(c, recovery_state.head_sha)
+                    for c in comments
+                )
+                or WritebackService.is_authentic_receipt(
+                    refetched.description, recovery_state.head_sha
+                )
+            )
+
+            if not has_receipt:
                 return DispatchResult(
                     task_id=task_id,
                     final_state=TaskState.BLOCKED,
@@ -1072,31 +1084,53 @@ class AutonomousDispatcher:
                     transitions=(),
                 )
 
-            header_marker = "### Autonomous Task Execution Evidence"
-            sha_marker = f"HEAD_SHA:** `{recovery_state.head_sha}`" if recovery_state.head_sha else ""
-            has_receipt = (
-                any(header_marker in c and sha_marker in c for c in comments)
-                or (header_marker in refetched.description and sha_marker in refetched.description)
-            )
-
-            if has_receipt:
-                if recovery_state.worktree_path:
-                    self._worktree_service.remove_worktree(
-                        recovery_state.worktree_path, recovery_state.branch
+            if refetched.state.lower() not in ("done", "completed", "closed"):
+                # Complete transition to Done if authentic receipt is already verified
+                ok = self._linear_client.update_issue(task_id, {"state": "Done"})
+                if not ok:
+                    return DispatchResult(
+                        task_id=task_id,
+                        final_state=TaskState.BLOCKED,
+                        branch=recovery_state.branch,
+                        pr_number=recovery_state.pr_number,
+                        pr_url=recovery_state.pr_url,
+                        head_sha=recovery_state.head_sha,
+                        block_reason=BlockReasonCode.REREAD_VERIFICATION_FAILED.value,
+                        transitions=(),
                     )
-                self._lease_manager.release(task_id, owner, token)
-                if self._ledger:
-                    self._ledger.clear()
-                return DispatchResult(
-                    task_id=task_id,
-                    final_state=TaskState.DONE,
-                    branch=recovery_state.branch,
-                    pr_number=recovery_state.pr_number,
-                    pr_url=recovery_state.pr_url,
-                    head_sha=recovery_state.head_sha,
-                    block_reason=None,
-                    transitions=(),
+                refetched = self._linear_client.get_issue(task_id)
+                if (
+                    not refetched
+                    or refetched.state.lower() not in ("done", "completed", "closed")
+                ):
+                    return DispatchResult(
+                        task_id=task_id,
+                        final_state=TaskState.BLOCKED,
+                        branch=recovery_state.branch,
+                        pr_number=recovery_state.pr_number,
+                        pr_url=recovery_state.pr_url,
+                        head_sha=recovery_state.head_sha,
+                        block_reason=BlockReasonCode.REREAD_VERIFICATION_FAILED.value,
+                        transitions=(),
+                    )
+
+            if recovery_state.worktree_path:
+                self._worktree_service.remove_worktree(
+                    recovery_state.worktree_path, recovery_state.branch
                 )
+            self._lease_manager.release(task_id, owner, token)
+            if self._ledger:
+                self._ledger.clear()
+            return DispatchResult(
+                task_id=task_id,
+                final_state=TaskState.DONE,
+                branch=recovery_state.branch,
+                pr_number=recovery_state.pr_number,
+                pr_url=recovery_state.pr_url,
+                head_sha=recovery_state.head_sha,
+                block_reason=None,
+                transitions=(),
+            )
 
             return DispatchResult(
                 task_id=task_id,

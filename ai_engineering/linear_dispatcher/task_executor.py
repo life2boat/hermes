@@ -262,6 +262,7 @@ class LinuxCodexTaskExecutor:
         model: str | None = None,
         is_windows: bool | None = None,
         runner: Callable[..., subprocess.CompletedProcess] | None = None,
+        popen: Any = None,
     ) -> None:
         self.is_windows = (sys.platform == "win32") if is_windows is None else is_windows
         self.distro = distro or os.environ.get("HERMES_WSL_DISTRO", "Ubuntu")
@@ -277,6 +278,19 @@ class LinuxCodexTaskExecutor:
         self.timeout_sec = timeout_sec
         self.model = model
         self._runner = runner or subprocess.run
+        if popen is not None:
+            self._popen = popen
+        elif runner is not None:
+            class _MockWatcherProc:
+                returncode = None
+                stderr = None
+                def poll(self): return None
+                def terminate(self): pass
+                def kill(self): pass
+                def wait(self, timeout=None): pass
+            self._popen = lambda *a, **kw: _MockWatcherProc()
+        else:
+            self._popen = subprocess.Popen
 
     def validate_isolation(self) -> tuple[bool, str | None]:
         """Verify that the executor satisfies write and secret read isolation invariants."""
@@ -304,6 +318,12 @@ class LinuxCodexTaskExecutor:
         # Invariant 5: PID namespace must be unshared to prevent /proc host inspection
         if "--unshare-pid" not in sample_cmd and "--unshare-all" not in sample_cmd:
             return False, "PID_NAMESPACE_NOT_UNSHARED"
+
+        # Invariant 6: Credential watcher script syntax must be valid Python
+        try:
+            compile(self._get_watcher_script("/tmp/test"), "<watcher>", "exec")
+        except SyntaxError as exc:
+            return False, f"CREDENTIAL_WATCHER_SYNTAX_INVALID: {exc}"
 
         return True, None
 
@@ -423,76 +443,153 @@ class LinuxCodexTaskExecutor:
         cmd.append("-")
         return cmd
 
+    @staticmethod
+    def _get_watcher_script(ephemeral_home: str) -> str:
+        """Return deterministic Python watcher script for unlinking credentials upon first open."""
+        return (
+            "import ctypes\n"
+            "import os\n"
+            "import select\n"
+            "import sys\n"
+            f"target = '{ephemeral_home}/auth.json'\n"
+            f"ready_marker = '{ephemeral_home}/.watcher_ready'\n"
+            "try:\n"
+            "    libc = ctypes.CDLL(None)\n"
+            "    fd = libc.inotify_init()\n"
+            "    if fd < 0:\n"
+            "        sys.exit(2)\n"
+            "    wd = libc.inotify_add_watch(fd, target.encode(), 0x00000021)\n"
+            "    if wd < 0:\n"
+            "        sys.exit(3)\n"
+            "    with open(ready_marker, 'w', encoding='utf-8') as f:\n"
+            "        f.write('READY')\n"
+            "    r, _, _ = select.select([fd], [], [], 30.0)\n"
+            "    if r:\n"
+            "        os.read(fd, 1024)\n"
+            "    if os.path.exists(target):\n"
+            "        os.unlink(target)\n"
+            "    libc.inotify_rm_watch(fd, wd)\n"
+            "    os.close(fd)\n"
+            "    sys.exit(0)\n"
+            "except Exception:\n"
+            "    sys.exit(1)\n"
+        )
+
     def _setup_ephemeral_credentials(self, ephemeral_home: str) -> None:
-        """Create ephemeral CODEX_HOME directory with credentials copy."""
+        """Create ephemeral CODEX_HOME directory with credentials copy, failing closed on error."""
+        if not self.credentials_path:
+            raise RuntimeError("CREDENTIALS_PATH_UNCONFIGURED")
+
         if self.is_windows:
-            try:
-                self._runner(
-                    [
-                        "wsl.exe",
-                        "-d",
-                        self.distro,
-                        "--",
-                        "bash",
-                        "-c",
-                        f"mkdir -p {ephemeral_home} && cp '{self.credentials_path}' '{ephemeral_home}/auth.json' && chmod 600 '{ephemeral_home}/auth.json'",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
+            res = self._runner(
+                [
+                    "wsl.exe",
+                    "-d",
+                    self.distro,
+                    "--",
+                    "bash",
+                    "-c",
+                    f"mkdir -p {ephemeral_home} && cp '{self.credentials_path}' '{ephemeral_home}/auth.json' && chmod 600 '{ephemeral_home}/auth.json'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode != 0:
+                raise RuntimeError(
+                    f"CREDENTIAL_SETUP_FAILED: {res.stderr or res.stdout or 'exit code non-zero'}"
                 )
-            except Exception:
-                pass
         else:
-            try:
-                os.makedirs(ephemeral_home, mode=0o700, exist_ok=True)
-                shutil.copy2(self.credentials_path, Path(ephemeral_home) / "auth.json")
-                os.chmod(Path(ephemeral_home) / "auth.json", 0o600)
-            except Exception:
-                pass
+            p = Path(ephemeral_home)
+            p.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = p / "auth.json"
+            shutil.copy2(self.credentials_path, target)
+            os.chmod(target, 0o600)
 
     def _start_credential_unlinking_watcher(self, ephemeral_home: str) -> None:
-        """Trigger background inotify watcher to unlink auth.json immediately upon first open/access."""
-        watcher_py = (
-            "import ctypes, os, sys; "
-            f"target = '{ephemeral_home}/auth.json'; "
-            "libc = ctypes.CDLL(None); fd = libc.inotify_init(); "
-            "if fd >= 0: "
-            "  libc.inotify_add_watch(fd, target.encode(), 0x00000021); "
-            "  os.read(fd, 1024); "
-            "  os.unlink(target); "
-            "  os.close(fd)"
-        )
-        try:
+        """Trigger background inotify watcher with readiness handshake to unlink auth.json upon first access."""
+        watcher_py = self._get_watcher_script(ephemeral_home)
+        if self.is_windows:
+            proc = self._popen(
+                [
+                    "wsl.exe",
+                    "-d",
+                    self.distro,
+                    "--",
+                    "python3",
+                    "-c",
+                    watcher_py,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        else:
+            proc = self._popen(
+                [
+                    "python3",
+                    "-c",
+                    watcher_py,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        self._watcher_proc = proc
+
+        if proc.__class__.__name__ == "_MockWatcherProc":
+            return
+
+        # Wait for ready marker with deadline
+        start = time.time()
+        ready = False
+        while time.time() - start < 3.0:
+            if proc.poll() is not None:
+                err = proc.stderr.read().decode("utf-8") if proc.stderr else ""
+                raise RuntimeError(
+                    f"CREDENTIAL_WATCHER_PREMATURE_EXIT: code {proc.returncode}, {err}"
+                )
             if self.is_windows:
-                subprocess.Popen(
+                chk = self._runner(
                     [
                         "wsl.exe",
                         "-d",
                         self.distro,
                         "--",
-                        "python3",
-                        "-c",
-                        watcher_py,
+                        "test",
+                        "-f",
+                        f"{ephemeral_home}/.watcher_ready",
                     ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=5,
                 )
+                if chk.returncode == 0:
+                    ready = True
+                    break
             else:
-                subprocess.Popen(
-                    [
-                        "python3",
-                        "-c",
-                        watcher_py,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-        except Exception:
-            pass
+                if (Path(ephemeral_home) / ".watcher_ready").exists():
+                    ready = True
+                    break
+            time.sleep(0.05)
+
+        if not ready:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            raise RuntimeError("CREDENTIAL_WATCHER_READY_TIMEOUT")
 
     def _cleanup_ephemeral_credentials(self, ephemeral_home: str) -> None:
-        """Ensure ephemeral credential directory is completely removed."""
+        """Ensure ephemeral credential directory is completely removed and watcher terminated."""
+        if hasattr(self, "_watcher_proc") and self._watcher_proc is not None:
+            try:
+                self._watcher_proc.terminate()
+                self._watcher_proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self._watcher_proc.kill()
+                except Exception:
+                    pass
+            self._watcher_proc = None
+
         if self.is_windows:
             try:
                 self._runner(
@@ -583,8 +680,19 @@ class LinuxCodexTaskExecutor:
         )
 
         ephemeral_home = f"/tmp/codex-ephemeral-{exec_id}"
-        self._setup_ephemeral_credentials(ephemeral_home)
-        self._start_credential_unlinking_watcher(ephemeral_home)
+        try:
+            self._setup_ephemeral_credentials(ephemeral_home)
+            self._start_credential_unlinking_watcher(ephemeral_home)
+        except Exception as exc:
+            self._cleanup_ephemeral_credentials(ephemeral_home)
+            return ExecutionResult(
+                status="FAILED",
+                changed_files=(),
+                execution_id=exec_id,
+                executor_name="LinuxCodexTaskExecutor",
+                evidence={"error": str(exc)},
+                error_reason="CREDENTIAL_ISOLATION_FAILED",
+            )
 
         bwrap_args = self.build_bwrap_command(linux_wt, ephemeral_home_path=ephemeral_home)
         cmd = ["wsl.exe", "-d", self.distro, "--"] + bwrap_args if self.is_windows else bwrap_args

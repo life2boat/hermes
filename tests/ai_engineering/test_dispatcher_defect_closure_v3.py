@@ -60,6 +60,13 @@ class MockLinearClient:
         return True
 
     def update_issue(self, issue_id: str, fields: dict[str, Any]) -> bool:
+        t = self.tasks.get(issue_id)
+        if not t:
+            return False
+        from dataclasses import replace
+        new_state = fields.get("state", t.state)
+        new_desc = fields.get("description", t.description)
+        self.tasks[issue_id] = replace(t, state=new_state, description=new_desc)
         return True
 
 
@@ -430,7 +437,7 @@ def test_worktree_cleanup_blocked(tmp_path, monkeypatch):
     monkeypatch.setattr(
         LocalValidator,
         "run_validation",
-        staticmethod(lambda cwd: (False, {"error": "forced_validation_failure"})),
+        staticmethod(lambda *args, **kwargs: (False, {"error": "forced_validation_failure"})),
     )
 
     def dummy_mutation(wt: Path, t: LinearTask):

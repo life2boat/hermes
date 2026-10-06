@@ -47,17 +47,27 @@ class GitHubProductionService(IGitHubService):
             search_res = self._request("GET", f"pulls?head=life2boat:{branch_name}&state=open")
             if search_res and len(search_res) == 1:
                 pr = search_res[0]
+                actual_head = pr.get("head", {}).get("sha", "")
+                actual_base = pr.get("base", {}).get("ref", "")
+                is_draft = pr.get("draft", False)
+                if not is_draft:
+                    return False, None, "EXISTING_PR_NOT_DRAFT"
+                if actual_head != head_sha:
+                    return False, None, f"EXISTING_PR_HEAD_MISMATCH_{actual_head}_VS_{head_sha}"
+                if actual_base != "main":
+                    return False, None, f"EXISTING_PR_BASE_MISMATCH_{actual_base}"
                 return True, PRCreationResult(
                     pr_number=pr.get("number", 0),
                     pr_url=pr.get("html_url", ""),
                     base_sha=base_sha,
                     head_sha=head_sha,
-                    is_draft=pr.get("draft", True)
+                    is_draft=True,
                 ), None
             elif search_res and len(search_res) > 1:
                 return False, None, "MULTIPLE_CONFLICTING_PRS"
         except Exception as e:
-            # Continue to try creating if search fails
+            if "EXISTING_PR" in str(e):
+                return False, None, str(e)
             pass
 
         pr_title = f"feat({task.id.lower()}): {task.title}"
@@ -97,7 +107,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
         expected_head_sha: str,
         pr_number: int,
     ) -> tuple[bool, CIStatusResult | None, BlockReasonCode | None]:
-        # Using GitHub check-runs API which is more standard than actions/runs for commit status
+        # Using GitHub check-runs API with exact head verification and required check suite
         try:
             res = self._request("GET", f"commits/{expected_head_sha}/check-runs")
             check_runs = res.get("check_runs", [])
@@ -112,12 +122,24 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                 details={},
             ), None
 
+        # Verify head SHA scoping on returned check runs
+        for r in check_runs:
+            run_head = r.get("head_sha", "")
+            if run_head and run_head != expected_head_sha:
+                return False, CIStatusResult(
+                    overall_status="FAIL",
+                    head_sha=expected_head_sha,
+                    runs=check_runs,
+                    details={"error": f"CHECK_RUN_HEAD_MISMATCH_{run_head}_VS_{expected_head_sha}"},
+                ), BlockReasonCode.CI_SHA_MISMATCH
+
         details: dict[str, str] = {}
+        completed_success = 0
         for r in check_runs:
             name = r.get("name", "unknown")
             status = r.get("status")
             conclusion = r.get("conclusion")
-            
+
             if status != "completed":
                 details[name] = f"in_progress ({status})"
                 return False, CIStatusResult(
@@ -137,6 +159,17 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                 ), BlockReasonCode.CI_FAILED
 
             details[name] = conclusion or "success"
+            if conclusion == "success":
+                completed_success += 1
+
+        # Must have completed checks to prove test suite ran
+        if len(check_runs) < 2 and completed_success < 1:
+            return False, CIStatusResult(
+                overall_status="PENDING",
+                head_sha=expected_head_sha,
+                runs=check_runs,
+                details={"status": "INSUFFICIENT_CHECK_RUNS"},
+            ), None
 
         return True, CIStatusResult(
             overall_status="PASS",

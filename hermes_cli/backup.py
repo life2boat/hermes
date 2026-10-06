@@ -118,23 +118,41 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
     """Copy a SQLite database safely using the backup() API.
 
     Handles WAL mode — produces a consistent snapshot even while
-    the DB is being written to.  Falls back to raw copy on failure.
+    the DB is being written to. Fails safe if a consistent snapshot cannot be obtained.
     """
+    conn = None
+    backup_conn = None
     try:
         conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
         backup_conn = sqlite3.connect(str(dst))
         conn.backup(backup_conn)
         backup_conn.close()
+        backup_conn = None
         conn.close()
+        conn = None
+
+        # Verify integrity of copied database
+        with sqlite3.connect(str(dst)) as verify_conn:
+            res = verify_conn.execute("PRAGMA integrity_check").fetchall()
+            if res != [("ok",)]:
+                logger.error("SQLite backup integrity check failed for %s", dst)
+                dst.unlink(missing_ok=True)
+                return False
         return True
     except Exception as exc:
-        logger.warning("SQLite safe copy failed for %s: %s", src, exc)
-        try:
-            shutil.copy2(src, dst)
-            return True
-        except Exception as exc2:
-            logger.error("Raw copy also failed for %s: %s", src, exc2)
-            return False
+        logger.error("SQLite safe copy failed for %s: %s", src, exc)
+        if backup_conn is not None:
+            try:
+                backup_conn.close()
+            except Exception:
+                pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        dst.unlink(missing_ok=True)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -421,12 +439,36 @@ def run_import(args) -> None:
                 if os.path.normcase(target.name) == "jobs.json.lock" and _is_cron_jobs_path(target.with_name("jobs.json"), hermes_root):
                     continue  # Never truncate/replace a live coordination file.
                 with zf.open(member) as src:
+                    content = src.read()
                     if _is_cron_jobs_path(target, hermes_root):
                         from cron.jobs import replace_jobs_file
-                        replace_jobs_file(src.read(), target)
+                        replace_jobs_file(content, target)
+                    elif target.suffix == ".db":
+                        tmp_target = target.parent / f".{target.name}.import_tmp"
+                        with open(tmp_target, "wb") as dst:
+                            dst.write(content)
+                        if content != b"SQLite format 3\x00":
+                            chk_conn = None
+                            try:
+                                chk_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
+                                res = chk_conn.execute("PRAGMA integrity_check").fetchall()
+                                if res != [("ok",)]:
+                                    tmp_target.unlink(missing_ok=True)
+                                    errors.append(f"  {rel}: db integrity check failed")
+                                    continue
+                            except Exception as exc:
+                                tmp_target.unlink(missing_ok=True)
+                                errors.append(f"  {rel}: db validation failed: {exc}")
+                                continue
+                            finally:
+                                if chk_conn:
+                                    chk_conn.close()
+                        os.replace(str(tmp_target), str(target))
                     else:
-                        with open(target, "wb") as dst:
-                            dst.write(src.read())
+                        tmp_target = target.parent / f".{target.name}.import_tmp"
+                        with open(tmp_target, "wb") as dst:
+                            dst.write(content)
+                        os.replace(str(tmp_target), str(target))
                 if target.name in _SECRET_FILE_NAMES:
                     os.chmod(target, 0o600)
                 restored += 1
@@ -685,22 +727,44 @@ def restore_quick_snapshot(
             continue
 
         dst = home / rel
+        try:
+            dst.resolve().relative_to(home.resolve())
+        except ValueError:
+            logger.error("Path traversal blocked for %s", rel)
+            continue
+
         dst.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             if os.path.normcase(dst.name) == "jobs.json.lock" and _is_cron_jobs_path(dst.with_name("jobs.json"), home):
                 continue
             if dst.suffix == ".db":
-                # Atomic-ish replace for databases
                 tmp = dst.parent / f".{dst.name}.snap_restore"
                 shutil.copy2(src, tmp)
-                dst.unlink(missing_ok=True)
-                shutil.move(str(tmp), str(dst))
+                if tmp.read_bytes() != b"SQLite format 3\x00":
+                    chk_conn = None
+                    try:
+                        chk_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                        res = chk_conn.execute("PRAGMA integrity_check").fetchall()
+                        if res != [("ok",)]:
+                            tmp.unlink(missing_ok=True)
+                            logger.error("Database integrity check failed for %s", rel)
+                            continue
+                    except Exception as exc:
+                        tmp.unlink(missing_ok=True)
+                        logger.error("Database validation failed for %s: %s", rel, exc)
+                        continue
+                    finally:
+                        if chk_conn:
+                            chk_conn.close()
+                os.replace(str(tmp), str(dst))
             elif _is_cron_jobs_path(dst, home):
                 from cron.jobs import replace_jobs_file
                 replace_jobs_file(src.read_bytes(), dst)
             else:
-                shutil.copy2(src, dst)
+                tmp = dst.parent / f".{dst.name}.snap_restore"
+                shutil.copy2(src, tmp)
+                os.replace(str(tmp), str(dst))
             restored += 1
         except (OSError, PermissionError) as exc:
             logger.error("Failed to restore %s: %s", rel, exc)

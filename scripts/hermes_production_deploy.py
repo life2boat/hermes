@@ -3271,14 +3271,24 @@ def execute_recovery(
         except Exception as _e:
             _fail("zero-writer-proof-failed")
 
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(backup_path, flags, 0o600)
-            os.close(fd)
-        except OSError:
-            _fail("recovery-backup-file-create")
+            src_conn = sqlite3.connect(f"file:{contract.database_source}?mode=ro", uri=True)
+            dst_conn = sqlite3.connect(str(backup_path))
+            src_conn.backup(dst_conn)
+            dst_conn.close()
+            src_conn.close()
+            os.chmod(backup_path, 0o600)
+        except Exception as _e:
+            _fail(f"recovery-backup-copy-failed: {_e}")
 
         _validate_recovery_backup_file(backup_path)
+
+        with sqlite3.connect(str(backup_path)) as conn:
+            tbl_count = conn.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'"
+            ).fetchone()[0]
+            if tbl_count == 0:
+                _fail("recovery-backup-empty-tables")
 
         _check_db(backup_path)
 

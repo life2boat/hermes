@@ -398,7 +398,7 @@ def test_dispatcher_integration_with_linux_codex_executor(tmp_path):
     wt_service = WorktreeService(canonical_root=canonical_root, base_sha=canonical_sha)
 
     def dispatch_runner(cmd, **kwargs):
-        if "which" in cmd or "test" in cmd:
+        if "which" in cmd or "test" in cmd or "bash" in cmd or "rm" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0)
         if "wslpath" in cmd:
             return subprocess.CompletedProcess(cmd, returncode=0, stdout=f"/tmp/{Path(cmd[-1]).name}\n")

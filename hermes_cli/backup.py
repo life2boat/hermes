@@ -132,12 +132,19 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
         conn = None
 
         # Verify integrity of copied database
-        with sqlite3.connect(str(dst)) as verify_conn:
+        verify_conn = None
+        try:
+            verify_conn = sqlite3.connect(str(dst))
             res = verify_conn.execute("PRAGMA integrity_check").fetchall()
             if res != [("ok",)]:
                 logger.error("SQLite backup integrity check failed for %s", dst)
+                verify_conn.close()
+                verify_conn = None
                 dst.unlink(missing_ok=True)
                 return False
+        finally:
+            if verify_conn is not None:
+                verify_conn.close()
         return True
     except Exception as exc:
         logger.error("SQLite safe copy failed for %s: %s", src, exc)
@@ -447,23 +454,52 @@ def run_import(args) -> None:
                         tmp_target = target.parent / f".{target.name}.import_tmp"
                         with open(tmp_target, "wb") as dst:
                             dst.write(content)
-                        if content != b"SQLite format 3\x00":
-                            chk_conn = None
-                            try:
-                                chk_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
-                                res = chk_conn.execute("PRAGMA integrity_check").fetchall()
-                                if res != [("ok",)]:
-                                    tmp_target.unlink(missing_ok=True)
-                                    errors.append(f"  {rel}: db integrity check failed")
-                                    continue
-                            except Exception as exc:
+                        chk_conn = None
+                        try:
+                            chk_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
+                            res = chk_conn.execute("PRAGMA integrity_check").fetchall()
+                            if res != [("ok",)]:
                                 tmp_target.unlink(missing_ok=True)
-                                errors.append(f"  {rel}: db validation failed: {exc}")
+                                errors.append(f"  {rel}: db integrity check failed")
                                 continue
-                            finally:
-                                if chk_conn:
-                                    chk_conn.close()
-                        os.replace(str(tmp_target), str(target))
+                            chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                            chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                        except Exception as exc:
+                            tmp_target.unlink(missing_ok=True)
+                            errors.append(f"  {rel}: db validation failed: {exc}")
+                            continue
+                        finally:
+                            if chk_conn is not None:
+                                chk_conn.close()
+
+                        bak_target = target.with_suffix(target.suffix + ".restore_bak")
+                        wal_file = target.with_name(f"{target.name}-wal")
+                        shm_file = target.with_name(f"{target.name}-shm")
+                        wal_bak = target.with_name(f"{target.name}-wal.restore_bak")
+                        shm_bak = target.with_name(f"{target.name}-shm.restore_bak")
+                        try:
+                            if target.exists():
+                                shutil.copy2(target, bak_target)
+                            if wal_file.exists():
+                                shutil.move(str(wal_file), str(wal_bak))
+                            if shm_file.exists():
+                                shutil.move(str(shm_file), str(shm_bak))
+                            os.replace(str(tmp_target), str(target))
+                            with sqlite3.connect(f"file:{target}?mode=ro", uri=True) as post_chk:
+                                post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                            bak_target.unlink(missing_ok=True)
+                            wal_bak.unlink(missing_ok=True)
+                            shm_bak.unlink(missing_ok=True)
+                        except Exception as exc:
+                            if bak_target.exists():
+                                os.replace(str(bak_target), str(target))
+                            if wal_bak.exists():
+                                os.replace(str(wal_bak), str(wal_file))
+                            if shm_bak.exists():
+                                os.replace(str(shm_bak), str(shm_file))
+                            tmp_target.unlink(missing_ok=True)
+                            errors.append(f"  {rel}: atomic replace failed: {exc}")
+                            continue
                     else:
                         tmp_target = target.parent / f".{target.name}.import_tmp"
                         with open(tmp_target, "wb") as dst:
@@ -741,23 +777,52 @@ def restore_quick_snapshot(
             if dst.suffix == ".db":
                 tmp = dst.parent / f".{dst.name}.snap_restore"
                 shutil.copy2(src, tmp)
-                if tmp.read_bytes() != b"SQLite format 3\x00":
-                    chk_conn = None
-                    try:
-                        chk_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
-                        res = chk_conn.execute("PRAGMA integrity_check").fetchall()
-                        if res != [("ok",)]:
-                            tmp.unlink(missing_ok=True)
-                            logger.error("Database integrity check failed for %s", rel)
-                            continue
-                    except Exception as exc:
+                chk_conn = None
+                try:
+                    chk_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                    res = chk_conn.execute("PRAGMA integrity_check").fetchall()
+                    if res != [("ok",)]:
                         tmp.unlink(missing_ok=True)
-                        logger.error("Database validation failed for %s: %s", rel, exc)
+                        logger.error("Database integrity check failed for %s", rel)
                         continue
-                    finally:
-                        if chk_conn:
-                            chk_conn.close()
-                os.replace(str(tmp), str(dst))
+                    chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                    chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                except Exception as exc:
+                    tmp.unlink(missing_ok=True)
+                    logger.error("Database validation failed for %s: %s", rel, exc)
+                    continue
+                finally:
+                    if chk_conn is not None:
+                        chk_conn.close()
+
+                bak_dst = dst.with_suffix(dst.suffix + ".restore_bak")
+                wal_file = dst.with_name(f"{dst.name}-wal")
+                shm_file = dst.with_name(f"{dst.name}-shm")
+                wal_bak = dst.with_name(f"{dst.name}-wal.restore_bak")
+                shm_bak = dst.with_name(f"{dst.name}-shm.restore_bak")
+                try:
+                    if dst.exists():
+                        shutil.copy2(dst, bak_dst)
+                    if wal_file.exists():
+                        shutil.move(str(wal_file), str(wal_bak))
+                    if shm_file.exists():
+                        shutil.move(str(shm_file), str(shm_bak))
+                    os.replace(str(tmp), str(dst))
+                    with sqlite3.connect(f"file:{dst}?mode=ro", uri=True) as post_chk:
+                        post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                    bak_dst.unlink(missing_ok=True)
+                    wal_bak.unlink(missing_ok=True)
+                    shm_bak.unlink(missing_ok=True)
+                except Exception as exc:
+                    if bak_dst.exists():
+                        os.replace(str(bak_dst), str(dst))
+                    if wal_bak.exists():
+                        os.replace(str(wal_bak), str(wal_file))
+                    if shm_bak.exists():
+                        os.replace(str(shm_bak), str(shm_file))
+                    tmp.unlink(missing_ok=True)
+                    logger.error("Database atomic replace failed for %s: %s", rel, exc)
+                    continue
             elif _is_cron_jobs_path(dst, home):
                 from cron.jobs import replace_jobs_file
                 replace_jobs_file(src.read_bytes(), dst)

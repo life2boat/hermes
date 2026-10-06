@@ -37,6 +37,18 @@ _VALID_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         TaskState.FAILED,
     ]),
     TaskState.VALIDATING: frozenset([
+        TaskState.COMMITTED,
+        TaskState.PR_OPEN,
+        TaskState.BLOCKED,
+        TaskState.FAILED,
+    ]),
+    TaskState.COMMITTED: frozenset([
+        TaskState.BRANCH_PUSHED,
+        TaskState.PR_OPEN,
+        TaskState.BLOCKED,
+        TaskState.FAILED,
+    ]),
+    TaskState.BRANCH_PUSHED: frozenset([
         TaskState.PR_OPEN,
         TaskState.BLOCKED,
         TaskState.FAILED,

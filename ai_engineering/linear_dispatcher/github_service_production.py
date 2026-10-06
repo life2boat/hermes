@@ -66,9 +66,8 @@ class GitHubProductionService(IGitHubService):
             elif search_res and len(search_res) > 1:
                 return False, None, "MULTIPLE_CONFLICTING_PRS"
         except Exception as e:
-            if "EXISTING_PR" in str(e):
-                return False, None, str(e)
-            pass
+            # Do not silently fall through on search errors
+            return False, None, f"PR_SEARCH_FAILED: {e}"
 
         pr_title = f"feat({task.id.lower()}): {task.title}"
         pr_body = f"""## Purpose & Scope
@@ -91,9 +90,29 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                 "base": "main",
                 "draft": True
             })
+            pr_num = res.get("number", 0)
+            actual_head = res.get("head", {}).get("sha", "")
+            actual_base = res.get("base", {}).get("ref", "")
+            is_draft = res.get("draft", False)
+            if not is_draft:
+                return False, None, "POST_PR_NOT_DRAFT"
+            if actual_head != head_sha:
+                return False, None, f"POST_PR_HEAD_MISMATCH_{actual_head}_VS_{head_sha}"
+            if actual_base != "main":
+                return False, None, f"POST_PR_BASE_MISMATCH_{actual_base}"
+
+            # Reread PR via GET to verify actual state from API
+            reread = self._request("GET", f"pulls/{pr_num}")
+            if not reread.get("draft", False):
+                return False, None, "REREAD_PR_NOT_DRAFT"
+            if reread.get("head", {}).get("sha", "") != head_sha:
+                return False, None, "REREAD_PR_HEAD_MISMATCH"
+            if reread.get("base", {}).get("ref", "") != "main":
+                return False, None, "REREAD_PR_BASE_MISMATCH"
+
             return True, PRCreationResult(
-                pr_number=res.get("number", 0),
-                pr_url=res.get("html_url", ""),
+                pr_number=pr_num,
+                pr_url=reread.get("html_url", res.get("html_url", "")),
                 base_sha=base_sha,
                 head_sha=head_sha,
                 is_draft=True
@@ -107,10 +126,19 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
         expected_head_sha: str,
         pr_number: int,
     ) -> tuple[bool, CIStatusResult | None, BlockReasonCode | None]:
-        # Using GitHub check-runs API with exact head verification and required check suite
+        # Using GitHub check-runs API with pagination, exact head verification and required check suite
+        check_runs = []
+        page = 1
+        per_page = 100
         try:
-            res = self._request("GET", f"commits/{expected_head_sha}/check-runs")
-            check_runs = res.get("check_runs", [])
+            while True:
+                res = self._request("GET", f"commits/{expected_head_sha}/check-runs?per_page={per_page}&page={page}")
+                runs_page = res.get("check_runs", [])
+                total_count = res.get("total_count", len(runs_page))
+                check_runs.extend(runs_page)
+                if not runs_page or len(check_runs) >= total_count:
+                    break
+                page += 1
         except Exception:
             return False, None, BlockReasonCode.CI_FAILED
 
@@ -162,13 +190,13 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
             if conclusion == "success":
                 completed_success += 1
 
-        # Must have completed checks to prove test suite ran
-        if len(check_runs) < 2 and completed_success < 1:
+        # Must have at least 1 successful check run (cannot pass with 0 success and only skipped/neutral)
+        if completed_success < 1:
             return False, CIStatusResult(
                 overall_status="PENDING",
                 head_sha=expected_head_sha,
                 runs=check_runs,
-                details={"status": "INSUFFICIENT_CHECK_RUNS"},
+                details={"status": "NO_SUCCESSFUL_CHECK_RUNS"},
             ), None
 
         return True, CIStatusResult(

@@ -76,6 +76,23 @@ class WritebackService:
     def __init__(self, linear_client: ILinearClient) -> None:
         self._client = linear_client
 
+    @staticmethod
+    def is_authentic_receipt(
+        text: str | None,
+        head_sha: str | None = None,
+        exec_id: str | None = None,
+    ) -> bool:
+        if not text:
+            return False
+        header_marker = "### Hermes Autonomous Loop Execution Evidence"
+        if header_marker not in text:
+            return False
+        if head_sha and f"HEAD_SHA:** `{head_sha}`" not in text:
+            return False
+        if exec_id and f"EXECUTION_ID:** `{exec_id}`" not in text:
+            return False
+        return True
+
     def writeback_and_verify(
         self,
         task: LinearTask,
@@ -88,23 +105,10 @@ class WritebackService:
         comments = self._client.get_issue_comments(task.id)
         refetched_task = self._client.get_issue(task.id)
         exec_id = getattr(evidence, "execution_id", "") or evidence.task_id
-        receipt_marker = f"EXECUTION_ID:** `{exec_id}`"
-        sha_marker = f"HEAD_SHA:** `{evidence.head_sha}`"
+
         already_has_receipt = (
-            any(
-                (receipt_marker in c or sha_marker in c or (evidence.head_sha in c and "evidence" in c.lower()))
-                for c in comments
-            )
-            or (
-                refetched_task
-                and (
-                    receipt_marker in refetched_task.description
-                    or sha_marker in refetched_task.description
-                    or (evidence.head_sha in refetched_task.description and "evidence" in refetched_task.description.lower())
-                )
-            )
-            if refetched_task
-            else False
+            any(self.is_authentic_receipt(c, evidence.head_sha, exec_id) for c in comments)
+            or (refetched_task and self.is_authentic_receipt(refetched_task.description, evidence.head_sha, exec_id))
         )
         if refetched_task and already_has_receipt:
             if refetched_task.state.lower() in ("done", "completed", "closed"):
@@ -138,15 +142,9 @@ class WritebackService:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED
 
         comments = self._client.get_issue_comments(task.id)
-        persisted = any(
-            (receipt_marker in c or sha_marker in c) and "Execution Evidence" in c
-            for c in comments
-        ) or (
-            (
-                receipt_marker in refetched_task.description
-                or sha_marker in refetched_task.description
-            )
-            and "Execution Evidence" in refetched_task.description
+        persisted = (
+            any(self.is_authentic_receipt(c, evidence.head_sha, exec_id) for c in comments)
+            or self.is_authentic_receipt(refetched_task.description, evidence.head_sha, exec_id)
         )
         if not persisted:
             return False, BlockReasonCode.REREAD_VERIFICATION_FAILED

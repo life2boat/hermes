@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -74,6 +75,27 @@ class AutonomousDispatcher:
         self._ledger = execution_ledger
         self._task_executor = task_executor
         self._canonical_root = getattr(worktree_service, "canonical_root", Path("."))
+
+    @staticmethod
+    def _safe_git_run(
+        args: list[str], cwd: Path | str, **kwargs
+    ) -> subprocess.CompletedProcess:
+        safe_opts = [
+            "-c", "core.fsmonitor=",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.whitespace=cr-at-eol",
+            "-c", "core.autocrlf=false",
+            "-c", "filter.lfs.smudge=",
+            "-c", "filter.lfs.clean=",
+            "-c", "filter.lfs.process=",
+            "-c", "filter.lfs.required=false",
+        ]
+        env = dict(kwargs.pop("env", os.environ))
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+        env["GIT_CONFIG_SYSTEM"] = os.devnull
+        cmd = ["git"] + safe_opts + ["-C", str(cwd)] + args
+        return subprocess.run(cmd, env=env, **kwargs)
 
     def dispatch_one_task(
         self,
@@ -332,12 +354,12 @@ class AutonomousDispatcher:
             )
 
         # Git stage changes
-        subprocess.run(["git", "add", "-A"], cwd=str(wt_path), check=True)
+        self._safe_git_run(["add", "-A"], cwd=wt_path, check=True)
 
         # Re-verify staged files against ScopeGate
-        staged_res = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=str(wt_path),
+        staged_res = self._safe_git_run(
+            ["diff", "--cached", "--name-only"],
+            cwd=wt_path,
             capture_output=True,
             text=True,
             check=True,
@@ -397,17 +419,36 @@ class AutonomousDispatcher:
             )
 
         commit_msg = f"feat({task.id.lower()}): {task.title}"
-        subprocess.run(
-            ["git", "commit", "-m", commit_msg], cwd=str(wt_path), check=True
+        self._safe_git_run(
+            ["commit", "-m", commit_msg], cwd=wt_path, check=True
         )
-        head_sha_proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(wt_path),
+        head_sha_proc = self._safe_git_run(
+            ["rev-parse", "HEAD"],
+            cwd=wt_path,
             capture_output=True,
             text=True,
             check=True,
         )
         head_sha = head_sha_proc.stdout.strip()
+
+        sm.transition(
+            TaskState.COMMITTED,
+            evidence={"head_sha": head_sha},
+            now_iso=now_iso,
+        )
+        if self._ledger:
+            self._ledger.write_state(
+                ExecutionState(
+                    task_id=task.id,
+                    state=TaskState.COMMITTED.value,
+                    claim_owner=self._config.worker_id,
+                    claim_token=claim_record.claim_token,
+                    worktree_path=str(wt_path),
+                    branch=branch_name,
+                    head_sha=head_sha,
+                    base_sha=self._canonical_main_sha,
+                )
+            )
 
         # Phase 7: Main Drift Barrier (before push / PR)
         current_main_sha = self._resolve_remote_main_sha(wt_path)
@@ -480,15 +521,16 @@ class AutonomousDispatcher:
             )
 
         # Push branch
-        chk_remote = subprocess.run(
-            ["git", "-C", str(wt_path), "remote", "get-url", self._config.canonical_remote],
+        chk_remote = self._safe_git_run(
+            ["remote", "get-url", self._config.canonical_remote],
+            cwd=wt_path,
             capture_output=True,
             text=True,
         )
         if chk_remote.returncode == 0:
-            push_res = subprocess.run(
-                ["git", "push", self._config.canonical_remote, branch_name],
-                cwd=str(wt_path),
+            push_res = self._safe_git_run(
+                ["push", self._config.canonical_remote, branch_name],
+                cwd=wt_path,
                 capture_output=True,
                 text=True,
             )
@@ -514,6 +556,25 @@ class AutonomousDispatcher:
                     head_sha=head_sha,
                     block_reason="GIT_PUSH_FAILED",
                     transitions=sm.history,
+                )
+
+            sm.transition(
+                TaskState.BRANCH_PUSHED,
+                evidence={"branch": branch_name, "head_sha": head_sha},
+                now_iso=now_iso,
+            )
+            if self._ledger:
+                self._ledger.write_state(
+                    ExecutionState(
+                        task_id=task.id,
+                        state=TaskState.BRANCH_PUSHED.value,
+                        claim_owner=self._config.worker_id,
+                        claim_token=claim_record.claim_token,
+                        worktree_path=str(wt_path),
+                        branch=branch_name,
+                        head_sha=head_sha,
+                        base_sha=self._canonical_main_sha,
+                    )
                 )
 
         # Heartbeat check 4: Before PR creation
@@ -769,7 +830,31 @@ class AutonomousDispatcher:
         token = recovery_state.claim_token
         state_val = recovery_state.state
 
-        # Early abortable states (before PR creation)
+        # Invariant H06: Exclusive lease fencing MUST precede all effects and cleanup
+        if not self._lease_manager.verify_lease(task_id, owner, token, now_iso=now_iso):
+            claim_ok, claim_record, claim_reason = self._lease_manager.claim(
+                task_id, self._config.worker_id, self._config.lease_duration_sec, now_iso=now_iso
+            )
+            if not claim_ok or not claim_record:
+                reason = (
+                    claim_reason.value
+                    if hasattr(claim_reason, "value")
+                    else (str(claim_reason) if claim_reason else BlockReasonCode.LOST_LEASE.value)
+                )
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=reason,
+                    transitions=(),
+                )
+            owner = self._config.worker_id
+            token = claim_record.claim_token
+
+        # Early abortable states (before git commit)
         if state_val in (TaskState.CLAIMED.value, TaskState.WORKTREE_READY.value):
             if recovery_state.worktree_path and recovery_state.branch:
                 self._worktree_service.remove_worktree(
@@ -780,7 +865,35 @@ class AutonomousDispatcher:
                 self._ledger.clear()
             return None
 
-        # Recovery for PR_OPEN or CI_PENDING
+        # Reconcile COMMITTED or BRANCH_PUSHED states
+        if state_val in (TaskState.COMMITTED.value, TaskState.BRANCH_PUSHED.value):
+            if self._github_service and recovery_state.branch:
+                try:
+                    search_res = self._github_service._request(
+                        "GET", f"pulls?head=life2boat:{recovery_state.branch}&state=open"
+                    )
+                    if search_res and len(search_res) == 1:
+                        pr_num = search_res[0].get("number", 0)
+                        pr_url = search_res[0].get("html_url", "")
+                        recovery_state.pr_number = pr_num
+                        recovery_state.pr_url = pr_url
+                        state_val = TaskState.PR_OPEN.value
+                except Exception:
+                    pass
+
+            if state_val != TaskState.PR_OPEN.value:
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=BlockReasonCode.RECOVERY_BLOCKED.value,
+                    transitions=(),
+                )
+
+        # Recovery for PR_OPEN or CI_PENDING or CI_PASS
         if state_val in (
             TaskState.PR_OPEN.value,
             TaskState.CI_PENDING.value,
@@ -834,12 +947,9 @@ class AutonomousDispatcher:
                         transitions=(),
                     )
 
-            # Invariant: Must verify or reacquire exclusive lease before any recovery writeback or cleanup
-            if not self._lease_manager.verify_lease(task_id, owner, token, now_iso=now_iso):
-                claim_ok, claim_record, _ = self._lease_manager.claim(
-                    task_id, self._config.worker_id, self._config.lease_duration_sec, now_iso=now_iso
-                )
-                if not claim_ok or not claim_record:
+            # Invariant H06: For CI_PASS recovery, re-verify with GitHub that CI is actually PASS
+            if state_val == TaskState.CI_PASS.value:
+                if not self._github_service:
                     return DispatchResult(
                         task_id=task_id,
                         final_state=TaskState.BLOCKED,
@@ -847,20 +957,20 @@ class AutonomousDispatcher:
                         pr_number=recovery_state.pr_number,
                         pr_url=recovery_state.pr_url,
                         head_sha=recovery_state.head_sha,
-                        block_reason=BlockReasonCode.LOST_LEASE.value,
+                        block_reason="CI_PASS_REVALIDATION_FAILED",
                         transitions=(),
                     )
-                owner = self._config.worker_id
-                token = claim_record.claim_token
-
-            # Invariant: For CI_PASS recovery, re-verify with GitHub that CI is actually PASS
-            if state_val == TaskState.CI_PASS.value and self._github_service:
                 ci_ok, ci_result, ci_reason = self._github_service.get_ci_status(
                     self._config.canonical_repo,
                     recovery_state.head_sha,
                     recovery_state.pr_number or 0,
                 )
-                if not ci_ok or not ci_result or ci_result.overall_status != "PASS":
+                if (
+                    not ci_ok
+                    or not ci_result
+                    or ci_result.overall_status != "PASS"
+                    or ci_result.head_sha != recovery_state.head_sha
+                ):
                     return DispatchResult(
                         task_id=task_id,
                         final_state=TaskState.BLOCKED,
@@ -899,6 +1009,7 @@ class AutonomousDispatcher:
                 ci_status="PASS",
                 ci_head_sha=recovery_state.head_sha or "",
                 sha_match="YES",
+                execution_id=recovery_state.head_sha or task_id,
             )
             wb_ok, wb_reason = self._writeback_service.writeback_and_verify(
                 task, evidence
@@ -934,34 +1045,92 @@ class AutonomousDispatcher:
             )
 
         if state_val == TaskState.WRITEBACK_DONE.value:
-            # Re-read Linear evidence
+            # Re-read Linear evidence and verify terminal state and authentic receipt
             comments = self._linear_client.get_issue_comments(task_id)
             refetched = self._linear_client.get_issue(task_id)
-            has_evidence = False
-            if recovery_state.head_sha:
-                if any(recovery_state.head_sha in c for c in comments):
-                    has_evidence = True
-                elif refetched and recovery_state.head_sha in refetched.description:
-                    has_evidence = True
-
-            if has_evidence:
-                if recovery_state.worktree_path:
-                    self._worktree_service.remove_worktree(
-                        recovery_state.worktree_path, recovery_state.branch
-                    )
-                self._lease_manager.release(task_id, owner, token)
-                if self._ledger:
-                    self._ledger.clear()
+            if not refetched:
                 return DispatchResult(
                     task_id=task_id,
-                    final_state=TaskState.DONE,
+                    final_state=TaskState.BLOCKED,
                     branch=recovery_state.branch,
                     pr_number=recovery_state.pr_number,
                     pr_url=recovery_state.pr_url,
                     head_sha=recovery_state.head_sha,
-                    block_reason=None,
+                    block_reason="LINEAR_TASK_NOT_FOUND",
                     transitions=(),
                 )
+
+            from ai_engineering.linear_dispatcher.writeback import WritebackService
+
+            has_receipt = (
+                any(
+                    WritebackService.is_authentic_receipt(c, recovery_state.head_sha)
+                    for c in comments
+                )
+                or WritebackService.is_authentic_receipt(
+                    refetched.description, recovery_state.head_sha
+                )
+            )
+
+            if not has_receipt:
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=BlockReasonCode.REREAD_VERIFICATION_FAILED.value,
+                    transitions=(),
+                )
+
+            if refetched.state.lower() not in ("done", "completed", "closed"):
+                # Complete transition to Done if authentic receipt is already verified
+                ok = self._linear_client.update_issue(task_id, {"state": "Done"})
+                if not ok:
+                    return DispatchResult(
+                        task_id=task_id,
+                        final_state=TaskState.BLOCKED,
+                        branch=recovery_state.branch,
+                        pr_number=recovery_state.pr_number,
+                        pr_url=recovery_state.pr_url,
+                        head_sha=recovery_state.head_sha,
+                        block_reason=BlockReasonCode.REREAD_VERIFICATION_FAILED.value,
+                        transitions=(),
+                    )
+                refetched = self._linear_client.get_issue(task_id)
+                if (
+                    not refetched
+                    or refetched.state.lower() not in ("done", "completed", "closed")
+                ):
+                    return DispatchResult(
+                        task_id=task_id,
+                        final_state=TaskState.BLOCKED,
+                        branch=recovery_state.branch,
+                        pr_number=recovery_state.pr_number,
+                        pr_url=recovery_state.pr_url,
+                        head_sha=recovery_state.head_sha,
+                        block_reason=BlockReasonCode.REREAD_VERIFICATION_FAILED.value,
+                        transitions=(),
+                    )
+
+            if recovery_state.worktree_path:
+                self._worktree_service.remove_worktree(
+                    recovery_state.worktree_path, recovery_state.branch
+                )
+            self._lease_manager.release(task_id, owner, token)
+            if self._ledger:
+                self._ledger.clear()
+            return DispatchResult(
+                task_id=task_id,
+                final_state=TaskState.DONE,
+                branch=recovery_state.branch,
+                pr_number=recovery_state.pr_number,
+                pr_url=recovery_state.pr_url,
+                head_sha=recovery_state.head_sha,
+                block_reason=None,
+                transitions=(),
+            )
 
             return DispatchResult(
                 task_id=task_id,
@@ -1021,37 +1190,22 @@ class AutonomousDispatcher:
     def _resolve_remote_main_sha(self, wt_path: Path | str | None = None) -> str:
         try:
             remote = self._config.canonical_remote
-            cmd = ["git"]
-            if wt_path:
-                cmd.extend(["-C", str(wt_path)])
+            cwd = wt_path or self._canonical_root
 
             # Check if remote is configured in this repository
-            chk_remote = subprocess.run(
-                cmd + ["remote", "get-url", remote],
+            chk_remote = self._safe_git_run(
+                ["remote", "get-url", remote],
+                cwd=cwd,
                 capture_output=True,
                 text=True,
             )
             if chk_remote.returncode != 0:
-                # If remote does not exist (e.g. local test repository), check local main
-                rev_proc = subprocess.run(
-                    cmd + ["rev-parse", "refs/heads/main"],
-                    capture_output=True,
-                    text=True,
-                )
-                if rev_proc.returncode == 0 and rev_proc.stdout.strip():
-                    return rev_proc.stdout.strip()
-                rev_master = subprocess.run(
-                    cmd + ["rev-parse", "refs/heads/master"],
-                    capture_output=True,
-                    text=True,
-                )
-                if rev_master.returncode == 0 and rev_master.stdout.strip():
-                    return rev_master.stdout.strip()
+                # Canonical remote must be configured; fail closed if missing
                 return ""
 
-            cmd.extend(["ls-remote", remote, "refs/heads/main"])
-            drift_proc = subprocess.run(
-                cmd,
+            drift_proc = self._safe_git_run(
+                ["ls-remote", remote, "refs/heads/main"],
+                cwd=cwd,
                 capture_output=True,
                 text=True,
             )
@@ -1063,9 +1217,9 @@ class AutonomousDispatcher:
 
     def _get_git_changes(self, worktree_path: Path) -> tuple[str, ...]:
         try:
-            res = subprocess.run(
-                ["git", "status", "--porcelain=v1"],
-                cwd=str(worktree_path),
+            res = self._safe_git_run(
+                ["status", "--porcelain=v1"],
+                cwd=worktree_path,
                 capture_output=True,
                 text=True,
                 check=True,

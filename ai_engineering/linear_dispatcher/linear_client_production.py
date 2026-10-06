@@ -140,7 +140,7 @@ class LinearProductionClient:
         payload_fields = dict(fields)
         if "state" in payload_fields and "stateId" not in payload_fields:
             state_val = payload_fields.pop("state")
-            # If state name provided, resolve to workflow state id if possible
+            # If state name provided, resolve to workflow state id scoped to team
             try:
                 states_query = """
                 query {
@@ -149,6 +149,11 @@ class LinearProductionClient:
                       id
                       name
                       type
+                      team {
+                        id
+                        name
+                        key
+                      }
                     }
                   }
                 }

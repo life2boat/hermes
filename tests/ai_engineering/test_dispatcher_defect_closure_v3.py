@@ -136,6 +136,7 @@ class MockGitHubService(IGitHubService):
 def init_mock_git_repo(repo_dir: Path) -> str:
     """Initialize a git repo with a commit and return HEAD SHA."""
     subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-B", "main"], cwd=str(repo_dir), check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test User"], cwd=str(repo_dir), check=True
     )
@@ -150,6 +151,10 @@ def init_mock_git_repo(repo_dir: Path) -> str:
     subprocess.run(
         ["git", "commit", "-m", "initial commit"], cwd=str(repo_dir), check=True
     )
+    # Add self as remote 'github' so git ls-remote github refs/heads/main works
+    subprocess.run(
+        ["git", "remote", "add", "github", str(repo_dir)], cwd=str(repo_dir), check=True
+    )
     res = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(repo_dir),
@@ -160,13 +165,15 @@ def init_mock_git_repo(repo_dir: Path) -> str:
     return res.stdout.strip()
 
 
-def make_linear_task(task_id: str = "HER-100", title: str = "Test Task") -> LinearTask:
+def make_linear_task(
+    task_id: str = "HER-100", title: str = "Test Task", state: str = "Todo"
+) -> LinearTask:
     return LinearTask(
         id=task_id,
         uuid=f"uuid-{task_id}",
         title=title,
         description="Harmless bounded task description",
-        state="Todo",
+        state=state,
         priority=1,
         assignee="agent",
         labels=("agent:auto", "agent:shadow"),
@@ -733,10 +740,26 @@ def test_recovery_ci_pending_resumes(tmp_path):
 
 def test_recovery_writeback_done(tmp_path):
     """Task interrupted at WRITEBACK_DONE verifies Linear evidence and marks DONE."""
+    from ai_engineering.linear_dispatcher.writeback import ExecutionEvidence
+
     config = DispatcherConfig(worker_id="test-worker")
-    task = make_linear_task("HER-305")
+    task = make_linear_task("HER-305", state="Done")
     linear = MockLinearClient([task])
-    linear.comments[task.id] = ["Evidence verified for head_sha_789"]
+    ev = ExecutionEvidence(
+        task_id=task.id,
+        execution_status="PASS",
+        claim_owner=config.worker_id,
+        branch="agent/her-305",
+        pr_number=389,
+        pr_url="url",
+        base_sha="sha",
+        head_sha="head_sha_789",
+        validation_status="PASS",
+        ci_status="PASS",
+        ci_head_sha="head_sha_789",
+        sha_match="YES",
+    )
+    linear.comments[task.id] = [ev.to_markdown()]
 
     leases = LeaseManager(tmp_path / "leases.json")
     wt_service = WorktreeService(canonical_root=tmp_path, base_sha="sha")
@@ -787,8 +810,6 @@ def test_duplicate_writeback_prevented(tmp_path):
 
     task = make_linear_task("HER-400")
     linear = MockLinearClient([task])
-    linear.comments[task.id] = ["Prior evidence head_sha_abc"]
-    wb = WritebackService(linear)
     ev = ExecutionEvidence(
         task_id=task.id,
         execution_status="PASS",
@@ -803,6 +824,8 @@ def test_duplicate_writeback_prevented(tmp_path):
         ci_head_sha="head_sha_abc",
         sha_match="YES",
     )
+    linear.comments[task.id] = [ev.to_markdown()]
+    wb = WritebackService(linear)
     ok, err = wb.writeback_and_verify(task, ev)
     assert ok is True
     # Did not append a second comment

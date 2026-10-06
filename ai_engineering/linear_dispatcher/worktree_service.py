@@ -87,9 +87,57 @@ class WorktreeService:
                 return None, None, BlockReasonCode.UNKNOWN_BASE_COMMIT
 
         if worktree_path.exists():
-            # If already exists, verify it is a valid, clean git worktree matching expected base
+            # If already exists, verify it is a registered worktree of canonical root with matching branch and base
+            chk_common = subprocess.run(
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+            )
+            canonical_git_dir = subprocess.run(
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(self._canonical_root), "rev-parse", "--git-dir"],
+                capture_output=True,
+                text=True,
+            )
+            if chk_common.returncode != 0 or canonical_git_dir.returncode != 0:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+            common_resolved = Path(chk_common.stdout.strip()).resolve()
+            if not common_resolved.is_absolute():
+                common_resolved = (worktree_path / common_resolved).resolve()
+            canonical_resolved = Path(canonical_git_dir.stdout.strip()).resolve()
+            if not canonical_resolved.is_absolute():
+                canonical_resolved = (Path(self._canonical_root) / canonical_resolved).resolve()
+            if common_resolved != canonical_resolved:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+
+            # Verify worktree is registered in canonical worktree list
+            chk_wt_list = subprocess.run(
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(self._canonical_root), "worktree", "list", "--porcelain"],
+                capture_output=True,
+                text=True,
+            )
+            if chk_wt_list.returncode != 0:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+            wt_lines = chk_wt_list.stdout.splitlines()
+            registered_wts = [
+                Path(line.split(maxsplit=1)[1].strip()).resolve()
+                for line in wt_lines
+                if line.startswith("worktree ")
+            ]
+            if worktree_path.resolve() not in registered_wts:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+
+            # Verify task branch ownership
+            chk_branch = subprocess.run(
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "symbolic-ref", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+            )
+            if chk_branch.returncode != 0 or chk_branch.stdout.strip() != branch_name:
+                return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
+
+            # Verify clean status and matching base HEAD
             chk_git = subprocess.run(
-                ["git", "-C", str(worktree_path), "status", "--porcelain"],
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "status", "--porcelain"],
                 capture_output=True,
                 text=True,
             )
@@ -97,7 +145,7 @@ class WorktreeService:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
             chk_head = subprocess.run(
-                ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "rev-parse", "HEAD"],
                 capture_output=True,
                 text=True,
             )

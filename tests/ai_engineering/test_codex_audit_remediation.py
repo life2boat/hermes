@@ -559,3 +559,322 @@ def test_release_gate_workflow_executes_real_cli_without_echo_bypass():
     assert 'echo "{\\"status\\": \\"PASS\\"}"' not in content
     # Must bind exact PR head SHA
     assert "github.event.pull_request.head.sha" in content
+
+
+# ============================================================================
+# C01 Additions: Death After READY, Build Failure, Unlinked Verification
+# ============================================================================
+
+def test_credential_watcher_death_after_ready_fails_closed(tmp_path: Path):
+    """C01: If watcher process dies after READY before execution, executor must fail closed."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    executor = LinuxCodexTaskExecutor(
+        credentials_path=auth_file,
+        is_windows=False,
+    )
+    executor.health = MagicMock(return_value=True)
+    executor._setup_ephemeral_credentials = MagicMock()
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = 1
+    mock_proc.returncode = 1
+
+    def start_watcher(h):
+        executor._watcher_proc = mock_proc
+
+    executor._start_credential_unlinking_watcher = start_watcher
+
+    task = LinearTask(
+        id="HER-100",
+        uuid="uuid-1",
+        title="Test",
+        description="",
+        state="Todo",
+        priority=1,
+        assignee="agent",
+        labels=(),
+        created_at="",
+        updated_at="",
+        url="",
+    )
+
+    result = executor.execute(task, worktree, "base_sha")
+    assert result.status == "FAILED"
+    assert result.error_reason == "CREDENTIAL_ISOLATION_FAILED"
+
+
+def test_command_build_failure_cleans_up_ephemeral_credentials(tmp_path: Path):
+    """C01: Exception in build_bwrap_command must invoke _cleanup_ephemeral_credentials."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    executor = LinuxCodexTaskExecutor(
+        credentials_path=auth_file,
+        is_windows=False,
+    )
+    executor.health = MagicMock(return_value=True)
+    executor._setup_ephemeral_credentials = MagicMock()
+    executor._start_credential_unlinking_watcher = MagicMock()
+    cleanup_mock = MagicMock()
+    executor._cleanup_ephemeral_credentials = cleanup_mock
+
+    executor.build_bwrap_command = MagicMock(side_effect=RuntimeError("BUILD_FAIL"))
+
+    task = LinearTask(
+        id="HER-100",
+        uuid="uuid-1",
+        title="Test",
+        description="",
+        state="Todo",
+        priority=1,
+        assignee="agent",
+        labels=(),
+        created_at="",
+        updated_at="",
+        url="",
+    )
+
+    result = executor.execute(task, worktree, "base_sha")
+    assert result.status == "FAILED"
+    assert cleanup_mock.called
+
+
+def test_unlinked_verification_failure_fails_closed(tmp_path: Path):
+    """C01: If credentials are not unlinked during run, execute must fail closed."""
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    executor = LinuxCodexTaskExecutor(
+        credentials_path=auth_file,
+        is_windows=False,
+    )
+    executor.health = MagicMock(return_value=True)
+    executor._setup_ephemeral_credentials = MagicMock()
+    executor._start_credential_unlinking_watcher = MagicMock()
+    executor._cleanup_ephemeral_credentials = MagicMock()
+    executor._runner = MagicMock(return_value=MagicMock(returncode=0))
+    executor._verify_credential_unlinked = MagicMock(return_value=False)
+
+    task = LinearTask(
+        id="HER-100",
+        uuid="uuid-1",
+        title="Test",
+        description="",
+        state="Todo",
+        priority=1,
+        assignee="agent",
+        labels=(),
+        created_at="",
+        updated_at="",
+        url="",
+    )
+
+    result = executor.execute(task, worktree, "base_sha")
+    assert result.status == "FAILED"
+    assert result.error_reason == "CREDENTIAL_UNLINK_VERIFICATION_FAILED"
+
+
+# ============================================================================
+# C02 Additions: Candidate Host Execution Blocking
+# ============================================================================
+
+def test_validator_blocks_candidate_host_test_execution(tmp_path: Path):
+    """C02: LocalValidator blocks run_tests=True on untrusted candidate worktrees."""
+    untrusted = tmp_path / "untrusted"
+    untrusted.mkdir()
+    with patch.object(LocalValidator, "run_diff_check", return_value=(True, "")):
+        ok, res = LocalValidator.run_validation(untrusted, run_tests=True, trusted_root=tmp_path)
+    assert ok is False
+    assert "pytest" in res
+    assert "forbidden" in res["pytest"]
+
+
+# ============================================================================
+# H05 & H06 Additions: COMMITTED & BRANCH_PUSHED In Ledger, Fencing Before Cleanup
+# ============================================================================
+
+def test_dispatcher_records_committed_and_branch_pushed_in_ledger(tmp_path: Path):
+    """H05: Dispatcher records durable COMMITTED and BRANCH_PUSHED states in ledger."""
+    from ai_engineering.linear_dispatcher.task_executor import ExecutionResult
+
+    ledger_path = tmp_path / "ledger.json"
+    ledger = ExecutionLedger(ledger_path)
+
+    mock_leases = MagicMock()
+    mock_leases.is_held_by_foreign_worker.return_value = False
+    mock_leases.claim.return_value = (True, MagicMock(claim_token="tok-1"), None)
+    mock_leases.verify_lease.return_value = True
+
+    mock_executor = MagicMock()
+    mock_executor.execute.return_value = ExecutionResult(
+        status="SUCCESS",
+        changed_files=("feat.py",),
+        execution_id="exec-1",
+        executor_name="MockExecutor",
+    )
+
+    mock_validator = MagicMock()
+    mock_validator.run_validation.return_value = (True, {})
+
+    mock_github = MagicMock()
+    from ai_engineering.linear_dispatcher.github_service import PRCreationResult, CIStatusResult
+    mock_github.create_draft_pr.return_value = (
+        True,
+        PRCreationResult(
+            pr_number=42,
+            pr_url="https://pr/42",
+            base_sha="canonical123",
+            head_sha="head123",
+            is_draft=True,
+        ),
+        None,
+    )
+    mock_github.get_ci_status.return_value = (True, CIStatusResult(overall_status="PASS", head_sha="head123", runs=(), details={}), None)
+
+    dispatcher = AutonomousDispatcher(
+        config=DispatcherConfig(),
+        linear_client=MagicMock(),
+        lease_manager=mock_leases,
+        worktree_service=MagicMock(),
+        github_service=mock_github,
+        worktree_base_dir=tmp_path / "worktrees",
+        canonical_main_sha="canonical123",
+        task_executor=mock_executor,
+        execution_ledger=ledger,
+    )
+    dispatcher._resolve_remote_main_sha = MagicMock(return_value="canonical123")
+    dispatcher._validator = mock_validator
+
+    task = LinearTask(
+        id="HER-100",
+        uuid="uuid-1",
+        title="Test Task",
+        description="",
+        state="Todo",
+        priority=1,
+        assignee="agent",
+        labels=("agent:auto", "agent:shadow"),
+        created_at="2026-10-05T00:00:00Z",
+        updated_at="2026-10-05T00:00:00Z",
+        url="https://linear.app",
+    )
+
+    states_written = []
+    original_write = ledger.write_state
+    def tracking_write(st):
+        states_written.append(st.state)
+        original_write(st)
+    ledger.write_state = tracking_write
+
+    wt_path = tmp_path / "wt"
+    wt_path.mkdir(parents=True, exist_ok=True)
+    dispatcher._worktree_service.create_worktree.return_value = (wt_path, "feature-branch", None)
+    dispatcher._get_git_changes = MagicMock(return_value=("feat.py",))
+
+    with patch.object(AutonomousDispatcher, "_safe_git_run") as mock_safe_git, \
+         patch.object(LocalValidator, "run_validation", return_value=(True, {})):
+        def fake_git(args, **kw):
+            if "rev-parse" in args:
+                return MagicMock(returncode=0, stdout="head123\n")
+            if "remote" in args:
+                return MagicMock(returncode=0, stdout="git@github.com:life2boat/hermes.git\n")
+            return MagicMock(returncode=0, stdout="")
+        mock_safe_git.side_effect = fake_git
+
+        res = dispatcher.dispatch_one_task([task])
+
+    assert TaskState.COMMITTED.value in states_written
+    assert TaskState.BRANCH_PUSHED.value in states_written
+
+
+def test_recovery_fencing_precedes_cleanup_and_effects(tmp_path: Path):
+    """H06: Stale foreign lease halts recovery before any worktree removal."""
+    mock_leases = MagicMock()
+    mock_leases.verify_lease.return_value = False
+    mock_leases.claim.return_value = (False, None, BlockReasonCode.ACTIVE_FOREIGN_LEASE)
+
+    mock_worktree = MagicMock()
+
+    dispatcher = AutonomousDispatcher(
+        config=DispatcherConfig(),
+        linear_client=MagicMock(),
+        lease_manager=mock_leases,
+        worktree_service=mock_worktree,
+        github_service=MagicMock(),
+        worktree_base_dir=tmp_path / "worktrees",
+        canonical_main_sha="canonical123",
+    )
+
+    recovery_state = ExecutionState(
+        task_id="HER-100",
+        state=TaskState.WRITEBACK_DONE.value,
+        claim_owner="foreign-worker",
+        claim_token="token-1",
+        worktree_path=str(tmp_path / "foreign_wt"),
+        branch="agent/her-100",
+        pr_number=1,
+        pr_url="https://github.com/life2boat/hermes/pull/1",
+        head_sha="head123",
+        base_sha="base123",
+    )
+
+    res = dispatcher.recover_task(recovery_state)
+    assert res.final_state == TaskState.BLOCKED
+    assert res.block_reason == BlockReasonCode.ACTIVE_FOREIGN_LEASE.value
+    assert not mock_worktree.remove_worktree.called
+
+
+# ============================================================================
+# H10 Additions: Header-Only Database Rejected
+# ============================================================================
+
+def test_restore_rejects_header_only_corrupt_database(tmp_path: Path):
+    """H10: Ensure restore_quick_snapshot rejects 16-byte SQLite format 3 dummy header."""
+    home = tmp_path / "hermes_home"
+    home.mkdir()
+    valid_db = home / "state.db"
+    with sqlite3.connect(valid_db) as conn:
+        conn.execute("CREATE TABLE t (id INT);")
+
+    snap_dir = home / "state-snapshots" / "snap-header-only"
+    snap_dir.mkdir(parents=True)
+    (snap_dir / "state.db").write_bytes(b"SQLite format 3\x00" + b"\x00" * 84)
+    manifest = {"files": {"state.db": 100}}
+    (snap_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    restored = restore_quick_snapshot("snap-header-only", hermes_home=home)
+    assert restored is False
+
+
+# ============================================================================
+# N01 & N02: Secret Scanner CLI & Backup Handle Closure
+# ============================================================================
+
+def test_secret_scanner_nonexistent_path_fails_closed(tmp_path: Path):
+    """N01: Ensure secret_scanner.main returns exit code 1 when target paths do not exist."""
+    from scripts.secret_scanner import main as scanner_main
+    missing_file = tmp_path / "nonexistent_target_dir_or_file"
+    exit_code = scanner_main([str(missing_file)])
+    assert exit_code == 1
+
+
+def test_safe_copy_db_does_not_leak_connection_handle(tmp_path: Path):
+    """N02: Ensure _safe_copy_db explicitly closes verify_conn so destination can be deleted immediately."""
+    src = tmp_path / "src.db"
+    with sqlite3.connect(src) as conn:
+        conn.execute("CREATE TABLE t (id INT);")
+        conn.execute("INSERT INTO t VALUES (1);")
+    dst = tmp_path / "dst.db"
+    ok = _safe_copy_db(src, dst)
+    assert ok is True
+    # Deleting dst immediately must succeed without WinError 32
+    dst.unlink()
+    assert not dst.exists()

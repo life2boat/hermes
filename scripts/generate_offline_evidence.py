@@ -171,25 +171,41 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
     rb_health = attestation_cfg.get("rollback_health_required", True)
     rb_attempt_max = attestation_cfg.get("rollback_attempt_count_max", 1)
 
-    # Finding H11: Return BLOCKED when a real rehearsal receipt is absent.
-    # Bind verified receipt, digest, and health results rather than promoting docker inspect.
+    # Finding H11: Return BLOCKED when a real rehearsal receipt is absent or unverified.
+    # Bind verified receipt, exact target_sha, rollback revision, digest, health hash, and file SHA-256.
     rehearsal_path = os.environ.get("HERMES_ROLLBACK_REHEARSAL_PATH", "deploy/rollback-rehearsal.json")
     if not os.path.isfile(rehearsal_path):
         return {"status": "BLOCKED"}
 
     try:
-        with open(rehearsal_path, "r", encoding="utf-8") as f:
-            rehearsal_data = json.load(f)
+        raw_bytes = Path(rehearsal_path).read_bytes()
+        rehearsal_data = json.loads(raw_bytes.decode("utf-8"))
+        receipt_id = rehearsal_data.get("receipt_id", "")
+        rehearsal_type = rehearsal_data.get("rehearsal_type", "")
+        health_hash = rehearsal_data.get("health_evidence_sha256", "")
+
+        import re
+        sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
+
         if (
             rehearsal_data.get("status") != "PASS"
-            or not rehearsal_data.get("receipt_id")
+            or not receipt_id
+            or not receipt_id.startswith("receipt-rollback-")
             or rehearsal_data.get("rollback_image_digest") != digest
+            or rehearsal_data.get("rollback_revision") != revision
+            or rehearsal_data.get("target_sha") != target_sha
             or rehearsal_data.get("health_check_status") != "PASS"
+            or rehearsal_type not in ("live-container-rollback", "docker-compose-revert", "isolated-rollback-drill")
+            or not health_hash
+            or not sha256_pattern.match(health_hash)
+            or not rehearsal_data.get("executed_at")
         ):
             return {"status": "BLOCKED"}
+
+        rehearsal_receipt_sha256 = hashlib.sha256(raw_bytes).hexdigest()
         canonical_rehearsal = rehearsal_data.get(
             "canonical_rehearsal_evidence",
-            f"artifact:rollback-rehearsal:{rehearsal_data['receipt_id']}:pass"
+            f"artifact:rollback-rehearsal:{receipt_id}:{rehearsal_receipt_sha256[:16]}:pass"
         )
     except Exception:
         return {"status": "BLOCKED"}

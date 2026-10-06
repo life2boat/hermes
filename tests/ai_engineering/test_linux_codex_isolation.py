@@ -289,6 +289,7 @@ def test_native_linux_command_execution(tmp_path, monkeypatch):
     monkeypatch.setattr(executor, "health", lambda: True)
     monkeypatch.setattr(executor, "_setup_ephemeral_credentials", lambda home: None)
     monkeypatch.setattr(executor, "_start_credential_unlinking_watcher", lambda home: None)
+    monkeypatch.setattr(executor, "_verify_credential_unlinked", lambda home: True)
     monkeypatch.setattr(executor, "_cleanup_ephemeral_credentials", lambda home: None)
     res = executor.execute(make_linear_task(), wt, "base_sha")
 
@@ -420,6 +421,8 @@ def test_dispatcher_integration_with_linux_codex_executor(tmp_path):
         canonical_main_sha=canonical_sha,
         task_executor=executor,
     )
+
+    dispatcher._resolve_remote_main_sha = lambda *a, **kw: canonical_sha
 
     result = dispatcher.dispatch_one_task([task])
     assert result is not None

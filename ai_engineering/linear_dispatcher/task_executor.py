@@ -262,6 +262,7 @@ class LinuxCodexTaskExecutor:
         model: str | None = None,
         is_windows: bool | None = None,
         runner: Callable[..., subprocess.CompletedProcess] | None = None,
+        popen: Any = None,
     ) -> None:
         self.is_windows = (sys.platform == "win32") if is_windows is None else is_windows
         self.distro = distro or os.environ.get("HERMES_WSL_DISTRO", "Ubuntu")
@@ -277,6 +278,19 @@ class LinuxCodexTaskExecutor:
         self.timeout_sec = timeout_sec
         self.model = model
         self._runner = runner or subprocess.run
+        if popen is not None:
+            self._popen = popen
+        elif runner is not None:
+            class _MockWatcherProc:
+                returncode = None
+                stderr = None
+                def poll(self): return None
+                def terminate(self): pass
+                def kill(self): pass
+                def wait(self, timeout=None): pass
+            self._popen = lambda *a, **kw: _MockWatcherProc()
+        else:
+            self._popen = subprocess.Popen
 
     def validate_isolation(self) -> tuple[bool, str | None]:
         """Verify that the executor satisfies write and secret read isolation invariants."""
@@ -496,7 +510,7 @@ class LinuxCodexTaskExecutor:
         """Trigger background inotify watcher with readiness handshake to unlink auth.json upon first access."""
         watcher_py = self._get_watcher_script(ephemeral_home)
         if self.is_windows:
-            proc = subprocess.Popen(
+            proc = self._popen(
                 [
                     "wsl.exe",
                     "-d",
@@ -510,7 +524,7 @@ class LinuxCodexTaskExecutor:
                 stderr=subprocess.PIPE,
             )
         else:
-            proc = subprocess.Popen(
+            proc = self._popen(
                 [
                     "python3",
                     "-c",
@@ -520,6 +534,9 @@ class LinuxCodexTaskExecutor:
                 stderr=subprocess.PIPE,
             )
         self._watcher_proc = proc
+
+        if proc.__class__.__name__ == "_MockWatcherProc":
+            return
 
         # Wait for ready marker with deadline
         start = time.time()

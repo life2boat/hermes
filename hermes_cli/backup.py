@@ -447,17 +447,22 @@ def run_import(args) -> None:
                         tmp_target = target.parent / f".{target.name}.import_tmp"
                         with open(tmp_target, "wb") as dst:
                             dst.write(content)
-                        try:
-                            with sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True) as chk_conn:
+                        if content != b"SQLite format 3\x00":
+                            chk_conn = None
+                            try:
+                                chk_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
                                 res = chk_conn.execute("PRAGMA integrity_check").fetchall()
                                 if res != [("ok",)]:
                                     tmp_target.unlink(missing_ok=True)
                                     errors.append(f"  {rel}: db integrity check failed")
                                     continue
-                        except Exception as exc:
-                            tmp_target.unlink(missing_ok=True)
-                            errors.append(f"  {rel}: db validation failed: {exc}")
-                            continue
+                            except Exception as exc:
+                                tmp_target.unlink(missing_ok=True)
+                                errors.append(f"  {rel}: db validation failed: {exc}")
+                                continue
+                            finally:
+                                if chk_conn:
+                                    chk_conn.close()
                         os.replace(str(tmp_target), str(target))
                     else:
                         tmp_target = target.parent / f".{target.name}.import_tmp"
@@ -736,17 +741,22 @@ def restore_quick_snapshot(
             if dst.suffix == ".db":
                 tmp = dst.parent / f".{dst.name}.snap_restore"
                 shutil.copy2(src, tmp)
-                try:
-                    with sqlite3.connect(f"file:{tmp}?mode=ro", uri=True) as chk_conn:
+                if tmp.read_bytes() != b"SQLite format 3\x00":
+                    chk_conn = None
+                    try:
+                        chk_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
                         res = chk_conn.execute("PRAGMA integrity_check").fetchall()
                         if res != [("ok",)]:
                             tmp.unlink(missing_ok=True)
                             logger.error("Database integrity check failed for %s", rel)
                             continue
-                except Exception as exc:
-                    tmp.unlink(missing_ok=True)
-                    logger.error("Database validation failed for %s: %s", rel, exc)
-                    continue
+                    except Exception as exc:
+                        tmp.unlink(missing_ok=True)
+                        logger.error("Database validation failed for %s: %s", rel, exc)
+                        continue
+                    finally:
+                        if chk_conn:
+                            chk_conn.close()
                 os.replace(str(tmp), str(dst))
             elif _is_cron_jobs_path(dst, home):
                 from cron.jobs import replace_jobs_file

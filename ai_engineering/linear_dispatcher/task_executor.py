@@ -263,6 +263,7 @@ class LinuxCodexTaskExecutor:
         is_windows: bool | None = None,
         runner: Callable[..., subprocess.CompletedProcess] | None = None,
         popen: Any = None,
+        allow_unsupported_codex_credential_boundary: bool = False,
     ) -> None:
         self.is_windows = (sys.platform == "win32") if is_windows is None else is_windows
         self.distro = distro or os.environ.get("HERMES_WSL_DISTRO", "Ubuntu")
@@ -277,6 +278,10 @@ class LinuxCodexTaskExecutor:
         )
         self.timeout_sec = timeout_sec
         self.model = model
+        self.allow_unsupported_codex_credential_boundary = (
+            allow_unsupported_codex_credential_boundary
+            or (os.environ.get("ALLOW_UNSUPPORTED_CODEX_CREDENTIAL_BOUNDARY", "").lower() in ("1", "true"))
+        )
         self._runner = runner or subprocess.run
         if popen is not None:
             self._popen = popen
@@ -691,13 +696,24 @@ class LinuxCodexTaskExecutor:
                 error_reason="INVALID_WORKTREE_PATH",
             )
 
-        if not self.health():
+        if not self.allow_unsupported_codex_credential_boundary:
             return ExecutionResult(
-                status="FAILED",
+                status="BLOCKED",
                 changed_files=(),
                 execution_id=exec_id,
                 executor_name="LinuxCodexTaskExecutor",
-                error_reason="LINUX_CODEX_UNAVAILABLE",
+                error_reason="CODEX_CREDENTIAL_BOUNDARY_UNSUPPORTED",
+            )
+
+        if not self.health():
+            iso_ok, iso_err = self.validate_isolation()
+            reason = iso_err if not iso_ok else "LINUX_CODEX_UNAVAILABLE"
+            return ExecutionResult(
+                status="BLOCKED" if reason == "CODEX_CREDENTIAL_BOUNDARY_UNSUPPORTED" else "FAILED",
+                changed_files=(),
+                execution_id=exec_id,
+                executor_name="LinuxCodexTaskExecutor",
+                error_reason=reason,
             )
 
         try:

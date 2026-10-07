@@ -153,60 +153,69 @@ class LinearProductionClient:
             return False
 
         payload_fields = dict(fields)
-        if "state" in payload_fields and "stateId" not in payload_fields:
-            state_val = payload_fields.pop("state")
-            # If state name provided, resolve to workflow state id scoped to team
-            try:
-                issue_team_id = self._issue_teams.get(issue_id) or self._issue_teams.get(issue.uuid) or self._issue_teams.get(issue.id)
-                states_query = """
-                query {
-                  workflowStates {
-                    nodes {
-                      id
-                      name
-                      type
-                      team {
-                        id
-                        name
-                        key
-                      }
-                    }
-                  }
-                }
-                """
-                s_res = self._graphql_request(states_query)
-                nodes = (
-                    s_res.get("data", {})
-                    .get("workflowStates", {})
-                    .get("nodes", [])
-                )
-                if issue_team_id:
-                    team_nodes = [
-                        n for n in nodes
-                        if n.get("team", {}).get("id") == issue_team_id
-                        or n.get("team", {}).get("key") == issue_team_id
-                    ]
-                else:
-                    team_nodes = nodes
+        issue_team_id = (
+            self._issue_teams.get(issue_id)
+            or self._issue_teams.get(issue.uuid)
+            or self._issue_teams.get(issue.id)
+        )
+        if not issue_team_id:
+            # Invariant H04: Must have authoritative team metadata; fail closed
+            return False
 
-                match = next(
-                    (
-                        n["id"]
-                        for n in team_nodes
-                        if n.get("name", "").lower() == str(state_val).lower()
-                        or (
-                            str(state_val).lower() in ("done", "completed")
-                            and n.get("type", "").lower() in ("completed", "done")
-                        )
-                    ),
-                    None,
-                )
-                if match:
-                    payload_fields["stateId"] = match
-                else:
-                    payload_fields["stateId"] = str(state_val)
-            except Exception:
-                payload_fields["stateId"] = str(state_val)
+        states_query = """
+        query {
+          workflowStates {
+            nodes {
+              id
+              name
+              type
+              team {
+                id
+                name
+                key
+              }
+            }
+          }
+        }
+        """
+        try:
+            s_res = self._graphql_request(states_query)
+            nodes = (
+                s_res.get("data", {})
+                .get("workflowStates", {})
+                .get("nodes", [])
+            )
+            team_nodes = [
+                n for n in nodes
+                if n.get("team", {}).get("id") == issue_team_id
+                or n.get("team", {}).get("key") == issue_team_id
+            ]
+            if not team_nodes:
+                return False
+
+            if "state" in payload_fields and "stateId" not in payload_fields:
+                state_val = payload_fields.pop("state")
+                matching_nodes = [
+                    n["id"]
+                    for n in team_nodes
+                    if n.get("name", "").lower() == str(state_val).lower()
+                    or (
+                        str(state_val).lower() in ("done", "completed")
+                        and n.get("type", "").lower() in ("completed", "done")
+                    )
+                ]
+                if len(matching_nodes) != 1:
+                    # Invariant H04: Must be unambiguous match within issue team; no raw/global fallback
+                    return False
+                payload_fields["stateId"] = matching_nodes[0]
+
+            elif "stateId" in payload_fields:
+                state_id_val = payload_fields["stateId"]
+                if not any(n.get("id") == state_id_val for n in team_nodes):
+                    return False
+
+        except Exception:
+            return False
 
         query = """
         mutation($id: String!, $input: IssueUpdateInput!) {

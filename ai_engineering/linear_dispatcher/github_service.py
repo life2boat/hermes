@@ -57,6 +57,12 @@ class IGitHubService(Protocol):
     ) -> tuple[bool, PRCreationResult | None, str | None]:
         ...
 
+    def get_pr_for_branch(
+        self,
+        branch: str,
+    ) -> tuple[bool, PRCreationResult | None]:
+        ...
+
 
 class GitHubService(IGitHubService):
     """Production GitHub client using gh CLI."""
@@ -224,3 +230,39 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
             ), None
         except Exception as e:
             return False, None, str(e)
+
+    def get_pr_for_branch(
+        self,
+        branch: str,
+    ) -> tuple[bool, PRCreationResult | None]:
+        cmd = [
+            "gh",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--repo",
+            self._repo,
+            "--state",
+            "open",
+            "--json",
+            "number,url,isDraft,headRefOid,baseRefName",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            return False, None
+        try:
+            prs = json.loads(res.stdout)
+            if prs and len(prs) == 1:
+                p = prs[0]
+                if p.get("isDraft") and p.get("baseRefName") == "main":
+                    return True, PRCreationResult(
+                        pr_number=p.get("number", 0),
+                        pr_url=p.get("url", ""),
+                        base_sha="",
+                        head_sha=p.get("headRefOid", ""),
+                        is_draft=True,
+                    )
+            return False, None
+        except Exception:
+            return False, None

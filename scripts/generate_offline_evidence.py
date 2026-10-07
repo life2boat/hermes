@@ -12,6 +12,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+TRUSTED_REHEARSAL_PRODUCERS = frozenset({
+    "healbite-rehearsal-engine",
+    "hermes-rollback-runner",
+    "healbite-production-drill",
+    "healbite-production",
+})
+
 def check_secret_presence(manifest_secrets):
     approved_path = manifest_secrets.get("approved_source_path")
     approved_uids = manifest_secrets.get("approved_owner_uids", [])
@@ -188,11 +195,18 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         import re
         sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
 
+        if not rehearsal_producer or rehearsal_producer not in TRUSTED_REHEARSAL_PRODUCERS:
+            return {"status": "BLOCKED"}
+
         executed_at_str = rehearsal_data.get("executed_at", "")
         if not executed_at_str:
             return {"status": "BLOCKED"}
         try:
-            datetime.datetime.fromisoformat(executed_at_str.replace("Z", "+00:00"))
+            executed_dt = datetime.datetime.fromisoformat(executed_at_str.replace("Z", "+00:00"))
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            delta_sec = (now_dt - executed_dt).total_seconds()
+            if delta_sec < -300 or delta_sec > 48 * 3600:
+                return {"status": "BLOCKED"}
         except Exception:
             return {"status": "BLOCKED"}
 
@@ -208,6 +222,12 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             return {"status": "BLOCKED"}
         health_json = json.loads(health_bytes.decode("utf-8"))
         if health_json.get("status") != "PASS" and health_json.get("health_status") != "PASS":
+            return {"status": "BLOCKED"}
+        if (
+            health_json.get("target_sha") != target_sha
+            or health_json.get("rollback_image_digest") != digest
+            or health_json.get("rollback_revision") != revision
+        ):
             return {"status": "BLOCKED"}
 
         prov = rehearsal_data.get("execution_provenance")

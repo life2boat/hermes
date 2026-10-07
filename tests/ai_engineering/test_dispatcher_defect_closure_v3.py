@@ -132,6 +132,12 @@ class MockGitHubService(IGitHubService):
             BlockReasonCode.CI_FAILED,
         )
 
+    def get_pr_for_branch(self, branch: str) -> tuple[bool, PRCreationResult | None]:
+        for item in self.created_prs:
+            if item["branch"] == branch:
+                return True, item["pr"]
+        return False, None
+
 
 def init_mock_git_repo(repo_dir: Path) -> str:
     """Initialize a git repo with a commit and return HEAD SHA."""

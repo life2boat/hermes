@@ -390,6 +390,12 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Exit with code 1 if findings exist",
     )
+    parser.add_argument(
+        "--fail-on-skipped",
+        action="store_true",
+        default=False,
+        help="Exit with code 1 if files were skipped",
+    )
     args = parser.parse_args(argv)
 
     findings_count = 0
@@ -459,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if findings_count > 0 or error_count > 0:
         print(f"FAIL: {findings_count} findings, {error_count} errors.")
+        return 1
+    if args.fail_on_skipped and skipped_count > 0:
+        print(f"FAIL: {skipped_count} files skipped with --fail-on-skipped.", file=sys.stderr)
         return 1
     if inspected_count == 0:
         print("FAIL: No files inspected (fail-closed).", file=sys.stderr)

@@ -295,8 +295,8 @@ class DispatcherWorker:
                     task_executor=executor,
                 )
                 rec_result = dispatcher.recover_task(state)
-                if rec_result is not None and rec_result.final_state != TaskState.DONE:
-                    reason = rec_result.block_reason or "UNRESOLVED_RECOVERY_STATE"
+                if rec_result is None or rec_result.final_state != TaskState.DONE:
+                    reason = (rec_result.block_reason if rec_result else "UNRESOLVED_RECOVERY_STATE") or "UNRESOLVED_RECOVERY_STATE"
                     logger.error(
                         f"Task recovery failed: {reason}. BLOCKED."
                     )

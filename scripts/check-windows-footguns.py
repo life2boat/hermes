@@ -338,9 +338,12 @@ def should_scan_file(path: Path) -> bool:
         if str(path).endswith(suffix):
             return False
     # Skip self and docs that intentionally mention the patterns
-    rel = path.relative_to(REPO_ROOT).as_posix()
-    if rel in EXCLUDED_FILES:
-        return False
+    try:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in EXCLUDED_FILES:
+            return False
+    except ValueError:
+        pass
     # Only scan text files (rough heuristic — .py, .md, .sh, .ps1, .yaml, etc.)
     if path.suffix in {".py", ".pyw", ".pyi"}:
         return True

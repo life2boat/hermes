@@ -459,16 +459,42 @@ def run_import(args) -> None:
                             chk_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
                             res = chk_conn.execute("PRAGMA integrity_check").fetchall()
                             if res != [("ok",)]:
+                                chk_conn.close()
+                                chk_conn = None
                                 tmp_target.unlink(missing_ok=True)
                                 errors.append(f"  {rel}: db integrity check failed")
                                 continue
                             fk_res = chk_conn.execute("PRAGMA foreign_key_check").fetchall()
                             if fk_res:
+                                chk_conn.close()
+                                chk_conn = None
                                 tmp_target.unlink(missing_ok=True)
                                 errors.append(f"  {rel}: db foreign key check failed ({len(fk_res)} violations)")
                                 continue
-                            chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                            candidate_tables = {
+                                r[0] for r in chk_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                            }
+                            if target.exists():
+                                existing_conn = None
+                                try:
+                                    existing_conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+                                    existing_tables = {
+                                        r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                                    }
+                                    missing_tables = existing_tables - candidate_tables
+                                    if missing_tables:
+                                        chk_conn.close()
+                                        chk_conn = None
+                                        tmp_target.unlink(missing_ok=True)
+                                        errors.append(f"  {rel}: db schema incompatible, missing tables: {missing_tables}")
+                                        continue
+                                finally:
+                                    if existing_conn is not None:
+                                        existing_conn.close()
                         except Exception as exc:
+                            if chk_conn is not None:
+                                chk_conn.close()
+                                chk_conn = None
                             tmp_target.unlink(missing_ok=True)
                             errors.append(f"  {rel}: db validation failed: {exc}")
                             continue
@@ -476,11 +502,12 @@ def run_import(args) -> None:
                             if chk_conn is not None:
                                 chk_conn.close()
 
-                        # Verify writer quiescence before proceeding with backup and file swap
+                        # Verify writer quiescence and truncate WAL before file swap
                         if target.exists():
                             quiesce_conn = None
                             try:
-                                quiesce_conn = sqlite3.connect(str(target), timeout=1.0)
+                                quiesce_conn = sqlite3.connect(str(target), timeout=2.0)
+                                quiesce_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                                 quiesce_conn.execute("BEGIN EXCLUSIVE")
                                 quiesce_conn.execute("ROLLBACK")
                             except Exception as q_exc:
@@ -507,7 +534,12 @@ def run_import(args) -> None:
                             post_chk = None
                             try:
                                 post_chk = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
-                                post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                                p_res = post_chk.execute("PRAGMA integrity_check").fetchall()
+                                if p_res != [("ok",)]:
+                                    raise RuntimeError("post-publication integrity check failed")
+                                p_fk = post_chk.execute("PRAGMA foreign_key_check").fetchall()
+                                if p_fk:
+                                    raise RuntimeError(f"post-publication foreign key check failed ({len(p_fk)} violations)")
                             finally:
                                 if post_chk is not None:
                                     post_chk.close()
@@ -806,11 +838,15 @@ def restore_quick_snapshot(
                     chk_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
                     res = chk_conn.execute("PRAGMA integrity_check").fetchall()
                     if res != [("ok",)]:
+                        chk_conn.close()
+                        chk_conn = None
                         tmp.unlink(missing_ok=True)
                         logger.error("Database integrity check failed for %s", rel)
                         continue
                     fk_res = chk_conn.execute("PRAGMA foreign_key_check").fetchall()
                     if fk_res:
+                        chk_conn.close()
+                        chk_conn = None
                         tmp.unlink(missing_ok=True)
                         logger.error(
                             "Database foreign key check failed for %s (%d violations)",
@@ -818,8 +854,30 @@ def restore_quick_snapshot(
                             len(fk_res),
                         )
                         continue
-                    chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                    candidate_tables = {
+                        r[0] for r in chk_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    }
+                    if dst.exists():
+                        existing_conn = None
+                        try:
+                            existing_conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+                            existing_tables = {
+                                r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                            }
+                            missing_tables = existing_tables - candidate_tables
+                            if missing_tables:
+                                chk_conn.close()
+                                chk_conn = None
+                                tmp.unlink(missing_ok=True)
+                                logger.error("Database schema incompatible for %s, missing tables: %s", rel, missing_tables)
+                                continue
+                        finally:
+                            if existing_conn is not None:
+                                existing_conn.close()
                 except Exception as exc:
+                    if chk_conn is not None:
+                        chk_conn.close()
+                        chk_conn = None
                     tmp.unlink(missing_ok=True)
                     logger.error("Database validation failed for %s: %s", rel, exc)
                     continue
@@ -827,11 +885,12 @@ def restore_quick_snapshot(
                     if chk_conn is not None:
                         chk_conn.close()
 
-                # Verify writer quiescence before proceeding with backup and file swap
+                # Verify writer quiescence and truncate WAL before file swap
                 if dst.exists():
                     quiesce_conn = None
                     try:
-                        quiesce_conn = sqlite3.connect(str(dst), timeout=1.0)
+                        quiesce_conn = sqlite3.connect(str(dst), timeout=2.0)
+                        quiesce_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                         quiesce_conn.execute("BEGIN EXCLUSIVE")
                         quiesce_conn.execute("ROLLBACK")
                     except Exception as q_exc:
@@ -858,7 +917,12 @@ def restore_quick_snapshot(
                     post_chk = None
                     try:
                         post_chk = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
-                        post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                        p_res = post_chk.execute("PRAGMA integrity_check").fetchall()
+                        if p_res != [("ok",)]:
+                            raise RuntimeError("post-publication integrity check failed")
+                        p_fk = post_chk.execute("PRAGMA foreign_key_check").fetchall()
+                        if p_fk:
+                            raise RuntimeError(f"post-publication foreign key check failed ({len(p_fk)} violations)")
                     finally:
                         if post_chk is not None:
                             post_chk.close()

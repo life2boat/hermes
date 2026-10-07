@@ -36,6 +36,7 @@ class ExecutionEvidence:
         exec_id = self.execution_id or self.task_id
         return f"""### Hermes Autonomous Loop Execution Evidence
 
+- **PRODUCER:** `linear-dispatcher-worker`
 - **EXECUTION_ID:** `{exec_id}`
 - **EXECUTION_STATUS:** `{self.execution_status}`
 - **CLAIM_OWNER:** `{self.claim_owner}`
@@ -96,6 +97,10 @@ class WritebackService:
                 parts = line[4:-1].split(":** `", 1)
                 if len(parts) == 2:
                     fields[parts[0]] = parts[1]
+
+        # Require authentic producer
+        if fields.get("PRODUCER") != "linear-dispatcher-worker":
+            return False
 
         # Require successful status and reject failure markers
         if fields.get("EXECUTION_STATUS") != "PASS":

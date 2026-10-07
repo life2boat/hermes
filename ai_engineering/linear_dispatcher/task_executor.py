@@ -41,6 +41,10 @@ class ITaskExecutor(Protocol):
         """Return True if executor dependencies and runtimes are available."""
         ...
 
+    def execution_ready(self) -> bool:
+        """Return True if executor is functionally capable of executing tasks safely."""
+        ...
+
 
 class CodexTaskExecutor:
     """Production task executor invoking Codex non-interactively within the worktree sandbox."""
@@ -74,6 +78,10 @@ class CodexTaskExecutor:
             return res.returncode == 0
         except Exception:
             return False
+
+    def execution_ready(self) -> bool:
+        """Return False for CodexTaskExecutor as host unsandboxed execution is not production ready."""
+        return False
 
     def execute(
         self,
@@ -379,6 +387,20 @@ class LinuxCodexTaskExecutor:
                 return False
 
         # 2. Verify command isolation invariants
+        ok, _ = self.validate_isolation()
+        return ok
+
+    def execution_ready(self) -> bool:
+        """Return True if executor is ready to execute tasks safely.
+
+        Since Codex CLI currently lacks OS-level process privilege separation
+        between credential brokers and tool subprocesses, execution_ready()
+        returns False unless allow_unsupported_codex_credential_boundary is explicitly enabled.
+        """
+        if not self.allow_unsupported_codex_credential_boundary:
+            return False
+        if not self.health():
+            return False
         ok, _ = self.validate_isolation()
         return ok
 
@@ -897,6 +919,9 @@ class SimulatedTaskExecutor:
         self.call_count = 0
 
     def health(self) -> bool:
+        return True
+
+    def execution_ready(self) -> bool:
         return True
 
     def execute(

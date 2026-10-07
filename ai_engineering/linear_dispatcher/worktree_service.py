@@ -39,6 +39,76 @@ SAFE_GIT_OPTS: list[str] = [
 ]
 
 
+def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
+    """Inspect repository configuration and attributes to discover and neutralize any filter or diff drivers."""
+    configs: list[str] = []
+    rp = Path(repo_path)
+    if not rp.exists():
+        return []
+
+    # 1. Inspect repository and worktree git config for custom filter and diff drivers
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(rp), "config", "--get-regexp", r"^(filter|diff)\."],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split(maxsplit=1)
+                if parts:
+                    key = parts[0]
+                    mf = re.match(r"^filter\.([^.]+)\.", key)
+                    if mf:
+                        name = mf.group(1)
+                        configs.extend([
+                            f"filter.{name}.clean=",
+                            f"filter.{name}.smudge=",
+                            f"filter.{name}.process=",
+                            f"filter.{name}.required=false",
+                        ])
+                    md = re.match(r"^diff\.([^.]+)\.", key)
+                    if md:
+                        name = md.group(1)
+                        configs.extend([
+                            f"diff.{name}.command=",
+                            f"diff.{name}.textconv=",
+                        ])
+    except Exception:
+        pass
+
+    # 2. Inspect worktree .gitattributes and .git/info/attributes for driver names
+    attr_files = [rp / ".gitattributes", rp / ".git" / "info" / "attributes"]
+    for af in attr_files:
+        if af.is_file():
+            try:
+                content = af.read_text(encoding="utf-8", errors="ignore")
+                for mf in re.finditer(r"filter=([^\s]+)", content):
+                    name = mf.group(1)
+                    configs.extend([
+                        f"filter.{name}.clean=",
+                        f"filter.{name}.smudge=",
+                        f"filter.{name}.process=",
+                        f"filter.{name}.required=false",
+                    ])
+                for md in re.finditer(r"diff=([^\s]+)", content):
+                    name = md.group(1)
+                    configs.extend([
+                        f"diff.{name}.command=",
+                        f"diff.{name}.textconv=",
+                    ])
+            except Exception:
+                pass
+
+    # Deduplicate preserving order
+    deduped = list(dict.fromkeys(configs))
+    opts: list[str] = []
+    for entry in deduped:
+        opts.extend(["-c", entry])
+    return opts
+
+
 def get_clean_git_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base_env or os.environ)
     for k in list(env.keys()):
@@ -56,6 +126,13 @@ def get_clean_git_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env["NoDefaultCurrentDirectoryInExePath"] = "1"
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Clean PATH: strip empty elements, relative directories, and current directory
+    if "PATH" in env:
+        safe_dirs = [
+            d for d in env["PATH"].split(os.pathsep)
+            if d and Path(d).is_absolute() and not Path(d).name.startswith(".")
+        ]
+        env["PATH"] = os.pathsep.join(safe_dirs)
     return env
 
 
@@ -118,7 +195,8 @@ class WorktreeService:
         self, args: list[str], cwd: Path | str, **kwargs
     ) -> subprocess.CompletedProcess:
         env = get_clean_git_env(kwargs.pop("env", None))
-        cmd = ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd)] + args
+        dynamic_opts = get_effective_filter_opts(cwd)
+        cmd = ["git"] + SAFE_GIT_OPTS + dynamic_opts + ["-C", str(cwd)] + args
         return subprocess.run(cmd, env=env, **kwargs)
 
     @property

@@ -29,7 +29,14 @@ class LinearProductionClient:
         try:
             with urllib.request.urlopen(req) as response:
                 body = response.read().decode("utf-8")
-                return json.loads(body)
+                res = json.loads(body)
+                if not isinstance(res, dict):
+                    raise RuntimeError("Linear API returned non-dict response")
+                if "errors" in res and res["errors"]:
+                    raise RuntimeError(f"Linear API returned errors: {res['errors']}")
+                if "data" not in res or res["data"] is None:
+                    raise RuntimeError("Linear API returned empty or missing data")
+                return res
         except urllib.error.URLError as e:
             # We don't expose secrets in logs, just raise generic or safe error
             raise RuntimeError(f"Linear API request failed: {e}")
@@ -83,7 +90,10 @@ class LinearProductionClient:
           }
         }
         """
-        res = self._graphql_request(query, {"limit": limit})
+        try:
+            res = self._graphql_request(query, {"limit": limit})
+        except Exception:
+            return []
         nodes = res.get("data", {}).get("issues", {}).get("nodes", [])
         return [self._parse_task(node) for node in nodes if node.get("identifier")]
 
@@ -110,7 +120,10 @@ class LinearProductionClient:
           }
         }
         """
-        res = self._graphql_request(query, {"id": issue_id})
+        try:
+            res = self._graphql_request(query, {"id": issue_id})
+        except Exception:
+            return None
         node = res.get("data", {}).get("issue")
         if node:
             return self._parse_task(node)
@@ -128,7 +141,10 @@ class LinearProductionClient:
           }
         }
         """
-        res = self._graphql_request(query, {"id": issue_id})
+        try:
+            res = self._graphql_request(query, {"id": issue_id})
+        except Exception:
+            return []
         nodes = res.get("data", {}).get("issue", {}).get("comments", {}).get("nodes", [])
         return [n.get("body", "") for n in nodes]
 
@@ -224,7 +240,10 @@ class LinearProductionClient:
           }
         }
         """
-        res = self._graphql_request(query, {"id": issue.uuid, "input": payload_fields})
-        if "errors" in res:
+        try:
+            res = self._graphql_request(query, {"id": issue.uuid, "input": payload_fields})
+            if "errors" in res:
+                return False
+            return res.get("data", {}).get("issueUpdate", {}).get("success", False)
+        except Exception:
             return False
-        return res.get("data", {}).get("issueUpdate", {}).get("success", False)

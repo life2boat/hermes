@@ -161,6 +161,13 @@ class DispatcherWorker:
                 )
                 return False
 
+        if hasattr(executor, "execution_ready") and not executor.execution_ready():
+            logger.error(
+                "Configured task execution backend is not execution ready. "
+                "Refusing to declare Dispatcher Worker READY. NOT_READY."
+            )
+            return False
+
         return True
 
     def _get_executor(self) -> ITaskExecutor | None:

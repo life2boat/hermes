@@ -478,6 +478,15 @@ def run_import(args) -> None:
                                 existing_conn = None
                                 try:
                                     existing_conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+                                    existing_ver = existing_conn.execute("PRAGMA user_version").fetchone()[0]
+                                    candidate_ver = chk_conn.execute("PRAGMA user_version").fetchone()[0]
+                                    if existing_ver != candidate_ver:
+                                        chk_conn.close()
+                                        chk_conn = None
+                                        tmp_target.unlink(missing_ok=True)
+                                        errors.append(f"  {rel}: db user_version mismatch: candidate {candidate_ver} != existing {existing_ver}")
+                                        continue
+
                                     existing_tables = {
                                         r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                                     }
@@ -487,6 +496,27 @@ def run_import(args) -> None:
                                         chk_conn = None
                                         tmp_target.unlink(missing_ok=True)
                                         errors.append(f"  {rel}: db schema incompatible, missing tables: {missing_tables}")
+                                        continue
+
+                                    # Column-level schema check for every existing table
+                                    col_mismatch = False
+                                    for tbl in existing_tables.intersection(candidate_tables):
+                                        existing_cols = {
+                                            row[1]: (row[2], row[3], row[5])
+                                            for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                                        }
+                                        candidate_cols = {
+                                            row[1]: (row[2], row[3], row[5])
+                                            for row in chk_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                                        }
+                                        if set(existing_cols.keys()) != set(candidate_cols.keys()):
+                                            col_mismatch = True
+                                            errors.append(f"  {rel}: db schema column mismatch in table {tbl}")
+                                            break
+                                    if col_mismatch:
+                                        chk_conn.close()
+                                        chk_conn = None
+                                        tmp_target.unlink(missing_ok=True)
                                         continue
                                 finally:
                                     if existing_conn is not None:
@@ -502,60 +532,51 @@ def run_import(args) -> None:
                             if chk_conn is not None:
                                 chk_conn.close()
 
-                        # Verify writer quiescence and truncate WAL before file swap
+                        # Publish using SQLite backup API while managing writer exclusion
                         if target.exists():
-                            quiesce_conn = None
-                            try:
-                                quiesce_conn = sqlite3.connect(str(target), timeout=2.0)
-                                quiesce_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                                quiesce_conn.execute("BEGIN EXCLUSIVE")
-                                quiesce_conn.execute("ROLLBACK")
-                            except Exception as q_exc:
+                            bak_target = target.with_suffix(target.suffix + ".restore_bak")
+                            if not _safe_copy_db(target, bak_target):
                                 tmp_target.unlink(missing_ok=True)
-                                errors.append(f"  {rel}: writer quiescence check failed: {q_exc}")
+                                errors.append(f"  {rel}: failed to create pre-restore safety backup")
                                 continue
-                            finally:
-                                if quiesce_conn is not None:
-                                    quiesce_conn.close()
 
-                        bak_target = target.with_suffix(target.suffix + ".restore_bak")
-                        wal_file = target.with_name(f"{target.name}-wal")
-                        shm_file = target.with_name(f"{target.name}-shm")
-                        wal_bak = target.with_name(f"{target.name}-wal.restore_bak")
-                        shm_bak = target.with_name(f"{target.name}-shm.restore_bak")
-                        try:
-                            if target.exists():
-                                shutil.copy2(target, bak_target)
-                            if wal_file.exists():
-                                shutil.move(str(wal_file), str(wal_bak))
-                            if shm_file.exists():
-                                shutil.move(str(shm_file), str(shm_bak))
-                            os.replace(str(tmp_target), str(target))
-                            post_chk = None
+                            live_conn = None
                             try:
-                                post_chk = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
-                                p_res = post_chk.execute("PRAGMA integrity_check").fetchall()
+                                live_conn = sqlite3.connect(str(target), timeout=2.0, isolation_level=None)
+                                live_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                                cand_conn = sqlite3.connect(f"file:{tmp_target}?mode=ro", uri=True)
+                                cand_conn.backup(live_conn)
+                                cand_conn.close()
+
+                                p_res = live_conn.execute("PRAGMA integrity_check").fetchall()
                                 if p_res != [("ok",)]:
                                     raise RuntimeError("post-publication integrity check failed")
-                                p_fk = post_chk.execute("PRAGMA foreign_key_check").fetchall()
+                                p_fk = live_conn.execute("PRAGMA foreign_key_check").fetchall()
                                 if p_fk:
                                     raise RuntimeError(f"post-publication foreign key check failed ({len(p_fk)} violations)")
+
+                                bak_target.unlink(missing_ok=True)
+                                tmp_target.unlink(missing_ok=True)
+                            except Exception as exc:
+                                errors.append(f"  {rel}: database restore failed: {exc}")
+                                if live_conn is not None and bak_target.exists():
+                                    try:
+                                        bak_conn = sqlite3.connect(f"file:{bak_target}?mode=ro", uri=True)
+                                        bak_conn.backup(live_conn)
+                                        bak_conn.close()
+                                    except Exception as rb_exc:
+                                        errors.append(f"  {rel}: rollback backup restoration failed: {rb_exc}")
+                                tmp_target.unlink(missing_ok=True)
+                                continue
                             finally:
-                                if post_chk is not None:
-                                    post_chk.close()
-                            bak_target.unlink(missing_ok=True)
-                            wal_bak.unlink(missing_ok=True)
-                            shm_bak.unlink(missing_ok=True)
-                        except Exception as exc:
-                            if bak_target.exists():
-                                os.replace(str(bak_target), str(target))
-                            if wal_bak.exists():
-                                os.replace(str(wal_bak), str(wal_file))
-                            if shm_bak.exists():
-                                os.replace(str(shm_bak), str(shm_file))
+                                if live_conn is not None:
+                                    live_conn.close()
+                        else:
+                            if not _safe_copy_db(tmp_target, target):
+                                tmp_target.unlink(missing_ok=True)
+                                errors.append(f"  {rel}: safe copy failed")
+                                continue
                             tmp_target.unlink(missing_ok=True)
-                            errors.append(f"  {rel}: atomic replace failed: {exc}")
-                            continue
                     else:
                         tmp_target = target.parent / f".{target.name}.import_tmp"
                         with open(tmp_target, "wb") as dst:
@@ -861,6 +882,15 @@ def restore_quick_snapshot(
                         existing_conn = None
                         try:
                             existing_conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+                            existing_ver = existing_conn.execute("PRAGMA user_version").fetchone()[0]
+                            candidate_ver = chk_conn.execute("PRAGMA user_version").fetchone()[0]
+                            if existing_ver != candidate_ver:
+                                chk_conn.close()
+                                chk_conn = None
+                                tmp.unlink(missing_ok=True)
+                                logger.error("Database user_version mismatch for %s: candidate %d != existing %d", rel, candidate_ver, existing_ver)
+                                continue
+
                             existing_tables = {
                                 r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
                             }
@@ -870,6 +900,27 @@ def restore_quick_snapshot(
                                 chk_conn = None
                                 tmp.unlink(missing_ok=True)
                                 logger.error("Database schema incompatible for %s, missing tables: %s", rel, missing_tables)
+                                continue
+
+                            # Column-level schema check for every existing table
+                            col_mismatch = False
+                            for tbl in existing_tables.intersection(candidate_tables):
+                                existing_cols = {
+                                    row[1]: (row[2], row[3], row[5])
+                                    for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                                }
+                                candidate_cols = {
+                                    row[1]: (row[2], row[3], row[5])
+                                    for row in chk_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+                                }
+                                if set(existing_cols.keys()) != set(candidate_cols.keys()):
+                                    col_mismatch = True
+                                    logger.error("Database schema column mismatch for %s in table %s", rel, tbl)
+                                    break
+                            if col_mismatch:
+                                chk_conn.close()
+                                chk_conn = None
+                                tmp.unlink(missing_ok=True)
                                 continue
                         finally:
                             if existing_conn is not None:
@@ -885,60 +936,51 @@ def restore_quick_snapshot(
                     if chk_conn is not None:
                         chk_conn.close()
 
-                # Verify writer quiescence and truncate WAL before file swap
+                # Publish using SQLite backup API while managing writer exclusion
                 if dst.exists():
-                    quiesce_conn = None
-                    try:
-                        quiesce_conn = sqlite3.connect(str(dst), timeout=2.0)
-                        quiesce_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                        quiesce_conn.execute("BEGIN EXCLUSIVE")
-                        quiesce_conn.execute("ROLLBACK")
-                    except Exception as q_exc:
+                    bak_dst = dst.with_suffix(dst.suffix + ".restore_bak")
+                    if not _safe_copy_db(dst, bak_dst):
                         tmp.unlink(missing_ok=True)
-                        logger.error("Writer quiescence check failed for %s: %s", rel, q_exc)
+                        logger.error("Failed to create pre-restore safety backup for %s", rel)
                         continue
-                    finally:
-                        if quiesce_conn is not None:
-                            quiesce_conn.close()
 
-                bak_dst = dst.with_suffix(dst.suffix + ".restore_bak")
-                wal_file = dst.with_name(f"{dst.name}-wal")
-                shm_file = dst.with_name(f"{dst.name}-shm")
-                wal_bak = dst.with_name(f"{dst.name}-wal.restore_bak")
-                shm_bak = dst.with_name(f"{dst.name}-shm.restore_bak")
-                try:
-                    if dst.exists():
-                        shutil.copy2(dst, bak_dst)
-                    if wal_file.exists():
-                        shutil.move(str(wal_file), str(wal_bak))
-                    if shm_file.exists():
-                        shutil.move(str(shm_file), str(shm_bak))
-                    os.replace(str(tmp), str(dst))
-                    post_chk = None
+                    live_conn = None
                     try:
-                        post_chk = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
-                        p_res = post_chk.execute("PRAGMA integrity_check").fetchall()
+                        live_conn = sqlite3.connect(str(dst), timeout=2.0, isolation_level=None)
+                        live_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        cand_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                        cand_conn.backup(live_conn)
+                        cand_conn.close()
+
+                        p_res = live_conn.execute("PRAGMA integrity_check").fetchall()
                         if p_res != [("ok",)]:
                             raise RuntimeError("post-publication integrity check failed")
-                        p_fk = post_chk.execute("PRAGMA foreign_key_check").fetchall()
+                        p_fk = live_conn.execute("PRAGMA foreign_key_check").fetchall()
                         if p_fk:
                             raise RuntimeError(f"post-publication foreign key check failed ({len(p_fk)} violations)")
+
+                        bak_dst.unlink(missing_ok=True)
+                        tmp.unlink(missing_ok=True)
+                    except Exception as exc:
+                        logger.error("Database restore failed for %s: %s", rel, exc)
+                        if live_conn is not None and bak_dst.exists():
+                            try:
+                                bak_conn = sqlite3.connect(f"file:{bak_dst}?mode=ro", uri=True)
+                                bak_conn.backup(live_conn)
+                                bak_conn.close()
+                            except Exception as rb_exc:
+                                logger.error("Rollback backup restoration failed for %s: %s", rel, rb_exc)
+                        tmp.unlink(missing_ok=True)
+                        continue
                     finally:
-                        if post_chk is not None:
-                            post_chk.close()
-                    bak_dst.unlink(missing_ok=True)
-                    wal_bak.unlink(missing_ok=True)
-                    shm_bak.unlink(missing_ok=True)
-                except Exception as exc:
-                    if bak_dst.exists():
-                        os.replace(str(bak_dst), str(dst))
-                    if wal_bak.exists():
-                        os.replace(str(wal_bak), str(wal_file))
-                    if shm_bak.exists():
-                        os.replace(str(shm_bak), str(shm_file))
+                        if live_conn is not None:
+                            live_conn.close()
+                else:
+                    if not _safe_copy_db(tmp, dst):
+                        tmp.unlink(missing_ok=True)
+                        logger.error("Safe copy failed for %s", rel)
+                        continue
                     tmp.unlink(missing_ok=True)
-                    logger.error("Database atomic replace failed for %s: %s", rel, exc)
-                    continue
             elif _is_cron_jobs_path(dst, home):
                 from cron.jobs import replace_jobs_file
                 replace_jobs_file(src.read_bytes(), dst)

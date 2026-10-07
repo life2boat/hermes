@@ -178,8 +178,9 @@ def test_c02_dynamic_filter_discovery_neutralizes_all_drivers(tmp_path: Path):
 
 def test_c02_clean_git_env_sanitizes_relative_paths():
     """get_clean_git_env strips relative elements and dot directories from PATH."""
+    abs_dir = "C:\\Windows\\System32" if os.name == "nt" else "/usr/bin"
     dirty_env = {
-        "PATH": f".{os.pathsep}relative/bin{os.pathsep}C:\\Windows\\System32{os.pathsep}..\\parent",
+        "PATH": f".{os.pathsep}relative/bin{os.pathsep}{abs_dir}{os.pathsep}..{os.sep}parent",
         "GIT_DIR": ".git",
         "PAGER": "cat",
     }
@@ -188,7 +189,8 @@ def test_c02_clean_git_env_sanitizes_relative_paths():
     clean_path = clean["PATH"].split(os.pathsep)
     assert "." not in clean_path
     assert "relative/bin" not in clean_path
-    assert "..\\parent" not in clean_path
+    assert f"..{os.sep}parent" not in clean_path
+    assert abs_dir in clean_path
     assert all(Path(p).is_absolute() for p in clean_path)
 
 

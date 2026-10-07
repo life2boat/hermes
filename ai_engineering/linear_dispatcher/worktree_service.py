@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -11,6 +12,70 @@ from ai_engineering.linear_dispatcher.contracts import (
     DispatcherConfig,
     LinearTask,
 )
+
+SAFE_GIT_OPTS: list[str] = [
+    "-c", "core.fsmonitor=",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.sshCommand=false",
+    "-c", "core.askPass=false",
+    "-c", "core.editor=false",
+    "-c", "core.pager=cat",
+    "-c", "credential.helper=",
+    "-c", "diff.external=",
+    "-c", "diff.command=",
+    "-c", "protocol.ext.allow=never",
+    "-c", "protocol.allow=https:ssh:file",
+    "-c", "core.gitProxy=",
+    "-c", "uploadpack.packObjectsHook=",
+    "-c", "filter.lfs.smudge=",
+    "-c", "filter.lfs.clean=",
+    "-c", "filter.lfs.process=",
+    "-c", "filter.lfs.required=false",
+    "-c", "core.autocrlf=input",
+    "-c", "core.safecrlf=false",
+]
+
+
+def get_clean_git_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base_env or os.environ)
+    for k in list(env.keys()):
+        if k.startswith("GIT_") and k not in ("GIT_DIR", "GIT_WORK_TREE"):
+            env.pop(k, None)
+    for k in ("PAGER", "EDITOR", "VISUAL"):
+        env.pop(k, None)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_SSH_COMMAND"] = "false"
+    env["GIT_ASKPASS"] = "false"
+    env["GIT_ALLOW_PROTOCOL"] = "https:ssh:file"
+    return env
+
+
+def is_canonical_remote_url(
+    url: str,
+    canonical_repo: str = "life2boat/hermes",
+    canonical_root: Path | str | None = None,
+) -> bool:
+    clean = url.strip()
+    if clean.endswith(".git"):
+        clean = clean[:-4]
+    if clean in (
+        f"https://github.com/{canonical_repo}",
+        f"git@github.com:{canonical_repo}",
+        f"ssh://git@github.com/{canonical_repo}",
+    ):
+        return True
+    if canonical_root is not None:
+        try:
+            clean_path = clean
+            if clean_path.startswith("file://"):
+                clean_path = clean_path[7:]
+            if Path(clean_path).resolve() == Path(canonical_root).resolve():
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def slugify(text: str) -> str:
@@ -30,9 +95,24 @@ def compute_branch_name(task: LinearTask) -> str:
 class WorktreeService:
     """Manages creation, verification, and teardown of isolated worktrees."""
 
-    def __init__(self, canonical_root: Path | str, base_sha: str) -> None:
+    def __init__(
+        self,
+        canonical_root: Path | str,
+        base_sha: str,
+        canonical_remote: str = "github",
+        canonical_repo: str = "life2boat/hermes",
+    ) -> None:
         self._canonical_root = Path(canonical_root).resolve()
         self._base_sha = base_sha
+        self._canonical_remote = canonical_remote
+        self._canonical_repo = canonical_repo
+
+    def _run_git(
+        self, args: list[str], cwd: Path | str, **kwargs
+    ) -> subprocess.CompletedProcess:
+        env = get_clean_git_env(kwargs.pop("env", None))
+        cmd = ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd)] + args
+        return subprocess.run(cmd, env=env, **kwargs)
 
     @property
     def canonical_root(self) -> Path:
@@ -40,18 +120,13 @@ class WorktreeService:
 
     def is_canonical_dirty(self) -> bool:
         """Check if canonical checkout has uncommitted tracked changes."""
-        res = subprocess.run(
-            ["git", "-C", str(self._canonical_root), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-        )
+        res = self._run_git(["status", "--porcelain"], self._canonical_root, capture_output=True, text=True)
         if res.returncode != 0:
-            # If status check fails, fail closed
             return True
         lines = res.stdout.strip().splitlines()
         tracked_changes = [
             l for l in lines
-            if not l.startswith("??")  # Untracked files alone don't violate worktree branch base
+            if not l.startswith("??")
         ]
         return len(tracked_changes) > 0
 
@@ -73,14 +148,28 @@ class WorktreeService:
         worktree_path = (Path(worktree_base_dir) / safe_dir_name).resolve()
 
         # Ensure base_sha object is available in local object store
-        chk_obj = subprocess.run(
-            ["git", "-C", str(self._canonical_root), "cat-file", "-e", f"{self._base_sha}^{{commit}}"],
+        chk_obj = self._run_git(
+            ["cat-file", "-e", f"{self._base_sha}^{{commit}}"],
+            self._canonical_root,
             capture_output=True,
         )
         if chk_obj.returncode != 0:
+            # Validate canonical remote URL before fetching
+            chk_remote = self._run_git(
+                ["remote", "get-url", self._canonical_remote],
+                self._canonical_root,
+                capture_output=True,
+                text=True,
+            )
+            if chk_remote.returncode != 0 or not is_canonical_remote_url(
+                chk_remote.stdout.strip(), self._canonical_repo, self._canonical_root
+            ):
+                return None, None, BlockReasonCode.CANONICAL_ROOT_INVALID
+
             # Fetch base object from remote
-            fetch_res = subprocess.run(
-                ["git", "-C", str(self._canonical_root), "fetch", "github", self._base_sha],
+            fetch_res = self._run_git(
+                ["fetch", self._canonical_remote, self._base_sha],
+                self._canonical_root,
                 capture_output=True,
             )
             if fetch_res.returncode != 0:
@@ -88,30 +177,36 @@ class WorktreeService:
 
         if worktree_path.exists():
             # If already exists, verify it is a registered worktree of canonical root with matching branch and base
-            chk_common = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            chk_common = self._run_git(
+                ["rev-parse", "--git-common-dir"],
+                worktree_path,
                 capture_output=True,
                 text=True,
             )
-            canonical_git_dir = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(self._canonical_root), "rev-parse", "--git-dir"],
+            canonical_git_dir = self._run_git(
+                ["rev-parse", "--git-dir"],
+                self._canonical_root,
                 capture_output=True,
                 text=True,
             )
             if chk_common.returncode != 0 or canonical_git_dir.returncode != 0:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
-            common_resolved = Path(chk_common.stdout.strip()).resolve()
-            if not common_resolved.is_absolute():
-                common_resolved = (worktree_path / common_resolved).resolve()
-            canonical_resolved = Path(canonical_git_dir.stdout.strip()).resolve()
-            if not canonical_resolved.is_absolute():
-                canonical_resolved = (Path(self._canonical_root) / canonical_resolved).resolve()
+
+            raw_common = chk_common.stdout.strip()
+            p_common = Path(raw_common)
+            common_resolved = (p_common if p_common.is_absolute() else (worktree_path / p_common)).resolve()
+
+            raw_canonical = canonical_git_dir.stdout.strip()
+            p_canonical = Path(raw_canonical)
+            canonical_resolved = (p_canonical if p_canonical.is_absolute() else (Path(self._canonical_root) / p_canonical)).resolve()
+
             if common_resolved != canonical_resolved:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
             # Verify worktree is registered in canonical worktree list
-            chk_wt_list = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(self._canonical_root), "worktree", "list", "--porcelain"],
+            chk_wt_list = self._run_git(
+                ["worktree", "list", "--porcelain"],
+                self._canonical_root,
                 capture_output=True,
                 text=True,
             )
@@ -127,8 +222,9 @@ class WorktreeService:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
             # Verify task branch ownership
-            chk_branch = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "symbolic-ref", "--short", "HEAD"],
+            chk_branch = self._run_git(
+                ["symbolic-ref", "--short", "HEAD"],
+                worktree_path,
                 capture_output=True,
                 text=True,
             )
@@ -136,16 +232,18 @@ class WorktreeService:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
             # Verify clean status and matching base HEAD
-            chk_git = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "status", "--porcelain"],
+            chk_git = self._run_git(
+                ["status", "--porcelain"],
+                worktree_path,
                 capture_output=True,
                 text=True,
             )
             if chk_git.returncode != 0 or chk_git.stdout.strip():
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
-            chk_head = subprocess.run(
-                ["git", "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-C", str(worktree_path), "rev-parse", "HEAD"],
+            chk_head = self._run_git(
+                ["rev-parse", "HEAD"],
+                worktree_path,
                 capture_output=True,
                 text=True,
             )
@@ -155,9 +253,6 @@ class WorktreeService:
             return worktree_path, branch_name, None
 
         cmd = [
-            "git",
-            "-C",
-            str(self._canonical_root),
             "worktree",
             "add",
             "-b",
@@ -165,25 +260,23 @@ class WorktreeService:
             str(worktree_path),
             self._base_sha,
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = self._run_git(cmd, self._canonical_root, capture_output=True, text=True)
         if res.returncode != 0:
             # Check if branch already exists pointing to exact base_sha
-            branch_head = subprocess.run(
-                ["git", "-C", str(self._canonical_root), "rev-parse", branch_name],
+            branch_head = self._run_git(
+                ["rev-parse", branch_name],
+                self._canonical_root,
                 capture_output=True,
                 text=True,
             )
             if branch_head.returncode == 0 and branch_head.stdout.strip() == self._base_sha:
                 cmd_existing = [
-                    "git",
-                    "-C",
-                    str(self._canonical_root),
                     "worktree",
                     "add",
                     str(worktree_path),
                     branch_name,
                 ]
-                res_existing = subprocess.run(cmd_existing, capture_output=True, text=True)
+                res_existing = self._run_git(cmd_existing, self._canonical_root, capture_output=True, text=True)
                 if res_existing.returncode != 0:
                     return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
             else:
@@ -195,14 +288,16 @@ class WorktreeService:
         """Safely remove isolated worktree and delete its local branch."""
         wt = Path(worktree_path).resolve()
         if wt.exists():
-            subprocess.run(
-                ["git", "-C", str(self._canonical_root), "worktree", "remove", "--force", str(wt)],
+            self._run_git(
+                ["worktree", "remove", "--force", str(wt)],
+                self._canonical_root,
                 capture_output=True,
                 text=True,
             )
         if branch_name:
-            subprocess.run(
-                ["git", "-C", str(self._canonical_root), "branch", "-D", branch_name],
+            self._run_git(
+                ["branch", "-D", branch_name],
+                self._canonical_root,
                 capture_output=True,
                 text=True,
             )

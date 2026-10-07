@@ -51,6 +51,12 @@ class IGitHubService(Protocol):
     ) -> tuple[bool, CIStatusResult | None, BlockReasonCode | None]:
         ...
 
+    def get_pr(
+        self,
+        pr_number: int,
+    ) -> tuple[bool, PRCreationResult | None, str | None]:
+        ...
+
 
 class GitHubService(IGitHubService):
     """Production GitHub client using gh CLI."""
@@ -185,3 +191,36 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
             runs=runs,
             details=details,
         ), None
+
+    def get_pr(
+        self,
+        pr_number: int,
+    ) -> tuple[bool, PRCreationResult | None, str | None]:
+        cmd = [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            self._repo,
+            "--json",
+            "number,url,isDraft,headRefOid,baseRefName",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            return False, None, res.stderr or "PR_NOT_FOUND"
+        try:
+            data = json.loads(res.stdout)
+            if not data.get("isDraft", False):
+                return False, None, "PR_NOT_DRAFT"
+            if data.get("baseRefName") != "main":
+                return False, None, "PR_BASE_MISMATCH"
+            return True, PRCreationResult(
+                pr_number=data.get("number", pr_number),
+                pr_url=data.get("url", ""),
+                base_sha="",
+                head_sha=data.get("headRefOid", ""),
+                is_draft=True,
+            ), None
+        except Exception as e:
+            return False, None, str(e)

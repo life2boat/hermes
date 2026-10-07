@@ -462,7 +462,11 @@ def run_import(args) -> None:
                                 tmp_target.unlink(missing_ok=True)
                                 errors.append(f"  {rel}: db integrity check failed")
                                 continue
-                            chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                            fk_res = chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                            if fk_res:
+                                tmp_target.unlink(missing_ok=True)
+                                errors.append(f"  {rel}: db foreign key check failed ({len(fk_res)} violations)")
+                                continue
                             chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
                         except Exception as exc:
                             tmp_target.unlink(missing_ok=True)
@@ -471,6 +475,21 @@ def run_import(args) -> None:
                         finally:
                             if chk_conn is not None:
                                 chk_conn.close()
+
+                        # Verify writer quiescence before proceeding with backup and file swap
+                        if target.exists():
+                            quiesce_conn = None
+                            try:
+                                quiesce_conn = sqlite3.connect(str(target), timeout=1.0)
+                                quiesce_conn.execute("BEGIN EXCLUSIVE")
+                                quiesce_conn.execute("ROLLBACK")
+                            except Exception as q_exc:
+                                tmp_target.unlink(missing_ok=True)
+                                errors.append(f"  {rel}: writer quiescence check failed: {q_exc}")
+                                continue
+                            finally:
+                                if quiesce_conn is not None:
+                                    quiesce_conn.close()
 
                         bak_target = target.with_suffix(target.suffix + ".restore_bak")
                         wal_file = target.with_name(f"{target.name}-wal")
@@ -485,8 +504,13 @@ def run_import(args) -> None:
                             if shm_file.exists():
                                 shutil.move(str(shm_file), str(shm_bak))
                             os.replace(str(tmp_target), str(target))
-                            with sqlite3.connect(f"file:{target}?mode=ro", uri=True) as post_chk:
+                            post_chk = None
+                            try:
+                                post_chk = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
                                 post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                            finally:
+                                if post_chk is not None:
+                                    post_chk.close()
                             bak_target.unlink(missing_ok=True)
                             wal_bak.unlink(missing_ok=True)
                             shm_bak.unlink(missing_ok=True)
@@ -785,7 +809,15 @@ def restore_quick_snapshot(
                         tmp.unlink(missing_ok=True)
                         logger.error("Database integrity check failed for %s", rel)
                         continue
-                    chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                    fk_res = chk_conn.execute("PRAGMA foreign_key_check").fetchall()
+                    if fk_res:
+                        tmp.unlink(missing_ok=True)
+                        logger.error(
+                            "Database foreign key check failed for %s (%d violations)",
+                            rel,
+                            len(fk_res),
+                        )
+                        continue
                     chk_conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
                 except Exception as exc:
                     tmp.unlink(missing_ok=True)
@@ -794,6 +826,21 @@ def restore_quick_snapshot(
                 finally:
                     if chk_conn is not None:
                         chk_conn.close()
+
+                # Verify writer quiescence before proceeding with backup and file swap
+                if dst.exists():
+                    quiesce_conn = None
+                    try:
+                        quiesce_conn = sqlite3.connect(str(dst), timeout=1.0)
+                        quiesce_conn.execute("BEGIN EXCLUSIVE")
+                        quiesce_conn.execute("ROLLBACK")
+                    except Exception as q_exc:
+                        tmp.unlink(missing_ok=True)
+                        logger.error("Writer quiescence check failed for %s: %s", rel, q_exc)
+                        continue
+                    finally:
+                        if quiesce_conn is not None:
+                            quiesce_conn.close()
 
                 bak_dst = dst.with_suffix(dst.suffix + ".restore_bak")
                 wal_file = dst.with_name(f"{dst.name}-wal")
@@ -808,8 +855,13 @@ def restore_quick_snapshot(
                     if shm_file.exists():
                         shutil.move(str(shm_file), str(shm_bak))
                     os.replace(str(tmp), str(dst))
-                    with sqlite3.connect(f"file:{dst}?mode=ro", uri=True) as post_chk:
+                    post_chk = None
+                    try:
+                        post_chk = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
                         post_chk.execute("SELECT count(*) FROM sqlite_master").fetchone()
+                    finally:
+                        if post_chk is not None:
+                            post_chk.close()
                     bak_dst.unlink(missing_ok=True)
                     wal_bak.unlink(missing_ok=True)
                     shm_bak.unlink(missing_ok=True)

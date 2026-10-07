@@ -87,10 +87,50 @@ class WritebackService:
         header_marker = "### Hermes Autonomous Loop Execution Evidence"
         if header_marker not in text:
             return False
-        if head_sha and f"HEAD_SHA:** `{head_sha}`" not in text:
+
+        # Parse key-value bullet points
+        fields: dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("- **") and ":** `" in line and line.endswith("`"):
+                parts = line[4:-1].split(":** `", 1)
+                if len(parts) == 2:
+                    fields[parts[0]] = parts[1]
+
+        # Require successful status and reject failure markers
+        if fields.get("EXECUTION_STATUS") != "PASS":
             return False
-        if exec_id and f"EXECUTION_ID:** `{exec_id}`" not in text:
+        if fields.get("VALIDATION") != "PASS":
             return False
+        if fields.get("CI") != "PASS":
+            return False
+        if fields.get("SHA_MATCH") != "YES":
+            return False
+
+        # Verify boundary constraints: 0 mutations, 0 deployments
+        for boundary_key in ("PRODUCTION_CHANGES", "DB_CHANGES", "QDRANT_CHANGES", "DEPLOYMENT", "MERGE"):
+            if fields.get(boundary_key) != "0":
+                return False
+
+        # Require authentic non-empty execution ID matching expectation
+        receipt_exec_id = fields.get("EXECUTION_ID")
+        if not receipt_exec_id:
+            return False
+        if exec_id and receipt_exec_id != exec_id:
+            return False
+
+        # Require authentic head SHA matching expectation
+        receipt_head_sha = fields.get("HEAD_SHA")
+        if not receipt_head_sha:
+            return False
+        if head_sha and receipt_head_sha != head_sha:
+            return False
+
+        # Reject contradictory failure/blocked indications in text
+        lower_text = text.lower()
+        if any(bad in lower_text for bad in ("execution_status:** `fail", "execution_status:** `blocked", "status: fail", "status: blocked")):
+            return False
+
         return True
 
     def writeback_and_verify(

@@ -82,6 +82,7 @@ def test_credential_watcher_readiness_failure_fails_closed(tmp_path: Path):
     executor = LinuxCodexTaskExecutor(
         credentials_path=auth_file,
         is_windows=False,
+        allow_unsupported_codex_credential_boundary=True,
     )
     # Stub health check to pass
     executor.health = MagicMock(return_value=True)
@@ -314,6 +315,8 @@ def test_dispatcher_push_failure_fails_closed(tmp_path: Path):
     # Dispatch one task where push fails
     with patch("subprocess.run") as mock_run:
         def side_effect(cmd, **kwargs):
+            if "remote" in cmd:
+                return MagicMock(returncode=0, stdout="git@github.com:life2boat/hermes.git\n")
             if "push" in cmd:
                 return MagicMock(returncode=1, stderr="fatal: remote rejected push")
             if "diff" in cmd and "--cached" in cmd:
@@ -575,6 +578,7 @@ def test_credential_watcher_death_after_ready_fails_closed(tmp_path: Path):
     executor = LinuxCodexTaskExecutor(
         credentials_path=auth_file,
         is_windows=False,
+        allow_unsupported_codex_credential_boundary=True,
     )
     executor.health = MagicMock(return_value=True)
     executor._setup_ephemeral_credentials = MagicMock()
@@ -617,6 +621,7 @@ def test_command_build_failure_cleans_up_ephemeral_credentials(tmp_path: Path):
     executor = LinuxCodexTaskExecutor(
         credentials_path=auth_file,
         is_windows=False,
+        allow_unsupported_codex_credential_boundary=True,
     )
     executor.health = MagicMock(return_value=True)
     executor._setup_ephemeral_credentials = MagicMock()
@@ -655,6 +660,7 @@ def test_unlinked_verification_failure_fails_closed(tmp_path: Path):
     executor = LinuxCodexTaskExecutor(
         credentials_path=auth_file,
         is_windows=False,
+        allow_unsupported_codex_credential_boundary=True,
     )
     executor.health = MagicMock(return_value=True)
     executor._setup_ephemeral_credentials = MagicMock()

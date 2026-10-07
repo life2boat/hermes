@@ -10,6 +10,18 @@ from typing import Any
 from ai_engineering.linear_dispatcher.contracts import BlockReasonCode, LinearTask
 from ai_engineering.linear_dispatcher.github_service import IGitHubService, PRCreationResult, CIStatusResult
 
+CANONICAL_REQUIRED_CHECKS: tuple[str, ...] = (
+    "Tests",
+    "Lint (ruff + ty)",
+    "Typecheck",
+    "Agent Release Gate",
+    "Supply Chain Audit",
+    "History Check",
+    "Contributor Attribution Check",
+    "Docs Site Checks",
+)
+
+
 class GitHubProductionService(IGitHubService):
     def __init__(
         self,
@@ -22,7 +34,11 @@ class GitHubProductionService(IGitHubService):
         if not self._token:
             raise ValueError("GITHUB_TOKEN environment variable is required")
         self.base_url = "https://api.github.com"
-        self._required_checks = tuple(required_checks) if required_checks is not None else ("tests",)
+        self._required_checks = (
+            tuple(required_checks)
+            if required_checks is not None
+            else CANONICAL_REQUIRED_CHECKS
+        )
 
     def _request(self, method: str, endpoint: str, data: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}/repos/{self._repo}/{endpoint}"
@@ -146,7 +162,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                     return False, None, BlockReasonCode.REREAD_VERIFICATION_FAILED
                 if expected_base_sha:
                     observed_base_sha = pr_res.get("base", {}).get("sha", "")
-                    if observed_base_sha and observed_base_sha != expected_base_sha:
+                    if not observed_base_sha or observed_base_sha != expected_base_sha:
                         return False, None, BlockReasonCode.CANONICAL_MAIN_DRIFT
             except Exception:
                 return False, None, BlockReasonCode.CI_FAILED
@@ -155,6 +171,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
         check_runs = []
         page = 1
         per_page = 100
+        total_count = 0
         try:
             while True:
                 res = self._request("GET", f"commits/{expected_head_sha}/check-runs?per_page={per_page}&page={page}")
@@ -168,6 +185,9 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                     break
                 page += 1
         except Exception:
+            return False, None, BlockReasonCode.CI_FAILED
+
+        if len(check_runs) < total_count:
             return False, None, BlockReasonCode.CI_FAILED
 
         if not check_runs:
@@ -190,15 +210,21 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                 ), BlockReasonCode.CI_SHA_MISMATCH
 
             app = r.get("app")
-            if isinstance(app, dict):
-                app_slug = app.get("slug")
-                if app_slug and app_slug not in ("github-actions", "hermes-release-gate", "ci"):
-                    return False, CIStatusResult(
-                        overall_status="FAIL",
-                        head_sha=expected_head_sha,
-                        runs=check_runs,
-                        details={"error": f"UNTRUSTED_CHECK_PRODUCER_{app_slug}"},
-                    ), BlockReasonCode.CI_FAILED
+            if not isinstance(app, dict):
+                return False, CIStatusResult(
+                    overall_status="FAIL",
+                    head_sha=expected_head_sha,
+                    runs=check_runs,
+                    details={"error": f"MISSING_CHECK_PRODUCER_{r.get('name')}"},
+                ), BlockReasonCode.CI_FAILED
+            app_slug = app.get("slug")
+            if not app_slug or app_slug not in ("github-actions", "hermes-release-gate", "ci"):
+                return False, CIStatusResult(
+                    overall_status="FAIL",
+                    head_sha=expected_head_sha,
+                    runs=check_runs,
+                    details={"error": f"UNTRUSTED_CHECK_PRODUCER_{app_slug}"},
+                ), BlockReasonCode.CI_FAILED
 
         # Step 4: Verify mandatory required check presence
         req_checks = set(required_checks) if required_checks is not None else set(self._required_checks)
@@ -306,3 +332,27 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
             ), None
         except Exception as e:
             return False, None, f"PR_GET_FAILED: {e}"
+
+    def get_pr_for_branch(self, branch: str) -> tuple[bool, PRCreationResult | None]:
+        """Find an existing open draft PR for the branch."""
+        try:
+            search_res = self._request("GET", f"pulls?head=life2boat:{branch}&state=open")
+            if search_res and len(search_res) == 1:
+                pr = search_res[0]
+                pr_number = pr.get("number", 0)
+                is_draft = pr.get("draft", False)
+                head_sha = pr.get("head", {}).get("sha", "")
+                base_ref = pr.get("base", {}).get("ref", "")
+                base_sha = pr.get("base", {}).get("sha", "")
+                pr_url = pr.get("html_url", "")
+                if is_draft and base_ref == "main":
+                    return True, PRCreationResult(
+                        pr_number=pr_number,
+                        pr_url=pr_url,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        is_draft=True,
+                    )
+            return False, None
+        except Exception:
+            return False, None

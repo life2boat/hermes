@@ -125,6 +125,7 @@ def init_mock_git_repo(path: Path) -> str:
     readme.write_text("# Mock Repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=str(path), check=True)
     subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(path), check=True)
+    subprocess.run(["git", "remote", "add", "github", str(path)], cwd=str(path), check=True)
     res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path), capture_output=True, text=True, check=True)
     return res.stdout.strip()
 
@@ -253,7 +254,12 @@ def test_wsl_command_wrapping_on_windows(tmp_path):
 
     wt = tmp_path / "worktree"
     wt.mkdir()
-    executor = LinuxCodexTaskExecutor(distro="Ubuntu", is_windows=True, runner=mock_runner)
+    executor = LinuxCodexTaskExecutor(
+        distro="Ubuntu",
+        is_windows=True,
+        runner=mock_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     res = executor.execute(make_linear_task(), wt, "base_sha")
 
     assert res.status == "SUCCESS"
@@ -285,6 +291,7 @@ def test_native_linux_command_execution(tmp_path, monkeypatch):
         credentials_path=creds,
         is_windows=False,
         runner=mock_runner,
+        allow_unsupported_codex_credential_boundary=True,
     )
     monkeypatch.setattr(executor, "health", lambda: True)
     monkeypatch.setattr(executor, "_setup_ephemeral_credentials", lambda home: None)
@@ -320,7 +327,11 @@ def test_timeout_handling(tmp_path, monkeypatch):
 
     wt = tmp_path / "worktree"
     wt.mkdir()
-    executor = LinuxCodexTaskExecutor(is_windows=True, runner=timeout_runner)
+    executor = LinuxCodexTaskExecutor(
+        is_windows=True,
+        runner=timeout_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     res = executor.execute(make_linear_task(), wt, "base_sha")
     assert res.status == "FAILED"
     assert res.error_reason == "CODEX_EXEC_TIMEOUT"
@@ -338,7 +349,11 @@ def test_nonzero_exit_code_handling(tmp_path):
 
     wt = tmp_path / "worktree"
     wt.mkdir()
-    executor = LinuxCodexTaskExecutor(is_windows=True, runner=fail_runner)
+    executor = LinuxCodexTaskExecutor(
+        is_windows=True,
+        runner=fail_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     res = executor.execute(make_linear_task(), wt, "base_sha")
     assert res.status == "FAILED"
     assert res.error_reason == "CODEX_EXEC_FAILED_EXIT_42"
@@ -358,7 +373,11 @@ def test_no_changes_detected_blocks(tmp_path):
 
     wt = tmp_path / "worktree"
     wt.mkdir()
-    executor = LinuxCodexTaskExecutor(is_windows=True, runner=empty_runner)
+    executor = LinuxCodexTaskExecutor(
+        is_windows=True,
+        runner=empty_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     res = executor.execute(make_linear_task(), wt, "base_sha")
     assert res.status == "BLOCKED"
     assert res.error_reason == "NO_CHANGES_PRODUCED"
@@ -377,11 +396,24 @@ def test_changes_detected_success(tmp_path):
 
     wt = tmp_path / "worktree"
     wt.mkdir()
-    executor = LinuxCodexTaskExecutor(is_windows=True, runner=success_runner)
+    executor = LinuxCodexTaskExecutor(
+        is_windows=True,
+        runner=success_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     res = executor.execute(make_linear_task(), wt, "base_sha")
     assert res.status == "SUCCESS"
     assert res.changed_files == ("app.py", "new.py")
     assert res.evidence.get("changed_count") == 2
+
+
+def test_executor_codex_credential_boundary_fails_closed_by_default(tmp_path):
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    executor = LinuxCodexTaskExecutor(is_windows=True)
+    res = executor.execute(make_linear_task(), wt, "base_sha")
+    assert res.status == "BLOCKED"
+    assert res.error_reason == "CODEX_CREDENTIAL_BOUNDARY_UNSUPPORTED"
 
 
 # Test 15: AutonomousDispatcher integration with LinuxCodexTaskExecutor
@@ -410,7 +442,11 @@ def test_dispatcher_integration_with_linux_codex_executor(tmp_path):
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="bwrap executed")
         return subprocess.run(cmd, **kwargs)
 
-    executor = LinuxCodexTaskExecutor(is_windows=True, runner=dispatch_runner)
+    executor = LinuxCodexTaskExecutor(
+        is_windows=True,
+        runner=dispatch_runner,
+        allow_unsupported_codex_credential_boundary=True,
+    )
     dispatcher = AutonomousDispatcher(
         config=config,
         linear_client=linear,

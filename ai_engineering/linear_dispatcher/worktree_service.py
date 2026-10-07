@@ -14,7 +14,7 @@ from ai_engineering.linear_dispatcher.contracts import (
 )
 
 SAFE_GIT_OPTS: list[str] = [
-    "-c", "core.fsmonitor=",
+    "-c", "core.fsmonitor=false",
     "-c", "core.hooksPath=/dev/null",
     "-c", "core.sshCommand=false",
     "-c", "core.askPass=false",
@@ -23,14 +23,17 @@ SAFE_GIT_OPTS: list[str] = [
     "-c", "credential.helper=",
     "-c", "diff.external=",
     "-c", "diff.command=",
+    "-c", "diff.*.command=",
+    "-c", "diff.*.textconv=",
     "-c", "protocol.ext.allow=never",
     "-c", "protocol.allow=https:ssh:file",
     "-c", "core.gitProxy=",
     "-c", "uploadpack.packObjectsHook=",
-    "-c", "filter.lfs.smudge=",
-    "-c", "filter.lfs.clean=",
-    "-c", "filter.lfs.process=",
-    "-c", "filter.lfs.required=false",
+    "-c", "filter.*.process=",
+    "-c", "filter.*.clean=",
+    "-c", "filter.*.smudge=",
+    "-c", "filter.*.required=false",
+    "-c", "core.attributesFile=/dev/null",
     "-c", "core.autocrlf=input",
     "-c", "core.safecrlf=false",
 ]
@@ -48,7 +51,11 @@ def get_clean_git_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_SSH_COMMAND"] = "false"
     env["GIT_ASKPASS"] = "false"
+    env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ALLOW_PROTOCOL"] = "https:ssh:file"
+    env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 
@@ -183,20 +190,20 @@ class WorktreeService:
                 capture_output=True,
                 text=True,
             )
-            canonical_git_dir = self._run_git(
-                ["rev-parse", "--git-dir"],
+            canonical_git_common = self._run_git(
+                ["rev-parse", "--git-common-dir"],
                 self._canonical_root,
                 capture_output=True,
                 text=True,
             )
-            if chk_common.returncode != 0 or canonical_git_dir.returncode != 0:
+            if chk_common.returncode != 0 or canonical_git_common.returncode != 0:
                 return None, None, BlockReasonCode.STALE_WORKTREE_DIRTY
 
             raw_common = chk_common.stdout.strip()
             p_common = Path(raw_common)
             common_resolved = (p_common if p_common.is_absolute() else (worktree_path / p_common)).resolve()
 
-            raw_canonical = canonical_git_dir.stdout.strip()
+            raw_canonical = canonical_git_common.stdout.strip()
             p_canonical = Path(raw_canonical)
             canonical_resolved = (p_canonical if p_canonical.is_absolute() else (Path(self._canonical_root) / p_canonical)).resolve()
 

@@ -8,26 +8,10 @@ import subprocess
 import sys
 from typing import Any
 
-SAFE_GIT_OPTS = [
-    "-c", "core.fsmonitor=",
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "core.whitespace=cr-at-eol",
-    "-c", "core.autocrlf=false",
-    "-c", "filter.lfs.smudge=",
-    "-c", "filter.lfs.clean=",
-    "-c", "filter.lfs.process=",
-    "-c", "filter.lfs.required=false",
-]
-
-SAFE_GIT_ENV = {
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_SYSTEM": os.devnull,
-    "PATH": os.environ.get("PATH", ""),
-    "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-    "TEMP": os.environ.get("TEMP", ""),
-    "TMP": os.environ.get("TMP", ""),
-}
+from ai_engineering.linear_dispatcher.worktree_service import (
+    SAFE_GIT_OPTS,
+    get_clean_git_env,
+)
 
 
 class LocalValidator:
@@ -36,8 +20,7 @@ class LocalValidator:
     @staticmethod
     def run_diff_check(cwd: Path | str) -> tuple[bool, str]:
         """Run git diff --check on unstaged and staged changes safely."""
-        env = dict(os.environ)
-        env.update(SAFE_GIT_ENV)
+        env = get_clean_git_env()
 
         res_unstaged = subprocess.run(
             ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd), "diff", "--check"],
@@ -89,6 +72,7 @@ class LocalValidator:
             "PYTHONPATH": str(trusted_dir),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "NoDefaultCurrentDirectoryInExePath": "1",
         }
 
         candidate_data_path = str(Path(cwd).resolve())

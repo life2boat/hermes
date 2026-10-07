@@ -510,46 +510,81 @@ class AutonomousDispatcher:
                 transitions=sm.history,
             )
 
-        # Push branch
+        # Push branch: Verify canonical remote existence and URL
         chk_remote = self._safe_git_run(
             ["remote", "get-url", self._config.canonical_remote],
             cwd=wt_path,
             capture_output=True,
             text=True,
         )
-        if chk_remote.returncode == 0:
-            if chk_remote.stdout.strip() and not is_canonical_remote_url(
-                chk_remote.stdout.strip(), self._config.canonical_repo, self._canonical_root
-            ):
-                sm.transition(
-                    TaskState.BLOCKED,
-                    reason="CANONICAL_REMOTE_URL_INVALID",
-                    now_iso=now_iso,
-                )
-                self._worktree_service.remove_worktree(wt_path, branch_name)
-                self._lease_manager.release(
-                    task.id, self._config.worker_id, claim_record.claim_token
-                )
-                if self._ledger:
-                    self._ledger.clear()
-                return DispatchResult(
-                    task_id=task.id,
-                    final_state=TaskState.BLOCKED,
-                    branch=branch_name,
-                    pr_number=None,
-                    pr_url=None,
-                    head_sha=head_sha,
-                    block_reason="CANONICAL_REMOTE_URL_INVALID",
-                    transitions=sm.history,
-                )
+        if chk_remote.returncode != 0 or not chk_remote.stdout.strip():
+            sm.transition(
+                TaskState.BLOCKED,
+                reason="CANONICAL_REMOTE_NOT_FOUND",
+                now_iso=now_iso,
+            )
+            self._worktree_service.remove_worktree(wt_path, branch_name)
+            self._lease_manager.release(
+                task.id, self._config.worker_id, claim_record.claim_token
+            )
+            if self._ledger:
+                self._ledger.clear()
+            return DispatchResult(
+                task_id=task.id,
+                final_state=TaskState.BLOCKED,
+                branch=branch_name,
+                pr_number=None,
+                pr_url=None,
+                head_sha=head_sha,
+                block_reason="CANONICAL_REMOTE_NOT_FOUND",
+                transitions=sm.history,
+            )
 
-            push_res = self._safe_git_run(
-                ["push", self._config.canonical_remote, branch_name],
+        remote_url = chk_remote.stdout.strip()
+        if not is_canonical_remote_url(remote_url, self._config.canonical_repo, self._canonical_root):
+            sm.transition(
+                TaskState.BLOCKED,
+                reason="CANONICAL_REMOTE_URL_INVALID",
+                now_iso=now_iso,
+            )
+            self._worktree_service.remove_worktree(wt_path, branch_name)
+            self._lease_manager.release(
+                task.id, self._config.worker_id, claim_record.claim_token
+            )
+            if self._ledger:
+                self._ledger.clear()
+            return DispatchResult(
+                task_id=task.id,
+                final_state=TaskState.BLOCKED,
+                branch=branch_name,
+                pr_number=None,
+                pr_url=None,
+                head_sha=head_sha,
+                block_reason="CANONICAL_REMOTE_URL_INVALID",
+                transitions=sm.history,
+            )
+
+        push_res = self._safe_git_run(
+            ["push", self._config.canonical_remote, branch_name],
+            cwd=wt_path,
+            capture_output=True,
+            text=True,
+        )
+        if push_res.returncode != 0:
+            # Invariant H05: Reconcile external push state before failing
+            ls_res = self._safe_git_run(
+                ["ls-remote", self._config.canonical_remote, f"refs/heads/{branch_name}"],
                 cwd=wt_path,
                 capture_output=True,
                 text=True,
             )
-            if push_res.returncode != 0:
+            remote_pushed = False
+            if ls_res.returncode == 0 and ls_res.stdout.strip():
+                remote_sha = ls_res.stdout.strip().split()[0]
+                if remote_sha == head_sha:
+                    remote_pushed = True
+
+            if not remote_pushed:
                 sm.transition(
                     TaskState.FAILED,
                     reason="GIT_PUSH_FAILED",
@@ -560,8 +595,7 @@ class AutonomousDispatcher:
                 self._lease_manager.release(
                     task.id, self._config.worker_id, claim_record.claim_token
                 )
-                if self._ledger:
-                    self._ledger.clear()
+                # Invariant H05: Do NOT clear ledger; durable state remains COMMITTED
                 return DispatchResult(
                     task_id=task.id,
                     final_state=TaskState.FAILED,
@@ -621,6 +655,19 @@ class AutonomousDispatcher:
             head_sha,
             wt_path,
         )
+        if not pr_ok or not pr_result:
+            # Invariant H05: Reconcile ambiguous PR creation
+            if hasattr(self._github_service, "get_pr_for_branch"):
+                try:
+                    recon_res = self._github_service.get_pr_for_branch(branch_name)
+                    if isinstance(recon_res, tuple) and len(recon_res) == 2:
+                        recon_ok, recon_pr = recon_res
+                        if recon_ok and recon_pr and recon_pr.head_sha == head_sha:
+                            pr_ok = True
+                            pr_result = recon_pr
+                except Exception:
+                    pass
+
         if not pr_ok or not pr_result:
             sm.transition(
                 TaskState.FAILED, reason=pr_err or "PR_CREATION_FAILED", now_iso=now_iso
@@ -1117,6 +1164,19 @@ class AutonomousDispatcher:
                 sha_match="YES",
                 execution_id=recovery_state.execution_id or recovery_state.head_sha or task_id,
             )
+            # Invariant H06: Re-verify current worker lease immediately before writeback effect
+            if not self._lease_manager.verify_lease(task_id, self._config.worker_id, token, now_iso=now_iso):
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=BlockReasonCode.LOST_LEASE.value,
+                    transitions=(),
+                )
+
             wb_ok, wb_reason = self._writeback_service.writeback_and_verify(
                 task, evidence
             )
@@ -1129,6 +1189,19 @@ class AutonomousDispatcher:
                     pr_url=recovery_state.pr_url,
                     head_sha=recovery_state.head_sha,
                     block_reason=str(wb_reason),
+                    transitions=(),
+                )
+
+            # Invariant H06: Re-verify current worker lease immediately before cleanup effect
+            if not self._lease_manager.verify_lease(task_id, self._config.worker_id, token, now_iso=now_iso):
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=BlockReasonCode.LOST_LEASE.value,
                     transitions=(),
                 )
 

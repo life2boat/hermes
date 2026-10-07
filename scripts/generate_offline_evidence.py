@@ -195,6 +195,7 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         import re
         sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
 
+        rehearsal_producer = rehearsal_data.get("producer") or rehearsal_data.get("rehearsal_producer", "")
         if not rehearsal_producer or rehearsal_producer not in TRUSTED_REHEARSAL_PRODUCERS:
             return {"status": "BLOCKED"}
 
@@ -232,6 +233,20 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
 
         prov = rehearsal_data.get("execution_provenance")
         if not isinstance(prov, dict) or not prov.get("runtime_identity") or not prov.get("isolation_level"):
+            return {"status": "BLOCKED"}
+
+        signature = prov.get("signature")
+        if not signature:
+            return {"status": "BLOCKED"}
+
+        prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
+        if prov_key:
+            import hmac
+            payload_to_verify = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}".encode("utf-8")
+            expected_sig = hmac.new(prov_key.encode("utf-8"), payload_to_verify, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature, expected_sig):
+                return {"status": "BLOCKED"}
+        elif not sha256_pattern.match(signature):
             return {"status": "BLOCKED"}
 
         if (

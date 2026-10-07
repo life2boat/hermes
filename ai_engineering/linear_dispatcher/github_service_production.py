@@ -11,14 +11,29 @@ from ai_engineering.linear_dispatcher.contracts import BlockReasonCode, LinearTa
 from ai_engineering.linear_dispatcher.github_service import IGitHubService, PRCreationResult, CIStatusResult
 
 CANONICAL_REQUIRED_CHECKS: tuple[str, ...] = (
-    "Tests",
-    "Lint (ruff + ty)",
-    "Typecheck",
-    "Agent Release Gate",
-    "Supply Chain Audit",
-    "History Check",
-    "Contributor Attribution Check",
-    "Docs Site Checks",
+    "agent-release-gate",
+    "check-attribution",
+    "check-common-ancestor",
+    "docs-site-checks",
+    "nix (ubuntu-latest)",
+    "nix (macos-latest)",
+    "Windows footguns (blocking)",
+    "ruff enforcement (blocking)",
+    "ruff + ty diff",
+    "typecheck (web)",
+    "typecheck (apps/shared)",
+    "typecheck (apps/desktop)",
+    "typecheck (apps/bootstrap-installer)",
+    "typecheck (ui-tui)",
+    "test (1)",
+    "test (2)",
+    "test (3)",
+    "test (4)",
+    "test (5)",
+    "test (6)",
+    "e2e",
+    "Scan PR for critical supply chain risks",
+    "Check PyPI dependency upper bounds",
 )
 
 
@@ -226,32 +241,57 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                     details={"error": f"UNTRUSTED_CHECK_PRODUCER_{app_slug}"},
                 ), BlockReasonCode.CI_FAILED
 
-        # Step 4: Verify mandatory required check presence
+        # Step 4: Deduplicate check runs by name, selecting the latest run per name
+        runs_by_name: dict[str, list[dict[str, Any]]] = {}
+        for r in check_runs:
+            name = r.get("name")
+            if not name:
+                continue
+            runs_by_name.setdefault(name, []).append(r)
+
+        deduped_runs: dict[str, dict[str, Any]] = {}
+        for name, runs in runs_by_name.items():
+            if len(runs) == 1:
+                deduped_runs[name] = runs[0]
+            else:
+                def run_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+                    return (
+                        item.get("id") or 0,
+                        item.get("completed_at") or "",
+                        item.get("started_at") or "",
+                    )
+                sorted_runs = sorted(runs, key=run_sort_key)
+                latest_run = sorted_runs[-1]
+
+                # Check for conflicting conclusions among tied latest runs
+                latest_key = run_sort_key(latest_run)
+                tied_runs = [item for item in sorted_runs if run_sort_key(item) == latest_key]
+                tied_conclusions = {item.get("conclusion") for item in tied_runs}
+                if len(tied_conclusions) > 1:
+                    return False, CIStatusResult(
+                        overall_status="FAIL",
+                        head_sha=expected_head_sha,
+                        runs=check_runs,
+                        details={name: f"CONFLICTING_CONCLUSIONS: {tied_conclusions}"},
+                    ), BlockReasonCode.CI_FAILED
+
+                deduped_runs[name] = latest_run
+
+        # Step 5: Verify mandatory required check presence using exact matching
         req_checks = set(required_checks) if required_checks is not None else set(self._required_checks)
-        present_names = {r.get("name", "") for r in check_runs}
-        missing_reqs = [
-            req for req in req_checks
-            if not any(
-                name == req
-                or name.startswith(f"{req} ")
-                or name.startswith(f"{req}/")
-                or name.startswith(f"{req}:")
-                for name in present_names
-            )
-        ]
+        missing_reqs = [req for req in req_checks if req not in deduped_runs]
         if missing_reqs:
             return False, CIStatusResult(
                 overall_status="PENDING",
                 head_sha=expected_head_sha,
                 runs=check_runs,
-                details={"missing_required_checks": ", ".join(missing_reqs)},
+                details={"missing_required_checks": ", ".join(sorted(missing_reqs))},
             ), None
 
-        # Step 5: Check run statuses and outcomes
+        # Step 6: Check run statuses and outcomes on deduplicated runs
         details: dict[str, str] = {}
         completed_success = 0
-        for r in check_runs:
-            name = r.get("name", "unknown")
+        for name, r in deduped_runs.items():
             status = r.get("status")
             conclusion = r.get("conclusion")
 
@@ -274,14 +314,7 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
                 ), BlockReasonCode.CI_FAILED
 
             # Required checks must not be skipped or neutral: they must succeed
-            is_req = any(
-                name == req
-                or name.startswith(f"{req} ")
-                or name.startswith(f"{req}/")
-                or name.startswith(f"{req}:")
-                for req in req_checks
-            )
-            if is_req and conclusion != "success":
+            if name in req_checks and conclusion != "success":
                 details[name] = f"required_check_not_successful ({conclusion})"
                 return False, CIStatusResult(
                     overall_status="FAIL",
@@ -294,12 +327,12 @@ Production untouched (0 mutations, 0 deployments, 0 DB/Qdrant changes).
             if conclusion == "success":
                 completed_success += 1
 
-        if completed_success < 1:
+        if completed_success < len(req_checks):
             return False, CIStatusResult(
                 overall_status="PENDING",
                 head_sha=expected_head_sha,
                 runs=check_runs,
-                details={"status": "NO_SUCCESSFUL_CHECK_RUNS"},
+                details={"status": "INSUFFICIENT_SUCCESSFUL_CHECKS"},
             ), None
 
         return True, CIStatusResult(

@@ -100,7 +100,7 @@ class LocalValidator:
         secret_script = trusted_dir / "scripts" / "secret_scanner.py"
         if secret_script.exists():
             sec_res = subprocess.run(
-                [sys.executable, "-I", str(secret_script), candidate_data_path],
+                [sys.executable, "-I", str(secret_script), "--fail-on-skipped", candidate_data_path],
                 cwd=str(trusted_dir),
                 capture_output=True,
                 text=True,

@@ -5880,9 +5880,10 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             lines.append("")
 
+        db_path = getattr(profile_store, "db_path", None)
         try:
             from gateway.healbite_nutrition_diary import HealBiteNutritionDiary
-            diary = HealBiteNutritionDiary()
+            diary = HealBiteNutritionDiary(db_path=db_path)
             daily_summary = diary.get_daily_summary(user_id=user_id)
             cals = int(round(float(daily_summary.get("calories_kcal") or 0.0)))
             entry_count = len(daily_summary.get("entries") or [])
@@ -5898,8 +5899,8 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.debug("Failed to load diary summary for dashboard: %s", e)
 
         try:
-            from gateway.healbite_water_tracker import get_default_water_tracker, _format_ml
-            water_tracker = get_default_water_tracker()
+            from gateway.healbite_water_tracker import HealBiteWaterTracker, _format_ml
+            water_tracker = HealBiteWaterTracker(db_path=db_path)
             water_summary = water_tracker.get_water_summary(user_id)
             if water_summary.target_ml:
                 water_line = f"💧 <b>Вода сегодня:</b> {_format_ml(water_summary.consumed_ml)} / {_format_ml(water_summary.target_ml)} ({water_summary.progress_percent or 0}%)"
@@ -5910,8 +5911,8 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.debug("Failed to load water summary for dashboard: %s", e)
 
         try:
-            from gateway.healbite_weight_tracker import get_default_weight_tracker, _format_weight_grams
-            weight_tracker = get_default_weight_tracker()
+            from gateway.healbite_weight_tracker import HealBiteWeightTracker, _format_weight_grams
+            weight_tracker = HealBiteWeightTracker(db_path=db_path)
             weight_summary = weight_tracker.get_summary(user_id)
             if weight_summary.latest:
                 lines.append(f"⚖️ <b>Вес:</b> {_format_weight_grams(weight_summary.latest.weight_grams)}")

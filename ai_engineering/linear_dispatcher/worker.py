@@ -28,8 +28,10 @@ from ai_engineering.linear_dispatcher.linear_client_production import (
 )
 from ai_engineering.linear_dispatcher.task_executor import (
     CodexTaskExecutor,
+    DshModelGateway,
     ITaskExecutor,
     LinuxCodexTaskExecutor,
+    SandboxedBrokerTaskExecutor,
     SimulatedTaskExecutor,
 )
 from ai_engineering.linear_dispatcher.worktree_service import WorktreeService
@@ -177,6 +179,16 @@ class DispatcherWorker:
         backend = os.environ.get("DISPATCHER_EXECUTOR_BACKEND", "codex").lower()
         if backend in ("codex", "linux_codex"):
             return LinuxCodexTaskExecutor()
+        elif backend in ("sandboxed_broker", "broker", "safe_broker"):
+            dsh_bin = os.environ.get("DSH_BIN")
+            use_dsh = os.environ.get("HERMES_USE_DSH", "").lower() in ("1", "true")
+            patch_path = os.environ.get("DSH_PATCH_PATH")
+            gateway = (
+                DshModelGateway(dsh_bin=dsh_bin, patch_path=patch_path)
+                if (dsh_bin or use_dsh)
+                else None
+            )
+            return SandboxedBrokerTaskExecutor(model_gateway=gateway)
         elif backend in ("simulated", "offline"):
             return SimulatedTaskExecutor()
         return None

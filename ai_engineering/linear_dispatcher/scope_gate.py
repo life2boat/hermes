@@ -87,11 +87,18 @@ class ScopeGate:
         """Check if any changed file falls into forbidden scope."""
         for path in changed_files:
             norm_path = path.strip().replace("\\", "/")
+            while norm_path.startswith("./"):
+                norm_path = norm_path[2:]
+            while norm_path.startswith("/"):
+                norm_path = norm_path[1:]
+            # Normalize Windows trailing dot/space segment aliases (e.g. gateway/migrations./v1.sql -> gateway/migrations/v1.sql)
+            canonical_segments = [seg.rstrip(". ") for seg in norm_path.split("/") if seg]
+            norm_canonical = "/".join(canonical_segments)
             for pat in _FORBIDDEN_FILE_PATTERNS:
-                if pat.search(norm_path):
-                    if "migration" in norm_path.lower():
+                if pat.search(norm_path) or pat.search(norm_canonical):
+                    if "migration" in norm_canonical.lower():
                         return False, BlockReasonCode.DB_MIGRATION_FORBIDDEN
-                    if "secret" in norm_path.lower() or ".env" in norm_path.lower():
+                    if "secret" in norm_canonical.lower() or ".env" in norm_canonical.lower():
                         return False, BlockReasonCode.CREDENTIALS_MUTATION_FORBIDDEN
                     return False, BlockReasonCode.PRODUCTION_MUTATION_FORBIDDEN
         return True, None

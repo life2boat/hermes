@@ -9,6 +9,12 @@ from gateway.config import PlatformConfig
 from gateway.healbite_water_tracker import HealBiteWaterTracker
 from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
+try:
+    from telegram.constants import ParseMode
+except ImportError:
+    ParseMode = None
+
+
 
 def _water_target_resolver(*, user_id: int = 101, target_ml: int = 2200):
     return lambda requested_user_id: target_ml if int(requested_user_id) == int(user_id) else None
@@ -72,6 +78,8 @@ async def test_water_keyboard_routes_to_local_tracker_without_generic_dispatch(t
     assert "Вода сегодня" in sent["text"]
     assert "2 200 мл" in sent["text"]
     assert sent.get("reply_markup") is not None
+    assert sent.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
+
 
 
 @pytest.mark.asyncio

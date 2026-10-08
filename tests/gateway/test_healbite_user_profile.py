@@ -23,6 +23,12 @@ from gateway.platforms.telegram import (
     TelegramAdapter,
 )
 
+try:
+    from telegram.constants import ParseMode
+except ImportError:
+    ParseMode = None
+
+
 
 def _build_record(*, meal_name: str, calories_kcal: float, protein_g: float, fat_g: float, carbs_g: float):
     return normalize_nutrition_payload(
@@ -437,6 +443,7 @@ async def test_telegram_start_for_new_user_starts_extended_onboarding(tmp_path, 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "настроим профиль" in kwargs["text"].casefold()
     assert kwargs["reply_markup"] == [["Мужской", "Женский"]]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert store.get_onboarding_state(701) is not None
     adapter.handle_message.assert_not_called()
 
@@ -453,6 +460,7 @@ async def test_telegram_start_for_existing_user_returns_menu_without_reset(tmp_p
 
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert kwargs["text"]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert kwargs["reply_markup"] == HEALBITE_REPLY_KEYBOARD_ROWS
     assert store.get_user_profile(702).daily_kcal_target == 2000
 
@@ -470,6 +478,7 @@ async def test_telegram_start_edit_opens_safe_reconfiguration_flow(tmp_path, mon
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "обновим профиль" in kwargs["text"].casefold()
     assert kwargs["reply_markup"] == [["Мужской", "Женский"]]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert store.get_user_profile(703).daily_kcal_target == 2000
     assert store.get_onboarding_state(703) is not None
 
@@ -488,6 +497,7 @@ async def test_telegram_profile_command_renders_extended_profile(tmp_path, monke
     assert "Ваш профиль" in kwargs["text"]
     assert "2000 ккал" in kwargs["text"]
     assert "Мужской" in kwargs["text"]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     adapter.handle_message.assert_not_called()
 
 
@@ -505,6 +515,7 @@ async def test_telegram_onboarding_reply_short_circuits_and_advances(tmp_path, m
     kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "полных лет" in kwargs["text"]
     assert kwargs["reply_markup"] is None
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert store.get_onboarding_state(705).step == "age"
     adapter._enqueue_text_event.assert_not_called()
     water_factory.assert_not_called()
@@ -533,7 +544,8 @@ async def test_telegram_start_for_existing_user_renders_rich_dashboard(tmp_path,
     _patch_telegram_profile_store(monkeypatch, store)
 
     adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
-    adapter._has_healbite_advanced_access = lambda uid: False
+    adapter._healbite_menu_rows = TelegramAdapter._healbite_menu_rows.__get__(adapter, TelegramAdapter)
+    adapter._is_feature_allowlisted = lambda feat, uid: False
 
     await adapter._handle_command(_make_update("/start", user_id=801), SimpleNamespace())
 
@@ -543,6 +555,7 @@ async def test_telegram_start_for_existing_user_renders_rich_dashboard(tmp_path,
     assert "Питание сегодня:" in kwargs["text"]
     assert "Вода сегодня:" in kwargs["text"]
     assert "Быстрые действия:" in kwargs["text"]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert kwargs["reply_markup"] == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
 
 
@@ -552,7 +565,8 @@ async def test_telegram_help_command_renders_friendly_guide_and_menu(tmp_path, m
     store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     _patch_telegram_profile_store(monkeypatch, store)
     adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
-    adapter._has_healbite_advanced_access = lambda uid: False
+    adapter._healbite_menu_rows = TelegramAdapter._healbite_menu_rows.__get__(adapter, TelegramAdapter)
+    adapter._is_feature_allowlisted = lambda feat, uid: False
     adapter._maybe_handle_healbite_help_command = TelegramAdapter._maybe_handle_healbite_help_command.__get__(adapter, TelegramAdapter)
     adapter._dispatch_healbite_keyboard_action = TelegramAdapter._dispatch_healbite_keyboard_action.__get__(adapter, TelegramAdapter)
 
@@ -563,20 +577,24 @@ async def test_telegram_help_command_renders_friendly_guide_and_menu(tmp_path, m
     assert "Распознавание еды:" in kwargs["text"]
     assert "Трекер воды:" in kwargs["text"]
     assert "Трекер веса:" in kwargs["text"]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert kwargs["reply_markup"] == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
 
     # Test via keyboard button "❓ Помощь"
     await adapter._handle_command(_make_update("❓ Помощь", user_id=802), SimpleNamespace())
     kwargs_btn = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert "Справка по возможностям HealBite" in kwargs_btn["text"]
+    assert kwargs_btn.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
 
 
 def test_healbite_main_menu_keyboard_layout_and_feature_gating():
     adapter = object.__new__(TelegramAdapter)
     adapter._healbite_reply_keyboard = lambda rows: rows
+    adapter._healbite_menu_rows = TelegramAdapter._healbite_menu_rows.__get__(adapter, TelegramAdapter)
+    adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
 
     # User without advanced access gets compact 3-row layout
-    adapter._has_healbite_advanced_access = lambda uid: False
+    adapter._is_feature_allowlisted = lambda feat, uid: False
     public_rows = adapter._healbite_main_menu_keyboard(actor_user_id=101)
     assert public_rows == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
     assert len(public_rows) == 3
@@ -584,10 +602,39 @@ def test_healbite_main_menu_keyboard_layout_and_feature_gating():
     assert public_rows[1] == ["💧 Вода", "⚖️ Вес"]
     assert public_rows[2] == ["👤 Профиль", "❓ Помощь"]
 
-    # Allowlisted user gets full rows
-    adapter._has_healbite_advanced_access = lambda uid: True
-    operator_rows = adapter._healbite_main_menu_keyboard(actor_user_id=968323641)
-    assert operator_rows == HEALBITE_REPLY_KEYBOARD_ROWS
+    # Granular gating: only weekly menu enabled
+    adapter._is_feature_allowlisted = lambda feat, uid: feat == "HEALBITE_WEEKLY_MENU"
+    weekly_only_rows = adapter._healbite_main_menu_keyboard(actor_user_id=101)
+    assert ["📋 Меню на неделю"] in weekly_only_rows
+    assert not any("🛒 Список покупок" in row for row in weekly_only_rows)
+    assert not any("👨‍👩‍👧 Семья" in row for row in weekly_only_rows)
+
+    # Granular gating: weekly menu + shopping list paired
+    adapter._is_feature_allowlisted = lambda feat, uid: feat in {"HEALBITE_WEEKLY_MENU", "HEALBITE_SHOPPING_LIST"}
+    weekly_shopping_rows = adapter._healbite_main_menu_keyboard(actor_user_id=101)
+    assert ["📋 Меню на неделю", "🛒 Список покупок"] in weekly_shopping_rows
+
+    # Granular gating: only households enabled
+    adapter._is_feature_allowlisted = lambda feat, uid: feat == "HEALBITE_HOUSEHOLDS"
+    family_only_rows = adapter._healbite_main_menu_keyboard(actor_user_id=101)
+    assert ["👨‍👩‍👧 Семья"] in family_only_rows
+    assert not any("📋 Меню на неделю" in row for row in family_only_rows)
+
+    # All advanced features enabled
+    adapter._is_feature_allowlisted = lambda feat, uid: True
+    all_rows = adapter._healbite_main_menu_keyboard(actor_user_id=968323641)
+    assert ["🍎 Дневник", "📊 Статистика"] in all_rows
+    assert ["📋 Меню на неделю", "🛒 Список покупок"] in all_rows
+    assert ["🥘 Из холодильника в меню"] in all_rows
+    assert ["🥕 Продукты дома"] in all_rows
+    assert ["💧 Вода", "⚖️ Вес"] in all_rows
+    assert ["👨‍👩‍👧 Семья"] in all_rows
+    assert ["👤 Профиль", "❓ Помощь"] in all_rows
+
+    # Verify dead-end restrictions button is NEVER present in any layout
+    for rows in (public_rows, weekly_only_rows, weekly_shopping_rows, family_only_rows, all_rows):
+        assert not any("⚙️ Ограничения" in row for row in rows)
+
 
 
 def test_onboarding_step_progress_and_recovery_formatting(tmp_path):
@@ -603,3 +650,69 @@ def test_onboarding_step_progress_and_recovery_formatting(tmp_path):
     resumed_prompt = store.begin_onboarding(user_id=803, username="oleg")
     assert "Продолжаем настройку профиля!" in resumed_prompt
     assert "Шаг 2 из 7 • Возраст" in resumed_prompt
+
+
+@pytest.mark.asyncio
+async def test_telegram_onboarding_reply_completion_sets_parse_mode_and_main_menu(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=804, username="oleg")
+    # Advance first 6 steps
+    for answer in ("Мужской", "35", "180", "85", "Поддержание веса", "Умеренная активность"):
+        store.handle_onboarding_reply(user_id=804, text=answer, username="oleg")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
+    adapter._healbite_menu_rows = TelegramAdapter._healbite_menu_rows.__get__(adapter, TelegramAdapter)
+    adapter._is_feature_allowlisted = lambda feat, uid: False
+
+    # Send 7th step through telegram adapter
+    await adapter._handle_text_message(_make_update("2000", user_id=804), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
+    assert kwargs["reply_markup"] == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
+    assert "Профиль успешно настроен" in kwargs["text"]
+    assert store.get_onboarding_state(804) is None
+
+
+def test_healbite_profile_and_dashboard_escapes_untrusted_html(tmp_path):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=999, username="<attacker>")
+    _complete_onboarding(store, user_id=999, username="<attacker>", manual_target="2200")
+
+    # Set untrusted fields with special HTML characters directly on the profile
+    profile = store.get_user_profile(999)
+    assert profile is not None
+    profile.allergies = "<script>alert(1)</script>"
+    profile.stop_products = "<b>poison</b> & more"
+    profile.preferences = "vegan <raw> \"quotes\""
+    profile.budget = "low < cost > 100 &"
+    profile.cooking_frequency = "rare < 1"
+
+    report = format_healbite_profile_report(profile)
+    assert "<script>" not in report
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in report
+    assert "<b>poison</b>" not in report
+    assert "&lt;b&gt;poison&lt;/b&gt; &amp; more" in report
+    assert "&lt;raw&gt;" in report
+    assert "&quot;quotes&quot;" in report
+    assert "low &lt; cost &gt; 100 &amp;" in report
+    assert "rare &lt; 1" in report
+
+    # Test returning dashboard escaping
+    adapter = object.__new__(TelegramAdapter)
+    adapter._build_healbite_returning_dashboard = TelegramAdapter._build_healbite_returning_dashboard.__get__(adapter, TelegramAdapter)
+    mock_store = Mock()
+    mock_store.get_user_profile = Mock(return_value=profile)
+    mock_store.db_path = tmp_path / "healbite.db"
+    import gateway.platforms.telegram as tg_mod
+    orig_get_profile = tg_mod.get_default_healbite_user_profile
+    try:
+        tg_mod.get_default_healbite_user_profile = lambda: mock_store
+        dashboard = adapter._build_healbite_returning_dashboard(999)
+        assert "<script>" not in dashboard
+        assert "<b>С возвращением в HealBite!</b>" in dashboard  # Template bold tag preserved
+        assert "<b>Быстрые действия:</b>" in dashboard
+    finally:
+        tg_mod.get_default_healbite_user_profile = orig_get_profile

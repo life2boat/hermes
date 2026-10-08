@@ -112,3 +112,45 @@ async def test_send_draft_non_badrequest_propagates_without_retry():
 
     assert result.success is False
     assert len(calls) == 1  # no plain-text retry on non-BadRequest
+
+
+@pytest.mark.asyncio
+async def test_send_passes_html_parse_mode_and_preserves_content():
+    adapter = _make_adapter()
+    adapter._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+
+    result = await adapter.send("123", "<b>Hello</b> &amp; world", metadata={"parse_mode": "HTML"})
+
+    assert result.success is True
+    assert result.message_id == "42"
+    adapter._bot.send_message.assert_awaited_once()
+    kwargs = adapter._bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 123
+    assert kwargs["text"] == "<b>Hello</b> &amp; world"
+    assert kwargs["parse_mode"] in {"HTML", tg_mod.ParseMode.HTML}
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_to_plain_text_on_html_parse_error():
+    adapter = _make_adapter()
+    from telegram.error import BadRequest
+
+    calls = []
+
+    async def _send(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("parse_mode") is not None:
+            raise BadRequest("can't parse entities: unclosed tag")
+        return MagicMock(message_id=43)
+
+    adapter._bot.send_message = AsyncMock(side_effect=_send)
+
+    result = await adapter.send("123", "<b>broken tag", metadata={"parse_mode": "HTML"})
+
+    assert result.success is True
+    assert result.message_id == "43"
+    assert len(calls) == 2
+    assert calls[0]["parse_mode"] in {"HTML", tg_mod.ParseMode.HTML}
+    assert calls[0]["text"] == "<b>broken tag"
+    assert calls[1]["parse_mode"] is None
+    assert calls[1]["text"] == "broken tag"

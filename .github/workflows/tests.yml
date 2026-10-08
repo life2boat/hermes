@@ -130,19 +130,34 @@ jobs:
         with:
           pattern: test-durations-slice-*
           path: durations
-          merge-multiple: true
 
       - name: Merge into single durations file
         run: |
           python3 -c "
-          import json, glob, os
+          import glob, json, os
           merged = {}
-          for f in glob.glob('durations/*test_durations.json'):
-            with open(f) as fh:
-              merged.update(json.load(fh))
-          with open('test_durations.json', 'w') as fh:
-            json.dump(merged, fh, indent=2, sort_keys=True)
-          print(f'Merged {len(merged)} file durations')
+          decoder = json.JSONDecoder()
+          duration_files = sorted(glob.glob('durations/**/*.json', recursive=True))
+          for f in duration_files:
+              if not os.path.isfile(f):
+                  continue
+              with open(f, 'r', encoding='utf-8') as fh:
+                  content = fh.read().strip()
+              idx = 0
+              while idx < len(content):
+                  while idx < len(content) and content[idx].isspace():
+                      idx += 1
+                  if idx >= len(content):
+                      break
+                  obj, end = decoder.raw_decode(content, idx)
+                  if isinstance(obj, dict):
+                      merged.update(obj)
+                  idx = end
+          if not merged:
+              raise RuntimeError(f'No durations found in {len(duration_files)} files under durations/')
+          with open('test_durations.json', 'w', encoding='utf-8') as fh:
+              json.dump(merged, fh, indent=2, sort_keys=True)
+          print(f'Merged {len(merged)} file durations from {len(duration_files)} files')
           "
 
       - name: Save merged duration cache

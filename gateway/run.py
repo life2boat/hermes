@@ -8695,6 +8695,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 source,
                                 self._reply_anchor_for_event(event),
                             )
+                            metadata = dict(metadata) if metadata else {}
+                            metadata["parse_mode"] = "HTML"
                             if adapter and source.chat_id:
                                 await adapter.send(
                                     source.chat_id,

@@ -240,13 +240,16 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             return {"status": "BLOCKED"}
 
         prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
-        if prov_key:
-            import hmac
-            payload_to_verify = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}".encode("utf-8")
-            expected_sig = hmac.new(prov_key.encode("utf-8"), payload_to_verify, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(signature, expected_sig):
-                return {"status": "BLOCKED"}
-        elif not sha256_pattern.match(signature):
+        if not prov_key or not prov_key.strip():
+            # Invariant H11: Must fail closed if provenance verification key is missing
+            return {"status": "BLOCKED"}
+
+        import hmac
+        payload_standard = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}".encode("utf-8")
+        payload_with_producer = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}:{rehearsal_producer}".encode("utf-8")
+        sig_standard = hmac.new(prov_key.encode("utf-8"), payload_standard, hashlib.sha256).hexdigest()
+        sig_with_producer = hmac.new(prov_key.encode("utf-8"), payload_with_producer, hashlib.sha256).hexdigest()
+        if not (hmac.compare_digest(signature, sig_standard) or hmac.compare_digest(signature, sig_with_producer)):
             return {"status": "BLOCKED"}
 
         if (

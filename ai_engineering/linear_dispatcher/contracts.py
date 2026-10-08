@@ -128,3 +128,4 @@ class DispatcherConfig:
     ci_max_wait_sec: int = 600
     enabled: bool = False
     mode: str = "shadow"
+    executor_backend: str = "sandboxed_broker"

@@ -39,6 +39,40 @@ SAFE_GIT_OPTS: list[str] = [
 ]
 
 
+TRUSTED_GIT_ENV_VARS: set[str] = {
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "SYSTEMDRIVE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERPROFILE",
+    "ALLUSERSPROFILE",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMDATA",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "HOME",
+    "USER",
+    "USERNAME",
+    "LOGNAME",
+    "SHELL",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TZ",
+}
+
+
 def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
     """Inspect repository configuration and attributes to discover and neutralize any filter or diff drivers."""
     configs: list[str] = []
@@ -59,22 +93,24 @@ def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
                 parts = line.split(maxsplit=1)
                 if parts:
                     key = parts[0]
-                    mf = re.match(r"^filter\.([^.]+)\.", key)
-                    if mf:
-                        name = mf.group(1)
-                        configs.extend([
-                            f"filter.{name}.clean=",
-                            f"filter.{name}.smudge=",
-                            f"filter.{name}.process=",
-                            f"filter.{name}.required=false",
-                        ])
-                    md = re.match(r"^diff\.([^.]+)\.", key)
-                    if md:
-                        name = md.group(1)
-                        configs.extend([
-                            f"diff.{name}.command=",
-                            f"diff.{name}.textconv=",
-                        ])
+                    if key.startswith("filter."):
+                        rest = key[len("filter."):]
+                        if "." in rest:
+                            name, _ = rest.rsplit(".", 1)
+                            configs.extend([
+                                f"filter.{name}.clean=",
+                                f"filter.{name}.smudge=",
+                                f"filter.{name}.process=",
+                                f"filter.{name}.required=false",
+                            ])
+                    elif key.startswith("diff."):
+                        rest = key[len("diff."):]
+                        if "." in rest:
+                            name, _ = rest.rsplit(".", 1)
+                            configs.extend([
+                                f"diff.{name}.command=",
+                                f"diff.{name}.textconv=",
+                            ])
     except Exception:
         pass
 
@@ -85,19 +121,21 @@ def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
             try:
                 content = af.read_text(encoding="utf-8", errors="ignore")
                 for mf in re.finditer(r"filter=([^\s]+)", content):
-                    name = mf.group(1)
-                    configs.extend([
-                        f"filter.{name}.clean=",
-                        f"filter.{name}.smudge=",
-                        f"filter.{name}.process=",
-                        f"filter.{name}.required=false",
-                    ])
+                    name = mf.group(1).strip()
+                    if name and name != "false":
+                        configs.extend([
+                            f"filter.{name}.clean=",
+                            f"filter.{name}.smudge=",
+                            f"filter.{name}.process=",
+                            f"filter.{name}.required=false",
+                        ])
                 for md in re.finditer(r"diff=([^\s]+)", content):
-                    name = md.group(1)
-                    configs.extend([
-                        f"diff.{name}.command=",
-                        f"diff.{name}.textconv=",
-                    ])
+                    name = md.group(1).strip()
+                    if name and name != "false":
+                        configs.extend([
+                            f"diff.{name}.command=",
+                            f"diff.{name}.textconv=",
+                        ])
             except Exception:
                 pass
 
@@ -110,30 +148,44 @@ def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
 
 
 def get_clean_git_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(base_env or os.environ)
-    for k in list(env.keys()):
-        if k.startswith("GIT_") and k not in ("GIT_DIR", "GIT_WORK_TREE"):
-            env.pop(k, None)
-    for k in ("PAGER", "EDITOR", "VISUAL"):
-        env.pop(k, None)
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_SYSTEM"] = os.devnull
-    env["GIT_SSH_COMMAND"] = "false"
-    env["GIT_ASKPASS"] = "false"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env["GIT_ALLOW_PROTOCOL"] = "https:ssh:file"
-    env["NoDefaultCurrentDirectoryInExePath"] = "1"
-    env["PYTHONNOUSERSITE"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    """Retain only explicitly trusted environment variables, sanitizing all repository control variables."""
+    source = dict(base_env if base_env is not None else os.environ)
+    trusted_upper = {k.upper() for k in TRUSTED_GIT_ENV_VARS}
+    clean_env: dict[str, str] = {}
+
+    for k, v in source.items():
+        k_upper = k.upper()
+        # Strictly forbid any git repository control or hook variables
+        if k_upper.startswith("GIT_"):
+            continue
+        # Strip pagers, editors, visual
+        if k_upper in ("PAGER", "EDITOR", "VISUAL"):
+            continue
+        # Only retain explicitly trusted environment variables
+        if k_upper in trusted_upper:
+            clean_env[k] = v
+
+    # Explicitly enforce safe Git configuration boundaries
+    clean_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    clean_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    clean_env["GIT_CONFIG_SYSTEM"] = os.devnull
+    clean_env["GIT_SSH_COMMAND"] = "false"
+    clean_env["GIT_ASKPASS"] = "false"
+    clean_env["GIT_TERMINAL_PROMPT"] = "0"
+    clean_env["GIT_ALLOW_PROTOCOL"] = "https:ssh:file"
+    clean_env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    clean_env["PYTHONNOUSERSITE"] = "1"
+    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
+
     # Clean PATH: strip empty elements, relative directories, and current directory
-    if "PATH" in env:
+    path_key = next((k for k in clean_env if k.upper() == "PATH"), None)
+    if path_key and clean_env[path_key]:
         safe_dirs = [
-            d for d in env["PATH"].split(os.pathsep)
+            d for d in clean_env[path_key].split(os.pathsep)
             if d and Path(d).is_absolute() and not Path(d).name.startswith(".")
         ]
-        env["PATH"] = os.pathsep.join(safe_dirs)
-    return env
+        clean_env[path_key] = os.pathsep.join(safe_dirs)
+    return clean_env
 
 
 def is_canonical_remote_url(

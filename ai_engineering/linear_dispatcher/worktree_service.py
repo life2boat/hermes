@@ -125,26 +125,31 @@ def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
 
     try:
         if rp.is_dir():
-            for p in rp.rglob(".gitattributes"):
-                if p.is_file():
-                    attr_files.append(p)
+            for root, dirs, files in os.walk(rp, onerror=lambda _: None):
+                if ".git" in dirs:
+                    dirs.remove(".git")
+                if ".gitattributes" in files:
+                    attr_files.append(Path(root) / ".gitattributes")
     except Exception as exc:
         raise WorktreeIsolationError(f"Failed scanning .gitattributes in {rp}: {exc}") from exc
 
     for af in attr_files:
-        if af.is_file():
-            try:
-                content = af.read_text(encoding="utf-8", errors="ignore")
-                for mf in re.finditer(r"filter=([^\s]+)", content):
-                    name = mf.group(1).strip()
-                    if name and name != "false" and name != "unset":
-                        discovered_drivers.add(name)
-                for md in re.finditer(r"diff=([^\s]+)", content):
-                    name = md.group(1).strip()
-                    if name and name != "false" and name != "unset":
-                        discovered_drivers.add(name)
-            except Exception as exc:
-                raise WorktreeIsolationError(f"Failed reading attributes file {af}: {exc}") from exc
+        try:
+            if not af.is_file():
+                continue
+            content = af.read_text(encoding="utf-8", errors="ignore")
+            for mf in re.finditer(r"filter=([^\s]+)", content):
+                name = mf.group(1).strip()
+                if name and name != "false" and name != "unset":
+                    discovered_drivers.add(name)
+            for md in re.finditer(r"diff=([^\s]+)", content):
+                name = md.group(1).strip()
+                if name and name != "false" and name != "unset":
+                    discovered_drivers.add(name)
+        except (FileNotFoundError, PermissionError):
+            continue
+        except Exception as exc:
+            raise WorktreeIsolationError(f"Failed reading attributes file {af}: {exc}") from exc
 
     # 3. Neutralize all discovered drivers: empty clean, smudge, process, command, textconv, and required=false
     configs: list[str] = []

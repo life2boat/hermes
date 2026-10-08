@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import secrets
-from typing import Mapping
+import threading
+from typing import Callable, Mapping
 
 from ai_engineering.linear_dispatcher.contracts import (
     BlockReasonCode,
@@ -22,6 +23,7 @@ class LeaseManager:
     """Thread-safe and process-safe claim/lease manager."""
 
     def __init__(self, persistence_path: Path | str | None = None) -> None:
+        self._lock = threading.RLock()
         self._persistence_path = Path(persistence_path) if persistence_path else None
         self._leases: dict[str, ClaimRecord] = {}
         if self._persistence_path and self._persistence_path.exists():
@@ -156,11 +158,44 @@ class LeaseManager:
 
     def release(self, task_id: str, owner: str, claim_token: str) -> bool:
         """Release lease upon successful completion or graceful abort."""
-        lease = self._leases.get(task_id)
-        if not lease:
+        with self._lock:
+            lease = self._leases.get(task_id)
+            if not lease:
+                return False
+            if lease.claim_owner == owner and lease.claim_token == claim_token:
+                del self._leases[task_id]
+                self._save()
+                return True
             return False
-        if lease.claim_owner == owner and lease.claim_token == claim_token:
-            del self._leases[task_id]
-            self._save()
-            return True
-        return False
+
+    def fenced_cleanup(
+        self,
+        task_id: str,
+        owner: str,
+        claim_token: str,
+        cleanup_callback: Callable[[], None] | None = None,
+        now_iso: str | None = None,
+    ) -> bool:
+        """Atomically verify ownership, execute cleanup callback, and release lease.
+
+        Guarantees that:
+        1. If ownership is no longer proven before cleanup, callback is NOT called,
+           no lease is released, returns False.
+        2. If ownership is altered/lost during callback execution, lease is NOT released,
+           returns False.
+        3. Only if ownership remained intact throughout is the lease released and True returned.
+        """
+        with self._lock:
+            if not self.verify_lease(task_id, owner, claim_token, now_iso=now_iso):
+                return False
+            if cleanup_callback:
+                cleanup_callback()
+            # Fencing check: re-verify ownership before releasing
+            if not self.verify_lease(task_id, owner, claim_token, now_iso=now_iso):
+                return False
+            lease = self._leases.get(task_id)
+            if lease and lease.claim_owner == owner and lease.claim_token == claim_token:
+                del self._leases[task_id]
+                self._save()
+                return True
+            return False

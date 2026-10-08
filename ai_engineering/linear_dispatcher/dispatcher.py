@@ -99,6 +99,47 @@ class AutonomousDispatcher:
         cmd = ["git"] + SAFE_GIT_OPTS + dynamic_opts + extra_opts + ["-C", str(cwd)] + args
         return subprocess.run(cmd, env=env, **kwargs)
 
+    def _perform_fenced_cleanup(
+        self,
+        task_id: str,
+        worker_id: str,
+        claim_token: str,
+        wt_path: Path | str | None,
+        branch_name: str | None,
+        now_iso: str | None = None,
+        clear_ledger: bool = True,
+    ) -> bool:
+        """Atomically fences destructive cleanup against lease loss, expiry, or theft.
+
+        Verifies exact task_id, worker_id, and claim_token before and during cleanup.
+        If ownership is no longer proven:
+        - does NOT delete the worktree;
+        - does NOT clear recovery evidence / ledger;
+        - does NOT release another worker's lease;
+        - returns False.
+
+        If ownership is verified:
+        - removes the worktree;
+        - releases the lease (fenced);
+        - clears recovery ledger (if clear_ledger=True);
+        - returns True.
+        """
+        def _cb() -> None:
+            if wt_path:
+                p = Path(wt_path)
+                if p.exists():
+                    self._worktree_service.remove_worktree(p, branch_name)
+
+        released = self._lease_manager.fenced_cleanup(
+            task_id, worker_id, claim_token, cleanup_callback=_cb, now_iso=now_iso
+        )
+        if not released:
+            return False
+
+        if clear_ledger and self._ledger:
+            self._ledger.clear()
+        return True
+
     def dispatch_one_task(
         self,
         tasks: Sequence[LinearTask],
@@ -242,12 +283,14 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.NO_SUPPORTED_TASK_EXECUTION_BACKEND.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            final_reason = (
+                BlockReasonCode.NO_SUPPORTED_TASK_EXECUTION_BACKEND.value
+                if cleaned
+                else BlockReasonCode.LOST_LEASE.value
+            )
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -255,7 +298,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=None,
-                block_reason=BlockReasonCode.NO_SUPPORTED_TASK_EXECUTION_BACKEND.value,
+                block_reason=final_reason,
                 transitions=sm.history,
             )
 
@@ -267,12 +310,12 @@ class AutonomousDispatcher:
             )
             reason = exec_res.error_reason or "EXECUTOR_FAILED"
             sm.transition(target_state, reason=reason, now_iso=now_iso)
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            if not cleaned:
+                target_state = TaskState.BLOCKED
+                reason = BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=target_state,
@@ -398,20 +441,19 @@ class AutonomousDispatcher:
                 reason="LOCAL_VALIDATION_FAILED",
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            final_state = TaskState.FAILED if cleaned else TaskState.BLOCKED
+            reason = "LOCAL_VALIDATION_FAILED" if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
-                final_state=TaskState.FAILED,
+                final_state=final_state,
                 branch=branch_name,
                 pr_number=None,
                 pr_url=None,
                 head_sha=None,
-                block_reason="LOCAL_VALIDATION_FAILED",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -456,12 +498,14 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.CANONICAL_MAIN_LOOKUP_FAILED.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            final_reason = (
+                BlockReasonCode.CANONICAL_MAIN_LOOKUP_FAILED.value
+                if cleaned
+                else BlockReasonCode.LOST_LEASE.value
+            )
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -469,7 +513,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason=BlockReasonCode.CANONICAL_MAIN_LOOKUP_FAILED.value,
+                block_reason=final_reason,
                 transitions=sm.history,
             )
         elif current_main_sha != self._canonical_main_sha:
@@ -478,12 +522,14 @@ class AutonomousDispatcher:
                 reason=BlockReasonCode.CANONICAL_MAIN_DRIFT.value,
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            final_reason = (
+                BlockReasonCode.CANONICAL_MAIN_DRIFT.value
+                if cleaned
+                else BlockReasonCode.LOST_LEASE.value
+            )
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -491,7 +537,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason=BlockReasonCode.CANONICAL_MAIN_DRIFT.value,
+                block_reason=final_reason,
                 transitions=sm.history,
             )
 
@@ -528,12 +574,10 @@ class AutonomousDispatcher:
                 reason="CANONICAL_REMOTE_NOT_FOUND",
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            reason = "CANONICAL_REMOTE_NOT_FOUND" if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -541,7 +585,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason="CANONICAL_REMOTE_NOT_FOUND",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -552,12 +596,10 @@ class AutonomousDispatcher:
                 reason="CANONICAL_REMOTE_URL_INVALID",
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            reason = "CANONICAL_REMOTE_URL_INVALID" if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -565,7 +607,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason="CANONICAL_REMOTE_URL_INVALID",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -581,12 +623,10 @@ class AutonomousDispatcher:
                 reason="CANONICAL_REMOTE_NOT_FOUND",
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            reason = "CANONICAL_REMOTE_NOT_FOUND" if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -594,7 +634,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason="CANONICAL_REMOTE_NOT_FOUND",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -605,12 +645,10 @@ class AutonomousDispatcher:
                 reason="CANONICAL_REMOTE_URL_INVALID",
                 now_iso=now_iso,
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            reason = "CANONICAL_REMOTE_URL_INVALID" if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -618,7 +656,7 @@ class AutonomousDispatcher:
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason="CANONICAL_REMOTE_URL_INVALID",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -649,19 +687,20 @@ class AutonomousDispatcher:
                     evidence={"stderr": push_res.stderr or push_res.stdout},
                     now_iso=now_iso,
                 )
-                self._worktree_service.remove_worktree(wt_path, branch_name)
-                self._lease_manager.release(
-                    task.id, self._config.worker_id, claim_record.claim_token
+                cleaned = self._perform_fenced_cleanup(
+                    task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso, clear_ledger=False
                 )
+                final_state = TaskState.FAILED if cleaned else TaskState.BLOCKED
+                reason = "GIT_PUSH_FAILED" if cleaned else BlockReasonCode.LOST_LEASE.value
                 # Invariant H05: Do NOT clear ledger; durable state remains COMMITTED
                 return DispatchResult(
                     task_id=task.id,
-                    final_state=TaskState.FAILED,
+                    final_state=final_state,
                     branch=branch_name,
                     pr_number=None,
                     pr_url=None,
                     head_sha=head_sha,
-                    block_reason="GIT_PUSH_FAILED",
+                    block_reason=reason,
                     transitions=sm.history,
                 )
 
@@ -735,20 +774,21 @@ class AutonomousDispatcher:
             sm.transition(
                 TaskState.FAILED, reason=pr_err or "PR_CREATION_FAILED", now_iso=now_iso
             )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso, clear_ledger=False
             )
+            final_state = TaskState.FAILED if cleaned else TaskState.BLOCKED
+            reason = (pr_err or "PR_CREATION_FAILED") if cleaned else BlockReasonCode.LOST_LEASE.value
             # Invariant H05: Do NOT clear ledger on PR creation failure.
             # Branch was pushed; durable state is retained for recovery.
             return DispatchResult(
                 task_id=task.id,
-                final_state=TaskState.FAILED,
+                final_state=final_state,
                 branch=branch_name,
                 pr_number=None,
                 pr_url=None,
                 head_sha=head_sha,
-                block_reason=pr_err or "PR_CREATION_FAILED",
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -824,12 +864,12 @@ class AutonomousDispatcher:
                     block_reason=reason_code,
                     transitions=sm.history,
                 )
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            if not cleaned:
+                target_state = TaskState.BLOCKED
+                reason_code = BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=target_state,
@@ -902,12 +942,10 @@ class AutonomousDispatcher:
         wb_ok, wb_reason = self._writeback_service.writeback_and_verify(task, evidence)
         if not wb_ok:
             sm.transition(TaskState.BLOCKED, reason=str(wb_reason), now_iso=now_iso)
-            self._worktree_service.remove_worktree(wt_path, branch_name)
-            self._lease_manager.release(
-                task.id, self._config.worker_id, claim_record.claim_token
+            cleaned = self._perform_fenced_cleanup(
+                task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
             )
-            if self._ledger:
-                self._ledger.clear()
+            reason = str(wb_reason) if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task.id,
                 final_state=TaskState.BLOCKED,
@@ -915,7 +953,7 @@ class AutonomousDispatcher:
                 pr_number=pr_result.pr_number,
                 pr_url=pr_result.pr_url,
                 head_sha=head_sha,
-                block_reason=str(wb_reason),
+                block_reason=reason,
                 transitions=sm.history,
             )
 
@@ -959,12 +997,25 @@ class AutonomousDispatcher:
         sm.transition(TaskState.DONE, now_iso=now_iso)
 
         # Cleanup on DONE
-        self._worktree_service.remove_worktree(wt_path, branch_name)
-        self._lease_manager.release(
-            task.id, self._config.worker_id, claim_record.claim_token
+        cleaned = self._perform_fenced_cleanup(
+            task.id, self._config.worker_id, claim_record.claim_token, wt_path, branch_name, now_iso=now_iso
         )
-        if self._ledger:
-            self._ledger.clear()
+        if not cleaned:
+            sm.transition(
+                TaskState.BLOCKED,
+                reason=BlockReasonCode.LOST_LEASE.value,
+                now_iso=now_iso,
+            )
+            return DispatchResult(
+                task_id=task.id,
+                final_state=TaskState.BLOCKED,
+                branch=branch_name,
+                pr_number=pr_result.pr_number,
+                pr_url=pr_result.pr_url,
+                head_sha=head_sha,
+                block_reason=BlockReasonCode.LOST_LEASE.value,
+                transitions=sm.history,
+            )
 
         return DispatchResult(
             task_id=task.id,
@@ -1037,13 +1088,20 @@ class AutonomousDispatcher:
 
         # Early abortable states (before git commit)
         if state_val in (TaskState.CLAIMED.value, TaskState.WORKTREE_READY.value):
-            if recovery_state.worktree_path and recovery_state.branch:
-                self._worktree_service.remove_worktree(
-                    recovery_state.worktree_path, recovery_state.branch
+            cleaned = self._perform_fenced_cleanup(
+                task_id, owner, token, recovery_state.worktree_path, recovery_state.branch, now_iso=now_iso
+            )
+            if not cleaned:
+                return DispatchResult(
+                    task_id=task_id,
+                    final_state=TaskState.BLOCKED,
+                    branch=recovery_state.branch,
+                    pr_number=recovery_state.pr_number,
+                    pr_url=recovery_state.pr_url,
+                    head_sha=recovery_state.head_sha,
+                    block_reason=BlockReasonCode.LOST_LEASE.value,
+                    transitions=(),
                 )
-            self._lease_manager.release(task_id, owner, token)
-            if self._ledger:
-                self._ledger.clear()
             return None
 
         # Reconcile COMMITTED or BRANCH_PUSHED states
@@ -1256,32 +1314,19 @@ class AutonomousDispatcher:
                             transitions=(),
                         )
                     # Invariant H06: Re-verify lease immediately before worktree cleanup
-                    if not self._lease_manager.verify_lease(task_id, self._config.worker_id, token, now_iso=now_iso):
-                        return DispatchResult(
-                            task_id=task_id,
-                            final_state=TaskState.BLOCKED,
-                            branch=recovery_state.branch,
-                            pr_number=recovery_state.pr_number,
-                            pr_url=recovery_state.pr_url,
-                            head_sha=recovery_state.head_sha,
-                            block_reason=BlockReasonCode.LOST_LEASE.value,
-                            transitions=(),
-                        )
-                    if recovery_state.worktree_path:
-                        self._worktree_service.remove_worktree(
-                            recovery_state.worktree_path, recovery_state.branch
-                        )
-                    self._lease_manager.release(task_id, owner, token)
-                    if self._ledger:
-                        self._ledger.clear()
+                    cleaned = self._perform_fenced_cleanup(
+                        task_id, owner, token, recovery_state.worktree_path, recovery_state.branch, now_iso=now_iso
+                    )
+                    final_state = TaskState.FAILED if cleaned else TaskState.BLOCKED
+                    final_reason = reason if cleaned else BlockReasonCode.LOST_LEASE.value
                     return DispatchResult(
                         task_id=task_id,
-                        final_state=TaskState.FAILED,
+                        final_state=final_state,
                         branch=recovery_state.branch,
                         pr_number=recovery_state.pr_number,
                         pr_url=recovery_state.pr_url,
                         head_sha=recovery_state.head_sha,
-                        block_reason=reason,
+                        block_reason=final_reason,
                         transitions=(),
                     )
 
@@ -1378,33 +1423,19 @@ class AutonomousDispatcher:
                 )
 
             # Invariant H06: Re-verify current worker lease immediately before cleanup effect
-            if not self._lease_manager.verify_lease(task_id, self._config.worker_id, token, now_iso=now_iso):
-                return DispatchResult(
-                    task_id=task_id,
-                    final_state=TaskState.BLOCKED,
-                    branch=recovery_state.branch,
-                    pr_number=recovery_state.pr_number,
-                    pr_url=recovery_state.pr_url,
-                    head_sha=recovery_state.head_sha,
-                    block_reason=BlockReasonCode.LOST_LEASE.value,
-                    transitions=(),
-                )
-
-            if recovery_state.worktree_path:
-                self._worktree_service.remove_worktree(
-                    recovery_state.worktree_path, recovery_state.branch
-                )
-            self._lease_manager.release(task_id, owner, token)
-            if self._ledger:
-                self._ledger.clear()
+            cleaned = self._perform_fenced_cleanup(
+                task_id, owner, token, recovery_state.worktree_path, recovery_state.branch, now_iso=now_iso
+            )
+            final_state = TaskState.DONE if cleaned else TaskState.BLOCKED
+            block_reason = None if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task_id,
-                final_state=TaskState.DONE,
+                final_state=final_state,
                 branch=recovery_state.branch,
                 pr_number=recovery_state.pr_number,
                 pr_url=recovery_state.pr_url,
                 head_sha=recovery_state.head_sha,
-                block_reason=None,
+                block_reason=block_reason,
                 transitions=(),
             )
 
@@ -1493,33 +1524,19 @@ class AutonomousDispatcher:
                     )
 
             # Invariant H06: Re-verify lease immediately before worktree cleanup
-            if not self._lease_manager.verify_lease(task_id, self._config.worker_id, token, now_iso=now_iso):
-                return DispatchResult(
-                    task_id=task_id,
-                    final_state=TaskState.BLOCKED,
-                    branch=recovery_state.branch,
-                    pr_number=recovery_state.pr_number,
-                    pr_url=recovery_state.pr_url,
-                    head_sha=recovery_state.head_sha,
-                    block_reason=BlockReasonCode.LOST_LEASE.value,
-                    transitions=(),
-                )
-
-            if recovery_state.worktree_path:
-                self._worktree_service.remove_worktree(
-                    recovery_state.worktree_path, recovery_state.branch
-                )
-            self._lease_manager.release(task_id, owner, token)
-            if self._ledger:
-                self._ledger.clear()
+            cleaned = self._perform_fenced_cleanup(
+                task_id, owner, token, recovery_state.worktree_path, recovery_state.branch, now_iso=now_iso
+            )
+            final_state = TaskState.DONE if cleaned else TaskState.BLOCKED
+            block_reason = None if cleaned else BlockReasonCode.LOST_LEASE.value
             return DispatchResult(
                 task_id=task_id,
-                final_state=TaskState.DONE,
+                final_state=final_state,
                 branch=recovery_state.branch,
                 pr_number=recovery_state.pr_number,
                 pr_url=recovery_state.pr_url,
                 head_sha=recovery_state.head_sha,
-                block_reason=None,
+                block_reason=block_reason,
                 transitions=(),
             )
 

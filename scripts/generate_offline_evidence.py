@@ -144,6 +144,21 @@ def check_schema_compatibility(manifest_db):
             "foreign_key_violation_count": 1,
         }
 
+def compute_rollback_rehearsal_payload(
+    receipt_id: str,
+    target_sha: str,
+    image_digest: str,
+    oci_revision: str,
+    health_hash: str,
+    producer_identity: str,
+    executed_at: str,
+    rehearsal_type: str,
+    result_status: str,
+) -> bytes:
+    """Canonical versioned payload for rollback rehearsal HMAC binding (H11-ext)."""
+    return f"v2:{receipt_id}:{target_sha}:{image_digest}:{oci_revision}:{health_hash}:{producer_identity}:{executed_at}:{rehearsal_type}:{result_status}".encode("utf-8")
+
+
 def get_real_rollback_evidence(target_sha, now, manifest=None):
     import subprocess
     digest = ""
@@ -179,8 +194,9 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
     rb_health = attestation_cfg.get("rollback_health_required", True)
     rb_attempt_max = attestation_cfg.get("rollback_attempt_count_max", 1)
 
-    # Finding H11: Return BLOCKED when a real rehearsal receipt is absent or unverified.
-    # Bind verified receipt, exact target_sha, rollback revision, digest, health hash, and file SHA-256.
+    # Finding H11-ext: Return BLOCKED when a real rehearsal receipt is absent or unverified.
+    # Bind verified receipt, exact target_sha, rollback revision, digest, health hash,
+    # producer identity, executed_at, rehearsal_type, and result status into canonical HMAC payload.
     rehearsal_path = os.environ.get("HERMES_ROLLBACK_REHEARSAL_PATH", "deploy/rollback-rehearsal.json")
     if not os.path.isfile(rehearsal_path):
         return {"status": "BLOCKED"}
@@ -191,9 +207,25 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         receipt_id = rehearsal_data.get("receipt_id", "")
         rehearsal_type = rehearsal_data.get("rehearsal_type", "")
         health_hash = rehearsal_data.get("health_evidence_sha256", "")
+        rehearsal_status = rehearsal_data.get("status", "")
 
         import re
         sha256_pattern = re.compile(r"^[0-9a-f]{64}$")
+
+        if (
+            not receipt_id
+            or not receipt_id.startswith("receipt-rollback-")
+            or rehearsal_status != "PASS"
+            or rehearsal_type not in ("live-container-rollback", "docker-compose-revert", "isolated-rollback-drill")
+            or not health_hash
+            or not sha256_pattern.match(health_hash)
+            or rehearsal_data.get("rollback_image_digest") != digest
+            or rehearsal_data.get("rollback_revision") != revision
+            or rehearsal_data.get("target_sha") != target_sha
+            or rehearsal_data.get("health_check_status") != "PASS"
+            or not rehearsal_data.get("rollback_procedure_proven")
+        ):
+            return {"status": "BLOCKED"}
 
         rehearsal_producer = rehearsal_data.get("producer") or rehearsal_data.get("rehearsal_producer", "")
         if not rehearsal_producer or rehearsal_producer not in TRUSTED_REHEARSAL_PRODUCERS:
@@ -202,6 +234,39 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
         executed_at_str = rehearsal_data.get("executed_at", "")
         if not executed_at_str:
             return {"status": "BLOCKED"}
+
+        prov = rehearsal_data.get("execution_provenance")
+        if not isinstance(prov, dict) or not prov.get("runtime_identity") or not prov.get("isolation_level"):
+            return {"status": "BLOCKED"}
+
+        signature = prov.get("signature")
+        if not signature:
+            return {"status": "BLOCKED"}
+
+        prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
+        if not prov_key or not prov_key.strip():
+            # Invariant H11: Must fail closed if provenance verification key is missing
+            return {"status": "BLOCKED"}
+
+        import hmac
+        # H11-ext: Verify canonical versioned HMAC payload binding executed_at and all mandatory fields.
+        # Legacy signatures that omit mandatory authenticated fields are strictly rejected.
+        payload = compute_rollback_rehearsal_payload(
+            receipt_id=receipt_id,
+            target_sha=target_sha,
+            image_digest=digest,
+            oci_revision=revision,
+            health_hash=health_hash,
+            producer_identity=rehearsal_producer,
+            executed_at=executed_at_str,
+            rehearsal_type=rehearsal_type,
+            result_status=rehearsal_status,
+        )
+        expected_sig = hmac.new(prov_key.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            return {"status": "BLOCKED"}
+
+        # Freshness check uses only the authenticated executed_at value
         try:
             executed_dt = datetime.datetime.fromisoformat(executed_at_str.replace("Z", "+00:00"))
             now_dt = datetime.datetime.now(datetime.timezone.utc)
@@ -228,42 +293,6 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             health_json.get("target_sha") != target_sha
             or health_json.get("rollback_image_digest") != digest
             or health_json.get("rollback_revision") != revision
-        ):
-            return {"status": "BLOCKED"}
-
-        prov = rehearsal_data.get("execution_provenance")
-        if not isinstance(prov, dict) or not prov.get("runtime_identity") or not prov.get("isolation_level"):
-            return {"status": "BLOCKED"}
-
-        signature = prov.get("signature")
-        if not signature:
-            return {"status": "BLOCKED"}
-
-        prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
-        if not prov_key or not prov_key.strip():
-            # Invariant H11: Must fail closed if provenance verification key is missing
-            return {"status": "BLOCKED"}
-
-        import hmac
-        payload_standard = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}".encode("utf-8")
-        payload_with_producer = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}:{rehearsal_producer}".encode("utf-8")
-        sig_standard = hmac.new(prov_key.encode("utf-8"), payload_standard, hashlib.sha256).hexdigest()
-        sig_with_producer = hmac.new(prov_key.encode("utf-8"), payload_with_producer, hashlib.sha256).hexdigest()
-        if not (hmac.compare_digest(signature, sig_standard) or hmac.compare_digest(signature, sig_with_producer)):
-            return {"status": "BLOCKED"}
-
-        if (
-            rehearsal_data.get("status") != "PASS"
-            or not receipt_id
-            or not receipt_id.startswith("receipt-rollback-")
-            or rehearsal_data.get("rollback_image_digest") != digest
-            or rehearsal_data.get("rollback_revision") != revision
-            or rehearsal_data.get("target_sha") != target_sha
-            or rehearsal_data.get("health_check_status") != "PASS"
-            or rehearsal_type not in ("live-container-rollback", "docker-compose-revert", "isolated-rollback-drill")
-            or not health_hash
-            or not sha256_pattern.match(health_hash)
-            or not rehearsal_data.get("rollback_procedure_proven")
         ):
             return {"status": "BLOCKED"}
 

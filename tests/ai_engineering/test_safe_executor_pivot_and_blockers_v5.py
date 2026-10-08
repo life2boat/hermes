@@ -598,18 +598,33 @@ def test_h11_valid_signed_rehearsal_passes(tmp_path: Path, monkeypatch):
     health_file.write_bytes(health_bytes)
     health_hash = hashlib.sha256(health_bytes).hexdigest()
 
+    from scripts.generate_offline_evidence import compute_rollback_rehearsal_payload
+
+    producer = "healbite-rehearsal-engine"
+    rehearsal_type = "docker-compose-revert"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
     # Compute valid signature
-    payload = f"{receipt_id}:{target_sha}:{digest}:{revision}:{health_hash}".encode("utf-8")
+    payload = compute_rollback_rehearsal_payload(
+        receipt_id=receipt_id,
+        target_sha=target_sha,
+        image_digest=digest,
+        oci_revision=revision,
+        health_hash=health_hash,
+        producer_identity=producer,
+        executed_at=now_iso,
+        rehearsal_type=rehearsal_type,
+        result_status="PASS",
+    )
     sig = hmac.new(key.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
     rehearsal_file = tmp_path / "rollback-rehearsal.json"
-    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     rehearsal_payload = {
         "status": "PASS",
         "receipt_id": receipt_id,
-        "producer": "healbite-rehearsal-engine",
+        "producer": producer,
         "executed_at": now_iso,
-        "rehearsal_type": "docker-compose-revert",
+        "rehearsal_type": rehearsal_type,
         "rollback_image_digest": digest,
         "rollback_revision": revision,
         "target_sha": target_sha,

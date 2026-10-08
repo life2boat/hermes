@@ -73,21 +73,32 @@ TRUSTED_GIT_ENV_VARS: set[str] = {
 }
 
 
+class WorktreeIsolationError(RuntimeError):
+    """Raised when repository isolation verification or filter neutralization fails."""
+
+
 def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
     """Inspect repository configuration and attributes to discover and neutralize any filter or diff drivers."""
-    configs: list[str] = []
     rp = Path(repo_path)
     if not rp.exists():
         return []
 
-    # 1. Inspect repository and worktree git config for custom filter and diff drivers
+    discovered_drivers: set[str] = set()
+    clean_env = get_clean_git_env()
+
+    # 1. Inspect repository and worktree git config for custom filter and diff drivers using sanitized env
     try:
         res = subprocess.run(
             ["git", "-C", str(rp), "config", "--get-regexp", r"^(filter|diff)\."],
             capture_output=True,
             text=True,
             timeout=5,
+            env=clean_env,
         )
+        if res.returncode not in (0, 1):
+            raise WorktreeIsolationError(
+                f"git config query failed with exit code {res.returncode}: {res.stderr.strip()}"
+            )
         if res.returncode == 0:
             for line in res.stdout.splitlines():
                 parts = line.split(maxsplit=1)
@@ -97,52 +108,58 @@ def get_effective_filter_opts(repo_path: Path | str) -> list[str]:
                         rest = key[len("filter."):]
                         if "." in rest:
                             name, _ = rest.rsplit(".", 1)
-                            configs.extend([
-                                f"filter.{name}.clean=",
-                                f"filter.{name}.smudge=",
-                                f"filter.{name}.process=",
-                                f"filter.{name}.required=false",
-                            ])
+                            discovered_drivers.add(name)
                     elif key.startswith("diff."):
                         rest = key[len("diff."):]
                         if "." in rest:
                             name, _ = rest.rsplit(".", 1)
-                            configs.extend([
-                                f"diff.{name}.command=",
-                                f"diff.{name}.textconv=",
-                            ])
-    except Exception:
-        pass
+                            discovered_drivers.add(name)
+    except subprocess.SubprocessError as exc:
+        raise WorktreeIsolationError(f"git config execution error: {exc}") from exc
 
-    # 2. Inspect worktree .gitattributes and .git/info/attributes for driver names
-    attr_files = [rp / ".gitattributes", rp / ".git" / "info" / "attributes"]
+    # 2. Inspect all .gitattributes across the worktree tree and .git/info/attributes for driver names
+    attr_files: list[Path] = []
+    info_attr = rp / ".git" / "info" / "attributes"
+    if info_attr.is_file():
+        attr_files.append(info_attr)
+
+    try:
+        if rp.is_dir():
+            for p in rp.rglob(".gitattributes"):
+                if p.is_file():
+                    attr_files.append(p)
+    except Exception as exc:
+        raise WorktreeIsolationError(f"Failed scanning .gitattributes in {rp}: {exc}") from exc
+
     for af in attr_files:
         if af.is_file():
             try:
                 content = af.read_text(encoding="utf-8", errors="ignore")
                 for mf in re.finditer(r"filter=([^\s]+)", content):
                     name = mf.group(1).strip()
-                    if name and name != "false":
-                        configs.extend([
-                            f"filter.{name}.clean=",
-                            f"filter.{name}.smudge=",
-                            f"filter.{name}.process=",
-                            f"filter.{name}.required=false",
-                        ])
+                    if name and name != "false" and name != "unset":
+                        discovered_drivers.add(name)
                 for md in re.finditer(r"diff=([^\s]+)", content):
                     name = md.group(1).strip()
-                    if name and name != "false":
-                        configs.extend([
-                            f"diff.{name}.command=",
-                            f"diff.{name}.textconv=",
-                        ])
-            except Exception:
-                pass
+                    if name and name != "false" and name != "unset":
+                        discovered_drivers.add(name)
+            except Exception as exc:
+                raise WorktreeIsolationError(f"Failed reading attributes file {af}: {exc}") from exc
 
-    # Deduplicate preserving order
-    deduped = list(dict.fromkeys(configs))
+    # 3. Neutralize all discovered drivers: empty clean, smudge, process, command, textconv, and required=false
+    configs: list[str] = []
+    for name in sorted(discovered_drivers):
+        configs.extend([
+            f"filter.{name}.clean=",
+            f"filter.{name}.smudge=",
+            f"filter.{name}.process=",
+            f"filter.{name}.required=false",
+            f"diff.{name}.command=",
+            f"diff.{name}.textconv=",
+        ])
+
     opts: list[str] = []
-    for entry in deduped:
+    for entry in configs:
         opts.extend(["-c", entry])
     return opts
 

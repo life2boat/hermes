@@ -902,21 +902,62 @@ def restore_quick_snapshot(
                                 logger.error("Database schema incompatible for %s, missing tables: %s", rel, missing_tables)
                                 continue
 
-                            # Column-level schema check for every existing table
+                            # Comprehensive schema compatibility check for every existing table
                             col_mismatch = False
+
+                            def _get_table_indexes(conn: sqlite3.Connection, table: str) -> set[tuple[bool, tuple[str, ...]]]:
+                                idxs = set()
+                                for idx_row in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
+                                    is_unique = bool(idx_row[2])
+                                    idx_name = idx_row[1]
+                                    cols = tuple(
+                                        info_row[2]
+                                        for info_row in conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                                        if info_row[2]
+                                    )
+                                    idxs.add((is_unique, cols))
+                                return idxs
+
                             for tbl in existing_tables.intersection(candidate_tables):
+                                # 1. Column names, declared types, notnull, pk
                                 existing_cols = {
-                                    row[1]: (row[2], row[3], row[5])
+                                    row[1]: (str(row[2]).strip().upper(), int(row[3]), int(row[5]))
                                     for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
                                 }
                                 candidate_cols = {
-                                    row[1]: (row[2], row[3], row[5])
+                                    row[1]: (str(row[2]).strip().upper(), int(row[3]), int(row[5]))
                                     for row in chk_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
                                 }
-                                if set(existing_cols.keys()) != set(candidate_cols.keys()):
+                                if existing_cols != candidate_cols:
                                     col_mismatch = True
-                                    logger.error("Database schema column mismatch for %s in table %s", rel, tbl)
+                                    logger.error(
+                                        "Database schema column/type/constraint mismatch for %s in table %s (existing: %s, candidate: %s)",
+                                        rel, tbl, existing_cols, candidate_cols
+                                    )
                                     break
+
+                                # 2. Foreign keys definition check
+                                existing_fks = {
+                                    (row[2].lower(), row[3].lower(), row[4].lower(), str(row[5]).upper(), str(row[6]).upper())
+                                    for row in existing_conn.execute(f"PRAGMA foreign_key_list('{tbl}')").fetchall()
+                                    if row[2] and row[3] and row[4]
+                                }
+                                candidate_fks = {
+                                    (row[2].lower(), row[3].lower(), row[4].lower(), str(row[5]).upper(), str(row[6]).upper())
+                                    for row in chk_conn.execute(f"PRAGMA foreign_key_list('{tbl}')").fetchall()
+                                    if row[2] and row[3] and row[4]
+                                }
+                                if existing_fks != candidate_fks:
+                                    col_mismatch = True
+                                    logger.error("Database foreign key definition mismatch for %s in table %s", rel, tbl)
+                                    break
+
+                                # 3. Index and unique constraints check
+                                if _get_table_indexes(existing_conn, tbl) != _get_table_indexes(chk_conn, tbl):
+                                    col_mismatch = True
+                                    logger.error("Database index/constraint mismatch for %s in table %s", rel, tbl)
+                                    break
+
                             if col_mismatch:
                                 chk_conn.close()
                                 chk_conn = None
@@ -948,9 +989,13 @@ def restore_quick_snapshot(
                     try:
                         live_conn = sqlite3.connect(str(dst), timeout=2.0, isolation_level=None)
                         live_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                        cand_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
-                        cand_conn.backup(live_conn)
-                        cand_conn.close()
+                        cand_conn = None
+                        try:
+                            cand_conn = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                            cand_conn.backup(live_conn)
+                        finally:
+                            if cand_conn is not None:
+                                cand_conn.close()
 
                         p_res = live_conn.execute("PRAGMA integrity_check").fetchall()
                         if p_res != [("ok",)]:
@@ -964,12 +1009,15 @@ def restore_quick_snapshot(
                     except Exception as exc:
                         logger.error("Database restore failed for %s: %s", rel, exc)
                         if live_conn is not None and bak_dst.exists():
+                            bak_conn = None
                             try:
                                 bak_conn = sqlite3.connect(f"file:{bak_dst}?mode=ro", uri=True)
                                 bak_conn.backup(live_conn)
-                                bak_conn.close()
                             except Exception as rb_exc:
                                 logger.error("Rollback backup restoration failed for %s: %s", rel, rb_exc)
+                            finally:
+                                if bak_conn is not None:
+                                    bak_conn.close()
                         tmp.unlink(missing_ok=True)
                         continue
                     finally:

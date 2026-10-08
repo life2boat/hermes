@@ -176,19 +176,19 @@ class DispatcherWorker:
         if self._task_executor:
             return self._task_executor
 
-        backend = os.environ.get("DISPATCHER_EXECUTOR_BACKEND", "codex").lower()
-        if backend in ("codex", "linux_codex"):
-            return LinuxCodexTaskExecutor()
-        elif backend in ("sandboxed_broker", "broker", "safe_broker"):
+        backend = os.environ.get("DISPATCHER_EXECUTOR_BACKEND", "sandboxed_broker").lower()
+        if backend in ("sandboxed_broker", "broker", "safe_broker"):
             dsh_bin = os.environ.get("DSH_BIN")
             use_dsh = os.environ.get("HERMES_USE_DSH", "").lower() in ("1", "true")
             patch_path = os.environ.get("DSH_PATCH_PATH")
             gateway = (
                 DshModelGateway(dsh_bin=dsh_bin, patch_path=patch_path)
-                if (dsh_bin or use_dsh)
+                if (dsh_bin or use_dsh or patch_path)
                 else None
             )
             return SandboxedBrokerTaskExecutor(model_gateway=gateway)
+        elif backend in ("codex", "linux_codex"):
+            return LinuxCodexTaskExecutor()
         elif backend in ("simulated", "offline"):
             return SimulatedTaskExecutor()
         return None

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import subprocess
 import time
 from typing import Any, Callable, Sequence
+
+logger = logging.getLogger("hermes.dispatcher")
 
 from ai_engineering.linear_dispatcher.contracts import (
     BlockReasonCode,
@@ -715,9 +718,14 @@ class AutonomousDispatcher:
             if hasattr(self._github_service, "get_pr_for_branch"):
                 try:
                     recon_res = self._github_service.get_pr_for_branch(branch_name)
-                    if isinstance(recon_res, tuple) and len(recon_res) == 2:
-                        recon_ok, recon_pr = recon_res
-                        if recon_ok and recon_pr and recon_pr.head_sha == head_sha:
+                    if isinstance(recon_res, tuple) and len(recon_res) >= 2:
+                        recon_ok, recon_pr = recon_res[0], recon_res[1]
+                        if (
+                            recon_ok
+                            and recon_pr
+                            and getattr(recon_pr, "head_sha", None) == head_sha
+                            and getattr(recon_pr, "is_draft", None) is True
+                        ):
                             pr_ok = True
                             pr_result = recon_pr
                 except Exception:
@@ -928,6 +936,26 @@ class AutonomousDispatcher:
                     execution_id=current_exec_id,
                 )
             )
+        # Invariant H06: Final lease fencing before normal cleanup
+        if not self._lease_manager.verify_lease(
+            task.id, self._config.worker_id, claim_record.claim_token, now_iso=now_iso
+        ):
+            sm.transition(
+                TaskState.BLOCKED,
+                reason=BlockReasonCode.LOST_LEASE.value,
+                now_iso=now_iso,
+            )
+            return DispatchResult(
+                task_id=task.id,
+                final_state=TaskState.BLOCKED,
+                branch=branch_name,
+                pr_number=pr_result.pr_number,
+                pr_url=pr_result.pr_url,
+                head_sha=head_sha,
+                block_reason=BlockReasonCode.LOST_LEASE.value,
+                transitions=sm.history,
+            )
+
         sm.transition(TaskState.DONE, now_iso=now_iso)
 
         # Cleanup on DONE
@@ -1046,24 +1074,54 @@ class AutonomousDispatcher:
                             transitions=(),
                         )
 
-            # Reconcile or create PR
+            # Reconcile or create PR (Invariant H05)
             if self._github_service and recovery_state.branch:
-                pr_found = None
+                pr_resolved_result = None
                 if hasattr(self._github_service, "get_pr_for_branch"):
-                    pr_found = self._github_service.get_pr_for_branch(recovery_state.branch)
+                    try:
+                        recon_res = self._github_service.get_pr_for_branch(recovery_state.branch)
+                        if isinstance(recon_res, tuple) and len(recon_res) >= 2:
+                            r_ok, r_obj = recon_res[0], recon_res[1]
+                            if r_ok and r_obj:
+                                if (
+                                    getattr(r_obj, "head_sha", None) == recovery_state.head_sha
+                                    and getattr(r_obj, "is_draft", None) is True
+                                ):
+                                    pr_resolved_result = r_obj
+                                else:
+                                    logger.warning(
+                                        "Reconciliation PR mismatch: head_sha=%s (expected %s), is_draft=%s",
+                                        getattr(r_obj, "head_sha", None),
+                                        recovery_state.head_sha,
+                                        getattr(r_obj, "is_draft", None),
+                                    )
+                    except Exception as e:
+                        logger.error("Failed to query get_pr_for_branch during recovery: %s", e)
                 elif hasattr(self._github_service, "_request"):
                     try:
                         search_res = self._github_service._request(
                             "GET", f"pulls?head=life2boat:{recovery_state.branch}&state=open"
                         )
                         if search_res and len(search_res) == 1:
-                            pr_found = search_res[0]
-                    except Exception:
-                        pass
+                            pr_dict = search_res[0]
+                            if (
+                                pr_dict.get("draft") is True
+                                and pr_dict.get("head", {}).get("sha") == recovery_state.head_sha
+                                and pr_dict.get("base", {}).get("ref") == "main"
+                            ):
+                                pr_resolved_result = PRCreationResult(
+                                    pr_number=pr_dict.get("number", 0),
+                                    pr_url=pr_dict.get("html_url", ""),
+                                    base_sha=pr_dict.get("base", {}).get("sha", ""),
+                                    head_sha=pr_dict.get("head", {}).get("sha", ""),
+                                    is_draft=True,
+                                )
+                    except Exception as e:
+                        logger.error("Failed to query GitHub API during recovery: %s", e)
 
-                if pr_found:
-                    recovery_state.pr_number = pr_found.get("number", 0)
-                    recovery_state.pr_url = pr_found.get("html_url", "")
+                if pr_resolved_result:
+                    recovery_state.pr_number = pr_resolved_result.pr_number
+                    recovery_state.pr_url = pr_resolved_result.pr_url
                     state_val = TaskState.PR_OPEN.value
                     recovery_state.state = TaskState.PR_OPEN.value
                     if self._ledger:
@@ -1071,14 +1129,28 @@ class AutonomousDispatcher:
                 elif remote_pushed and hasattr(self._github_service, "create_draft_pr"):
                     task = self._linear_client.get_issue(task_id)
                     if task and recovery_state.head_sha:
-                        pr_res = self._github_service.create_draft_pr(task, recovery_state.branch, recovery_state.head_sha)
-                        if pr_res.success and pr_res.pr_number:
-                            recovery_state.pr_number = pr_res.pr_number
-                            recovery_state.pr_url = pr_res.pr_url
-                            state_val = TaskState.PR_OPEN.value
-                            recovery_state.state = TaskState.PR_OPEN.value
-                            if self._ledger:
-                                self._ledger.write_state(recovery_state)
+                        cwd = (
+                            Path(recovery_state.worktree_path)
+                            if recovery_state.worktree_path and Path(recovery_state.worktree_path).exists()
+                            else self._worktree_service.canonical_root
+                        )
+                        base_sha = recovery_state.base_sha or self._canonical_main_sha
+                        pr_res = self._github_service.create_draft_pr(
+                            task,
+                            recovery_state.branch,
+                            base_sha,
+                            recovery_state.head_sha,
+                            cwd,
+                        )
+                        if isinstance(pr_res, tuple) and len(pr_res) >= 2:
+                            c_ok, c_obj = pr_res[0], pr_res[1]
+                            if c_ok and c_obj:
+                                recovery_state.pr_number = c_obj.pr_number
+                                recovery_state.pr_url = c_obj.pr_url
+                                state_val = TaskState.PR_OPEN.value
+                                recovery_state.state = TaskState.PR_OPEN.value
+                                if self._ledger:
+                                    self._ledger.write_state(recovery_state)
 
             if state_val not in (TaskState.PR_OPEN.value, TaskState.CI_PENDING.value, TaskState.CI_PASS.value):
                 return DispatchResult(

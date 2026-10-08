@@ -1099,9 +1099,7 @@ class DshModelGateway:
                 "tool-bash": "@deepseek-ai/dsh-tool-bash",
                 "tool-jobs": "@deepseek-ai/dsh-tool-jobs",
                 "web": "@deepseek-ai/dsh-web",
-                "tool-web": "@deepseek-ai/dsh-tool-web",
                 "subagent": "@deepseek-ai/dsh-subagent",
-                "tool-subagent": "@deepseek-ai/dsh-tool-subagent",
                 "tool-skill": "@deepseek-ai/dsh-tool-skill",
                 "tool-todo": "@deepseek-ai/dsh-tool-todo",
                 "tool-goal": "@deepseek-ai/dsh-tool-goal",
@@ -1114,7 +1112,10 @@ class DshModelGateway:
                 # Reject any entry specifying group: true which could defeat Cordis disabled flags
                 if "group" in entry or entry.get("group") is True:
                     return False
-                tool_id = str(entry.get("id", "")).lower()
+                raw_id = entry.get("id")
+                if not isinstance(raw_id, str) or not raw_id:
+                    return False
+                tool_id = raw_id  # Exact case-sensitive match, NO lower()!
                 tool_name = str(entry.get("name", ""))
                 is_disabled = (entry.get("disabled") is True)
 
@@ -1123,19 +1124,23 @@ class DshModelGateway:
                     return False
 
                 if is_disabled:
-                    if tool_id in canonical_tool_names:
-                        # Require exact package identity when name is provided; Cordis skips patch on any mismatch
-                        raw_name = entry.get("name")
-                        if raw_name is not None:
-                            expected_name = canonical_tool_names.get(tool_id)
-                            if raw_name != expected_name:
-                                return False
-                        disabled_found.add(tool_id)
+                    # Must match exact canonical tool ID (fail closed on unknown, misspelled, mis-cased, or duplicate)
+                    if tool_id not in canonical_tool_names or tool_id in disabled_found:
+                        return False
+                    # Require exact package identity when name is provided; Cordis skips patch on any mismatch
+                    raw_name = entry.get("name")
+                    if raw_name is not None:
+                        if not isinstance(raw_name, str):
+                            return False
+                        expected_name = canonical_tool_names.get(tool_id)
+                        if raw_name != expected_name:
+                            return False
+                    disabled_found.add(tool_id)
                 else:
                     # Non-disabled entry must ONLY be model/provider selection and contain no tool keywords
-                    if not (tool_id.endswith("-model") or tool_id in ("model", "agent-default-model")):
+                    if any(kw in tool_id.lower() or kw in tool_name.lower() for kw in tool_keywords):
                         return False
-                    if any(kw in tool_id or kw in tool_name.lower() for kw in tool_keywords):
+                    if not (tool_id.endswith("-model") or tool_id in ("model", "agent-default-model")):
                         return False
                     # Inspect nested config
                     config = entry.get("config", {})
@@ -1145,7 +1150,7 @@ class DshModelGateway:
                             return False
                     else:
                         return False
-            return required_disabled_tools.issubset(disabled_found)
+            return disabled_found == required_disabled_tools
         except Exception:
             return False
 
@@ -1200,6 +1205,8 @@ class DshModelGateway:
         sanitized_env["CORDIS_USER_PROFILE"] = ""
         sanitized_env["CORDIS_DISABLE_PLUGINS"] = "1"
         sanitized_env["PYTHONIOENCODING"] = "utf-8"
+        if os.environ.get("DEEPSEEK_API_KEY"):
+            sanitized_env["DEEPSEEK_API_KEY"] = os.environ["DEEPSEEK_API_KEY"]
         return sanitized_env
 
     def health(self) -> bool:
@@ -1892,11 +1899,14 @@ class SandboxedBrokerTaskExecutor:
                     return [], "JSON_BLOCK_IN_SINGLE_FILE_FALLBACK_REJECTED"
                 except Exception:
                     pass
-            # Verify AST parses as python and is not just a bare expression statement (e.g. naked list/dict/data)
+            # Verify AST parses as python and is not just bare expression statements (e.g. naked list/dict/data)
             try:
                 import ast
                 parsed_ast = ast.parse(content)
-                if len(parsed_ast.body) == 1 and isinstance(parsed_ast.body[0], ast.Expr):
+                if not parsed_ast.body:
+                    return [], "SINGLE_FILE_FALLBACK_EMPTY_BODY_REJECTED"
+                non_expr = [s for s in parsed_ast.body if not isinstance(s, ast.Expr)]
+                if not non_expr:
                     return [], "SINGLE_FILE_FALLBACK_LITERAL_EXPRESSION_REJECTED"
             except SyntaxError:
                 return [], "SINGLE_FILE_FALLBACK_SYNTAX_ERROR"

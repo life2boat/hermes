@@ -116,6 +116,7 @@ from gateway.healbite_nutrition_diary import (
     get_default_nutrition_diary,
 )
 from gateway.healbite_user_profile import (
+    _format_target,
     format_healbite_profile_report,
     get_default_healbite_user_profile,
     get_existing_healbite_user_profile,
@@ -218,6 +219,11 @@ def _vision_size_bucket(size_bytes: Any) -> str:
 
 
 MAX_COMMANDS_PER_SCOPE = 30
+HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS = [
+    ["🍎 Дневник", "📊 Статистика"],
+    ["💧 Вода", "⚖️ Вес"],
+    ["👤 Профиль", "❓ Помощь"],
+]
 HEALBITE_REPLY_KEYBOARD_ROWS = [
     ["👤 Мой профиль", "🍎 Дневник еды"],
     ["📋 Меню на неделю", "🛒 Список покупок"],
@@ -228,6 +234,14 @@ HEALBITE_REPLY_KEYBOARD_ROWS = [
     ["⚙️ Ограничения", "❓ Помощь"],
 ]
 HEALBITE_REPLY_KEYBOARD_ACTIONS = {
+    # Modern compact "HealBite Fresh" labels
+    "🍎 Дневник": "/diary",
+    "📊 Статистика": "/stats 7d",
+    "💧 Вода": "/water",
+    "⚖️ Вес": "/weight",
+    "👤 Профиль": "/profile",
+    "❓ Помощь": "/help",
+    # Legacy labels preserved for compatibility
     "👤 Мой профиль": "/profile",
     "🍎 Дневник еды": "/diary",
     "📋 Меню на неделю": WEEKLY_MENU_COMMAND,
@@ -239,7 +253,6 @@ HEALBITE_REPLY_KEYBOARD_ACTIONS = {
     "👨‍👩‍👧 Семья": FAMILY_COMMAND,
     "📈 Отчет за неделю": "/stats 7d",
     "⚙️ Ограничения": "__placeholder__:restrictions",
-    "❓ Помощь": "__placeholder__:help",
 }
 _HEALBITE_NORMALIZED_COMMAND_MAP = {
     "список покупок": SHOPPING_COMMAND,
@@ -258,8 +271,9 @@ _HEALBITE_NORMALIZED_COMMAND_MAP = {
     "семья": FAMILY_COMMAND,
     "отчет за неделю": "/stats 7d",
     "отчёт за неделю": "/stats 7d",
+    "статистика": "/stats 7d",
     "ограничения": "__placeholder__:restrictions",
-    "помощь": "__placeholder__:help",
+    "помощь": "/help",
 }
 _WEEKLY_MENU_INTENT_PATTERNS = (
     re.compile(r"\bсоставить\s+меню\b", re.IGNORECASE),
@@ -5809,8 +5823,20 @@ class TelegramAdapter(BasePlatformAdapter):
             is_persistent=False,
         )
 
-    def _healbite_main_menu_keyboard(self) -> Optional[Any]:
-        return self._healbite_reply_keyboard(HEALBITE_REPLY_KEYBOARD_ROWS)
+    def _has_healbite_advanced_access(self, actor_user_id: int | None) -> bool:
+        if actor_user_id is None:
+            return False
+        return (
+            self._is_feature_allowlisted("HEALBITE_WEEKLY_MENU", actor_user_id)
+            or self._is_feature_allowlisted("HEALBITE_SHOPPING_LIST", actor_user_id)
+            or self._is_feature_allowlisted("HEALBITE_INVENTORY_HOME", actor_user_id)
+            or self._is_feature_allowlisted("HEALBITE_HOUSEHOLDS", actor_user_id)
+        )
+
+    def _healbite_main_menu_keyboard(self, actor_user_id: int | None = None) -> Optional[Any]:
+        if actor_user_id is not None and self._has_healbite_advanced_access(actor_user_id):
+            return self._healbite_reply_keyboard(HEALBITE_REPLY_KEYBOARD_ROWS)
+        return self._healbite_reply_keyboard(HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS)
 
     @staticmethod
     def _healbite_command_from_text(text: str) -> str:
@@ -5838,28 +5864,169 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         return all(line.startswith("/") or line in HEALBITE_REPLY_KEYBOARD_ACTIONS for line in lines)
 
+    def _build_healbite_returning_dashboard(self, user_id: int) -> str:
+        profile_store = get_default_healbite_user_profile()
+        profile = profile_store.get_user_profile(user_id)
+        lines = ["👋 <b>С возвращением в HealBite!</b>", ""]
+
+        if profile is not None and profile.daily_kcal_target is not None:
+            from gateway.healbite_nutrition_targets import goal_label
+            lines.append(f"🎯 <b>Цель:</b> {goal_label(profile.goal)}")
+            lines.append(
+                f"🔥 <b>Норма дня:</b> {_format_target(profile.daily_kcal_target, 'ккал')} "
+                f"(Б {_format_target(profile.daily_protein_target, 'г')} · "
+                f"Ж {_format_target(profile.daily_fat_target, 'г')} · "
+                f"У {_format_target(profile.daily_carbs_target, 'г')})"
+            )
+            lines.append("")
+
+        db_path = getattr(profile_store, "db_path", None)
+        try:
+            from gateway.healbite_nutrition_diary import HealBiteNutritionDiary
+            diary = HealBiteNutritionDiary(db_path=db_path)
+            daily_summary = diary.get_daily_summary(user_id=user_id)
+            cals = int(round(float(daily_summary.get("calories_kcal") or 0.0)))
+            entry_count = len(daily_summary.get("entries") or [])
+            if profile is not None and profile.daily_kcal_target:
+                pct = int(round((cals / profile.daily_kcal_target) * 100))
+                diary_line = f"🍎 <b>Питание сегодня:</b> {cals} / {int(profile.daily_kcal_target)} ккал ({pct}%)"
+            else:
+                diary_line = f"🍎 <b>Питание сегодня:</b> {cals} ккал"
+            if entry_count > 0:
+                diary_line += f" · записей: {entry_count}"
+            lines.append(diary_line)
+        except Exception as e:
+            logger.debug("Failed to load diary summary for dashboard: %s", e)
+
+        try:
+            from gateway.healbite_water_tracker import HealBiteWaterTracker, _format_ml
+            water_tracker = HealBiteWaterTracker(db_path=db_path)
+            water_summary = water_tracker.get_water_summary(user_id)
+            if water_summary.target_ml:
+                water_line = f"💧 <b>Вода сегодня:</b> {_format_ml(water_summary.consumed_ml)} / {_format_ml(water_summary.target_ml)} ({water_summary.progress_percent or 0}%)"
+            else:
+                water_line = f"💧 <b>Вода сегодня:</b> {_format_ml(water_summary.consumed_ml)}"
+            lines.append(water_line)
+        except Exception as e:
+            logger.debug("Failed to load water summary for dashboard: %s", e)
+
+        try:
+            from gateway.healbite_weight_tracker import HealBiteWeightTracker, _format_weight_grams
+            weight_tracker = HealBiteWeightTracker(db_path=db_path)
+            weight_summary = weight_tracker.get_summary(user_id)
+            if weight_summary.latest:
+                lines.append(f"⚖️ <b>Вес:</b> {_format_weight_grams(weight_summary.latest.weight_grams)}")
+            elif profile is not None and profile.weight_kg:
+                lines.append(f"⚖️ <b>Вес:</b> {_format_target(profile.weight_kg, 'кг')}")
+        except Exception as e:
+            logger.debug("Failed to load weight summary for dashboard: %s", e)
+
+        lines.extend([
+            "",
+            "💡 <b>Быстрые действия:</b>",
+            "• Отправьте <b>фото еды</b> или текст — я определю калории и БЖУ.",
+            "• Напишите <code>+250</code> или <code>вода 250</code>, чтобы записать воду.",
+            "• Используйте кнопки меню ниже для перехода в нужный раздел.",
+        ])
+        return "\n".join(lines)
+
     async def _send_healbite_menu_message(self, msg: Message, *, command: str) -> None:
         chat = getattr(msg, "chat", None)
         chat_id = getattr(chat, "id", None)
         if chat_id is None:
             return
         thread_id = getattr(msg, "message_thread_id", None)
-        if command == "/start":
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if command == "/start" and user_id is not None:
+            text = self._build_healbite_returning_dashboard(int(user_id))
+        elif command == "/start":
             text = (
                 "Добро пожаловать в HealBite.\n"
                 "Ниже вернул главное меню, чтобы можно было быстро перейти к нужному разделу."
             )
         else:
             text = "Главное меню HealBite снова на месте. Используйте кнопки ниже."
+
+        try:
+            reply_markup = self._healbite_main_menu_keyboard(int(user_id) if user_id is not None else None)
+        except TypeError:
+            reply_markup = self._healbite_main_menu_keyboard()
+
         kwargs: Dict[str, Any] = {
             "chat_id": int(chat_id),
             "text": text,
-            "reply_markup": self._healbite_main_menu_keyboard(),
+            "reply_markup": reply_markup,
             **self._link_preview_kwargs(),
         }
         if thread_id is not None:
             kwargs["message_thread_id"] = thread_id
         await self._send_message_with_thread_fallback(**kwargs)
+
+    async def _maybe_handle_healbite_help_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token != "/help":
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="help",
+            )
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+
+        help_text = (
+            "🌿 <b>Справка по возможностям HealBite</b>\n\n"
+            "HealBite — ваш персональный ассистент по питанию и здоровому образу жизни.\n\n"
+            "📸 <b>Распознавание еды:</b>\n"
+            "• Отправьте <b>фотографию блюда</b> прямо в чат — бот распознает состав, вес, калории и БЖУ.\n"
+            "• Можно описать еду текстом, например:\n"
+            "  <i>«Овсяная каша 200г с ягодами и чашка капучино»</i>\n"
+            "• После распознавания нажмите «Да» для сохранения в дневник.\n\n"
+            "💧 <b>Трекер воды:</b>\n"
+            "• Отправьте число, например <code>+250</code>, <code>вода 300</code> или <code>0.5 л</code>.\n"
+            "• Или нажмите кнопку <b>💧 Вода</b> в меню для быстрого добавления.\n\n"
+            "⚖️ <b>Трекер веса:</b>\n"
+            "• Отправьте вес, например: <code>/weight 74.5</code> или используйте кнопку <b>⚖️ Вес</b>.\n"
+            "• При изменении веса нормы калорий автоматически пересчитываются.\n\n"
+            "📊 <b>Дневник и статистика:</b>\n"
+            "• <b>🍎 Дневник</b> (/diary) — список приёмов пищи за сегодня и прогресс по БЖУ.\n"
+            "• <b>📊 Статистика</b> (/stats) — итоги и средние значения за 7 дней.\n"
+            "• /undo_meal — удалить последнюю запись еды.\n\n"
+            "👤 <b>Профиль и цели:</b>\n"
+            "• <b>👤 Профиль</b> (/profile) — просмотр текущих целей, норм и параметров.\n"
+            "• /start edit — изменить параметры профиля и пересчитать норму."
+        )
+
+        try:
+            reply_markup = self._healbite_main_menu_keyboard(int(user_id) if user_id is not None else None)
+        except TypeError:
+            reply_markup = self._healbite_main_menu_keyboard()
+
+        kwargs: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": help_text,
+            "reply_markup": reply_markup,
+            **self._link_preview_kwargs(),
+        }
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        await self._send_message_with_thread_fallback(**kwargs)
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="help",
+            outcome="help_sent",
+        )
+        return True
 
     @staticmethod
     def _healbite_sender_username(msg: Message) -> str:
@@ -5909,7 +6076,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if not has_profile:
             return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
         return (
-            "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, /weight, "
+            "В публичном режиме HealBite доступны /profile, /diary, /stats, /water, /weight, /help, "
             "фото еды и ответы Да/Нет для сохранения."
         )
 
@@ -6421,7 +6588,11 @@ class TelegramAdapter(BasePlatformAdapter):
             next_profile,
         )
         if reply.status == "completed":
-            keyboard_rows = HEALBITE_REPLY_KEYBOARD_ROWS
+            keyboard_rows = (
+                HEALBITE_REPLY_KEYBOARD_ROWS
+                if self._has_healbite_advanced_access(int(user_id))
+                else HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
+            )
         await self._send_message_with_thread_fallback(
             chat_id=chat_id,
             text=reply.text,
@@ -8454,6 +8625,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,
             )
+        if normalized_action == "/help":
+            return await self._maybe_handle_healbite_help_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         return False
 
     async def _maybe_handle_healbite_menu_button(
@@ -9092,6 +9269,8 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
         if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
+            return
+        if await self._maybe_handle_healbite_help_command(msg):
             return
         if await self._maybe_handle_memory_stats_command(msg):
             return

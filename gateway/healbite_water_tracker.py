@@ -335,6 +335,13 @@ class HealBiteWaterTracker:
             conn.execute(f"DELETE FROM {WATER_PENDING_TABLE} WHERE user_id = ?", (int(user_id),))
 
 
+def _water_progress_bar(percent: int | None, width: int = 8) -> str:
+    if percent is None or percent <= 0:
+        return "⬜" * width
+    filled = min(width, max(1, int(round((percent / 100.0) * width))))
+    return "🟩" * filled + "⬜" * (width - filled)
+
+
 def format_water_tracker_report(summary: WaterSummary, *, notice: str | None = None) -> str:
     lines = [
         "💧 <b>Вода сегодня</b>",
@@ -349,11 +356,13 @@ def format_water_tracker_report(summary: WaterSummary, *, notice: str | None = N
             ]
         )
     else:
+        pct = summary.progress_percent or 0
+        bar = _water_progress_bar(pct)
         lines.extend(
             [
                 f"Цель: {_format_ml(summary.target_ml)}",
                 f"Осталось: {_format_ml(summary.remaining_ml)}",
-                f"Прогресс: {summary.progress_percent or 0}%",
+                f"Прогресс: {bar} {pct}%",
             ]
         )
     if notice:

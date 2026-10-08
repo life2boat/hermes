@@ -2880,18 +2880,18 @@ def format_pending_meal_saved_reply(
 
 
 def format_pending_meal_cancelled_reply() -> str:
-    return "❌ Отменено. Что исправить?"
+    return "❌ Отменено. Вы можете отправить новое фото или описание в любой момент."
 
 
 def format_pending_meal_wait_reply() -> str:
     return (
-        "Жду подтверждение записи. Напиши Да или Нет. "
-        "Если передумал, отправь новое фото или вызови /diary."
+        "⏳ Жду подтверждения записи. Напишите «Да» или «Нет».\n"
+        "Если хотите записать другое блюдо, отправьте новое фото или напишите /diary."
     )
 
 
 def format_pending_meal_expired_reply() -> str:
-    return "⌛ Подтверждение истекло. Отправь фото ещё раз."
+    return "⌛ Время ожидания подтверждения истекло. Отправьте фото ещё раз."
 
 
 def load_nutrition_targets(

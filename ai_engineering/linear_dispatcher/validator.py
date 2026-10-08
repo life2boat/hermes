@@ -11,6 +11,7 @@ from typing import Any
 from ai_engineering.linear_dispatcher.worktree_service import (
     SAFE_GIT_OPTS,
     get_clean_git_env,
+    get_effective_filter_opts,
 )
 
 
@@ -21,9 +22,20 @@ class LocalValidator:
     def run_diff_check(cwd: Path | str) -> tuple[bool, str]:
         """Run git diff --check on unstaged and staged changes safely."""
         env = get_clean_git_env()
+        try:
+            filter_opts = get_effective_filter_opts(cwd)
+        except Exception as exc:
+            return False, f"Failed discovering filter options: {exc}"
+
+        diff_cmd_base = (
+            ["git"]
+            + SAFE_GIT_OPTS
+            + filter_opts
+            + ["-C", str(cwd), "diff", "--check", "--no-textconv", "--no-ext-diff"]
+        )
 
         res_unstaged = subprocess.run(
-            ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd), "diff", "--check"],
+            diff_cmd_base,
             capture_output=True,
             text=True,
             timeout=30,
@@ -33,7 +45,7 @@ class LocalValidator:
             return False, res_unstaged.stdout or res_unstaged.stderr
 
         res_staged = subprocess.run(
-            ["git"] + SAFE_GIT_OPTS + ["-C", str(cwd), "diff", "--check", "--cached"],
+            diff_cmd_base + ["--cached"],
             capture_output=True,
             text=True,
             timeout=30,

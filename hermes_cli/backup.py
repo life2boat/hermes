@@ -11,6 +11,7 @@ HERMES_HOME root.
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -365,6 +366,180 @@ def _is_cron_jobs_path(path: Path, home: Path) -> bool:
     )
 
 
+def extract_check_constraints(sql: str | None) -> set[str]:
+    """Extract and normalize all CHECK (...) constraint expressions from SQLite table DDL."""
+    if not sql:
+        return set()
+    checks = set()
+    for match in re.finditer(r"\bCHECK\s*\(", sql, re.IGNORECASE):
+        start = match.end() - 1
+        depth = 0
+        end = -1
+        for i in range(start, len(sql)):
+            if sql[i] == "(":
+                depth += 1
+            elif sql[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            expr = sql[start + 1:end].strip()
+            norm_expr = " ".join(expr.split()).upper()
+            checks.add(norm_expr)
+    return checks
+
+
+def validate_sqlite_schema_compatibility(
+    existing_conn: sqlite3.Connection,
+    candidate_conn: sqlite3.Connection,
+) -> tuple[bool, str | None]:
+    """Unified, strict schema compatibility validation for SQLite database restore.
+
+    Shared between quick-snapshot restore and archive-import restore.
+    Verifies:
+    1. PRAGMA user_version parity.
+    2. Table names and definitions (all existing non-internal tables exist in candidate).
+    3. Column names, declared types, nullability, defaults, and primary key definitions.
+    4. Foreign key definitions (table, from, to, on_update, on_delete, match).
+    5. Unique constraints and indexes (including partial indexes and WHERE predicates).
+    6. CHECK constraints in table definitions.
+    7. Triggers on existing tables.
+    """
+    try:
+        # 1. user_version check
+        candidate_ver = candidate_conn.execute("PRAGMA user_version").fetchone()[0]
+        existing_ver = existing_conn.execute("PRAGMA user_version").fetchone()[0]
+        if candidate_ver != existing_ver:
+            return False, f"user_version mismatch: candidate {candidate_ver} != existing {existing_ver}"
+
+        # 2. Table names check
+        existing_tables = {
+            r[0]
+            for r in existing_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        candidate_tables = {
+            r[0]
+            for r in candidate_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        missing_tables = existing_tables - candidate_tables
+        if missing_tables:
+            return False, f"schema incompatible, missing tables: {missing_tables}"
+
+        for tbl in existing_tables:
+            # 3. Column names, declared types, nullability, defaults, primary keys
+            # PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
+            existing_cols = {
+                row[1]: (
+                    str(row[2]).strip().upper(),
+                    int(row[3]),
+                    str(row[4]).strip() if row[4] is not None else None,
+                    int(row[5]),
+                )
+                for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+            }
+            candidate_cols = {
+                row[1]: (
+                    str(row[2]).strip().upper(),
+                    int(row[3]),
+                    str(row[4]).strip() if row[4] is not None else None,
+                    int(row[5]),
+                )
+                for row in candidate_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
+            }
+            if set(existing_cols.keys()) != set(candidate_cols.keys()):
+                return False, f"column set mismatch in table '{tbl}'"
+
+            for col_name, ex_def in existing_cols.items():
+                cand_def = candidate_cols[col_name]
+                if ex_def != cand_def:
+                    return False, f"column definition mismatch in table '{tbl}' for '{col_name}': existing {ex_def} != candidate {cand_def}"
+
+            # 4. Foreign key definitions
+            # PRAGMA foreign_key_list returns: (id, seq, table, from, to, on_update, on_delete, match)
+            def _get_fks(conn: sqlite3.Connection, table: str) -> set[tuple[str, str, str, str, str, str]]:
+                fks = set()
+                for row in conn.execute(f"PRAGMA foreign_key_list('{table}')").fetchall():
+                    if row[2] and row[3] and row[4]:
+                        fks.add((
+                            str(row[2]).lower(),
+                            str(row[3]).lower(),
+                            str(row[4]).lower(),
+                            str(row[5]).upper(),
+                            str(row[6]).upper(),
+                            str(row[7]).upper(),
+                        ))
+                return fks
+
+            if _get_fks(existing_conn, tbl) != _get_fks(candidate_conn, tbl):
+                return False, f"foreign key definition mismatch in table '{tbl}'"
+
+            # 5. Unique constraints and indexes (including partial indexes and WHERE predicates)
+            def _get_table_indexes(conn: sqlite3.Connection, table: str) -> set[tuple[bool, tuple[str, ...], bool, str]]:
+                idxs = set()
+                sql_map = {
+                    r[0]: (r[1] or "")
+                    for r in conn.execute(
+                        "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,)
+                    ).fetchall()
+                }
+                for idx_row in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
+                    is_unique = bool(idx_row[2])
+                    idx_name = idx_row[1]
+                    is_partial = bool(idx_row[4]) if len(idx_row) > 4 else False
+                    cols = tuple(
+                        str(info_row[2])
+                        for info_row in conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
+                        if info_row[2] is not None
+                    )
+                    idx_sql = sql_map.get(idx_name, "")
+                    where_clause = ""
+                    where_match = re.search(r"\bWHERE\b\s+(.*)$", idx_sql, re.IGNORECASE)
+                    if where_match:
+                        where_clause = " ".join(where_match.group(1).split()).upper()
+                    idxs.add((is_unique, cols, is_partial, where_clause))
+                return idxs
+
+            existing_idxs = _get_table_indexes(existing_conn, tbl)
+            candidate_idxs = _get_table_indexes(candidate_conn, tbl)
+            if existing_idxs != candidate_idxs:
+                return False, f"index or unique constraint mismatch in table '{tbl}'"
+
+            # 6. CHECK constraints
+            ex_sql_row = existing_conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+            cand_sql_row = candidate_conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
+            ).fetchone()
+            ex_checks = extract_check_constraints(ex_sql_row[0] if ex_sql_row else None)
+            cand_checks = extract_check_constraints(cand_sql_row[0] if cand_sql_row else None)
+            if ex_checks != cand_checks:
+                return False, f"CHECK constraint mismatch in table '{tbl}'"
+
+            # 7. Triggers
+            def _get_table_triggers(conn: sqlite3.Connection, table: str) -> set[tuple[str, str]]:
+                trigs = set()
+                for row in conn.execute(
+                    "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,)
+                ).fetchall():
+                    name = str(row[0])
+                    sql = " ".join(str(row[1]).split()).upper() if row[1] else ""
+                    trigs.add((name, sql))
+                return trigs
+
+            if _get_table_triggers(existing_conn, tbl) != _get_table_triggers(candidate_conn, tbl):
+                return False, f"trigger definition mismatch in table '{tbl}'"
+
+        return True, None
+    except Exception as exc:
+        return False, f"schema validation error: {exc}"
+
+
 def run_import(args) -> None:
     """Restore a Hermes backup from a zip file."""
     zip_path = Path(args.zipfile).expanduser().resolve()
@@ -478,45 +653,12 @@ def run_import(args) -> None:
                                 existing_conn = None
                                 try:
                                     existing_conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
-                                    existing_ver = existing_conn.execute("PRAGMA user_version").fetchone()[0]
-                                    candidate_ver = chk_conn.execute("PRAGMA user_version").fetchone()[0]
-                                    if existing_ver != candidate_ver:
+                                    compat_ok, compat_err = validate_sqlite_schema_compatibility(existing_conn, chk_conn)
+                                    if not compat_ok:
                                         chk_conn.close()
                                         chk_conn = None
                                         tmp_target.unlink(missing_ok=True)
-                                        errors.append(f"  {rel}: db user_version mismatch: candidate {candidate_ver} != existing {existing_ver}")
-                                        continue
-
-                                    existing_tables = {
-                                        r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                                    }
-                                    missing_tables = existing_tables - candidate_tables
-                                    if missing_tables:
-                                        chk_conn.close()
-                                        chk_conn = None
-                                        tmp_target.unlink(missing_ok=True)
-                                        errors.append(f"  {rel}: db schema incompatible, missing tables: {missing_tables}")
-                                        continue
-
-                                    # Column-level schema check for every existing table
-                                    col_mismatch = False
-                                    for tbl in existing_tables.intersection(candidate_tables):
-                                        existing_cols = {
-                                            row[1]: (row[2], row[3], row[5])
-                                            for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
-                                        }
-                                        candidate_cols = {
-                                            row[1]: (row[2], row[3], row[5])
-                                            for row in chk_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
-                                        }
-                                        if set(existing_cols.keys()) != set(candidate_cols.keys()):
-                                            col_mismatch = True
-                                            errors.append(f"  {rel}: db schema column mismatch in table {tbl}")
-                                            break
-                                    if col_mismatch:
-                                        chk_conn.close()
-                                        chk_conn = None
-                                        tmp_target.unlink(missing_ok=True)
+                                        errors.append(f"  {rel}: db schema incompatible: {compat_err}")
                                         continue
                                 finally:
                                     if existing_conn is not None:
@@ -875,93 +1017,16 @@ def restore_quick_snapshot(
                             len(fk_res),
                         )
                         continue
-                    candidate_tables = {
-                        r[0] for r in chk_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                    }
                     if dst.exists():
                         existing_conn = None
                         try:
                             existing_conn = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
-                            existing_ver = existing_conn.execute("PRAGMA user_version").fetchone()[0]
-                            candidate_ver = chk_conn.execute("PRAGMA user_version").fetchone()[0]
-                            if existing_ver != candidate_ver:
+                            compat_ok, compat_err = validate_sqlite_schema_compatibility(existing_conn, chk_conn)
+                            if not compat_ok:
                                 chk_conn.close()
                                 chk_conn = None
                                 tmp.unlink(missing_ok=True)
-                                logger.error("Database user_version mismatch for %s: candidate %d != existing %d", rel, candidate_ver, existing_ver)
-                                continue
-
-                            existing_tables = {
-                                r[0] for r in existing_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                            }
-                            missing_tables = existing_tables - candidate_tables
-                            if missing_tables:
-                                chk_conn.close()
-                                chk_conn = None
-                                tmp.unlink(missing_ok=True)
-                                logger.error("Database schema incompatible for %s, missing tables: %s", rel, missing_tables)
-                                continue
-
-                            # Comprehensive schema compatibility check for every existing table
-                            col_mismatch = False
-
-                            def _get_table_indexes(conn: sqlite3.Connection, table: str) -> set[tuple[bool, tuple[str, ...]]]:
-                                idxs = set()
-                                for idx_row in conn.execute(f"PRAGMA index_list('{table}')").fetchall():
-                                    is_unique = bool(idx_row[2])
-                                    idx_name = idx_row[1]
-                                    cols = tuple(
-                                        info_row[2]
-                                        for info_row in conn.execute(f"PRAGMA index_info('{idx_name}')").fetchall()
-                                        if info_row[2]
-                                    )
-                                    idxs.add((is_unique, cols))
-                                return idxs
-
-                            for tbl in existing_tables.intersection(candidate_tables):
-                                # 1. Column names, declared types, notnull, pk
-                                existing_cols = {
-                                    row[1]: (str(row[2]).strip().upper(), int(row[3]), int(row[5]))
-                                    for row in existing_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
-                                }
-                                candidate_cols = {
-                                    row[1]: (str(row[2]).strip().upper(), int(row[3]), int(row[5]))
-                                    for row in chk_conn.execute(f"PRAGMA table_info('{tbl}')").fetchall()
-                                }
-                                if existing_cols != candidate_cols:
-                                    col_mismatch = True
-                                    logger.error(
-                                        "Database schema column/type/constraint mismatch for %s in table %s (existing: %s, candidate: %s)",
-                                        rel, tbl, existing_cols, candidate_cols
-                                    )
-                                    break
-
-                                # 2. Foreign keys definition check
-                                existing_fks = {
-                                    (row[2].lower(), row[3].lower(), row[4].lower(), str(row[5]).upper(), str(row[6]).upper())
-                                    for row in existing_conn.execute(f"PRAGMA foreign_key_list('{tbl}')").fetchall()
-                                    if row[2] and row[3] and row[4]
-                                }
-                                candidate_fks = {
-                                    (row[2].lower(), row[3].lower(), row[4].lower(), str(row[5]).upper(), str(row[6]).upper())
-                                    for row in chk_conn.execute(f"PRAGMA foreign_key_list('{tbl}')").fetchall()
-                                    if row[2] and row[3] and row[4]
-                                }
-                                if existing_fks != candidate_fks:
-                                    col_mismatch = True
-                                    logger.error("Database foreign key definition mismatch for %s in table %s", rel, tbl)
-                                    break
-
-                                # 3. Index and unique constraints check
-                                if _get_table_indexes(existing_conn, tbl) != _get_table_indexes(chk_conn, tbl):
-                                    col_mismatch = True
-                                    logger.error("Database index/constraint mismatch for %s in table %s", rel, tbl)
-                                    break
-
-                            if col_mismatch:
-                                chk_conn.close()
-                                chk_conn = None
-                                tmp.unlink(missing_ok=True)
+                                logger.error("Database schema incompatible for %s: %s", rel, compat_err)
                                 continue
                         finally:
                             if existing_conn is not None:

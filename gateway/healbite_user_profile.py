@@ -291,10 +291,10 @@ def format_calculation_version(value: str | None) -> str:
 def _manual_target_reply_hint(profile: HealBiteUserProfile | None) -> str:
     if profile is not None and profile.manual_kcal_target is not None:
         return (
-            f"Сейчас сохранена ручная цель: {_format_target(profile.manual_kcal_target, 'ккал')}.\n"
+            f"Сейчас сохранена ручная цель: <b>{_format_target(profile.manual_kcal_target, 'ккал')}</b>.\n\n"
             "Отправьте новое число, нажмите «Оставить как есть» или «Рассчитать автоматически»."
         )
-    return "Если хотите, отправьте свою ручную цель калорий. Или нажмите «Пропустить»."
+    return "Если хотите, отправьте свою ручную цель калорий. Или нажмите «Пропустить» для автоматического расчёта."
 
 
 def onboarding_keyboard_rows(step: str, profile: HealBiteUserProfile | None = None) -> list[list[str]] | None:
@@ -319,19 +319,19 @@ def effective_household_size(profile: HealBiteUserProfile | None) -> int:
 def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
     if profile is None:
         return (
-            "👤 Профиль\n"
+            "👤 <b>Профиль HealBite</b>\n\n"
             "🎯 Цель ещё не настроена.\n"
             "Нажми /start, и я помогу заполнить базовый профиль."
         )
 
     lines = [
         "👤 Ваш профиль",
-        f"Цель: {goal_label(profile.goal)}",
-        f"Пол: {sex_label(profile.sex)}",
-        f"Возраст: {_format_target(profile.age, 'лет')}",
-        f"Рост: {_format_target(profile.height_cm, 'см')}",
-        f"Вес: {_format_target(profile.weight_kg, 'кг')}",
-        f"Активность: {activity_level_label(profile.activity_level)}",
+        f"🎯 Цель: {goal_label(profile.goal)}",
+        f"⚧ Пол: {sex_label(profile.sex)}",
+        f"🎂 Возраст: {_format_target(profile.age, 'лет')}",
+        f"📏 Рост: {_format_target(profile.height_cm, 'см')}",
+        f"⚖️ Вес: {_format_target(profile.weight_kg, 'кг')}",
+        f"🏃 Активность: {activity_level_label(profile.activity_level)}",
         "",
     ]
 
@@ -362,6 +362,7 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
     else:
         lines.append("🔥 Суточная норма: —")
 
+    additional = []
     for label, value in (
         ("Человек дома", profile.household_size),
         ("Как часто готовите", profile.cooking_frequency),
@@ -371,51 +372,99 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
         ("Предпочтения", profile.preferences),
     ):
         if value is not None and value != "":
-            lines.append(f"{label}: {value}")
+            additional.append(f"• {label}: {value}")
+    if additional:
+        lines.append("")
+        lines.append("<b>Дополнительно:</b>")
+        lines.extend(additional)
+
     missing = profile_missing_fields(profile)
     if missing:
         lines.extend(
             [
                 "",
-                "Чтобы рассчитать персональную норму, заполните:",
+                "⚠️ Чтобы рассчитать персональную норму, заполните:",
                 "• " + "\n• ".join(missing),
             ]
         )
     return "\n".join(lines)
 
 
-def format_healbite_onboarding_prompt(step: str, profile: HealBiteUserProfile | None = None, *, edit_mode: bool = False) -> str:
-    prefix = "🛠 Обновим профиль HealBite.\n" if edit_mode else "👋 Давайте настроим профиль HealBite.\n"
+def format_healbite_onboarding_prompt(
+    step: str,
+    profile: HealBiteUserProfile | None = None,
+    *,
+    edit_mode: bool = False,
+    resuming: bool = False,
+) -> str:
+    if resuming:
+        prefix = "🔄 <b>Продолжаем настройку профиля!</b>\n\n"
+    elif edit_mode:
+        prefix = "🛠 Обновим профиль HealBite.\n\n"
+    elif step == ONBOARDING_STEP_SEX:
+        prefix = (
+            "👋 Давайте настроим профиль HealBite!\n"
+            "Я помогу рассчитать персональную норму калорий и БЖУ.\n\n"
+        )
+    else:
+        prefix = ""
+
     prompts = {
-        ONBOARDING_STEP_SEX: "Укажите пол: Мужской или Женский.",
-        ONBOARDING_STEP_AGE: "Сколько вам полных лет? Укажите число от 18 до 100.",
-        ONBOARDING_STEP_HEIGHT: "Укажите рост в сантиметрах, например: 180.",
-        ONBOARDING_STEP_WEIGHT: "Укажите текущий вес в килограммах, например: 85.",
-        ONBOARDING_STEP_GOAL: "Выберите цель: Снижение веса, Поддержание веса или Набор массы.",
-        ONBOARDING_STEP_ACTIVITY: "Выберите уровень активности.",
-        ONBOARDING_STEP_MANUAL_TARGET: _manual_target_reply_hint(profile),
+        ONBOARDING_STEP_SEX: (
+            "📍 <b>Шаг 1 из 7 • Пол</b>\n"
+            "Укажите пол: Мужской или Женский (кнопками ниже)."
+        ),
+        ONBOARDING_STEP_AGE: (
+            "📍 <b>Шаг 2 из 7 • Возраст</b>\n"
+            "Сколько вам полных лет? Укажите число от 18 до 100."
+        ),
+        ONBOARDING_STEP_HEIGHT: (
+            "📍 <b>Шаг 3 из 7 • Рост</b>\n"
+            "Укажите ваш рост в сантиметрах, например: <code>175</code>."
+        ),
+        ONBOARDING_STEP_WEIGHT: (
+            "📍 <b>Шаг 4 из 7 • Вес</b>\n"
+            "Укажите текущий вес в килограммах, например: <code>70</code> или <code>70.5</code>."
+        ),
+        ONBOARDING_STEP_GOAL: (
+            "📍 <b>Шаг 5 из 7 • Цель</b>\n"
+            "Выберите цель: Снижение веса, Поддержание веса или Набор массы."
+        ),
+        ONBOARDING_STEP_ACTIVITY: (
+            "📍 <b>Шаг 6 из 7 • Активность</b>\n"
+            "Выберите уровень активности в течение недели."
+        ),
+        ONBOARDING_STEP_MANUAL_TARGET: (
+            "📍 <b>Шаг 7 из 7 • Цель по калориям</b>\n"
+            + _manual_target_reply_hint(profile)
+        ),
     }
     return prefix + prompts.get(step, "Продолжим настройку профиля.")
 
 
 def format_healbite_onboarding_invalid_reply(step: str, profile: HealBiteUserProfile | None = None) -> str:
     messages = {
-        ONBOARDING_STEP_SEX: "Не понял пол. Выберите: Мужской или Женский.",
-        ONBOARDING_STEP_AGE: "Не понял возраст. Напишите число от 18 до 100.",
-        ONBOARDING_STEP_HEIGHT: "Не понял рост. Напишите число в сантиметрах, например: 180.",
-        ONBOARDING_STEP_WEIGHT: "Не понял вес. Напишите число в килограммах, например: 85.",
-        ONBOARDING_STEP_GOAL: "Не понял цель. Выберите: Снижение веса, Поддержание веса или Набор массы.",
-        ONBOARDING_STEP_ACTIVITY: "Не понял активность. Выберите один из предложенных вариантов.",
-        ONBOARDING_STEP_MANUAL_TARGET: _manual_target_reply_hint(profile),
+        ONBOARDING_STEP_SEX: "⚠️ Не понял пол. Выберите: Мужской или Женский.",
+        ONBOARDING_STEP_AGE: "⚠️ Не понял возраст. Напишите число от 18 до 100.",
+        ONBOARDING_STEP_HEIGHT: "⚠️ Не понял рост. Напишите число в сантиметрах, например: <code>175</code>.",
+        ONBOARDING_STEP_WEIGHT: "⚠️ Не понял вес. Напишите число в килограммах, например: <code>70</code> или <code>70.5</code>.",
+        ONBOARDING_STEP_GOAL: "⚠️ Не понял цель. Выберите: Снижение веса, Поддержание веса или Набор массы.",
+        ONBOARDING_STEP_ACTIVITY: "⚠️ Не понял активность. Выберите один из предложенных вариантов.",
+        ONBOARDING_STEP_MANUAL_TARGET: (
+            "⚠️ Не понял цель по калориям. " + _manual_target_reply_hint(profile)
+        ),
     }
-    return messages.get(step, "Не понял ответ. Попробуйте ещё раз.")
+    return messages.get(step, "⚠️ Не понял ответ. Попробуйте ещё раз.")
 
 
 def format_healbite_onboarding_completed_reply(profile: HealBiteUserProfile) -> str:
     return (
-        "✅ Профиль обновлён.\n"
+        "🎉 <b>Профиль успешно настроен!</b>\n\n"
         f"{format_healbite_profile_report(profile)}\n\n"
-        "Командой /profile можно посмотреть профиль в любой момент."
+        "💡 <b>Быстрый старт:</b>\n"
+        "• Отправьте <b>фото еды</b> или напишите текстом (например: <i>«овсянка 200г, кофе»</i>) — я определю калории и БЖУ.\n"
+        "• Для записи воды напишите число (например: <code>+250</code> или <code>вода 250</code>).\n"
+        "• Меню ниже поможет следить за дневником и статистикой!"
     )
 
 
@@ -817,7 +866,7 @@ class HealBiteUserProfileStore:
         profile = self.get_user_profile(int(user_id))
         existing_state = self.get_onboarding_state(int(user_id))
         if existing_state is not None:
-            return format_healbite_onboarding_prompt(existing_state.step, profile, edit_mode=edit_mode)
+            return format_healbite_onboarding_prompt(existing_state.step, profile, edit_mode=edit_mode, resuming=True)
         if not edit_mode and profile is not None and not profile_missing_fields(profile) and profile.daily_kcal_target is not None:
             return format_healbite_profile_report(profile)
 

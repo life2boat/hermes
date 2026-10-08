@@ -17,7 +17,11 @@ from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
     format_healbite_profile_report,
 )
-from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ROWS, TelegramAdapter
+from gateway.platforms.telegram import (
+    HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS,
+    HEALBITE_REPLY_KEYBOARD_ROWS,
+    TelegramAdapter,
+)
 
 
 def _build_record(*, meal_name: str, calories_kcal: float, protein_g: float, fat_g: float, carbs_g: float):
@@ -518,3 +522,84 @@ def test_route_marker_log_is_pii_safe(caplog):
     assert "3131313131" not in caplog.text
     assert "secret-user" not in caplog.text
     assert "/profile" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_start_for_existing_user_renders_rich_dashboard(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=801, username="oleg")
+    _complete_onboarding(store, user_id=801, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
+    adapter._has_healbite_advanced_access = lambda uid: False
+
+    await adapter._handle_command(_make_update("/start", user_id=801), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "С возвращением в HealBite!" in kwargs["text"]
+    assert "2000 ккал" in kwargs["text"]
+    assert "Питание сегодня:" in kwargs["text"]
+    assert "Вода сегодня:" in kwargs["text"]
+    assert "Быстрые действия:" in kwargs["text"]
+    assert kwargs["reply_markup"] == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
+
+
+@pytest.mark.asyncio
+async def test_telegram_help_command_renders_friendly_guide_and_menu(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    _patch_telegram_profile_store(monkeypatch, store)
+    adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
+    adapter._has_healbite_advanced_access = lambda uid: False
+    adapter._maybe_handle_healbite_help_command = TelegramAdapter._maybe_handle_healbite_help_command.__get__(adapter, TelegramAdapter)
+    adapter._dispatch_healbite_keyboard_action = TelegramAdapter._dispatch_healbite_keyboard_action.__get__(adapter, TelegramAdapter)
+
+    # Test via /help slash command
+    await adapter._handle_command(_make_update("/help", user_id=802), SimpleNamespace())
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Справка по возможностям HealBite" in kwargs["text"]
+    assert "Распознавание еды:" in kwargs["text"]
+    assert "Трекер воды:" in kwargs["text"]
+    assert "Трекер веса:" in kwargs["text"]
+    assert kwargs["reply_markup"] == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
+
+    # Test via keyboard button "❓ Помощь"
+    await adapter._handle_command(_make_update("❓ Помощь", user_id=802), SimpleNamespace())
+    kwargs_btn = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Справка по возможностям HealBite" in kwargs_btn["text"]
+
+
+def test_healbite_main_menu_keyboard_layout_and_feature_gating():
+    adapter = object.__new__(TelegramAdapter)
+    adapter._healbite_reply_keyboard = lambda rows: rows
+
+    # User without advanced access gets compact 3-row layout
+    adapter._has_healbite_advanced_access = lambda uid: False
+    public_rows = adapter._healbite_main_menu_keyboard(actor_user_id=101)
+    assert public_rows == HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
+    assert len(public_rows) == 3
+    assert public_rows[0] == ["🍎 Дневник", "📊 Статистика"]
+    assert public_rows[1] == ["💧 Вода", "⚖️ Вес"]
+    assert public_rows[2] == ["👤 Профиль", "❓ Помощь"]
+
+    # Allowlisted user gets full rows
+    adapter._has_healbite_advanced_access = lambda uid: True
+    operator_rows = adapter._healbite_main_menu_keyboard(actor_user_id=968323641)
+    assert operator_rows == HEALBITE_REPLY_KEYBOARD_ROWS
+
+
+def test_onboarding_step_progress_and_recovery_formatting(tmp_path):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    prompt_step1 = store.begin_onboarding(user_id=803, username="oleg")
+    assert "Шаг 1 из 7 • Пол" in prompt_step1
+    assert "настроим профиль" in prompt_step1.casefold()
+
+    reply_step2 = store.handle_onboarding_reply(user_id=803, text="Мужской")
+    assert "Шаг 2 из 7 • Возраст" in reply_step2.text
+
+    # Resuming in-progress session
+    resumed_prompt = store.begin_onboarding(user_id=803, username="oleg")
+    assert "Продолжаем настройку профиля!" in resumed_prompt
+    assert "Шаг 2 из 7 • Возраст" in resumed_prompt

@@ -12,6 +12,12 @@ from gateway.healbite_user_profile import HealBiteUserProfileStore
 from gateway.healbite_weight_tracker import HealBiteWeightTracker
 from gateway.platforms.telegram import HEALBITE_REPLY_KEYBOARD_ACTIONS, TelegramAdapter
 
+try:
+    from telegram.constants import ParseMode
+except ImportError:
+    ParseMode = None
+
+
 
 def _weight_button_label() -> str:
     for label, action in HEALBITE_REPLY_KEYBOARD_ACTIONS.items():
@@ -104,7 +110,9 @@ async def test_weight_keyboard_routes_to_local_tracker_without_generic_dispatch(
     adapter._enqueue_text_event.assert_not_called()
     sent = adapter._send_message_with_thread_fallback.await_args.kwargs
     assert sent.get("reply_markup") is not None
+    assert sent.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
     assert tracker.get_summary(101).latest is None
+
 
 
 def test_weight_keyboard_contains_history_button_and_hides_reminder_toggle(monkeypatch):

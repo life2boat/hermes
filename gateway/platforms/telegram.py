@@ -2143,11 +2143,22 @@ class TelegramAdapter(BasePlatformAdapter):
 
         try:
             # Format and split message if needed
-            formatted = self.format_message(content)
+            target_parse_mode = metadata.get("parse_mode") if metadata else None
+            is_html = (
+                target_parse_mode == "HTML"
+                or (ParseMode is not None and target_parse_mode == ParseMode.HTML)
+            )
+            if is_html:
+                effective_parse_mode = ParseMode.HTML if ParseMode is not None else "HTML"
+                formatted = content
+            else:
+                effective_parse_mode = ParseMode.MARKDOWN_V2
+                formatted = self.format_message(content)
+
             chunks = self.truncate_message(
                 formatted, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
             )
-            if len(chunks) > 1:
+            if len(chunks) > 1 and not is_html:
                 # truncate_message appends a raw " (1/2)" suffix. Escape the
                 # MarkdownV2-special parentheses so Telegram doesn't reject the
                 # chunk and fall back to plain text.
@@ -2222,22 +2233,22 @@ class TelegramAdapter(BasePlatformAdapter):
                 msg = None
                 for _send_attempt in range(3):
                     try:
-                        # Try Markdown first, fall back to plain text if it fails
+                        # Try formatted first, fall back to plain text if it fails
                         try:
                             msg = await self._bot.send_message(
                                 chat_id=int(chat_id),
                                 text=chunk,
-                                parse_mode=ParseMode.MARKDOWN_V2,
+                                parse_mode=effective_parse_mode,
                                 reply_to_message_id=reply_to_id,
                                 **thread_kwargs,
                                 **self._link_preview_kwargs(),
                                 **self._notification_kwargs(metadata),
                             )
                         except Exception as md_error:
-                            # Markdown parsing failed, try plain text
-                            if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
-                                logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
-                                plain_chunk = _strip_mdv2(chunk)
+                            # Formatting parsing failed, try plain text
+                            if any(term in str(md_error).lower() for term in ("parse", "markdown", "html", "tag", "entity")):
+                                logger.warning("[%s] %s parse failed, falling back to plain text: %s", self.name, effective_parse_mode, md_error)
+                                plain_chunk = re.sub(r"</?[^>]+>", "", chunk) if is_html else _strip_mdv2(chunk)
                                 msg = await self._bot.send_message(
                                     chat_id=int(chat_id),
                                     text=plain_chunk,
@@ -5831,12 +5842,53 @@ class TelegramAdapter(BasePlatformAdapter):
             or self._is_feature_allowlisted("HEALBITE_SHOPPING_LIST", actor_user_id)
             or self._is_feature_allowlisted("HEALBITE_INVENTORY_HOME", actor_user_id)
             or self._is_feature_allowlisted("HEALBITE_HOUSEHOLDS", actor_user_id)
+            or self._is_feature_allowlisted("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI", actor_user_id)
         )
 
+    def _healbite_menu_rows(self, actor_user_id: int | None = None) -> list[list[str]]:
+        if actor_user_id is None:
+            return [list(row) for row in HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS]
+
+        has_weekly = self._is_feature_allowlisted("HEALBITE_WEEKLY_MENU", actor_user_id)
+        has_shopping = self._is_feature_allowlisted("HEALBITE_SHOPPING_LIST", actor_user_id)
+        has_fridge = (
+            self._is_feature_allowlisted("HEALBITE_INVENTORY_WEEKLY_GENERATION_UI", actor_user_id)
+            or (
+                hasattr(self, "_fridge_menu_telegram")
+                and getattr(self._fridge_menu_telegram, "_ready", lambda _: False)(actor_user_id)
+            )
+        )
+        has_inventory = self._is_feature_allowlisted("HEALBITE_INVENTORY_HOME", actor_user_id)
+        has_family = self._is_feature_allowlisted("HEALBITE_HOUSEHOLDS", actor_user_id)
+
+        rows: list[list[str]] = [
+            ["🍎 Дневник", "📊 Статистика"],
+        ]
+
+        if has_weekly and has_shopping:
+            rows.append(["📋 Меню на неделю", "🛒 Список покупок"])
+        elif has_weekly:
+            rows.append(["📋 Меню на неделю"])
+        elif has_shopping:
+            rows.append(["🛒 Список покупок"])
+
+        if has_fridge:
+            rows.append(["🥘 Из холодильника в меню"])
+
+        if has_inventory:
+            rows.append(["🥕 Продукты дома"])
+
+        rows.append(["💧 Вода", "⚖️ Вес"])
+
+        if has_family:
+            rows.append(["👨‍👩‍👧 Семья"])
+
+        rows.append(["👤 Профиль", "❓ Помощь"])
+        return rows
+
     def _healbite_main_menu_keyboard(self, actor_user_id: int | None = None) -> Optional[Any]:
-        if actor_user_id is not None and self._has_healbite_advanced_access(actor_user_id):
-            return self._healbite_reply_keyboard(HEALBITE_REPLY_KEYBOARD_ROWS)
-        return self._healbite_reply_keyboard(HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS)
+        rows = self._healbite_menu_rows(actor_user_id)
+        return self._healbite_reply_keyboard(rows)
 
     @staticmethod
     def _healbite_command_from_text(text: str) -> str:
@@ -5871,7 +5923,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         if profile is not None and profile.daily_kcal_target is not None:
             from gateway.healbite_nutrition_targets import goal_label
-            lines.append(f"🎯 <b>Цель:</b> {goal_label(profile.goal)}")
+            lines.append(f"🎯 <b>Цель:</b> {_html.escape(goal_label(profile.goal))}")
             lines.append(
                 f"🔥 <b>Норма дня:</b> {_format_target(profile.daily_kcal_target, 'ккал')} "
                 f"(Б {_format_target(profile.daily_protein_target, 'г')} · "
@@ -5956,6 +6008,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": int(chat_id),
             "text": text,
             "reply_markup": reply_markup,
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
             **self._link_preview_kwargs(),
         }
         if thread_id is not None:
@@ -6015,6 +6068,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "text": help_text,
             "reply_markup": reply_markup,
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
             **self._link_preview_kwargs(),
         }
         if thread_id is not None:
@@ -6447,6 +6501,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         current_profile,
                     )
                 ),
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
             )
             self._log_healbite_marker(
                 "healbite_reply_sent",
@@ -6499,6 +6554,7 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id=chat_id,
             text=format_healbite_profile_report(profile),
             message_thread_id=thread_id,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
         )
         self._log_healbite_marker(
             "healbite_reply_sent",
@@ -6588,16 +6644,18 @@ class TelegramAdapter(BasePlatformAdapter):
             next_profile,
         )
         if reply.status == "completed":
-            keyboard_rows = (
-                HEALBITE_REPLY_KEYBOARD_ROWS
-                if self._has_healbite_advanced_access(int(user_id))
-                else HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS
-            )
+            try:
+                reply_markup = self._healbite_main_menu_keyboard(int(user_id))
+            except TypeError:
+                reply_markup = self._healbite_main_menu_keyboard()
+        else:
+            reply_markup = self._healbite_reply_keyboard(keyboard_rows)
         await self._send_message_with_thread_fallback(
             chat_id=chat_id,
             text=reply.text,
             message_thread_id=getattr(msg, "message_thread_id", None),
-            reply_markup=self._healbite_reply_keyboard(keyboard_rows),
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
         )
         self._log_healbite_route_selected(
             msg=msg,
@@ -6706,9 +6764,8 @@ class TelegramAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {
             "text": text,
             "reply_markup": self._healbite_weight_reminder_keyboard(rows),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await query.edit_message_text(**kwargs)
 
     async def _show_weight_reminder_main(self, query: Any, *, user_id: int, notice: str | None = None) -> None:
@@ -6976,9 +7033,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": format_weight_tracker_report(summary, notice=notice),
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_weight_keyboard(user_id=int(user_id)),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await self._send_message_with_thread_fallback(**kwargs)
 
     async def _edit_healbite_weight_screen(
@@ -6992,9 +7048,8 @@ class TelegramAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {
             "text": format_weight_tracker_report(summary, notice=notice),
             "reply_markup": self._healbite_weight_keyboard(user_id=int(user_id)),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -7045,9 +7100,8 @@ class TelegramAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {
             "text": format_weight_history_report(summary),
             "reply_markup": self._healbite_weight_history_keyboard(),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await query.edit_message_text(**kwargs)
 
     async def _maybe_handle_healbite_weight_command(
@@ -7237,9 +7291,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": format_water_tracker_report(summary, notice=notice),
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_water_keyboard(),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await self._send_message_with_thread_fallback(**kwargs)
 
     async def _edit_healbite_water_screen(
@@ -7253,9 +7306,8 @@ class TelegramAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {
             "text": format_water_tracker_report(summary, notice=notice),
             "reply_markup": self._healbite_water_keyboard(),
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -7453,8 +7505,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_family_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         await self._send_message_with_thread_fallback(**kwargs)
 
     async def _maybe_handle_healbite_family_command(
@@ -7545,8 +7597,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": self._healbite_family_result_text(result),
             "reply_markup": self._healbite_family_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -7585,8 +7637,8 @@ class TelegramAdapter(BasePlatformAdapter):
             }
             if index == len(chunks) - 1:
                 kwargs["reply_markup"] = self._healbite_fridge_menu_keyboard(result)
-            if result.screen.parse_mode == "HTML" and ParseMode is not None:
-                kwargs["parse_mode"] = ParseMode.HTML
+            if result.screen.parse_mode == "HTML":
+                kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
             await self._send_message_with_thread_fallback(**kwargs)
 
     async def _maybe_handle_healbite_fridge_menu_command(
@@ -7759,8 +7811,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": result.screen.chunks[-1],
             "reply_markup": self._healbite_fridge_menu_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -7794,8 +7846,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 "text": text,
                 "message_thread_id": getattr(msg, "message_thread_id", None),
             }
-            if result.screen.parse_mode == "HTML" and ParseMode is not None:
-                kwargs["parse_mode"] = ParseMode.HTML
+            if result.screen.parse_mode == "HTML":
+                kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
             await self._send_message_with_thread_fallback(**kwargs)
 
     async def _send_healbite_inventory_result(
@@ -7810,8 +7862,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_inventory_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await self._send_message_with_thread_fallback(**kwargs)
             await self._send_healbite_inventory_continuations(msg, result)
@@ -8169,8 +8221,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": result.screen.text,
             "reply_markup": self._healbite_inventory_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -8206,8 +8258,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_shopping_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         await self._send_message_with_thread_fallback(**kwargs)
 
     async def _maybe_handle_healbite_shopping_command(
@@ -8356,8 +8408,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": result.screen.text,
             "reply_markup": self._healbite_shopping_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -8391,8 +8443,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "message_thread_id": getattr(msg, "message_thread_id", None),
             "reply_markup": self._healbite_weekly_menu_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         await self._send_message_with_thread_fallback(**kwargs)
 
     @staticmethod
@@ -8469,8 +8521,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 "text": shopping_result.screen.text,
                 "reply_markup": self._healbite_shopping_keyboard(shopping_result),
             }
-            if shopping_result.screen.parse_mode == "HTML" and ParseMode is not None:
-                kwargs["parse_mode"] = ParseMode.HTML
+            if shopping_result.screen.parse_mode == "HTML":
+                kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
             try:
                 await query.edit_message_text(**kwargs)
             except Exception:
@@ -8505,8 +8557,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "text": result.screen.text,
             "reply_markup": self._healbite_weekly_menu_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         try:
             await query.edit_message_text(**kwargs)
         except Exception:
@@ -9021,9 +9073,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "text": report,
             "message_thread_id": thread_id,
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await self._send_message_with_thread_fallback(**kwargs)
         return True
 
@@ -9099,8 +9150,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "message_thread_id": thread_id,
             "reply_markup": self._healbite_weekly_menu_keyboard(result),
         }
-        if result.screen.parse_mode == "HTML" and ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
+        if result.screen.parse_mode == "HTML":
+            kwargs["parse_mode"] = ParseMode.HTML if ParseMode is not None else "HTML"
         await self._send_message_with_thread_fallback(**kwargs)
         self._log_healbite_marker(
             "healbite_reply_sent",
@@ -9232,9 +9283,8 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "text": report,
             "message_thread_id": thread_id,
+            "parse_mode": ParseMode.HTML if ParseMode is not None else "HTML",
         }
-        if ParseMode is not None:
-            kwargs["parse_mode"] = ParseMode.HTML
         await self._send_message_with_thread_fallback(**kwargs)
         return True
 

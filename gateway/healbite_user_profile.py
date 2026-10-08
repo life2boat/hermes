@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 import sqlite3
 import threading
@@ -326,7 +327,7 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
 
     lines = [
         "👤 Ваш профиль",
-        f"🎯 Цель: {goal_label(profile.goal)}",
+        f"🎯 Цель: {html.escape(goal_label(profile.goal))}",
         f"⚧ Пол: {sex_label(profile.sex)}",
         f"🎂 Возраст: {_format_target(profile.age, 'лет')}",
         f"📏 Рост: {_format_target(profile.height_cm, 'см')}",
@@ -372,7 +373,7 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
         ("Предпочтения", profile.preferences),
     ):
         if value is not None and value != "":
-            additional.append(f"• {label}: {value}")
+            additional.append(f"• {label}: {html.escape(str(value))}")
     if additional:
         lines.append("")
         lines.append("<b>Дополнительно:</b>")

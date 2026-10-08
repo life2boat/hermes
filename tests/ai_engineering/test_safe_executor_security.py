@@ -2008,6 +2008,8 @@ def test_sec74_case_insensitive_python_syntax_check(tmp_path: Path):
             return "```python file:app.PY\ndef broken(): invalid syntax here !!!\n```"
 
     executor = SandboxedBrokerTaskExecutor(model_gateway=MockGateway())
+    executor.health = lambda: True  # type: ignore[assignment]
+    executor.execution_ready = lambda: True  # type: ignore[assignment]
     executor._run_sandboxed_probe = lambda w: (True, None)  # type: ignore[assignment]
 
     def mock_syntax_check(w, rel):
@@ -2253,6 +2255,8 @@ def test_sec81_fenced_json_parsed_and_single_fallback_restricted(tmp_path: Path)
     wt = tmp_path / "wt"
     wt.mkdir()
     subprocess.run(["git", "init", str(wt)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.name", "Hermes Agent"], check=True)
+    subprocess.run(["git", "-C", str(wt), "config", "user.email", "agent@hermes.local"], check=True)
     target_py = wt / "calculator.py"
     target_py.write_text("def multiply(a, b): pass\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(wt), "add", "calculator.py"], check=True, capture_output=True)
@@ -2263,6 +2267,8 @@ def test_sec81_fenced_json_parsed_and_single_fallback_restricted(tmp_path: Path)
     executor = SandboxedBrokerTaskExecutor(
         model_gateway=CallableModelGateway(lambda p, t, w: fenced_payload),
     )
+    executor.health = lambda: True  # type: ignore[assignment]
+    executor.execution_ready = lambda: True  # type: ignore[assignment]
     # Mock runner and probe to test mutation application
     executor._run_sandboxed_probe = lambda w: (True, None)
     executor._run_sandboxed_syntax_check = lambda w, p: (True, None)

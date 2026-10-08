@@ -120,6 +120,7 @@ from gateway.healbite_user_profile import (
     format_healbite_profile_report,
     get_default_healbite_user_profile,
     get_existing_healbite_user_profile,
+    is_healbite_profile_edit_intent,
     onboarding_keyboard_rows,
 )
 from gateway.healbite_weekly_menu_telegram import (
@@ -3695,6 +3696,11 @@ class TelegramAdapter(BasePlatformAdapter):
             await self._handle_healbite_water_callback(query, data)
             return
 
+        # --- HealBite profile callbacks ---
+        if data.startswith("profile:"):
+            await self._handle_healbite_profile_callback(query, data)
+            return
+
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
@@ -6453,15 +6459,22 @@ class TelegramAdapter(BasePlatformAdapter):
             error_type=type(error).__name__ if error is not None else None,
         )
 
-    async def _maybe_handle_healbite_start_command(self, msg: Message) -> bool:
-        text = (getattr(msg, "text", None) or "").strip()
+    async def _maybe_handle_healbite_start_command(
+        self,
+        msg: Message,
+        *,
+        text_override: Optional[str] = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command_token != "/start":
             return False
-        self._log_healbite_route_selected(
-            msg=msg,
-            route="start_command",
-        )
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="start_command",
+            )
 
         chat = getattr(msg, "chat", None)
         chat_id = str(getattr(chat, "id", ""))
@@ -6529,8 +6542,12 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> bool:
         text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
         command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
-        if command_token != "/profile":
+        if command_token not in {"/profile", "/profile_edit"}:
             return False
+        if text.casefold().startswith("/profile edit") or command_token == "/profile_edit":
+            return await self._maybe_handle_healbite_start_command(
+                msg, text_override="/start edit"
+            )
         if emit_route_marker:
             self._log_healbite_route_selected(
                 msg=msg,
@@ -6550,10 +6567,12 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
 
         profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
+        keyboard = self._healbite_profile_keyboard(user_id=int(user_id))
         await self._send_message_with_thread_fallback(
             chat_id=chat_id,
             text=format_healbite_profile_report(profile),
             message_thread_id=thread_id,
+            reply_markup=keyboard,
             parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
         )
         self._log_healbite_marker(
@@ -6563,6 +6582,79 @@ class TelegramAdapter(BasePlatformAdapter):
             outcome="profile_rendered",
         )
         return True
+
+    def _healbite_profile_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Изменить профиль", callback_data=f"profile:edit:{user_id}")],
+        ])
+
+    async def _handle_healbite_profile_callback(self, query: Any, data: str) -> None:
+        caller_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if caller_user_id is None:
+            await query.answer(text="Не удалось определить пользователя.")
+            return
+
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else "open"
+        try:
+            target_user_id = int(parts[2]) if len(parts) > 2 else caller_user_id
+        except (ValueError, TypeError):
+            target_user_id = caller_user_id
+
+        # Telegram callback ownership validation:
+        if caller_user_id != target_user_id:
+            await query.answer(text="Действие доступно только владельцу профиля.", show_alert=True)
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                msg=getattr(query, "message", None),
+                route="profile_callback",
+                lane="healbite_public",
+                result="blocked_ownership_mismatch",
+            )
+            return
+
+        if action == "edit":
+            profile_store = get_default_healbite_user_profile()
+            username = getattr(query.from_user, "username", "") or ""
+            onboarding_text = profile_store.begin_onboarding(
+                user_id=int(caller_user_id),
+                username=username,
+                edit_mode=True,
+            )
+            current_profile = profile_store.get_user_profile(int(caller_user_id))
+            current_state = profile_store.get_onboarding_state(int(caller_user_id))
+
+            await query.answer()
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+            message = getattr(query, "message", None)
+            chat_id = str(getattr(getattr(message, "chat", None), "id", caller_user_id))
+            thread_id = getattr(message, "message_thread_id", None)
+
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=onboarding_text,
+                message_thread_id=thread_id,
+                reply_markup=self._healbite_reply_keyboard(
+                    onboarding_keyboard_rows(
+                        current_state.step if current_state is not None else "",
+                        current_profile,
+                    )
+                ),
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            self._log_healbite_marker(
+                "healbite_reply_sent",
+                msg=message,
+                route="profile_callback",
+                outcome="edit_started",
+            )
+            return
 
     async def _maybe_handle_healbite_profile_update(self, msg: Message) -> bool:
         from gateway.healbite_profile_conversation import (
@@ -8743,6 +8835,8 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
+        if await self._maybe_handle_healbite_explicit_intent(msg):
+            return
         if await self._maybe_handle_healbite_onboarding_reply(msg):
             return
         if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
@@ -8756,8 +8850,6 @@ class TelegramAdapter(BasePlatformAdapter):
         if await self._maybe_handle_healbite_profile_update(msg):
             return
         if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
-            return
-        if await self._maybe_handle_healbite_explicit_intent(msg):
             return
         await self._ensure_forum_commands(update.message)
 
@@ -9235,6 +9327,17 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return await self._maybe_handle_healbite_shopping_command(
                 msg, text_override=SHOPPING_COMMAND
+            )
+
+        if is_healbite_profile_edit_intent(text):
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="profile_edit_intent",
+                action="open_start_edit",
+                lane="healbite_public",
+            )
+            return await self._maybe_handle_healbite_start_command(
+                msg, text_override="/start edit"
             )
 
         return False

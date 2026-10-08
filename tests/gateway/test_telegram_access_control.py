@@ -216,3 +216,18 @@ def test_public_lane_correlation_marker_is_hashed_and_has_no_pii():
     assert corr
     assert "968323641" not in corr
     assert ":" not in corr
+
+
+def test_public_lane_profile_edit_intent_is_allowed(tmp_path, monkeypatch):
+    store = _seed_profile(tmp_path, user_id=123)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+
+    decision = _healbite_public_lane_decision(
+        source=_source(123),
+        event=_event(user_id=123, text="Я хочу внести изменения в профиль"),
+    )
+
+    assert decision["action"] == "allow"
+    assert decision["route"] == "public_profile_edit_intent"
+    assert decision["has_profile"] is True

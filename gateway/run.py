@@ -1876,7 +1876,10 @@ def _healbite_public_lane_decision(
 ) -> Dict[str, Any]:
     from gateway.config import Platform
     from gateway.healbite_nutrition_diary import get_default_nutrition_diary
-    from gateway.healbite_user_profile import get_default_healbite_user_profile
+    from gateway.healbite_user_profile import (
+        get_default_healbite_user_profile,
+        is_healbite_profile_edit_intent,
+    )
 
     if not _healbite_public_onboarding_enabled():
         return {"enabled": False, "action": "disabled", "route": "disabled"}
@@ -1982,6 +1985,15 @@ def _healbite_public_lane_decision(
             "enabled": True,
             "action": "allow",
             "route": f"public_diary_{diary_turn}",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    if is_healbite_profile_edit_intent(text_value):
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": "public_profile_edit_intent",
             "has_profile": True,
             "onboarding_active": False,
         }

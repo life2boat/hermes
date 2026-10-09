@@ -854,6 +854,8 @@ class TelegramAdapter(BasePlatformAdapter):
         user_name: Optional[str] = None,
     ) -> bool:
         """Centralized check whether a Telegram user/chat is authorized."""
+        if getattr(self, "config", None) is None:
+            return True
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return False
@@ -3828,8 +3830,19 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(query_thread_id) if query_thread_id is not None else None,
             user_name=query_user_name,
         )
+        HEALBITE_LOCAL_CALLBACK_ROOTS = (
+            FAMILY_CALLBACK_ROOT,
+            FRIDGE_MENU_CALLBACK_ROOT,
+            INVENTORY_CALLBACK_ROOT,
+            "inv:",
+            WEEKLY_MENU_CALLBACK_ROOT,
+            "weekly:",
+            SHOPPING_CALLBACK_ROOT,
+            "weight:",
+            "water:",
+        )
         if not query_is_authorized and not self._healbite_public_onboarding_enabled():
-            if not data.startswith("profile:"):
+            if data.startswith(HEALBITE_LOCAL_CALLBACK_ROOTS):
                 try:
                     await query.answer(text="Действие недоступно.", show_alert=True)
                 except Exception:
@@ -3837,19 +3850,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 return
 
         if not query_is_authorized and self._healbite_public_onboarding_enabled():
-            if data.startswith((
-                FAMILY_CALLBACK_ROOT,
-                FRIDGE_MENU_CALLBACK_ROOT,
-                INVENTORY_CALLBACK_ROOT,
-                WEEKLY_MENU_CALLBACK_ROOT,
-                SHOPPING_CALLBACK_ROOT,
-                "gt:", "ea:", "sc:", "mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:",
-            )):
-                try:
-                    await query.answer(text="Раздел недоступен в публичном режиме.", show_alert=True)
-                except Exception:
-                    pass
-                return
             if data.startswith(("weight:", "water:")):
                 profile_store = get_default_healbite_user_profile()
                 if query_user_id is None or profile_store.get_user_profile(int(query_user_id)) is None:
@@ -4207,6 +4207,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
+            if not query_is_authorized:
+                try:
+                    await query.answer(text="Действие недоступно.", show_alert=True)
+                except Exception:
+                    pass
             return
         answer = data.split(":", 1)[1]  # "y" or "n"
         caller_id = str(getattr(query.from_user, "id", ""))
@@ -6394,36 +6399,24 @@ class TelegramAdapter(BasePlatformAdapter):
         actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
         if self._is_feature_allowlisted(feature_name, actor_user_id):
             return False
-        chat = getattr(msg, "chat", None)
-        chat_id = getattr(chat, "id", None)
-        chat_type = getattr(chat, "type", None)
-        thread_id = getattr(msg, "message_thread_id", None)
-        user_name = getattr(getattr(msg, "from_user", None), "username", None)
-        if not self._healbite_public_onboarding_enabled():
-            return False
         reason = self._healbite_public_lane_block_reason(msg)
-        if reason is not None:
-            self._log_healbite_route_selected(
-                msg=msg,
-                route="public_lane_blocked",
-                lane="healbite_public",
-                result=reason,
-            )
-            if reason == "active_onboarding":
-                reply_text = "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
-            else:
-                reply_text = "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
-            chat_id_str = str(getattr(chat, "id", ""))
-            await self._send_message_with_thread_fallback(
-                chat_id=chat_id_str,
-                text=reply_text,
-                message_thread_id=thread_id,
-            )
-            return True
-        reply_text = self._healbite_public_lane_reply(has_profile=True, onboarding_active=False)
-        chat_id_str = str(getattr(chat, "id", ""))
+        if reason is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="public_lane_blocked",
+            lane="healbite_public",
+            result=reason,
+        )
+        if reason == "active_onboarding":
+            reply_text = "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+        else:
+            reply_text = "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
         await self._send_message_with_thread_fallback(
-            chat_id=chat_id_str,
+            chat_id=chat_id,
             text=reply_text,
             message_thread_id=thread_id,
         )
@@ -6438,28 +6431,40 @@ class TelegramAdapter(BasePlatformAdapter):
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
         if self._is_feature_allowlisted(feature_name, actor_user_id):
             return False
+        if not self._healbite_public_onboarding_enabled():
+            return False
         msg = getattr(query, "message", None)
         chat = getattr(msg, "chat", None) if msg is not None else None
-        chat_id = getattr(chat, "id", None) if chat is not None else actor_user_id
-        chat_type = getattr(chat, "type", None) if chat is not None else "private"
-        thread_id = getattr(msg, "message_thread_id", None) if msg is not None else None
-        user_name = getattr(getattr(query, "from_user", None), "username", None)
-        if not self._healbite_public_onboarding_enabled():
-            if self._is_telegram_user_authorized(
-                actor_user_id,
-                chat_id=str(chat_id) if chat_id is not None else None,
-                chat_type=str(chat_type) if chat_type is not None else None,
-                thread_id=str(thread_id) if thread_id is not None else None,
-                user_name=user_name,
-            ):
-                return False
-            try:
-                await query.answer(text="Действие недоступно.", show_alert=True)
-            except Exception:
-                pass
+        chat_type = str(getattr(chat, "type", "") or "").strip().lower() if chat is not None else "private"
+        if chat_type not in {"private", "dm", "direct"}:
+            return False
+        if actor_user_id is None:
             return True
+        profile_store = get_default_healbite_user_profile()
+        if profile_store.get_onboarding_state(int(actor_user_id)) is not None:
+            reason = "active_onboarding"
+        else:
+            profile = profile_store.get_user_profile(int(actor_user_id))
+            if profile is None:
+                reason = "missing_profile"
+            elif profile.daily_kcal_target is None:
+                reason = "incomplete_profile"
+            else:
+                reason = None
+        if reason is None:
+            return False
+        self._log_healbite_route_selected(
+            msg=msg,
+            route="public_lane_blocked",
+            lane="healbite_public",
+            result=reason,
+        )
+        if reason == "active_onboarding":
+            reply_text = "Продолжим настройку профиля. Ответь на вопрос из /start одним сообщением."
+        else:
+            reply_text = "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
         try:
-            await query.answer(text="Раздел недоступен в публичном режиме.", show_alert=True)
+            await query.answer(text=reply_text, show_alert=True)
         except Exception:
             pass
         return True

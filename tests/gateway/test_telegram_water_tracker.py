@@ -55,7 +55,7 @@ def _query(*, user_id: int = 101, query_id: str = "callback-1"):
 
 
 def _adapter():
-    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token", extra={}))
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token", extra={"allowed_users": ["*"]}))
     adapter._send_message_with_thread_fallback = AsyncMock()
     adapter._enqueue_text_event = Mock()
     return adapter

@@ -215,8 +215,11 @@ class TestTelegramUnauthorizedAccessSecurity:
         adapter.handle_message.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_sec_05_unknown_user_callbacks_deny(self, monkeypatch):
+    async def test_sec_05_unknown_user_callbacks_deny(self, tmp_path, monkeypatch):
         """SEC-05: Unknown user triggers callbacks -> DENY."""
+        db_path = tmp_path / "healbite_sec05.db"
+        store = HealBiteUserProfileStore(db_path=db_path)
+        monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
         monkeypatch.delenv("HEALBITE_PUBLIC_ONBOARDING", raising=False)
         monkeypatch.delenv("TELEGRAM_ALLOWED_USERS", raising=False)
 

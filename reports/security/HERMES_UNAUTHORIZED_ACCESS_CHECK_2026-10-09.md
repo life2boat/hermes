@@ -63,14 +63,8 @@ All Telegram intake vectors were inventoried and audited:
 ### Root Cause 1: Interception Before Gateway Authorization
 `GatewayRunner._handle_message` contains robust authorization checks (`_is_user_authorized`) and fails closed against unknown users. However, `TelegramAdapter` processed many intents and commands locally inside the adapter itself prior to invoking `self.handle_message(event)`.
 
-### Root Cause 2: Inverted Public Lane Logic
-In `TelegramAdapter`:
-```python
-# PREVIOUS VULNERABLE CODE
-if not self._healbite_public_onboarding_enabled():
-    return False # FAILED OPEN: returned False, meaning "do not block"!
-```
-When `HEALBITE_PUBLIC_ONBOARDING` was off, `_maybe_block_public_feature_callback` and `_healbite_public_lane_block_reason` returned `False` / `None`, which caused feature gates to treat the user as unblocked instead of denying them!
+### Root Cause 2: Missing Adapter-Level Authorization on Local Handlers
+Handlers for commands (`/start`, `/menu`, `/shopping`, `/inventory`, `/water`, `/weight`), messages, media, and callbacks operated inside `TelegramAdapter` without verifying caller authorization against the gateway allowlist or runner. In addition, when `HEALBITE_PUBLIC_ONBOARDING` was disabled, local commands bypassed gateway gating entirely.
 
 ### Root Cause 3: Zero Auth Check on `/start`
 `_maybe_handle_healbite_start_command` had no caller authorization verification. Any unknown user sending `/start` triggered `profile_store.begin_onboarding(user_id=int(user_id))`, immediately inserting a row into the SQLite database for that unauthenticated actor.

@@ -3838,6 +3838,7 @@ class TelegramAdapter(BasePlatformAdapter):
             WEEKLY_MENU_CALLBACK_ROOT,
             "weekly:",
             SHOPPING_CALLBACK_ROOT,
+            HEALBITE_PROFILE_CALLBACK_ROOT,
             "weight:",
             "water:",
         )
@@ -6868,6 +6869,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         if action != HEALBITE_PROFILE_CALLBACK_EDIT:  # unreachable while the parser is strict
             await query.answer(text=HEALBITE_PROFILE_CALLBACK_STALE_REPLY)
+            return
+
+        chat = getattr(message, "chat", None)
+        if not self._is_telegram_user_authorized(
+            caller_user_id,
+            chat_id=str(getattr(chat, "id", "")) if chat is not None else None,
+            chat_type=getattr(chat, "type", None) if chat is not None else None,
+            thread_id=getattr(message, "message_thread_id", None),
+            user_name=getattr(query.from_user, "username", None),
+        ) and not self._healbite_public_onboarding_enabled():
+            await query.answer(text="Действие недоступно.", show_alert=True)
             return
 
         profile_store = get_default_healbite_user_profile()

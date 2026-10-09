@@ -844,16 +844,18 @@ class TelegramAdapter(BasePlatformAdapter):
             return {}
         return {"disable_notification": True}
 
-    def _is_callback_user_authorized(
+    def _is_telegram_user_authorized(
         self,
-        user_id: str,
+        user_id: Any,
         *,
         chat_id: Optional[str] = None,
         chat_type: Optional[str] = None,
         thread_id: Optional[str] = None,
         user_name: Optional[str] = None,
     ) -> bool:
-        """Return whether a Telegram inline-button caller may perform gated actions."""
+        """Centralized check whether a Telegram user/chat is authorized."""
+        if getattr(self, "config", None) is None:
+            return True
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return False
@@ -881,20 +883,110 @@ class TelegramAdapter(BasePlatformAdapter):
                 return bool(auth_fn(source))
             except Exception:
                 logger.debug(
-                    "[Telegram] Falling back to env-only callback auth for user %s",
+                    "[Telegram] Falling back to env-only auth for user %s",
                     normalized_user_id,
                     exc_info=True,
                 )
 
+        if os.getenv("TELEGRAM_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
+            return True
+        if os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}:
+            return True
+
+        config_extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        if isinstance(config_extra, dict):
+            extra_allowed = set()
+            for key in (
+                "allowed_users",
+                "allow_from",
+                "admin_users",
+                "allow_admin_from",
+                "group_allow_admin_from",
+                "group_admin_users",
+            ):
+                val = config_extra.get(key)
+                if isinstance(val, (list, tuple, set)):
+                    extra_allowed.update(str(x).strip() for x in val)
+                elif isinstance(val, str) and val.strip():
+                    extra_allowed.update(x.strip() for x in val.split(",") if x.strip())
+            if extra_allowed and (normalized_user_id in extra_allowed or "*" in extra_allowed):
+                return True
+
         allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
-        if not allowed_csv:
-            # Fail-closed: no allowlist means deny by default.
-            # The runner auth path in _is_user_authorized() handles
-            # GATEWAY_ALLOW_ALL_USERS; this fallback must not silently
-            # allow everyone (fixes #24457).
-            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
-        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        global_csv = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+        admin_csv = os.getenv("TELEGRAM_ADMIN_USERS", "").strip()
+        gateway_admin_csv = os.getenv("GATEWAY_ADMIN_USERS", "").strip()
+        group_csv = ""
+        group_admin_csv = ""
+        normalized_chat_type = str(chat_type or "dm").strip().lower() or "dm"
+        if normalized_chat_type in {"group", "supergroup", "forum"}:
+            group_csv = os.getenv("TELEGRAM_GROUP_ALLOWED_USERS", "").strip()
+            group_admin_csv = os.getenv("TELEGRAM_GROUP_ADMIN_USERS", "").strip()
+
+        if (
+            not allowed_csv
+            and not global_csv
+            and not group_csv
+            and not admin_csv
+            and not gateway_admin_csv
+            and not group_admin_csv
+        ):
+            try:
+                actor_num = int(normalized_user_id)
+                for controller_attr in ("_family_telegram", "_fridge_menu_telegram", "_inventory_telegram", "_shopping_telegram", "_weekly_menu_telegram"):
+                    ctrl = getattr(self, controller_attr, None)
+                    if ctrl is not None:
+                        for cfg_name in ("_config", "_text_config", "_photo_config", "_weekly_generation_config"):
+                            cfg = getattr(ctrl, cfg_name, None)
+                            if cfg is not None and getattr(cfg, "allowlist_valid", True) and actor_num in getattr(cfg, "allowlist", set()):
+                                return True
+                        runtime_fn = getattr(ctrl, "_runtime_factory", None)
+                        if callable(runtime_fn):
+                            try:
+                                rt = runtime_fn()
+                                r_cfg = getattr(rt, "config", getattr(rt, "_config", None))
+                                if r_cfg is not None and getattr(r_cfg, "configuration_valid", getattr(r_cfg, "allowlist_valid", True)) and actor_num in getattr(r_cfg, "allowlist", set()):
+                                    return True
+                            except Exception:
+                                pass
+                if any(
+                    self._is_feature_allowlisted(feat, actor_num)
+                    for feat in (
+                        "HEALBITE_SHOPPING_LIST",
+                        "HEALBITE_WEEKLY_MENU",
+                        "HEALBITE_HOUSEHOLDS",
+                        "HEALBITE_INVENTORY_HOME",
+                    )
+                ):
+                    return True
+            except Exception:
+                pass
+            return False
+
+        allowed_ids = set()
+        for csv_val in (allowed_csv, global_csv, group_csv, admin_csv, gateway_admin_csv, group_admin_csv):
+            if csv_val:
+                allowed_ids.update(uid.strip() for uid in csv_val.split(",") if uid.strip())
+
         return "*" in allowed_ids or normalized_user_id in allowed_ids
+
+    def _is_callback_user_authorized(
+        self,
+        user_id: str,
+        *,
+        chat_id: Optional[str] = None,
+        chat_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        user_name: Optional[str] = None,
+    ) -> bool:
+        """Return whether a Telegram inline-button caller may perform gated actions."""
+        return self._is_telegram_user_authorized(
+            user_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+            thread_id=thread_id,
+            user_name=user_name,
+        )
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -3730,6 +3822,46 @@ class TelegramAdapter(BasePlatformAdapter):
         query_chat_type = getattr(query_chat, "type", None)
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
+        query_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        query_is_authorized = self._is_telegram_user_authorized(
+            query_user_id,
+            chat_id=str(query_chat_id) if query_chat_id is not None else None,
+            chat_type=str(query_chat_type) if query_chat_type is not None else None,
+            thread_id=str(query_thread_id) if query_thread_id is not None else None,
+            user_name=query_user_name,
+        )
+        HEALBITE_LOCAL_CALLBACK_ROOTS = (
+            FAMILY_CALLBACK_ROOT,
+            FRIDGE_MENU_CALLBACK_ROOT,
+            INVENTORY_CALLBACK_ROOT,
+            "inv:",
+            WEEKLY_MENU_CALLBACK_ROOT,
+            "weekly:",
+            SHOPPING_CALLBACK_ROOT,
+            HEALBITE_PROFILE_CALLBACK_ROOT,
+            "weight:",
+            "water:",
+        )
+        if not query_is_authorized and not self._healbite_public_onboarding_enabled():
+            if data.startswith(HEALBITE_LOCAL_CALLBACK_ROOTS):
+                try:
+                    await query.answer(text="Действие недоступно.", show_alert=True)
+                except Exception:
+                    pass
+                return
+
+        if not query_is_authorized and self._healbite_public_onboarding_enabled():
+            if data.startswith(("weight:", "water:")):
+                profile_store = get_default_healbite_user_profile()
+                if query_user_id is None or profile_store.get_user_profile(int(query_user_id)) is None:
+                    try:
+                        await query.answer(
+                            text="Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль.",
+                            show_alert=True,
+                        )
+                    except Exception:
+                        pass
+                    return
 
         # --- HealBite Family callbacks (always consumed locally) ---
         if data.startswith(FAMILY_CALLBACK_ROOT):
@@ -4076,6 +4208,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):
+            if not query_is_authorized:
+                try:
+                    await query.answer(text="Действие недоступно.", show_alert=True)
+                except Exception:
+                    pass
             return
         answer = data.split(":", 1)[1]  # "y" or "n"
         caller_id = str(getattr(query.from_user, "id", ""))
@@ -6558,6 +6695,16 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return True
 
+        is_authorized = self._is_telegram_user_authorized(
+            user_id,
+            chat_id=chat_id,
+            chat_type=getattr(chat, "type", None),
+            thread_id=thread_id,
+            user_name=self._healbite_sender_username(msg),
+        )
+        if not is_authorized and not self._healbite_public_onboarding_enabled():
+            return False
+
         profile_store = get_default_healbite_user_profile()
         profile = profile_store.get_user_profile(int(user_id))
         edit_mode = text.casefold().startswith("/start edit")
@@ -6722,6 +6869,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         if action != HEALBITE_PROFILE_CALLBACK_EDIT:  # unreachable while the parser is strict
             await query.answer(text=HEALBITE_PROFILE_CALLBACK_STALE_REPLY)
+            return
+
+        chat = getattr(message, "chat", None)
+        if not self._is_telegram_user_authorized(
+            caller_user_id,
+            chat_id=str(getattr(chat, "id", "")) if chat is not None else None,
+            chat_type=getattr(chat, "type", None) if chat is not None else None,
+            thread_id=getattr(message, "message_thread_id", None),
+            user_name=getattr(query.from_user, "username", None),
+        ) and not self._healbite_public_onboarding_enabled():
+            await query.answer(text="Действие недоступно.", show_alert=True)
             return
 
         profile_store = get_default_healbite_user_profile()
@@ -8773,6 +8931,21 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> bool:
         if not action:
             return False
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_name = self._healbite_sender_username(msg)
+        is_authorized = self._is_telegram_user_authorized(
+            actor_user_id,
+            chat_id=str(chat_id) if chat_id is not None else None,
+            chat_type=str(chat_type) if chat_type is not None else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            user_name=user_name,
+        )
+        if not is_authorized and not self._healbite_public_onboarding_enabled():
+            return False
         normalized_action = action.split(maxsplit=1)[0].split("@", 1)[0].lower()
         original_text = (getattr(msg, "text", None) or "").strip()
         is_keyboard_action = bool(original_text and not original_text.startswith("/"))
@@ -8906,6 +9079,21 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         if not self._should_process_message(msg, is_command=True):
             return True
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_name = self._healbite_sender_username(msg)
+        is_authorized = self._is_telegram_user_authorized(
+            actor_user_id,
+            chat_id=str(chat_id) if chat_id is not None else None,
+            chat_type=str(chat_type) if chat_type is not None else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            user_name=user_name,
+        )
+        if not is_authorized and not self._healbite_public_onboarding_enabled():
+            return False
         return await self._dispatch_healbite_keyboard_action(msg, action=action)
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -8927,8 +9115,23 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         if await self._maybe_reject_healbite_compound_input(msg):
             return
-        if await self._maybe_handle_healbite_menu_button(update, context):
-            return
+
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_name = self._healbite_sender_username(msg)
+        is_authorized = self._is_telegram_user_authorized(
+            actor_user_id,
+            chat_id=str(chat_id) if chat_id is not None else None,
+            chat_type=str(chat_type) if chat_type is not None else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            user_name=user_name,
+        )
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_menu_button(update, context):
+                return
         if not self._should_process_message(msg):
             reason = self._healbite_public_lane_block_reason(msg)
             if reason is not None:
@@ -8942,22 +9145,23 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
-        if await self._maybe_handle_healbite_explicit_intent(msg):
-            return
-        if await self._maybe_handle_healbite_onboarding_reply(msg):
-            return
-        if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
-            return
-        if await self._maybe_handle_healbite_inventory_pending_text(msg):
-            return
-        if await self._maybe_handle_healbite_weight_pending_reply(msg):
-            return
-        if await self._maybe_handle_healbite_water_pending_reply(msg):
-            return
-        if await self._maybe_handle_healbite_profile_update(msg):
-            return
-        if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
-            return
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_explicit_intent(msg):
+                return
+            if await self._maybe_handle_healbite_onboarding_reply(msg):
+                return
+            if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
+                return
+            if await self._maybe_handle_healbite_inventory_pending_text(msg):
+                return
+            if await self._maybe_handle_healbite_weight_pending_reply(msg):
+                return
+            if await self._maybe_handle_healbite_water_pending_reply(msg):
+                return
+            if await self._maybe_handle_healbite_profile_update(msg):
+                return
+            if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
+                return
         await self._ensure_forum_commands(update.message)
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
@@ -9528,23 +9732,37 @@ class TelegramAdapter(BasePlatformAdapter):
                     result=reason,
                 )
             return
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_name = self._healbite_sender_username(msg)
+        is_authorized = self._is_telegram_user_authorized(
+            actor_user_id,
+            chat_id=str(chat_id) if chat_id is not None else None,
+            chat_type=str(chat_type) if chat_type is not None else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            user_name=user_name,
+        )
         command = self._healbite_command_from_text(msg.text)
-        if await self._maybe_handle_healbite_start_command(msg):
-            return
-        dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
-        if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
-            return
-        if await self._maybe_handle_healbite_help_command(msg):
-            return
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_start_command(msg):
+                return
+            dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
+            if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
+                return
+            if await self._maybe_handle_healbite_help_command(msg):
+                return
+            if await self._maybe_handle_healbite_weight_command(msg):
+                return
+            if await self._maybe_handle_healbite_profile_command(msg):
+                return
+            if await self._maybe_handle_nutrition_diary_undo_command(msg):
+                return
+            if await self._maybe_handle_nutrition_diary_command(msg):
+                return
         if await self._maybe_handle_memory_stats_command(msg):
-            return
-        if await self._maybe_handle_healbite_weight_command(msg):
-            return
-        if await self._maybe_handle_healbite_profile_command(msg):
-            return
-        if await self._maybe_handle_nutrition_diary_undo_command(msg):
-            return
-        if await self._maybe_handle_nutrition_diary_command(msg):
             return
         await self._ensure_forum_commands(msg)
 
@@ -9804,11 +10022,24 @@ class TelegramAdapter(BasePlatformAdapter):
 
         msg = update.message
 
-        if msg.photo and await self._maybe_handle_healbite_fridge_menu_photo(msg):
-            return
-
-        if msg.photo and await self._maybe_handle_healbite_inventory_photo(msg):
-            return
+        actor_user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_name = self._healbite_sender_username(msg)
+        is_authorized = self._is_telegram_user_authorized(
+            actor_user_id,
+            chat_id=str(chat_id) if chat_id is not None else None,
+            chat_type=str(chat_type) if chat_type is not None else None,
+            thread_id=str(thread_id) if thread_id is not None else None,
+            user_name=user_name,
+        )
+        if msg.photo and (is_authorized or self._healbite_public_onboarding_enabled()):
+            if await self._maybe_handle_healbite_fridge_menu_photo(msg):
+                return
+            if await self._maybe_handle_healbite_inventory_photo(msg):
+                return
 
         msg_type = self._media_message_type(msg)
 

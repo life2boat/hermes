@@ -413,7 +413,7 @@ def _make_adapter() -> TelegramAdapter:
     adapter._healbite_reply_keyboard = lambda rows: rows
     adapter._should_observe_unmentioned_group_message = lambda msg: False
     adapter._observe_unmentioned_group_message = Mock()
-    adapter.config = SimpleNamespace(extra={})
+    adapter.config = SimpleNamespace(extra={"allowed_users": ["*"]})
     return adapter
 
 

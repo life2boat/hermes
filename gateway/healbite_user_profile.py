@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -76,6 +77,38 @@ ACTIVITY_OPTION_ROWS = [
 ]
 MANUAL_TARGET_SKIP_ROWS = [["Пропустить"]]
 MANUAL_TARGET_KEEP_ROWS = [["Оставить как есть"], ["Рассчитать автоматически"]]
+
+_PROFILE_EDIT_EXCLUSIONS = (
+    "как ",
+    "где ",
+    "почему ",
+    "что такое",
+    "покажи",
+    "посмотреть",
+    "открой",
+    "какой ",
+    "сколько ",
+)
+
+_PROFILE_EDIT_INTENT_PATTERN = re.compile(
+    r"^(?:я\s+)?(?:хочу\s+)?(?:"
+    r"(?:внести\s+(?:изменения|правки)\s+в(?:\s+(?:свой|мой))?\s+(?:профиль|анкету))|"
+    r"(?:(?:изменить|измени|обновить|обнови|редактировать|отредактировать|поменять|перенастроить|перезаполнить|заполнить\s+заново|настроить\s+заново)\s+(?:(?:свой|мой)\s+)?(?:данные\s+(?:в\s+)?)?(?:профил[яьею]|анкет[уе]))|"
+    r"(?:(?:профиль|анкету)\s+(?:изменить|обновить|отредактировать|поменять|перенастроить))"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def is_healbite_profile_edit_intent(text: str) -> bool:
+    """Return True if text expresses a clear intent to edit or reconfigure profile."""
+    cleaned = re.sub(r"[\s.,!?;:\(\)]+", " ", (text or "").strip().lower()).strip()
+    if not cleaned:
+        return False
+    if any(q in cleaned for q in _PROFILE_EDIT_EXCLUSIONS):
+        return False
+    return bool(_PROFILE_EDIT_INTENT_PATTERN.match(cleaned))
+
 
 _GLOBAL_PROFILE_LOCK = threading.Lock()
 _GLOBAL_PROFILE_STORE: HealBiteUserProfileStore | None = None

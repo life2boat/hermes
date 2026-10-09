@@ -16,6 +16,7 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
     format_healbite_profile_report,
+    is_healbite_profile_edit_intent,
 )
 from gateway.platforms.telegram import (
     HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS,
@@ -716,3 +717,431 @@ def test_healbite_profile_and_dashboard_escapes_untrusted_html(tmp_path):
         assert "<b>Быстрые действия:</b>" in dashboard
     finally:
         tg_mod.get_default_healbite_user_profile = orig_get_profile
+
+
+def test_is_healbite_profile_edit_intent():
+    positive_phrases = [
+        "Я хочу внести изменения в профиль",
+        "я хочу внести изменения в профиль",
+        "Я хочу внести правки в профиль",
+        "хочу внести изменения в анкету",
+        "хочу изменить профиль",
+        "изменить профиль",
+        "измени профиль",
+        "обновить профиль",
+        "обнови анкету",
+        "редактировать профиль",
+        "отредактировать профиль",
+        "поменять профиль",
+        "поменять данные профиля",
+        "перенастроить профиль",
+        "заполнить заново анкету",
+        "настроить заново профиль",
+        "профиль изменить",
+        "анкету обновить",
+        "Я хочу изменить свой профиль!",
+    ]
+    for phrase in positive_phrases:
+        assert is_healbite_profile_edit_intent(phrase), f"Failed for positive: {phrase}"
+
+    negative_phrases = [
+        "как изменить профиль",
+        "где изменить профиль",
+        "почему изменить профиль",
+        "что такое профиль",
+        "покажи профиль",
+        "посмотреть профиль",
+        "открой профиль",
+        "какой у меня профиль",
+        "сколько калорий в профиле",
+        "мой вес 75",
+        "съел банан на 100 ккал",
+        "выпил 300 мл воды",
+        "привет",
+        "/start",
+        "/profile",
+        "/help",
+        "прочитай файл",
+        "",
+        "   ",
+    ]
+    for phrase in negative_phrases:
+        assert not is_healbite_profile_edit_intent(phrase), f"Failed for negative: {phrase}"
+
+
+@pytest.mark.asyncio
+async def test_telegram_profile_command_includes_edit_button(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=704, username="oleg")
+    _complete_onboarding(store, user_id=704, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    await adapter._handle_command(_make_update("/profile", user_id=704), SimpleNamespace())
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Ваш профиль" in kwargs["text"]
+    keyboard = kwargs.get("reply_markup")
+    assert keyboard is not None
+    import gateway.platforms.telegram as tg_mod
+    if hasattr(keyboard, "inline_keyboard") and not isinstance(keyboard.inline_keyboard, Mock):
+        button = keyboard.inline_keyboard[0][0]
+        assert button.text == "✏️ Изменить профиль"
+        assert button.callback_data == "profile:edit:704"
+    elif hasattr(tg_mod.InlineKeyboardButton, "call_args") and tg_mod.InlineKeyboardButton.call_args:
+        call = tg_mod.InlineKeyboardButton.call_args
+        assert "✏️ Изменить профиль" in call.args
+        assert call.kwargs.get("callback_data") == "profile:edit:704"
+
+
+@pytest.mark.asyncio
+async def test_telegram_profile_edit_callback_starts_edit_mode_and_preserves_profile(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=704, username="oleg")
+    _complete_onboarding(store, user_id=704, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    initial_profile = store.get_user_profile(704)
+    assert initial_profile.daily_kcal_target == 2000
+    assert store.get_onboarding_state(704) is None
+
+    # Construct callback query from user 704
+    update_msg = _make_update("old", user_id=704).message
+    query = SimpleNamespace(
+        id="q_edit_704",
+        data="profile:edit:704",
+        from_user=SimpleNamespace(id=704, username="oleg", first_name="Oleg"),
+        message=update_msg,
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+    )
+    update = SimpleNamespace(update_id=1, callback_query=query, effective_message=None)
+
+    await adapter._handle_callback_query(update, SimpleNamespace())
+
+    query.answer.assert_awaited_once()
+    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+
+    # Saved profile must NOT be modified by simply entering edit mode
+    preserved_profile = store.get_user_profile(704)
+    assert preserved_profile.daily_kcal_target == 2000
+    assert preserved_profile.weight_kg == 85
+    assert preserved_profile.height_cm == 180
+
+    # Onboarding state must be active at step 'sex'
+    state = store.get_onboarding_state(704)
+    assert state is not None
+    assert state.step == "sex"
+
+    # Message sent with step 1 prompt and buttons
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "обновим профиль" in kwargs["text"].casefold()
+    assert kwargs["reply_markup"] == [["Мужской", "Женский"]]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
+
+
+@pytest.mark.asyncio
+async def test_telegram_profile_edit_callback_enforces_ownership(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=704, username="oleg")
+    _complete_onboarding(store, user_id=704, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    # Different user (999) attempts to click edit on user 704's profile
+    update_msg = _make_update("old", user_id=704).message
+    query = SimpleNamespace(
+        id="q_edit_forged",
+        data="profile:edit:704",
+        from_user=SimpleNamespace(id=999, username="intruder", first_name="Intruder"),
+        message=update_msg,
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+    )
+    update = SimpleNamespace(update_id=1, callback_query=query, effective_message=None)
+
+    await adapter._handle_callback_query(update, SimpleNamespace())
+
+    # Must reject with alert
+    query.answer.assert_awaited_once_with(text="Действие доступно только владельцу профиля.", show_alert=True)
+    query.edit_message_reply_markup.assert_not_called()
+    adapter._send_message_with_thread_fallback.assert_not_called()
+
+    # User 704's state is untouched
+    assert store.get_onboarding_state(704) is None
+    assert store.get_onboarding_state(999) is None
+
+
+@pytest.mark.asyncio
+async def test_telegram_text_profile_edit_intent_starts_editing(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=706, username="oleg")
+    _complete_onboarding(store, user_id=706, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    # User types reported exact text: "Я хочу внести изменения в профиль"
+    update = _make_update("Я хочу внести изменения в профиль", user_id=706)
+    await adapter._handle_text_message(update, SimpleNamespace())
+
+    # Saved profile must remain unchanged
+    profile = store.get_user_profile(706)
+    assert profile.daily_kcal_target == 2000
+    assert profile.weight_kg == 85
+
+    # Onboarding re-entry must be active
+    state = store.get_onboarding_state(706)
+    assert state is not None
+    assert state.step == "sex"
+
+    # Step 1 prompt sent
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "обновим профиль" in kwargs["text"].casefold()
+    assert kwargs["reply_markup"] == [["Мужской", "Женский"]]
+    assert kwargs.get("parse_mode") in {"HTML", getattr(ParseMode, "HTML", "HTML")}
+
+
+@pytest.mark.asyncio
+async def test_telegram_text_profile_edit_intent_with_incomplete_registration(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=707, username="oleg")
+    # Advance partially (steps: sex -> age -> height -> weight)
+    store.handle_onboarding_reply(user_id=707, text="Мужской")
+    store.handle_onboarding_reply(user_id=707, text="35")
+    store.handle_onboarding_reply(user_id=707, text="180")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    assert store.get_onboarding_state(707).step == "weight_kg"
+
+    # Incomplete user sends profile edit intent
+    update = _make_update("Я хочу внести изменения в профиль", user_id=707)
+    await adapter._handle_text_message(update, SimpleNamespace())
+
+    # Should resume existing step without throwing validation errors for weight
+    state = store.get_onboarding_state(707)
+    assert state is not None
+    assert state.step == "weight_kg"
+
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Продолжаем настройку профиля!" in kwargs["text"]
+    assert "Шаг 4 из 7 • Вес" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_profile_edit_slash_commands(tmp_path, monkeypatch):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=708, username="oleg")
+    _complete_onboarding(store, user_id=708, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    # Test /profile edit
+    await adapter._handle_command(_make_update("/profile edit", user_id=708), SimpleNamespace())
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "обновим профиль" in kwargs["text"].casefold()
+    assert kwargs["reply_markup"] == [["Мужской", "Женский"]]
+
+    # Clear onboarding state to test /profile_edit
+    store.clear_onboarding_state(708)
+
+    await adapter._handle_command(_make_update("/profile_edit", user_id=708), SimpleNamespace())
+    kwargs2 = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "обновим профиль" in kwargs2["text"].casefold()
+
+
+# ---------------------------------------------------------------------------
+# HER-9 Phase 3: callback-data parsing and callback-context authorization
+# ---------------------------------------------------------------------------
+
+
+def _make_callback_update(
+    *,
+    data: str,
+    user_id: int,
+    chat_id: int | None = None,
+    chat_type: str = "private",
+) -> SimpleNamespace:
+    """Build a minimal Telegram callback update for the HealBite profile lane."""
+    effective_chat_id = chat_id if chat_id is not None else user_id
+    message = SimpleNamespace(
+        text="old",
+        chat_id=effective_chat_id,
+        chat=SimpleNamespace(id=effective_chat_id, type=chat_type),
+        from_user=SimpleNamespace(id=user_id, username="oleg", first_name="Oleg"),
+        message_thread_id=None,
+        reply_to_message=None,
+    )
+    query = SimpleNamespace(
+        id="q_profile",
+        data=data,
+        from_user=SimpleNamespace(id=user_id, username="oleg", first_name="Oleg"),
+        message=message,
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(),
+    )
+    return SimpleNamespace(update_id=1, callback_query=query, effective_message=None)
+
+
+def _seeded_edit_user(tmp_path, monkeypatch, *, user_id: int = 704):
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=user_id, username="oleg")
+    _complete_onboarding(store, user_id=user_id, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+    return adapter, store
+
+
+def test_profile_callback_parser_accepts_only_exact_format():
+    from gateway.platforms.telegram import parse_healbite_profile_callback
+
+    assert parse_healbite_profile_callback("profile:edit:704") == ("edit", 704)
+
+    rejected = [
+        "profile:edit",  # missing target
+        "profile:edit:",  # empty target
+        "profile:edit:abc",  # non-numeric target
+        "profile:edit:-1",  # negative target
+        "profile:edit:0",  # zero target
+        "profile:edit:+704",  # explicit sign
+        "profile:edit: 704",  # whitespace
+        "profile:edit:704 ",  # trailing whitespace
+        "profile:edit:704:705",  # unexpected extra field
+        "profile:delete:704",  # unknown action
+        "profile:704",  # missing action
+        "profile:",  # missing action + target
+        "profile",  # missing separators
+        "",  # empty
+        "Profile:Edit:704",  # wrong case prefix/action
+        "xprofile:edit:704",  # wrong root
+        "profile:edit:٧٠٤",  # non-ASCII digits
+        "profile:edit:" + "9" * 5000,  # oversized payload
+    ]
+    for payload in rejected:
+        assert parse_healbite_profile_callback(payload) is None, payload
+
+
+@pytest.mark.asyncio
+async def test_profile_callback_malformed_payloads_never_mutate_state(tmp_path, monkeypatch):
+    adapter, store = _seeded_edit_user(tmp_path, monkeypatch)
+
+    malformed = [
+        "profile:edit",  # missing target -> must NOT fall back to caller
+        "profile:edit:",  # empty target
+        "profile:edit:abc",  # non-numeric target
+        "profile:edit:704:extra",  # unexpected extra field
+        "profile:edit:704:705",  # unexpected extra field
+        "profile:delete:704",  # unknown action
+        "profile:704",  # missing action
+        "profile:",  # missing action + target
+        "profile:edit: 704",  # whitespace-padded target
+        "profile:edit:+704",  # signed target
+        "profile:edit:٧٠٤",  # non-ASCII digits
+        "profile:edit:" + "9" * 5000,  # oversized payload (int() digit cap path)
+    ]
+
+    for payload in malformed:
+        adapter._send_message_with_thread_fallback.reset_mock()
+        update = _make_callback_update(data=payload, user_id=704)
+        await adapter._handle_callback_query(update, SimpleNamespace())
+
+        assert store.get_onboarding_state(704) is None, f"mutated onboarding for {payload!r}"
+        profile = store.get_user_profile(704)
+        assert profile is not None and profile.daily_kcal_target == 2000, payload
+        adapter._send_message_with_thread_fallback.assert_not_called()
+        # Fail closed with feedback: never leave the Telegram spinner hanging.
+        assert update.callback_query.answer.await_count >= 1, payload
+
+    # A payload without the `profile:` root is not a profile callback at all: it
+    # must not be hijacked into the profile lane and must not change any state.
+    foreign = _make_callback_update(data="profile", user_id=704)
+    await adapter._handle_callback_query(foreign, SimpleNamespace())
+    assert store.get_onboarding_state(704) is None
+    adapter._send_message_with_thread_fallback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_profile_callback_requires_private_chat_context(tmp_path, monkeypatch):
+    adapter, store = _seeded_edit_user(tmp_path, monkeypatch)
+
+    # Same owner, correct payload, but the button lives in a group chat.
+    update = _make_callback_update(
+        data="profile:edit:704",
+        user_id=704,
+        chat_id=-1009876543210,
+        chat_type="group",
+    )
+    await adapter._handle_callback_query(update, SimpleNamespace())
+
+    assert store.get_onboarding_state(704) is None
+    profile = store.get_user_profile(704)
+    assert profile is not None and profile.daily_kcal_target == 2000
+    # No onboarding prompt may be posted into a group.
+    adapter._send_message_with_thread_fallback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_profile_callback_rejects_cross_user_and_group_targets(tmp_path, monkeypatch):
+    adapter, store = _seeded_edit_user(tmp_path, monkeypatch)
+
+    cases = [
+        # foreign user clicking user 704's button in a private chat
+        dict(data="profile:edit:704", user_id=999, chat_type="private"),
+        # foreign user clicking user 704's button in a group
+        dict(data="profile:edit:704", user_id=999, chat_id=-1009876543210, chat_type="group"),
+    ]
+    for case in cases:
+        adapter._send_message_with_thread_fallback.reset_mock()
+        update = _make_callback_update(**case)
+        await adapter._handle_callback_query(update, SimpleNamespace())
+
+        assert store.get_onboarding_state(704) is None, case
+        assert store.get_onboarding_state(999) is None, case
+        adapter._send_message_with_thread_fallback.assert_not_called()
+        assert update.callback_query.answer.await_count >= 1, case
+    assert store.get_user_profile(704).daily_kcal_target == 2000
+
+
+@pytest.mark.asyncio
+async def test_profile_callback_private_owner_still_starts_editing(tmp_path, monkeypatch):
+    """The legitimate public-lane path must keep working (no over-blocking)."""
+    adapter, store = _seeded_edit_user(tmp_path, monkeypatch)
+
+    update = _make_callback_update(data="profile:edit:704", user_id=704, chat_type="private")
+    await adapter._handle_callback_query(update, SimpleNamespace())
+
+    state = store.get_onboarding_state(704)
+    assert state is not None and state.step == "sex"
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "обновим профиль" in kwargs["text"].casefold()
+    # Profile data preserved while re-entering onboarding.
+    assert store.get_user_profile(704).daily_kcal_target == 2000
+
+
+@pytest.mark.asyncio
+async def test_text_profile_edit_intent_requires_private_chat(tmp_path, monkeypatch):
+    """The natural-language lane honours the same private-chat binding."""
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=709, username="oleg")
+    _complete_onboarding(store, user_id=709, username="oleg", manual_target="2000")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    # Group thread: the intent must not be claimed and no prompt may be posted.
+    group_msg = _make_update("Я хочу внести изменения в профиль", user_id=709).message
+    group_msg.chat = SimpleNamespace(id=-1009876543210, type="group")
+
+    consumed = await adapter._maybe_handle_healbite_explicit_intent(group_msg)
+
+    assert consumed is False
+    assert store.get_onboarding_state(709) is None
+    assert store.get_user_profile(709).daily_kcal_target == 2000
+    adapter._send_message_with_thread_fallback.assert_not_called()
+
+    # Same text in a private chat is still consumed and starts editing.
+    private_msg = _make_update("Я хочу внести изменения в профиль", user_id=709).message
+    consumed_private = await adapter._maybe_handle_healbite_explicit_intent(private_msg)
+
+    assert consumed_private is True
+    assert store.get_onboarding_state(709) is not None

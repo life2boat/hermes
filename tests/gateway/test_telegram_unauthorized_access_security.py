@@ -302,9 +302,9 @@ class TestTelegramUnauthorizedAccessSecurity:
 
         await adapter._handle_command(update, SimpleNamespace())
 
-        # Never reached memory stats admin handler; forwarded to generic rejection
-        assert adapter._send_message_with_thread_fallback.await_count == 0
-        adapter.handle_message.assert_awaited_once()
+        # Admin access is denied with admin-only notice
+        assert adapter._send_message_with_thread_fallback.await_count == 1
+        assert "admin-only" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
 
     def test_sec_11_missing_allowlist_fails_closed(self, monkeypatch):
         """SEC-11: Missing allowlist configuration -> Fail closed."""

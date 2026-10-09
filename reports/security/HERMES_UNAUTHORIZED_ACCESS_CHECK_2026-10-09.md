@@ -147,7 +147,16 @@ A complete regression run of all related gateway suites was executed:
 - `tests/gateway/test_healbite_telegram_intent_routing_e2e.py` (10 passed)
 - `tests/gateway/test_telegram_memory_stats_access.py` (3 passed)
 - `tests/gateway/test_unauthorized_dm_behavior.py` (33 passed)
-**Total: 242 tests passed, 0 failures.**
+- `tests/gateway/test_slash_access.py` (22 passed)
+- `tests/gateway/test_telegram_noise_filter.py` (6 passed)
+- `tests/gateway/test_vision_memory_leak.py` (5 passed)
+- `tests/gateway/test_healbite_nutrition_targets.py` (17 passed)
+- `tests/gateway/platforms/test_healbite_memory_bridge.py` (20 passed)
+- `tests/gateway/test_telegram_photo_vision_flow.py` (20 passed)
+- `tests/gateway/test_telegram_memory_stats.py` (4 passed)
+- `tests/gateway/test_healbite_user_profile.py` (36 passed)
+- `tests/gateway/test_telegram_unauthorized_access_security.py` (18 passed)
+**Total: 369 tests passed, 0 failures.**
 
 ---
 

@@ -893,18 +893,42 @@ class TelegramAdapter(BasePlatformAdapter):
 
         config_extra = getattr(getattr(self, "config", None), "extra", {}) or {}
         if isinstance(config_extra, dict):
-            extra_allowed = config_extra.get("allowed_users") or config_extra.get("allow_from") or []
-            if extra_allowed and (normalized_user_id in [str(x) for x in extra_allowed] or "*" in extra_allowed):
+            extra_allowed = set()
+            for key in (
+                "allowed_users",
+                "allow_from",
+                "admin_users",
+                "allow_admin_from",
+                "group_allow_admin_from",
+                "group_admin_users",
+            ):
+                val = config_extra.get(key)
+                if isinstance(val, (list, tuple, set)):
+                    extra_allowed.update(str(x).strip() for x in val)
+                elif isinstance(val, str) and val.strip():
+                    extra_allowed.update(x.strip() for x in val.split(",") if x.strip())
+            if extra_allowed and (normalized_user_id in extra_allowed or "*" in extra_allowed):
                 return True
 
         allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
         global_csv = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+        admin_csv = os.getenv("TELEGRAM_ADMIN_USERS", "").strip()
+        gateway_admin_csv = os.getenv("GATEWAY_ADMIN_USERS", "").strip()
         group_csv = ""
+        group_admin_csv = ""
         normalized_chat_type = str(chat_type or "dm").strip().lower() or "dm"
         if normalized_chat_type in {"group", "supergroup", "forum"}:
             group_csv = os.getenv("TELEGRAM_GROUP_ALLOWED_USERS", "").strip()
+            group_admin_csv = os.getenv("TELEGRAM_GROUP_ADMIN_USERS", "").strip()
 
-        if not allowed_csv and not global_csv and not group_csv:
+        if (
+            not allowed_csv
+            and not global_csv
+            and not group_csv
+            and not admin_csv
+            and not gateway_admin_csv
+            and not group_admin_csv
+        ):
             try:
                 actor_num = int(normalized_user_id)
                 for controller_attr in ("_family_telegram", "_fridge_menu_telegram", "_inventory_telegram", "_shopping_telegram", "_weekly_menu_telegram"):
@@ -938,12 +962,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
         allowed_ids = set()
-        if allowed_csv:
-            allowed_ids.update(uid.strip() for uid in allowed_csv.split(",") if uid.strip())
-        if global_csv:
-            allowed_ids.update(uid.strip() for uid in global_csv.split(",") if uid.strip())
-        if group_csv:
-            allowed_ids.update(uid.strip() for uid in group_csv.split(",") if uid.strip())
+        for csv_val in (allowed_csv, global_csv, group_csv, admin_csv, gateway_admin_csv, group_admin_csv):
+            if csv_val:
+                allowed_ids.update(uid.strip() for uid in csv_val.split(",") if uid.strip())
 
         return "*" in allowed_ids or normalized_user_id in allowed_ids
 
@@ -3808,11 +3829,12 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=query_user_name,
         )
         if not query_is_authorized and not self._healbite_public_onboarding_enabled():
-            try:
-                await query.answer(text="Действие недоступно.", show_alert=True)
-            except Exception:
-                pass
-            return
+            if not data.startswith("profile:"):
+                try:
+                    await query.answer(text="Действие недоступно.", show_alert=True)
+                except Exception:
+                    pass
+                return
 
         if not query_is_authorized and self._healbite_public_onboarding_enabled():
             if data.startswith((
@@ -9090,27 +9112,9 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
-            if not self._should_process_message(msg):
-                if self._should_observe_unmentioned_group_message(msg):
-                    self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_menu_button(update, context):
                 return
-            await self._ensure_forum_commands(update.message)
-            event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
-            event.text = self._clean_bot_trigger_text(event.text)
-            event = self._apply_telegram_group_observe_attribution(event)
-            self._log_healbite_route_selected(
-                msg=msg,
-                update_id=update.update_id,
-                route="generic_lane",
-                lane="text",
-                level=logging.DEBUG,
-            )
-            self._enqueue_text_event(event)
-            return
-
-        if await self._maybe_handle_healbite_menu_button(update, context):
-            return
         if not self._should_process_message(msg):
             reason = self._healbite_public_lane_block_reason(msg)
             if reason is not None:
@@ -9124,22 +9128,23 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
-        if await self._maybe_handle_healbite_explicit_intent(msg):
-            return
-        if await self._maybe_handle_healbite_onboarding_reply(msg):
-            return
-        if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
-            return
-        if await self._maybe_handle_healbite_inventory_pending_text(msg):
-            return
-        if await self._maybe_handle_healbite_weight_pending_reply(msg):
-            return
-        if await self._maybe_handle_healbite_water_pending_reply(msg):
-            return
-        if await self._maybe_handle_healbite_profile_update(msg):
-            return
-        if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
-            return
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_explicit_intent(msg):
+                return
+            if await self._maybe_handle_healbite_onboarding_reply(msg):
+                return
+            if await self._maybe_handle_healbite_fridge_menu_pending_text(msg):
+                return
+            if await self._maybe_handle_healbite_inventory_pending_text(msg):
+                return
+            if await self._maybe_handle_healbite_weight_pending_reply(msg):
+                return
+            if await self._maybe_handle_healbite_water_pending_reply(msg):
+                return
+            if await self._maybe_handle_healbite_profile_update(msg):
+                return
+            if await self._maybe_handle_healbite_unprompted_inventory_text(msg):
+                return
         await self._ensure_forum_commands(update.message)
 
         event = self._build_message_event(msg, MessageType.TEXT, update_id=update.update_id)
@@ -9723,37 +9728,24 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
-            await self._ensure_forum_commands(msg)
-            event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
-            event.text = self._clean_bot_trigger_text(event.text)
-            event = self._apply_telegram_group_observe_attribution(event)
-            self._log_healbite_route_selected(
-                msg=msg,
-                update_id=update.update_id,
-                route="generic_lane",
-                lane="command",
-                level=logging.DEBUG,
-            )
-            await self.handle_message(event)
-            return
         command = self._healbite_command_from_text(msg.text)
-        if await self._maybe_handle_healbite_start_command(msg):
-            return
-        dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
-        if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
-            return
-        if await self._maybe_handle_healbite_help_command(msg):
-            return
+        if is_authorized or self._healbite_public_onboarding_enabled():
+            if await self._maybe_handle_healbite_start_command(msg):
+                return
+            dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
+            if await self._dispatch_healbite_keyboard_action(msg, action=dispatch_action):
+                return
+            if await self._maybe_handle_healbite_help_command(msg):
+                return
+            if await self._maybe_handle_healbite_weight_command(msg):
+                return
+            if await self._maybe_handle_healbite_profile_command(msg):
+                return
+            if await self._maybe_handle_nutrition_diary_undo_command(msg):
+                return
+            if await self._maybe_handle_nutrition_diary_command(msg):
+                return
         if await self._maybe_handle_memory_stats_command(msg):
-            return
-        if await self._maybe_handle_healbite_weight_command(msg):
-            return
-        if await self._maybe_handle_healbite_profile_command(msg):
-            return
-        if await self._maybe_handle_nutrition_diary_undo_command(msg):
-            return
-        if await self._maybe_handle_nutrition_diary_command(msg):
             return
         await self._ensure_forum_commands(msg)
 
@@ -10026,20 +10018,11 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
-            msg_type = self._media_message_type(msg)
-            event = self._build_message_event(msg, msg_type, update_id=update.update_id)
-            if msg.caption:
-                event.text = self._clean_bot_trigger_text(msg.caption)
-            event = self._apply_telegram_group_observe_attribution(event)
-            await self.handle_message(event)
-            return
-
-        if msg.photo and await self._maybe_handle_healbite_fridge_menu_photo(msg):
-            return
-
-        if msg.photo and await self._maybe_handle_healbite_inventory_photo(msg):
-            return
+        if msg.photo and (is_authorized or self._healbite_public_onboarding_enabled()):
+            if await self._maybe_handle_healbite_fridge_menu_photo(msg):
+                return
+            if await self._maybe_handle_healbite_inventory_photo(msg):
+                return
 
         msg_type = self._media_message_type(msg)
 

@@ -29,7 +29,7 @@ class _InventoryBatchState:
 import html as _html
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Set, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +340,76 @@ def _is_structured_inventory_input(text: str) -> bool:
         if not (tokens & conversational_words):
             return True
     return False
+
+
+# --- HealBite profile-edit callback contract --------------------------------
+#
+# Telegram inline-keyboard payloads are untrusted input: any user can forge or
+# replay a callback_data string.  The profile-edit lane therefore accepts exactly
+# one shape (``profile:edit:<positive_user_id>``) and fails closed on everything
+# else instead of guessing a target or substituting the caller's own id.
+HEALBITE_PROFILE_CALLBACK_ROOT = "profile:"
+HEALBITE_PROFILE_CALLBACK_EDIT = "edit"
+HEALBITE_PROFILE_CALLBACK_ACTIONS = frozenset({HEALBITE_PROFILE_CALLBACK_EDIT})
+# Telegram caps callback_data at 64 bytes.  Bound it independently so an
+# oversized payload can never reach int(), whose 4300-digit cap raises
+# ValueError (the exact path that previously fell back to the caller's id).
+HEALBITE_PROFILE_CALLBACK_MAX_LEN = 64
+HEALBITE_PROFILE_CALLBACK_STALE_REPLY = (
+    "Кнопка устарела. Откройте /profile и нажмите «Изменить профиль» заново."
+)
+HEALBITE_PROFILE_CALLBACK_PRIVATE_ONLY_REPLY = (
+    "Изменить профиль можно только в личном чате с ботом."
+)
+
+
+def parse_healbite_profile_callback(data: Any) -> Optional[Tuple[str, int]]:
+    """Strictly parse the only supported profile callback payload.
+
+    Accepts exactly ``profile:<action>:<positive_integer_user_id>`` where
+    ``<action>`` is a known action.  Returns ``(action, target_user_id)`` on an
+    exact match and ``None`` for every other input (missing/empty/non-numeric/
+    signed/zero/negative/unpadded target, unknown action, extra fields, wrong
+    prefix, wrong case, oversized payload).  Never raises and never substitutes
+    the caller's id -- callers must treat ``None`` as fail-closed.
+    """
+    if not isinstance(data, str):
+        return None
+    if not data.startswith(HEALBITE_PROFILE_CALLBACK_ROOT):
+        return None
+    if len(data) > HEALBITE_PROFILE_CALLBACK_MAX_LEN:
+        return None
+    parts = data.split(":")
+    if len(parts) != 3:
+        return None
+    _, action, raw_target = parts
+    if action not in HEALBITE_PROFILE_CALLBACK_ACTIONS:
+        return None
+    # ``isdigit`` alone accepts non-ASCII digits (e.g. Arabic-Indic) that int()
+    # happily converts; require plain ASCII decimal digits.
+    if not raw_target.isascii() or not raw_target.isdigit():
+        return None
+    target_user_id = int(raw_target)
+    if target_user_id <= 0:
+        return None
+    return action, target_user_id
+
+
+def _is_private_chat_type(chat_type: Any) -> bool:
+    """Return True when a Telegram chat type denotes a private (DM) chat."""
+    value = getattr(chat_type, "value", chat_type)
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"private", "dm"}:
+        return True
+    if ChatType is None:
+        return False
+    private = ChatType.PRIVATE
+    return normalized in {
+        str(private).lower(),
+        str(getattr(private, "value", private)).lower(),
+    }
 
 
 HEALBITE_PLACEHOLDER_REPLY = "В разработке"
@@ -3697,7 +3767,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return
 
         # --- HealBite profile callbacks ---
-        if data.startswith("profile:"):
+        if data.startswith(HEALBITE_PROFILE_CALLBACK_ROOT):
             await self._handle_healbite_profile_callback(query, data)
             return
 
@@ -6587,7 +6657,13 @@ class TelegramAdapter(BasePlatformAdapter):
         if not TELEGRAM_AVAILABLE:
             return None
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Изменить профиль", callback_data=f"profile:edit:{user_id}")],
+            [
+                InlineKeyboardButton(
+                    "✏️ Изменить профиль",
+                    callback_data=f"{HEALBITE_PROFILE_CALLBACK_ROOT}"
+                    f"{HEALBITE_PROFILE_CALLBACK_EDIT}:{user_id}",
+                )
+            ],
         ])
 
     async def _handle_healbite_profile_callback(self, query: Any, data: str) -> None:
@@ -6596,65 +6672,96 @@ class TelegramAdapter(BasePlatformAdapter):
             await query.answer(text="Не удалось определить пользователя.")
             return
 
-        parts = data.split(":")
-        action = parts[1] if len(parts) > 1 else "open"
-        try:
-            target_user_id = int(parts[2]) if len(parts) > 2 else caller_user_id
-        except (ValueError, TypeError):
-            target_user_id = caller_user_id
+        message = getattr(query, "message", None)
 
-        # Telegram callback ownership validation:
+        # (1) Fail closed on anything that is not exactly `profile:edit:<id>`.
+        # A malformed payload must never start onboarding or touch any state.
+        parsed = parse_healbite_profile_callback(data)
+        if parsed is None:
+            await query.answer(text=HEALBITE_PROFILE_CALLBACK_STALE_REPLY)
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                msg=message,
+                route="profile_callback",
+                lane="healbite_public",
+                result="blocked_malformed_payload",
+            )
+            return
+        action, target_user_id = parsed
+
+        # (2) Profile editing is private-chat only.  A callback fired from a
+        # group/supergroup thread must not bootstrap onboarding or echo profile
+        # prompts into that chat, even when the owner pressed their own button.
+        chat = getattr(message, "chat", None)
+        if not _is_private_chat_type(getattr(chat, "type", None)):
+            await query.answer(
+                text=HEALBITE_PROFILE_CALLBACK_PRIVATE_ONLY_REPLY, show_alert=True
+            )
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                msg=message,
+                route="profile_callback",
+                lane="healbite_public",
+                result="blocked_non_private_chat",
+            )
+            return
+
+        # (3) Trusted-context authorization: the caller must be the profile owner
+        # carried by the payload.  Equality alone is not trusted for anything
+        # else, and no foreign/cross-user action may proceed.
         if caller_user_id != target_user_id:
             await query.answer(text="Действие доступно только владельцу профиля.", show_alert=True)
             self._log_healbite_marker(
                 "healbite_route_selected",
-                msg=getattr(query, "message", None),
+                msg=message,
                 route="profile_callback",
                 lane="healbite_public",
                 result="blocked_ownership_mismatch",
             )
             return
 
-        if action == "edit":
-            profile_store = get_default_healbite_user_profile()
-            username = getattr(query.from_user, "username", "") or ""
-            onboarding_text = profile_store.begin_onboarding(
-                user_id=int(caller_user_id),
-                username=username,
-                edit_mode=True,
-            )
-            current_profile = profile_store.get_user_profile(int(caller_user_id))
-            current_state = profile_store.get_onboarding_state(int(caller_user_id))
-
-            await query.answer()
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-
-            message = getattr(query, "message", None)
-            chat_id = str(getattr(getattr(message, "chat", None), "id", caller_user_id))
-            thread_id = getattr(message, "message_thread_id", None)
-
-            await self._send_message_with_thread_fallback(
-                chat_id=chat_id,
-                text=onboarding_text,
-                message_thread_id=thread_id,
-                reply_markup=self._healbite_reply_keyboard(
-                    onboarding_keyboard_rows(
-                        current_state.step if current_state is not None else "",
-                        current_profile,
-                    )
-                ),
-                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
-            )
-            self._log_healbite_marker(
-                "healbite_reply_sent",
-                msg=message,
-                route="profile_callback",
-                outcome="edit_started",
-            )
+        if action != HEALBITE_PROFILE_CALLBACK_EDIT:  # unreachable while the parser is strict
+            await query.answer(text=HEALBITE_PROFILE_CALLBACK_STALE_REPLY)
             return
+
+        profile_store = get_default_healbite_user_profile()
+        username = getattr(query.from_user, "username", "") or ""
+        onboarding_text = profile_store.begin_onboarding(
+            user_id=int(caller_user_id),
+            username=username,
+            edit_mode=True,
+        )
+        current_profile = profile_store.get_user_profile(int(caller_user_id))
+        current_state = profile_store.get_onboarding_state(int(caller_user_id))
+
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        chat_id = str(getattr(getattr(message, "chat", None), "id", caller_user_id))
+        thread_id = getattr(message, "message_thread_id", None)
+
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=onboarding_text,
+            message_thread_id=thread_id,
+            reply_markup=self._healbite_reply_keyboard(
+                onboarding_keyboard_rows(
+                    current_state.step if current_state is not None else "",
+                    current_profile,
+                )
+            ),
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=message,
+            route="profile_callback",
+            outcome="edit_started",
+        )
+        return
 
     async def _maybe_handle_healbite_profile_update(self, msg: Message) -> bool:
         from gateway.healbite_profile_conversation import (
@@ -9330,6 +9437,10 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         if is_healbite_profile_edit_intent(text):
+            # Profile editing is private-chat only (same binding as the inline
+            # button lane): never post onboarding prompts into a group thread.
+            if not _is_private_chat_type(getattr(getattr(msg, "chat", None), "type", None)):
+                return False
             self._log_healbite_route_selected(
                 msg=msg,
                 route="profile_edit_intent",

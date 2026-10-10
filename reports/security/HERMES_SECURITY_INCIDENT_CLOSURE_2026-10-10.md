@@ -1,35 +1,38 @@
 # Hermes / HealBite Security Incident Closure & Forensic Evidence Reconciliation Report
 
-**Task:** Hermes Incident Closure Evidence Reconciliation v1
+**Task:** Hermes Operator-Authorized Access Test — Final Reclassification
 **Project:** Hermes / HealBite
-**Priority:** P1 — Security Evidence Accuracy
+**Priority:** P1 — Security Evidence Accuracy & Context Alignment
 **Executor:** Antigravity
 **Execution Mode:** FAST_TRACK
 **Date:** 2026-10-10
 **Status:** **PASS**
-**Corrected Incident Classification:** **`CLOSED — Contained, historical exposure unknown`** (`CLOSED_CONTAINED_HISTORICAL_EXPOSURE_UNKNOWN`)
+**Event Characterization:** **`OPERATOR_AUTHORIZED_ACCESS_TEST`**
+**Final Incident Classification:** **`CLOSED — Operator-authorized test, no protected access`** (`CLOSED_OPERATOR_AUTHORIZED_TEST`)
 
 ---
 
 ## 1. Executive Summary
 
-This report reconciles the forensic investigation of the October 9, 2026 unauthorized access attempt against the operator's original observation that an unknown individual attempted to access the Hermes / HealBite Telegram bot.
+Following completion of the technical forensic audit and production hotfix rollout (PR #405), the operator explicitly confirmed the real-world context of the October 9, 2026 interaction:
 
-Following technical qualification, PR #405 was merged into canonical `main` at revision `25bcfd8addaf2491ccf6926eb7d1bd8c4a561ab5`, and immutable image `sha256:c9b71be2a5c48a86b6c2cb513786a74e49478bb1c852bd81b5daafffa0510073` was deployed to production.
+> **Operator Confirmation:** The October 9 Telegram bot interaction was an **operator-authorized access test**. The operator asked his son to access the Hermes / HealBite bot from the son's own device to test bot availability and intake behavior. This was not a malicious intrusion or external attack.
 
-A rigorous reassessment of the runtime evidence and log timelines revealed that:
-1. **Available Logs Do Not Cover All 24 Hours of October 9:** The Telegram gateway experienced network disconnection windows (00:08–05:00 UTC) and a ~7-hour container offline period (15:50–22:24 UTC). Therefore, historical absence of updates in local logs cannot be interpreted as proof that no access attempt occurred.
-2. **Client-Side Bot Discovery Leaves Zero API Updates:** In Telegram's architecture, opening a bot chat, searching its handle, or viewing its profile without clicking `/start` generates zero Telegram Bot API updates.
-3. **Absence of HTTP 409 Conflicts is Supporting, Not Absolute Proof:** Lack of 409 Conflict proves absence of *concurrent* polling, but cannot rule out sequential polling during container downtime.
-4. **Durable State Proves Zero Mutation:** The authoritative SQLite database (`healbite.db`), session store (`state.db`), and vector memory prove that **zero unauthorized users, profiles, sessions, or records were created in October 2026**.
-5. **Final Classification:** Reconciled from `CLOSED — No confirmed protected access` to **`CLOSED — Contained, historical exposure unknown`** to accurately document residual uncertainty regarding unobserved client interactions and offline windows.
+This report establishes the final reclassification of the event, clearly delineating operator authorization from technical allowlist enforcement, preserving all original forensic data, and confirming the permanent retention of the security hardening deployed in PR #405.
+
+### Key Conclusions:
+1. **Event Reclassification:** Formally classified as `OPERATOR_AUTHORIZED_ACCESS_TEST`. The access attempt was benign, authorized by the service owner, and executed for testing purposes.
+2. **Operator Authorization vs. Technical Allowlist:** While authorized by the operator in the physical/human realm, the son's Telegram user ID was not configured in the bot's runtime allowlist (`TELEGRAM_ALLOWED_USERS`), nor was `HEALBITE_PUBLIC_ONBOARDING` active. From the perspective of the software access control engine, incoming traffic from this device constituted unallowlisted intake.
+3. **Validity of Security Hardening:** The architectural vulnerability identified during the investigation—where unauthenticated `/start` commands could initiate onboarding and write profiles to `healbite.db` in `TelegramAdapter`—was genuine. The fail-closed authorization implemented in PR #405 remains vital and permanent.
+4. **Durable State Evidence:** Forensic audit of the production database (`healbite.db`) and session store (`state.db`) confirms that **zero unauthorized users, profiles, sessions, or records were created in October 2026**.
+5. **Preventive Monitoring Alignment:** The planned `Hermes Security Monitoring & Intrusion Alerts v1` project is confirmed as a preventive reliability and observability enhancement rather than an adversary-response mechanism.
 
 ---
 
-## 2. Reconciled Incident Timeline & Timezone Analysis
+## 2. Reconciled Timeline & Monitoring Coverage
 
-Timestamps in container logs are formatted in **UTC** (verified via `/etc/localtime -> /usr/share/zoneinfo/Etc/UTC`).
-Local operator timezone is **UTC+7** (MSK is UTC+3). October 9 in operator local time spans **2026-10-08 17:00 UTC to 2026-10-09 17:00 UTC**.
+Timestamps in container logs are recorded in **UTC** (`/etc/localtime -> Etc/UTC`).
+The operator operates in **UTC+7** (MSK is UTC+3). October 9 in operator local time corresponds to **2026-10-08 17:00 UTC to 2026-10-09 17:00 UTC**.
 
 | Timestamp Window (UTC) | Component Status | Operational Reality | Evidentiary Impact |
 |---|---|---|---|
@@ -41,6 +44,7 @@ Local operator timezone is **UTC+7** (MSK is UTC+3). October 9 in operator local
 | **2026-10-09 08:00:12** | Connected | Scheduled menu command registration. | Routine maintenance. |
 | **2026-10-09 15:50:44** | **Stopped** | `gateway.run` received SIGTERM; container stopped cleanly. | Gateway shutdown. |
 | **2026-10-09 15:50–22:24** | **Offline** | **Gateway completely offline for 6 hours 34 minutes.** | **Log Gap 2:** 6h 34m downtime window on Oct 9. |
+| **2026-10-09 (During Day)** | Client-Side / Off-Log | Operator's son accessed `@HealBitebot` from personal device. | **Operator-authorized access test.** |
 | **2026-10-09 22:24:03** | Starting | Gateway started; initial connect timeout during DNS resolution. | Startup sequence. |
 | **2026-10-09 22:32:10** | Connected | Telegram connected (polling mode); commands registered. | Gateway restored. |
 | **2026-10-09 23:48–23:59** | Connected / Recreated | Operator investigations and hotfix rehearsals. | Pre-deployment checks. |
@@ -48,87 +52,81 @@ Local operator timezone is **UTC+7** (MSK is UTC+3). October 9 in operator local
 
 ---
 
-## 3. Telegram Update Ingestion & Client-Side Semantics
+## 3. Operator Authorization vs. Technical Allowlist Enforcement
 
-The investigation assessed the discrepancy between the operator's statement and the lack of recorded update events on October 9:
+A crucial distinction exists between real-world authorization and software policy enforcement:
 
-1. **Client-Side Discovery vs. Bot API Updates:**
-   - When a Telegram user searches for `@HealBitebot`, opens the bot profile, reads the description, or opens the chat window without pressing the "START" button, **Telegram's Bot API does not transmit any event or update to the webhook or polling endpoint**.
-   - If an unauthorized user opened the bot chat or viewed the bot profile, this attempt is by design invisible in server-side logs.
-2. **Offline Queuing and Expiration:**
-   - During the 6.5-hour downtime window (15:50–22:24 UTC), Telegram cloud servers buffer pending updates.
-   - If an unauthenticated user dispatched a command that was superseded or expired, or if updates were fetched by an ephemeral inspection tool, they would not appear in the post-22:24 polling stream.
-3. **Distinction Between Unobserved and Non-Existent:**
-   - The absence of entries in `gateway.log` proves only that **no update was ingested by the gateway process while logging**.
-   - It **does not prove** that no human attempted to interact with the bot in the Telegram client.
-   - The finding is therefore calibrated to: `UNAUTHORIZED_ATTEMPT_DETECTED=NOT_OBSERVED_IN_AVAILABLE_EVIDENCE`.
-
----
-
-## 4. Reassessment of Single-Consumer Assertion
-
-1. **Protocol Mechanism:**
-   - Long-polling returns `HTTP 409 Conflict: terminated by other getUpdates request` only when two connections poll Telegram concurrently.
-   - During the period when `hermes-bot` was actively connected, zero 409 Conflict errors were logged, confirming no concurrent polling occurred during those specific hours.
-2. **Sequential Polling Limitation:**
-   - Between 15:50 and 22:24 UTC, the container was stopped.
-   - If another environment (e.g., an operator test script or ephemeral instance) consumed updates during that window, no HTTP 409 conflict would have been generated.
-3. **Conclusion:**
-   - Lack of 409 Conflict is supporting evidence of exclusive polling during active uptime, but cannot be claimed as definitive proof of lifetime exclusivity across all hours of October 9.
+1. **Human / Operator Authority:**
+   - The test was fully authorized by the system owner.
+   - The participant was a trusted family member acting under direct parental request.
+   - There was zero malicious intent, exploit payload, or adversarial objective.
+2. **Technical Access Control Policy:**
+   - The bot's software policy strictly gates features via `TELEGRAM_ALLOWED_USERS` and `GATEWAY_ALLOWED_USERS`.
+   - The son's Telegram user account was not enrolled in `TELEGRAM_ALLOWED_USERS` (which contained only operator hash `d1cb1390`).
+   - `HEALBITE_PUBLIC_ONBOARDING` was set to `false`.
+   - Consequently, from the perspective of the software security boundary, updates from this user were unallowlisted.
+3. **Why the Fix Was Necessary Regardless of Intent:**
+   - Under the pre-PR #405 code, any unallowlisted device sending `/start` would trigger `begin_onboarding` in `TelegramAdapter`, writing an unvetted profile record to `healbite.db`.
+   - The fact that the test was conducted by a trusted individual illuminated an architectural flaw before external discovery occurred.
+   - The hardening implemented in PR #405 ensures all unallowlisted traffic is rejected fail-closed, regardless of caller identity.
 
 ---
 
-## 5. Durable State Reconciliation (SQLite & Sessions)
+## 4. Telegram Client Semantics & Log Analysis
 
-While ephemeral logs have coverage gaps, the durable storage systems provide mathematical proof regarding data exposure and state mutation:
+The lack of recorded user updates on October 9 in `gateway.log` is fully explained by Telegram's client-server architecture:
+
+1. **Opening a Bot Generates Zero API Updates:**
+   - When a user searches for `@HealBitebot`, clicks the bot link, views the bot description, or opens the chat pane in the Telegram app, **Telegram sends zero updates to the bot API**.
+   - Telegram generates an update object only if the user presses the "START" button or types a message.
+   - If the tester opened the bot and examined the profile without sending a message, zero log entries were generated by design.
+2. **Offline Queuing Semantics:**
+   - If a message was sent during the 6.5-hour gateway downtime window (15:50–22:24 UTC), Telegram buffered the update in cloud queues.
+   - If the update expired or was superseded prior to reconnection, it would not appear in local container logs.
+3. **Absence of 409 Conflicts:**
+   - Telegram long-polling returns HTTP 409 Conflict only when two polling connections compete concurrently.
+   - Zero 409 errors occurred while the container was running, but this does not preclude sequential polling during offline hours.
+
+---
+
+## 5. Durable State Verification (SQLite & Sessions)
+
+The durable storage engines provide empirical proof regarding data exposure and state mutation:
 
 1. **Authoritative Database (`/var/lib/hermes/production-db/healbite.db`):**
-   - Checksum: `b7af915851a9243e281f6e403b7cc892c032d7c7d227e25242e887e3c2a1a32c`.
-   - `users`: Exactly 6 rows (created between 2026-06-07 and 2026-06-29; zero created in October 2026).
+   - SHA-256 Checksum: `b7af915851a9243e281f6e403b7cc892c032d7c7d227e25242e887e3c2a1a32c`.
+   - `users`: Exactly 6 rows (all created June–July 2026; zero created in October 2026).
    - `profiles`: Exactly 5 rows (last updated 2026-09-06 13:03:23 UTC; zero created or updated in October 2026).
    - `households`: Exactly 4 rows (created 2026-07-03).
    - `household_members`: Exactly 5 rows (created July 2026).
    - `user_onboarding_state`: 0 rows.
-   - Comprehensive column scan across all 56 tables revealed **0 records created or modified in October 2026**.
+   - Comprehensive scan of all 56 tables confirms **zero records created or modified in October 2026**.
 2. **Session Database (`state.db`):**
-   - `sessions`: Exactly 8 rows (all associated with recognized baseline users `d1cb1390` and `4fd19e1b`).
+   - `sessions`: Exactly 8 rows (all belonging to recognized baseline users `d1cb1390` and `4fd19e1b`).
    - Latest session started: `2026-10-05 14:15:51 UTC`.
    - Latest message recorded: `2026-10-05 14:16:35 UTC`.
    - Zero sessions or messages were created between October 6 and October 10.
 3. **Qdrant Vector Store:**
    - Collections `healbite_memory_os` and `healbite_memory_os_v2` intact.
    - Zero unauthorized points, vectors, or facts.
-4. **Reconciliation Synthesis:**
-   - Even if an unknown party opened the bot or attempted interaction, **zero data exposure, zero profile creation, zero onboarding, and zero session establishment occurred in production**.
+4. **Summary:**
+   - Although log coverage has gaps and client-side discovery is invisible to Bot API, the persistent state proves that **no database mutations, profile creations, onboarding initiations, or cross-user data access occurred**.
 
 ---
 
-## 6. Pre-Patch Vulnerability vs. Observed Reality
+## 6. Security Hardening Retention
 
-| Vector | Code Vulnerability (Pre-PR #405) | Production Observation | Reconciled Finding |
-|---|---|---|---|
-| **`/start` Onboarding** | Vulnerable: unauthenticated `/start` wrote profile to SQLite | Zero rows added in October 2026 | Vulnerability existed in code; **no successful exploitation observed** |
-| **`/menu` & Shortcuts** | Vulnerable: returned reply markup | Zero sessions initiated in October 2026 | No menu interaction recorded |
-| **Plain Text / Photos** | Vulnerable: evaluated intents locally | Zero food/water records in October 2026 | No media or text logged |
-| **Cross-User Data** | Isolated: queries bound to actor ID | Data isolated by user/household ID | **Zero cross-user data exposure** |
-| **Admin Commands** | Protected: caller ID verified | Admin commands fail closed | **Zero admin compromise** |
-
----
-
-## 7. Current Production Security Controls
-
-The running container `hermes-bot` (`906bca46c236`) is attested and operating under verified fail-closed controls:
+All security controls deployed in PR #405 remain permanently active and fully verified:
 
 - **Immutable Image:** `sha256:c9b71be2a5c48a86b6c2cb513786a74e49478bb1c852bd81b5daafffa0510073`
-- **OCI Source Revision:** `25bcfd8addaf2491ccf6926eb7d1bd8c4a561ab5` (PR #405 merge commit)
+- **OCI Revision:** `25bcfd8addaf2491ccf6926eb7d1bd8c4a561ab5` (PR #405 merge commit)
 - **Code Checksum (`gateway/platforms/telegram.py`):** `a1a1e0eda35811299d57eb58e5b9c7ff6451a7f36bd5f884083116816cf94f43` (exact match)
-- **Runtime Flags:**
+- **Runtime Configuration:**
   - `TELEGRAM_ALLOW_ALL_USERS=UNSET`
   - `GATEWAY_ALLOW_ALL_USERS=false`
   - `HEALBITE_PUBLIC_ONBOARDING=false`
   - `TELEGRAM_ALLOWED_USERS=d1cb1390` (strictly 1 authorized operator)
-  - Feature Flags (`SHOPPING_LIST`, `HOUSEHOLDS`, `WEEKLY_MENU`): `false`
-- **Deterministic Test Verification:** 18/18 security tests pass (`tests/gateway/test_telegram_unauthorized_access_security.py`).
+- **Test Suite Verification:** All 18 adversarial tests pass (`tests/gateway/test_telegram_unauthorized_access_security.py`).
 - **Enforced Invariants:**
   ```text
   UNAUTHORIZED_PROFILE_CREATION=DENIED
@@ -141,11 +139,28 @@ The running container `hermes-bot` (`906bca46c236`) is attested and operating un
 
 ---
 
+## 7. Preventive Security Monitoring Project Status
+
+### Project: `Hermes Security Monitoring & Intrusion Alerts v1`
+
+- **Role & Scope:**
+  - Designed as a preventive reliability, observability, and security capability.
+  - Generates minimal, structured, privacy-preserving alerts to the operator channel when unallowlisted users interact with the bot.
+  - Monitors fail-closed rejection rates, gateway disconnects, and polling lag.
+- **Context Calibration:**
+  - The feature will **not** treat family testing or accidental user discovery as adversarial attacks.
+  - Alerts will be classified informatively (e.g., `UNALLOWLISTED_INTERACTION_DROPPED`, `GATEWAY_DISCONNECTED`) rather than raising false alarms.
+- **Implementation Status:**
+  - Queued as a preventive engineering feature for subsequent implementation.
+  - Independent of this incident closure task (no production mutations permitted).
+
+---
+
 ## 8. Preserved Forensic Evidence Inventory
 
-All raw evidence remains securely preserved in `/var/lib/hermes/evidence-incident-2026-10-10/` (permissions `0700` / `0600`, root owned):
+All forensic artifacts remain preserved in `/var/lib/hermes/evidence-incident-2026-10-10/` (permissions `0700` / `0600`, root owned):
 
-| Preserved File | SHA-256 Checksum |
+| Preserved Artifact | SHA-256 Checksum |
 |---|---|
 | `gateway.log` | `f2f674a2f3e0a346faa7bb4de4f03256b7d5885a357c24bbb97148dfce04a457` |
 | `agent.log` | `c12eac6c3bb3f34423d5c8cd044df40529dc044d4922bedb7dbc3a3f2148302d` |
@@ -161,23 +176,15 @@ All raw evidence remains securely preserved in `/var/lib/hermes/evidence-inciden
 
 ---
 
-## 9. Residual Uncertainties
+## 9. Final Incident Classification
 
-1. **Client-Side Discovery Events:** Because Telegram does not report chat opens without message dispatches, any client-side reconnaissance of the bot handle cannot be detected or ruled out via server logs.
-2. **Downtime Window Traffic:** Any update dispatched by an external user during the 15:50–22:24 UTC offline period that expired in Telegram's queue prior to reconnect cannot be reconstructed from local logs.
-3. **Durable Certainty:** The persistent database guarantees that regardless of client-side or offline attempts, **no state mutation, profile creation, or data leakage ever occurred**.
-
----
-
-## 10. Corrected Incident Classification
-
-### Classification: **`CLOSED — Contained, historical exposure unknown`** (`CLOSED_CONTAINED_HISTORICAL_EXPOSURE_UNKNOWN`)
+### Classification: **`CLOSED — Operator-authorized test, no protected access`** (`CLOSED_OPERATOR_AUTHORIZED_TEST`)
 
 **Justification:**
-1. The production runtime is actively secured, running the verified PR #405 patch with zero code drift.
-2. All incoming intake points reject unauthenticated requests fail-closed without side effects.
-3. No active compromise, persistent session, or unauthorized profile exists.
-4. Complete audit of SQLite and session stores proves zero data mutation or exposure occurred.
-5. Incomplete log coverage during historical downtime and client-side Telegram architectural boundaries preclude asserting absolute historical absence of access attempts; therefore, residual uncertainty is explicitly recorded.
+1. Confirmed by operator as an intentional, authorized test conducted by his son.
+2. The bot software policy properly treats unallowlisted IDs fail-closed.
+3. Durable database and session records prove that no profiles, users, sessions, or vector facts were created.
+4. The security fix from PR #405 is permanently active in production.
+5. Zero active compromise, backdoor, or exposure exists.
 
-Incident investigation is formally closed with reconciled evidence.
+Incident investigation is formally closed.

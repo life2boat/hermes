@@ -55,6 +55,8 @@ try:
         MessageHandler as TelegramMessageHandler,
         ContextTypes,
         filters,
+        TypeHandler,
+        ChatMemberHandler,
     )
     from telegram.constants import ParseMode, ChatType
     from telegram.request import HTTPXRequest
@@ -74,6 +76,8 @@ except ImportError:
     CommandHandler = Any
     CallbackQueryHandler = Any
     TelegramMessageHandler = Any
+    TypeHandler = Any
+    ChatMemberHandler = Any
     HTTPXRequest = Any
     filters = None
     ParseMode = None
@@ -766,6 +770,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
+        self._in_flight_ptb_updates: Dict[int, Dict[str, Any]] = {}
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._family_telegram = build_family_telegram_controller()
         self._inventory_telegram = build_inventory_telegram_controller()
@@ -1921,6 +1926,226 @@ class TelegramAdapter(BasePlatformAdapter):
                             self.name, topic_name, seed_err,
                         )
 
+    @staticmethod
+    def _determine_update_type(update: Any) -> str:
+        for attr in (
+            "message",
+            "edited_message",
+            "callback_query",
+            "my_chat_member",
+            "chat_member",
+            "channel_post",
+            "edited_channel_post",
+            "inline_query",
+            "chosen_inline_result",
+            "shipping_query",
+            "pre_checkout_query",
+            "poll",
+            "poll_answer",
+            "chat_join_request",
+            "message_reaction",
+            "message_reaction_count",
+            "chat_boost",
+            "removed_chat_boost",
+            "business_connection",
+            "business_message",
+            "edited_business_message",
+            "deleted_business_messages",
+            "purchased_paid_media",
+        ):
+            if getattr(update, attr, None) is not None:
+                return attr
+        return "unknown"
+
+    def _record_update_ingress(
+        self,
+        update_id: Optional[int],
+        *,
+        corr: str,
+        update_type: str,
+        timestamp_utc: str,
+    ) -> None:
+        if update_id is None:
+            return
+        in_flight = getattr(self, "_in_flight_ptb_updates", None)
+        if in_flight is None:
+            in_flight = {}
+            self._in_flight_ptb_updates = in_flight
+        in_flight[update_id] = {
+            "corr": corr,
+            "update_type": update_type,
+            "timestamp_utc": timestamp_utc,
+            "handler": None,
+        }
+        if len(in_flight) > 2048:
+            for old_id in list(in_flight)[:512]:
+                in_flight.pop(old_id, None)
+
+    def _record_handler_selection(self, update_id: Optional[int], handler: str) -> None:
+        if update_id is None:
+            return
+        in_flight = getattr(self, "_in_flight_ptb_updates", None)
+        if in_flight is None:
+            in_flight = {}
+            self._in_flight_ptb_updates = in_flight
+        record = in_flight.setdefault(update_id, {
+            "corr": self._healbite_correlation_id(None, update_id=update_id),
+            "update_type": "unknown",
+            "timestamp_utc": self._healbite_now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "handler": None,
+        })
+        record["handler"] = handler
+
+    async def _observe_ptb_update_ingress(
+        self, update: Any, context: Any = None
+    ) -> None:
+        """Early non-consuming diagnostic observer for all PTB update arrivals.
+
+        BOUNDARY DISTINCTION:
+        This observer hooks into handler group -1, representing the earliest
+        supported application-level boundary in python-telegram-bot. It inspects
+        updates that have already been retrieved and deserialized by the PTB
+        transport layer into `telegram.Update` instances.
+
+        This is NOT equivalent to raw Telegram Bot API transport ingestion (HTTP
+        long-polling getUpdates or incoming webhook POSTs). An update unobserved
+        here never arrived at or was rejected prior to PTB deserialization (such
+        as transport network failure, webhook configuration mismatch, or consumption
+        by a competing polling instance).
+        """
+        del context
+        if update is None:
+            return
+        update_id = getattr(update, "update_id", None)
+        update_type = self._determine_update_type(update)
+        msg = self._effective_update_message(update)
+        corr = self._healbite_correlation_id(msg, update_id=update_id)
+        now_utc = self._healbite_now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        self._record_update_ingress(
+            update_id,
+            corr=corr,
+            update_type=update_type,
+            timestamp_utc=now_utc,
+        )
+
+        self._log_healbite_marker(
+            "telegram_ptb_update_ingress",
+            msg=msg,
+            update_id=update_id,
+            update_type=update_type,
+            timestamp_utc=now_utc,
+        )
+
+    async def _observe_ptb_update_dispatch_outcome(
+        self, update: Any, context: Any = None
+    ) -> None:
+        """Post-dispatch outcome observer running in handler group 1.
+
+        Verifies whether an update was handled by an earlier business handler
+        in group 0 or fell through unhandled/silent-filtered.
+        """
+        del context
+        if update is None:
+            return
+        update_id = getattr(update, "update_id", None)
+        in_flight = getattr(self, "_in_flight_ptb_updates", None)
+        record = in_flight.pop(update_id, None) if in_flight and update_id is not None else None
+        update_type = record.get("update_type") if record else self._determine_update_type(update)
+        msg = self._effective_update_message(update)
+        handler = record.get("handler") if record else None
+        handler_outcome = "matched" if handler else "unhandled"
+        handler_name = handler or "none"
+
+        self._log_healbite_marker(
+            "telegram_handler_outcome",
+            msg=msg,
+            update_id=update_id,
+            update_type=update_type,
+            handler_outcome=handler_outcome,
+            handler=handler_name,
+        )
+
+    async def _handle_my_chat_member(
+        self, update: Any, context: Any = None
+    ) -> None:
+        """Harmless membership update diagnostic handler."""
+        del context
+        update_id = getattr(update, "update_id", None)
+        self._record_handler_selection(update_id, "my_chat_member")
+        self._log_healbite_marker(
+            "telegram_membership_update",
+            update_id=update_id,
+            update_type="my_chat_member",
+            outcome="acknowledged",
+        )
+
+    def _register_handlers(self) -> None:
+        """Register PTB update handlers across priority groups.
+
+        Handler Group Architecture:
+        - Group -1: Early non-consuming diagnostic observer (_observe_ptb_update_ingress).
+          Runs on ALL deserialized Update instances before any business handler.
+          Distinguishes PTB handler-level arrival from raw Bot API transport ingestion.
+        - Group 0: Business handlers (_handle_text_message, _handle_command,
+          _handle_location_message, _handle_media_message, _handle_callback_query,
+          and harmless diagnostic _handle_my_chat_member observer).
+        - Group 1: Post-dispatch outcome observer (_observe_ptb_update_dispatch_outcome).
+          Verifies whether an update matched a handler or dropped through unhandled.
+        """
+        if not self._app:
+            return
+
+        # Group -1: Early non-consuming diagnostic observer
+        if TypeHandler is not Any:
+            self._app.add_handler(
+                TypeHandler(Update, self._observe_ptb_update_ingress),
+                group=-1,
+            )
+
+        # Group 0: Business handlers
+        self._app.add_handler(
+            TelegramMessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                self._handle_text_message,
+            ),
+            group=0,
+        )
+        self._app.add_handler(
+            TelegramMessageHandler(
+                filters.COMMAND,
+                self._handle_command,
+            ),
+            group=0,
+        )
+        self._app.add_handler(
+            TelegramMessageHandler(
+                filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION),
+                self._handle_location_message,
+            ),
+            group=0,
+        )
+        self._app.add_handler(
+            TelegramMessageHandler(
+                filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
+                self._handle_media_message,
+            ),
+            group=0,
+        )
+        self._app.add_handler(CallbackQueryHandler(self._handle_callback_query), group=0)
+        if ChatMemberHandler is not Any and getattr(ChatMemberHandler, "MY_CHAT_MEMBER", None) is not None:
+            self._app.add_handler(
+                ChatMemberHandler(self._handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
+                group=0,
+            )
+
+        # Group 1: Post-dispatch outcome observer
+        if TypeHandler is not Any:
+            self._app.add_handler(
+                TypeHandler(Update, self._observe_ptb_update_dispatch_outcome),
+                group=1,
+            )
+
     async def connect(self) -> bool:
         """Connect to Telegram via polling or webhook.
 
@@ -2036,25 +2261,8 @@ class TelegramAdapter(BasePlatformAdapter):
             self._app = builder.build()
             self._bot = self._app.bot
 
-            # Register handlers
-            self._app.add_handler(TelegramMessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._handle_text_message
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.COMMAND,
-                self._handle_command
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.LOCATION | getattr(filters, "VENUE", filters.LOCATION),
-                self._handle_location_message
-            ))
-            self._app.add_handler(TelegramMessageHandler(
-                filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
-                self._handle_media_message
-            ))
-            # Handle inline keyboard button callbacks (update prompts)
-            self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+            # Register handlers across priority groups (-1, 0, 1)
+            self._register_handlers()
 
             # Start polling — retry initialize() for transient TLS resets
             try:
@@ -2541,6 +2749,15 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 pass  # Typing failures are non-fatal
 
+            update_id_ref = None
+            if isinstance(metadata, dict):
+                update_id_ref = metadata.get("telegram_update_id") or metadata.get("update_id")
+            self._log_healbite_marker(
+                "telegram_response_outcome",
+                update_id=update_id_ref,
+                response_outcome="sent",
+            )
+
             return SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
@@ -2552,6 +2769,15 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
         except Exception as e:
+            update_id_ref = None
+            if isinstance(metadata, dict):
+                update_id_ref = metadata.get("telegram_update_id") or metadata.get("update_id")
+            self._log_healbite_marker(
+                "telegram_response_outcome",
+                update_id=update_id_ref,
+                response_outcome="failed",
+                error_type=type(e).__name__,
+            )
             logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
             err_str = str(e).lower()
             # Message too long — content exceeded 4096 chars. Return failure so
@@ -3082,7 +3308,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
         message_thread_id = kwargs.get("message_thread_id")
         try:
-            return await self._bot.send_message(**kwargs)
+            res = await self._bot.send_message(**kwargs)
+            self._log_healbite_marker(
+                "telegram_response_outcome",
+                response_outcome="sent",
+            )
+            return res
         except Exception as send_err:
             if (
                 message_thread_id is not None
@@ -3096,7 +3327,25 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 retry_kwargs = dict(kwargs)
                 retry_kwargs.pop("message_thread_id", None)
-                return await self._bot.send_message(**retry_kwargs)
+                try:
+                    res = await self._bot.send_message(**retry_kwargs)
+                    self._log_healbite_marker(
+                        "telegram_response_outcome",
+                        response_outcome="sent",
+                    )
+                    return res
+                except Exception as retry_err:
+                    self._log_healbite_marker(
+                        "telegram_response_outcome",
+                        response_outcome="failed",
+                        error_type=type(retry_err).__name__,
+                    )
+                    raise
+            self._log_healbite_marker(
+                "telegram_response_outcome",
+                response_outcome="failed",
+                error_type=type(send_err).__name__,
+            )
             raise
 
     async def send_update_prompt(
@@ -3829,6 +4078,16 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_type=str(query_chat_type) if query_chat_type is not None else None,
             thread_id=str(query_thread_id) if query_thread_id is not None else None,
             user_name=query_user_name,
+        )
+        self._record_handler_selection(getattr(update, "update_id", None), "callback_query")
+        public_onboarding = self._healbite_public_onboarding_enabled()
+        auth_decision = "allowed" if query_is_authorized else ("public_bypass" if public_onboarding else "denied")
+        self._log_healbite_marker(
+            "telegram_auth_decision",
+            msg=query_message,
+            update_id=getattr(update, "update_id", None),
+            auth_decision=auth_decision,
+            public_onboarding=public_onboarding,
         )
         HEALBITE_LOCAL_CALLBACK_ROOTS = (
             FAMILY_CALLBACK_ROOT,
@@ -6473,6 +6732,7 @@ class TelegramAdapter(BasePlatformAdapter):
     _HEALBITE_LOG_FIELD_ALLOWLIST = {
         "action",
         "amount_ml",
+        "auth_decision",
         "choice_type",
         "chunk_count",
         "command",
@@ -6481,6 +6741,8 @@ class TelegramAdapter(BasePlatformAdapter):
         "duration_ms",
         "error_type",
         "entry_count",
+        "handler",
+        "handler_outcome",
         "has_caption",
         "has_choice",
         "has_draft",
@@ -6497,9 +6759,11 @@ class TelegramAdapter(BasePlatformAdapter):
         "media_count",
         "mime",
         "ok",
+        "onboarding",
         "operation",
         "outcome",
         "public_onboarding",
+        "response_outcome",
         "result",
         "retryable",
         "route",
@@ -6512,8 +6776,10 @@ class TelegramAdapter(BasePlatformAdapter):
         "schedule_version_changed",
         "session_scope",
         "time_bucket",
+        "timestamp_utc",
         "timezone_present",
         "timezone_region_bucket",
+        "update_type",
         "weekday_bucket",
     }
 
@@ -6528,6 +6794,8 @@ class TelegramAdapter(BasePlatformAdapter):
         text = str(value).strip()
         if not text:
             return None
+        if key in {"timestamp_utc", "timestamp"} and re.fullmatch(r"[A-Za-z0-9_.:/+-]+", text):
+            return text[:80]
         if key == "error_type" and re.fullmatch(r"[A-Za-z0-9_.]+", text):
             if text.endswith(("Error", "Exception", "Warning", "Timeout")):
                 return text[:80]
@@ -6703,6 +6971,12 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=self._healbite_sender_username(msg),
         )
         if not is_authorized and not self._healbite_public_onboarding_enabled():
+            self._log_healbite_marker(
+                "healbite_onboarding_entry",
+                msg=msg,
+                onboarding="denied",
+                outcome="unauthorized",
+            )
             return False
 
         profile_store = get_default_healbite_user_profile()
@@ -6734,6 +7008,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
             )
             self._log_healbite_marker(
+                "healbite_onboarding_entry",
+                msg=msg,
+                onboarding="started",
+                outcome="onboarding_started",
+            )
+            self._log_healbite_marker(
                 "healbite_reply_sent",
                 msg=msg,
                 route="start_command",
@@ -6742,6 +7022,12 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
 
         await self._send_healbite_menu_message(msg, command=command_token)
+        self._log_healbite_marker(
+            "healbite_onboarding_entry",
+            msg=msg,
+            onboarding="already_completed",
+            outcome="menu_returned",
+        )
         self._log_healbite_marker(
             "healbite_reply_sent",
             msg=msg,
@@ -9103,6 +9389,7 @@ class TelegramAdapter(BasePlatformAdapter):
         rapid successive text messages from the same user/chat and aggregate
         them into a single MessageEvent before dispatching.
         """
+        self._record_handler_selection(update.update_id, "text")
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
@@ -9129,7 +9416,21 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if is_authorized or self._healbite_public_onboarding_enabled():
+        public_onboarding = self._healbite_public_onboarding_enabled()
+        if is_authorized:
+            auth_decision = "allowed"
+        elif public_onboarding:
+            auth_decision = "public_bypass"
+        else:
+            auth_decision = "denied"
+        self._log_healbite_marker(
+            "telegram_auth_decision",
+            msg=msg,
+            update_id=update.update_id,
+            auth_decision=auth_decision,
+            public_onboarding=public_onboarding,
+        )
+        if is_authorized or public_onboarding:
             if await self._maybe_handle_healbite_menu_button(update, context):
                 return
         if not self._should_process_message(msg):
@@ -9709,6 +10010,7 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
         del context
+        self._record_handler_selection(update.update_id, "command")
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
@@ -9745,8 +10047,22 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
+        public_onboarding = self._healbite_public_onboarding_enabled()
+        if is_authorized:
+            auth_decision = "allowed"
+        elif public_onboarding:
+            auth_decision = "public_bypass"
+        else:
+            auth_decision = "denied"
+        self._log_healbite_marker(
+            "telegram_auth_decision",
+            msg=msg,
+            update_id=update.update_id,
+            auth_decision=auth_decision,
+            public_onboarding=public_onboarding,
+        )
         command = self._healbite_command_from_text(msg.text)
-        if is_authorized or self._healbite_public_onboarding_enabled():
+        if is_authorized or public_onboarding:
             if await self._maybe_handle_healbite_start_command(msg):
                 return
             dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
@@ -9780,6 +10096,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
+        self._record_handler_selection(update.update_id, "location")
         msg = self._effective_update_message(update)
         if not msg:
             return
@@ -9992,6 +10309,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
+        self._record_handler_selection(update.update_id, "media")
         if not update.message:
             return
         media_kind = "document" if getattr(update.message, "document", None) else "photo"

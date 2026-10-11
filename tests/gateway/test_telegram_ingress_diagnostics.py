@@ -242,6 +242,10 @@ async def test_non_allowlisted_start_public_onboarding_disabled(tmp_path, monkey
     monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
     profile_store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
     monkeypatch.setattr(
+        "gateway.platforms.telegram.get_default_healbite_user_profile",
+        lambda: profile_store,
+    )
+    monkeypatch.setattr(
         "gateway.healbite_user_profile.get_default_healbite_user_profile",
         lambda: profile_store,
     )
@@ -285,6 +289,10 @@ async def test_non_allowlisted_start_public_onboarding_enabled(tmp_path, monkeyp
     monkeypatch.delenv("TELEGRAM_ALLOWED_USERS", raising=False)
     monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
     profile_store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    monkeypatch.setattr(
+        "gateway.platforms.telegram.get_default_healbite_user_profile",
+        lambda: profile_store,
+    )
     monkeypatch.setattr(
         "gateway.healbite_user_profile.get_default_healbite_user_profile",
         lambda: profile_store,

@@ -740,6 +740,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
+        self._drop_pending_updates: bool = self._coerce_bool_extra(
+            "drop_pending_updates",
+            os.getenv("TELEGRAM_DROP_PENDING_UPDATES", "false").strip().lower() in {"true", "1", "yes", "on"},
+        )
         # Buffer rapid/album photo updates so Telegram image bursts are handled
         # as a single MessageEvent instead of self-interrupting multiple turns.
         self._media_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", "0.8"))
@@ -1427,7 +1431,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             await self._app.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=False,
+                drop_pending_updates=self._drop_pending_updates,
                 error_callback=self._polling_error_callback_ref,
             )
             logger.info(
@@ -1554,7 +1558,7 @@ class TelegramAdapter(BasePlatformAdapter):
             try:
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=False,
+                    drop_pending_updates=self._drop_pending_updates,
                     error_callback=self._polling_error_callback_ref,
                 )
                 logger.info(
@@ -2326,7 +2330,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     webhook_url=webhook_url,
                     secret_token=webhook_secret,
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=self._drop_pending_updates,
                 )
                 self._webhook_mode = True
                 logger.info(
@@ -2339,7 +2343,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # previous webhook registration and silently stop receiving updates.
                 delete_webhook = getattr(self._bot, "delete_webhook", None)
                 if callable(delete_webhook):
-                    await delete_webhook(drop_pending_updates=False)
+                    await delete_webhook(drop_pending_updates=self._drop_pending_updates)
 
                 loop = asyncio.get_running_loop()
 
@@ -2359,7 +2363,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=self._drop_pending_updates,
                     error_callback=_polling_error_callback,
                 )
 
@@ -2408,7 +2412,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
             self._mark_connected()
             mode = "webhook" if self._webhook_mode else "polling"
-            logger.info("[%s] Connected to Telegram (%s mode)", self.name, mode)
+            logger.info(
+                "[%s] Connected to Telegram (%s mode, drop_pending_updates=%s)",
+                self.name, mode, self._drop_pending_updates,
+            )
 
             # Set up DM topics (Bot API 9.4 — Private Chat Topics)
             # Runs after connection is established so the bot can call createForumTopic.

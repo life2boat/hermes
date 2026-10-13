@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
+import re
+import secrets
 import socket
-from typing import Iterable, Optional
+import time
+from typing import Any, Callable, Iterable, Optional
 
 import httpx
 
@@ -49,6 +53,52 @@ def _resolve_proxy_url(target_hosts=None) -> str | None:
     return resolve_proxy_url("TELEGRAM_PROXY", target_hosts=target_hosts)
 
 
+
+def _extract_safe_api_method(url_path: str) -> str:
+    """Extract only the API method name from request URL path.
+
+    Privacy invariant: never log or return the bot token or raw path.
+    Standard Telegram Bot API paths are /bot<token>/<method> or /file/bot<token>/<path>.
+    """
+    if not url_path:
+        return "unknown"
+    parts = [p for p in url_path.strip().split("/") if p]
+    if not parts:
+        return "unknown"
+    candidate = parts[-1]
+    if re.fullmatch(r"[A-Za-z0-9_]{1,64}", candidate):
+        return candidate
+    return "unknown"
+
+
+def _emit_transport_telemetry(
+    event: dict[str, Any],
+    callback: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> None:
+    """Format and emit transport-level exchange telemetry safely."""
+    parts = [f"corr={event.get('corr', '')}"]
+    for k in (
+        "request_method",
+        "api_method",
+        "status_code",
+        "duration_ms",
+        "updates_count",
+        "min_update_id",
+        "max_update_id",
+        "error_type",
+        "ok",
+    ):
+        v = event.get(k)
+        if v is not None:
+            parts.append(f"{k}={v}")
+    logger.info("[Telegram][telegram_transport_exchange] %s", " ".join(parts))
+    if callback is not None:
+        try:
+            callback(event)
+        except Exception as cb_err:
+            logger.debug("Telemetry callback exception: %s", cb_err)
+
+
 class TelegramFallbackTransport(httpx.AsyncBaseTransport):
     """Retry Telegram Bot API requests via fallback IPs while preserving TLS/SNI.
 
@@ -58,8 +108,15 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
     ``curl --resolve api.telegram.org:443:<ip>``.
     """
 
-    def __init__(self, fallback_ips: Iterable[str], **transport_kwargs):
+    def __init__(
+        self,
+        fallback_ips: Iterable[str],
+        *,
+        telemetry_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+        **transport_kwargs,
+    ):
         self._fallback_ips = list(dict.fromkeys(_normalize_fallback_ips(fallback_ips)))
+        self._telemetry_callback = telemetry_callback
         proxy_url = _resolve_proxy_url(target_hosts=[_TELEGRAM_API_HOST, *self._fallback_ips])
         if proxy_url and "proxy" not in transport_kwargs:
             transport_kwargs["proxy"] = proxy_url
@@ -71,6 +128,67 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
         self._sticky_lock = asyncio.Lock()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        start_time = time.monotonic()
+        safe_method = _extract_safe_api_method(request.url.path)
+        request_method = request.method
+        corr = secrets.token_hex(6)
+
+        try:
+            response = await self._dispatch_request(request)
+            duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+            updates_count = 0
+            min_update_id = None
+            max_update_id = None
+            if safe_method == "getUpdates" and response.status_code == 200:
+                try:
+                    content = await response.aread()
+                    data = json.loads(content.decode("utf-8", errors="replace"))
+                    if isinstance(data, dict) and data.get("ok"):
+                        res = data.get("result")
+                        if isinstance(res, list):
+                            updates_count = len(res)
+                            if updates_count > 0:
+                                ids = [
+                                    item.get("update_id")
+                                    for item in res
+                                    if isinstance(item, dict) and "update_id" in item
+                                ]
+                                if ids:
+                                    min_update_id = min(ids)
+                                    max_update_id = max(ids)
+                except Exception as parse_err:
+                    logger.debug("Failed parsing getUpdates response telemetry: %s", parse_err)
+
+            event = {
+                "marker": "telegram_transport_exchange",
+                "corr": corr,
+                "request_method": request_method,
+                "api_method": safe_method,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+                "updates_count": updates_count,
+                "min_update_id": min_update_id,
+                "max_update_id": max_update_id,
+                "ok": response.is_success,
+            }
+            _emit_transport_telemetry(event, callback=self._telemetry_callback)
+            return response
+        except Exception as exc:
+            duration_ms = round((time.monotonic() - start_time) * 1000, 2)
+            event = {
+                "marker": "telegram_transport_exchange",
+                "corr": corr,
+                "request_method": request_method,
+                "api_method": safe_method,
+                "status_code": 0,
+                "duration_ms": duration_ms,
+                "error_type": type(exc).__name__,
+                "ok": False,
+            }
+            _emit_transport_telemetry(event, callback=self._telemetry_callback)
+            raise
+
+    async def _dispatch_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host != _TELEGRAM_API_HOST or not self._fallback_ips:
             return await self._primary.handle_async_request(request)
 

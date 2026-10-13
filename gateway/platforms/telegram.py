@@ -126,6 +126,7 @@ from gateway.healbite_user_profile import (
     get_existing_healbite_user_profile,
     is_healbite_profile_edit_intent,
     onboarding_keyboard_rows,
+    profile_missing_fields,
 )
 from gateway.healbite_weekly_menu_telegram import (
     WEEKLY_MENU_CALLBACK_ROOT,
@@ -1961,6 +1962,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 return attr
         return "unknown"
 
+    def _record_transport_telemetry(self, event: dict[str, Any]) -> None:
+        corr = event.get("corr")
+        updates_count = event.get("updates_count", 0)
+        min_update_id = event.get("min_update_id")
+        if updates_count > 0 and min_update_id is not None and corr:
+            cache = getattr(self, "_healbite_log_correlations", None)
+            if cache is not None:
+                cache[("update", min_update_id)] = corr
+        stats = getattr(self, "_transport_telemetry_stats", None)
+        if stats is None:
+            stats = {
+                "total_requests": 0,
+                "get_updates_requests": 0,
+                "get_updates_total_updates": 0,
+                "last_get_updates_count": 0,
+                "last_get_updates_status": None,
+            }
+            self._transport_telemetry_stats = stats
+        stats["total_requests"] += 1
+        if event.get("api_method") == "getUpdates":
+            stats["get_updates_requests"] += 1
+            stats["get_updates_total_updates"] += updates_count
+            stats["last_get_updates_count"] = updates_count
+            stats["last_get_updates_status"] = event.get("status_code")
+
     def _record_update_ingress(
         self,
         update_id: Optional[int],
@@ -2245,21 +2271,65 @@ class TelegramAdapter(BasePlatformAdapter):
                 # polling reconnect + bot API bootstrap/delete_webhook calls.
                 request = HTTPXRequest(
                     **request_kwargs,
-                    httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            fallback_ips,
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
                 )
                 get_updates_request = HTTPXRequest(
                     **request_kwargs,
-                    httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            fallback_ips,
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
                 )
             elif proxy_url:
                 logger.info("[%s] Proxy detected; passing explicitly to HTTPXRequest: %s", self.name, proxy_url)
-                request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
-                get_updates_request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
+                request = HTTPXRequest(
+                    **request_kwargs,
+                    proxy=proxy_url,
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            fallback_ips,
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
+                )
+                get_updates_request = HTTPXRequest(
+                    **request_kwargs,
+                    proxy=proxy_url,
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            fallback_ips,
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
+                )
             else:
                 if disable_fallback:
                     logger.info("[%s] Telegram fallback-IP transport disabled via env", self.name)
-                request = HTTPXRequest(**request_kwargs)
-                get_updates_request = HTTPXRequest(**request_kwargs)
+                request = HTTPXRequest(
+                    **request_kwargs,
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            [],
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
+                )
+                get_updates_request = HTTPXRequest(
+                    **request_kwargs,
+                    httpx_kwargs={
+                        "transport": TelegramFallbackTransport(
+                            [],
+                            telemetry_callback=self._record_transport_telemetry,
+                        )
+                    },
+                )
 
             builder = builder.request(request).get_updates_request(get_updates_request)
             self._app = builder.build()
@@ -6739,6 +6809,7 @@ class TelegramAdapter(BasePlatformAdapter):
     _HEALBITE_LOG_FIELD_ALLOWLIST = {
         "action",
         "amount_ml",
+        "api_method",
         "auth_decision",
         "choice_type",
         "chunk_count",
@@ -6747,6 +6818,10 @@ class TelegramAdapter(BasePlatformAdapter):
         "context",
         "duration_ms",
         "error_type",
+        "max_update_id",
+        "min_update_id",
+        "request_method",
+        "updates_count",
         "entry_count",
         "handler",
         "handler_outcome",
@@ -6991,6 +7066,7 @@ class TelegramAdapter(BasePlatformAdapter):
         edit_mode = text.casefold().startswith("/start edit")
         if (
             profile is None
+            or bool(profile_missing_fields(profile))
             or profile.daily_kcal_target is None
             or profile_store.get_onboarding_state(int(user_id)) is not None
             or edit_mode

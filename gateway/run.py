@@ -1943,7 +1943,7 @@ def _healbite_public_lane_decision(
         }
 
     try:
-        pending = get_default_nutrition_diary().get_pending_meal(user_id, include_expired=True)
+        pending = get_default_nutrition_diary().get_pending_state(user_id, include_expired=True)
     except PermissionError:
         pending = None
     if pending is not None and _healbite_pending_choice(text_value) is not None:

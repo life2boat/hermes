@@ -43,15 +43,19 @@ def test_create_sqlite_snapshot_consistent_and_permissions(tmp_path: Path):
 def test_check_qdrant_state_handles_errors_gracefully():
     state = check_qdrant_state("http://127.0.0.1:9999")
     assert "ERROR" in state["health"]
-    assert state["collections"] == []
+    assert isinstance(state["collections"], dict)
 
 
 def test_inspect_container_image_extracts_digest_and_revision():
     inspect_output = [
         {
-            "Image": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "Image": (
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            ),
             "ImageManifestDescriptor": {
-                "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                "digest": (
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                )
             },
             "Config": {"Labels": {"org.opencontainers.image.revision": "abc123rev"}},
         }

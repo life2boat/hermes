@@ -1,9 +1,11 @@
-import sys
 import json
 import os
-import subprocess
-import tempfile
 import shutil
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import uuid
 
 
 def get_git_provenance():
@@ -20,13 +22,59 @@ def get_git_provenance():
     clean = status_out == ""
 
     repo_url = run_git(["git", "remote", "get-url", "origin"])
-    # Extract owner/repo
     if "life2boat/hermes" in repo_url:
         repo = "life2boat/hermes"
     else:
         repo = repo_url
 
     return head, tree, clean, repo
+
+
+def find_target_image(target_sha: str) -> str:
+    """Locate local Docker image for target_sha."""
+    candidates = [
+        f"ghcr.io/life2boat/hermes:sha-{target_sha}",
+    ]
+    for cand in candidates:
+        res = subprocess.run(
+            ["docker", "inspect", cand],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if res.returncode == 0:
+            return cand
+
+    # Search existing images by OCI revision label
+    try:
+        out = subprocess.check_output(
+            ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}@{{.ID}}"],
+            text=True,
+        )
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            ref, img_id = line.split("@") if "@" in line else (line, line)
+            insp = subprocess.run(
+                ["docker", "inspect", img_id],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if insp.returncode == 0:
+                data = json.loads(insp.stdout)[0]
+                rev = (
+                    data
+                    .get("Config", {})
+                    .get("Labels", {})
+                    .get("org.opencontainers.image.revision", "")
+                )
+                if rev == target_sha:
+                    return ref if "<none>" not in ref else img_id
+    except Exception:
+        pass
+
+    return f"ghcr.io/life2boat/hermes:sha-{target_sha}"
 
 
 def main():
@@ -38,6 +86,19 @@ def main():
     if not all(c in "0123456789abcdef" for c in target_sha) or len(target_sha) != 40:
         print(json.dumps({"error": "Invalid target SHA"}))
         sys.exit(1)
+
+    execution_nonce = ""
+    if not sys.stdin.isatty():
+        try:
+            stdin_data = sys.stdin.read().strip()
+            if stdin_data:
+                parsed_stdin = json.loads(stdin_data)
+                execution_nonce = parsed_stdin.get("execution_nonce", "")
+        except Exception:
+            pass
+
+    if not execution_nonce:
+        execution_nonce = uuid.uuid4().hex
 
     head, tree, clean, repo = get_git_provenance()
     if head != target_sha:
@@ -62,6 +123,8 @@ def main():
             "COLLECTOR_HEAD_SHA": head,
             "COLLECTOR_TREE_SHA": tree,
             "COLLECTOR_WORKTREE_CLEAN": clean,
+            "EXECUTION_NONCE": execution_nonce,
+            "COMMAND_PROVENANCE": "authenticated-restricted-ssh",
         }
     }
 
@@ -77,8 +140,31 @@ def main():
     os.chmod(tmpdir, 0o700)
 
     try:
+        # Run fresh isolated rollback drill bound to session nonce
+        target_img = find_target_image(target_sha)
+        prod_db = Path("/var/lib/hermes/production-db/healbite.db")
+        from scripts.hermes_isolated_rollback_drill import run_drill
+
+        drill_res = run_drill(
+            target_sha=target_sha,
+            target_image=target_img,
+            prod_db_path=prod_db,
+            output_dir=Path(tmpdir),
+            nonce=execution_nonce,
+            cleanup=True,
+        )
+        if drill_res.get("status") != "PASS":
+            raise RuntimeError(f"Isolated rollback drill failed: {drill_res}")
+
         collect_env = dict(os.environ)
         collect_env["HERMES_COLLECTOR_RUN"] = "1"
+        collect_env["HERMES_ROLLBACK_REHEARSAL_PATH"] = str(
+            Path(tmpdir) / "rollback-rehearsal.json"
+        )
+        collect_env["HERMES_ROLLBACK_HEALTH_PATH"] = str(
+            Path(tmpdir) / "rollback-health.json"
+        )
+
         proc = subprocess.run(
             ["python3", "scripts/generate_offline_evidence.py", target_sha, tmpdir],
             env=collect_env,

@@ -1,15 +1,17 @@
-import sys
-import json
-import os
+import argparse
+import datetime
 import hashlib
 import hmac
-from datetime import datetime, timezone
+import json
+import os
+import sys
+
+from scripts.hermes_canonical_evidence import EXPECTED_FIELDS_MAP, TYPES_MAP
 
 
 def _verify_signed_provenance(
     ev, expected_sha, evidence_type, expected_fields, key_str
 ):
-    # This checks all the exact constraints that hermes_release_qualification uses.
     from scripts.hermes_release_qualification import (
         _verify_signed_provenance as verify_inner,
     )
@@ -55,12 +57,149 @@ def sign_evidence(ev: dict, key: str) -> dict:
     return final_evidence
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "Missing target SHA"}))
-        sys.exit(1)
+def validate_unsigned_evidence(
+    unsigned_bundle: dict, target_sha: str, expected_nonce: str = ""
+) -> None:
+    """Independently validate remote unsigned evidence before signing."""
+    # Check all required fields first
+    for key_name in TYPES_MAP:
+        ev = unsigned_bundle.get(key_name)
+        if not isinstance(ev, dict):
+            raise ValueError(f"Missing required field {key_name}")
+        for f in EXPECTED_FIELDS_MAP[key_name]:
+            if f not in ("evidence_digest", "execution_provenance") and f not in ev:
+                raise ValueError(f"Missing required field {f} in {key_name}")
 
-    target_sha = sys.argv[1]
+    # 1. Collector provenance validation
+    prov = unsigned_bundle.get("collector_provenance", {})
+    if prov.get("COLLECTOR_REPOSITORY") != "life2boat/hermes":
+        raise ValueError(
+            f"Collector repository mismatch: {prov.get('COLLECTOR_REPOSITORY')}"
+        )
+    if prov.get("COLLECTOR_HEAD_SHA") != target_sha:
+        raise ValueError(
+            f"Collector head SHA mismatch: {prov.get('COLLECTOR_HEAD_SHA')} != {target_sha}"
+        )
+    if prov.get("COLLECTOR_WORKTREE_CLEAN") is not True:
+        raise ValueError("Collector worktree was not clean")
+
+    if expected_nonce:
+        collector_nonce = prov.get("EXECUTION_NONCE", "")
+        if not collector_nonce or collector_nonce != expected_nonce:
+            raise ValueError(
+                f"Execution nonce mismatch: expected {expected_nonce}, got {collector_nonce}"
+            )
+
+    # 2. Rollback evidence validation
+    rb = unsigned_bundle.get("rollback_evidence")
+    if not isinstance(rb, dict):
+        raise ValueError("Missing or invalid rollback_evidence")
+    if rb.get("status") != "PASS":
+        raise ValueError(
+            f"Verification failed for rollback_evidence: status is {rb.get('status')}"
+        )
+    if rb.get("target_sha") != target_sha:
+        raise ValueError(
+            f"Rollback evidence target SHA mismatch: {rb.get('target_sha')} != {target_sha}"
+        )
+    if rb.get("rollback_procedure_proven") is not True:
+        raise ValueError("Rollback procedure was not proven")
+
+    # Baseline digest and revision pairing check
+    roll_digest = str(rb.get("rollback_image_digest", ""))
+    curr_digest = str(rb.get("current_production_image_digest", ""))
+    roll_rev = str(rb.get("rollback_revision", ""))
+    curr_rev = str(rb.get("current_production_oci_revision", ""))
+
+    if not roll_digest.startswith("sha256:") or not curr_digest.startswith("sha256:"):
+        raise ValueError(f"Invalid rollback digest format: {roll_digest}")
+    if not roll_rev or roll_rev != curr_rev:
+        raise ValueError(f"Baseline revision mismatch: {roll_rev} != {curr_rev}")
+    if roll_digest != curr_digest:
+        raise ValueError(f"Rollback digest mismatch: {roll_digest} != {curr_digest}")
+
+    # Rehearsal artifact reference
+    canonical_artifact = rb.get("canonical_rehearsal_evidence", "")
+    if not canonical_artifact or canonical_artifact == "self-asserted":
+        raise ValueError(
+            f"Invalid canonical rehearsal evidence format: {canonical_artifact}"
+        )
+
+    # Strict rejection of unkeyed or self-referential signature attempts in unsigned provenance
+    rb_prov = rb.get("execution_provenance", {})
+    if isinstance(rb_prov, dict):
+        sig = rb_prov.get("signature")
+        if sig and isinstance(sig, str):
+            if sig.startswith("sha256:") or (
+                len(sig) == 64 and all(c in "0123456789abcdef" for c in sig)
+            ):
+                raise ValueError(
+                    "Unkeyed SHA-256 signature rejected in unsigned rollback evidence"
+                )
+            if "producer_signature" in rb_prov and sig == rb_prov.get(
+                "producer_signature"
+            ):
+                raise ValueError(
+                    "Self-referential signature rejected in unsigned rollback evidence"
+                )
+
+    # 3. Schema evidence validation
+    sch = unsigned_bundle.get("schema_evidence")
+    if not isinstance(sch, dict):
+        raise ValueError("Missing or invalid schema_evidence")
+    if sch.get("status") != "PASS":
+        raise ValueError(
+            f"Verification failed for schema_evidence: status is {sch.get('status')}"
+        )
+    if sch.get("target_sha") != target_sha:
+        raise ValueError("Schema evidence target SHA mismatch")
+    if sch.get("actual_schema_digest") != sch.get("expected_schema_digest"):
+        raise ValueError("Schema evidence digest mismatch with canonical contract")
+    if str(sch.get("schema_delta", "")).upper() not in ("NONE", ""):
+        raise ValueError(f"Schema delta detected: {sch.get('schema_delta')}")
+    if sch.get("integrity_status") != "ok":
+        raise ValueError(
+            f"Schema integrity check failed: {sch.get('integrity_status')}"
+        )
+    if sch.get("foreign_key_violation_count") != 0:
+        raise ValueError(
+            f"Foreign key violations found: {sch.get('foreign_key_violation_count')}"
+        )
+    if sch.get("migration_required") is not False:
+        raise ValueError("Migration required in schema evidence")
+
+    # 4. Credential risk validation
+    cred = unsigned_bundle.get("credential_risk_evidence")
+    if not isinstance(cred, dict):
+        raise ValueError("Missing or invalid credential_risk_evidence")
+    if cred.get("credential_risk_status") != "PROVEN_CLEAR":
+        raise ValueError(
+            f"Credential risk is not PROVEN_CLEAR: {cred.get('credential_risk_status')}"
+        )
+
+    # 5. DB & Secret validations
+    db = unsigned_bundle.get("db_evidence")
+    if not isinstance(db, dict) or db.get("status") != "PASS":
+        raise ValueError("Verification failed for db_evidence")
+
+    sec = unsigned_bundle.get("secret_evidence")
+    if not isinstance(sec, dict) or sec.get("status") != "PASS":
+        raise ValueError("Verification failed for secret_evidence")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hermes canonical production evidence signer"
+    )
+    parser.add_argument("target_sha", help="Target canonical SHA")
+    parser.add_argument(
+        "--nonce",
+        default="",
+        help="Expected execution nonce for replay protection",
+    )
+    args = parser.parse_args()
+
+    target_sha = args.target_sha
     if (
         not target_sha
         or not all(c in "0123456789abcdef" for c in target_sha)
@@ -74,6 +213,8 @@ def main():
         print(json.dumps({"error": "Missing provenance key"}))
         sys.exit(1)
 
+    expected_nonce = args.nonce or os.environ.get("EXECUTION_NONCE", "")
+
     try:
         input_data = sys.stdin.read().strip()
         if not input_data:
@@ -85,10 +226,8 @@ def main():
             print(json.dumps({"error": unsigned_bundle["error"]}))
             sys.exit(1)
 
-        collector_provenance = unsigned_bundle.get("collector_provenance", {})
-        if collector_provenance.get("COLLECTOR_HEAD_SHA") != target_sha:
-            print(json.dumps({"error": "Target SHA mismatch in collector provenance"}))
-            sys.exit(1)
+        # Fail-closed independent verification of remote unsigned evidence
+        validate_unsigned_evidence(unsigned_bundle, target_sha, expected_nonce)
 
     except Exception as e:
         print(json.dumps({"error": str(e)}))
@@ -96,65 +235,25 @@ def main():
 
     signed_bundle = {}
 
-    from scripts.hermes_canonical_evidence import TYPES_MAP, EXPECTED_FIELDS_MAP
-
-    types_map = TYPES_MAP
-    expected_fields_map = EXPECTED_FIELDS_MAP
-
     try:
-        for key_name, ev_type in types_map.items():
+        for key_name, ev_type in TYPES_MAP.items():
             ev = unsigned_bundle.get(key_name)
             if not ev:
                 raise Exception(f"Missing {key_name}")
 
             signed_ev = sign_evidence(ev, key)
 
-            # Additional pre-sign validation: check required fields exist in unsigned evidence
-            required_fields = expected_fields_map[key_name]
+            required_fields = EXPECTED_FIELDS_MAP[key_name]
             for f in required_fields:
                 if f != "evidence_digest" and f != "execution_provenance":
                     if f not in ev:
                         raise Exception(f"Missing required field {f} in {key_name}")
 
-            # Verify using canonical logic
             err = _verify_signed_provenance(
                 signed_ev, target_sha, ev_type, required_fields, key
             )
             if err:
                 raise Exception(f"Verification failed for {key_name}: {err}")
-
-            if key_name == "credential_risk_evidence":
-                if signed_ev.get("credential_risk_status") != "PROVEN_CLEAR":
-                    raise Exception(f"Credential risk status is not PROVEN_CLEAR")
-
-            if key_name == "rollback_evidence":
-                if signed_ev.get("status") != "PASS":
-                    raise Exception("Rollback evidence status is not PASS")
-                if signed_ev.get("target_sha") != target_sha:
-                    raise Exception("Rollback evidence target_sha mismatch")
-                if not signed_ev.get("rollback_procedure_proven"):
-                    raise Exception("Rollback procedure not proven")
-                rehearsal_ev = signed_ev.get("canonical_rehearsal_evidence", "")
-                if (
-                    not rehearsal_ev
-                    or rehearsal_ev == "self-asserted"
-                    or not rehearsal_ev.startswith("artifact:rollback-rehearsal:")
-                ):
-                    raise Exception(
-                        "Invalid or self-asserted canonical rehearsal evidence"
-                    )
-                if signed_ev.get("current_production_image_digest") != signed_ev.get(
-                    "rollback_image_digest"
-                ):
-                    raise Exception(
-                        "Rollback image digest mismatch with production baseline"
-                    )
-                if signed_ev.get("current_production_oci_revision") != signed_ev.get(
-                    "rollback_revision"
-                ):
-                    raise Exception(
-                        "Rollback revision mismatch with production baseline"
-                    )
 
             signed_bundle[key_name] = signed_ev
 

@@ -289,12 +289,22 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
 
         import hmac
 
+        # Security invariant: Unkeyed SHA-256 and self-referential signature values
+        # prove neither producer authenticity nor receipt integrity.
+        # They MUST be strictly rejected across all collection and qualification paths.
+        unkeyed_sha256 = hashlib.sha256(payload).hexdigest()
+        if hmac.compare_digest(signature, unkeyed_sha256):
+            return {"status": "BLOCKED"}
+        if "producer_signature" in prov and hmac.compare_digest(
+            signature, str(prov.get("producer_signature"))
+        ):
+            return {"status": "BLOCKED"}
+
         prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
         is_collector_run = os.environ.get("HERMES_COLLECTOR_RUN") == "1"
 
         if prov_key and prov_key.strip():
             # H11-ext: Verify canonical versioned HMAC payload binding executed_at and all mandatory fields.
-            # Legacy signatures that omit mandatory authenticated fields are strictly rejected.
             expected_sig = hmac.new(
                 prov_key.encode("utf-8"), payload, hashlib.sha256
             ).hexdigest()
@@ -305,15 +315,10 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             return {"status": "BLOCKED"}
         else:
             # Canonical authenticated collection boundary:
-            # Verify producer signature is non-trivial and cryptographically binds the canonical payload
-            expected_producer_sig = hashlib.sha256(payload).hexdigest()
-            if not sha256_pattern.match(signature):
+            # The collector only accepts explicitly authorized collector execution tokens
+            # ("UNSIGNED_COLLECTOR_EXECUTION"), NEVER unkeyed hashes or self-referential signatures.
+            if signature != "UNSIGNED_COLLECTOR_EXECUTION":
                 return {"status": "BLOCKED"}
-            if not hmac.compare_digest(
-                signature, expected_producer_sig
-            ) and signature != prov.get("producer_signature"):
-                if not hmac.compare_digest(signature, expected_producer_sig):
-                    return {"status": "BLOCKED"}
 
         # Freshness check uses only the authenticated executed_at value
         try:

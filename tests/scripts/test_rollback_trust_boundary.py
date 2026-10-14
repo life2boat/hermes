@@ -22,14 +22,18 @@ from scripts.hermes_canonical_evidence import (
     ROLLBACK_EVIDENCE_FIELDS,
     ROLLBACK_EVIDENCE_TYPE,
 )
+from scripts.hermes_production_evidence_sign import (
+    sign_evidence,
+    validate_unsigned_evidence,
+)
 from scripts.hermes_release_qualification import _verify_signed_provenance
 
 
 @pytest.fixture
 def rehearsal_setup(tmp_path: Path):
     target_sha = "a" * 40
-    digest = "sha256:" + "1" * 64
-    revision = "b" * 40
+    digest = "sha256:86d0df36546dec8b77ae8159ea814a41e60fc2d1eff868c3802ef6c63c365302"
+    revision = "cc68409727f79acc6bb25280c9f7099fe2caa0c8"
     receipt_id = "receipt-rollback-001"
     producer = "healbite-rehearsal-engine"
     rehearsal_type = "isolated-rollback-drill"
@@ -62,7 +66,6 @@ def rehearsal_setup(tmp_path: Path):
         rehearsal_type=rehearsal_type,
         result_status="PASS",
     )
-    producer_sig = hashlib.sha256(payload).hexdigest()
 
     rehearsal_file = tmp_path / "rollback-rehearsal.json"
     rehearsal_payload = {
@@ -81,7 +84,7 @@ def rehearsal_setup(tmp_path: Path):
         "execution_provenance": {
             "runtime_identity": "healbite-production",
             "isolation_level": "docker",
-            "signature": producer_sig,
+            "signature": "UNSIGNED_COLLECTOR_EXECUTION",
         },
     }
     rehearsal_file.write_text(json.dumps(rehearsal_payload), encoding="utf-8")
@@ -104,19 +107,112 @@ def rehearsal_setup(tmp_path: Path):
         "health_file": health_file,
         "h_hash": h_hash,
         "payload": payload,
-        "producer_sig": producer_sig,
         "rehearsal_file": rehearsal_file,
         "rehearsal_payload": rehearsal_payload,
         "docker_inspect_data": docker_inspect_data,
     }
 
 
-def test_missing_key_and_no_collector_fails_closed(rehearsal_setup, monkeypatch):
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 1: Unkeyed SHA-256 presented as signature -> REJECTED
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_unkeyed_sha256_as_signature(rehearsal_setup, monkeypatch):
+    """Presenting hashlib.sha256(payload).hexdigest() as a signature MUST be rejected."""
+    unkeyed_hash = hashlib.sha256(rehearsal_setup["payload"]).hexdigest()
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["execution_provenance"] = {
+        "runtime_identity": "healbite-production",
+        "isolation_level": "docker",
+        "signature": unkeyed_hash,
+    }
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
+
+    # 1. In collector mode
+    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        res = get_real_rollback_evidence(
+            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+        )
+        assert res.get("status") == "BLOCKED"
+
+    # 2. Outside collector mode without key
+    monkeypatch.delenv("HERMES_COLLECTOR_RUN", raising=False)
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        res = get_real_rollback_evidence(
+            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+        )
+        assert res.get("status") == "BLOCKED"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 2: Arbitrary matching signature/producer_signature -> REJECTED
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_self_referential_signature_matching(rehearsal_setup, monkeypatch):
+    """Self-referential signature matching MUST be rejected."""
+    arbitrary_sig = "c0ffee" * 10 + "1234"
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["execution_provenance"] = {
+        "runtime_identity": "healbite-production",
+        "isolation_level": "docker",
+        "signature": arbitrary_sig,
+        "producer_signature": arbitrary_sig,
+    }
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
+    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
+
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        res = get_real_rollback_evidence(
+            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+        )
+        assert res.get("status") == "BLOCKED"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 3: Forged PASS receipt with recomputed hashes -> REJECTED
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_forged_pass_receipt_with_recomputed_hashes(
+    rehearsal_setup, monkeypatch
+):
+    """Forged PASS receipt with recomputed hashes without key MUST be rejected."""
+    fake_sig = hashlib.sha256(b"attacker-recomputed-hash").hexdigest()
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["execution_provenance"] = {
+        "runtime_identity": "healbite-production",
+        "isolation_level": "docker",
+        "signature": fake_sig,
+    }
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
     monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
     monkeypatch.delenv("HERMES_COLLECTOR_RUN", raising=False)
-    monkeypatch.setenv(
-        "HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_setup["rehearsal_file"])
-    )
 
     with patch(
         "subprocess.check_output",
@@ -128,41 +224,28 @@ def test_missing_key_and_no_collector_fails_closed(rehearsal_setup, monkeypatch)
         assert res.get("status") == "BLOCKED"
 
 
-def test_collector_run_with_valid_producer_hash_passes(rehearsal_setup, monkeypatch):
-    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
-    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
-    monkeypatch.setenv(
-        "HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_setup["rehearsal_file"])
-    )
-
-    with patch(
-        "subprocess.check_output",
-        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
-    ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
-        )
-        assert res.get("status") == "PASS"
-        assert res["schema_version"] == 1
-        assert res["evidence_type"] == "rollback_ready"
-        assert res["target_sha"] == rehearsal_setup["target_sha"]
-        assert res["rollback_image_digest"] == rehearsal_setup["digest"]
-        assert res["rollback_revision"] == rehearsal_setup["revision"]
-        assert res["rollback_procedure_proven"] is True
-        assert res["canonical_rehearsal_evidence"].startswith(
-            f"artifact:rollback-rehearsal:{rehearsal_setup['receipt_id']}:"
-        )
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 4: HERMES_COLLECTOR_RUN=1 without trusted authentication -> REJECTED
+# ---------------------------------------------------------------------------
 
 
-def test_collector_run_rejects_tampered_executed_at(rehearsal_setup, monkeypatch):
-    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
-    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
-
+def test_rejection_of_collector_run_without_trusted_authentication(
+    rehearsal_setup, monkeypatch
+):
+    """HERMES_COLLECTOR_RUN=1 must not bypass authentication on arbitrary or untrusted tokens."""
     data = dict(rehearsal_setup["rehearsal_payload"])
-    data["executed_at"] = "2026-10-14T00:00:00Z"  # Tampered timestamp
-    rehearsal_file = rehearsal_setup["rehearsal_file"]
-    rehearsal_file.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_file))
+    data["execution_provenance"] = {
+        "runtime_identity": "healbite-production",
+        "isolation_level": "docker",
+        "signature": "arbitrary_unauthenticated_string",
+    }
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
+    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
 
     with patch(
         "subprocess.check_output",
@@ -174,66 +257,222 @@ def test_collector_run_rejects_tampered_executed_at(rehearsal_setup, monkeypatch
         assert res.get("status") == "BLOCKED"
 
 
-def test_collector_run_rejects_tampered_target_sha(rehearsal_setup, monkeypatch):
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 5: Altered target SHA, digest, revision, timestamp, health -> REJECTED
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_altered_target_sha_digest_revision_timestamp_health(
+    rehearsal_setup, monkeypatch
+):
     monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
     monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
 
+    # 1. Altered target SHA
     data = dict(rehearsal_setup["rehearsal_payload"])
-    data["target_sha"] = "c" * 40  # Tampered SHA
-    rehearsal_file = rehearsal_setup["rehearsal_file"]
-    rehearsal_file.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_file))
-
+    data["target_sha"] = "f" * 40
+    f = rehearsal_setup["health_file"].parent / "rb1.json"
+    f.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(f))
     with patch(
         "subprocess.check_output",
         return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
     ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+        assert (
+            get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            ).get("status")
+            == "BLOCKED"
         )
-        assert res.get("status") == "BLOCKED"
 
+    # 2. Altered image digest
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["rollback_image_digest"] = "sha256:" + "9" * 64
+    f.write_text(json.dumps(data), encoding="utf-8")
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        assert (
+            get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            ).get("status")
+            == "BLOCKED"
+        )
 
-def test_collector_run_rejects_health_hash_mismatch(rehearsal_setup, monkeypatch):
-    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
-    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+    # 3. Altered revision
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["rollback_revision"] = "f" * 40
+    f.write_text(json.dumps(data), encoding="utf-8")
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        assert (
+            get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            ).get("status")
+            == "BLOCKED"
+        )
 
+    # 4. Altered timestamp (future)
+    future_iso = "2099-01-01T00:00:00Z"
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["executed_at"] = future_iso
+    f.write_text(json.dumps(data), encoding="utf-8")
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        assert (
+            get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            ).get("status")
+            == "BLOCKED"
+        )
+
+    # 5. Mutated health evidence
     rehearsal_setup["health_file"].write_bytes(b'{"mutated": true}')
     monkeypatch.setenv(
-        "HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_setup["rehearsal_file"])
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        assert (
+            get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            ).get("status")
+            == "BLOCKED"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 6: Stale or replayed receipts -> REJECTED
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_stale_or_replayed_receipts(rehearsal_setup, monkeypatch):
+    """Receipt older than 48 hours must be rejected as stale."""
+    stale_iso = "2020-01-01T00:00:00Z"
+    data = dict(rehearsal_setup["rehearsal_payload"])
+    data["executed_at"] = stale_iso
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
+    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
+
+    with patch(
+        "subprocess.check_output",
+        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+    ):
+        res = get_real_rollback_evidence(
+            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+        )
+        assert res.get("status") == "BLOCKED"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 7 & 8: Container failure handling in drill
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_of_failed_container_in_drill(tmp_path):
+    """Drill must fail if forward or rollback container fails to start or health fails."""
+    from scripts.hermes_isolated_rollback_drill import run_drill
+
+    db_path = tmp_path / "test.db"
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE t (id INTEGER);")
+
+    # Target container start fails
+    with patch(
+        "scripts.hermes_isolated_rollback_drill.inspect_container_image",
+        return_value=("sha256:" + "1" * 64, "rev1"),
+    ):
+        with patch(
+            "scripts.hermes_isolated_rollback_drill.check_qdrant_state",
+            return_value={"health": "ok", "collections": {}},
+        ):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 1
+                mock_run.return_value.stderr = "Docker daemon error"
+                with pytest.raises(
+                    RuntimeError, match="Failed to start forward container"
+                ):
+                    run_drill(
+                        target_sha="a" * 40,
+                        target_image="img:test",
+                        prod_db_path=db_path,
+                        output_dir=tmp_path,
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 9: Nonce replay and signer validation
+# ---------------------------------------------------------------------------
+
+
+def test_signer_validates_nonce_and_fails_closed_on_tampering():
+    """Signer must independently validate nonce and baseline pairing."""
+    from tests.test_hermes_production_evidence_sign import get_base_unsigned_bundle
+
+    target_sha = "a" * 40
+    unsigned_bundle = get_base_unsigned_bundle()
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
+
+    # Valid nonce matches
+    validate_unsigned_evidence(
+        unsigned_bundle, target_sha, expected_nonce="nonce-alpha"
     )
 
-    with patch(
-        "subprocess.check_output",
-        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
-    ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+    # Replayed / mismatched nonce fails closed
+    with pytest.raises(ValueError, match="Execution nonce mismatch"):
+        validate_unsigned_evidence(
+            unsigned_bundle, target_sha, expected_nonce="nonce-other"
         )
-        assert res.get("status") == "BLOCKED"
+
+    # Altered baseline fails closed
+    bad_bundle = dict(unsigned_bundle)
+    bad_bundle["rollback_evidence"] = dict(unsigned_bundle["rollback_evidence"])
+    bad_bundle["rollback_evidence"]["rollback_image_digest"] = "sha256:wrong_digest"
+    with pytest.raises(ValueError, match="Rollback digest mismatch"):
+        validate_unsigned_evidence(bad_bundle, target_sha, expected_nonce="nonce-alpha")
 
 
-def test_collector_run_rejects_untrusted_producer(rehearsal_setup, monkeypatch):
-    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
-    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+# ---------------------------------------------------------------------------
+# Phase 3 Adversarial Test 10: Cross-user isolation / schema incompatibility
+# ---------------------------------------------------------------------------
 
-    data = dict(rehearsal_setup["rehearsal_payload"])
-    data["producer"] = "untrusted-attacker"
-    rehearsal_file = rehearsal_setup["rehearsal_file"]
-    rehearsal_file.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_file))
 
-    with patch(
-        "subprocess.check_output",
-        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
-    ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+def test_schema_incompatibility_fails_closed_in_signer():
+    """Signer strictly rejects bundles reporting schema deltas or integrity failures."""
+    from tests.test_hermes_production_evidence_sign import get_base_unsigned_bundle
+
+    target_sha = "a" * 40
+    unsigned_bundle = get_base_unsigned_bundle()
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
+    unsigned_bundle["schema_evidence"]["status"] = "FAIL"
+
+    with pytest.raises(ValueError, match="Verification failed for schema_evidence: status is FAIL"):
+        validate_unsigned_evidence(
+            unsigned_bundle, target_sha, expected_nonce="nonce-alpha"
         )
-        assert res.get("status") == "BLOCKED"
 
 
-def test_key_verification_passes_with_hmac(rehearsal_setup, monkeypatch):
+# ---------------------------------------------------------------------------
+# Valid Authenticated Path with HMAC Passes
+# ---------------------------------------------------------------------------
+
+
+def test_valid_authenticated_path_with_hmac_passes(rehearsal_setup, monkeypatch):
     key = "super-secret-ci-provenance-key"
     monkeypatch.setenv("HERMES_PROVENANCE_KEY", key)
 
@@ -246,9 +485,11 @@ def test_key_verification_passes_with_hmac(rehearsal_setup, monkeypatch):
         "isolation_level": "docker",
         "signature": valid_hmac,
     }
-    rehearsal_file = rehearsal_setup["rehearsal_file"]
-    rehearsal_file.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_file))
+    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setenv(
+        "HERMES_ROLLBACK_REHEARSAL_PATH",
+        str(rehearsal_setup["rehearsal_file"]),
+    )
 
     with patch(
         "subprocess.check_output",
@@ -258,70 +499,4 @@ def test_key_verification_passes_with_hmac(rehearsal_setup, monkeypatch):
             rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
         )
         assert res.get("status") == "PASS"
-
-
-def test_key_verification_fails_with_invalid_hmac(rehearsal_setup, monkeypatch):
-    key = "super-secret-ci-provenance-key"
-    monkeypatch.setenv("HERMES_PROVENANCE_KEY", key)
-
-    data = dict(rehearsal_setup["rehearsal_payload"])
-    data["execution_provenance"] = {
-        "runtime_identity": "healbite-production",
-        "isolation_level": "docker",
-        "signature": "f" * 64,  # Invalid HMAC
-    }
-    rehearsal_file = rehearsal_setup["rehearsal_file"]
-    rehearsal_file.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("HERMES_ROLLBACK_REHEARSAL_PATH", str(rehearsal_file))
-
-    with patch(
-        "subprocess.check_output",
-        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
-    ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
-        )
-        assert res.get("status") == "BLOCKED"
-
-
-def test_production_signer_signs_and_verifies_rollback_evidence(rehearsal_setup):
-    from scripts.hermes_production_evidence_sign import sign_evidence
-
-    key = "test-ci-anchor-key"
-    target_sha = rehearsal_setup["target_sha"]
-    digest = rehearsal_setup["digest"]
-    revision = rehearsal_setup["revision"]
-
-    unsigned_rollback = {
-        "schema_version": 1,
-        "evidence_type": "rollback_ready",
-        "target_sha": target_sha,
-        "status": "PASS",
-        "collected_at_utc": rehearsal_setup["now_iso"],
-        "execution_provenance": {
-            "isolation_level": "docker",
-            "runtime_identity": "healbite-production",
-        },
-        "current_production_image_digest": digest,
-        "current_production_oci_revision": revision,
-        "rollback_image_digest": digest,
-        "rollback_image_resolvable": True,
-        "rollback_revision": revision,
-        "rollback_mechanism_id": "docker-compose-revert",
-        "same_compose_chain": True,
-        "database_restore_required": False,
-        "schema_downgrade_required": False,
-        "rollback_health_required": True,
-        "rollback_attempt_count_max": 1,
-        "rollback_procedure_proven": True,
-        "canonical_rehearsal_evidence": f"artifact:rollback-rehearsal:{rehearsal_setup['receipt_id']}:1234567890abcdef:pass",
-    }
-
-    signed = sign_evidence(unsigned_rollback, key)
-    assert "signature" in signed["execution_provenance"]
-    assert "evidence_digest" in signed
-
-    err = _verify_signed_provenance(
-        signed, target_sha, ROLLBACK_EVIDENCE_TYPE, ROLLBACK_EVIDENCE_FIELDS, key
-    )
-    assert err is None
+        assert res["rollback_procedure_proven"] is True

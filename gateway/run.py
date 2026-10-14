@@ -28,10 +28,12 @@ import asyncio
 import dataclasses
 import inspect
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import site
 import sys
@@ -1829,6 +1831,9 @@ def _healbite_public_onboarding_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+_CORRELATION_HMAC_KEY: bytes = secrets.token_bytes(32)
+
+
 def _healbite_event_correlation_id(event: Optional[MessageEvent]) -> str:
     if event is None:
         seed = "missing"
@@ -1843,13 +1848,11 @@ def _healbite_event_correlation_id(event: Optional[MessageEvent]) -> str:
                 str(getattr(event, "platform_update_id", "") or ""),
             ]
         )
-    return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
-
-
-def _privacy_safe_user_ref(user_id: Any) -> str:
-    if user_id is None:
-        return "none"
-    return hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:12]
+    return hmac.new(
+        _CORRELATION_HMAC_KEY,
+        seed.encode("utf-8", errors="ignore"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
 
 
 def _healbite_pending_choice(text: str) -> str | None:
@@ -8707,14 +8710,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             return None
 
                         corr = _healbite_event_correlation_id(event)
-                        user_ref = _privacy_safe_user_ref(getattr(source, "user_id", None))
 
                         # Public (non-admin / unpaired) users MUST fail closed on any vision failure or non-food.
                         if not is_authorized:
                             logger.info(
-                                "[Gateway][public_photo_fail_closed] corr=%s user_ref=%s validation_status=%s",
+                                "[Gateway][public_photo_fail_closed] corr=%s validation_status=%s",
                                 corr,
-                                user_ref,
                                 getattr(outcome, "validation_status", None),
                             )
                             await self._send_vision_unavailable_reply(source=source, event=event)
@@ -8724,9 +8725,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         validation_status = getattr(outcome, "validation_status", None)
                         if validation_status != "NON_FOOD":
                             logger.info(
-                                "[Gateway][authorized_photo_fail_closed] corr=%s user_ref=%s validation_status=%s",
+                                "[Gateway][authorized_photo_fail_closed] corr=%s validation_status=%s",
                                 corr,
-                                user_ref,
                                 validation_status,
                             )
                             await self._send_vision_unavailable_reply(source=source, event=event)

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 from types import SimpleNamespace
@@ -886,8 +887,10 @@ async def test_public_photo_fail_closed_logs_privacy_safe_identifiers(tmp_path, 
     assert len(log_messages) == 1
     msg = log_messages[0]
     assert "corr=" in msg
-    assert "user_ref=" in msg
+    assert "user_ref=" not in msg
     assert raw_user_id not in msg
+    assert hashlib.sha256(raw_user_id.encode("utf-8")).hexdigest()[:12] not in msg
+    assert hashlib.sha1(raw_user_id.encode("utf-8")).hexdigest()[:12] not in msg
 
 
 @pytest.mark.asyncio
@@ -914,5 +917,7 @@ async def test_authorized_photo_fail_closed_logs_privacy_safe_identifiers(tmp_pa
     assert len(log_messages) == 1
     msg = log_messages[0]
     assert "corr=" in msg
-    assert "user_ref=" in msg
+    assert "user_ref=" not in msg
     assert raw_user_id not in msg
+    assert hashlib.sha256(raw_user_id.encode("utf-8")).hexdigest()[:12] not in msg
+    assert hashlib.sha1(raw_user_id.encode("utf-8")).hexdigest()[:12] not in msg

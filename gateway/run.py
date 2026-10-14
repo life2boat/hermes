@@ -8673,7 +8673,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     len(image_paths),
                     getattr(source.platform, "value", source.platform),
                 )
-                if source.platform == Platform.TELEGRAM:
+                if source.platform == Platform.TELEGRAM and getattr(source, "user_id", None) is not None:
                     is_authorized = self._is_user_authorized(source)
                     is_explicit_generic = self._is_explicit_generic_image_authorization(source, event)
 

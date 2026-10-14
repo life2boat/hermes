@@ -8673,28 +8673,54 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     len(image_paths),
                     getattr(source.platform, "value", source.platform),
                 )
-                if source.platform == Platform.TELEGRAM:
-                    message_text, vision_success, pending_reply = await self._try_enrich_message_with_healbite_nutrition(
-                        event=event,
-                        source=source,
-                        user_text=message_text,
-                        image_paths=image_paths,
-                    )
-                    if pending_reply:
-                        adapter = self.adapters.get(source.platform)
-                        metadata = self._thread_metadata_for_source(
-                            source,
-                            self._reply_anchor_for_event(event),
+                if source.platform == Platform.TELEGRAM and getattr(source, "user_id", None) is not None:
+                    is_authorized = self._is_user_authorized(source)
+                    is_explicit_generic = self._is_explicit_generic_image_authorization(source, event)
+
+                    if not is_explicit_generic:
+                        message_text, vision_success, pending_reply, outcome = await self._try_enrich_message_with_healbite_nutrition(
+                            event=event,
+                            source=source,
+                            user_text=message_text,
+                            image_paths=image_paths,
                         )
-                        metadata = dict(metadata) if metadata else {}
-                        metadata["parse_mode"] = "HTML"
-                        if adapter and source.chat_id:
-                            await adapter.send(
-                                source.chat_id,
-                                pending_reply,
-                                metadata=metadata,
+                        if pending_reply:
+                            adapter = self.adapters.get(source.platform)
+                            metadata = self._thread_metadata_for_source(
+                                source,
+                                self._reply_anchor_for_event(event),
                             )
-                        return None
+                            metadata = dict(metadata) if metadata else {}
+                            metadata["parse_mode"] = "HTML"
+                            if adapter and source.chat_id:
+                                await adapter.send(
+                                    source.chat_id,
+                                    pending_reply,
+                                    metadata=metadata,
+                                )
+                            return None
+
+                        # Public (non-admin / unpaired) users MUST fail closed on any vision failure or non-food.
+                        if not is_authorized:
+                            logger.info(
+                                "[Gateway][public_photo_fail_closed] user=%s validation_status=%s",
+                                getattr(source, "user_id", None),
+                                getattr(outcome, "validation_status", None),
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
+
+                        # For authorized users, only preserve generic image handling if structured outcome confirmed NON_FOOD
+                        validation_status = getattr(outcome, "validation_status", None)
+                        if validation_status != "NON_FOOD":
+                            logger.info(
+                                "[Gateway][authorized_photo_fail_closed] user=%s validation_status=%s",
+                                getattr(source, "user_id", None),
+                                validation_status,
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
+
                     if _img_mode == "native":
                         # Defer attachment to the run_conversation call site.
                         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
@@ -8706,17 +8732,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Image routing: native (model supports vision). %d image(s) will be attached inline.",
                             len(image_paths),
                         )
-                    elif not vision_success:
+                    else:
                         logger.info(
-                            "[Gateway][vision_unavailable] platform=%s images=%d",
-                            getattr(source.platform, "value", source.platform),
-                            len(image_paths),
+                            "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                            _img_mode, len(image_paths),
                         )
-                        logger.info(
-                            "Image routing: auxiliary vision unavailable; replying with safe fallback and skipping text-only model path."
+                        message_text, vision_success = await self._try_enrich_message_with_vision(
+                            message_text,
+                            image_paths,
                         )
-                        await self._send_vision_unavailable_reply(source=source, event=event)
-                        return None
+                        if not vision_success:
+                            logger.info(
+                                "[Gateway][vision_unavailable] platform=%s images=%d",
+                                getattr(source.platform, "value", source.platform),
+                                len(image_paths),
+                            )
+                            logger.info(
+                                "Image routing: auxiliary vision unavailable; replying with safe fallback and skipping text-only model path."
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
                 else:
                     if _img_mode == "native":
                         # Defer attachment to the run_conversation call site.
@@ -13091,6 +13126,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
         return f"telegram:{source.chat_id}:{message_ref}"
 
+    def _is_explicit_generic_image_authorization(
+        self,
+        source: SessionSource,
+        event: MessageEvent,
+    ) -> bool:
+        """Return True when an authorized user explicitly requested generic image processing."""
+        if not self._is_user_authorized(source):
+            return False
+        text = (getattr(event, "text", None) or "").strip().lower()
+        if not text:
+            return False
+        explicit_prefixes = (
+            "/ask",
+            "/agent",
+            "/vision",
+            "/image",
+            "/img",
+            "/describe",
+            "/ocr",
+            "/code",
+            "/chat",
+            "/hermes",
+            "/doc",
+            "/analyze",
+        )
+        return any(text.startswith(p) for p in explicit_prefixes)
+
     async def _try_enrich_message_with_healbite_nutrition(
         self,
         *,
@@ -13098,15 +13160,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: SessionSource,
         user_text: str,
         image_paths: List[str],
-    ) -> tuple[str, bool, str | None]:
+    ) -> tuple[str, bool, str | None, Any]:
         from gateway.healbite_nutrition_diary import (
+            NutritionDiaryOutcome,
             format_nutrition_context,
             format_pending_meal_prompt,
         )
 
         try:
             if not getattr(source, "user_id", None):
-                return user_text, False, None
+                return user_text, False, None, NutritionDiaryOutcome(available=False, validation_status="MISSING_USER")
             diary = self._get_healbite_nutrition_diary()
             outcome = await diary.analyze_and_maybe_log(
                 user_id=int(source.user_id),
@@ -13121,23 +13184,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "[Gateway][vision_failed] nutrition diary analysis error_type=%s",
                 exc.__class__.__name__,
             )
-            return user_text, False, None
+            return user_text, False, None, NutritionDiaryOutcome(available=False, validation_status="PROVIDER_ERROR")
         if not outcome.available:
-            return user_text, False, None
+            return user_text, False, None, outcome
         if outcome.clarification_text:
-            return user_text, True, outcome.clarification_text
+            return user_text, True, outcome.clarification_text, outcome
         if outcome.record is None:
-            return user_text, False, None
+            return user_text, False, None, outcome
         if outcome.pending:
-            return user_text, True, format_pending_meal_prompt(outcome.record)
+            return user_text, True, format_pending_meal_prompt(outcome.record), outcome
         context = format_nutrition_context(
             outcome.record,
             saved=outcome.saved,
             duplicate=outcome.duplicate,
         )
         if user_text:
-            return f"{context}\n\n{user_text}", True, None
-        return context, True, None
+            return f"{context}\n\n{user_text}", True, None, outcome
+        return context, True, None, outcome
 
     async def _try_enrich_message_with_vision(
         self,

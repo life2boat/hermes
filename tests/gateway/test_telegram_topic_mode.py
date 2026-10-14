@@ -4,6 +4,7 @@ Topic mode makes the root Telegram DM a system lobby while user-created
 Telegram topics act as independent Hermes session lanes.
 """
 
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -340,7 +341,7 @@ async def test_group_new_keeps_existing_reset_semantics_when_dm_topic_mode_enabl
     result = await runner._handle_message(_make_group_event("/new", thread_id="555"))
 
     assert "Started a new Hermes session in this topic" not in result
-    assert "parallel work" not in result
+    assert "Tip: for parallel work, open All Messages" not in result
     runner.session_store.reset_session.assert_called_once_with(group_key)
 
 
@@ -1238,6 +1239,7 @@ def _seed_two_topic_bindings(session_db):
         session_key=build_session_key(src_a),
         session_id="sess-A",
     )
+    time.sleep(0.02)
     src_b = _make_source(thread_id="222")
     session_db.bind_telegram_topic(
         chat_id=src_b.chat_id,

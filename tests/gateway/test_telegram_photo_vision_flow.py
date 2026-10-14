@@ -513,8 +513,41 @@ async def test_runner_photo_native_mode_routes_food_photo_to_healbite(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_runner_photo_native_mode_non_food_attaches_to_pending_native(tmp_path):
+async def test_runner_photo_native_mode_structured_non_food_attaches_to_pending_native_for_authorized_user(tmp_path):
     runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: True
+    source = _runner_source()
+    event = _runner_photo_event(source, text="What is this document?")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    non_food_payload = json.dumps({
+        "success": True,
+        "analysis": json.dumps({
+            "schema_version": "food_vision_inventory_v1",
+            "is_food": False,
+            "items": [],
+            "overall_confidence": 0.0,
+        }),
+    })
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=non_food_payload)):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    adapter.send.assert_not_called()
+    assert result == "What is this document?"
+    session_key = runner._session_key_for_source(source)
+    assert runner._pending_native_image_paths_by_session[session_key] == ["/tmp/meal.png"]
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_native_mode_malformed_output_fails_closed_even_for_authorized_user(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: True
     source = _runner_source()
     event = _runner_photo_event(source, text="What is this document?")
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
@@ -530,10 +563,182 @@ async def test_runner_photo_native_mode_non_food_attaches_to_pending_native(tmp_
             history=[],
         )
 
+    assert result is None
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[1] == SAFE_VISION_FALLBACK
+    session_key = runner._session_key_for_source(source)
+    assert session_key not in getattr(runner, "_pending_native_image_paths_by_session", {})
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_native_mode_provider_failure_fails_closed_for_authorized_user(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: True
+    source = _runner_source()
+    event = _runner_photo_event(source, text="Count calories")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch(
+        "tools.vision_tools.vision_analyze_tool",
+        new=AsyncMock(return_value=json.dumps({"success": False, "error": "Gemini HTTP 503 (UNAVAILABLE)", "analysis": ""})),
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[1] == SAFE_VISION_FALLBACK
+    session_key = runner._session_key_for_source(source)
+    assert session_key not in getattr(runner, "_pending_native_image_paths_by_session", {})
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_native_mode_explicit_generic_command_attaches_to_pending_native(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: True
+    source = _runner_source()
+    event = _runner_photo_event(source, text="/describe what is this architecture diagram?")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock()) as mock_tool:
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+        mock_tool.assert_not_called()
+
     adapter.send.assert_not_called()
-    assert result == "What is this document?"
+    assert result == "/describe what is this architecture diagram?"
     session_key = runner._session_key_for_source(source)
     assert runner._pending_native_image_paths_by_session[session_key] == ["/tmp/meal.png"]
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_public_user_isolation_never_attaches_to_pending_native_on_non_food(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: False
+    source = _runner_source()
+    event = _runner_photo_event(source, text="What is this document?")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    non_food_payload = json.dumps({
+        "success": True,
+        "analysis": json.dumps({
+            "schema_version": "food_vision_inventory_v1",
+            "is_food": False,
+            "items": [],
+            "overall_confidence": 0.0,
+        }),
+    })
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=non_food_payload)):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[1] == SAFE_VISION_FALLBACK
+    session_key = runner._session_key_for_source(source)
+    assert session_key not in getattr(runner, "_pending_native_image_paths_by_session", {})
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_public_user_isolation_never_attaches_to_pending_native_on_provider_error(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: False
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch(
+        "tools.vision_tools.vision_analyze_tool",
+        new=AsyncMock(return_value=json.dumps({"success": False, "error": "Gemini HTTP 503 (UNAVAILABLE)", "analysis": ""})),
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[1] == SAFE_VISION_FALLBACK
+    session_key = runner._session_key_for_source(source)
+    assert session_key not in getattr(runner, "_pending_native_image_paths_by_session", {})
+    assert diary.get_pending_meal(1) is None
+    assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_public_user_isolation_never_attaches_to_pending_native_on_invalid_schema(tmp_path):
+    runner, adapter = _make_native_runner()
+    runner._is_user_authorized = lambda s: False
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    invalid_schema_payload = json.dumps({
+        "success": True,
+        "analysis": json.dumps({"schema_version": "unsupported_v9", "items": []}),
+    })
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=invalid_schema_payload)):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    assert adapter.send.await_args.args[1] == SAFE_VISION_FALLBACK
+    session_key = runner._session_key_for_source(source)
+    assert session_key not in getattr(runner, "_pending_native_image_paths_by_session", {})
+    assert diary.get_pending_meal(1) is None
+    assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_text_mode_structured_non_food_routes_to_generic_vision_enrich(tmp_path):
+    runner, adapter = _make_text_only_runner()
+    runner._is_user_authorized = lambda s: True
+    source = _runner_source()
+    event = _runner_photo_event(source, text="Explain this diagram")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    non_food_payload = json.dumps({
+        "success": True,
+        "analysis": json.dumps({
+            "schema_version": "food_vision_inventory_v1",
+            "is_food": False,
+            "items": [],
+            "overall_confidence": 0.0,
+        }),
+    })
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=non_food_payload)), \
+         patch.object(runner, "_try_enrich_message_with_vision", new=AsyncMock(return_value=("[Image description: A system architecture diagram]\n\nExplain this diagram", True))):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    adapter.send.assert_not_called()
+    assert result == "[Image description: A system architecture diagram]\n\nExplain this diagram"
 
 
 @pytest.mark.asyncio

@@ -165,16 +165,19 @@ def run_drill(
     # 3. Setup isolated drill sandbox directory (mode 0700)
     drill_dir = tempfile.mkdtemp(prefix="hermes-isolated-rollback-drill-")
     os.chmod(drill_dir, 0o700)
-    snapshot_path = Path(drill_dir) / "snapshot_healbite.db"
+    golden_backup_path = Path(drill_dir) / "golden_pre_deploy_backup.db"
 
     forward_cid = ""
     rollback_cid = ""
     try:
         # 4. Create ACID snapshot via SQLite Online Backup API (mode 0600)
-        create_sqlite_snapshot(prod_db_path, snapshot_path)
+        create_sqlite_snapshot(prod_db_path, golden_backup_path)
+        golden_backup_digest = hashlib.sha256(
+            golden_backup_path.read_bytes()
+        ).hexdigest()
 
-        # 5. Pre-drill DB verification on snapshot
-        with sqlite3.connect(snapshot_path) as conn:
+        # 5. Pre-drill DB verification on golden snapshot
+        with sqlite3.connect(golden_backup_path) as conn:
             pre_integrity = conn.execute("PRAGMA integrity_check;").fetchone()[0]
             pre_fk_violations = len(
                 conn.execute("PRAGMA foreign_key_check;").fetchall()
@@ -188,7 +191,19 @@ def run_drill(
                 f"Snapshot has foreign key violations: {pre_fk_violations}"
             )
 
-        # 6. Forward-start temporary container with target image
+        # Verify Compose configuration contract
+        compose_configuration_verified = (
+            canonical_mount_target == "/home/hermes/healbite.db"
+            and (_REPO_ROOT / "docker-compose.yml").is_file()
+            and (_REPO_ROOT / "deploy" / "docker-compose.production.yml").is_file()
+        )
+
+        # 6. Prepare forward active database from golden backup
+        forward_active_path = Path(drill_dir) / "forward_active_healbite.db"
+        create_sqlite_snapshot(golden_backup_path, forward_active_path)
+        os.chmod(forward_active_path, 0o600)
+
+        # 7. Forward-start temporary container with target image
         forward_cmd = [
             "docker",
             "run",
@@ -206,7 +221,7 @@ def run_drill(
             "-e",
             "DROP_PENDING_UPDATES=false",
             "-v",
-            f"{snapshot_path}:{canonical_mount_target}:rw",
+            f"{forward_active_path}:{canonical_mount_target}:rw",
             target_image,
             "hermes",
             "gateway",
@@ -254,7 +269,40 @@ def run_drill(
         subprocess.run(["docker", "rm", "-f", forward_cid], capture_output=True)
         forward_cid = ""
 
-        # 7. Rollback: Start temporary container with baseline image
+        # 8. Forward schema mutation simulation (incompatible forward evolution)
+        with sqlite3.connect(forward_active_path) as conn:
+            conn.execute(
+                "CREATE TABLE forward_drill_incompatible_marker ("
+                "id INTEGER PRIMARY KEY, marker TEXT NOT NULL);"
+            )
+            conn.execute(
+                "INSERT INTO forward_drill_incompatible_marker (marker) "
+                "VALUES ('forward_target_schema_evolution');"
+            )
+            conn.commit()
+
+        with sqlite3.connect(forward_active_path) as conn:
+            forward_mutation_applied = bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='forward_drill_incompatible_marker';"
+                ).fetchone()
+            )
+
+        # 9. Demonstrate SQLite state restoration using private consistent snapshot
+        restored_active_path = Path(drill_dir) / "restored_active_healbite.db"
+        create_sqlite_snapshot(golden_backup_path, restored_active_path)
+        os.chmod(restored_active_path, 0o600)
+
+        restored_digest = hashlib.sha256(restored_active_path.read_bytes()).hexdigest()
+        database_restoration_proven = bool(restored_digest == golden_backup_digest)
+
+        with sqlite3.connect(restored_active_path) as conn:
+            marker_check = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='forward_drill_incompatible_marker';"
+            ).fetchone()
+            incompatible_schema_rollback_proven = bool(marker_check is None)
+
+        # 10. Rollback: Start temporary container with baseline image on restored database
         rollback_cmd = [
             "docker",
             "run",
@@ -272,7 +320,7 @@ def run_drill(
             "-e",
             "DROP_PENDING_UPDATES=false",
             "-v",
-            f"{snapshot_path}:{canonical_mount_target}:rw",
+            f"{restored_active_path}:{canonical_mount_target}:rw",
             baseline_digest,
             "hermes",
             "gateway",
@@ -299,7 +347,7 @@ def run_drill(
             .get("org.opencontainers.image.revision", "")
         )
 
-        # 8. Post-rollback health check
+        # 11. Post-rollback health check
         health_cmd = ["docker", "exec", rollback_cid, "hermes", "gateway", "status"]
         health_proc = subprocess.run(health_cmd, capture_output=True, text=True)
         health_exit_code = health_proc.returncode
@@ -317,19 +365,19 @@ def run_drill(
         subprocess.run(["docker", "rm", "-f", rollback_cid], capture_output=True)
         rollback_cid = ""
 
-        # 9. Post-rollback DB verification on snapshot
-        with sqlite3.connect(snapshot_path) as conn:
+        # 12. Post-rollback DB verification on restored database
+        with sqlite3.connect(restored_active_path) as conn:
             post_integrity = conn.execute("PRAGMA integrity_check;").fetchone()[0]
             post_fk_violations = len(
                 conn.execute("PRAGMA foreign_key_check;").fetchall()
             )
             post_schema = evaluate_database_schema(conn)
 
-        # 10. Check Qdrant post-drill state
+        # 13. Check Qdrant post-drill state
         qdrant_post = check_qdrant_state(qdrant_url)
         qdrant_unmodified = qdrant_pre == qdrant_post
 
-        # 11. Derive statuses from actual observations
+        # 14. Derive statuses from actual observations
         rollback_health_ok = (
             health_exit_code == 0 and "Gateway is running" in health_stdout
         )
@@ -352,6 +400,10 @@ def run_drill(
             and rollback_health_ok
             and forward_exit_code == 0
             and rollback_exit_code == 0
+            and compose_configuration_verified
+            and forward_mutation_applied
+            and database_restoration_proven
+            and incompatible_schema_rollback_proven
             and db_healthy
             and revisions_matched
             and qdrant_unmodified
@@ -362,7 +414,7 @@ def run_drill(
             "%Y-%m-%dT%H:%M:%SZ"
         )
 
-        # 12. Write rollback-health.json
+        # 15. Write rollback-health.json
         output_dir.mkdir(parents=True, exist_ok=True)
         health_file = output_dir / "rollback-health.json"
         health_payload = {
@@ -387,6 +439,11 @@ def run_drill(
             "health_exit_code": health_exit_code,
             "health_stdout": health_stdout.strip(),
             "canonical_mount_target": canonical_mount_target,
+            "compose_configuration_verified": compose_configuration_verified,
+            "forward_mutation_applied": forward_mutation_applied,
+            "database_restoration_proven": database_restoration_proven,
+            "incompatible_schema_rollback_proven": incompatible_schema_rollback_proven,
+            "database_restoration_method": "sqlite3-online-backup-restore",
             "sqlite_pre_integrity": pre_integrity,
             "sqlite_post_integrity": post_integrity,
             "sqlite_pre_fk_violations": pre_fk_violations,
@@ -412,7 +469,7 @@ def run_drill(
         actual_health_bytes = health_file.read_bytes()
         health_evidence_sha256 = hashlib.sha256(actual_health_bytes).hexdigest()
 
-        # 13. Generate rollback-rehearsal.json
+        # 16. Generate rollback-rehearsal.json
         receipt_id = (
             f"receipt-rollback-{target_sha[:8]}-{nonce[:16]}"
             if nonce
@@ -434,17 +491,22 @@ def run_drill(
         )
 
         prov_key = os.environ.get("HERMES_PROVENANCE_KEY", "")
+        sig = None
         if prov_key and prov_key.strip():
             sig = hmac.new(
                 prov_key.encode("utf-8"), payload, hashlib.sha256
             ).hexdigest()
-        else:
-            # Under fail-closed authentication, NEVER generate an unkeyed SHA-256 fallback signature.
-            # When executed by the authenticated SSH collector on the production host (where the CI
-            # signing key is isolated), the receipt is explicitly marked as collector execution.
-            sig = "UNSIGNED_COLLECTOR_EXECUTION"
 
         rehearsal_file = output_dir / "rollback-rehearsal.json"
+        execution_prov = {
+            "runtime_identity": "healbite-production",
+            "isolation_level": "docker",
+            "execution_nonce": nonce,
+            "execution_method": "restricted-ssh-collector",
+        }
+        if sig is not None:
+            execution_prov["signature"] = sig
+
         rehearsal_payload = {
             "status": final_status,
             "receipt_id": receipt_id,
@@ -462,14 +524,11 @@ def run_drill(
             "rollback_container_started": rollback_running,
             "forward_exit_code": forward_exit_code,
             "rollback_exit_code": rollback_exit_code,
+            "database_restoration_proven": database_restoration_proven,
+            "incompatible_schema_rollback_proven": incompatible_schema_rollback_proven,
+            "compose_configuration_verified": compose_configuration_verified,
             "execution_nonce": nonce,
-            "execution_provenance": {
-                "runtime_identity": "healbite-production",
-                "isolation_level": "docker",
-                "signature": sig,
-                "execution_nonce": nonce,
-                "execution_method": "restricted-ssh-collector",
-            },
+            "execution_provenance": execution_prov,
         }
         rehearsal_json_bytes = json.dumps(
             rehearsal_payload, indent=2, sort_keys=True

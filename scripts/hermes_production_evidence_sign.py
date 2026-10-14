@@ -72,10 +72,23 @@ def validate_unsigned_evidence(
 
     # 1. Collector provenance validation
     prov = unsigned_bundle.get("collector_provenance", {})
-    if prov.get("COLLECTOR_REPOSITORY") != "life2boat/hermes":
+    if not isinstance(prov, dict):
+        raise ValueError("Missing collector_provenance")
+
+    valid_repos = {
+        "life2boat/hermes",
+        "https://github.com/life2boat/hermes",
+        "git@github.com:life2boat/hermes",
+        "git@github-healbite:life2boat/hermes",
+    }
+    col_repo = str(prov.get("COLLECTOR_REPOSITORY", "")).strip()
+    if col_repo.endswith(".git"):
+        col_repo = col_repo[:-4]
+    if col_repo not in valid_repos:
         raise ValueError(
             f"Collector repository mismatch: {prov.get('COLLECTOR_REPOSITORY')}"
         )
+
     if prov.get("COLLECTOR_HEAD_SHA") != target_sha:
         raise ValueError(
             f"Collector head SHA mismatch: {prov.get('COLLECTOR_HEAD_SHA')} != {target_sha}"
@@ -90,7 +103,171 @@ def validate_unsigned_evidence(
                 f"Execution nonce mismatch: expected {expected_nonce}, got {collector_nonce}"
             )
 
-    # 2. Rollback evidence validation
+    # 2. Raw rehearsal receipt and raw health evidence validation
+    raw_receipt = unsigned_bundle.get("raw_rehearsal_receipt")
+    raw_health = unsigned_bundle.get("raw_rehearsal_health")
+    if not isinstance(raw_receipt, dict):
+        raise ValueError("Missing or invalid raw_rehearsal_receipt in unsigned bundle")
+    if not isinstance(raw_health, dict):
+        raise ValueError("Missing or invalid raw_rehearsal_health in unsigned bundle")
+
+    if raw_receipt.get("execution_nonce") != raw_health.get("execution_nonce"):
+        raise ValueError(
+            f"Nonce mismatch between raw receipt ({raw_receipt.get('execution_nonce')}) and raw health ({raw_health.get('execution_nonce')})"
+        )
+    if prov.get("EXECUTION_NONCE") and raw_receipt.get("execution_nonce") != prov.get(
+        "EXECUTION_NONCE"
+    ):
+        raise ValueError(
+            f"Nonce mismatch between raw receipt ({raw_receipt.get('execution_nonce')}) and collector provenance ({prov.get('EXECUTION_NONCE')})"
+        )
+
+    if expected_nonce:
+        if raw_receipt.get("execution_nonce") != expected_nonce:
+            raise ValueError(
+                f"Raw receipt execution nonce mismatch: expected {expected_nonce}, got {raw_receipt.get('execution_nonce')}"
+            )
+        if raw_health.get("execution_nonce") != expected_nonce:
+            raise ValueError(
+                f"Raw health execution nonce mismatch: expected {expected_nonce}, got {raw_health.get('execution_nonce')}"
+            )
+        receipt_id = raw_receipt.get("receipt_id", "")
+        if (
+            not receipt_id.startswith("receipt-rollback-")
+            or expected_nonce[:16] not in receipt_id
+        ):
+            raise ValueError(f"Receipt ID is not properly nonce-bound: {receipt_id}")
+
+    if raw_receipt.get("target_sha") != target_sha:
+        raise ValueError(
+            f"Raw receipt target SHA mismatch: {raw_receipt.get('target_sha')} != {target_sha}"
+        )
+    if raw_health.get("target_sha") != target_sha:
+        raise ValueError(
+            f"Raw health target SHA mismatch: {raw_health.get('target_sha')} != {target_sha}"
+        )
+
+    # Recompute raw health evidence SHA-256 and assert match with receipt
+    computed_health_hash = hashlib.sha256(
+        json.dumps(raw_health, indent=2, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    receipt_health_hash = raw_receipt.get("health_evidence_sha256", "")
+
+    raw_health_raw = unsigned_bundle.get("raw_rehearsal_health_raw")
+    if raw_health_raw:
+        computed_raw_str_hash = hashlib.sha256(
+            raw_health_raw.encode("utf-8")
+        ).hexdigest()
+        if (
+            computed_raw_str_hash != receipt_health_hash
+            and computed_health_hash != receipt_health_hash
+        ):
+            raise ValueError("Raw health evidence SHA-256 mismatch with receipt")
+    elif computed_health_hash != receipt_health_hash:
+        compact_hash = hashlib.sha256(
+            json.dumps(raw_health, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        if compact_hash != receipt_health_hash:
+            raise ValueError("Raw health evidence SHA-256 mismatch with receipt")
+
+    from scripts.generate_offline_evidence import TRUSTED_REHEARSAL_PRODUCERS
+
+    producer = raw_receipt.get("producer") or raw_receipt.get("rehearsal_producer", "")
+    if not producer or producer not in TRUSTED_REHEARSAL_PRODUCERS:
+        raise ValueError(f"Untrusted or missing rehearsal producer: {producer}")
+
+    executed_at_str = raw_receipt.get("executed_at", "")
+    if not executed_at_str:
+        raise ValueError("Missing executed_at in raw receipt")
+    try:
+        executed_dt = datetime.datetime.fromisoformat(
+            executed_at_str.replace("Z", "+00:00")
+        )
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        delta_sec = (now_dt - executed_dt).total_seconds()
+        if delta_sec < -60 or delta_sec > 900:  # Fresh within last 15 minutes
+            raise ValueError(
+                f"Stale or future rehearsal receipt timestamp: {executed_at_str} (delta: {delta_sec}s)"
+            )
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Invalid executed_at timestamp in receipt: {e}")
+
+    # Real observed container and procedure results
+    if raw_receipt.get("forward_container_started") is not True:
+        raise ValueError("Forward container was not observed running")
+    if raw_receipt.get("rollback_container_started") is not True:
+        raise ValueError("Rollback container was not observed running")
+    if raw_receipt.get("forward_exit_code") != 0:
+        raise ValueError(
+            f"Forward container exited with non-zero code: {raw_receipt.get('forward_exit_code')}"
+        )
+    if raw_receipt.get("rollback_exit_code") != 0:
+        raise ValueError(
+            f"Rollback container exited with non-zero code: {raw_receipt.get('rollback_exit_code')}"
+        )
+    if raw_receipt.get("rollback_procedure_proven") is not True:
+        raise ValueError("Rollback procedure was not proven in receipt")
+    if (
+        raw_receipt.get("status") != "PASS"
+        or raw_receipt.get("health_check_status") != "PASS"
+    ):
+        raise ValueError("Receipt does not report PASS")
+
+    if raw_health.get("health_status") != "PASS":
+        raise ValueError(
+            f"Rollback health status is not PASS: {raw_health.get('health_status')}"
+        )
+    if raw_health.get("health_cmd") != "hermes gateway status":
+        raise ValueError(f"Unexpected health command: {raw_health.get('health_cmd')}")
+    if raw_health.get("health_exit_code") != 0:
+        raise ValueError(
+            f"Health check exited with code: {raw_health.get('health_exit_code')}"
+        )
+    if "Gateway is running" not in str(raw_health.get("health_stdout", "")):
+        raise ValueError("Health command stdout does not confirm running gateway")
+
+    if (
+        raw_health.get("sqlite_pre_integrity") != "ok"
+        or raw_health.get("sqlite_post_integrity") != "ok"
+    ):
+        raise ValueError("SQLite integrity check failed during drill")
+    if (
+        raw_health.get("sqlite_pre_fk_violations") != 0
+        or raw_health.get("sqlite_post_fk_violations") != 0
+    ):
+        raise ValueError("SQLite foreign key violations detected during drill")
+    if raw_health.get("qdrant_unmodified") is not True:
+        raise ValueError("Qdrant mutation detected during drill")
+    if raw_health.get("canonical_mount_target") != "/home/hermes/healbite.db":
+        raise ValueError(
+            f"Invalid canonical mount target: {raw_health.get('canonical_mount_target')}"
+        )
+    if raw_health.get("database_restoration_proven") is not True:
+        raise ValueError("Database restoration was not proven in drill")
+    if raw_health.get("incompatible_schema_rollback_proven") is not True:
+        raise ValueError("Incompatible schema rollback was not proven in drill")
+    if raw_health.get("compose_configuration_verified") is not True:
+        raise ValueError("Compose configuration was not verified in drill")
+
+    # Strict rejection of unkeyed or self-referential or collector markers
+    receipt_prov = raw_receipt.get("execution_provenance", {})
+    if isinstance(receipt_prov, dict):
+        sig = receipt_prov.get("signature")
+        if sig and isinstance(sig, str):
+            if sig == "UNSIGNED_COLLECTOR_EXECUTION":
+                raise ValueError(
+                    "Unauthenticated collector marker rejected in raw receipt"
+                )
+            if sig.startswith("sha256:") or (
+                len(sig) == 64 and all(c in "0123456789abcdef" for c in sig)
+            ):
+                raise ValueError("Unkeyed SHA-256 signature rejected in raw receipt")
+
+    # 3. Rollback evidence validation
     rb = unsigned_bundle.get("rollback_evidence")
     if not isinstance(rb, dict):
         raise ValueError("Missing or invalid rollback_evidence")
@@ -105,7 +282,7 @@ def validate_unsigned_evidence(
     if rb.get("rollback_procedure_proven") is not True:
         raise ValueError("Rollback procedure was not proven")
 
-    # Baseline digest and revision pairing check
+    # Baseline digest and revision pairing check across receipt, health, and rollback evidence
     roll_digest = str(rb.get("rollback_image_digest", ""))
     curr_digest = str(rb.get("current_production_image_digest", ""))
     roll_rev = str(rb.get("rollback_revision", ""))
@@ -118,32 +295,12 @@ def validate_unsigned_evidence(
     if roll_digest != curr_digest:
         raise ValueError(f"Rollback digest mismatch: {roll_digest} != {curr_digest}")
 
-    # Rehearsal artifact reference
-    canonical_artifact = rb.get("canonical_rehearsal_evidence", "")
-    if not canonical_artifact or canonical_artifact == "self-asserted":
-        raise ValueError(
-            f"Invalid canonical rehearsal evidence format: {canonical_artifact}"
-        )
+    if raw_receipt.get("rollback_image_digest") != roll_digest:
+        raise ValueError("Raw receipt image digest mismatch with rollback evidence")
+    if raw_receipt.get("rollback_revision") != roll_rev:
+        raise ValueError("Raw receipt revision mismatch with rollback evidence")
 
-    # Strict rejection of unkeyed or self-referential signature attempts in unsigned provenance
-    rb_prov = rb.get("execution_provenance", {})
-    if isinstance(rb_prov, dict):
-        sig = rb_prov.get("signature")
-        if sig and isinstance(sig, str):
-            if sig.startswith("sha256:") or (
-                len(sig) == 64 and all(c in "0123456789abcdef" for c in sig)
-            ):
-                raise ValueError(
-                    "Unkeyed SHA-256 signature rejected in unsigned rollback evidence"
-                )
-            if "producer_signature" in rb_prov and sig == rb_prov.get(
-                "producer_signature"
-            ):
-                raise ValueError(
-                    "Self-referential signature rejected in unsigned rollback evidence"
-                )
-
-    # 3. Schema evidence validation
+    # 4. Schema evidence validation
     sch = unsigned_bundle.get("schema_evidence")
     if not isinstance(sch, dict):
         raise ValueError("Missing or invalid schema_evidence")
@@ -168,7 +325,7 @@ def validate_unsigned_evidence(
     if sch.get("migration_required") is not False:
         raise ValueError("Migration required in schema evidence")
 
-    # 4. Credential risk validation
+    # 5. Credential risk validation
     cred = unsigned_bundle.get("credential_risk_evidence")
     if not isinstance(cred, dict):
         raise ValueError("Missing or invalid credential_risk_evidence")
@@ -177,7 +334,7 @@ def validate_unsigned_evidence(
             f"Credential risk is not PROVEN_CLEAR: {cred.get('credential_risk_status')}"
         )
 
-    # 5. DB & Secret validations
+    # 6. DB & Secret validations
     db = unsigned_bundle.get("db_evidence")
     if not isinstance(db, dict) or db.get("status") != "PASS":
         raise ValueError("Verification failed for db_evidence")
@@ -236,6 +393,36 @@ def main():
     signed_bundle = {}
 
     try:
+        # Sign rehearsal receipt with CI provenance key and bind canonical reference
+        raw_receipt = unsigned_bundle.get("raw_rehearsal_receipt")
+        if raw_receipt:
+            from scripts.generate_offline_evidence import (
+                compute_rollback_rehearsal_payload,
+            )
+
+            receipt_payload = compute_rollback_rehearsal_payload(
+                receipt_id=raw_receipt["receipt_id"],
+                target_sha=target_sha,
+                image_digest=raw_receipt["rollback_image_digest"],
+                oci_revision=raw_receipt["rollback_revision"],
+                health_hash=raw_receipt["health_evidence_sha256"],
+                producer_identity=raw_receipt["producer"],
+                executed_at=raw_receipt["executed_at"],
+                rehearsal_type=raw_receipt["rehearsal_type"],
+                result_status=raw_receipt["status"],
+            )
+            rehearsal_sig = hmac.new(
+                key.encode("utf-8"), receipt_payload, hashlib.sha256
+            ).hexdigest()
+            raw_receipt["execution_provenance"]["signature"] = rehearsal_sig
+            receipt_sha256 = hashlib.sha256(
+                json.dumps(raw_receipt, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            if "rollback_evidence" in unsigned_bundle:
+                unsigned_bundle["rollback_evidence"]["canonical_rehearsal_evidence"] = (
+                    f"artifact:rollback-rehearsal:{raw_receipt['receipt_id']}:{receipt_sha256[:16]}:pass"
+                )
+
         for key_name, ev_type in TYPES_MAP.items():
             ev = unsigned_bundle.get(key_name)
             if not ev:

@@ -301,24 +301,17 @@ def get_real_rollback_evidence(target_sha, now, manifest=None):
             return {"status": "BLOCKED"}
 
         prov_key = os.environ.get("HERMES_PROVENANCE_KEY")
-        is_collector_run = os.environ.get("HERMES_COLLECTOR_RUN") == "1"
-
-        if prov_key and prov_key.strip():
-            # H11-ext: Verify canonical versioned HMAC payload binding executed_at and all mandatory fields.
-            expected_sig = hmac.new(
-                prov_key.encode("utf-8"), payload, hashlib.sha256
-            ).hexdigest()
-            if not hmac.compare_digest(signature, expected_sig):
-                return {"status": "BLOCKED"}
-        elif not is_collector_run:
-            # Invariant H11: Must fail closed if provenance verification key is missing outside canonical collection
+        if not prov_key or not prov_key.strip():
+            # Invariant H11-ext: Must fail closed if provenance verification key is missing.
+            # Magic strings, collector markers, or unauthenticated tokens are strictly forbidden.
             return {"status": "BLOCKED"}
-        else:
-            # Canonical authenticated collection boundary:
-            # The collector only accepts explicitly authorized collector execution tokens
-            # ("UNSIGNED_COLLECTOR_EXECUTION"), NEVER unkeyed hashes or self-referential signatures.
-            if signature != "UNSIGNED_COLLECTOR_EXECUTION":
-                return {"status": "BLOCKED"}
+
+        # H11-ext: Verify canonical versioned HMAC payload binding executed_at and all mandatory fields.
+        expected_sig = hmac.new(
+            prov_key.encode("utf-8"), payload, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            return {"status": "BLOCKED"}
 
         # Freshness check uses only the authenticated executed_at value
         try:

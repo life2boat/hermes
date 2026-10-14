@@ -612,3 +612,16 @@ def test_substring_repository_spoofing_rejected():
     proc = run_signer(bundle)
     assert proc.returncode != 0
     assert "Collector repository mismatch" in proc.stdout
+
+
+def test_rollback_evidence_canonical_schema_signing_succeeds():
+    bundle = get_base_unsigned_bundle()
+    bundle["rollback_evidence"]["execution_nonce"] = (
+        "testnonce"  # even if present in raw bundle
+    )
+    proc = run_signer(bundle)
+    assert proc.returncode == 0, proc.stderr
+    signed = json.loads(proc.stdout)
+    assert "rollback_evidence" in signed
+    assert "execution_nonce" not in signed["rollback_evidence"]
+    assert signed["rollback_evidence"]["status"] == "PASS"

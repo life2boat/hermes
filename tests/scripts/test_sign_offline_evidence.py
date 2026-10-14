@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import subprocess
 import pytest
@@ -18,7 +19,7 @@ def run_signer(evidence_dict):
     temp_out = temp_in + ".out"
 
     proc = subprocess.run(
-        ["python3", "scripts/sign_offline_evidence.py", temp_in, temp_out],
+        [sys.executable, "scripts/sign_offline_evidence.py", temp_in, temp_out],
         capture_output=True, text=True, env=env
     )
 
@@ -106,7 +107,7 @@ def base_secret_evidence():
         }
     }
 
-CANONICAL_SCHEMA_DIGEST = "99d49c97f776cbe4140f2fa352f438b4af6a83ba7fe4968f6299d17471f1fe5e"
+from scripts.canonical_schema_contract import EXPECTED_SCHEMA_DIGEST as CANONICAL_SCHEMA_DIGEST
 
 @pytest.fixture
 def base_schema_evidence():

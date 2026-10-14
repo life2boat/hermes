@@ -106,10 +106,10 @@ def sign_ev(ev, key):
     return final_ev
 
 
-def test_producer_output_accepted_by_real_qualifier():
+def test_producer_output_accepted_by_real_qualifier(monkeypatch):
     target_sha = "abc123sha4567890123456789012345678901234"
     key = "testanchor"
-    os.environ["HERMES_PROVENANCE_KEY"] = key
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", key)
     fresh_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     from scripts.canonical_schema_contract import (
@@ -182,9 +182,9 @@ def test_producer_output_accepted_by_real_qualifier():
     assert rb_gate.status == Status.PASS, f"Rollback gate failed: {rb_gate.reason}"
 
 
-def test_missing_top_level_source_class_rejected():
+def test_missing_top_level_source_class_rejected(monkeypatch):
     key = "testanchor"
-    os.environ["HERMES_PROVENANCE_KEY"] = key
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", key)
     fresh_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     target_sha = "sha123"
 

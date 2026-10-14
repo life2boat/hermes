@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 
 EXPECTED_USER_VERSION: int = 0
 EXPECTED_SCHEMA_DIGEST: str = (
-    "99d49c97f776cbe4140f2fa352f438b4af6a83ba7fe4968f6299d17471f1fe5e"
+    "e0fad8b16a18909e248fd80f86531e4f51612d8bd90d7f194e9492c5aa56b30b"
 )
 
 EXPECTED_TABLES: Tuple[str, ...] = (
@@ -24,6 +24,7 @@ EXPECTED_TABLES: Tuple[str, ...] = (
     "household_shopping_lists",
     "household_weekly_menu_entries",
     "household_weekly_menu_entry_ingredients",
+    "household_weekly_menu_entry_recipe_refs",
     "household_weekly_menu_idempotency",
     "household_weekly_menu_series",
     "household_weekly_menus",
@@ -119,6 +120,8 @@ EXPECTED_INDEXES: Tuple[str, ...] = (
     "idx_weekly_menu_idempotency_unique",
     "idx_weekly_menu_ingredients_entry_position_unique",
     "idx_weekly_menu_plans_user_week",
+    "idx_weekly_menu_recipe_refs_entry",
+    "idx_weekly_menu_recipe_refs_household",
     "idx_weekly_menu_revisions_id_household",
     "idx_weekly_menu_revisions_series_revision_unique",
     "idx_weekly_menu_revisions_single_approved",

@@ -280,6 +280,7 @@ def create_bundle(extra: dict) -> dict:
 
 def valid_utc() -> str:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -550,87 +551,110 @@ def test_modify_payload_recompute_digest_fails_signature():
     gate = next(g for g in gates if g.gate_name == "DB_PATH_SAFETY")
     assert gate.status == Status.FAIL
 
+
 # Task 8.3.3 specific tests for credential risk
+
 
 def test_hardcoded_false_cannot_authorize():
     from scripts.hermes_release_qualification import check_credential_risk
+
     # missing evidence blocks
     bundle = {}
-    has_risk, err = check_credential_risk(bundle, 'sha123')
+    has_risk, err = check_credential_risk(bundle, "sha123")
     assert has_risk is True
-    assert 'Missing' in err
+    assert "Missing" in err
+
 
 def test_unknown_credential_state_blocks():
     from scripts.hermes_release_qualification import check_credential_risk
     import os
-    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+
+    os.environ["HERMES_PROVENANCE_KEY"] = "testkey"
     ev = {
-        'schema_version': 1,
-        'evidence_type': 'credential_risk',
-        'target_sha': 'sha123',
-        'status': 'PASS',
-        'credential_risk_status': 'UNKNOWN',
-        'collected_at_utc': valid_utc(),
-        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+        "schema_version": 1,
+        "evidence_type": "credential_risk",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "credential_risk_status": "UNKNOWN",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
     }
-    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
-    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
-    bundle = {'credential_risk_evidence': ev}
-    has_risk, err = check_credential_risk(bundle, 'sha123')
+    ev["execution_provenance"]["signature"] = sign_evidence(ev, "testkey")
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = {"credential_risk_evidence": ev}
+    has_risk, err = check_credential_risk(bundle, "sha123")
     assert has_risk is True
-    assert 'Unknown credential_risk_status: UNKNOWN' in err
+    assert "Unknown credential_risk_status: UNKNOWN" in err
+
 
 def test_proven_risk_blocks():
     from scripts.hermes_release_qualification import check_credential_risk
     import os
-    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+
+    os.environ["HERMES_PROVENANCE_KEY"] = "testkey"
     ev = {
-        'schema_version': 1,
-        'evidence_type': 'credential_risk',
-        'target_sha': 'sha123',
-        'status': 'PASS',
-        'credential_risk_status': 'PROVEN_RISK',
-        'collected_at_utc': valid_utc(),
-        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+        "schema_version": 1,
+        "evidence_type": "credential_risk",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "credential_risk_status": "PROVEN_RISK",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
     }
-    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
-    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
-    bundle = {'credential_risk_evidence': ev}
-    has_risk, err = check_credential_risk(bundle, 'sha123')
+    ev["execution_provenance"]["signature"] = sign_evidence(ev, "testkey")
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = {"credential_risk_evidence": ev}
+    has_risk, err = check_credential_risk(bundle, "sha123")
     assert has_risk is True
     assert err is None
+
 
 def test_proven_clear_can_proceed():
     from scripts.hermes_release_qualification import check_credential_risk
     import os
-    os.environ['HERMES_PROVENANCE_KEY'] = 'testkey'
+
+    os.environ["HERMES_PROVENANCE_KEY"] = "testkey"
     ev = {
-        'schema_version': 1,
-        'evidence_type': 'credential_risk',
-        'target_sha': 'sha123',
-        'status': 'PASS',
-        'credential_risk_status': 'PROVEN_CLEAR',
-        'collected_at_utc': valid_utc(),
-        'execution_provenance': {'isolation_level': 'docker', 'runtime_identity': 'healbite-production'}
+        "schema_version": 1,
+        "evidence_type": "credential_risk",
+        "target_sha": "sha123",
+        "status": "PASS",
+        "credential_risk_status": "PROVEN_CLEAR",
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
     }
-    ev['execution_provenance']['signature'] = sign_evidence(ev, 'testkey')
-    ev['evidence_digest'] = compute_canonical_digest_from_dict(ev)
-    bundle = {'credential_risk_evidence': ev}
-    has_risk, err = check_credential_risk(bundle, 'sha123')
+    ev["execution_provenance"]["signature"] = sign_evidence(ev, "testkey")
+    ev["evidence_digest"] = compute_canonical_digest_from_dict(ev)
+    bundle = {"credential_risk_evidence": ev}
+    has_risk, err = check_credential_risk(bundle, "sha123")
     assert has_risk is False
     assert err is None
 
+
 def test_malformed_credential_evidence_blocks():
     from scripts.hermes_release_qualification import check_credential_risk
-    bundle = {'credential_risk_evidence': 'malformed'}
-    has_risk, err = check_credential_risk(bundle, 'sha123')
+
+    bundle = {"credential_risk_evidence": "malformed"}
+    has_risk, err = check_credential_risk(bundle, "sha123")
     assert has_risk is True
-    assert 'must be a dictionary' in err
+    assert "must be a dictionary" in err
 
 
 # Task 8.3.5 specific tests for schema compatibility and rollback qualification
 
-from scripts.canonical_schema_contract import EXPECTED_SCHEMA_DIGEST, EXPECTED_USER_VERSION
+from scripts.canonical_schema_contract import (
+    EXPECTED_SCHEMA_DIGEST,
+    EXPECTED_USER_VERSION,
+)
 
 
 def make_valid_schema_evidence(target_sha="sha123", key="testkey", **overrides):
@@ -830,7 +854,9 @@ def test_empty_digest_rejected(monkeypatch):
 
 def test_invalid_sha256_digest_rejected(monkeypatch):
     monkeypatch.setenv("HERMES_PROVENANCE_KEY", "testkey")
-    ev = make_valid_rollback_evidence(current_production_image_digest="not_sha256_prefix")
+    ev = make_valid_rollback_evidence(
+        current_production_image_digest="not_sha256_prefix"
+    )
     bundle = create_bundle({"rollback_evidence": ev})
     gates, *_ = get_all_gates("sha123", bundle)
     gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
@@ -944,3 +970,157 @@ def test_valid_real_rollback_contract_accepted(monkeypatch):
     gates, *_ = get_all_gates("sha123", bundle)
     gate = next(g for g in gates if g.gate_name == "ROLLBACK_QUALIFIED")
     assert gate.status == Status.PASS
+
+
+def test_image_digest_not_shadowed_by_schema_digest(monkeypatch):
+    import hmac, hashlib
+    from scripts.hermes_canonical_evidence import (
+        SCHEMA_EVIDENCE_TYPE,
+        SCHEMA_EVIDENCE_FIELDS,
+    )
+
+    key = "test_provenance_key_123"
+    monkeypatch.setenv("HERMES_PROVENANCE_KEY", key)
+
+    target_sha = "d" * 40
+    expected_image_digest = "sha256:" + "e" * 64
+    schema_digest = "f" * 64
+
+    sch = {
+        "schema_version": 1,
+        "evidence_type": SCHEMA_EVIDENCE_TYPE,
+        "target_sha": target_sha,
+        "status": "PASS",
+        "digest": schema_digest,
+        "observed_schema": "CREATE TABLE test (id INT);",
+        "actual_schema_digest": schema_digest,
+        "expected_schema_digest": schema_digest,
+        "user_version": 0,
+        "actual_user_version": 0,
+        "expected_user_version": 0,
+        "schema_delta": "NONE",
+        "migration_required": False,
+        "integrity_status": "ok",
+        "foreign_key_violation_count": 0,
+        "collected_at_utc": valid_utc(),
+        "execution_provenance": {
+            "isolation_level": "docker",
+            "runtime_identity": "healbite-production",
+        },
+    }
+    payload = {
+        k: v
+        for k, v in sch.items()
+        if k not in ("evidence_digest", "execution_provenance")
+    }
+    payload["execution_provenance"] = {
+        k: v for k, v in sch["execution_provenance"].items() if k != "signature"
+    }
+    payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload_digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+    sch["execution_provenance"]["signature"] = hmac.new(
+        key.encode("utf-8"), payload_digest.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    sch["evidence_digest"] = compute_canonical_digest_from_dict(sch)
+
+    bundle = create_bundle({
+        "target_sha": target_sha,
+        "image_digest": expected_image_digest,
+        "oci_revision": target_sha,
+        "build_source_sha": target_sha,
+        "architecture": "amd64",
+        "entrypoint": ["/init"],
+        "schema_evidence": sch,
+    })
+
+    (
+        gates,
+        returned_image_digest,
+        revision,
+        arch,
+        entrypoint,
+        tree_sha,
+        cfg_digest,
+        returned_sch_digest,
+        *_,
+    ) = get_all_gates(target_sha, bundle)
+
+    # Prove returned_image_digest was NOT shadowed by sch_digest
+    assert returned_image_digest == expected_image_digest
+    assert returned_image_digest != returned_sch_digest
+    assert returned_sch_digest == schema_digest
+    gate_build = next(g for g in gates if g.gate_name == "EXACT_MAIN_BUILD")
+    assert gate_build.status == Status.PASS
+    gate_schema = next(g for g in gates if g.gate_name == "SCHEMA_COMPATIBILITY")
+    assert gate_schema.status == Status.PASS
+
+
+def test_receipt_image_identity_matches_container_image_digest():
+    from scripts.hermes_release_qualification import (
+        GateResult,
+        ReleaseCandidateManifest,
+        ReleaseQualificationRequest,
+        ReleaseQualifier,
+    )
+
+    expected_sha = "1" * 40
+    expected_image_digest = "sha256:" + "2" * 64
+    schema_digest = "3" * 64
+
+    manifest = ReleaseCandidateManifest.create(
+        schema_version=1,
+        release_candidate_id=f"rc-{expected_sha[:8]}",
+        repository="life2boat/hermes",
+        canonical_main_ref="refs/remotes/github/main",
+        canonical_main_sha=expected_sha,
+        git_tree_sha="tree_123",
+        build_source_sha=expected_sha,
+        container_image_repository="ghcr.io/life2boat/hermes",
+        container_image_digest=expected_image_digest,
+        oci_revision=expected_sha,
+        build_workflow_id="123",
+        build_run_id="456",
+        configuration_contract_digest="cfg",
+        schema_contract_digest=schema_digest,
+        rollback_bundle_digest="rb",
+        required_ci_snapshot_digest="ci",
+        qualification_timestamp_utc=valid_utc(),
+        architecture="amd64",
+        entrypoint=["/init"],
+    )
+
+    request = ReleaseQualificationRequest.create(
+        schema_version=1,
+        qualification_id=f"q-{expected_sha[:8]}",
+        repository="life2boat/hermes",
+        canonical_remote="github",
+        canonical_main_ref="refs/remotes/github/main",
+        canonical_main_sha=expected_sha,
+        task8_run_id="run-local",
+        required_ci_workflows=(
+            "Tests",
+            "Lint (ruff + ty diff)",
+            "Typecheck",
+            "Nix",
+            "Agent Release Gate",
+            "Supply Chain Audit",
+            "History Check",
+        ),
+        production_target_id="prod",
+        requested_at_utc=valid_utc(),
+    )
+
+    gates = [GateResult(f"GATE_{i}", Status.PASS) for i in range(12)]
+    qualifier = ReleaseQualifier()
+    receipt = qualifier.qualify(
+        request=request,
+        manifest=manifest,
+        gates=gates,
+        has_credential_risk=False,
+        current_main_sha=expected_sha,
+        timestamp=valid_utc(),
+    )
+
+    assert receipt.image_digest == expected_image_digest
+    assert receipt.image_digest != schema_digest
+    assert receipt.image_digest.startswith("sha256:")

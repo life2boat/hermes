@@ -1021,7 +1021,35 @@ def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationRes
     if payload.get("schema_version") != FOOD_VISION_SCHEMA_VERSION:
         return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="unsupported_schema_version")
 
+    if "is_food" in payload and not isinstance(payload["is_food"], bool):
+        return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_is_food")
+
     if payload.get("is_food") is False:
+        items_payload = payload.get("items")
+        if not isinstance(items_payload, list):
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_items")
+        if len(items_payload) != 0:
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="non_empty_items_for_non_food")
+
+        overall_confidence = _parse_probability(payload.get("overall_confidence"))
+        if overall_confidence is None:
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_overall_confidence")
+
+        needs_user_confirmation = payload.get("needs_user_confirmation")
+        if not isinstance(needs_user_confirmation, bool):
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_needs_user_confirmation")
+
+        warnings_payload = payload.get("warnings")
+        if not isinstance(warnings_payload, list):
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_warnings")
+        if len(warnings_payload) > _MAX_FOOD_VISION_WARNINGS:
+            return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="too_many_warnings")
+
+        for warning in warnings_payload:
+            normalized_warning = _bounded_text(warning, max_length=_MAX_FOOD_VISION_WARNING_LENGTH)
+            if normalized_warning is None:
+                return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="invalid_warning_text")
+
         return FoodVisionValidationResult(status="NON_FOOD", reason="not_food")
 
     items_payload = payload.get("items")

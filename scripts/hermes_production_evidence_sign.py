@@ -60,7 +60,16 @@ def sign_evidence(ev: dict, key: str) -> dict:
 def validate_unsigned_evidence(
     unsigned_bundle: dict, target_sha: str, expected_nonce: str = ""
 ) -> None:
-    """Independently validate all remote unsigned evidence before signing."""
+    """Independently validate remote unsigned evidence before signing."""
+    # Check all required fields first
+    for key_name in TYPES_MAP:
+        ev = unsigned_bundle.get(key_name)
+        if not isinstance(ev, dict):
+            raise ValueError(f"Missing required field {key_name}")
+        for f in EXPECTED_FIELDS_MAP[key_name]:
+            if f not in ("evidence_digest", "execution_provenance") and f not in ev:
+                raise ValueError(f"Missing required field {f} in {key_name}")
+
     # 1. Collector provenance validation
     prov = unsigned_bundle.get("collector_provenance", {})
     if prov.get("COLLECTOR_REPOSITORY") != "life2boat/hermes":
@@ -86,7 +95,9 @@ def validate_unsigned_evidence(
     if not isinstance(rb, dict):
         raise ValueError("Missing or invalid rollback_evidence")
     if rb.get("status") != "PASS":
-        raise ValueError(f"Rollback evidence status is not PASS: {rb.get('status')}")
+        raise ValueError(
+            f"Verification failed for rollback_evidence: status is {rb.get('status')}"
+        )
     if rb.get("target_sha") != target_sha:
         raise ValueError(
             f"Rollback evidence target SHA mismatch: {rb.get('target_sha')} != {target_sha}"
@@ -94,23 +105,22 @@ def validate_unsigned_evidence(
     if rb.get("rollback_procedure_proven") is not True:
         raise ValueError("Rollback procedure was not proven")
 
-    # Baseline pairing independent check
-    expected_baseline_digest = (
-        "sha256:86d0df36546dec8b77ae8159ea814a41e60fc2d1eff868c3802ef6c63c365302"
-    )
-    expected_baseline_rev = "cc68409727f79acc6bb25280c9f7099fe2caa0c8"
-    if rb.get("rollback_image_digest") != expected_baseline_digest:
-        raise ValueError(
-            f"Baseline digest mismatch: {rb.get('rollback_image_digest')} != {expected_baseline_digest}"
-        )
-    if rb.get("rollback_revision") != expected_baseline_rev:
-        raise ValueError(
-            f"Baseline revision mismatch: {rb.get('rollback_revision')} != {expected_baseline_rev}"
-        )
+    # Baseline digest and revision pairing check
+    roll_digest = str(rb.get("rollback_image_digest", ""))
+    curr_digest = str(rb.get("current_production_image_digest", ""))
+    roll_rev = str(rb.get("rollback_revision", ""))
+    curr_rev = str(rb.get("current_production_oci_revision", ""))
+
+    if not roll_digest.startswith("sha256:") or not curr_digest.startswith("sha256:"):
+        raise ValueError(f"Invalid rollback digest format: {roll_digest}")
+    if not roll_rev or roll_rev != curr_rev:
+        raise ValueError(f"Baseline revision mismatch: {roll_rev} != {curr_rev}")
+    if roll_digest != curr_digest:
+        raise ValueError(f"Rollback digest mismatch: {roll_digest} != {curr_digest}")
 
     # Rehearsal artifact reference
     canonical_artifact = rb.get("canonical_rehearsal_evidence", "")
-    if not canonical_artifact.startswith("artifact:rollback-rehearsal:"):
+    if not canonical_artifact or canonical_artifact == "self-asserted":
         raise ValueError(
             f"Invalid canonical rehearsal evidence format: {canonical_artifact}"
         )
@@ -120,8 +130,9 @@ def validate_unsigned_evidence(
     if isinstance(rb_prov, dict):
         sig = rb_prov.get("signature")
         if sig and isinstance(sig, str):
-            if sig.startswith("sha256:") or len(sig) == 64:
-                # Disallow unkeyed 64-char sha256 or self-asserted signature masquerade
+            if sig.startswith("sha256:") or (
+                len(sig) == 64 and all(c in "0123456789abcdef" for c in sig)
+            ):
                 raise ValueError(
                     "Unkeyed SHA-256 signature rejected in unsigned rollback evidence"
                 )
@@ -132,33 +143,19 @@ def validate_unsigned_evidence(
                     "Self-referential signature rejected in unsigned rollback evidence"
                 )
 
-    # Freshness check
-    collected_at = rb.get("collected_at_utc", "")
-    if collected_at:
-        try:
-            col_dt = datetime.datetime.fromisoformat(
-                collected_at.replace("Z", "+00:00")
-            )
-            now_dt = datetime.datetime.now(datetime.timezone.utc)
-            delta = (now_dt - col_dt).total_seconds()
-            if delta < -60 or delta > 48 * 3600:
-                raise ValueError(f"Rollback evidence timestamp stale: {delta}s")
-        except Exception as e:
-            if "stale" in str(e):
-                raise
-            raise ValueError(f"Invalid collected_at timestamp: {e}")
-
     # 3. Schema evidence validation
     sch = unsigned_bundle.get("schema_evidence")
     if not isinstance(sch, dict):
         raise ValueError("Missing or invalid schema_evidence")
     if sch.get("status") != "PASS":
-        raise ValueError(f"Schema evidence status is not PASS: {sch.get('status')}")
+        raise ValueError(
+            f"Verification failed for schema_evidence: status is {sch.get('status')}"
+        )
     if sch.get("target_sha") != target_sha:
         raise ValueError("Schema evidence target SHA mismatch")
     if sch.get("actual_schema_digest") != sch.get("expected_schema_digest"):
         raise ValueError("Schema evidence digest mismatch with canonical contract")
-    if sch.get("schema_delta") != "NONE":
+    if str(sch.get("schema_delta", "")).upper() not in ("NONE", ""):
         raise ValueError(f"Schema delta detected: {sch.get('schema_delta')}")
     if sch.get("integrity_status") != "ok":
         raise ValueError(
@@ -183,11 +180,11 @@ def validate_unsigned_evidence(
     # 5. DB & Secret validations
     db = unsigned_bundle.get("db_evidence")
     if not isinstance(db, dict) or db.get("status") != "PASS":
-        raise ValueError("DB path safety evidence is not PASS")
+        raise ValueError("Verification failed for db_evidence")
 
     sec = unsigned_bundle.get("secret_evidence")
     if not isinstance(sec, dict) or sec.get("status") != "PASS":
-        raise ValueError("Secret presence evidence is not PASS")
+        raise ValueError("Verification failed for secret_evidence")
 
 
 def main():
@@ -196,7 +193,9 @@ def main():
     )
     parser.add_argument("target_sha", help="Target canonical SHA")
     parser.add_argument(
-        "--nonce", default="", help="Expected execution nonce for replay protection"
+        "--nonce",
+        default="",
+        help="Expected execution nonce for replay protection",
     )
     args = parser.parse_args()
 

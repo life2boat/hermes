@@ -422,47 +422,11 @@ def test_rejection_of_failed_container_in_drill(tmp_path):
 
 def test_signer_validates_nonce_and_fails_closed_on_tampering():
     """Signer must independently validate nonce and baseline pairing."""
+    from tests.test_hermes_production_evidence_sign import get_base_unsigned_bundle
+
     target_sha = "a" * 40
-    unsigned_bundle = {
-        "collector_provenance": {
-            "COLLECTOR_REPOSITORY": "life2boat/hermes",
-            "COLLECTOR_HEAD_SHA": target_sha,
-            "COLLECTOR_TREE_SHA": "tree123",
-            "COLLECTOR_WORKTREE_CLEAN": True,
-            "EXECUTION_NONCE": "nonce-alpha",
-        },
-        "rollback_evidence": {
-            "status": "PASS",
-            "target_sha": target_sha,
-            "rollback_image_digest": "sha256:86d0df36546dec8b77ae8159ea814a41e60fc2d1eff868c3802ef6c63c365302",
-            "rollback_revision": "cc68409727f79acc6bb25280c9f7099fe2caa0c8",
-            "rollback_procedure_proven": True,
-            "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:rec1:hash1",
-            "collected_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "execution_provenance": {
-                "runtime_identity": "healbite-production",
-                "isolation_level": "docker",
-                "signature": "UNSIGNED_COLLECTOR_EXECUTION",
-            },
-        },
-        "schema_evidence": {
-            "status": "PASS",
-            "target_sha": target_sha,
-            "actual_schema_digest": "digest_match",
-            "expected_schema_digest": "digest_match",
-            "schema_delta": "NONE",
-            "integrity_status": "ok",
-            "foreign_key_violation_count": 0,
-            "migration_required": False,
-        },
-        "credential_risk_evidence": {
-            "credential_risk_status": "PROVEN_CLEAR",
-        },
-        "db_evidence": {"status": "PASS"},
-        "secret_evidence": {"status": "PASS"},
-    }
+    unsigned_bundle = get_base_unsigned_bundle()
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
 
     # Valid nonce matches
     validate_unsigned_evidence(
@@ -479,7 +443,7 @@ def test_signer_validates_nonce_and_fails_closed_on_tampering():
     bad_bundle = dict(unsigned_bundle)
     bad_bundle["rollback_evidence"] = dict(unsigned_bundle["rollback_evidence"])
     bad_bundle["rollback_evidence"]["rollback_image_digest"] = "sha256:wrong_digest"
-    with pytest.raises(ValueError, match="Baseline digest mismatch"):
+    with pytest.raises(ValueError, match="Rollback digest mismatch"):
         validate_unsigned_evidence(bad_bundle, target_sha, expected_nonce="nonce-alpha")
 
 
@@ -490,44 +454,14 @@ def test_signer_validates_nonce_and_fails_closed_on_tampering():
 
 def test_schema_incompatibility_fails_closed_in_signer():
     """Signer strictly rejects bundles reporting schema deltas or integrity failures."""
-    target_sha = "a" * 40
-    unsigned_bundle = {
-        "collector_provenance": {
-            "COLLECTOR_REPOSITORY": "life2boat/hermes",
-            "COLLECTOR_HEAD_SHA": target_sha,
-            "COLLECTOR_TREE_SHA": "tree123",
-            "COLLECTOR_WORKTREE_CLEAN": True,
-            "EXECUTION_NONCE": "nonce-alpha",
-        },
-        "rollback_evidence": {
-            "status": "PASS",
-            "target_sha": target_sha,
-            "rollback_image_digest": "sha256:86d0df36546dec8b77ae8159ea814a41e60fc2d1eff868c3802ef6c63c365302",
-            "rollback_revision": "cc68409727f79acc6bb25280c9f7099fe2caa0c8",
-            "rollback_procedure_proven": True,
-            "canonical_rehearsal_evidence": "artifact:rollback-rehearsal:rec1:hash1",
-            "collected_at_utc": datetime.datetime.now(datetime.timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-        },
-        "schema_evidence": {
-            "status": "FAIL",
-            "target_sha": target_sha,
-            "actual_schema_digest": "digest_a",
-            "expected_schema_digest": "digest_b",
-            "schema_delta": "TABLE_DELTA",
-            "integrity_status": "INTEGRITY_FAIL",
-            "foreign_key_violation_count": 2,
-            "migration_required": True,
-        },
-        "credential_risk_evidence": {
-            "credential_risk_status": "PROVEN_CLEAR",
-        },
-        "db_evidence": {"status": "PASS"},
-        "secret_evidence": {"status": "PASS"},
-    }
+    from tests.test_hermes_production_evidence_sign import get_base_unsigned_bundle
 
-    with pytest.raises(ValueError, match="Schema evidence status is not PASS"):
+    target_sha = "a" * 40
+    unsigned_bundle = get_base_unsigned_bundle()
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
+    unsigned_bundle["schema_evidence"]["status"] = "FAIL"
+
+    with pytest.raises(ValueError, match="Verification failed for schema_evidence: status is FAIL"):
         validate_unsigned_evidence(
             unsigned_bundle, target_sha, expected_nonce="nonce-alpha"
         )

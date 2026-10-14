@@ -232,29 +232,30 @@ def test_rejection_of_forged_pass_receipt_with_recomputed_hashes(
 def test_rejection_of_collector_run_without_trusted_authentication(
     rehearsal_setup, monkeypatch
 ):
-    """HERMES_COLLECTOR_RUN=1 must not bypass authentication on arbitrary or untrusted tokens."""
-    data = dict(rehearsal_setup["rehearsal_payload"])
-    data["execution_provenance"] = {
-        "runtime_identity": "healbite-production",
-        "isolation_level": "docker",
-        "signature": "arbitrary_unauthenticated_string",
-    }
-    rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv(
-        "HERMES_ROLLBACK_REHEARSAL_PATH",
-        str(rehearsal_setup["rehearsal_file"]),
-    )
-    monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
-    monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
-
-    with patch(
-        "subprocess.check_output",
-        return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
-    ):
-        res = get_real_rollback_evidence(
-            rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+    """HERMES_COLLECTOR_RUN=1 must not bypass authentication on arbitrary or untrusted tokens or collector markers."""
+    for token in ["UNSIGNED_COLLECTOR_EXECUTION", "arbitrary_unauthenticated_string"]:
+        data = dict(rehearsal_setup["rehearsal_payload"])
+        data["execution_provenance"] = {
+            "runtime_identity": "healbite-production",
+            "isolation_level": "docker",
+            "signature": token,
+        }
+        rehearsal_setup["rehearsal_file"].write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setenv(
+            "HERMES_ROLLBACK_REHEARSAL_PATH",
+            str(rehearsal_setup["rehearsal_file"]),
         )
-        assert res.get("status") == "BLOCKED"
+        monkeypatch.setenv("HERMES_COLLECTOR_RUN", "1")
+        monkeypatch.delenv("HERMES_PROVENANCE_KEY", raising=False)
+
+        with patch(
+            "subprocess.check_output",
+            return_value=json.dumps(rehearsal_setup["docker_inspect_data"]).encode(),
+        ):
+            res = get_real_rollback_evidence(
+                rehearsal_setup["target_sha"], rehearsal_setup["now_iso"]
+            )
+            assert res.get("status") == "BLOCKED"
 
 
 # ---------------------------------------------------------------------------
@@ -426,17 +427,21 @@ def test_signer_validates_nonce_and_fails_closed_on_tampering():
 
     target_sha = "a" * 40
     unsigned_bundle = get_base_unsigned_bundle()
-    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
+    nonce = "noncealphadef123456789012345678"
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = nonce
+    unsigned_bundle["raw_rehearsal_receipt"]["execution_nonce"] = nonce
+    unsigned_bundle["raw_rehearsal_receipt"]["receipt_id"] = (
+        f"receipt-rollback-{target_sha[:8]}-{nonce[:16]}"
+    )
+    unsigned_bundle["raw_rehearsal_health"]["execution_nonce"] = nonce
 
     # Valid nonce matches
-    validate_unsigned_evidence(
-        unsigned_bundle, target_sha, expected_nonce="nonce-alpha"
-    )
+    validate_unsigned_evidence(unsigned_bundle, target_sha, expected_nonce=nonce)
 
     # Replayed / mismatched nonce fails closed
     with pytest.raises(ValueError, match="Execution nonce mismatch"):
         validate_unsigned_evidence(
-            unsigned_bundle, target_sha, expected_nonce="nonce-other"
+            unsigned_bundle, target_sha, expected_nonce="nonce-other-123456789012345678"
         )
 
     # Altered baseline fails closed
@@ -444,7 +449,7 @@ def test_signer_validates_nonce_and_fails_closed_on_tampering():
     bad_bundle["rollback_evidence"] = dict(unsigned_bundle["rollback_evidence"])
     bad_bundle["rollback_evidence"]["rollback_image_digest"] = "sha256:wrong_digest"
     with pytest.raises(ValueError, match="Rollback digest mismatch"):
-        validate_unsigned_evidence(bad_bundle, target_sha, expected_nonce="nonce-alpha")
+        validate_unsigned_evidence(bad_bundle, target_sha, expected_nonce=nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -458,13 +463,19 @@ def test_schema_incompatibility_fails_closed_in_signer():
 
     target_sha = "a" * 40
     unsigned_bundle = get_base_unsigned_bundle()
-    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = "nonce-alpha"
+    nonce = "noncealphadef123456789012345678"
+    unsigned_bundle["collector_provenance"]["EXECUTION_NONCE"] = nonce
+    unsigned_bundle["raw_rehearsal_receipt"]["execution_nonce"] = nonce
+    unsigned_bundle["raw_rehearsal_receipt"]["receipt_id"] = (
+        f"receipt-rollback-{target_sha[:8]}-{nonce[:16]}"
+    )
+    unsigned_bundle["raw_rehearsal_health"]["execution_nonce"] = nonce
     unsigned_bundle["schema_evidence"]["status"] = "FAIL"
 
-    with pytest.raises(ValueError, match="Verification failed for schema_evidence: status is FAIL"):
-        validate_unsigned_evidence(
-            unsigned_bundle, target_sha, expected_nonce="nonce-alpha"
-        )
+    with pytest.raises(
+        ValueError, match="Verification failed for schema_evidence: status is FAIL"
+    ):
+        validate_unsigned_evidence(unsigned_bundle, target_sha, expected_nonce=nonce)
 
 
 # ---------------------------------------------------------------------------

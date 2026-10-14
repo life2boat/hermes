@@ -8667,61 +8667,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Decide routing: native (attach pixels) vs text (vision_analyze
                 # pre-run + prepend description).  See agent/image_routing.py.
                 _img_mode = self._decide_image_input_mode()
-                if _img_mode == "native":
-                    logger.info(
-                        "[Gateway][vision_route_selected] mode=native images=%d platform=%s",
-                        len(image_paths),
-                        getattr(source.platform, "value", source.platform),
+                logger.info(
+                    "[Gateway][vision_route_selected] mode=%s images=%d platform=%s",
+                    _img_mode,
+                    len(image_paths),
+                    getattr(source.platform, "value", source.platform),
+                )
+                if source.platform == Platform.TELEGRAM:
+                    message_text, vision_success, pending_reply = await self._try_enrich_message_with_healbite_nutrition(
+                        event=event,
+                        source=source,
+                        user_text=message_text,
+                        image_paths=image_paths,
                     )
-                    # Defer attachment to the run_conversation call site.
-                    pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
-                    if pending_native is None:
-                        pending_native = {}
-                        self._pending_native_image_paths_by_session = pending_native
-                    pending_native[session_key] = list(image_paths)
-                    logger.info(
-                        "Image routing: native (model supports vision). %d image(s) will be attached inline.",
-                        len(image_paths),
-                    )
-                else:
-                    logger.info(
-                        "[Gateway][vision_route_selected] mode=%s images=%d platform=%s",
-                        _img_mode,
-                        len(image_paths),
-                        getattr(source.platform, "value", source.platform),
-                    )
-                    logger.info(
-                        "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
-                        _img_mode, len(image_paths),
-                    )
-                    if source.platform == Platform.TELEGRAM:
-                        message_text, vision_success, pending_reply = await self._try_enrich_message_with_healbite_nutrition(
-                            event=event,
-                            source=source,
-                            user_text=message_text,
-                            image_paths=image_paths,
+                    if pending_reply:
+                        adapter = self.adapters.get(source.platform)
+                        metadata = self._thread_metadata_for_source(
+                            source,
+                            self._reply_anchor_for_event(event),
                         )
-                        if pending_reply:
-                            adapter = self.adapters.get(source.platform)
-                            metadata = self._thread_metadata_for_source(
-                                source,
-                                self._reply_anchor_for_event(event),
+                        metadata = dict(metadata) if metadata else {}
+                        metadata["parse_mode"] = "HTML"
+                        if adapter and source.chat_id:
+                            await adapter.send(
+                                source.chat_id,
+                                pending_reply,
+                                metadata=metadata,
                             )
-                            metadata = dict(metadata) if metadata else {}
-                            metadata["parse_mode"] = "HTML"
-                            if adapter and source.chat_id:
-                                await adapter.send(
-                                    source.chat_id,
-                                    pending_reply,
-                                    metadata=metadata,
-                                )
-                            return None
-                    else:
-                        message_text, vision_success = await self._try_enrich_message_with_vision(
-                            message_text,
-                            image_paths,
+                        return None
+                    if _img_mode == "native":
+                        # Defer attachment to the run_conversation call site.
+                        pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+                        if pending_native is None:
+                            pending_native = {}
+                            self._pending_native_image_paths_by_session = pending_native
+                        pending_native[session_key] = list(image_paths)
+                        logger.info(
+                            "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                            len(image_paths),
                         )
-                    if not vision_success:
+                    elif not vision_success:
                         logger.info(
                             "[Gateway][vision_unavailable] platform=%s images=%d",
                             getattr(source.platform, "value", source.platform),
@@ -8732,6 +8717,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         await self._send_vision_unavailable_reply(source=source, event=event)
                         return None
+                else:
+                    if _img_mode == "native":
+                        # Defer attachment to the run_conversation call site.
+                        pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
+                        if pending_native is None:
+                            pending_native = {}
+                            self._pending_native_image_paths_by_session = pending_native
+                        pending_native[session_key] = list(image_paths)
+                        logger.info(
+                            "Image routing: native (model supports vision). %d image(s) will be attached inline.",
+                            len(image_paths),
+                        )
+                    else:
+                        logger.info(
+                            "Image routing: text (mode=%s). Pre-analyzing %d image(s) via vision_analyze.",
+                            _img_mode, len(image_paths),
+                        )
+                        message_text, vision_success = await self._try_enrich_message_with_vision(
+                            message_text,
+                            image_paths,
+                        )
+                        if not vision_success:
+                            logger.info(
+                                "[Gateway][vision_unavailable] platform=%s images=%d",
+                                getattr(source.platform, "value", source.platform),
+                                len(image_paths),
+                            )
+                            logger.info(
+                                "Image routing: auxiliary vision unavailable; replying with safe fallback and skipping text-only model path."
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
 
             if audio_paths:
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
@@ -13087,8 +13104,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             format_pending_meal_prompt,
         )
 
-        diary = self._get_healbite_nutrition_diary()
         try:
+            if not getattr(source, "user_id", None):
+                return user_text, False, None
+            diary = self._get_healbite_nutrition_diary()
             outcome = await diary.analyze_and_maybe_log(
                 user_id=int(source.user_id),
                 image_path=image_paths[0],

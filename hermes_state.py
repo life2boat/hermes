@@ -4219,7 +4219,7 @@ class SessionDB:
             try:
                 rows = self._conn.execute(
                     "SELECT * FROM telegram_dm_topic_bindings "
-                    "WHERE chat_id = ? ORDER BY updated_at DESC",
+                    "WHERE chat_id = ? ORDER BY updated_at DESC, rowid DESC",
                     (str(chat_id),),
                 ).fetchall()
             except sqlite3.OperationalError:

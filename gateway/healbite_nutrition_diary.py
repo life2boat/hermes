@@ -142,6 +142,7 @@ _FOOD_VISION_ALLOWED_TOP_LEVEL_FIELDS = frozenset({
     "overall_confidence",
     "needs_user_confirmation",
     "warnings",
+    "is_food",
 })
 _FOOD_VISION_ALLOWED_ITEM_FIELDS = frozenset({
     "visible_name",
@@ -193,15 +194,16 @@ _COMBINED_DISH_TITLE_PREFIXES = (
 )
 _VISION_PROMPT = (
     "You are HealBite Stage-1 food vision. "
-    "Return strict JSON only for schema food_vision_inventory_v1, with no markdown and no extra text. "
+    "Return strict JSON only for schema food_vision_inventory_v1, no markdown. "
+    "If not food, set is_food: false, items: []. "
     "Describe only separately visible food components in Russian. "
-    "Use one item per visible component and keep visible sauces or condiments as separate items. "
+    "One item per component; visible sauces as separate items. "
     "Do not collapse a mixed plate into one dish title. "
-    "Use a generic visual label when exact identity is uncertain, and put that uncertainty into the uncertainty field. "
-    "Do not invent hidden ingredients, fillings, or unsupported preparation details. "
-    "Give confidence per item and approximate gram ranges only when visually supportable; otherwise use null. "
+    "Put uncertainty into uncertainty field when identity is uncertain. "
+    "Do not invent hidden ingredients or fillings. "
+    "Confidence and gram ranges only when visually supportable, else null. "
     "Never return calories, macros, or totals. "
-    "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty}], overall_confidence, needs_user_confirmation, warnings."
+    "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty}], overall_confidence, needs_user_confirmation, warnings, is_food."
 )
 
 
@@ -1019,6 +1021,9 @@ def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationRes
     if payload.get("schema_version") != FOOD_VISION_SCHEMA_VERSION:
         return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="unsupported_schema_version")
 
+    if payload.get("is_food") is False:
+        return FoodVisionValidationResult(status="NON_FOOD", reason="not_food")
+
     items_payload = payload.get("items")
     if not isinstance(items_payload, list) or not items_payload:
         return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason="empty_items")
@@ -1791,10 +1796,20 @@ class HealBiteNutritionDiary:
             return NutritionDiaryOutcome(
                 available=False,
                 raw_analysis=str(result.get("analysis", "") if isinstance(result, dict) else ""),
+                validation_status="PROVIDER_ERROR",
             )
 
         raw_analysis = str(result.get("analysis") or "").strip()
         validation = validate_food_vision_inventory(raw_analysis)
+        if validation.status == "NON_FOOD":
+            logger.info("[HealBite][vision_parse_ok] ok=true is_food=false reason=not_food")
+            logger.info("[HealBite][vision_pending_staged] staged=false")
+            return NutritionDiaryOutcome(
+                available=False,
+                raw_analysis=raw_analysis,
+                validation_status="NON_FOOD",
+            )
+
         if validation.inventory is None:
             logger.info("[HealBite][vision_parse_ok] ok=false reason=%s", validation.reason or "structured_json_missing")
             logger.info("[HealBite][vision_pending_staged] staged=false")

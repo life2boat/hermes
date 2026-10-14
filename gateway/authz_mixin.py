@@ -224,7 +224,8 @@ class GatewayAuthorizationMixin:
 
         # Check pairing store (always checked, regardless of allowlists)
         platform_name = source.platform.value if source.platform else ""
-        if self.pairing_store.is_approved(platform_name, user_id):
+        pairing_store = getattr(self, "pairing_store", None)
+        if pairing_store and pairing_store.is_approved(platform_name, user_id):
             return True
 
         # Check platform-specific and global allowlists

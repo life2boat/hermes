@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -211,11 +212,47 @@ def test_public_lane_admin_flow_is_unchanged_when_flag_disabled(tmp_path, monkey
 
 
 def test_public_lane_correlation_marker_is_hashed_and_has_no_pii():
-    corr = _healbite_event_correlation_id(_event(user_id=968323641, text="/start"))
+    ev1 = _event(user_id=968323641, text="/start")
+    corr1 = _healbite_event_correlation_id(ev1)
 
-    assert corr
-    assert "968323641" not in corr
-    assert ":" not in corr
+    assert corr1
+    assert len(corr1) == 12
+    raw_user_id = "968323641"
+    assert raw_user_id not in corr1
+    assert ":" not in corr1
+    # Verify no unsalted hash of identifier is used
+    assert hashlib.sha256(raw_user_id.encode("utf-8")).hexdigest()[:12] != corr1
+    assert hashlib.sha1(raw_user_id.encode("utf-8")).hexdigest()[:12] != corr1
+
+    # Verify correlation stability within the same event
+    corr2 = _healbite_event_correlation_id(ev1)
+    assert corr1 == corr2
+
+    # Verify separation between different events
+    ev2 = _event(user_id=968323642, text="/start")
+    corr_diff_user = _healbite_event_correlation_id(ev2)
+    assert corr_diff_user != corr1
+
+    ev3 = MessageEvent(
+        source=_source(968323641),
+        message_id="msg_2",
+        message_type=MessageType.TEXT,
+        text="/help",
+    )
+    corr_diff_event = _healbite_event_correlation_id(ev3)
+    assert corr_diff_event != corr1
+
+    # Verify handling when event is None
+    corr_none = _healbite_event_correlation_id(None)
+    assert corr_none
+    assert len(corr_none) == 12
+    assert corr_none != corr1
+
+
+def test_obsolete_privacy_safe_user_ref_helper_is_removed():
+    import gateway.run as gateway_run
+
+    assert not hasattr(gateway_run, "_privacy_safe_user_ref")
 
 
 def test_public_lane_profile_edit_intent_is_allowed(tmp_path, monkeypatch):

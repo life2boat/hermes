@@ -239,6 +239,20 @@ def _make_text_only_runner():
     return runner, adapter
 
 
+def _make_native_runner():
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")},
+    )
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._model = "claude-3-5-sonnet"
+    runner._base_url = None
+    runner._has_setup_skill = lambda: False
+    runner._decide_image_input_mode = lambda: "native"
+    return runner, adapter
+
+
 def _runner_source():
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -474,6 +488,52 @@ async def test_runner_photo_parse_failed_returns_safe_fallback(tmp_path):
     assert sent_text == SAFE_VISION_FALLBACK
     assert diary.get_pending_meal(1) is None
     assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_native_mode_routes_food_photo_to_healbite(tmp_path):
+    runner, adapter = _make_native_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source)
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value=_vision_success_payload())):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    adapter.send.assert_awaited_once()
+    sent_text = adapter.send.await_args.args[1]
+    assert "Я вижу:" in sent_text
+    assert "КБЖУ не рассчитаны" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_runner_photo_native_mode_non_food_attaches_to_pending_native(tmp_path):
+    runner, adapter = _make_native_runner()
+    source = _runner_source()
+    event = _runner_photo_event(source, text="What is this document?")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch(
+        "tools.vision_tools.vision_analyze_tool",
+        new=AsyncMock(return_value=json.dumps({"success": True, "analysis": "A screenshot of an invoice."})),
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    adapter.send.assert_not_called()
+    assert result == "What is this document?"
+    session_key = runner._session_key_for_source(source)
+    assert runner._pending_native_image_paths_by_session[session_key] == ["/tmp/meal.png"]
 
 
 @pytest.mark.asyncio

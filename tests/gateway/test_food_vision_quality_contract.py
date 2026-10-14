@@ -356,6 +356,151 @@ def test_malformed_json_fails_safely():
     assert validation.reason == "invalid_json"
 
 
+def test_valid_non_food_payload_accepted():
+    payload = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [],
+    })
+
+    validation = validate_food_vision_inventory(payload)
+
+    assert validation.status == "NON_FOOD"
+    assert validation.reason == "not_food"
+    assert validation.inventory is None
+
+
+def test_non_food_rejects_incomplete_payloads():
+    base = {
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [],
+    }
+
+    # Missing items
+    p1 = {k: v for k, v in base.items() if k != "items"}
+    v1 = validate_food_vision_inventory(json.dumps(p1))
+    assert v1.status == "INVALID_PROVIDER_OUTPUT"
+    assert v1.reason == "invalid_items"
+
+    # Missing overall_confidence
+    p2 = {k: v for k, v in base.items() if k != "overall_confidence"}
+    v2 = validate_food_vision_inventory(json.dumps(p2))
+    assert v2.status == "INVALID_PROVIDER_OUTPUT"
+    assert v2.reason == "invalid_overall_confidence"
+
+    # Missing needs_user_confirmation
+    p3 = {k: v for k, v in base.items() if k != "needs_user_confirmation"}
+    v3 = validate_food_vision_inventory(json.dumps(p3))
+    assert v3.status == "INVALID_PROVIDER_OUTPUT"
+    assert v3.reason == "invalid_needs_user_confirmation"
+
+    # Missing warnings
+    p4 = {k: v for k, v in base.items() if k != "warnings"}
+    v4 = validate_food_vision_inventory(json.dumps(p4))
+    assert v4.status == "INVALID_PROVIDER_OUTPUT"
+    assert v4.reason == "invalid_warnings"
+
+
+def test_non_food_rejects_malformed_payloads():
+    # Non-empty items
+    p1 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [_item("Яблоко", "яблоко")],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [],
+    }, ensure_ascii=False)
+    v1 = validate_food_vision_inventory(p1)
+    assert v1.status == "INVALID_PROVIDER_OUTPUT"
+    assert v1.reason == "non_empty_items_for_non_food"
+
+    # Non-list items
+    p2 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": "not_a_list",
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [],
+    })
+    v2 = validate_food_vision_inventory(p2)
+    assert v2.status == "INVALID_PROVIDER_OUTPUT"
+    assert v2.reason == "invalid_items"
+
+    # Malformed overall_confidence
+    p3 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": "high",
+        "needs_user_confirmation": False,
+        "warnings": [],
+    })
+    v3 = validate_food_vision_inventory(p3)
+    assert v3.status == "INVALID_PROVIDER_OUTPUT"
+    assert v3.reason == "invalid_overall_confidence"
+
+    # Malformed needs_user_confirmation
+    p4 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": "no",
+        "warnings": [],
+    })
+    v4 = validate_food_vision_inventory(p4)
+    assert v4.status == "INVALID_PROVIDER_OUTPUT"
+    assert v4.reason == "invalid_needs_user_confirmation"
+
+    # Malformed warnings
+    p5 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": "none",
+    })
+    v5 = validate_food_vision_inventory(p5)
+    assert v5.status == "INVALID_PROVIDER_OUTPUT"
+    assert v5.reason == "invalid_warnings"
+
+    # Malformed warning item
+    p6 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": False,
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [123],
+    })
+    v6 = validate_food_vision_inventory(p6)
+    assert v6.status == "INVALID_PROVIDER_OUTPUT"
+    assert v6.reason == "invalid_warning_text"
+
+    # Malformed is_food
+    p7 = json.dumps({
+        "schema_version": FOOD_VISION_SCHEMA_VERSION,
+        "is_food": "false",
+        "items": [],
+        "overall_confidence": 0.0,
+        "needs_user_confirmation": False,
+        "warnings": [],
+    })
+    v7 = validate_food_vision_inventory(p7)
+    assert v7.status == "INVALID_PROVIDER_OUTPUT"
+    assert v7.reason == "invalid_is_food"
+
+
 def test_legacy_non_vision_payload_remains_accepted_for_text_flows():
     record = normalize_nutrition_payload(
         json.dumps(

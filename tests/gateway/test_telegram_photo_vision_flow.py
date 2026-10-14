@@ -528,6 +528,8 @@ async def test_runner_photo_native_mode_structured_non_food_attaches_to_pending_
             "is_food": False,
             "items": [],
             "overall_confidence": 0.0,
+            "needs_user_confirmation": False,
+            "warnings": [],
         }),
     })
 
@@ -635,6 +637,8 @@ async def test_runner_photo_public_user_isolation_never_attaches_to_pending_nati
             "is_food": False,
             "items": [],
             "overall_confidence": 0.0,
+            "needs_user_confirmation": False,
+            "warnings": [],
         }),
     })
 
@@ -726,6 +730,8 @@ async def test_runner_photo_text_mode_structured_non_food_routes_to_generic_visi
             "is_food": False,
             "items": [],
             "overall_confidence": 0.0,
+            "needs_user_confirmation": False,
+            "warnings": [],
         }),
     })
 
@@ -854,3 +860,59 @@ def test_text_turn_keeps_interactive_approval_policy():
     policy = _exec_approval_policy_for_turn(source=source, event=event)
 
     assert policy == "interactive"
+
+
+@pytest.mark.asyncio
+async def test_public_photo_fail_closed_logs_privacy_safe_identifiers(tmp_path, caplog):
+    runner, adapter = _make_text_only_runner()
+    runner._is_user_authorized = lambda s: False
+    raw_user_id = "987654321"
+    source = _runner_source()
+    source.user_id = raw_user_id
+    event = _runner_photo_event(source, text="photo of something")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value='{"success": false, "error": "upstream unavailable"}')), \
+         caplog.at_level("INFO", logger="gateway.run"):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    log_messages = [r.getMessage() for r in caplog.records if "[Gateway][public_photo_fail_closed]" in r.getMessage()]
+    assert len(log_messages) == 1
+    msg = log_messages[0]
+    assert "corr=" in msg
+    assert "user_ref=" in msg
+    assert raw_user_id not in msg
+
+
+@pytest.mark.asyncio
+async def test_authorized_photo_fail_closed_logs_privacy_safe_identifiers(tmp_path, caplog):
+    runner, adapter = _make_text_only_runner()
+    runner._is_user_authorized = lambda s: True
+    raw_user_id = "987654321"
+    source = _runner_source()
+    source.user_id = raw_user_id
+    event = _runner_photo_event(source, text="photo of something")
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    runner._get_healbite_nutrition_diary = lambda: diary
+
+    with patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock(return_value='{"success": false, "error": "upstream unavailable"}')), \
+         caplog.at_level("INFO", logger="gateway.run"):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is None
+    log_messages = [r.getMessage() for r in caplog.records if "[Gateway][authorized_photo_fail_closed]" in r.getMessage()]
+    assert len(log_messages) == 1
+    msg = log_messages[0]
+    assert "corr=" in msg
+    assert "user_ref=" in msg
+    assert raw_user_id not in msg

@@ -387,12 +387,19 @@ def main():
         validate_unsigned_evidence(unsigned_bundle, target_sha, expected_nonce)
 
     except Exception as e:
+        sys.stderr.write(f"hermes_production_evidence_sign error: {e}\n")
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
 
     signed_bundle = {}
 
     try:
+        # Sanitize rollback_evidence if redundant top-level execution_nonce is present
+        if "rollback_evidence" in unsigned_bundle and isinstance(
+            unsigned_bundle["rollback_evidence"], dict
+        ):
+            unsigned_bundle["rollback_evidence"].pop("execution_nonce", None)
+
         # Sign rehearsal receipt with CI provenance key and bind canonical reference
         raw_receipt = unsigned_bundle.get("raw_rehearsal_receipt")
         if raw_receipt:
@@ -445,6 +452,7 @@ def main():
             signed_bundle[key_name] = signed_ev
 
     except Exception as e:
+        sys.stderr.write(f"hermes_production_evidence_sign error: {e}\n")
         print(json.dumps({"error": str(e)}))
         sys.exit(1)
 

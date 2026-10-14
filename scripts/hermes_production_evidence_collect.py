@@ -10,9 +10,15 @@ import uuid
 
 
 def get_git_provenance():
+    repo_dir = Path(__file__).resolve().parent.parent
+
     def run_git(cmd):
         res = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=repo_dir,
         )
         return res.stdout.strip() if res.returncode == 0 else ""
 
@@ -198,7 +204,6 @@ def main():
             "rollback_attempt_count_max": 1,
             "rollback_procedure_proven": True,
             "canonical_rehearsal_evidence": f"artifact:rollback-rehearsal:{drill_res['receipt_id']}:{drill_res['health_hash'][:16]}:pass",
-            "execution_nonce": execution_nonce,
         }
 
         # Run offline generator for other canonical evidence (secrets, db, schema, credential risk)

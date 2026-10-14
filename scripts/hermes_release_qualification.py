@@ -1,10 +1,15 @@
 import os
 from scripts.hermes_canonical_evidence import (
-    SECRET_EVIDENCE_TYPE, SECRET_EVIDENCE_FIELDS,
-    DB_EVIDENCE_TYPE, DB_EVIDENCE_FIELDS,
-    SCHEMA_EVIDENCE_TYPE, SCHEMA_EVIDENCE_FIELDS,
-    ROLLBACK_EVIDENCE_TYPE, ROLLBACK_EVIDENCE_FIELDS,
-    CREDENTIAL_RISK_EVIDENCE_TYPE, CREDENTIAL_RISK_EVIDENCE_FIELDS
+    SECRET_EVIDENCE_TYPE,
+    SECRET_EVIDENCE_FIELDS,
+    DB_EVIDENCE_TYPE,
+    DB_EVIDENCE_FIELDS,
+    SCHEMA_EVIDENCE_TYPE,
+    SCHEMA_EVIDENCE_FIELDS,
+    ROLLBACK_EVIDENCE_TYPE,
+    ROLLBACK_EVIDENCE_FIELDS,
+    CREDENTIAL_RISK_EVIDENCE_TYPE,
+    CREDENTIAL_RISK_EVIDENCE_FIELDS,
 )
 import subprocess
 import json
@@ -39,11 +44,18 @@ def compute_file_sha256(filepath: str) -> str:
 from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
 
 
-
 MAX_EVIDENCE_AGE_SECONDS = 7200
 MAX_FUTURE_CLOCK_SKEW_SECONDS = 300
 
-def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, expected_fields: list, key: str, current_time_utc=None) -> str:
+
+def _verify_signed_provenance(
+    ev: dict,
+    expected_sha: str,
+    expected_type: str,
+    expected_fields: list,
+    key: str,
+    current_time_utc=None,
+) -> str:
     import re
     import datetime
     from scripts.compute_bundle_digest import compute_canonical_digest_from_dict
@@ -61,13 +73,19 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
     if ev.get("status") != "PASS":
         return "status not PASS"
 
-    if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(ev.get("collected_at_utc", ""))):
+    if not re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", str(ev.get("collected_at_utc", ""))
+    ):
         return "Invalid collected_at_utc timestamp"
 
     try:
-        dt = datetime.datetime.strptime(str(ev["collected_at_utc"]), "%Y-%m-%dT%H:%M:%SZ")
+        dt = datetime.datetime.strptime(
+            str(ev["collected_at_utc"]), "%Y-%m-%dT%H:%M:%SZ"
+        )
         if current_time_utc is None:
-            current_time_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            current_time_utc = datetime.datetime.now(datetime.timezone.utc).replace(
+                tzinfo=None
+            )
         delta = (current_time_utc - dt).total_seconds()
         if delta < -MAX_FUTURE_CLOCK_SKEW_SECONDS:
             return "collected_at_utc is too far in the future"
@@ -85,12 +103,15 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
 
     # Cryptographic check
     payload = {
-        k: v for k, v in ev.items() if k not in ("evidence_digest", "execution_provenance")
+        k: v
+        for k, v in ev.items()
+        if k not in ("evidence_digest", "execution_provenance")
     }
     prov_copy = {k: v for k, v in prov.items() if k != "signature"}
     payload["execution_provenance"] = prov_copy
 
     import json, hashlib, hmac
+
     payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     payload_digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
     expected_sig = hmac.new(
@@ -110,11 +131,11 @@ def _verify_signed_provenance(ev: dict, expected_sha: str, expected_type: str, e
 
     return None
 
-def get_all_gates(
 
+def get_all_gates(
     expected_sha: str, bundle: dict
 ) -> Tuple[List[GateResult], str, str, str, str, str, str, str, str, str, str, str]:
-    key = __import__('os').environ.get('HERMES_PROVENANCE_KEY', '')
+    key = __import__("os").environ.get("HERMES_PROVENANCE_KEY", "")
     # 1. BUNDLE_DIGEST validation
     if bundle:
         provided_digest = bundle.get("bundle_digest")
@@ -227,9 +248,9 @@ def get_all_gates(
         g3 = GateResult("EXACT_MAIN_CI", Status.BLOCKED, "Missing evidence")
 
     # 4. EXACT_MAIN_BUILD
-    digest = revision = arch = entrypoint = ""
+    image_digest = revision = arch = entrypoint = ""
     if bundle and bundle.get("image_digest"):
-        digest = bundle.get("image_digest", "")
+        image_digest = bundle.get("image_digest", "")
         revision = bundle.get("oci_revision", "")
         arch = bundle.get("architecture", "")
         entrypoint = bundle.get("entrypoint", "")
@@ -237,7 +258,11 @@ def get_all_gates(
         if isinstance(entrypoint, list):
             entrypoint = json.dumps(entrypoint)
 
-        if not digest.startswith("sha256:") or len(digest) != 71 or "0000000" in digest:
+        if (
+            not image_digest.startswith("sha256:")
+            or len(image_digest) != 71
+            or "0000000" in image_digest
+        ):
             g4 = GateResult("EXACT_MAIN_BUILD", Status.FAIL, "Invalid image digest")
         elif revision != expected_sha:
             g4 = GateResult("EXACT_MAIN_BUILD", Status.FAIL, "OCI revision mismatch")
@@ -281,58 +306,110 @@ def get_all_gates(
         pass
 
     if expected_secret_set is None:
-        g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot derive expected secret set")
+        g7 = GateResult(
+            "SECRET_CONTRACT", Status.BLOCKED, "Cannot derive expected secret set"
+        )
     elif not bundle or "secret_evidence" not in bundle:
         g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Missing secret evidence")
     else:
         ev = bundle.get("secret_evidence")
         if ev == "BLOCKED":
-            g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Secret evidence explicitly blocked")
+            g7 = GateResult(
+                "SECRET_CONTRACT", Status.BLOCKED, "Secret evidence explicitly blocked"
+            )
         elif isinstance(ev, dict) and ev.get("status") == "BLOCKED":
-            g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Secret evidence status blocked")
+            g7 = GateResult(
+                "SECRET_CONTRACT", Status.BLOCKED, "Secret evidence status blocked"
+            )
         elif isinstance(ev, dict) and ev.get("status") == "FAIL":
-            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Secret evidence explicitly failed")
+            g7 = GateResult(
+                "SECRET_CONTRACT", Status.FAIL, "Secret evidence explicitly failed"
+            )
         elif not isinstance(ev, dict):
-            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "secret_evidence must be a dictionary")
+            g7 = GateResult(
+                "SECRET_CONTRACT", Status.FAIL, "secret_evidence must be a dictionary"
+            )
         else:
             required = SECRET_EVIDENCE_FIELDS
 
             if not key:
-                g7 = GateResult("SECRET_CONTRACT", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+                g7 = GateResult(
+                    "SECRET_CONTRACT",
+                    Status.BLOCKED,
+                    "Cannot verify execution provenance: No approved trust anchor exists",
+                )
             else:
                 required = SECRET_EVIDENCE_FIELDS
-                err = _verify_signed_provenance(ev, expected_sha, SECRET_EVIDENCE_TYPE, required, key)
+                err = _verify_signed_provenance(
+                    ev, expected_sha, SECRET_EVIDENCE_TYPE, required, key
+                )
                 if err:
                     g7 = GateResult("SECRET_CONTRACT", Status.FAIL, err)
-                elif not isinstance(ev.get("required_secrets"), list) or not ev["required_secrets"]:
-                    g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "required_secrets must be a non-empty list")
+                elif (
+                    not isinstance(ev.get("required_secrets"), list)
+                    or not ev["required_secrets"]
+                ):
+                    g7 = GateResult(
+                        "SECRET_CONTRACT",
+                        Status.FAIL,
+                        "required_secrets must be a non-empty list",
+                    )
                 else:
                     secret_fail = False
                     observed_secret_set = set()
                     allowed_keys = {"name", "required", "present", "source_class"}
                     for sec in ev["required_secrets"]:
                         if not isinstance(sec, dict):
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Each secret must be a dict")
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "Each secret must be a dict",
+                            )
                             secret_fail = True
                             break
                         if set(sec.keys()) != allowed_keys:
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Secret record has missing or unknown fields")
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "Secret record has missing or unknown fields",
+                            )
                             secret_fail = True
                             break
                         if not isinstance(sec["name"], str) or not sec["name"]:
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "name must be a non-empty string")
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "name must be a non-empty string",
+                            )
                             secret_fail = True
                             break
-                        if not isinstance(sec["required"], bool) or not isinstance(sec["present"], bool):
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "required and present must be bools")
+                        if not isinstance(sec["required"], bool) or not isinstance(
+                            sec["present"], bool
+                        ):
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "required and present must be bools",
+                            )
                             secret_fail = True
                             break
-                        if not isinstance(sec["source_class"], str) or not sec["source_class"]:
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "source_class must be a non-empty string")
+                        if (
+                            not isinstance(sec["source_class"], str)
+                            or not sec["source_class"]
+                        ):
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "source_class must be a non-empty string",
+                            )
                             secret_fail = True
                             break
                         if sec["required"] and not sec["present"]:
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Required secret is not present")
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "Required secret is not present",
+                            )
                             secret_fail = True
                             break
                         if sec["required"]:
@@ -340,7 +417,11 @@ def get_all_gates(
 
                     if not secret_fail:
                         if expected_secret_set != observed_secret_set:
-                            g7 = GateResult("SECRET_CONTRACT", Status.FAIL, "Observed secrets do not match expected mandatory secrets exactly")
+                            g7 = GateResult(
+                                "SECRET_CONTRACT",
+                                Status.FAIL,
+                                "Observed secrets do not match expected mandatory secrets exactly",
+                            )
                         else:
                             g7 = GateResult("SECRET_CONTRACT", Status.PASS)
 
@@ -350,28 +431,50 @@ def get_all_gates(
     else:
         ev = bundle.get("db_evidence")
         if ev == "BLOCKED":
-            g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "DB evidence explicitly blocked")
+            g8 = GateResult(
+                "DB_PATH_SAFETY", Status.BLOCKED, "DB evidence explicitly blocked"
+            )
         elif isinstance(ev, dict) and ev.get("status") == "BLOCKED":
-            g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "DB evidence status blocked")
+            g8 = GateResult(
+                "DB_PATH_SAFETY", Status.BLOCKED, "DB evidence status blocked"
+            )
         elif isinstance(ev, dict) and ev.get("status") == "FAIL":
-            g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "DB evidence explicitly failed")
+            g8 = GateResult(
+                "DB_PATH_SAFETY", Status.FAIL, "DB evidence explicitly failed"
+            )
         elif not isinstance(ev, dict):
-            g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "db_evidence must be a dictionary")
+            g8 = GateResult(
+                "DB_PATH_SAFETY", Status.FAIL, "db_evidence must be a dictionary"
+            )
         else:
             required = DB_EVIDENCE_FIELDS
 
             if not key:
-                g8 = GateResult("DB_PATH_SAFETY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+                g8 = GateResult(
+                    "DB_PATH_SAFETY",
+                    Status.BLOCKED,
+                    "Cannot verify execution provenance: No approved trust anchor exists",
+                )
             else:
-                err = _verify_signed_provenance(ev, expected_sha, DB_EVIDENCE_TYPE, required, key)
+                err = _verify_signed_provenance(
+                    ev, expected_sha, DB_EVIDENCE_TYPE, required, key
+                )
                 if err:
                     g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, err)
                 elif ev.get("validator_id") != "validate_database_source_path":
-                    g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "validator_id is not canonical")
+                    g8 = GateResult(
+                        "DB_PATH_SAFETY", Status.FAIL, "validator_id is not canonical"
+                    )
                 elif str(ev.get("validator_version")) != "1":
-                    g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "foreign validator revision")
+                    g8 = GateResult(
+                        "DB_PATH_SAFETY", Status.FAIL, "foreign validator revision"
+                    )
                 elif ev.get("path_classification") != "authoritative-production-path":
-                    g8 = GateResult("DB_PATH_SAFETY", Status.FAIL, "path_classification is not authoritative")
+                    g8 = GateResult(
+                        "DB_PATH_SAFETY",
+                        Status.FAIL,
+                        "path_classification is not authoritative",
+                    )
                 else:
                     g8 = GateResult("DB_PATH_SAFETY", Status.PASS)
 
@@ -390,23 +493,43 @@ def get_all_gates(
 
             expected_fields = SCHEMA_EVIDENCE_FIELDS
             if not key:
-                g9 = GateResult("SCHEMA_COMPATIBILITY", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+                g9 = GateResult(
+                    "SCHEMA_COMPATIBILITY",
+                    Status.BLOCKED,
+                    "Cannot verify execution provenance: No approved trust anchor exists",
+                )
             else:
-                err = _verify_signed_provenance(sch, expected_sha, SCHEMA_EVIDENCE_TYPE, expected_fields, key)
+                err = _verify_signed_provenance(
+                    sch, expected_sha, SCHEMA_EVIDENCE_TYPE, expected_fields, key
+                )
                 if err:
                     if sch.get("status") == "FAIL":
                         obs_str = str(sch.get("observed_schema", ""))
-                        if "INTEGRITY_FAIL" in obs_str or sch.get("integrity_status") != "ok":
-                            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Integrity failure in production schema")
-                        elif "FK_VIOLATIONS" in obs_str or (sch.get("foreign_key_violation_count") is not None and sch.get("foreign_key_violation_count") > 0):
-                            g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "FK violations in production schema")
+                        if (
+                            "INTEGRITY_FAIL" in obs_str
+                            or sch.get("integrity_status") != "ok"
+                        ):
+                            g9 = GateResult(
+                                "SCHEMA_COMPATIBILITY",
+                                Status.FAIL,
+                                "Integrity failure in production schema",
+                            )
+                        elif "FK_VIOLATIONS" in obs_str or (
+                            sch.get("foreign_key_violation_count") is not None
+                            and sch.get("foreign_key_violation_count") > 0
+                        ):
+                            g9 = GateResult(
+                                "SCHEMA_COMPATIBILITY",
+                                Status.FAIL,
+                                "FK violations in production schema",
+                            )
                         else:
                             g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
                     else:
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, err)
                 else:
                     observed = str(sch.get("observed_schema", ""))
-                    digest = str(sch.get("digest", ""))
+                    sch_digest = str(sch.get("digest", ""))
                     actual_digest = str(sch.get("actual_schema_digest", ""))
                     expected_digest = str(sch.get("expected_schema_digest", ""))
                     user_version = sch.get("user_version")
@@ -418,27 +541,78 @@ def get_all_gates(
                     fk_violations = sch.get("foreign_key_violation_count")
 
                     if integrity != "ok" or "INTEGRITY_FAIL" in observed:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Integrity failure in production schema")
-                    elif (fk_violations is not None and fk_violations > 0) or "FK_VIOLATIONS" in observed:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "FK violations in production schema")
-                    elif digest == "dummy_digest" or not digest or actual_digest == "dummy_digest" or not actual_digest:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Dummy digest in schema evidence")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Integrity failure in production schema",
+                        )
+                    elif (
+                        fk_violations is not None and fk_violations > 0
+                    ) or "FK_VIOLATIONS" in observed:
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "FK violations in production schema",
+                        )
+                    elif (
+                        sch_digest == "dummy_digest"
+                        or not sch_digest
+                        or actual_digest == "dummy_digest"
+                        or not actual_digest
+                    ):
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Dummy digest in schema evidence",
+                        )
                     elif "unknown_schema" in observed:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Placeholder schema in evidence")
-                    elif actual_uv is None or expected_uv is None or actual_uv != expected_uv:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "User version mismatch")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Placeholder schema in evidence",
+                        )
+                    elif (
+                        actual_uv is None
+                        or expected_uv is None
+                        or actual_uv != expected_uv
+                    ):
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY", Status.FAIL, "User version mismatch"
+                        )
                     elif actual_digest != expected_digest:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Schema digest mismatch with canonical contract")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Schema digest mismatch with canonical contract",
+                        )
                     elif delta == "TABLE_DELTA":
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Table delta detected in schema")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Table delta detected in schema",
+                        )
                     elif delta == "INDEX_DELTA":
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Index delta detected in schema")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Index delta detected in schema",
+                        )
                     elif delta == "TRIGGER_DELTA":
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Trigger delta detected in schema")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Trigger delta detected in schema",
+                        )
                     elif delta != "NONE":
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Unknown schema delta")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY", Status.FAIL, "Unknown schema delta"
+                        )
                     elif migration_req is not False:
-                        g9 = GateResult("SCHEMA_COMPATIBILITY", Status.FAIL, "Migration required: schema mutation not permitted")
+                        g9 = GateResult(
+                            "SCHEMA_COMPATIBILITY",
+                            Status.FAIL,
+                            "Migration required: schema mutation not permitted",
+                        )
                     else:
                         g9 = GateResult("SCHEMA_COMPATIBILITY", Status.PASS)
     else:
@@ -455,56 +629,110 @@ def get_all_gates(
 
         rb = bundle.get("rollback_evidence")
         if not isinstance(rb, dict):
-            g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "rollback_evidence must be a dictionary")
+            g10 = GateResult(
+                "ROLLBACK_QUALIFIED",
+                Status.FAIL,
+                "rollback_evidence must be a dictionary",
+            )
         else:
             expected_fields = ROLLBACK_EVIDENCE_FIELDS
             if not key:
-                g10 = GateResult("ROLLBACK_QUALIFIED", Status.BLOCKED, "Cannot verify execution provenance: No approved trust anchor exists")
+                g10 = GateResult(
+                    "ROLLBACK_QUALIFIED",
+                    Status.BLOCKED,
+                    "Cannot verify execution provenance: No approved trust anchor exists",
+                )
             else:
-                err = _verify_signed_provenance(rb, expected_sha, ROLLBACK_EVIDENCE_TYPE, expected_fields, key)
+                err = _verify_signed_provenance(
+                    rb, expected_sha, ROLLBACK_EVIDENCE_TYPE, expected_fields, key
+                )
                 if err:
                     g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, err)
                 else:
                     curr_digest = str(rb.get("current_production_image_digest", ""))
                     roll_digest = str(rb.get("rollback_image_digest", ""))
                     roll_resolv = rb.get("rollback_image_resolvable")
-                    roll_rev    = str(rb.get("rollback_revision", ""))
-                    curr_rev    = str(rb.get("current_production_oci_revision", ""))
-                    mech_id     = str(rb.get("rollback_mechanism_id", ""))
-                    same_comp   = rb.get("same_compose_chain")
-                    db_restore  = rb.get("database_restore_required")
-                    sch_down    = rb.get("schema_downgrade_required")
-                    health      = rb.get("rollback_health_required")
+                    roll_rev = str(rb.get("rollback_revision", ""))
+                    curr_rev = str(rb.get("current_production_oci_revision", ""))
+                    mech_id = str(rb.get("rollback_mechanism_id", ""))
+                    same_comp = rb.get("same_compose_chain")
+                    db_restore = rb.get("database_restore_required")
+                    sch_down = rb.get("schema_downgrade_required")
+                    health = rb.get("rollback_health_required")
                     attempt_max = rb.get("rollback_attempt_count_max")
-                    proven      = rb.get("rollback_procedure_proven")
-                    rehearsal   = rb.get("canonical_rehearsal_evidence")
+                    proven = rb.get("rollback_procedure_proven")
+                    rehearsal = rb.get("canonical_rehearsal_evidence")
 
                     if "mocked" in curr_digest or "mocked" in roll_digest:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Mocked rollback evidence")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Mocked rollback evidence",
+                        )
                     elif not curr_digest or not roll_digest:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Empty digest")
-                    elif not curr_digest.startswith("sha256:") or not roll_digest.startswith("sha256:"):
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Invalid digest")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED", Status.FAIL, "Empty digest"
+                        )
+                    elif not curr_digest.startswith(
+                        "sha256:"
+                    ) or not roll_digest.startswith("sha256:"):
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED", Status.FAIL, "Invalid digest"
+                        )
                     elif not roll_resolv:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unresolvable image")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED", Status.FAIL, "Unresolvable image"
+                        )
                     elif not roll_rev or roll_rev != curr_rev:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Revision mismatch")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED", Status.FAIL, "Revision mismatch"
+                        )
                     elif not mech_id or mech_id != "docker-compose-revert":
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Unknown mechanism")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED", Status.FAIL, "Unknown mechanism"
+                        )
                     elif same_comp is not True:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Same compose chain not proven")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Same compose chain not proven",
+                        )
                     elif db_restore is not False:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "DB restore requirement mismatch")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "DB restore requirement mismatch",
+                        )
                     elif sch_down is not False:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Schema downgrade requirement mismatch")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Schema downgrade requirement mismatch",
+                        )
                     elif not health:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Rollback health policy mismatch")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Rollback health policy mismatch",
+                        )
                     elif attempt_max != 1:
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Rollback attempt limit mismatch")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Rollback attempt limit mismatch",
+                        )
                     elif not rehearsal or rehearsal == "self-asserted":
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Missing rehearsal evidence")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Missing rehearsal evidence",
+                        )
                     elif not proven or proven == "self-asserted":
-                        g10 = GateResult("ROLLBACK_QUALIFIED", Status.FAIL, "Self-asserted procedure unproven")
+                        g10 = GateResult(
+                            "ROLLBACK_QUALIFIED",
+                            Status.FAIL,
+                            "Self-asserted procedure unproven",
+                        )
                     else:
                         g10 = GateResult("ROLLBACK_QUALIFIED", Status.PASS)
     else:
@@ -553,7 +781,7 @@ def get_all_gates(
 
     return (
         [g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12],
-        digest,
+        image_digest,
         revision,
         arch,
         entrypoint,
@@ -571,7 +799,11 @@ def check_credential_risk(bundle, expected_sha):
     has_credential_risk = True
     cr_err = "Missing credential risk evidence"
     key_str = os.environ.get("HERMES_PROVENANCE_KEY", "")
-    if bundle and bundle.get("credential_risk_evidence") and bundle.get("credential_risk_evidence") != "BLOCKED":
+    if (
+        bundle
+        and bundle.get("credential_risk_evidence")
+        and bundle.get("credential_risk_evidence") != "BLOCKED"
+    ):
         cr = bundle.get("credential_risk_evidence")
         if not isinstance(cr, dict):
             cr_err = "credential_risk_evidence must be a dictionary"
@@ -580,7 +812,13 @@ def check_credential_risk(bundle, expected_sha):
             if not key_str:
                 cr_err = "Cannot verify execution provenance: No approved trust anchor exists"
             else:
-                cr_err = _verify_signed_provenance(cr, expected_sha, CREDENTIAL_RISK_EVIDENCE_TYPE, expected_fields, key_str)
+                cr_err = _verify_signed_provenance(
+                    cr,
+                    expected_sha,
+                    CREDENTIAL_RISK_EVIDENCE_TYPE,
+                    expected_fields,
+                    key_str,
+                )
                 if not cr_err:
                     status = cr.get("credential_risk_status")
                     if status == "PROVEN_CLEAR":
@@ -702,6 +940,57 @@ def qualify_main():
         current_main_sha=expected_sha,
         timestamp=timestamp,
     )
+
+    expected_image_digest = bundle.get("image_digest", "") if bundle else ""
+    if receipt.result == Status.PASS:
+        # Enforce exact registry-image identity in final receipt
+        if (
+            not receipt.image_digest
+            or not receipt.image_digest.startswith("sha256:")
+            or len(receipt.image_digest) != 71
+        ):
+            print(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "digest": receipt.report.report_digest,
+                        "image": receipt.image_digest,
+                        "blockers": [
+                            f"INVALID_RECEIPT_IMAGE_DIGEST: {receipt.image_digest}"
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(1)
+        if expected_image_digest and receipt.image_digest != expected_image_digest:
+            print(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "digest": receipt.report.report_digest,
+                        "image": receipt.image_digest,
+                        "blockers": [
+                            f"RECEIPT_IMAGE_DIGEST_MISMATCH: expected {expected_image_digest}, got {receipt.image_digest}"
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(1)
+        if sch_digest and receipt.image_digest == sch_digest:
+            print(
+                json.dumps(
+                    {
+                        "status": "FAIL",
+                        "digest": receipt.report.report_digest,
+                        "image": receipt.image_digest,
+                        "blockers": ["IMAGE_DIGEST_SHADOWED_BY_SCHEMA_DIGEST"],
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(1)
 
     print(
         json.dumps(

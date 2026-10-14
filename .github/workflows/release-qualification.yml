@@ -405,8 +405,13 @@ jobs:
         run: |
           if [ -f qualification-receipt.json ]; then
             STATUS=$(jq -r .status qualification-receipt.json)
+            RECEIPT_IMAGE=$(jq -r .image qualification-receipt.json)
             if [ "$STATUS" != "PASS" ]; then
               echo "Qualification failed with status $STATUS"
+              exit 1
+            fi
+            if [ "$RECEIPT_IMAGE" != "${{ env.IMAGE_DIGEST }}" ]; then
+              echo "Receipt image digest mismatch: expected ${{ env.IMAGE_DIGEST }}, got $RECEIPT_IMAGE"
               exit 1
             fi
           else

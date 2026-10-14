@@ -309,7 +309,10 @@ jobs:
             exit 1
           fi
 
-          ssh -T -p "${PROD_SSH_PORT}" -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "python3 scripts/hermes_production_evidence_collect.py ${{ inputs.target_sha }}" > unsigned_bundle.json
+          EXECUTION_NONCE=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+          echo "EXECUTION_NONCE=$EXECUTION_NONCE" >> $GITHUB_ENV
+
+          echo "{\"execution_nonce\": \"$EXECUTION_NONCE\"}" | ssh -T -p "${PROD_SSH_PORT}" -i ~/.ssh/id_rsa -o StrictHostKeyChecking=yes "$PROD_SSH_USER@$PROD_SSH_HOST" "python3 scripts/hermes_production_evidence_collect.py ${{ inputs.target_sha }}" > unsigned_bundle.json
 
 
       - name: Sign Canonical Production Evidence
@@ -317,7 +320,7 @@ jobs:
           HERMES_PROVENANCE_KEY: ${{ secrets.HERMES_PROVENANCE_KEY }}
           PYTHONPATH: .
         run: |
-          cat unsigned_bundle.json | python3 scripts/hermes_production_evidence_sign.py ${{ inputs.target_sha }} > signed_bundle_output.json
+          cat unsigned_bundle.json | python3 scripts/hermes_production_evidence_sign.py ${{ inputs.target_sha }} --nonce "$EXECUTION_NONCE" > signed_bundle_output.json
           rm -f unsigned_bundle.json
           
           jq -e -c '.secret_evidence' signed_bundle_output.json > secret_ev.json

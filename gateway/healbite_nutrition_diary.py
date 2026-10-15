@@ -1527,10 +1527,47 @@ def calculate_inventory_nutrition(inventory: PendingFoodVisionInventory) -> Inve
 _RU_CONFIRM_WORDS = {"\u0434\u0430", "\u0430\u0433\u0430", "\u043e\u043a", "\u043e\u043a\u0435\u0439", "yes", "y", "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", "\u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0439"}
 _RU_CANCEL_WORDS = {"\u043d\u0435\u0442", "\u043d\u0435\u0430", "\u043e\u0442\u043c\u0435\u043d\u0430", "\u043e\u0442\u043c\u0435\u043d\u0438", "cancel", "no", "n"}
 _GRAM_SUFFIX_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?)"
+_WEIGHT_UNIT_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043a\u0433|\u043a\u0438\u043b\u043e\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043c\u043b|\u043c\u0438\u043b\u043b\u0438\u043b\u0438\u0442\u0440(?:\u0430|\u043e\u0432)?|g|gr|grams?|kg|ml)\.?"
+_EXPLICIT_WEIGHT_RE = re.compile(rf"\b\d+(?:[.,]\d+)?\s*{_WEIGHT_UNIT_RE}\b", re.IGNORECASE)
+_INDEX_COLON_RE = re.compile(r"\b\d+\s*:", re.IGNORECASE)
+_ACTION_KEYWORD_RE = re.compile(r"\b(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c|\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c|\u0443\u0434\u0430\u043b\u0438\u0442\u044c|\u0432\u0435\u0441)\b", re.IGNORECASE)
+_EMBEDDED_QUANTITY_RE = re.compile(rf"(?:\b\d+(?:[.,]\d+)?\s*{_WEIGHT_UNIT_RE}\b|\b\d+(?:[.,]\d+)?{_WEIGHT_UNIT_RE})", re.IGNORECASE)
+_INVENTORY_AMBIGUOUS_ERROR = (
+    "\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0412 \u043e\u0434\u043d\u043e\u0439 \u043a\u043e\u043c\u0430\u043d\u0434\u0435 \u043c\u043e\u0436\u043d\u043e \u0443\u043a\u0430\u0437\u0430\u0442\u044c \u0442\u043e\u043b\u044c\u043a\u043e \u043e\u0434\u0438\u043d \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442, "
+    "\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u0421\u043b\u0438\u0432\u043e\u0447\u043d\u044b\u0439 \u0441\u044b\u0440, 50 \u0433 \u0438\u043b\u0438 \u0412\u0435\u0441 6: 200 \u0433."
+)
+
 _INVENTORY_REPLACE_RE = re.compile(rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c)\s+)?(?P<index>\d{{1,2}})\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_ADD_RE = re.compile(rf"^(?:\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c)\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_REMOVE_RE = re.compile(r"^(?:\u0443\u0434\u0430\u043b\u0438\u0442\u044c)\s+(?P<index>\d{1,2})\s*$", re.IGNORECASE)
 _INVENTORY_WEIGHT_RE = re.compile(rf"^(?:\u0432\u0435\u0441)\s+(?P<index>\d{{1,2}})\s*:\s*(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
+
+
+def _is_ambiguous_inventory_command(text: str) -> bool:
+    if len(_EXPLICIT_WEIGHT_RE.findall(text)) > 1:
+        return True
+    if len(_INDEX_COLON_RE.findall(text)) > 1:
+        return True
+    if len(_ACTION_KEYWORD_RE.findall(text)) > 1:
+        return True
+    return False
+
+
+def _name_has_embedded_quantity(name: str) -> bool:
+    if _EMBEDDED_QUANTITY_RE.search(name):
+        return True
+    tokens = name.split()
+    for i, token in enumerate(tokens):
+        cleaned = re.sub(r"^[^\w%]+|[^\w%]+$", "", token)
+        if re.match(r"^\d+(?:[.,]\d+)?$", cleaned):
+            val = float(cleaned.replace(",", "."))
+            if val == 0:
+                continue
+            next_word = tokens[i + 1].lower() if i + 1 < len(tokens) else ""
+            if next_word.startswith(("\u0437\u043b\u0430\u043a", "\u0432")):
+                continue
+            return True
+    return False
 
 
 def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
@@ -1542,6 +1579,10 @@ def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResu
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="confirm"))
     if lowered in _RU_CANCEL_WORDS:
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="cancel"))
+
+    if _is_ambiguous_inventory_command(normalized):
+        return PendingInventoryActionParseResult(ok=False, error=_INVENTORY_AMBIGUOUS_ERROR)
+
     for regex, action_kind in ((_INVENTORY_REPLACE_RE, "replace"), (_INVENTORY_ADD_RE, "add"), (_INVENTORY_REMOVE_RE, "remove"), (_INVENTORY_WEIGHT_RE, "weight")):
         match = regex.match(normalized)
         if not match:
@@ -1551,11 +1592,15 @@ def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResu
         grams = _parse_selected_grams(match.groupdict().get("grams"))
         if index is not None and index <= 0:
             return PendingInventoryActionParseResult(ok=False, error="\u041d\u043e\u043c\u0435\u0440 \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u0430 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u043f\u043e\u043b\u043e\u0436\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u043c.")
-        if action_kind in {"replace", "add"} and not name:
-            return PendingInventoryActionParseResult(ok=False, error="\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u043f\u043e\u043d\u044f\u0442\u043d\u043e\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0434\u043b\u044f \u0437\u0430\u043c\u0435\u043d\u044b \u0438\u043b\u0438 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f.")
+        if action_kind in {"replace", "add"}:
+            if not name:
+                return PendingInventoryActionParseResult(ok=False, error="\u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u043f\u043e\u043d\u044f\u0442\u043d\u043e\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0434\u043b\u044f \u0437\u0430\u043c\u0435\u043d\u044b \u0438\u043b\u0438 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f.")
+            if _name_has_embedded_quantity(name):
+                return PendingInventoryActionParseResult(ok=False, error=_INVENTORY_AMBIGUOUS_ERROR)
         if action_kind in {"replace", "add", "weight"} and grams is None:
             return PendingInventoryActionParseResult(ok=False, error="\u0412\u0435\u0441 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0431\u043e\u043b\u044c\u0448\u0435 0 \u0433 \u0438 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2000 \u0433.")
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind=action_kind, index=index, name=name, grams=grams))
+    return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
     return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
 
 

@@ -19,6 +19,16 @@ from typing import Any
 from gateway.memory.embedding_adapter import EmbeddingAdapter
 from gateway.healbite_time import local_day_window_utc
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
+from gateway.healbite_food_composition import (
+    NUTRITION_REFERENCE_PROVENANCE,
+    NUTRITION_REFERENCE_SOURCE,
+    NUTRITION_REFERENCE_UNITS,
+    NUTRITION_REFERENCE_VERSION,
+    FoodLookupResult,
+    FoodNutrientProfile,
+    normalize_food_lookup_key,
+    resolve_food_composition,
+)
 from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -328,6 +338,7 @@ class PendingInventoryAction:
     index: int | None = None
     name: str = ""
     grams: float | None = None
+    sub_actions: list[PendingInventoryAction] | None = None
 
 
 @dataclass(slots=True)
@@ -341,10 +352,14 @@ class PendingInventoryActionParseResult:
 class NutritionComponentEstimate:
     name: str
     grams: float
-    calories_kcal: float
-    protein_g: float
-    fat_g: float
-    carbs_g: float
+    calories_kcal: float | None
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    nutrition_available: bool = True
+    reference_confidence: float = 1.0
+    variance_note: str = ""
+    candidate_suggestions: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -365,6 +380,8 @@ class PendingInventoryReplyResult:
     record: NutritionRecord | None = None
     missing_indexes: list[int] | None = None
     blocked_indexes: list[int] | None = None
+    sqlite_id: int | None = None
+    saved: bool = False
 
 
 @dataclass(slots=True)
@@ -1290,42 +1307,95 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
 
 def _pending_inventory_notice_lines(notice: str | None) -> list[str]:
     if not notice:
-        return ["\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b.", "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0441\u0442\u0430\u0432 \u0438 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u0435 \u0438\u043b\u0438 \u0438\u0441\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0435\u0433\u043e."]
+        return ["КБЖУ не рассчитаны окончательно: проверьте состав перед сохранением."]
     return [notice]
 
 
 def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingFoodVisionInventory, *, notice: str | None = None) -> str:
     pending_inventory = inventory if isinstance(inventory, PendingFoodVisionInventory) else _pending_inventory_from_food_vision(0, inventory)
-    lines = ["\u042f \u0432\u0438\u0436\u0443:", ""]
+    lines = ["Я вижу:", ""]
+    has_unmapped_component = False
+    all_weights_present = True
+    total_calories = 0.0
+    total_protein = 0.0
+    total_fat = 0.0
+    total_carbs = 0.0
+    has_any_nutrition = False
+
     for item in pending_inventory.items:
-        detail = f"{item.index}. {html.escape(item.visible_name)} \u2014 {_format_food_vision_grams(item)}"
+        detail = f"{item.index}. {html.escape(item.visible_name)} — {_format_food_vision_grams(item)}"
         extras: list[str] = []
         if item.preparation:
             extras.append(html.escape(item.preparation))
         if item.uncertainty:
             extras.append(html.escape(item.uncertainty))
         if item.selected_grams is not None:
-            extras.append(f"\u0432\u0435\u0441 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d: {_format_grams(item.selected_grams)}")
+            extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
         else:
-            extras.append("\u0432\u0435\u0441 \u043d\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d")
+            extras.append("вес не подтверждён")
+            all_weights_present = False
         if extras:
             detail += f" ({'; '.join(extras)})"
+
+        comp_estimate = _estimate_component_nutrition(item)
+        if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
+            detail += (
+                f" · ~{int(round(comp_estimate.calories_kcal))} ккал "
+                f"· Б {_format_grams(comp_estimate.protein_g)} "
+                f"· Ж {_format_grams(comp_estimate.fat_g)} "
+                f"· У {_format_grams(comp_estimate.carbs_g)}"
+            )
+            total_calories += comp_estimate.calories_kcal
+            total_protein += comp_estimate.protein_g or 0.0
+            total_fat += comp_estimate.fat_g or 0.0
+            total_carbs += comp_estimate.carbs_g or 0.0
+            has_any_nutrition = True
+        elif comp_estimate is not None and not comp_estimate.nutrition_available:
+            detail += " · (КБЖУ не найдено)"
+            has_unmapped_component = True
+
         lines.append(detail)
+
     if pending_inventory.warnings:
-        lines.extend(["", "\u0423\u0442\u043e\u0447\u043d\u0435\u043d\u0438\u044f:"])
-        lines.extend(f"\u2022 {html.escape(warning)}" for warning in pending_inventory.warnings)
+        lines.extend(["", "Уточнения:"])
+        lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
+
+    if all_weights_present and not has_unmapped_component and has_any_nutrition:
+        lines.extend([
+            "",
+            f"Итого: ~{_format_kcal(round(total_calories, 1))} · "
+            f"Б {_format_grams(round(total_protein, 1))} · "
+            f"Ж {_format_grams(round(total_fat, 1))} · "
+            f"У {_format_grams(round(total_carbs, 1))}",
+        ])
+    elif has_unmapped_component:
+        lines.extend([
+            "",
+            "⚠️ Для некоторых компонентов справочные данные не найдены.",
+            "Можно исправить название или сохранить без КБЖУ.",
+        ])
+
+    notice_lines = _pending_inventory_notice_lines(notice)
+    if notice_lines:
+        lines.extend(["", *notice_lines])
+
     lines.extend([
         "",
-        *_pending_inventory_notice_lines(notice),
+        "Можно подтвердить или исправить, если что-то распознано неточно.",
         "",
-        "\u041c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u0438\u043b\u0438 \u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c, \u0435\u0441\u043b\u0438 \u0447\u0442\u043e-\u0442\u043e \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043e \u043d\u0435\u0442\u043e\u0447\u043d\u043e.",
-        "",
-        "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:",
-        "\u2022 \u0414\u0430 / \u041d\u0435\u0442",
-        "\u2022 \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433",
-        "\u2022 \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433",
-        "\u2022 \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5",
-        "\u2022 \u0412\u0435\u0441 3: 80 \u0433",
+        "Команды:",
+    ])
+    if has_unmapped_component:
+        lines.append("• ✅ Сохранить без КБЖУ")
+    else:
+        lines.append("• ✅ Сохранить")
+    lines.extend([
+        "• Да / Нет",
+        "• Исправить 2: куриная грудка, 120 г",
+        "• Добавить: сыр, 30 г",
+        "• Удалить 5",
+        "• Вес 3: 80 г",
+        "• ❌ Отмена",
     ])
     return "\n".join(lines)
 
@@ -1353,7 +1423,7 @@ def format_pending_inventory_missing_weight_reply(inventory: PendingFoodVisionIn
 
 
 def format_pending_inventory_unknown_component_reply(inventory: PendingFoodVisionInventory, blocked_indexes: list[int]) -> str:
-    return format_food_vision_inventory_reply(inventory, notice="\u042f \u043d\u0435 \u043c\u043e\u0433\u0443 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u041a\u0411\u0416\u0423 \u0434\u043b\u044f " + f"{_format_component_index_phrase(blocked_indexes)}. " + "\u0418\u0441\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435, \u0437\u0430\u043c\u0435\u043d\u0438\u0442\u0435 \u0435\u0433\u043e \u043d\u0430 \u0437\u043d\u0430\u043a\u043e\u043c\u044b\u0439 \u043f\u0440\u043e\u0434\u0443\u043a\u0442 \u0438\u043b\u0438 \u0443\u0434\u0430\u043b\u0438\u0442\u0435 \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442.")
+    return format_food_vision_inventory_reply(inventory, notice="\u042f \u043d\u0435 \u043c\u043e\u0433\u0443 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u0442\u044c \u041a\u0411\u0416\u0423 \u0434\u043b\u044f " + f"{_format_component_index_phrase(blocked_indexes)}. " + "\u0418\u0441\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435, \u0437\u0430\u043c\u0435\u043d\u0438\u0442\u0435 \u0435\u0433\u043e \u043d\u0430 \u0437\u043d\u0430\u043a\u043e\u043c\u044b\u0439 \u043f\u0440\u043e\u0434\u0443\u043a\u0442 \u0438\u043b\u0438 \u0443\u0434\u0430\u043b\u0438\u0442\u0435 \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442. \u0422\u0430\u043a\u0436\u0435 \u043c\u043e\u0436\u043d\u043e \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u00ab\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u041a\u0411\u0416\u0423\u00bb.")
 
 def _parse_selected_grams(value: Any) -> float | None:
     numeric = _to_float(value)
@@ -1452,6 +1522,15 @@ _SYNTHETIC_FOOD_ALIAS_INDEX = _build_synthetic_food_alias_index()
 
 
 def _resolve_synthetic_food_reference(name: str) -> tuple[str, dict[str, float]] | None:
+    lookup = resolve_food_composition(name)
+    if lookup.matched and lookup.profile:
+        p = lookup.profile
+        return p.display_name, {
+            "calories_kcal": p.calories_kcal,
+            "protein_g": p.protein_g,
+            "fat_g": p.fat_g,
+            "carbs_g": p.carbs_g,
+        }
     normalized_key = _normalize_food_lookup_key(name)
     canonical_name = _SYNTHETIC_FOOD_ALIAS_INDEX.get(normalized_key)
     if canonical_name is None:
@@ -1461,20 +1540,59 @@ def _resolve_synthetic_food_reference(name: str) -> tuple[str, dict[str, float]]
 
 
 def _estimate_component_nutrition(item: PendingFoodVisionItem) -> NutritionComponentEstimate | None:
-    if item.selected_grams is None:
-        return None
-    resolved = _resolve_synthetic_food_reference(item.normalized_name or item.visible_name)
-    if resolved is None:
-        return None
-    display_name, reference = resolved
-    multiplier = float(item.selected_grams) / 100.0
+    grams = item.selected_grams
+    if grams is None:
+        if item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            grams = (item.estimated_grams_min + item.estimated_grams_max) / 2.0
+        elif item.estimated_grams_min is not None:
+            grams = item.estimated_grams_min
+        elif item.estimated_grams_max is not None:
+            grams = item.estimated_grams_max
+        else:
+            return None
+
+    lookup = resolve_food_composition(item.normalized_name or item.visible_name)
+    if lookup.matched and lookup.profile:
+        profile = lookup.profile
+        multiplier = float(grams) / 100.0
+        return NutritionComponentEstimate(
+            name=profile.display_name,
+            grams=float(grams),
+            calories_kcal=round(profile.calories_kcal * multiplier, 1),
+            protein_g=round(profile.protein_g * multiplier, 1),
+            fat_g=round(profile.fat_g * multiplier, 1),
+            carbs_g=round(profile.carbs_g * multiplier, 1),
+            nutrition_available=True,
+            reference_confidence=lookup.confidence,
+            variance_note=profile.variance_note,
+        )
+
+    # Fallback to synthetic if present
+    synthetic = _resolve_synthetic_food_reference(item.normalized_name or item.visible_name)
+    if synthetic is not None:
+        display_name, reference = synthetic
+        multiplier = float(grams) / 100.0
+        return NutritionComponentEstimate(
+            name=display_name,
+            grams=float(grams),
+            calories_kcal=round(reference["calories_kcal"] * multiplier, 1),
+            protein_g=round(reference["protein_g"] * multiplier, 1),
+            fat_g=round(reference["fat_g"] * multiplier, 1),
+            carbs_g=round(reference["carbs_g"] * multiplier, 1),
+            nutrition_available=True,
+            reference_confidence=0.90,
+        )
+
     return NutritionComponentEstimate(
-        name=display_name,
-        grams=float(item.selected_grams),
-        calories_kcal=round(reference["calories_kcal"] * multiplier, 1),
-        protein_g=round(reference["protein_g"] * multiplier, 1),
-        fat_g=round(reference["fat_g"] * multiplier, 1),
-        carbs_g=round(reference["carbs_g"] * multiplier, 1),
+        name=item.visible_name,
+        grams=float(grams),
+        calories_kcal=None,
+        protein_g=None,
+        fat_g=None,
+        carbs_g=None,
+        nutrition_available=False,
+        reference_confidence=0.0,
+        candidate_suggestions=lookup.candidate_suggestions,
     )
 
 
@@ -1485,13 +1603,39 @@ def _build_component_meal_name(components: list[NutritionComponentEstimate]) -> 
     return ", ".join(names[:3])
 
 
-def _build_component_record(inventory: PendingFoodVisionInventory, components: list[NutritionComponentEstimate]) -> NutritionRecord:
-    items = [{"name": component.name, "estimated_weight_g": component.grams, "calories_kcal": component.calories_kcal, "protein_g": component.protein_g, "fat_g": component.fat_g, "carbs_g": component.carbs_g} for component in components]
+def _build_component_record(
+    inventory: PendingFoodVisionInventory,
+    components: list[NutritionComponentEstimate],
+    *,
+    is_complete: bool = True,
+) -> NutritionRecord:
+    items = [
+        {
+            "name": component.name,
+            "estimated_weight_g": component.grams,
+            "calories_kcal": component.calories_kcal,
+            "protein_g": component.protein_g,
+            "fat_g": component.fat_g,
+            "carbs_g": component.carbs_g,
+            "nutrition_available": component.nutrition_available,
+        }
+        for component in components
+    ]
     meal_name = _build_component_meal_name(components)
-    total_calories = round(sum(component.calories_kcal for component in components), 1)
-    total_protein = round(sum(component.protein_g for component in components), 1)
-    total_fat = round(sum(component.fat_g for component in components), 1)
-    total_carbs = round(sum(component.carbs_g for component in components), 1)
+    if is_complete:
+        total_calories = round(sum(component.calories_kcal for component in components if component.calories_kcal is not None), 1)
+        total_protein = round(sum(component.protein_g for component in components if component.protein_g is not None), 1)
+        total_fat = round(sum(component.fat_g for component in components if component.fat_g is not None), 1)
+        total_carbs = round(sum(component.carbs_g for component in components if component.carbs_g is not None), 1)
+        raw_summary = f"\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u043d\u043e\u0435 \u0444\u043e\u0442\u043e: {meal_name}"
+    else:
+        # Phase B: Store unavailable nutrient values as unknown (None), NEVER zero!
+        total_calories = None
+        total_protein = None
+        total_fat = None
+        total_carbs = None
+        raw_summary = f"\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u043d\u043e\u0435 \u0444\u043e\u0442\u043e (\u0431\u0435\u0437 \u041a\u0411\u0416\u0423): {meal_name}"
+
     return NutritionRecord(
         is_food=True,
         meal_name=meal_name,
@@ -1502,30 +1646,83 @@ def _build_component_record(inventory: PendingFoodVisionInventory, components: l
         fat_g=total_fat,
         carbs_g=total_carbs,
         confidence=inventory.overall_confidence,
-        raw_summary=f"\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u043d\u043e\u0435 \u0444\u043e\u0442\u043e: {meal_name}",
+        raw_summary=raw_summary,
     )
 
 
 def calculate_inventory_nutrition(inventory: PendingFoodVisionInventory) -> InventoryNutritionCalculationResult:
     readiness, missing_indexes = _pending_inventory_readiness(inventory)
     if readiness != READY_FOR_NUTRITION_CALCULATION:
-        return InventoryNutritionCalculationResult(status=readiness, components=[], missing_indexes=missing_indexes, blocked_indexes=[], reason="weights_missing" if missing_indexes else "invalid_inventory_state")
+        return InventoryNutritionCalculationResult(
+            status=readiness,
+            components=[],
+            missing_indexes=missing_indexes,
+            blocked_indexes=[],
+            reason="weights_missing" if missing_indexes else "invalid_inventory_state",
+        )
     components: list[NutritionComponentEstimate] = []
     blocked_indexes: list[int] = []
     for item in inventory.items:
         estimate = _estimate_component_nutrition(item)
-        if estimate is None:
+        if estimate is None or not estimate.nutrition_available:
             blocked_indexes.append(item.index)
+            if estimate is not None:
+                components.append(estimate)
+            else:
+                components.append(
+                    NutritionComponentEstimate(
+                        name=item.visible_name,
+                        grams=float(item.selected_grams or 0.0),
+                        calories_kcal=None,
+                        protein_g=None,
+                        fat_g=None,
+                        carbs_g=None,
+                        nutrition_available=False,
+                    )
+                )
             continue
         components.append(estimate)
+
+    is_complete = not bool(blocked_indexes)
+    record = _build_component_record(inventory, components, is_complete=is_complete)
     if blocked_indexes:
-        return InventoryNutritionCalculationResult(status=UNKNOWN_COMPONENT_BLOCKED, components=components, missing_indexes=[], blocked_indexes=blocked_indexes, reason="unknown_component")
-    record = _build_component_record(inventory, components)
-    return InventoryNutritionCalculationResult(status=READY_FOR_NUTRITION_CALCULATION, components=components, missing_indexes=[], blocked_indexes=[], record=record)
+        return InventoryNutritionCalculationResult(
+            status=UNKNOWN_COMPONENT_BLOCKED,
+            components=components,
+            missing_indexes=[],
+            blocked_indexes=blocked_indexes,
+            reason="unknown_component",
+            record=record,
+        )
+    return InventoryNutritionCalculationResult(
+        status=READY_FOR_NUTRITION_CALCULATION,
+        components=components,
+        missing_indexes=[],
+        blocked_indexes=[],
+        record=record,
+    )
 
 
-_RU_CONFIRM_WORDS = {"\u0434\u0430", "\u0430\u0433\u0430", "\u043e\u043a", "\u043e\u043a\u0435\u0439", "yes", "y", "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", "\u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0439"}
-_RU_CANCEL_WORDS = {"\u043d\u0435\u0442", "\u043d\u0435\u0430", "\u043e\u0442\u043c\u0435\u043d\u0430", "\u043e\u0442\u043c\u0435\u043d\u0438", "cancel", "no", "n"}
+_RU_SAVE_WORDS = {
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c",
+    "\u2705 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0439",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a",
+    "\u2705 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a",
+    "save",
+}
+_RU_SAVE_WITHOUT_KBZHU_WORDS = {
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043a\u0431\u0436\u0443",
+    "\u2705 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043a\u0431\u0436\u0443",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438 \u0431\u0435\u0437 \u043a\u0431\u0436\u0443",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0439 \u0431\u0435\u0437 \u043a\u0431\u0436\u0443",
+    "\u0431\u0435\u0437 \u043a\u0431\u0436\u0443",
+    "\u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043a\u0430\u043b\u043e\u0440\u0438\u0439",
+    "\u2705 \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0431\u0435\u0437 \u043a\u0430\u043b\u043e\u0440\u0438\u0439",
+}
+_RU_CONFIRM_WORDS = {"\u0434\u0430", "\u0430\u0433\u0430", "\u043e\u043a", "\u043e\u043a\u0435\u0439", "yes", "y"}
+_RU_CANCEL_WORDS = {"\u043d\u0435\u0442", "\u043d\u0435\u0430", "\u043e\u0442\u043c\u0435\u043d\u0430", "\u043e\u0442\u043c\u0435\u043d\u0438", "cancel", "no", "n", "\u274c \u043e\u0442\u043c\u0435\u043d\u0430"}
 _GRAM_SUFFIX_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?)"
 _WEIGHT_UNIT_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043a\u0433|\u043a\u0438\u043b\u043e\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043c\u043b|\u043c\u0438\u043b\u043b\u0438\u043b\u0438\u0442\u0440(?:\u0430|\u043e\u0432)?|g|gr|grams?|kg|ml)\.?"
 _EXPLICIT_WEIGHT_RE = re.compile(rf"\b\d+(?:[.,]\d+)?\s*{_WEIGHT_UNIT_RE}\b", re.IGNORECASE)
@@ -1570,11 +1767,15 @@ def _name_has_embedded_quantity(name: str) -> bool:
     return False
 
 
-def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
+def _parse_single_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
     normalized = re.sub(r"\s+", " ", (text or "").strip())
     if not normalized or normalized.startswith("/"):
-        return PendingInventoryActionParseResult(ok=False, error="\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043e\u0442\u0432\u0435\u0442 \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c N, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c, \u0423\u0434\u0430\u043b\u0438\u0442\u044c N \u0438\u043b\u0438 \u0412\u0435\u0441 N.")
+        return PendingInventoryActionParseResult(ok=False, error="\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043e\u0442\u0432\u0435\u0442 \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430: \u2705 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c N, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c, \u0423\u0434\u0430\u043b\u0438\u0442\u044c N \u0438\u043b\u0438 \u0412\u0435\u0441 N.")
     lowered = normalized.casefold()
+    if lowered in _RU_SAVE_WITHOUT_KBZHU_WORDS:
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="save_without_kbzhu"))
+    if lowered in _RU_SAVE_WORDS:
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="save"))
     if lowered in _RU_CONFIRM_WORDS:
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="confirm"))
     if lowered in _RU_CANCEL_WORDS:
@@ -1600,8 +1801,35 @@ def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResu
         if action_kind in {"replace", "add", "weight"} and grams is None:
             return PendingInventoryActionParseResult(ok=False, error="\u0412\u0435\u0441 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0431\u043e\u043b\u044c\u0448\u0435 0 \u0433 \u0438 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2000 \u0433.")
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind=action_kind, index=index, name=name, grams=grams))
-    return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
-    return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
+    return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u2705 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
+
+
+def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return PendingInventoryActionParseResult(ok=False, error="\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043e\u0442\u0432\u0435\u0442 \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430: \u2705 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c N, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c, \u0423\u0434\u0430\u043b\u0438\u0442\u044c N \u0438\u043b\u0438 \u0412\u0435\u0441 N.")
+    if len(lines) == 1:
+        return _parse_single_pending_inventory_action(lines[0])
+
+    sub_actions: list[PendingInventoryAction] = []
+    for line in lines:
+        single_res = _parse_single_pending_inventory_action(line)
+        if not single_res.ok or single_res.action is None:
+            return PendingInventoryActionParseResult(
+                ok=False,
+                error=single_res.error,
+            )
+        if single_res.action.kind in {"confirm", "cancel", "save", "save_without_kbzhu"}:
+            return PendingInventoryActionParseResult(
+                ok=False,
+                error="\u041a\u043e\u043c\u0430\u043d\u0434\u044b \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0438 \u043e\u0442\u043c\u0435\u043d\u044b \u043d\u0435 \u043c\u043e\u0433\u0443\u0442 \u043a\u043e\u043c\u0431\u0438\u043d\u0438\u0440\u043e\u0432\u0430\u0442\u044c\u0441\u044f \u0441 \u043f\u0440\u0430\u0432\u043a\u0430\u043c\u0438 \u0432 \u043e\u0434\u043d\u043e\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0438.",
+            )
+        sub_actions.append(single_res.action)
+
+    return PendingInventoryActionParseResult(
+        ok=True,
+        action=PendingInventoryAction(kind="batch", sub_actions=sub_actions),
+    )
 
 
 def _reindex_pending_inventory_items(items: list[PendingFoodVisionItem]) -> list[PendingFoodVisionItem]:
@@ -1610,7 +1838,7 @@ def _reindex_pending_inventory_items(items: list[PendingFoodVisionItem]) -> list
     return items
 
 
-def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: PendingInventoryAction) -> tuple[PendingFoodVisionInventory | None, str | None]:
+def _mutate_single_pending_inventory(inventory: PendingFoodVisionInventory, action: PendingInventoryAction) -> tuple[PendingFoodVisionInventory | None, str | None]:
     updated = _clone_pending_inventory(inventory)
     items = updated.items
     if action.kind != "add":
@@ -1645,6 +1873,17 @@ def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: Pen
         return None, "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435."
     updated.items = _reindex_pending_inventory_items(items)
     return updated, None
+
+
+def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: PendingInventoryAction) -> tuple[PendingFoodVisionInventory | None, str | None]:
+    if action.kind == "batch":
+        current = _clone_pending_inventory(inventory)
+        for sub_action in action.sub_actions:
+            current, error = _mutate_single_pending_inventory(current, sub_action)
+            if current is None:
+                return None, error
+        return current, None
+    return _mutate_single_pending_inventory(inventory, action)
 
 
 def _format_component_estimate_line(component: NutritionComponentEstimate) -> str:
@@ -2255,9 +2494,163 @@ class HealBiteNutritionDiary:
         if action.kind == "cancel":
             self.clear_pending_state(user_id)
             return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+        if action.kind == "save":
+            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now)
+        if action.kind == "save_without_kbzhu":
+            return self.save_pending_inventory_without_kbzhu(user_id, expected_inventory_id=expected_inventory_id, now=now)
         if action.kind == "confirm":
             return self.confirm_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now)
         return self.apply_pending_inventory_action(user_id, action, expected_inventory_id=expected_inventory_id, now=now)
+
+    def save_pending_inventory_directly(
+        self,
+        user_id: str | int,
+        *,
+        expected_inventory_id: str | None = None,
+        now: datetime | None = None,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u043f\u043e \u0444\u043e\u0442\u043e. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+            )
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="\u042d\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u0443\u0436\u0435 \u0437\u0430\u043c\u0435\u043d\u0435\u043d\u043e \u043d\u043e\u0432\u044b\u043c \u0444\u043e\u0442\u043e. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(
+                status="expired",
+                reply_text=format_pending_inventory_expired_reply(),
+            )
+
+        calculation = calculate_inventory_nutrition(payload)
+        if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
+            return PendingInventoryReplyResult(
+                status="needs_weight_confirmation",
+                reply_text=format_pending_inventory_missing_weight_reply(payload, calculation.missing_indexes),
+                inventory=payload,
+                missing_indexes=calculation.missing_indexes,
+            )
+        if calculation.status == UNKNOWN_COMPONENT_BLOCKED:
+            return PendingInventoryReplyResult(
+                status="unknown_component",
+                reply_text=format_pending_inventory_unknown_component_reply(payload, calculation.blocked_indexes),
+                inventory=payload,
+                blocked_indexes=calculation.blocked_indexes,
+            )
+        if calculation.record is None:
+            return PendingInventoryReplyResult(
+                status="invalid_inventory_state",
+                reply_text=format_food_vision_inventory_reply(
+                    payload,
+                    notice="\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0435. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0441\u0442\u0430\u0432 \u0438\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+                ),
+                inventory=payload,
+            )
+
+        sqlite_id, duplicate = self.save_record(
+            user_id=normalized_user_id,
+            source=payload.source,
+            record=calculation.record,
+            image_ref=payload.image_ref,
+            occurred_at=payload.occurred_at,
+        )
+        self.clear_pending_state(normalized_user_id)
+        summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
+        reply_text = format_pending_meal_saved_reply(
+            summary,
+            duplicate=bool(duplicate),
+        )
+        return PendingInventoryReplyResult(
+            status="saved",
+            reply_text=reply_text,
+            record=calculation.record,
+            sqlite_id=sqlite_id,
+            saved=True,
+        )
+
+    def save_pending_inventory_without_kbzhu(
+        self,
+        user_id: str | int,
+        *,
+        expected_inventory_id: str | None = None,
+        now: datetime | None = None,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u043f\u043e \u0444\u043e\u0442\u043e. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+            )
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="\u042d\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u0443\u0436\u0435 \u0437\u0430\u043c\u0435\u043d\u0435\u043d\u043e \u043d\u043e\u0432\u044b\u043c \u0444\u043e\u0442\u043e. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(
+                status="expired",
+                reply_text=format_pending_inventory_expired_reply(),
+            )
+
+        calculation = calculate_inventory_nutrition(payload)
+        if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
+            return PendingInventoryReplyResult(
+                status="needs_weight_confirmation",
+                reply_text=format_pending_inventory_missing_weight_reply(payload, calculation.missing_indexes),
+                inventory=payload,
+                missing_indexes=calculation.missing_indexes,
+            )
+
+        components: list[NutritionComponentEstimate] = []
+        for item in payload.items:
+            est = _estimate_component_nutrition(item)
+            if est is not None:
+                components.append(est)
+            else:
+                components.append(
+                    NutritionComponentEstimate(
+                        name=item.visible_name,
+                        grams=float(item.selected_grams or 0.0),
+                        calories_kcal=None,
+                        protein_g=None,
+                        fat_g=None,
+                        carbs_g=None,
+                        nutrition_available=False,
+                    )
+                )
+
+        record = _build_component_record(payload, components, is_complete=False)
+        sqlite_id, duplicate = self.save_record(
+            user_id=normalized_user_id,
+            source=payload.source,
+            record=record,
+            image_ref=payload.image_ref,
+            occurred_at=payload.occurred_at,
+        )
+        self.clear_pending_state(normalized_user_id)
+        summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
+        reply_text = format_pending_meal_saved_without_kbzhu_reply(
+            summary,
+            record=record,
+            duplicate=bool(duplicate),
+        )
+        return PendingInventoryReplyResult(
+            status="saved_without_kbzhu",
+            reply_text=reply_text,
+            record=record,
+            sqlite_id=sqlite_id,
+            saved=True,
+        )
 
     def confirm_pending_meal(
         self,
@@ -2777,6 +3170,8 @@ class HealBiteNutritionDiary:
             "carbs_g": carbs_total,
         }
         progress = _build_target_progress(comparison_values, targets)
+        has_incomplete_entries = any(row["calories_kcal"] is None for row in rows)
+        is_complete = not has_incomplete_entries
         return {
             "entries": entries,
             "entry_count": len(entries),
@@ -2784,6 +3179,8 @@ class HealBiteNutritionDiary:
             "protein_g": protein_total,
             "fat_g": fat_total,
             "carbs_g": carbs_total,
+            "has_incomplete_entries": has_incomplete_entries,
+            "is_complete": is_complete,
             "days": normalized_days,
             "period_key": period_key,
             "period_label": period_label,
@@ -2889,6 +3286,8 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
         meal_name = html.escape(localized_meal_display_name(row, "\u0411\u043b\u044e\u0434\u043e"))
         kcal = _format_kcal(row.get("calories_kcal"))
         lines.append(f"\u2022 {meal_name} (~{kcal})")
+    if summary.get("has_incomplete_entries"):
+        lines.extend(["", "\u26a0\ufe0f \u041d\u0435\u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b \u0431\u0435\u0437 \u041a\u0411\u0416\u0423, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u0438\u0442\u043e\u0433\u0438 \u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u043e\u043b\u043d\u044b\u043c\u0438."])
     return "\n".join(lines)
 
 
@@ -2961,6 +3360,23 @@ def format_pending_meal_saved_reply(
     prefix = "ℹ️ Эта запись уже есть в дневнике." if duplicate else "✅ Сохранено."
     return (
         f"{prefix} Итог за день: {_format_kcal(summary.get('calories_kcal'))} · "
+        f"Б {_format_grams(summary.get('protein_g'))} · "
+        f"Ж {_format_grams(summary.get('fat_g'))} · "
+        f"У {_format_grams(summary.get('carbs_g'))}"
+    )
+
+
+def format_pending_meal_saved_without_kbzhu_reply(
+    summary: dict[str, Any],
+    *,
+    record: NutritionRecord | None = None,
+    duplicate: bool = False,
+) -> str:
+    prefix = "ℹ️ Эта запись уже есть в дневнике." if duplicate else "✅ Сохранено без КБЖУ."
+    dish_name = f" «{record.meal_name}»" if record and record.meal_name else ""
+    return (
+        f"{prefix} Состав блюда{dish_name} сохранён в дневник.\n"
+        f"Итог за день: {_format_kcal(summary.get('calories_kcal'))} · "
         f"Б {_format_grams(summary.get('protein_g'))} · "
         f"Ж {_format_grams(summary.get('fat_g'))} · "
         f"У {_format_grams(summary.get('carbs_g'))}"

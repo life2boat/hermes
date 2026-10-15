@@ -13034,9 +13034,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
         if not normalized or normalized.startswith("/"):
             return None
-        if normalized in {"да", "ага", "ок", "окей", "yes", "y", "сохрани", "сохраняй"}:
+        if normalized in {
+            "да",
+            "ага",
+            "ок",
+            "окей",
+            "yes",
+            "y",
+            "сохрани",
+            "сохраняй",
+            "сохранить",
+            "✅ сохранить",
+            "сохранить в дневник",
+            "✅ сохранить в дневник",
+            "сохранить без кбжу",
+            "✅ сохранить без кбжу",
+            "save",
+        }:
             return "confirm"
-        if normalized in {"нет", "неа", "отмена", "отмени", "cancel", "no", "n"}:
+        if normalized in {"нет", "неа", "отмена", "отмени", "cancel", "no", "n", "❌ отмена"}:
             return "cancel"
         return "wait"
 

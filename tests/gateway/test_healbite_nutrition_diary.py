@@ -1128,7 +1128,7 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     older = _build_record(
         meal_name="\u0413\u0440\u0435\u0447\u043a\u0430",
         calories_kcal=310,
@@ -1188,7 +1188,7 @@ def test_update_last_meal_tool_ignores_none_fields(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     original = _build_record(
         meal_name="\u0411\u043e\u0440\u0449",
         calories_kcal=280,
@@ -1243,7 +1243,7 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     user_one = _build_record(
         meal_name="\u041f\u043b\u043e\u0432",
         calories_kcal=640,

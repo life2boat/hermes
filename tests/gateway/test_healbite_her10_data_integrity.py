@@ -1,4 +1,7 @@
+import hashlib
 import json
+import os
+from pathlib import Path
 import sqlite3
 from datetime import datetime, timedelta, timezone
 import pytest
@@ -18,6 +21,9 @@ from gateway.healbite_nutrition_diary import (
     calculate_inventory_nutrition,
     format_nutrition_diary_report,
 )
+
+FIXTURE_PATH = Path(__file__).resolve().parent.parent.parent / "gateway" / "fixtures" / "food_reference_catalog_v1.json"
+EXPECTED_FIXTURE_SHA256 = "8abfcdf2fdf234ea7aa54d1300b28e690cd646012c45c45d8ca2c2fbedd66c13"
 
 
 def _install_target_tables(db_path):
@@ -72,48 +78,56 @@ def _seed_targets(
             )
 
 
-def _pending_item(
-    index: int,
-    visible_name: str,
-    normalized_name: str,
-    grams: float | None = None,
-    min_g: float | None = 100.0,
-    max_g: float | None = 100.0,
-) -> PendingFoodVisionItem:
-    if grams is None:
-        min_g = None
-        max_g = None
-    return PendingFoodVisionItem(
-        index=index,
-        visible_name=visible_name,
-        normalized_name=normalized_name,
-        confidence=0.95,
-        estimated_grams_min=min_g,
-        estimated_grams_max=max_g,
-        selected_grams=grams,
-        preparation="",
-        is_sauce=False,
-        uncertainty="",
-        user_modified=False,
+def test_catalog_fixture_hash_and_value_verification():
+    """
+    Requirement 7: Deterministic catalog-wide validation against a version-pinned,
+    hash-verified source fixture. Tests verify source identity AND nutrient values,
+    not just nonempty metadata.
+    """
+    assert FIXTURE_PATH.is_file(), f"Missing fixture at {FIXTURE_PATH}"
+    fixture_content = FIXTURE_PATH.read_text(encoding="utf-8")
+    actual_sha256 = hashlib.sha256(fixture_content.encode("utf-8")).hexdigest()
+    assert actual_sha256 == EXPECTED_FIXTURE_SHA256, (
+        f"Fixture SHA-256 drift! Expected {EXPECTED_FIXTURE_SHA256}, got {actual_sha256}"
     )
 
-
-def _pending_inventory(user_id: int, *items: PendingFoodVisionItem) -> PendingFoodVisionInventory:
-    now = datetime.now(timezone.utc)
-    return PendingFoodVisionInventory(
-        user_id=user_id,
-        inventory_id=f"inv-{user_id}",
-        schema_version="food_vision_inventory_v1",
-        items=list(items),
-        overall_confidence=0.95,
-        warnings=[],
-        created_at=now,
-        expires_at=now + timedelta(minutes=15),
-        source="vision",
-        state="PENDING_INVENTORY_CONFIRMATION",
-        image_ref=f"telegram:{user_id}:1",
-        occurred_at=now,
+    fixture_items = json.loads(fixture_content)
+    fixture_by_id = {item["canonical_id"]: item for item in fixture_items}
+    assert len(fixture_by_id) == len(_FOOD_CATALOG), (
+        f"Catalog size ({len(_FOOD_CATALOG)}) does not match fixture size ({len(fixture_by_id)})"
     )
+
+    usda_count = 0
+    russian_count = 0
+
+    for profile in _FOOD_CATALOG:
+        assert profile.canonical_id in fixture_by_id, f"Profile {profile.canonical_id} missing from fixture"
+        fix = fixture_by_id[profile.canonical_id]
+
+        # Verify source provenance and metadata
+        assert profile.source_id == fix["source_id"]
+        assert profile.dataset_version == fix["dataset_version"]
+        assert profile.cooking_state == fix["cooking_state"]
+        assert profile.source_provenance == fix["source_provenance"]
+        assert profile.source_provenance != "", f"Empty source_provenance for {profile.canonical_id}"
+
+        # Verify exact nutrient values
+        assert profile.calories_kcal == pytest.approx(fix["calories_kcal"], abs=0.01)
+        assert profile.protein_g == pytest.approx(fix["protein_g"], abs=0.01)
+        assert profile.fat_g == pytest.approx(fix["fat_g"], abs=0.01)
+        assert profile.carbs_g == pytest.approx(fix["carbs_g"], abs=0.01)
+
+        if profile.source_id.startswith("USDA-FDC-"):
+            usda_count += 1
+            assert "USDA FoodData Central" in profile.source_provenance
+        elif profile.source_id.startswith("INTERNAL-SKURIKHIN-"):
+            russian_count += 1
+            assert "Скурихин" in profile.source_provenance
+        else:
+            pytest.fail(f"Invalid source_id prefix: {profile.source_id}")
+
+    assert usda_count == 18, f"Expected 18 USDA verified entries, got {usda_count}"
+    assert russian_count == 51, f"Expected 51 Russian reference entries, got {russian_count}"
 
 
 def test_dairy_fat_percentages_distinct_profiles():
@@ -136,8 +150,8 @@ def test_dairy_fat_percentages_distinct_profiles():
     assert res_tvorog_9.profile.fat_g == 9.0
     assert res_tvorog_5.profile.calories_kcal == 121.0
     assert res_tvorog_9.profile.calories_kcal == 159.0
-    assert res_tvorog_5.source_id == "SKURIKHIN-2008-0105"
-    assert res_tvorog_9.source_id == "SKURIKHIN-2008-0104"
+    assert res_tvorog_5.source_id == "INTERNAL-SKURIKHIN-2008-0105"
+    assert res_tvorog_9.source_id == "INTERNAL-SKURIKHIN-2008-0104"
 
     # 2. Сметана
     res_smetana_15 = resolve_food_composition("сметана 15%")
@@ -151,8 +165,8 @@ def test_dairy_fat_percentages_distinct_profiles():
     assert res_smetana_20.profile.fat_g == 20.0
     assert res_smetana_15.profile.calories_kcal == 158.0
     assert res_smetana_20.profile.calories_kcal == 206.0
-    assert res_smetana_15.source_id == "SKURIKHIN-2008-0112"
-    assert res_smetana_20.source_id == "SKURIKHIN-2008-0113"
+    assert res_smetana_15.source_id == "INTERNAL-SKURIKHIN-2008-0112"
+    assert res_smetana_20.source_id == "INTERNAL-SKURIKHIN-2008-0113"
 
     # 3. Молоко
     res_milk_25 = resolve_food_composition("молоко 2.5%")
@@ -166,63 +180,100 @@ def test_dairy_fat_percentages_distinct_profiles():
     assert res_milk_32.profile.fat_g == 3.2
     assert res_milk_25.profile.calories_kcal == 52.0
     assert res_milk_32.profile.calories_kcal == 59.0
-    assert res_milk_25.source_id == "SKURIKHIN-2008-0101"
-    assert res_milk_32.source_id == "SKURIKHIN-2008-0102"
+    assert res_milk_25.source_id == "INTERNAL-SKURIKHIN-2008-0101"
+    assert res_milk_32.source_id == "INTERNAL-SKURIKHIN-2008-0102"
 
 
 def test_cheese_types_distinct_profiles():
     """
-    Requirement B.2: Specific cheese types have dedicated verified profiles
-    and are not conflated with generic cream cheese or generic cheese.
+    Requirement B.2: Specific cheese types have dedicated verified profiles.
+    Unverified cheeses (mascarpone) fail closed (matched=False).
+    Verified cheeses match actual USDA FDC records.
     """
-    # Mascarpone vs Cream Cheese
+    # Mascarpone: unverified in reference editions -> fails closed
     res_mascarpone = resolve_food_composition("маскарпоне")
+    assert res_mascarpone.matched is False
+    assert res_mascarpone.profile is None
+
+    # Cream Cheese (FDC 173418)
     res_cream_cheese = resolve_food_composition("сливочный сыр")
+    assert res_cream_cheese.matched is True
+    assert res_cream_cheese.profile.canonical_id == "cream_cheese"
+    assert res_cream_cheese.source_id == "USDA-FDC-173418"
+    assert res_cream_cheese.profile.calories_kcal == 350.0
+    assert res_cream_cheese.profile.fat_g == 34.4
+    assert res_cream_cheese.profile.protein_g == 6.2
+    assert res_cream_cheese.profile.carbs_g == 5.5
 
-    assert res_mascarpone.matched is True
-    assert res_mascarpone.profile.canonical_id == "mascarpone"
-    assert res_mascarpone.profile.calories_kcal == 429.0
-    assert res_mascarpone.profile.fat_g == 42.9
-    assert res_mascarpone.source_id == "USDA-FDC-173440"
-    assert res_mascarpone.profile.canonical_id != res_cream_cheese.profile.canonical_id
-
-    # Parmesan
+    # Parmesan (FDC 170848)
     res_parmesan = resolve_food_composition("пармезан")
     assert res_parmesan.matched is True
     assert res_parmesan.profile.canonical_id == "cheese_parmesan"
+    assert res_parmesan.source_id == "USDA-FDC-170848"
+    assert res_parmesan.profile.calories_kcal == 392.0
     assert res_parmesan.profile.protein_g == 35.8
-    assert res_parmesan.source_id == "USDA-FDC-170845"
+    assert res_parmesan.profile.fat_g == 25.0
 
-    # Cheddar
+    # Cheddar (FDC 173414)
     res_cheddar = resolve_food_composition("чеддер")
     assert res_cheddar.matched is True
     assert res_cheddar.profile.canonical_id == "cheese_cheddar"
-    assert res_cheddar.profile.fat_g == 33.1
-    assert res_cheddar.source_id == "USDA-FDC-173418"
+    assert res_cheddar.source_id == "USDA-FDC-173414"
+    assert res_cheddar.profile.calories_kcal == 403.0
+    assert res_cheddar.profile.fat_g == 33.3
 
-    # Gouda
+    # Gouda (FDC 171241)
     res_gouda = resolve_food_composition("гауда")
     assert res_gouda.matched is True
     assert res_gouda.profile.canonical_id == "cheese_gouda"
-    assert res_gouda.source_id == "USDA-FDC-173426"
+    assert res_gouda.source_id == "USDA-FDC-171241"
+    assert res_gouda.profile.calories_kcal == 356.0
+    assert res_gouda.profile.fat_g == 27.4
 
-    # Mozzarella
+    # Mozzarella (FDC 170845)
     res_mozzarella = resolve_food_composition("моцарелла")
     assert res_mozzarella.matched is True
     assert res_mozzarella.profile.canonical_id == "cheese_mozzarella"
-    assert res_mozzarella.source_id == "USDA-FDC-173420"
+    assert res_mozzarella.source_id == "USDA-FDC-170845"
+    assert res_mozzarella.profile.calories_kcal == 299.0
+    assert res_mozzarella.profile.protein_g == 22.2
 
-    # Feta
+    # Feta (FDC 173420)
     res_feta = resolve_food_composition("фета")
     assert res_feta.matched is True
     assert res_feta.profile.canonical_id == "cheese_feta"
-    assert res_feta.source_id == "USDA-FDC-173422"
+    assert res_feta.source_id == "USDA-FDC-173420"
+    assert res_feta.profile.calories_kcal == 265.0
+    assert res_feta.profile.protein_g == 14.2
+    assert res_feta.profile.fat_g == 21.5
+
+    # Brie (FDC 172177)
+    res_brie = resolve_food_composition("бри")
+    assert res_brie.matched is True
+    assert res_brie.profile.canonical_id == "cheese_brie"
+    assert res_brie.source_id == "USDA-FDC-172177"
+    assert res_brie.profile.calories_kcal == 334.0
+
+    # Edam (FDC 173419)
+    res_edam = resolve_food_composition("эдам")
+    assert res_edam.matched is True
+    assert res_edam.profile.canonical_id == "cheese_edam"
+    assert res_edam.source_id == "USDA-FDC-173419"
+    assert res_edam.profile.calories_kcal == 357.0
+
+    # Swiss (FDC 171251)
+    res_swiss = resolve_food_composition("швейцарский сыр")
+    assert res_swiss.matched is True
+    assert res_swiss.profile.canonical_id == "cheese_swiss"
+    assert res_swiss.source_id == "USDA-FDC-171251"
+    assert res_swiss.profile.calories_kcal == 393.0
 
     # Russian cheese
     res_russian = resolve_food_composition("сыр российский")
     assert res_russian.matched is True
     assert res_russian.profile.canonical_id == "cheese_russian"
-    assert res_russian.source_id == "SKURIKHIN-2008-0120"
+    assert res_russian.source_id == "INTERNAL-SKURIKHIN-2008-0120"
+    assert res_russian.profile.calories_kcal == 364.0
 
 
 def test_cooking_states_distinct_profiles():
@@ -242,8 +293,12 @@ def test_cooking_states_distinct_profiles():
     assert res_baked_salmon.cooking_state == "baked"
     assert res_cured_salmon.cooking_state == "cured"
 
+    assert res_raw_salmon.source_id == "USDA-FDC-173686"
+    assert res_baked_salmon.source_id == "USDA-FDC-171998"
+    assert res_cured_salmon.source_id == "INTERNAL-SKURIKHIN-2008-0322"
+
     assert res_raw_salmon.profile.calories_kcal == 142.0
-    assert res_baked_salmon.profile.calories_kcal == 206.0
+    assert res_baked_salmon.profile.calories_kcal == 182.0
     assert res_cured_salmon.profile.calories_kcal == 195.0
 
     # Raw mushrooms vs fried mushrooms
@@ -277,22 +332,6 @@ def test_cooking_states_distinct_profiles():
     assert res_boiled_beef.profile.calories_kcal == 254.0
 
 
-def test_catalog_source_traceability():
-    """
-    Requirement B.4: Every catalog entry has valid source_id, dataset_version,
-    and cooking_state basis.
-    """
-    assert len(_FOOD_CATALOG) >= 45
-
-    for profile in _FOOD_CATALOG:
-        assert profile.source_id != "", f"Profile {profile.canonical_id} is missing source_id"
-        assert profile.dataset_version != "", f"Profile {profile.canonical_id} is missing dataset_version"
-        assert profile.cooking_state != "", f"Profile {profile.canonical_id} is missing cooking_state"
-        assert profile.source_id.startswith("SKURIKHIN-") or profile.source_id.startswith("USDA-FDC-"), (
-            f"Invalid source_id provenance {profile.source_id} for {profile.canonical_id}"
-        )
-
-
 def test_unknown_food_fails_closed_without_silent_substitution():
     """
     Requirement B.5: Where no defensible data exists, return an unresolved
@@ -303,6 +342,8 @@ def test_unknown_food_fails_closed_without_silent_substitution():
         "творог 18%",  # Non-standard unknown fat percentage
         "сыр с плесенью дорблю",  # Uncataloged cheese
         "экзотическая рыба фугу в карамели",  # Unknown dish
+        "маскарпоне",  # Unverified cheese left unresolved
+        "чечевичный суп с овощами",  # Composite unverified soup
     ]
 
     for query in unknown_queries:
@@ -461,10 +502,12 @@ def test_one_tap_save_with_real_vision_inventory_estimated_weights(tmp_path):
     assert summary["entry_count"] == 1
     items_json = json.loads(summary["entries"][0]["items_json"])
     assert len(items_json) == 2
-    assert items_json[0]["source_id"] == "SKURIKHIN-2008-0714"
+    assert items_json[0]["source_id"] == "INTERNAL-SKURIKHIN-2008-0714"
     assert items_json[0]["cooking_state"] == "fried"
-    assert items_json[1]["source_id"] == "SKURIKHIN-2008-0322"
+    assert items_json[0]["source_provenance"] != ""
+    assert items_json[1]["source_id"] == "INTERNAL-SKURIKHIN-2008-0322"
     assert items_json[1]["cooking_state"] == "cured"
+    assert items_json[1]["source_provenance"] != ""
 
 
 def test_one_tap_save_with_real_vision_inventory_missing_weights(tmp_path):

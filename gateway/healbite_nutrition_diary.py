@@ -362,6 +362,7 @@ class NutritionComponentEstimate:
     candidate_suggestions: tuple[str, ...] = ()
     source_id: str = ""
     cooking_state: str = ""
+    source_provenance: str = ""
 
 
 @dataclass(slots=True)
@@ -1579,6 +1580,7 @@ def _estimate_component_nutrition(item: PendingFoodVisionItem) -> NutritionCompo
             variance_note=profile.variance_note,
             source_id=profile.source_id,
             cooking_state=profile.cooking_state,
+            source_provenance=profile.source_provenance,
         )
 
     # Fallback to synthetic if present
@@ -1634,6 +1636,7 @@ def _build_component_record(
             "nutrition_available": component.nutrition_available,
             "source_id": component.source_id,
             "cooking_state": component.cooking_state,
+            "source_provenance": component.source_provenance,
         }
         for component in components
     ]

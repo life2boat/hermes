@@ -251,9 +251,9 @@ class FoodVisionItem:
     confidence: float
     estimated_grams_min: float | None
     estimated_grams_max: float | None
-    preparation: str
-    is_sauce: bool
-    uncertainty: str
+    preparation: str = ""
+    is_sauce: bool = False
+    uncertainty: str = ""
 
 
 @dataclass(slots=True)
@@ -360,6 +360,8 @@ class NutritionComponentEstimate:
     reference_confidence: float = 1.0
     variance_note: str = ""
     candidate_suggestions: tuple[str, ...] = ()
+    source_id: str = ""
+    cooking_state: str = ""
 
 
 @dataclass(slots=True)
@@ -731,8 +733,16 @@ def _build_target_progress(
     return progress
 
 
-def _build_progress_hints(progress: dict[str, dict[str, float]]) -> list[str]:
+def _build_progress_hints(
+    progress: dict[str, dict[str, float]],
+    *,
+    has_incomplete_entries: bool = False,
+) -> list[str]:
     hints: list[str] = []
+    if has_incomplete_entries:
+        hints.append("Учтены не все приёмы пищи (есть блюда без КБЖУ). Фактические показатели выше указанного промежуточного итога.")
+        return hints
+
     calories_progress = progress.get("calories_kcal")
     protein_progress = progress.get("protein_g")
     if calories_progress is not None and calories_progress["percent"] < 70.0:
@@ -751,14 +761,16 @@ def _format_progress_line(
     metric_name: str,
     current_value: float,
     progress: dict[str, dict[str, float]],
+    is_partial: bool = False,
 ) -> str:
     formatter = _format_kcal if metric_name == "calories_kcal" else _format_grams
     metric_progress = progress.get(metric_name)
     if metric_progress is None:
         return f"{emoji} {label}: {formatter(current_value)}"
+    percent_str = f"не менее {_format_percent(metric_progress['percent'])}" if is_partial else _format_percent(metric_progress['percent'])
     return (
         f"{emoji} {label}: {formatter(metric_progress['current'])} / "
-        f"{formatter(metric_progress['target'])} ({_format_percent(metric_progress['percent'])})"
+        f"{formatter(metric_progress['target'])} ({percent_str})"
     )
 
 
@@ -1565,6 +1577,8 @@ def _estimate_component_nutrition(item: PendingFoodVisionItem) -> NutritionCompo
             nutrition_available=True,
             reference_confidence=lookup.confidence,
             variance_note=profile.variance_note,
+            source_id=profile.source_id,
+            cooking_state=profile.cooking_state,
         )
 
     # Fallback to synthetic if present
@@ -1618,6 +1632,8 @@ def _build_component_record(
             "fat_g": component.fat_g,
             "carbs_g": component.carbs_g,
             "nutrition_available": component.nutrition_available,
+            "source_id": component.source_id,
+            "cooking_state": component.cooking_state,
         }
         for component in components
     ]
@@ -3172,6 +3188,14 @@ class HealBiteNutritionDiary:
         progress = _build_target_progress(comparison_values, targets)
         has_incomplete_entries = any(row["calories_kcal"] is None for row in rows)
         is_complete = not has_incomplete_entries
+        incomplete_entry_count = sum(1 for row in rows if row["calories_kcal"] is None)
+        complete_entry_count = len(rows) - incomplete_entry_count
+        known_subtotal = {
+            "calories_kcal": calories_total,
+            "protein_g": protein_total,
+            "fat_g": fat_total,
+            "carbs_g": carbs_total,
+        }
         return {
             "entries": entries,
             "entry_count": len(entries),
@@ -3181,6 +3205,9 @@ class HealBiteNutritionDiary:
             "carbs_g": carbs_total,
             "has_incomplete_entries": has_incomplete_entries,
             "is_complete": is_complete,
+            "incomplete_entry_count": incomplete_entry_count,
+            "complete_entry_count": complete_entry_count,
+            "known_subtotal": known_subtotal,
             "days": normalized_days,
             "period_key": period_key,
             "period_label": period_label,
@@ -3197,7 +3224,7 @@ class HealBiteNutritionDiary:
             "targets_available": targets.has_any(),
             "progress": progress,
             "comparison_values": comparison_values,
-            "hints": _build_progress_hints(progress),
+            "hints": _build_progress_hints(progress, has_incomplete_entries=has_incomplete_entries),
         }
 
     def get_daily_summary(self, *, user_id: int, now: datetime | None = None) -> dict[str, Any]:
@@ -3224,51 +3251,68 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
             message += "\n\n" + no_target_hint
         return message
 
+    has_incomplete = bool(summary.get("has_incomplete_entries"))
+    incomplete_count = int(summary.get("incomplete_entry_count") or (1 if has_incomplete else 0))
+
     if days == 1:
-        title = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>"
+        if has_incomplete:
+            title = f"\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>\n\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423). \u041d\u0438\u0436\u0435 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435.</i>"
+        else:
+            title = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>"
     else:
-        title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
+        if has_incomplete:
+            title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>\n\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423).</i>"
+        else:
+            title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
 
     lines = [title]
     if days > 1:
-        lines.append("\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>")
+        lines.append("\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>" if has_incomplete else "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>")
+    elif has_incomplete:
+        lines.append("\U0001f4cc <b>\u0418\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433:</b>")
+
     lines.extend(
         [
             _format_progress_line(
                 emoji="\U0001f525",
-                label="\u041a\u0430\u043b\u043e\u0440\u0438\u0438",
+                label="\u041a\u0430\u043b\u043e\u0440\u0438\u0438" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="calories_kcal",
                 current_value=float(comparison_values.get("calories_kcal") or 0.0),
                 progress=progress,
+                is_partial=has_incomplete,
             ),
             _format_progress_line(
                 emoji="\U0001f969",
-                label="\u0411\u0435\u043b\u043a\u0438",
+                label="\u0411\u0435\u043b\u043a\u0438" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="protein_g",
                 current_value=float(comparison_values.get("protein_g") or 0.0),
                 progress=progress,
+                is_partial=has_incomplete,
             ),
             _format_progress_line(
                 emoji="\U0001f9c8",
-                label="\u0416\u0438\u0440\u044b",
+                label="\u0416\u0438\u0440\u044b" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="fat_g",
                 current_value=float(comparison_values.get("fat_g") or 0.0),
                 progress=progress,
+                is_partial=has_incomplete,
             ),
             _format_progress_line(
                 emoji="\U0001f35e",
-                label="\u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b",
+                label="\u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="carbs_g",
                 current_value=float(comparison_values.get("carbs_g") or 0.0),
                 progress=progress,
+                is_partial=has_incomplete,
             ),
         ]
     )
     if days > 1:
+        total_subhead = f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439 (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>" if has_incomplete else f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
         lines.extend(
             [
                 "",
-                f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>",
+                total_subhead,
                 f"\U0001f525 \u041a\u0430\u043b\u043e\u0440\u0438\u0438: {_format_kcal(summary.get('calories_kcal'))}",
                 f"\U0001f969 \u0411\u0435\u043b\u043a\u0438: {_format_grams(summary.get('protein_g'))}",
                 f"\U0001f9c8 \u0416\u0438\u0440\u044b: {_format_grams(summary.get('fat_g'))}",
@@ -3286,8 +3330,11 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
         meal_name = html.escape(localized_meal_display_name(row, "\u0411\u043b\u044e\u0434\u043e"))
         kcal = _format_kcal(row.get("calories_kcal"))
         lines.append(f"\u2022 {meal_name} (~{kcal})")
-    if summary.get("has_incomplete_entries"):
-        lines.extend(["", "\u26a0\ufe0f \u041d\u0435\u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b \u0431\u0435\u0437 \u041a\u0411\u0416\u0423, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u0438\u0442\u043e\u0433\u0438 \u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u043e\u043b\u043d\u044b\u043c\u0438."])
+    if has_incomplete:
+        lines.extend([
+            "",
+            "\u26a0\ufe0f \u041d\u0435\u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b \u0431\u0435\u0437 \u041a\u0411\u0416\u0423, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u0438\u0442\u043e\u0433\u0438 \u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u043e\u043b\u043d\u044b\u043c\u0438. \u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0451\u043d \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435 \u0438\u043b\u0438 \u0434\u043e\u0441\u0442\u0438\u0436\u0435\u043d\u0438\u0435 \u0446\u0435\u043b\u0438."
+        ])
     return "\n".join(lines)
 
 

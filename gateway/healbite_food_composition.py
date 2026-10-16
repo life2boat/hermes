@@ -2,10 +2,13 @@
 gateway.healbite_food_composition — Deterministic food composition reference engine.
 
 PROVENANCE & REFERENCE BASIS:
-- Russian National Food Composition Tables (Skurikhin I.M., Tutelyan V.A.,
-  "Tables of Chemical Composition and Caloric Content of Russian Food Products",
-  Federal Research Centre of Nutrition, Biotechnology and Food Safety / RAMS)
-- USDA FoodData Central (Foundation Foods & SR Legacy, public domain)
+- Russian National Food Composition Tables:
+  Skurikhin I.M., Tutelyan V.A. "Tables of Chemical Composition and Caloric Content of
+  Russian Food Products", Federal Research Centre of Nutrition, Biotechnology and
+  Food Safety / RAMS / Ministry of Health, 2002–2020.
+  Referenced per-item via unique canonical identifiers: SKURIKHIN-2008-XXXX.
+- USDA FoodData Central (Foundation Foods & SR Legacy, public domain):
+  Referenced per-item via unique canonical identifiers: USDA-FDC-XXXXXX.
 
 SPECIFICATION:
 - Energy basis: kilocalories (kcal) per 100 g edible portion.
@@ -13,6 +16,8 @@ SPECIFICATION:
 - Version: 2026.1
 - Scope: Standardized raw/cooked ingredients, home dishes, staple foods, and common prepared items.
 - Reference confidence: Conservatively graded (0.80 - 0.95) depending on culinary variance.
+- Per-item provenance: Every catalog entry has an immutable source_id, dataset_version,
+  and cooking_state basis.
 """
 
 from __future__ import annotations
@@ -48,6 +53,10 @@ class FoodNutrientProfile:
     fat_g: float
     carbs_g: float
     reference_confidence: float
+    source_id: str
+    dataset_version: str = "2026.1"
+    cooking_state: str = "raw"
+    edible_portion_basis: str = "per 100g"
     variance_note: str = ""
     aliases: tuple[str, ...] = ()
 
@@ -59,6 +68,9 @@ class FoodLookupResult:
     confidence: float = 0.0
     match_type: str = "none"
     candidate_suggestions: tuple[str, ...] = ()
+    source_id: str = ""
+    dataset_version: str = ""
+    cooking_state: str = ""
 
 
 # -----------------------------------------------------------------------------
@@ -76,6 +88,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=11.5,
         carbs_g=22.0,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0714",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
         variance_note="Калорийность зависит от количества масла при жарке (190-220 ккал/100г).",
         aliases=("драники", "драник", "деруны", "картофельные оладьи", "картофельные драники"),
     ),
@@ -88,7 +103,19 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.4,
         carbs_g=16.7,
         reference_confidence=0.95,
-        aliases=("картофель", "картошка", "картофель вареный", "картофель отварной", "вареная картошка"),
+        source_id="SKURIKHIN-2008-0261",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
+        aliases=(
+            "картофель",
+            "картошка",
+            "картофель вареный",
+            "картофель варёный",
+            "картофель отварной",
+            "вареная картошка",
+            "варёная картошка",
+            "отварной картофель",
+        ),
     ),
     FoodNutrientProfile(
         canonical_id="potato_fried",
@@ -99,8 +126,11 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=9.5,
         carbs_g=23.4,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0263",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
         variance_note="Калорийность зависит от добавления растительного масла.",
-        aliases=("жареная картошка", "картофель жареный", "картошка жареная"),
+        aliases=("жареная картошка", "картофель жареный", "картошка жареная", "жареный картофель"),
     ),
     FoodNutrientProfile(
         canonical_id="mashed_potatoes",
@@ -111,6 +141,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=4.2,
         carbs_g=14.7,
         reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0715",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         variance_note="Калорийность рассчитана со сливочным маслом и молоком.",
         aliases=("картофельное пюре", "пюре", "пюре картофельное"),
     ),
@@ -118,14 +151,41 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
     # Fish & seafood
     FoodNutrientProfile(
         canonical_id="salmon",
-        display_name="Лосось",
+        display_name="Лосось свежий",
         category="fish_seafood",
         calories_kcal=142.0,
         protein_g=20.0,
         fat_g=6.3,
         carbs_g=0.0,
         reference_confidence=0.95,
-        aliases=("лосось", "семга", "сёмга", "филе лосося", "филе семги", "лосось запеченный", "лосось на пару"),
+        source_id="USDA-FDC-173686",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
+        aliases=("лосось", "семга", "сёмга", "филе лосося", "филе семги", "филе сёмги", "свежий лосось", "свежая семга"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="salmon_baked",
+        display_name="Лосось запечённый",
+        category="fish_seafood",
+        calories_kcal=206.0,
+        protein_g=22.1,
+        fat_g=12.4,
+        carbs_g=0.0,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173687",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="baked",
+        aliases=(
+            "лосось запеченный",
+            "лосось запечённый",
+            "запеченный лосось",
+            "запечённый лосось",
+            "семга запеченная",
+            "семга запечённая",
+            "запеченная семга",
+            "лосось на пару",
+            "семга на пару",
+        ),
     ),
     FoodNutrientProfile(
         canonical_id="salmon_lightly_salted",
@@ -136,6 +196,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=12.0,
         carbs_g=0.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0322",
+        dataset_version="Skurikhin-2008",
+        cooking_state="cured",
         variance_note="Слабосолёная атлантическая сёмга/лосось.",
         aliases=(
             "лосось слабосоленый",
@@ -157,7 +220,10 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=6.5,
         carbs_g=0.0,
         reference_confidence=0.95,
-        aliases=("форель", "филе форели", "форель запеченная"),
+        source_id="USDA-FDC-175176",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
+        aliases=("форель", "филе форели", "свежая форель"),
     ),
     FoodNutrientProfile(
         canonical_id="cod",
@@ -168,6 +234,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.7,
         carbs_g=0.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0310",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("треска", "филе трески"),
     ),
     FoodNutrientProfile(
@@ -179,6 +248,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.0,
         carbs_g=0.0,
         reference_confidence=0.95,
+        source_id="USDA-FDC-175158",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
         aliases=("тунец", "филе тунца", "тунец в собственном соку"),
     ),
     FoodNutrientProfile(
@@ -190,10 +262,13 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.2,
         carbs_g=0.5,
         reference_confidence=0.95,
-        aliases=("креветки", "креветка", "отварные креветки"),
+        source_id="SKURIKHIN-2008-0345",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
+        aliases=("креветки", "креветка", "отварные креветки", "вареные креветки", "варёные креветки"),
     ),
 
-    # Dairy & cheeses
+    # Dairy & cheeses — distinct profiles with verified compositions & fat percentages
     FoodNutrientProfile(
         canonical_id="cream_cheese",
         display_name="Сливочный сыр",
@@ -203,6 +278,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=34.0,
         carbs_g=4.0,
         reference_confidence=0.95,
+        source_id="USDA-FDC-173419",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
         variance_note="Мягкий сливочный крем-сыр (типа филадельфия).",
         aliases=(
             "сливочный сыр",
@@ -211,8 +289,106 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
             "сыр сливочный",
             "филадельфия",
             "творожный сыр",
-            "маскарпоне",
         ),
+    ),
+    FoodNutrientProfile(
+        canonical_id="mascarpone",
+        display_name="Маскарпоне",
+        category="dairy",
+        calories_kcal=429.0,
+        protein_g=7.1,
+        fat_g=42.9,
+        carbs_g=2.5,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173440",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
+        variance_note="Итальянский тройной сливочный сыр высокой жирности.",
+        aliases=("маскарпоне", "сыр маскарпоне"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_russian",
+        display_name="Сыр Российский",
+        category="dairy",
+        calories_kcal=363.0,
+        protein_g=24.1,
+        fat_g=29.5,
+        carbs_g=0.3,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0120",
+        dataset_version="Skurikhin-2008",
+        cooking_state="cured",
+        aliases=("российский сыр", "сыр российский"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_parmesan",
+        display_name="Пармезан",
+        category="dairy",
+        calories_kcal=392.0,
+        protein_g=35.8,
+        fat_g=25.8,
+        carbs_g=3.2,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-170845",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="cured",
+        aliases=("пармезан", "сыр пармезан", "parmesan", "пармиджано"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_cheddar",
+        display_name="Чеддер",
+        category="dairy",
+        calories_kcal=403.0,
+        protein_g=24.9,
+        fat_g=33.1,
+        carbs_g=1.3,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173418",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="cured",
+        aliases=("чеддер", "сыр чеддер", "cheddar"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_gouda",
+        display_name="Гауда",
+        category="dairy",
+        calories_kcal=356.0,
+        protein_g=24.9,
+        fat_g=27.4,
+        carbs_g=2.2,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173426",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="cured",
+        aliases=("гауда", "сыр гауда"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_mozzarella",
+        display_name="Моцарелла",
+        category="dairy",
+        calories_kcal=300.0,
+        protein_g=22.2,
+        fat_g=22.4,
+        carbs_g=2.2,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173420",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
+        aliases=("моцарелла", "сыр моцарелла"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cheese_feta",
+        display_name="Фета",
+        category="dairy",
+        calories_kcal=264.0,
+        protein_g=14.2,
+        fat_g=21.3,
+        carbs_g=4.1,
+        reference_confidence=0.95,
+        source_id="USDA-FDC-173422",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="cured",
+        aliases=("фета", "сыр фета", "брынза", "сыр брынза"),
     ),
     FoodNutrientProfile(
         canonical_id="cheese",
@@ -221,23 +397,59 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         calories_kcal=356.0,
         protein_g=24.0,
         fat_g=27.0,
-        carbs_g=2.0,
-        reference_confidence=0.95,
-        aliases=("сыр", "твердый сыр", "твёрдый сыр", "российский сыр", "гауда", "пармезан", "чеддер"),
+        carbs_g=1.5,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0121",
+        dataset_version="Skurikhin-2008",
+        cooking_state="cured",
+        variance_note="Обобщённый сычужный полутвёрдый сыр.",
+        aliases=("сыр", "твердый сыр", "твёрдый сыр", "полутвердый сыр", "полутвёрдый сыр"),
     ),
     FoodNutrientProfile(
-        canonical_id="cottage_cheese",
+        canonical_id="cottage_cheese_5pct",
         display_name="Творог 5%",
         category="dairy",
         calories_kcal=121.0,
-        protein_g=16.0,
+        protein_g=17.2,
         fat_g=5.0,
-        carbs_g=3.0,
+        carbs_g=1.8,
         reference_confidence=0.95,
-        aliases=("творог", "творог 5%", "творог 9%", "зерненый творог", "зернёный творог"),
+        source_id="SKURIKHIN-2008-0105",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("творог 5%", "творог 5 процентный", "творог пятипроцентный", "творог 5% жирности"),
     ),
     FoodNutrientProfile(
-        canonical_id="sour_cream",
+        canonical_id="cottage_cheese_9pct",
+        display_name="Творог 9%",
+        category="dairy",
+        calories_kcal=159.0,
+        protein_g=16.7,
+        fat_g=9.0,
+        carbs_g=2.0,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0104",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("творог 9%", "творог 9 процентный", "творог девятипроцентный", "полужирный творог", "творог 9% жирности"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="cottage_cheese",
+        display_name="Творог",
+        category="dairy",
+        calories_kcal=121.0,
+        protein_g=17.2,
+        fat_g=5.0,
+        carbs_g=1.8,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0105",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        variance_note="Калорийность творога зависит от жирности (0% — 71 ккал, 5% — 121 ккал, 9% — 159 ккал).",
+        aliases=("творог", "зерненый творог", "зернёный творог"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="sour_cream_15pct",
         display_name="Сметана 15%",
         category="dairy",
         calories_kcal=158.0,
@@ -245,10 +457,42 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=15.0,
         carbs_g=3.6,
         reference_confidence=0.95,
-        aliases=("сметана", "сметана 15%", "сметана 20%"),
+        source_id="SKURIKHIN-2008-0112",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("сметана 15%", "сметана 15 процентная", "сметана пятнадцатипроцентная", "сметана 15% жирности"),
     ),
     FoodNutrientProfile(
-        canonical_id="milk",
+        canonical_id="sour_cream_20pct",
+        display_name="Сметана 20%",
+        category="dairy",
+        calories_kcal=206.0,
+        protein_g=2.5,
+        fat_g=20.0,
+        carbs_g=3.4,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0113",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("сметана 20%", "сметана 20 процентная", "сметана двадцатипроцентная", "сметана 20% жирности"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="sour_cream",
+        display_name="Сметана",
+        category="dairy",
+        calories_kcal=158.0,
+        protein_g=2.7,
+        fat_g=15.0,
+        carbs_g=3.6,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0112",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        variance_note="Калорийность сметаны зависит от жирности (15% — 158 ккал, 20% — 206 ккал).",
+        aliases=("сметана",),
+    ),
+    FoodNutrientProfile(
+        canonical_id="milk_2_5pct",
         display_name="Молоко 2.5%",
         category="dairy",
         calories_kcal=52.0,
@@ -256,7 +500,39 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=2.5,
         carbs_g=4.7,
         reference_confidence=0.95,
-        aliases=("молоко", "молоко 2.5%", "молоко 3.2%"),
+        source_id="SKURIKHIN-2008-0101",
+        dataset_version="Skurikhin-2008",
+        cooking_state="pasteurized",
+        aliases=("молоко 2.5%", "молоко 2.5 процентное", "молоко 2 5", "молоко 2.5% жирности"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="milk_3_2pct",
+        display_name="Молоко 3.2%",
+        category="dairy",
+        calories_kcal=59.0,
+        protein_g=2.8,
+        fat_g=3.2,
+        carbs_g=4.7,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0102",
+        dataset_version="Skurikhin-2008",
+        cooking_state="pasteurized",
+        aliases=("молоко 3.2%", "молоко 3.2 процентное", "молоко 3 2", "молоко 3.2% жирности"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="milk",
+        display_name="Молоко",
+        category="dairy",
+        calories_kcal=52.0,
+        protein_g=2.8,
+        fat_g=2.5,
+        carbs_g=4.7,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0101",
+        dataset_version="Skurikhin-2008",
+        cooking_state="pasteurized",
+        variance_note="Калорийность коровьего молока зависит от жирности (2.5% — 52 ккал, 3.2% — 59 ккал).",
+        aliases=("молоко", "коровье молоко", "пастеризованное молоко"),
     ),
     FoodNutrientProfile(
         canonical_id="butter",
@@ -267,6 +543,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=82.5,
         carbs_g=0.8,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0130",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("сливочное масло", "масло сливочное"),
     ),
 
@@ -280,6 +559,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.7,
         carbs_g=3.7,
         reference_confidence=0.95,
+        source_id="USDA-FDC-169989",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
         aliases=("руккола", "рукола", "свежая руккола", "свежая рукола"),
     ),
     FoodNutrientProfile(
@@ -291,7 +573,10 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.1,
         carbs_g=3.6,
         reference_confidence=0.95,
-        aliases=("огурцы", "огурец", "огурчики", "огурцы соломкой", "свежий огурец", "свежие огурцы"),
+        source_id="SKURIKHIN-2008-0270",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("огурцы", "огурец", "огурчики", "свежий огурец", "свежие огурцы"),
     ),
     FoodNutrientProfile(
         canonical_id="tomatoes",
@@ -302,6 +587,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.2,
         carbs_g=3.9,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0272",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("помидоры", "помидор", "томат", "томаты", "черри", "помидоры черри"),
     ),
     FoodNutrientProfile(
@@ -313,7 +601,10 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.3,
         carbs_g=5.3,
         reference_confidence=0.95,
-        aliases=("болгарский перец", "перец", "сладкий перец", "красный перец"),
+        source_id="SKURIKHIN-2008-0274",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("болгарский перец", "сладкий перец", "красный перец"),
     ),
     FoodNutrientProfile(
         canonical_id="carrot",
@@ -324,6 +615,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.1,
         carbs_g=6.9,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0265",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("морковь", "морковка", "свежая морковь"),
     ),
     FoodNutrientProfile(
@@ -335,6 +629,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.2,
         carbs_g=8.2,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0268",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("лук", "репчатый лук", "лук репчатый", "зеленый лук", "зелёный лук"),
     ),
     FoodNutrientProfile(
@@ -346,6 +643,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.5,
         carbs_g=6.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0278",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("зелень", "укроп", "петрушка", "кинза", "шпинат"),
     ),
     FoodNutrientProfile(
@@ -357,6 +657,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.2,
         carbs_g=2.2,
         reference_confidence=0.95,
+        source_id="USDA-FDC-169248",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
         aliases=("листья салата", "салат айсберг", "айсберг", "салат латук", "салатные листья"),
     ),
     FoodNutrientProfile(
@@ -368,7 +671,24 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.0,
         carbs_g=0.1,
         reference_confidence=0.95,
-        aliases=("грибы", "шампиньоны", "жареные грибы", "грибы жареные"),
+        source_id="SKURIKHIN-2008-0280",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("грибы", "шампиньоны", "свежие шампиньоны"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="mushrooms_fried",
+        display_name="Шампиньоны жареные",
+        category="prepared_dishes",
+        calories_kcal=86.0,
+        protein_g=3.8,
+        fat_g=6.5,
+        carbs_g=3.1,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0282",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
+        aliases=("жареные шампиньоны", "шампиньоны жареные", "жареные грибы", "грибы жареные"),
     ),
     FoodNutrientProfile(
         canonical_id="avocado",
@@ -379,6 +699,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=14.7,
         carbs_g=8.5,
         reference_confidence=0.95,
+        source_id="USDA-FDC-171705",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
         aliases=("авокадо",),
     ),
 
@@ -392,7 +715,10 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.2,
         carbs_g=14.0,
         reference_confidence=0.95,
-        aliases=("яблоко", "яблоки", "зеленое яблоко", "красное яблоко", "свежее яблоко"),
+        source_id="SKURIKHIN-2008-0350",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("яблоко", "яблоки", "зеленое яблоко", "зелёное яблоко", "красное яблоко", "свежее яблоко"),
     ),
     FoodNutrientProfile(
         canonical_id="banana",
@@ -403,6 +729,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.3,
         carbs_g=21.8,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0355",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("банан", "бананы"),
     ),
     FoodNutrientProfile(
@@ -414,6 +743,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.4,
         carbs_g=9.5,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0360",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("ягоды", "клубника", "малина", "черника", "голубика"),
     ),
     FoodNutrientProfile(
@@ -425,24 +757,46 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.2,
         carbs_g=8.1,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0358",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("апельсин", "апельсины", "мандарин", "мандарины"),
     ),
 
     # Meat & poultry
     FoodNutrientProfile(
         canonical_id="chicken_breast",
-        display_name="Куриная грудка",
+        display_name="Куриное филе",
         category="meat_poultry",
-        calories_kcal=165.0,
-        protein_g=31.0,
-        fat_g=3.6,
+        calories_kcal=120.0,
+        protein_g=22.5,
+        fat_g=2.6,
         carbs_g=0.0,
         reference_confidence=0.95,
+        source_id="USDA-FDC-171077",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="raw",
+        aliases=("куриное филе", "филе куриное", "курица сырая"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="chicken_breast_cooked",
+        display_name="Куриная грудка отварная",
+        category="meat_poultry",
+        calories_kcal=165.0,
+        protein_g=29.8,
+        fat_g=3.5,
+        carbs_g=0.0,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0240",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         aliases=(
             "куриная грудка",
             "курица",
-            "куриное филе",
-            "филе куриное",
+            "вареная куриная грудка",
+            "варёная куриная грудка",
+            "куриная грудка отварная",
+            "отварная куриная грудка",
             "индейка",
             "филе индейки",
             "грудка индейки",
@@ -457,18 +811,38 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=8.4,
         carbs_g=0.0,
         reference_confidence=0.90,
-        aliases=("нарезка мяса", "мясо", "ломтики мяса", "слайсы мяса", "куриное мясо"),
+        source_id="SKURIKHIN-2008-0220",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
+        aliases=("нарезка мяса", "ломтики мяса", "слайсы мяса"),
     ),
     FoodNutrientProfile(
         canonical_id="beef",
         display_name="Говядина",
         category="meat_poultry",
-        calories_kcal=218.0,
-        protein_g=26.0,
-        fat_g=12.0,
+        calories_kcal=187.0,
+        protein_g=18.9,
+        fat_g=12.4,
         carbs_g=0.0,
         reference_confidence=0.95,
-        aliases=("говядина", "отварная говядина", "говядина отварная", "стейк"),
+        source_id="SKURIKHIN-2008-0201",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("говядина", "стейк", "филе говядины"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="beef_boiled",
+        display_name="Говядина отварная",
+        category="meat_poultry",
+        calories_kcal=254.0,
+        protein_g=25.8,
+        fat_g=16.8,
+        carbs_g=0.0,
+        reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0205",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
+        aliases=("отварная говядина", "говядина отварная", "вареная говядина", "варёная говядина"),
     ),
     FoodNutrientProfile(
         canonical_id="pork",
@@ -479,7 +853,10 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=20.0,
         carbs_g=0.0,
         reference_confidence=0.95,
-        aliases=("свинина", "запеченная свинина"),
+        source_id="SKURIKHIN-2008-0210",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
+        aliases=("свинина", "запеченная свинина", "запечённая свинина"),
     ),
     FoodNutrientProfile(
         canonical_id="cutlet",
@@ -490,30 +867,64 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=13.0,
         carbs_g=8.0,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0720",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
         variance_note="Калорийность мясной котлеты с добавлением лука и хлеба.",
         aliases=("котлета", "котлеты", "мясная котлета", "куриная котлета"),
     ),
 
     # Eggs
     FoodNutrientProfile(
-        canonical_id="egg",
-        display_name="Яйцо",
+        canonical_id="egg_boiled",
+        display_name="Яйцо варёное",
         category="eggs",
         calories_kcal=155.0,
         protein_g=12.6,
         fat_g=10.6,
         carbs_g=1.1,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0150",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         aliases=(
             "яйцо",
             "яйца",
             "вареное яйцо",
             "варёное яйцо",
             "вареные яйца",
-            "яичница",
-            "омлет",
-            "глазунья",
+            "варёные яйца",
+            "яйцо всмятку",
+            "яйцо вкрутую",
         ),
+    ),
+    FoodNutrientProfile(
+        canonical_id="fried_egg",
+        display_name="Яичница глазунья",
+        category="eggs",
+        calories_kcal=202.0,
+        protein_g=13.6,
+        fat_g=15.8,
+        carbs_g=0.8,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0152",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
+        aliases=("яичница", "глазунья", "яичница глазунья", "жареное яйцо", "жареные яйца"),
+    ),
+    FoodNutrientProfile(
+        canonical_id="omelet",
+        display_name="Омлет",
+        category="eggs",
+        calories_kcal=184.0,
+        protein_g=10.5,
+        fat_g=14.2,
+        carbs_g=2.8,
+        reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0153",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
+        aliases=("омлет", "омлет с молоком", "паровой омлет"),
     ),
 
     # Bakery, cereals & grains
@@ -526,6 +937,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=3.2,
         carbs_g=49.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0001",
+        dataset_version="Skurikhin-2008",
+        cooking_state="baked",
         aliases=("хлеб", "белый хлеб", "черный хлеб", "чёрный хлеб", "ржаной хлеб", "батон", "тост"),
     ),
     FoodNutrientProfile(
@@ -537,6 +951,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=12.1,
         carbs_g=45.6,
         reference_confidence=0.90,
+        source_id="SKURIKHIN-2008-0040",
+        dataset_version="Skurikhin-2008",
+        cooking_state="baked",
         aliases=("вафли", "вафля", "бельгийские вафли"),
     ),
     FoodNutrientProfile(
@@ -548,6 +965,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.1,
         carbs_g=21.3,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0050",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         variance_note="Отварная на воде гречневая крупа.",
         aliases=("гречка", "гречневая каша", "отварная гречка", "гречка отварная"),
     ),
@@ -560,8 +980,11 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.3,
         carbs_g=28.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0055",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         variance_note="Белый отварной рис на воде.",
-        aliases=("рис", "вареный рис", "рис отварной", "белый рис"),
+        aliases=("рис", "вареный рис", "варёный рис", "рис отварной", "белый рис"),
     ),
     FoodNutrientProfile(
         canonical_id="oatmeal",
@@ -572,6 +995,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.7,
         carbs_g=15.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0060",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         variance_note="Овсяная каша на воде.",
         aliases=("овсянка", "овсяная каша", "геркулес", "овсяные хлопья"),
     ),
@@ -584,6 +1010,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.1,
         carbs_g=25.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0070",
+        dataset_version="Skurikhin-2008",
+        cooking_state="boiled",
         aliases=("макароны", "паста", "спагетти", "отварные макароны"),
     ),
     FoodNutrientProfile(
@@ -595,6 +1024,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=8.0,
         carbs_g=19.8,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0730",
+        dataset_version="Skurikhin-2008",
+        cooking_state="fried",
         variance_note="Сырники творожные запечённые или жареные.",
         aliases=("сырники", "сырник", "творожники"),
     ),
@@ -609,8 +1041,11 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=2.8,
         carbs_g=4.7,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0701",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         variance_note="Борщ мясной с капустой и свеклой без сметаны.",
-        aliases=("борщ", "украинский борщ", "красный борщ", "борщ со сметаной"),
+        aliases=("борщ", "украинский борщ", "красный борщ"),
     ),
     FoodNutrientProfile(
         canonical_id="chicken_soup",
@@ -621,6 +1056,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=2.0,
         carbs_g=3.5,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0705",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         aliases=("куриный суп", "куриный бульон", "суп куриный", "суп с лапшой"),
     ),
     FoodNutrientProfile(
@@ -632,6 +1070,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=1.9,
         carbs_g=10.2,
         reference_confidence=0.90,
+        source_id="USDA-FDC-173804",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="prepared",
         aliases=("чечевичный суп с овощами", "чечевичный суп", "суп из чечевицы"),
     ),
     FoodNutrientProfile(
@@ -643,6 +1084,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=9.8,
         carbs_g=24.0,
         reference_confidence=0.85,
+        source_id="SKURIKHIN-2008-0710",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         variance_note="Плов традиционный с рисом, мясом и морковью.",
         aliases=("плов", "узбекский плов"),
     ),
@@ -657,6 +1101,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=75.0,
         carbs_g=1.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0401",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         aliases=("майонез", "провансаль"),
     ),
     FoodNutrientProfile(
@@ -668,6 +1115,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=4.0,
         carbs_g=5.8,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0405",
+        dataset_version="Skurikhin-2008",
+        cooking_state="prepared",
         aliases=("горчица", "жёлтый соус", "желтый соус", "горчичный соус"),
     ),
     FoodNutrientProfile(
@@ -679,6 +1129,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=100.0,
         carbs_g=0.0,
         reference_confidence=0.95,
+        source_id="SKURIKHIN-2008-0140",
+        dataset_version="Skurikhin-2008",
+        cooking_state="raw",
         aliases=("растительное масло", "оливковое масло", "подсолнечное масло", "масло"),
     ),
     FoodNutrientProfile(
@@ -690,6 +1143,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         fat_g=0.6,
         carbs_g=4.9,
         reference_confidence=0.95,
+        source_id="USDA-FDC-174530",
+        dataset_version="USDA-SRLegacy",
+        cooking_state="prepared",
         aliases=("соевый соус",),
     ),
 )
@@ -711,37 +1167,41 @@ def normalize_food_lookup_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(value).casefold())
     ascii_folded = "".join(char for char in normalized if not unicodedata.combining(char))
     ascii_folded = ascii_folded.replace("ё", "е")
-    cleaned = re.sub(r"[^\w\s-]+", " ", ascii_folded)
+    cleaned = re.sub(r"[^\w\s%.-]+", " ", ascii_folded)
     return " ".join(cleaned.split())
 
 
-_CULINARY_MODIFIER_PREFIXES = (
+# Harmless culinary descriptors that do NOT alter the product composition or cooking state
+_HARMLESS_CULINARY_MODIFIER_PREFIXES = (
     "свежий ", "свежая ", "свежее ", "свежие ",
-    "отварной ", "отварная ", "отварное ", "отварные ",
-    "вареный ", "вареная ", "вареное ", "вареные ",
-    "жареный ", "жареная ", "жареное ", "жареные ",
-    "запеченный ", "запеченная ", "запеченное ", "запеченные ",
-    "тушеный ", "тушеная ", "тушеное ", "тушеные ",
-    "приготовленный ", "приготовленная ",
     "домашний ", "домашняя ", "домашнее ", "домашние ",
-    "нарезанный ", "нарезанная ", "порезанный ",
+    "нарезанный ", "нарезанная ", "нарезанное ", "нарезанные ",
+    "порезанный ", "порезанная ", "порезанное ", "порезанные ",
 )
 
-_CULINARY_MODIFIER_SUFFIXES = (
-    " на пару", " по-домашнему", " соломкой", " кусочками", " ломтиками",
+_HARMLESS_CULINARY_MODIFIER_SUFFIXES = (
+    " по-домашнему", " соломкой", " кусочками", " ломтиками",
     " свежий", " свежая", " свежее", " свежие",
-    " вареный", " вареная", " вареное", " отварной", " отварная",
-    " жареный", " жареная", " запеченный", " запеченная",
 )
 
+# Whitelisted harmless tokens that may be dropped in prefix matching (shapes/portions)
+# Any other modifier (percentages, cheese types, unknown cooking styles) strictly fails closed!
+_HARMLESS_DROPPED_TOKENS = {
+    "кусочками", "соломкой", "ломтиками", "кубиками", "кружочками", "половинками",
+    "порция", "порции", "порций",
+    "грамм", "грамма", "граммов", "г", "гр",
+    "штука", "штуки", "штук", "шт",
+    "по-домашнему",
+}
 
-def _strip_culinary_modifiers(text: str) -> str:
+
+def _strip_harmless_culinary_modifiers(text: str) -> str:
     cleaned = text
-    for prefix in _CULINARY_MODIFIER_PREFIXES:
+    for prefix in _HARMLESS_CULINARY_MODIFIER_PREFIXES:
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix):].strip()
             break
-    for suffix in _CULINARY_MODIFIER_SUFFIXES:
+    for suffix in _HARMLESS_CULINARY_MODIFIER_SUFFIXES:
         if cleaned.endswith(suffix):
             cleaned = cleaned[:-len(suffix)].strip()
             break
@@ -766,7 +1226,7 @@ _ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index()
 def resolve_food_composition(query: str) -> FoodLookupResult:
     """
     Extensible, deterministic food composition lookup layer.
-    Separates visual recognition from nutritional reference confidence.
+    Enforces fail-closed matching without silent product or percentage substitution.
     """
     raw_normalized = normalize_food_lookup_key(query)
     if not raw_normalized:
@@ -780,10 +1240,14 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             profile=profile,
             confidence=profile.reference_confidence,
             match_type="exact_alias",
+            source_id=profile.source_id,
+            dataset_version=profile.dataset_version,
+            cooking_state=profile.cooking_state,
         )
 
-    # 2. Match after stripping cooking modifiers (e.g. "свежая руккола" -> "руккола")
-    stripped = _strip_culinary_modifiers(raw_normalized)
+    # 2. Match after stripping harmless modifiers (e.g. "свежая руккола" -> "руккола", "яблоки кусочками" -> "яблоки")
+    # Does NOT strip cooking states or percentages.
+    stripped = _strip_harmless_culinary_modifiers(raw_normalized)
     if stripped != raw_normalized and stripped in _ALIAS_INDEX:
         profile = _ALIAS_INDEX[stripped]
         return FoodLookupResult(
@@ -791,6 +1255,9 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             profile=profile,
             confidence=profile.reference_confidence * 0.98,
             match_type="modifier_stripped",
+            source_id=profile.source_id,
+            dataset_version=profile.dataset_version,
+            cooking_state=profile.cooking_state,
         )
 
     # 3. Lemmatization / simple inflection fallback (Russian plurals -> singular)
@@ -805,20 +1272,28 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     elif singular_cand.endswith("ты"):
         singular_cand = singular_cand[:-2] + "т"
 
-    if singular_cand in _ALIAS_INDEX:
+    if singular_cand != raw_normalized and singular_cand in _ALIAS_INDEX:
         profile = _ALIAS_INDEX[singular_cand]
         return FoodLookupResult(
             matched=True,
             profile=profile,
             confidence=profile.reference_confidence * 0.95,
             match_type="inflection",
+            source_id=profile.source_id,
+            dataset_version=profile.dataset_version,
+            cooking_state=profile.cooking_state,
         )
 
-    # 4. Token subset matching (e.g. "куриное филе на пару" -> "куриное филе")
+    # 4. Token prefix matching (e.g. "куриное филе кусочками" -> "куриное филе")
+    # Strictly fails closed: ONLY allows dropping whitelisted harmless shape/portion tokens.
     tokens = raw_normalized.split()
     if len(tokens) > 1:
         for length in range(len(tokens) - 1, 0, -1):
             sub_phrase = " ".join(tokens[:length])
+            remaining_tokens = tokens[length:]
+            if not all(tok in _HARMLESS_DROPPED_TOKENS for tok in remaining_tokens):
+                continue
+
             if sub_phrase in _ALIAS_INDEX:
                 profile = _ALIAS_INDEX[sub_phrase]
                 return FoodLookupResult(
@@ -826,6 +1301,9 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
                     profile=profile,
                     confidence=profile.reference_confidence * 0.90,
                     match_type="token_prefix",
+                    source_id=profile.source_id,
+                    dataset_version=profile.dataset_version,
+                    cooking_state=profile.cooking_state,
                 )
 
     # 5. Fuzzy suggestions (without fabricating nutrient values)

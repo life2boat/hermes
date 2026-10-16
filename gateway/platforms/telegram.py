@@ -116,9 +116,12 @@ from gateway.memory.analytics import compute_memory_analytics_summary, format_me
 from gateway.healbite_nutrition_diary import (
     compute_nutrition_diary_summary,
     format_nutrition_diary_report,
+    format_pending_inventory_cancelled_reply,
     format_undo_meal_report,
     get_default_nutrition_diary,
 )
+
+FOOD_INVENTORY_CALLBACK_ROOT = "food_inv:"
 from gateway.healbite_user_profile import (
     _format_target,
     format_healbite_profile_report,
@@ -2679,6 +2682,30 @@ class TelegramAdapter(BasePlatformAdapter):
                 effective_thread_id = thread_kwargs.get("message_thread_id")
 
                 msg = None
+                reply_markup_to_send = None
+                if metadata and "reply_markup" in metadata and i == len(chunks) - 1:
+                    raw_markup = metadata["reply_markup"]
+                    if isinstance(raw_markup, (list, tuple)):
+                        try:
+                            reply_markup_to_send = InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton(
+                                        text=btn["text"] if isinstance(btn, dict) else btn[0],
+                                        callback_data=btn.get("callback_data") if isinstance(btn, dict) else btn[1],
+                                    ) if isinstance(btn, (dict, list, tuple)) else btn
+                                    for btn in row
+                                ]
+                                for row in raw_markup
+                            ])
+                        except Exception:
+                            reply_markup_to_send = raw_markup
+                    else:
+                        reply_markup_to_send = raw_markup
+
+                send_extra = {}
+                if reply_markup_to_send is not None:
+                    send_extra["reply_markup"] = reply_markup_to_send
+
                 for _send_attempt in range(3):
                     try:
                         # Try formatted first, fall back to plain text if it fails
@@ -2689,6 +2716,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=effective_parse_mode,
                                 reply_to_message_id=reply_to_id,
                                 **thread_kwargs,
+                                **send_extra,
                                 **self._link_preview_kwargs(),
                                 **self._notification_kwargs(metadata),
                             )
@@ -2703,6 +2731,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     **thread_kwargs,
+                                    **send_extra,
                                     **self._link_preview_kwargs(),
                                     **self._notification_kwargs(metadata),
                                 )
@@ -4177,6 +4206,7 @@ class TelegramAdapter(BasePlatformAdapter):
             HEALBITE_PROFILE_CALLBACK_ROOT,
             "weight:",
             "water:",
+            FOOD_INVENTORY_CALLBACK_ROOT,
         )
         if not query_is_authorized and not self._healbite_public_onboarding_enabled():
             if data.startswith(HEALBITE_LOCAL_CALLBACK_ROOTS):
@@ -4237,6 +4267,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite profile callbacks ---
         if data.startswith(HEALBITE_PROFILE_CALLBACK_ROOT):
             await self._handle_healbite_profile_callback(query, data)
+            return
+
+        # --- HealBite food vision inventory callbacks ---
+        if data.startswith(FOOD_INVENTORY_CALLBACK_ROOT):
+            await self._handle_healbite_food_inventory_callback(query, data)
             return
 
         # --- Model picker callbacks ---
@@ -9052,6 +9087,212 @@ class TelegramAdapter(BasePlatformAdapter):
         if getattr(message, "message_id", None) is None:
             return None
         return message
+
+    async def _send_food_inventory_callback_reply(self, query: Any, text: str) -> None:
+        message = getattr(query, "message", None)
+        chat_id = str(getattr(message, "chat_id", None) or getattr(getattr(query, "from_user", None), "id", ""))
+        thread_id = getattr(message, "message_thread_id", None)
+        if hasattr(self, "_send_message_with_thread_fallback") and getattr(self, "_bot", None):
+            try:
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="HTML",
+                    message_thread_id=thread_id,
+                )
+                return
+            except Exception:
+                pass
+        if message is not None and hasattr(message, "reply_text"):
+            try:
+                await message.reply_text(text, parse_mode="HTML")
+                return
+            except Exception:
+                pass
+        await self.send(
+            chat_id=chat_id,
+            content=text,
+            metadata={"parse_mode": "HTML", "message_thread_id": thread_id},
+        )
+
+    async def _handle_healbite_food_inventory_callback(
+        self,
+        query: Any,
+        data: str,
+    ) -> None:
+        parts = data.split(":")
+        if len(parts) != 4:
+            try:
+                await query.answer(text="Некорректная команда.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        action = parts[1]
+        try:
+            target_user_id = int(parts[2])
+        except (ValueError, TypeError):
+            try:
+                await query.answer(text="Некорректный идентификатор пользователя.", show_alert=True)
+            except Exception:
+                pass
+            return
+        inventory_id = parts[3]
+
+        actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if actor_user_id != target_user_id:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result="cross_user_denied",
+            )
+            try:
+                await query.answer(text="Это действие доступно только автору фото.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        diary = get_default_nutrition_diary()
+
+        if action in {"save", "save_no_kbzhu"}:
+            if action == "save":
+                result = diary.save_pending_inventory_directly(
+                    user_id=target_user_id,
+                    expected_inventory_id=inventory_id,
+                )
+            else:
+                result = diary.save_pending_inventory_without_kbzhu(
+                    user_id=target_user_id,
+                    expected_inventory_id=inventory_id,
+                )
+
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result=result.status,
+            )
+
+            if result.status in {"saved", "saved_without_kbzhu"}:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                try:
+                    await query.answer(text="Сохранено в дневник!")
+                except Exception:
+                    pass
+                await self._send_food_inventory_callback_reply(query, result.reply_text)
+                return
+
+            if result.status in {"stale", "expired", "missing"}:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                if result.status == "stale":
+                    msg_text = "Это подтверждение уже заменено новым фото."
+                elif result.status == "expired":
+                    msg_text = "Время действия подтверждения истекло. Отправьте фото заново."
+                else:
+                    msg_text = "Запись уже сохранена или отменена."
+                try:
+                    await query.answer(text=msg_text, show_alert=True)
+                except Exception:
+                    pass
+                return
+
+            if result.status == "unknown_component":
+                try:
+                    await query.answer(
+                        text="В блюде есть неизвестные продукты. Нажмите «Сохранить без КБЖУ» или исправьте их.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+            if result.status == "needs_weight_confirmation":
+                try:
+                    await query.answer(
+                        text="Укажите вес для всех компонентов.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+            try:
+                await query.answer(text=result.reply_text or "Не удалось сохранить.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if action == "cancel":
+            pending = diary.get_pending_inventory(target_user_id, include_expired=True)
+            if pending is None or (inventory_id and pending.inventory_id != inventory_id):
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                try:
+                    await query.answer(text="Это подтверждение уже неактивно.", show_alert=True)
+                except Exception:
+                    pass
+                return
+
+            diary.clear_pending_state(target_user_id)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            try:
+                await query.answer(text="Отменено.")
+            except Exception:
+                pass
+            await self._send_food_inventory_callback_reply(query, format_pending_inventory_cancelled_reply())
+            return
+
+        if action == "edit":
+            pending = diary.get_pending_inventory(target_user_id, include_expired=True)
+            if pending is None or (inventory_id and pending.inventory_id != inventory_id):
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                try:
+                    await query.answer(text="Это подтверждение уже неактивно.", show_alert=True)
+                except Exception:
+                    pass
+                return
+
+            if diary.is_pending_meal_expired(pending):
+                diary.clear_pending_state(target_user_id)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                try:
+                    await query.answer(text="Время действия подтверждения истекло. Отправьте фото заново.", show_alert=True)
+                except Exception:
+                    pass
+                return
+
+            instructions = (
+                "Отправьте исправление сообщением:\n"
+                "• Исправить 1: название, вес г\n"
+                "• Вес 1: 150 г\n"
+                "• Добавить: продукт, 50 г\n"
+                "• Удалить 2"
+            )
+            try:
+                await query.answer(text=instructions, show_alert=True)
+            except Exception:
+                pass
+            return
 
     async def _handle_healbite_shopping_callback(self, query: Any, data: str) -> None:
         if await self._maybe_block_public_feature_callback(query, feature_name="HEALBITE_SHOPPING_LIST"):

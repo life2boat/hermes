@@ -242,6 +242,7 @@ class NutritionDiaryOutcome:
     raw_analysis: str = ""
     clarification_text: str = ""
     validation_status: str = ""
+    pending_inventory: PendingFoodVisionInventory | None = None
 
 
 @dataclass(slots=True)
@@ -1343,7 +1344,10 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         if item.uncertainty:
             extras.append(html.escape(item.uncertainty))
         if item.selected_grams is not None:
-            extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
+            if item.user_modified:
+                extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
+            else:
+                extras.append(f"расчётный вес: ~{_format_grams(item.selected_grams)}")
         else:
             extras.append("вес не подтверждён")
             all_weights_present = False
@@ -1394,23 +1398,46 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
 
     lines.extend([
         "",
-        "Можно подтвердить или исправить, если что-то распознано неточно.",
-        "",
-        "Команды:",
-    ])
-    if has_unmapped_component:
-        lines.append("• ✅ Сохранить без КБЖУ")
-    else:
-        lines.append("• ✅ Сохранить")
-    lines.extend([
-        "• Да / Нет",
+        "Можно сохранить кнопкой ниже или отправить исправление:",
         "• Исправить 2: куриная грудка, 120 г",
         "• Добавить: сыр, 30 г",
         "• Удалить 5",
         "• Вес 3: 80 г",
-        "• ❌ Отмена",
     ])
     return "\n".join(lines)
+
+
+def build_food_vision_inventory_keyboard(
+    inventory: PendingFoodVisionInventory,
+) -> list[list[dict[str, str]]]:
+    user_id = int(inventory.user_id or 0)
+    inv_id = str(inventory.inventory_id or "")
+    has_unmapped = any(
+        (comp := _estimate_component_nutrition(item)) is not None and not comp.nutrition_available
+        for item in inventory.items
+    )
+    if has_unmapped:
+        save_button = {
+            "text": "✅ Сохранить без КБЖУ",
+            "callback_data": f"food_inv:save_no_kbzhu:{user_id}:{inv_id}",
+        }
+    else:
+        save_button = {
+            "text": "✅ Сохранить",
+            "callback_data": f"food_inv:save:{user_id}:{inv_id}",
+        }
+    edit_button = {
+        "text": "✏️ Исправить",
+        "callback_data": f"food_inv:edit:{user_id}:{inv_id}",
+    }
+    cancel_button = {
+        "text": "❌ Отмена",
+        "callback_data": f"food_inv:cancel:{user_id}:{inv_id}",
+    }
+    return [
+        [save_button],
+        [edit_button, cancel_button],
+    ]
 
 
 def format_pending_inventory_cancelled_reply() -> str:
@@ -2168,6 +2195,7 @@ class HealBiteNutritionDiary:
             raw_analysis=raw_analysis,
             clarification_text=format_food_vision_inventory_reply(pending_inventory),
             validation_status=validation.status,
+            pending_inventory=pending_inventory,
         )
 
     def _should_stage_pending(self, record: NutritionRecord) -> bool:

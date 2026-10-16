@@ -8701,6 +8701,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                             metadata = dict(metadata) if metadata else {}
                             metadata["parse_mode"] = "HTML"
+                            pending_inv = getattr(outcome, "pending_inventory", None)
+                            if pending_inv is None and getattr(source, "user_id", None) is not None:
+                                try:
+                                    diary = self._get_healbite_nutrition_diary()
+                                    pending_inv = diary.get_pending_inventory(int(source.user_id))
+                                except Exception:
+                                    pending_inv = None
+                            if pending_inv is not None:
+                                from gateway.healbite_nutrition_diary import build_food_vision_inventory_keyboard
+                                metadata["reply_markup"] = build_food_vision_inventory_keyboard(pending_inv)
                             if adapter and source.chat_id:
                                 await adapter.send(
                                     source.chat_id,

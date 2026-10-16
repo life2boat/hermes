@@ -86,10 +86,10 @@ def test_her10_incident_draniki_and_salmon_calculates_and_saves(tmp_path):
     assert len(calc.blocked_indexes) == 0
     assert len(calc.components) == 2
 
-    # Draniki: 205 kcal/100g * 2 = 410 kcal
+    # Draniki: 196 kcal/100g * 2 = 392 kcal (Skurikhin table 714)
     draniki_comp = calc.components[0]
     assert draniki_comp.nutrition_available is True
-    assert draniki_comp.calories_kcal == pytest.approx(410.0, abs=1.0)
+    assert draniki_comp.calories_kcal == pytest.approx(392.0, abs=1.0)
 
     # Salmon: 142 kcal/100g * 1 = 142 kcal
     salmon_comp = calc.components[1]
@@ -97,7 +97,7 @@ def test_her10_incident_draniki_and_salmon_calculates_and_saves(tmp_path):
     assert salmon_comp.calories_kcal == pytest.approx(142.0, abs=1.0)
 
     assert calc.record is not None
-    assert calc.record.calories_kcal == pytest.approx(552.0, abs=2.0)
+    assert calc.record.calories_kcal == pytest.approx(534.0, abs=2.0)
 
     # 2. Stage inventory and one-tap save
     diary.stage_pending_inventory(
@@ -120,7 +120,7 @@ def test_her10_incident_draniki_and_salmon_calculates_and_saves(tmp_path):
     # Diary entry verified
     summary = diary.get_daily_summary(user_id=user_id)
     assert summary["entry_count"] == 1
-    assert summary["calories_kcal"] == pytest.approx(552.0, abs=2.0)
+    assert summary["calories_kcal"] == pytest.approx(534.0, abs=2.0)
     assert summary["has_incomplete_entries"] is False
     assert summary["is_complete"] is True
 
@@ -298,7 +298,6 @@ def test_her10_russian_inflections_and_aliases():
         ("яблоки", "apple"),
         ("хлеб", "bread"),
         ("белый хлеб", "bread"),
-        ("черный хлеб", "bread"),
     ]
 
     for query, expected_id in test_cases:

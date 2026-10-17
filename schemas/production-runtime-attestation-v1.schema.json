@@ -3,30 +3,149 @@
   "$id": "https://github.com/life2boat/hermes/schemas/production-runtime-attestation-v1.schema.json",
   "title": "ProductionRuntimeAttestation v1",
   "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "attestation_id",
-    "target",
-    "collected_at_utc",
-    "collectors"
-  ],
-  "properties": {
-    "schema_version": {"const": 1},
-    "attestation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "target": {
-      "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+  "oneOf": [
+    {
+      "title": "ProductionRuntimeAttestation v1 (Canonical Full)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "attestation_id",
+        "canonical_repository",
+        "canonical_main_sha",
+        "environment_id",
+        "collection_context_id",
+        "observed_at",
+        "collector_id",
+        "collector_version",
+        "evidence_provenance",
+        "observed_runtime_state",
+        "verification_metadata"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "attestation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "canonical_repository": {"type": "string", "minLength": 1, "maxLength": 512},
+        "canonical_main_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "collection_context_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "observed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "collector_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "collector_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "evidence_provenance": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "signer_identity",
+            "signature_algorithm",
+            "signature",
+            "signed_at_utc",
+            "valid_until_utc"
+          ],
+          "properties": {
+            "signer_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "signature_algorithm": {"type": "string", "enum": ["ed25519"]},
+            "signature": {"type": "string", "pattern": "^[0-9a-f]{128}$"},
+            "signed_at_utc": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            },
+            "valid_until_utc": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            }
+          }
+        },
+        "observed_runtime_state": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "image_digest",
+            "oci_revision",
+            "release_sha",
+            "runtime_contract",
+            "schema_version",
+            "active_services",
+            "configuration_contract_version"
+          ],
+          "properties": {
+            "image_digest": {"type": "string"},
+            "oci_revision": {"type": "string"},
+            "release_sha": {"type": "string"},
+            "runtime_contract": {"type": "string"},
+            "schema_version": {"type": "integer"},
+            "active_services": {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "configuration_contract_version": {"type": "string"},
+            "raw_observations": {"type": "object"}
+          }
+        },
+        "verification_metadata": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": [
+            "verified",
+            "verified_at_utc",
+            "integrity_status",
+            "authenticity_status",
+            "reason"
+          ],
+          "properties": {
+            "verified": {"type": "boolean"},
+            "verified_at_utc": {
+              "type": ["string", "null"],
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            },
+            "integrity_status": {"type": "string"},
+            "authenticity_status": {"type": "string"},
+            "reason": {"type": ["string", "null"]}
+          }
+        }
+      }
     },
-    "collected_at_utc": {
-      "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
-    },
-    "collectors": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/collector"}
+    {
+      "title": "ProductionRuntimeAttestation v1 (Compact / Legacy)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "attestation_id",
+        "target",
+        "collected_at_utc",
+        "collectors"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "attestation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "target": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "collected_at_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "collectors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/collector"}
+        }
+      }
     }
-  },
+  ],
   "$defs": {
     "collector": {
       "type": "object",

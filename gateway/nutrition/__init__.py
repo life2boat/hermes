@@ -23,6 +23,20 @@ from gateway.nutrition.diary_schema_v2 import (
     ensure_nutrition_diary_v2_schema,
     extract_macronutrient_intervals_from_row,
 )
+from gateway.nutrition.etl import (
+    ETLFoodItem,
+    build_nutrition_catalog,
+    extract_fineli_items,
+    extract_skurikhin_items,
+    extract_usda_items,
+)
+from gateway.nutrition.hfkb import (
+    HFKBCatalog,
+    HFKBFoodItem,
+    get_default_hfkb,
+    hfkb_item_to_nutrient_profile,
+    set_default_hfkb,
+)
 from gateway.nutrition.manifest import (
     CatalogManifest,
     RuntimeCatalogBinding,
@@ -32,11 +46,20 @@ from gateway.nutrition.manifest import (
     verify_catalog_artifact,
     verify_catalog_database_schema,
 )
+from gateway.nutrition.search import (
+    extract_stemmed_tokens,
+    match_query_against_aliases,
+    normalize_russian_food_text,
+    reduce_russian_stem,
+)
 
 __all__ = [
     "CalibratedQuantileSpec",
     "CatalogManifest",
     "ComponentNutritionEstimate",
+    "ETLFoodItem",
+    "HFKBCatalog",
+    "HFKBFoodItem",
     "MacronutrientIntervals",
     "MassBounds",
     "MealNutritionEstimate",
@@ -47,12 +70,23 @@ __all__ = [
     "UncertaintyModelType",
     "V2_NUTRITION_DIARY_COLUMNS",
     "aggregate_conservative_intervals",
+    "build_nutrition_catalog",
     "calculate_component_macronutrient_intervals",
     "calculate_conservative_nutrient_interval",
     "compute_file_sha256",
     "ensure_nutrition_diary_v2_schema",
+    "extract_fineli_items",
     "extract_macronutrient_intervals_from_row",
+    "extract_skurikhin_items",
+    "extract_stemmed_tokens",
+    "extract_usda_items",
+    "get_default_hfkb",
+    "hfkb_item_to_nutrient_profile",
     "load_and_verify_catalog_binding",
+    "match_query_against_aliases",
+    "normalize_russian_food_text",
+    "reduce_russian_stem",
+    "set_default_hfkb",
     "validate_catalog_manifest",
     "verify_catalog_artifact",
     "verify_catalog_database_schema",

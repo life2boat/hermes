@@ -92,8 +92,13 @@
               "items": {"type": "string"}
             },
             "configuration_contract_version": {"type": "string"},
+            "release_identity": {"type": "string"},
             "raw_observations": {"type": "object"}
           }
+        },
+        "collectors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/collector"}
         },
         "verification_metadata": {
           "type": ["object", "null"],

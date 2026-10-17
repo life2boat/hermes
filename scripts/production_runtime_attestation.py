@@ -80,6 +80,7 @@ def _create(
             schema_version=int(obs_dict.get("schema_version", 1)),
             active_services=tuple(sorted(list(obs_dict.get("active_services", ["gateway"])))),
             configuration_contract_version=str(obs_dict.get("configuration_contract_version", "v1")),
+            release_identity=str(obs_dict.get("release_identity", "")),
             raw_observations=obs_dict.get("raw_observations", {}),
         )
         attestation = create_attestation(
@@ -190,7 +191,9 @@ def _compare(
         intended, attestation, trusted_public_keys=keys, **kwargs
     )
     _write_new(output_path, serialize_comparison(comparison))
-    return 0 if comparison.status == ComparisonStatus.MATCH else 2
+    if comparison.status == ComparisonStatus.MATCH:
+        return 0 if comparison.authoritative_for_production else 3
+    return 2
 
 
 def _inspect(input_path: Path, output_path: Path | None = None, as_json: bool = False) -> int:
@@ -232,6 +235,7 @@ def _inspect(input_path: Path, output_path: Path | None = None, as_json: bool = 
             f"  - Image Digest:      {obs.image_digest}",
             f"  - OCI Revision:      {obs.oci_revision}",
             f"  - Release SHA:       {obs.release_sha}",
+            f"  - Release Identity:  {obs.release_identity}",
             f"  - Runtime Contract:  {obs.runtime_contract}",
             f"  - Active Services:   {', '.join(obs.active_services)}",
         ])

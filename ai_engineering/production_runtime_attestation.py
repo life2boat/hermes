@@ -28,7 +28,9 @@ DOMAIN_SEPARATOR_SIGNATURE_V1 = b"hermes-production-runtime-signature-v1\n"
 DOMAIN_SEPARATOR_SIGNATURE_V2 = b"hermes-production-runtime-signature-v2\n"
 DOMAIN_SEPARATOR_SIGNATURE = DOMAIN_SEPARATOR_SIGNATURE_V2
 DOMAIN_SEPARATOR_INTENDED = b"hermes-production-runtime-intended-v1\n"
-DOMAIN_SEPARATOR_COMPARISON = b"hermes-production-runtime-comparison-v1\n"
+DOMAIN_SEPARATOR_COMPARISON_V1 = b"hermes-production-runtime-comparison-v1\n"
+DOMAIN_SEPARATOR_COMPARISON_V2 = b"hermes-production-runtime-comparison-v2\n"
+DOMAIN_SEPARATOR_COMPARISON = DOMAIN_SEPARATOR_COMPARISON_V2
 
 SIGNATURE_CONTRACT_VERSION = 2
 SIGNATURE_ALGORITHM_V2 = "ed25519-v2"
@@ -112,6 +114,7 @@ class ObservedRuntimeState:
     schema_version: int
     active_services: tuple[str, ...]
     configuration_contract_version: str
+    release_identity: str = ""
     raw_observations: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -248,20 +251,32 @@ class CollectorExpectation:
     observations: Mapping[str, Any]
 
 
+_DEFAULT_CANONICAL_REPO = "https://github.com/life2boat/hermes.git"
+_DEFAULT_INTENDED_MAIN_SHA = "0" * 40
+_DEFAULT_INTENDED_IMAGE_DIGEST = "sha256:" + "0" * 64
+_DEFAULT_INTENDED_OCI_REVISION = "0" * 40
+_DEFAULT_EXPECTED_SERVICE_SET = ("gateway",)
+_DEFAULT_EXPECTED_RUNTIME_CONTRACT = "hermes-runtime-v1"
+_DEFAULT_EXPECTED_SCHEMA_VERSION = 1
+_DEFAULT_EXPECTED_CONFIG_CONTRACT_VERSION = "v1"
+_DEFAULT_EXPECTED_RELEASE_IDENTITY = "hermes-release-1"
+
+
 @dataclass(frozen=True, slots=True)
 class IntendedProductionState:
     schema_version: int
     target: str
     expected_collectors: tuple[CollectorExpectation, ...]
     canonical_repository: str = ""
-    intended_main_sha: str = "0" * 40
-    intended_image_digest: str = "sha256:" + "0" * 64
-    intended_oci_revision: str = "0" * 40
-    expected_service_set: tuple[str, ...] = ("gateway",)
-    expected_runtime_contract: str = "hermes-runtime-v1"
-    expected_schema_version: int = 1
-    expected_configuration_contract_version: str = "v1"
-    expected_release_identity: str = "hermes-release-1"
+    intended_main_sha: str = _DEFAULT_INTENDED_MAIN_SHA
+    intended_image_digest: str = _DEFAULT_INTENDED_IMAGE_DIGEST
+    intended_oci_revision: str = _DEFAULT_INTENDED_OCI_REVISION
+    expected_service_set: tuple[str, ...] = _DEFAULT_EXPECTED_SERVICE_SET
+    expected_runtime_contract: str = _DEFAULT_EXPECTED_RUNTIME_CONTRACT
+    expected_schema_version: int = _DEFAULT_EXPECTED_SCHEMA_VERSION
+    expected_configuration_contract_version: str = _DEFAULT_EXPECTED_CONFIG_CONTRACT_VERSION
+    expected_release_identity: str = _DEFAULT_EXPECTED_RELEASE_IDENTITY
+    has_structured_invariants: bool = True
 
     def __post_init__(self) -> None:
         if not self.canonical_repository:
@@ -280,6 +295,8 @@ class ProductionRuntimeComparison:
     missing_observations: tuple[str, ...]
     reason_codes: tuple[str, ...] = ()
     evaluated_at_utc: str = ""
+    evaluation_mode: str = "AUTHORITATIVE_PRODUCTION"
+    authoritative_for_production: bool = False
 
 
 _COLLECTOR_FIELDS = frozenset({"collector_id", "status", "observations"})
@@ -318,6 +335,18 @@ _V1_INTENDED_FIELDS = frozenset(
         "expected_release_identity",
     }
 )
+_LEGACY_COMPARISON_FIELDS = frozenset(
+    {
+        "schema_version",
+        "comparison_id",
+        "target",
+        "attestation_id",
+        "intended_digest",
+        "status",
+        "drifted_observations",
+        "missing_observations",
+    }
+)
 _COMPARISON_FIELDS = frozenset(
     {
         "schema_version",
@@ -328,6 +357,10 @@ _COMPARISON_FIELDS = frozenset(
         "status",
         "drifted_observations",
         "missing_observations",
+        "reason_codes",
+        "evaluated_at_utc",
+        "evaluation_mode",
+        "authoritative_for_production",
     }
 )
 
@@ -715,6 +748,10 @@ def verify_attestation_signature(
     max_clock_skew_seconds: int = MAX_CLOCK_SKEW_SECONDS,
     max_evidence_age_seconds: int = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
 ) -> tuple[bool, str]:
+    # Enforce trusted freshness policy bounds
+    if not (0 < max_evidence_age_seconds <= 86400) or not (0 <= max_clock_skew_seconds <= 300):
+        return False, "UNTRUSTED_FRESHNESS_POLICY"
+
     if attestation.evidence_provenance is None:
         return False, "MISSING_EVIDENCE_PROVENANCE"
 
@@ -826,6 +863,7 @@ def normalize_observed_state(state: ObservedRuntimeState) -> dict[str, object]:
         "configuration_contract_version": state.configuration_contract_version,
         "image_digest": state.image_digest,
         "oci_revision": state.oci_revision,
+        "release_identity": state.release_identity,
         "release_sha": state.release_sha,
         "runtime_contract": state.runtime_contract,
         "schema_version": state.schema_version,
@@ -903,8 +941,11 @@ def create_attestation(
 
     # If observed_runtime_state is supplied or no collectors, use v1 shape
     if observed_runtime_state is not None:
+        actual_main_sha = canonical_main_sha
+        if actual_main_sha == "0" * 40 and observed_runtime_state.release_sha != "0" * 40:
+            actual_main_sha = observed_runtime_state.release_sha
         v1_payload = {
-            "canonical_main_sha": canonical_main_sha,
+            "canonical_main_sha": actual_main_sha,
             "canonical_repository": canonical_repository,
             "collection_context_id": collection_context_id,
             "collector_id": collector_id,
@@ -924,7 +965,7 @@ def create_attestation(
             collected_at_utc=timestamp,
             collectors=ordered,
             canonical_repository=canonical_repository,
-            canonical_main_sha=canonical_main_sha,
+            canonical_main_sha=actual_main_sha,
             environment_id=normalized_target,
             collection_context_id=collection_context_id,
             observed_at=timestamp,
@@ -1082,8 +1123,20 @@ def validate_attestation(
             configuration_contract_version=str(
                 obs_dict["configuration_contract_version"]
             ),
+            release_identity=str(obs_dict.get("release_identity", "")),
             raw_observations=_mapping(obs_dict.get("raw_observations", {})),
         )
+
+        collectors_raw = payload.get("collectors", [])
+        collectors_list: list[CollectorResult] = []
+        if isinstance(collectors_raw, (list, tuple)):
+            for c_item in collectors_raw:
+                if isinstance(c_item, Mapping):
+                    cid = _identifier(c_item.get("collector_id", ""))
+                    status = str(c_item.get("status", "AVAILABLE"))
+                    obs = _mapping(c_item.get("observations", {}))
+                    collectors_list.append(create_collector_result(cid, status, obs))
+        collectors_tuple = tuple(sorted(collectors_list, key=lambda c: c.collector_id))
 
         env_id = _identifier(payload.get("environment_id", payload.get("target", "synthetic-prod")))
         obs_at = _canonical_timestamp(payload.get("observed_at", payload.get("collected_at_utc")))
@@ -1092,7 +1145,7 @@ def validate_attestation(
             attestation_id=expected_id,
             target=env_id,
             collected_at_utc=obs_at,
-            collectors=(),
+            collectors=collectors_tuple,
             canonical_repository=_identifier(payload.get("canonical_repository", "https://github.com/life2boat/hermes.git")),
             canonical_main_sha=str(payload.get("canonical_main_sha", "0" * 40)),
             environment_id=env_id,
@@ -1179,15 +1232,16 @@ def create_intended_state(
     *,
     target: str | None = None,
     expected_observations: Mapping[str, Mapping[str, object]] | None = None,
-    canonical_repository: str = "https://github.com/life2boat/hermes.git",
-    intended_main_sha: str = "0" * 40,
-    intended_image_digest: str = "sha256:" + "0" * 64,
-    intended_oci_revision: str = "0" * 40,
-    expected_service_set: Sequence[str] = ("gateway",),
-    expected_runtime_contract: str = "hermes-runtime-v1",
-    expected_schema_version: int = 1,
-    expected_configuration_contract_version: str = "v1",
-    expected_release_identity: str = "hermes-release-1",
+    canonical_repository: str = _DEFAULT_CANONICAL_REPO,
+    intended_main_sha: str = _DEFAULT_INTENDED_MAIN_SHA,
+    intended_image_digest: str = _DEFAULT_INTENDED_IMAGE_DIGEST,
+    intended_oci_revision: str = _DEFAULT_INTENDED_OCI_REVISION,
+    expected_service_set: Sequence[str] = _DEFAULT_EXPECTED_SERVICE_SET,
+    expected_runtime_contract: str = _DEFAULT_EXPECTED_RUNTIME_CONTRACT,
+    expected_schema_version: int = _DEFAULT_EXPECTED_SCHEMA_VERSION,
+    expected_configuration_contract_version: str = _DEFAULT_EXPECTED_CONFIG_CONTRACT_VERSION,
+    expected_release_identity: str = _DEFAULT_EXPECTED_RELEASE_IDENTITY,
+    has_structured_invariants: bool | None = None,
 ) -> IntendedProductionState:
     tgt = target or canonical_repository
     normalized_target = _identifier(tgt)
@@ -1206,6 +1260,24 @@ def create_intended_state(
             _fail("EXPECTED_COLLECTORS_EMPTY")
         expectations.sort(key=lambda item: item.collector_id)
 
+    if has_structured_invariants is not None:
+        structured = has_structured_invariants
+    elif expected_observations is not None:
+        is_default_structured = (
+            intended_main_sha == _DEFAULT_INTENDED_MAIN_SHA
+            and intended_image_digest == _DEFAULT_INTENDED_IMAGE_DIGEST
+            and intended_oci_revision == _DEFAULT_INTENDED_OCI_REVISION
+            and tuple(sorted(list(expected_service_set))) == _DEFAULT_EXPECTED_SERVICE_SET
+            and expected_runtime_contract == _DEFAULT_EXPECTED_RUNTIME_CONTRACT
+            and expected_schema_version == _DEFAULT_EXPECTED_SCHEMA_VERSION
+            and expected_configuration_contract_version == _DEFAULT_EXPECTED_CONFIG_CONTRACT_VERSION
+            and expected_release_identity == _DEFAULT_EXPECTED_RELEASE_IDENTITY
+            and (canonical_repository in (_DEFAULT_CANONICAL_REPO, normalized_target))
+        )
+        structured = not is_default_structured
+    else:
+        structured = True
+
     return IntendedProductionState(
         schema_version=SCHEMA_VERSION,
         target=normalized_target,
@@ -1221,11 +1293,12 @@ def create_intended_state(
             expected_configuration_contract_version
         ),
         expected_release_identity=str(expected_release_identity),
+        has_structured_invariants=structured,
     )
 
 
 def normalize_intended_state(value: IntendedProductionState) -> dict[str, object]:
-    if value.expected_collectors:
+    if not value.has_structured_invariants and value.expected_collectors:
         return {
             "expected_collectors": [
                 {
@@ -1237,7 +1310,7 @@ def normalize_intended_state(value: IntendedProductionState) -> dict[str, object
             "schema_version": value.schema_version,
             "target": value.target,
         }
-    return {
+    res: dict[str, object] = {
         "canonical_repository": value.canonical_repository,
         "expected_configuration_contract_version": value.expected_configuration_contract_version,
         "expected_release_identity": value.expected_release_identity,
@@ -1250,6 +1323,15 @@ def normalize_intended_state(value: IntendedProductionState) -> dict[str, object
         "schema_version": value.schema_version,
         "target": value.target,
     }
+    if value.expected_collectors:
+        res["expected_collectors"] = [
+            {
+                "collector_id": item.collector_id,
+                "observations": dict(item.observations),
+            }
+            for item in value.expected_collectors
+        ]
+    return res
 
 
 def validate_intended_state(
@@ -1261,21 +1343,23 @@ def validate_intended_state(
         return value
 
     mapping = _mapping(value)
-    if "expected_collectors" in mapping:
+    if "expected_collectors" in mapping and not any(k in mapping for k in _V1_INTENDED_FIELDS - {"schema_version"}):
         payload = dict(_exact_fields(mapping, _LEGACY_INTENDED_FIELDS))
+        has_structured = False
     else:
-        allowed = _V1_INTENDED_FIELDS | {"target"}
+        allowed = _V1_INTENDED_FIELDS | {"target", "expected_collectors"}
         keys = frozenset(mapping.keys())
         if not _V1_INTENDED_FIELDS.issubset(keys) or not keys.issubset(allowed):
             _fail("DOCUMENT_FIELD_MISMATCH")
         payload = dict(mapping)
+        has_structured = True
     verify_sanitized_evidence(payload)
 
     schema_ver = payload.get("schema_version")
     if schema_ver != SCHEMA_VERSION or isinstance(schema_ver, bool):
         _fail("SCHEMA_VERSION_INVALID")
 
-    if "expected_collectors" in payload:
+    if not has_structured:
         expected: dict[str, Mapping[str, object]] = {}
         ordered_ids: list[str] = []
         for item in _items(payload["expected_collectors"]):
@@ -1288,14 +1372,24 @@ def validate_intended_state(
         if ordered_ids != sorted(ordered_ids):
             _fail("COLLECTOR_ORDER_INVALID")
         result = create_intended_state(
-            target=_identifier(payload["target"]), expected_observations=expected
+            target=_identifier(payload["target"]),
+            expected_observations=expected,
+            has_structured_invariants=False,
         )
         verify_sanitized_evidence(normalize_intended_state(result))
         return result
 
     tgt = payload.get("target") or payload["canonical_repository"]
+    expectations: dict[str, Mapping[str, object]] = {}
+    if "expected_collectors" in payload:
+        for item in _items(payload["expected_collectors"]):
+            exp_dict = _mapping(item)
+            cid = _identifier(exp_dict["collector_id"])
+            expectations[cid] = _mapping(exp_dict["observations"])
+
     return create_intended_state(
         target=_identifier(tgt),
+        expected_observations=expectations if expectations else None,
         canonical_repository=_identifier(payload["canonical_repository"]),
         intended_main_sha=str(payload["intended_main_sha"]),
         intended_image_digest=_digest_or_sha(payload["intended_image_digest"]),
@@ -1307,6 +1401,7 @@ def validate_intended_state(
             payload["expected_configuration_contract_version"]
         ),
         expected_release_identity=str(payload["expected_release_identity"]),
+        has_structured_invariants=True,
     )
 
 
@@ -1323,7 +1418,7 @@ def deserialize_intended_state(value: bytes | str) -> IntendedProductionState:
 # ---------------------------------------------------------------------------
 
 
-def _comparison_content(
+def _legacy_comparison_content(
     *,
     target: str,
     attestation_id: str,
@@ -1341,6 +1436,42 @@ def _comparison_content(
         "status": status.value,
         "target": target,
     }
+
+
+def _comparison_content(
+    *,
+    attestation_id: str,
+    authoritative_for_production: bool,
+    drifted: Sequence[str],
+    evaluation_mode: str,
+    intended_digest: str,
+    missing: Sequence[str],
+    reason_codes: Sequence[str],
+    schema_version: int,
+    status: ComparisonStatus,
+    target: str,
+) -> dict[str, object]:
+    return {
+        "attestation_id": attestation_id,
+        "authoritative_for_production": authoritative_for_production,
+        "domain": "hermes-production-runtime-comparison-v2",
+        "drifted_observations": sorted(list(drifted)),
+        "evaluation_mode": evaluation_mode,
+        "intended_digest": intended_digest,
+        "missing_observations": sorted(list(missing)),
+        "reason_codes": sorted(list(set(reason_codes))),
+        "schema_version": schema_version,
+        "status": status.value,
+        "target": target,
+    }
+
+
+def compute_comparison_id(content: Mapping[str, object]) -> str:
+    canonical = _canonical_bytes(content)
+    hasher = hashlib.sha256()
+    hasher.update(DOMAIN_SEPARATOR_COMPARISON_V2)
+    hasher.update(canonical)
+    return hasher.hexdigest()
 
 
 def compare_production_runtime(
@@ -1362,7 +1493,21 @@ def compare_production_runtime(
     missing: list[str] = []
     reasons: list[str] = []
 
-    # Signature / provenance check
+    # 1. Freshness policy bounds check
+    if not (0 < max_evidence_age_seconds <= 86400) or not (
+        0 <= max_clock_skew_seconds <= 300
+    ):
+        missing.append("freshness_policy")
+        reasons.append("UNTRUSTED_FRESHNESS_POLICY")
+
+    # 2. Evaluation mode
+    evaluation_mode = (
+        "DIAGNOSTIC_TIME_OVERRIDE"
+        if current_time_utc is not None
+        else "AUTHORITATIVE_PRODUCTION"
+    )
+
+    # 3. Signature / provenance verification
     if not trusted_public_keys:
         missing.append("trusted_public_keys")
         reasons.append("MISSING_TRUST_STORE")
@@ -1381,7 +1526,23 @@ def compare_production_runtime(
             missing.append("signature_verification")
             reasons.append(sig_reason)
 
-    # Legacy expected collectors check
+    # 4. Check for completely empty runtime observations
+    has_collectors = bool(attestation.collectors)
+    obs = attestation.observed_runtime_state
+    has_real_obs = False
+    if obs is not None:
+        is_dummy = (
+            obs.release_sha in ("", "0" * 40)
+            and obs.image_digest in ("", "0" * 64, "sha256:" + "0" * 64)
+            and not obs.active_services
+        )
+        has_real_obs = not is_dummy
+
+    if not has_collectors and not has_real_obs:
+        missing.append("runtime_observations")
+        reasons.append("EMPTY_RUNTIME_OBSERVATIONS")
+
+    # 5. Independent evaluation: Collector expectations
     if intended.expected_collectors:
         available = {item.collector_id: item for item in attestation.collectors}
         for expected in intended.expected_collectors:
@@ -1390,85 +1551,274 @@ def compare_production_runtime(
                 path = f"{expected.collector_id}.{key}"
                 if observed is None or observed.status != CollectorStatus.AVAILABLE:
                     missing.append(path)
+                    reasons.append(f"MISSING_OBSERVATION:{path}")
                 elif key not in observed.observations:
                     missing.append(path)
+                    reasons.append(f"MISSING_OBSERVATION:{path}")
                 elif observed.observations[key] != expected_value:
                     drifted.append(path)
-    elif attestation.observed_runtime_state is not None:
-        obs = attestation.observed_runtime_state
-        if intended.intended_main_sha != obs.release_sha:
-            drifted.append(
-                f"release_sha: expected {intended.intended_main_sha} but observed {obs.release_sha}"
-            )
-        if intended.intended_image_digest != obs.image_digest:
-            drifted.append(
-                f"image_digest: expected {intended.intended_image_digest} but observed {obs.image_digest}"
-            )
-        if intended.intended_oci_revision != obs.oci_revision:
-            drifted.append(
-                f"oci_revision: expected {intended.intended_oci_revision} but observed {obs.oci_revision}"
-            )
-        if intended.expected_runtime_contract != obs.runtime_contract:
-            drifted.append(
-                f"runtime_contract: expected {intended.expected_runtime_contract} but observed {obs.runtime_contract}"
-            )
-        if intended.expected_schema_version != obs.schema_version:
-            drifted.append(
-                f"schema_version: expected {intended.expected_schema_version} but observed {obs.schema_version}"
-            )
-        if (
-            intended.expected_configuration_contract_version
-            != obs.configuration_contract_version
+                    reasons.append(f"OBSERVATION_DRIFT:{path}")
+
+    # 6. Independent evaluation: Structured invariants
+    if intended.has_structured_invariants:
+        # Check canonical repository provenance
+        if not attestation.canonical_repository:
+            missing.append("canonical_repository")
+            reasons.append("MISSING_OBSERVED_INVARIANT:canonical_repository")
+        elif (
+            intended.canonical_repository
+            and attestation.canonical_repository != intended.canonical_repository
         ):
             drifted.append(
-                f"configuration_contract_version: expected {intended.expected_configuration_contract_version} but observed {obs.configuration_contract_version}"
+                f"canonical_repository: expected {intended.canonical_repository} but observed {attestation.canonical_repository}"
             )
-        for expected_svc in intended.expected_service_set:
-            if expected_svc not in obs.active_services:
-                missing.append(f"service:{expected_svc}")
+            reasons.append("INVARIANT_DRIFT:canonical_repository")
 
-    # Determine comparison status
-    if reasons:
-        status = ComparisonStatus.INSUFFICIENT_EVIDENCE
-    elif drifted:
-        status = ComparisonStatus.DRIFT
-    elif missing:
-        status = ComparisonStatus.INSUFFICIENT_EVIDENCE
+        # Check canonical main sha provenance
+        if not attestation.canonical_main_sha or attestation.canonical_main_sha == "0" * 40:
+            missing.append("canonical_main_sha")
+            reasons.append("MISSING_OBSERVED_INVARIANT:canonical_main_sha")
+        elif (
+            intended.intended_main_sha != "0" * 40
+            and attestation.canonical_main_sha != intended.intended_main_sha
+        ):
+            drifted.append(
+                f"canonical_main_sha: expected {intended.intended_main_sha} but observed {attestation.canonical_main_sha}"
+            )
+            reasons.append("INVARIANT_DRIFT:canonical_main_sha")
+
+        if attestation.observed_runtime_state is None:
+            missing.append("observed_runtime_state")
+            reasons.append("MISSING_OBSERVED_RUNTIME_STATE")
+        else:
+            obs = attestation.observed_runtime_state
+
+            # release_sha
+            if not obs.release_sha or obs.release_sha == "0" * 40:
+                missing.append("release_sha")
+                reasons.append("MISSING_OBSERVED_INVARIANT:release_sha")
+            elif (
+                intended.intended_main_sha != "0" * 40
+                and intended.intended_main_sha != obs.release_sha
+            ):
+                drifted.append(
+                    f"release_sha: expected {intended.intended_main_sha} but observed {obs.release_sha}"
+                )
+                reasons.append("INVARIANT_DRIFT:release_sha")
+
+            # image_digest
+            if not obs.image_digest or obs.image_digest in ("0" * 64, "sha256:" + "0" * 64):
+                missing.append("image_digest")
+                reasons.append("MISSING_OBSERVED_INVARIANT:image_digest")
+            elif (
+                intended.intended_image_digest not in ("", "0" * 64, "sha256:" + "0" * 64)
+                and intended.intended_image_digest != obs.image_digest
+            ):
+                drifted.append(
+                    f"image_digest: expected {intended.intended_image_digest} but observed {obs.image_digest}"
+                )
+                reasons.append("INVARIANT_DRIFT:image_digest")
+
+            # oci_revision
+            if not obs.oci_revision or obs.oci_revision == "0" * 40:
+                missing.append("oci_revision")
+                reasons.append("MISSING_OBSERVED_INVARIANT:oci_revision")
+            elif (
+                intended.intended_oci_revision != "0" * 40
+                and intended.intended_oci_revision != obs.oci_revision
+            ):
+                drifted.append(
+                    f"oci_revision: expected {intended.intended_oci_revision} but observed {obs.oci_revision}"
+                )
+                reasons.append("INVARIANT_DRIFT:oci_revision")
+
+            # runtime_contract
+            if not obs.runtime_contract:
+                missing.append("runtime_contract")
+                reasons.append("MISSING_OBSERVED_INVARIANT:runtime_contract")
+            elif (
+                intended.expected_runtime_contract
+                and intended.expected_runtime_contract != obs.runtime_contract
+            ):
+                drifted.append(
+                    f"runtime_contract: expected {intended.expected_runtime_contract} but observed {obs.runtime_contract}"
+                )
+                reasons.append("INVARIANT_DRIFT:runtime_contract")
+
+            # schema_version
+            if not obs.schema_version:
+                missing.append("schema_version")
+                reasons.append("MISSING_OBSERVED_INVARIANT:schema_version")
+            elif (
+                intended.expected_schema_version
+                and intended.expected_schema_version != obs.schema_version
+            ):
+                drifted.append(
+                    f"schema_version: expected {intended.expected_schema_version} but observed {obs.schema_version}"
+                )
+                reasons.append("INVARIANT_DRIFT:schema_version")
+
+            # configuration_contract_version
+            if not obs.configuration_contract_version:
+                missing.append("configuration_contract_version")
+                reasons.append("MISSING_OBSERVED_INVARIANT:configuration_contract_version")
+            elif (
+                intended.expected_configuration_contract_version
+                and intended.expected_configuration_contract_version
+                != obs.configuration_contract_version
+            ):
+                drifted.append(
+                    f"configuration_contract_version: expected {intended.expected_configuration_contract_version} but observed {obs.configuration_contract_version}"
+                )
+                reasons.append("INVARIANT_DRIFT:configuration_contract_version")
+
+            # release_identity
+            if not obs.release_identity:
+                missing.append("release_identity")
+                reasons.append("MISSING_OBSERVED_INVARIANT:release_identity")
+            elif (
+                intended.expected_release_identity
+                and intended.expected_release_identity != obs.release_identity
+            ):
+                drifted.append(
+                    f"release_identity: expected {intended.expected_release_identity} but observed {obs.release_identity}"
+                )
+                reasons.append("INVARIANT_DRIFT:release_identity")
+
+            # active_services: exact set equality
+            expected_services = set(intended.expected_service_set)
+            observed_services = set(obs.active_services)
+            missing_services = expected_services - observed_services
+            extra_services = observed_services - expected_services
+
+            for svc in sorted(missing_services):
+                missing.append(f"service:{svc}")
+                reasons.append(f"MISSING_SERVICE:{svc}")
+
+            if extra_services:
+                reasons.append("EXTRA_SERVICE_DETECTED")
+                for svc in sorted(extra_services):
+                    drifted.append(f"service:{svc}")
+                    reasons.append(f"EXTRA_SERVICE:{svc}")
+
+    # 7. Status Resolution
+    if intended.has_structured_invariants:
+        # Co-occurrence of missing evidence/invariants and drift MUST resolve to INSUFFICIENT_EVIDENCE
+        has_missing_evidence = bool(missing) or any(
+            r.startswith("MISSING_")
+            or r in (
+                "UNTRUSTED_FRESHNESS_POLICY",
+                "EMPTY_RUNTIME_OBSERVATIONS",
+                "UNTRUSTED_SIGNATURE_KEY",
+                "EXPIRED_EVIDENCE",
+                "STALE_EVIDENCE",
+                "EVIDENCE_CLOCK_SKEW_FUTURE",
+                "INVALID_SIGNATURE_TIMESTAMP",
+                "INVALID_VALIDITY_INTERVAL",
+                "TIMESTAMP_PARSE_ERROR",
+                "INVALID_CRYPTOGRAPHIC_SIGNATURE",
+                "SIGNATURE_VERIFICATION_ERROR",
+                "UNSUPPORTED_SIGNATURE_CONTRACT",
+            )
+            for r in reasons
+        )
+        has_drift = bool(drifted) or any(
+            r.startswith("INVARIANT_DRIFT:")
+            or r.startswith("EXTRA_SERVICE")
+            or r.startswith("OBSERVATION_DRIFT:")
+            for r in reasons
+        )
+
+        if has_missing_evidence:
+            status = ComparisonStatus.INSUFFICIENT_EVIDENCE
+        elif has_drift:
+            status = ComparisonStatus.DRIFT
+        else:
+            status = ComparisonStatus.MATCH
     else:
-        status = ComparisonStatus.MATCH
+        # Legacy collector evaluation
+        if any(
+            r in (
+                "MISSING_TRUST_STORE",
+                "MISSING_EVIDENCE_PROVENANCE",
+                "UNTRUSTED_SIGNATURE_KEY",
+                "EXPIRED_EVIDENCE",
+                "STALE_EVIDENCE",
+                "EVIDENCE_CLOCK_SKEW_FUTURE",
+                "INVALID_SIGNATURE_TIMESTAMP",
+                "INVALID_VALIDITY_INTERVAL",
+                "TIMESTAMP_PARSE_ERROR",
+                "INVALID_CRYPTOGRAPHIC_SIGNATURE",
+                "SIGNATURE_VERIFICATION_ERROR",
+                "UNSUPPORTED_SIGNATURE_CONTRACT",
+                "UNTRUSTED_FRESHNESS_POLICY",
+                "EMPTY_RUNTIME_OBSERVATIONS",
+            )
+            for r in reasons
+        ):
+            status = ComparisonStatus.INSUFFICIENT_EVIDENCE
+        elif drifted:
+            status = ComparisonStatus.DRIFT
+        elif missing:
+            status = ComparisonStatus.INSUFFICIENT_EVIDENCE
+        else:
+            status = ComparisonStatus.MATCH
 
+    # 8. Authoritative for production
+    authoritative_for_production = (
+        status == ComparisonStatus.MATCH
+        and evaluation_mode == "AUTHORITATIVE_PRODUCTION"
+        and attestation.evidence_provenance is not None
+    )
+
+    # 9. Packaging
     intended_digest = _digest(normalize_intended_state(intended))
+    now_utc = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sorted_drifted = tuple(sorted(drifted))
+    sorted_missing = tuple(sorted(missing))
+    sorted_reasons = tuple(sorted(set(reasons)))
+
     content = _comparison_content(
+        attestation_id=attestation.attestation_id,
+        authoritative_for_production=authoritative_for_production,
+        drifted=sorted_drifted,
+        evaluation_mode=evaluation_mode,
+        intended_digest=intended_digest,
+        missing=sorted_missing,
+        reason_codes=sorted_reasons,
+        schema_version=SCHEMA_VERSION,
+        status=status,
+        target=intended.target,
+    )
+    comp_id = compute_comparison_id(content)
+
+    return ProductionRuntimeComparison(
+        schema_version=SCHEMA_VERSION,
+        comparison_id=comp_id,
         target=intended.target,
         attestation_id=attestation.attestation_id,
         intended_digest=intended_digest,
         status=status,
-        drifted=drifted,
-        missing=missing,
-    )
-    now_utc = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    return ProductionRuntimeComparison(
-        SCHEMA_VERSION,
-        _digest(content),
-        intended.target,
-        attestation.attestation_id,
-        intended_digest,
-        status,
-        tuple(drifted),
-        tuple(missing),
-        tuple(sorted(set(reasons))),
-        now_utc,
+        drifted_observations=sorted_drifted,
+        missing_observations=sorted_missing,
+        reason_codes=sorted_reasons,
+        evaluated_at_utc=now_utc,
+        evaluation_mode=evaluation_mode,
+        authoritative_for_production=authoritative_for_production,
     )
 
 
 def normalize_comparison(value: ProductionRuntimeComparison) -> dict[str, object]:
     return {
         "attestation_id": value.attestation_id,
+        "authoritative_for_production": value.authoritative_for_production,
         "comparison_id": value.comparison_id,
-        "drifted_observations": list(value.drifted_observations),
+        "drifted_observations": sorted(list(value.drifted_observations)),
+        "evaluated_at_utc": value.evaluated_at_utc,
+        "evaluation_mode": value.evaluation_mode,
         "intended_digest": value.intended_digest,
-        "missing_observations": list(value.missing_observations),
+        "missing_observations": sorted(list(value.missing_observations)),
+        "reason_codes": sorted(list(set(value.reason_codes))),
         "schema_version": value.schema_version,
         "status": value.status.value,
         "target": value.target,
@@ -1479,46 +1829,121 @@ def validate_comparison(
     value: ProductionRuntimeComparison | Mapping[str, object],
 ) -> ProductionRuntimeComparison:
     if isinstance(value, ProductionRuntimeComparison):
-        payload = normalize_comparison(value)
-    else:
-        payload = dict(_exact_fields(value, _COMPARISON_FIELDS))
+        if value.evaluation_mode == "LEGACY_UNSPECIFIED":
+            legacy_content = _legacy_comparison_content(
+                target=value.target,
+                attestation_id=value.attestation_id,
+                intended_digest=value.intended_digest,
+                status=value.status,
+                drifted=value.drifted_observations,
+                missing=value.missing_observations,
+            )
+            if value.comparison_id != _digest(legacy_content):
+                _fail("TAMPERED_COMPARISON_ID")
+            return value
 
-    schema_ver = payload.get("schema_version")
+        content = _comparison_content(
+            attestation_id=value.attestation_id,
+            authoritative_for_production=value.authoritative_for_production,
+            drifted=value.drifted_observations,
+            evaluation_mode=value.evaluation_mode,
+            intended_digest=value.intended_digest,
+            missing=value.missing_observations,
+            reason_codes=value.reason_codes,
+            schema_version=value.schema_version,
+            status=value.status,
+            target=value.target,
+        )
+        if value.comparison_id != compute_comparison_id(content):
+            _fail("TAMPERED_COMPARISON_ID")
+        return value
+
+    mapping = _mapping(value)
+    verify_sanitized_evidence(mapping)
+
+    schema_ver = mapping.get("schema_version")
     if schema_ver != SCHEMA_VERSION or isinstance(schema_ver, bool):
         _fail("SCHEMA_VERSION_INVALID")
 
-    target = _identifier(payload["target"])
-    att_id = _digest_or_sha(payload["attestation_id"])
-    intended_digest = _digest_or_sha(payload["intended_digest"])
+    target = _identifier(mapping["target"])
+    att_id = _digest_or_sha(mapping["attestation_id"])
+    intended_digest = _digest_or_sha(mapping["intended_digest"])
     try:
-        status = ComparisonStatus(payload["status"])
+        status = ComparisonStatus(mapping["status"])
     except ValueError as exc:
         raise ProductionRuntimeAttestationError("COMPARISON_STATUS_INVALID") from exc
 
-    drifted = tuple(str(x) for x in _items(payload["drifted_observations"]))
-    missing = tuple(str(x) for x in _items(payload["missing_observations"]))
+    drifted = tuple(str(x) for x in _items(mapping["drifted_observations"]))
+    missing = tuple(str(x) for x in _items(mapping["missing_observations"]))
+
+    # Detect legacy vs v1.2 comparison shape
+    if (
+        "authoritative_for_production" not in mapping
+        and "evaluation_mode" not in mapping
+    ):
+        _exact_fields(mapping, _LEGACY_COMPARISON_FIELDS)
+        legacy_content = _legacy_comparison_content(
+            target=target,
+            attestation_id=att_id,
+            intended_digest=intended_digest,
+            status=status,
+            drifted=drifted,
+            missing=missing,
+        )
+        expected_id = _digest(legacy_content)
+        if mapping.get("comparison_id") != expected_id:
+            _fail("TAMPERED_COMPARISON_ID")
+
+        return ProductionRuntimeComparison(
+            schema_version=SCHEMA_VERSION,
+            comparison_id=expected_id,
+            target=target,
+            attestation_id=att_id,
+            intended_digest=intended_digest,
+            status=status,
+            drifted_observations=drifted,
+            missing_observations=missing,
+            reason_codes=(),
+            evaluated_at_utc="",
+            evaluation_mode="LEGACY_UNSPECIFIED",
+            authoritative_for_production=False,
+        )
+
+    _exact_fields(mapping, _COMPARISON_FIELDS)
+    authoritative = bool(mapping["authoritative_for_production"])
+    eval_mode = str(mapping["evaluation_mode"])
+    reasons = tuple(str(x) for x in _items(mapping.get("reason_codes", ())))
+    evaluated_at = str(mapping.get("evaluated_at_utc", ""))
 
     content = _comparison_content(
+        attestation_id=att_id,
+        authoritative_for_production=authoritative,
+        drifted=drifted,
+        evaluation_mode=eval_mode,
+        intended_digest=intended_digest,
+        missing=missing,
+        reason_codes=reasons,
+        schema_version=SCHEMA_VERSION,
+        status=status,
+        target=target,
+    )
+    expected_id = compute_comparison_id(content)
+    if mapping.get("comparison_id") != expected_id:
+        _fail("TAMPERED_COMPARISON_ID")
+
+    return ProductionRuntimeComparison(
+        schema_version=SCHEMA_VERSION,
+        comparison_id=expected_id,
         target=target,
         attestation_id=att_id,
         intended_digest=intended_digest,
         status=status,
-        drifted=drifted,
-        missing=missing,
-    )
-    expected_id = _digest(content)
-    if payload.get("comparison_id") != expected_id:
-        _fail("TAMPERED_COMPARISON_ID")
-
-    return ProductionRuntimeComparison(
-        SCHEMA_VERSION,
-        expected_id,
-        target,
-        att_id,
-        intended_digest,
-        status,
-        drifted,
-        missing,
+        drifted_observations=drifted,
+        missing_observations=missing,
+        reason_codes=reasons,
+        evaluated_at_utc=evaluated_at,
+        evaluation_mode=eval_mode,
+        authoritative_for_production=authoritative,
     )
 
 

@@ -747,6 +747,7 @@ def test_regression_authenticated_image_mismatch_yields_drift() -> None:
             schema_version=1,
             active_services=("gateway",),
             configuration_contract_version="v1",
+            release_identity="hermes-release-1",
         ),
     )
     priv, pub = generate_keypair()
@@ -761,7 +762,7 @@ def test_regression_authenticated_image_mismatch_yields_drift() -> None:
     )
     assert comp.status == ComparisonStatus.DRIFT
     assert any("image_digest" in d for d in comp.drifted_observations)
-    assert comp.reason_codes == ()
+    assert "INVARIANT_DRIFT:image_digest" in comp.reason_codes
 
 
 def test_regression_valid_signed_and_matching_state_yields_match() -> None:
@@ -783,6 +784,7 @@ def test_regression_valid_signed_and_matching_state_yields_match() -> None:
             schema_version=1,
             active_services=("gateway",),
             configuration_contract_version="v1",
+            release_identity="hermes-release-1",
         ),
     )
     priv, pub = generate_keypair()
@@ -918,3 +920,767 @@ def test_regression_no_private_key_leakage_via_cli_logs_or_artifacts(
     artifact_bytes = out_file.read_bytes()
     assert priv_hex.encode("utf-8") not in artifact_bytes
     assert bytes.fromhex(priv_hex) not in artifact_bytes
+
+
+# ===========================================================================
+# FIX-5: 18 Mandatory ProductionRuntimeAttestation v1.2 Regression Tests
+# ===========================================================================
+
+
+# 1. SIGNED_EMPTY_EVIDENCE_NO_MATCH
+def test_regression_signed_empty_evidence_no_match() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        collectors=(),
+        observed_runtime_state=None,
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "EMPTY_RUNTIME_OBSERVATIONS" in comp.reason_codes
+    assert comp.authoritative_for_production is False
+
+
+# 2. PARTIAL_INVARIANTS_MISSING_INSUFFICIENT_EVIDENCE
+def test_regression_partial_invariants_missing_insufficient_evidence() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="",  # Missing / unpopulated
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_OBSERVED_INVARIANT:release_identity" in comp.reason_codes
+    assert comp.authoritative_for_production is False
+
+
+# 3. DRIFT_AND_MISSING_COOCCURRENCE_INSUFFICIENT_EVIDENCE
+def test_regression_drift_and_missing_cooccurrence_insufficient_evidence() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "9" * 64,  # DRIFT
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="",  # MISSING
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "INVARIANT_DRIFT:image_digest" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:release_identity" in comp.reason_codes
+    assert comp.authoritative_for_production is False
+
+
+# 4. EXTRA_SERVICE_DETECTED_DRIFT
+def test_regression_extra_service_detected_drift() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_service_set=("gateway",),
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway", "unapproved_worker"),  # Extra service!
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.DRIFT
+    assert "EXTRA_SERVICE_DETECTED" in comp.reason_codes
+    assert "EXTRA_SERVICE:unapproved_worker" in comp.reason_codes
+    assert "service:unapproved_worker" in comp.drifted_observations
+
+
+# 5. CANONICAL_PROVENANCE_MISMATCH_DRIFT_OR_INSUFFICIENT
+def test_regression_canonical_provenance_mismatch_drift_or_insufficient() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        canonical_main_sha="f" * 40,  # Provenance drift
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.DRIFT
+    assert "INVARIANT_DRIFT:canonical_main_sha" in comp.reason_codes
+    assert any("canonical_main_sha" in d for d in comp.drifted_observations)
+
+
+# 6. ZERO_PLACEHOLDER_HASH_REJECTED
+def test_regression_zero_placeholder_hash_rejected() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "0" * 64,  # Dummy placeholder
+            oci_revision="b" * 40,
+            release_sha="0" * 40,  # Dummy placeholder
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_OBSERVED_INVARIANT:release_sha" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:image_digest" in comp.reason_codes
+    assert comp.authoritative_for_production is False
+
+
+# 7. AUTHORITATIVE_MODE_TRUE_ON_FRESH_SIGNED_MATCH
+def test_regression_authoritative_mode_true_on_fresh_signed_match() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc=None,
+    )
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.evaluation_mode == "AUTHORITATIVE_PRODUCTION"
+    assert comp.authoritative_for_production is True
+
+
+# 8. DIAGNOSTIC_TIME_OVERRIDE_NOT_AUTHORITATIVE
+def test_regression_diagnostic_time_override_not_authoritative() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.evaluation_mode == "DIAGNOSTIC_TIME_OVERRIDE"
+    assert comp.authoritative_for_production is False
+
+
+# 9. CLI_COMPARE_EXIT_CODE_3_ON_DIAGNOSTIC_MATCH
+def test_regression_cli_compare_exit_code_3_on_diagnostic_match(tmp_path: Path) -> None:
+    intended_file = tmp_path / "intended.json"
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    intended_file.write_bytes(serialize_intended_state(intended))
+
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    att_file = tmp_path / "attestation.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    key_file = tmp_path / "trusted_keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    comp_file = tmp_path / "comparison.json"
+
+    exit_code = run(
+        [
+            "compare",
+            "--intended",
+            str(intended_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            "2026-01-02T03:10:00Z",
+        ]
+    )
+    assert exit_code == 3
+
+
+# 10. CLI_COMPARE_EXIT_CODE_0_ON_AUTHORITATIVE_MATCH
+def test_regression_cli_compare_exit_code_0_on_authoritative_match(tmp_path: Path) -> None:
+    intended_file = tmp_path / "intended.json"
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    intended_file.write_bytes(serialize_intended_state(intended))
+
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    att_file = tmp_path / "attestation.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    key_file = tmp_path / "trusted_keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    comp_file = tmp_path / "comparison.json"
+
+    exit_code = run(
+        [
+            "compare",
+            "--intended",
+            str(intended_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+        ]
+    )
+    assert exit_code == 0
+
+
+# 11. UNTRUSTED_FRESHNESS_POLICY_REJECTED
+def test_regression_untrusted_freshness_policy_rejected() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+
+    comp1 = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+        max_evidence_age_seconds=100000,
+    )
+    assert comp1.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "UNTRUSTED_FRESHNESS_POLICY" in comp1.reason_codes
+
+    comp2 = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+        max_clock_skew_seconds=600,
+    )
+    assert comp2.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "UNTRUSTED_FRESHNESS_POLICY" in comp2.reason_codes
+
+
+# 12. INDEPENDENT_EVALUATION_OF_COLLECTORS_AND_STRUCTURED_STATE
+def test_regression_independent_evaluation_of_collectors_and_structured_state() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        expected_observations={"runtime": {"running": True}},
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+        has_structured_invariants=True,
+    )
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+
+    # Case A: Collectors match, structured state drifts -> DRIFT
+    att_drift_structured = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "9" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    signed_a = sign_attestation(att_drift_structured, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp_a = compare_production_runtime(
+        intended, signed_a, trusted_public_keys=[pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
+    assert comp_a.status == ComparisonStatus.DRIFT
+    assert "INVARIANT_DRIFT:image_digest" in comp_a.reason_codes
+
+    # Case B: Structured state matches, collectors drift -> DRIFT
+    att_drift_collector = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        collectors=[create_collector_result("runtime", "AVAILABLE", {"running": False})],
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    signed_b = sign_attestation(att_drift_collector, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp_b = compare_production_runtime(
+        intended, signed_b, trusted_public_keys=[pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
+    assert comp_b.status == ComparisonStatus.DRIFT
+    assert "OBSERVATION_DRIFT:runtime.running" in comp_b.reason_codes
+
+    # Case C: Both match -> MATCH
+    att_match_both = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    signed_c = sign_attestation(att_match_both, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp_c = compare_production_runtime(
+        intended, signed_c, trusted_public_keys=[pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
+    assert comp_c.status == ComparisonStatus.MATCH
+
+
+# 13. RELEASE_IDENTITY_MISMATCH_DRIFT
+def test_regression_release_identity_mismatch_drift() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-v2-prod",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-v1-old",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.DRIFT
+    assert "INVARIANT_DRIFT:release_identity" in comp.reason_codes
+    assert any("release_identity" in d for d in comp.drifted_observations)
+
+
+# 14. RELEASE_IDENTITY_MISSING_INSUFFICIENT_EVIDENCE
+def test_regression_release_identity_missing_insufficient_evidence() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-v2-prod",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_OBSERVED_INVARIANT:release_identity" in comp.reason_codes
+
+
+# 15. REASON_CODES_SERIALIZED_AND_BOUND_IN_COMPARISON_ID
+def test_regression_reason_codes_serialized_and_bound_in_comparison_id() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "2" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    payload_bytes = serialize_comparison(comp)
+    raw_dict = json.loads(payload_bytes.decode("utf-8"))
+
+    deserialized = deserialize_comparison(payload_bytes)
+    assert deserialized.comparison_id == comp.comparison_id
+
+    # Tampering with reason_codes breaks comparison_id
+    tampered_reasons = dict(raw_dict)
+    tampered_reasons["reason_codes"] = ["FORGED_REASON"]
+    with pytest.raises(ProductionRuntimeAttestationError, match="TAMPERED_COMPARISON_ID"):
+        deserialize_comparison(json.dumps(tampered_reasons))
+
+    # Tampering with authoritative_for_production breaks comparison_id
+    tampered_auth = dict(raw_dict)
+    tampered_auth["authoritative_for_production"] = True
+    with pytest.raises(ProductionRuntimeAttestationError, match="TAMPERED_COMPARISON_ID"):
+        deserialize_comparison(json.dumps(tampered_auth))
+
+    # Tampering with evaluation_mode breaks comparison_id
+    tampered_mode = dict(raw_dict)
+    tampered_mode["evaluation_mode"] = "AUTHORITATIVE_PRODUCTION"
+    with pytest.raises(ProductionRuntimeAttestationError, match="TAMPERED_COMPARISON_ID"):
+        deserialize_comparison(json.dumps(tampered_mode))
+
+
+# 16. LEGACY_COMPARISON_DESERIALIZATION_NOT_AUTHORITATIVE
+def test_regression_legacy_comparison_deserialization_not_authoritative() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _digest,
+        _legacy_comparison_content,
+    )
+
+    legacy_dict = {
+        "schema_version": 1,
+        "target": "synthetic-prod",
+        "attestation_id": "a" * 64,
+        "intended_digest": "b" * 64,
+        "status": "MATCH",
+        "drifted_observations": [],
+        "missing_observations": [],
+    }
+    legacy_content = _legacy_comparison_content(
+        target=legacy_dict["target"],
+        attestation_id=legacy_dict["attestation_id"],
+        intended_digest=legacy_dict["intended_digest"],
+        status=ComparisonStatus.MATCH,
+        drifted=(),
+        missing=(),
+    )
+    legacy_dict["comparison_id"] = _digest(legacy_content)
+
+    comp = deserialize_comparison(json.dumps(legacy_dict))
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.authoritative_for_production is False
+    assert comp.evaluation_mode == "LEGACY_UNSPECIFIED"
+
+
+# 17. UNSIGNED_OR_TAMPERED_EVIDENCE_NO_MATCH
+def test_regression_unsigned_or_tampered_evidence_no_match() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    comp_unsigned = compare_production_runtime(intended, att)
+    assert comp_unsigned.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp_unsigned.authoritative_for_production is False
+
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    tampered_prov = replace(signed_att.evidence_provenance, signature="0" * 128)
+    tampered_att = replace(signed_att, evidence_provenance=tampered_prov)
+
+    comp_tampered = compare_production_runtime(
+        intended,
+        tampered_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp_tampered.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp_tampered.authoritative_for_production is False
+
+
+# 18. VALID_SIGNED_COMPLETE_MATCH
+def test_regression_valid_signed_complete_match() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.drifted_observations == ()
+    assert comp.missing_observations == ()
+    assert comp.reason_codes == ()

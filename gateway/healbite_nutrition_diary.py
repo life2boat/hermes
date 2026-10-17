@@ -276,6 +276,13 @@ class FoodVisionItem:
     preparation: str = ""
     is_sauce: bool = False
     uncertainty: str = ""
+    item_id: str = ""
+    suppressed_by_item_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.item_id:
+            h = hashlib.sha1(f"{self.visible_name}:{self.preparation}:{self.estimated_grams_min}:{self.estimated_grams_max}".encode()).hexdigest()[:8]
+            self.item_id = f"item_{h}"
 
 
 @dataclass(slots=True)
@@ -334,6 +341,12 @@ class PendingFoodVisionItem:
     is_sauce: bool
     uncertainty: str
     user_modified: bool = False
+    item_id: str = ""
+    suppressed_by_item_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.item_id:
+            self.item_id = f"item_{self.index}"
 
 
 @dataclass(slots=True)
@@ -353,6 +366,7 @@ class PendingFoodVisionInventory:
     kind: str = PENDING_INVENTORY_KIND
     needs_user_confirmation: bool = False
     calculation_snapshot: dict[str, Any] | None = None
+    household_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -1218,28 +1232,141 @@ def _detect_and_deduplicate_composite_inventory(
     from gateway.nutrition.contracts import RecipeMassConstraint
     from gateway.nutrition.search import normalize_russian_food_query
 
+    # Assign stable item_id if missing
+    for idx, it in enumerate(items, start=1):
+        if not getattr(it, "item_id", None):
+            it.item_id = f"item_{getattr(it, 'index', idx)}"
+
+    _KNOWN_RECIPE_INGREDIENTS: dict[str, frozenset[str]] = {
+        "борщ": frozenset({
+            "говядина", "мясо", "свинина", "бульон", "свекла", "свёкла",
+            "капуста", "картофель", "картошка", "морковь", "лук",
+            "чеснок", "томат", "томатная паста", "зелень", "укроп",
+            "петрушка", "сметана",
+        }),
+        "плов": frozenset({
+            "рис", "курица", "говядина", "баранина", "мясо", "морковь",
+            "лук", "чеснок", "изюм", "барбарис", "зира",
+        }),
+        "оливье": frozenset({
+            "колбаса", "вареная колбаса", "курица", "картофель", "картошка",
+            "морковь", "горошек", "зеленый горошек", "огурец", "соленый огурец",
+            "яйцо", "яйца", "майонез",
+        }),
+        "запеканка": frozenset({
+            "фарш", "мясо", "говядина", "свинина", "картофель", "картошка",
+            "сыр", "яйцо", "яйца", "лук", "творог", "манка",
+        }),
+        "суп": frozenset({
+            "картофель", "картошка", "морковь", "мясо", "говядина", "курица",
+            "бульон", "лапша", "вермишель", "лук", "зелень", "фрикадельки",
+        }),
+        "щи": frozenset({
+            "капуста", "квашеная капуста", "картофель", "картошка", "морковь",
+            "мясо", "говядина", "свинина", "бульон", "лук", "зелень", "сметана",
+        }),
+        "солянка": frozenset({
+            "колбаса", "сосиски", "мясо", "ветчина", "бульон", "огурцы",
+            "соленые огурцы", "маслины", "оливки", "лимон", "лук", "томатная паста",
+        }),
+        "уха": frozenset({
+            "рыба", "лосось", "семга", "судак", "минтай", "бульон",
+            "картофель", "морковь", "лук", "зелень",
+        }),
+        "рагу": frozenset({
+            "мясо", "говядина", "свинина", "курица", "картофель", "картошка",
+            "кабачки", "морковь", "лук", "томат", "перец",
+        }),
+    }
+
+    _SEPARATE_FOOD_MARKERS = frozenset({
+        "хлеб", "батон", "булочка", "лаваш", "гренки", "сухарики",
+        "яблоко", "банан", "апельсин", "десерт", "пирожное", "печенье",
+        "чай", "кофе", "компот", "сок", "морс", "вода",
+        "салат из помидоров", "салат из огурцов",
+    })
+
+    def _stem(t: str) -> str:
+        return t[:-2] if len(t) > 5 else (t[:-1] if len(t) > 4 else t)
+
     for i, candidate in enumerate(items):
         cand_norm = normalize_russian_food_query(candidate.normalized_name or candidate.visible_name)
         connectors = (" с ", " со ", " из ", " под ")
         has_connector = any(conn in cand_norm for conn in connectors)
-        has_dish_word = any(
-            w in cand_norm
-            for w in ("суп", "борщ", "салат", "паста", "макароны", "пицца", "каша", "рагу", "плов", "бутерброд", "омлет", "яичница")
-        )
-        if not (has_connector or has_dish_word):
+        matched_dish_type = None
+        for dtype in _KNOWN_RECIPE_INGREDIENTS:
+            if dtype in cand_norm:
+                matched_dish_type = dtype
+                break
+
+        if not (has_connector or matched_dish_type is not None):
             continue
 
         other_items = [it for j, it in enumerate(items) if j != i]
         matching_others = []
+        external_others = []
+
+        connector_ingredient_terms: list[str] = []
+        if has_connector:
+            for conn in connectors:
+                if conn in cand_norm:
+                    parts = cand_norm.split(conn, 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        raw_terms = parts[1].replace(" и ", " ").split()
+                        connector_ingredient_terms.extend([tok for tok in raw_terms if len(tok) > 2])
+
+        known_ingredients = _KNOWN_RECIPE_INGREDIENTS.get(matched_dish_type, frozenset())
+
         for other in other_items:
             other_norm = normalize_russian_food_query(other.normalized_name or other.visible_name)
+            other_vis = (other.visible_name or "").casefold()
+            other_prep = (getattr(other, "preparation", "") or "").casefold()
+            other_unc = (getattr(other, "uncertainty", "") or "").casefold()
+
+            is_explicitly_separate = (
+                any(marker in other_norm or marker in other_vis for marker in _SEPARATE_FOOD_MARKERS)
+                or any(w in other_prep or w in other_unc or w in other_vis for w in ("отдельно", "рядом", "на гарнир", "отдельный"))
+            )
+
+            is_separate_meat = (
+                matched_dish_type in ("борщ", "суп", "щи", "уха")
+                and (
+                    "стейк" in other_norm
+                    or "отбивная" in other_norm
+                    or any(w in other_prep for w in ("жарен", "гриль", "запечен"))
+                )
+            )
+
+            if is_explicitly_separate or is_separate_meat:
+                external_others.append(other)
+                continue
+
             other_tokens = [tok for tok in other_norm.split() if len(tok) > 2]
-            def _stem(t: str) -> str:
-                return t[:-2] if len(t) > 5 else (t[:-1] if len(t) > 4 else t)
-            if other_tokens and any(_stem(tok) in cand_norm for tok in other_tokens):
+            matches_connector = False
+            if connector_ingredient_terms and other_tokens:
+                matches_connector = any(
+                    _stem(tok) in connector_ingredient_terms
+                    or any(_stem(t) in tok for t in connector_ingredient_terms)
+                    for tok in other_tokens
+                )
+
+            matches_recipe = False
+            if known_ingredients and other_tokens:
+                matches_recipe = any(
+                    tok in known_ingredients or any(_stem(ing) in tok for ing in known_ingredients)
+                    for tok in other_tokens
+                )
+
+            if matches_connector or matches_recipe:
                 matching_others.append(other)
+            else:
+                external_others.append(other)
 
         if matching_others:
+            candidate.suppressed_by_item_id = None
+            for other in matching_others:
+                other.suppressed_by_item_id = candidate.item_id
+
             parent_min = candidate.estimated_grams_min
             parent_max = candidate.estimated_grams_max
             if parent_min is None and parent_max is None and candidate.selected_grams:
@@ -1248,8 +1375,8 @@ def _detect_and_deduplicate_composite_inventory(
             elif parent_min is not None and parent_max is not None:
                 pass
             else:
-                parent_min = (candidate.selected_grams or 200.0) * 0.8
-                parent_max = (candidate.selected_grams or 200.0) * 1.2
+                parent_min = (candidate.selected_grams or 300.0) * 0.8
+                parent_max = (candidate.selected_grams or 300.0) * 1.2
 
             constraint = RecipeMassConstraint(
                 total_dish_mass_min_g=parent_min,
@@ -1257,8 +1384,11 @@ def _detect_and_deduplicate_composite_inventory(
                 recipe_ingredient_names=frozenset(
                     (it.normalized_name or it.visible_name).casefold() for it in matching_others
                 ),
+                external_ingredient_names=frozenset(
+                    (it.normalized_name or it.visible_name).casefold() for it in external_others
+                ),
             )
-            deduped = [it for it in items if it is not candidate]
+            deduped = [it for it in items if not getattr(it, "suppressed_by_item_id", None)]
             return deduped, constraint
 
     return list(items), None
@@ -1352,7 +1482,9 @@ def _build_inventory_calculation_snapshot(
         "is_approximate_range": bool(meal_estimate.is_approximate_plausible_range),
         "components": [
             {
-                "name": c.name,
+                "item_id": getattr(itm, "item_id", ""),
+                "name": itm.visible_name or c.name,
+                "canonical_name": c.name,
                 "estimated_weight_g": c.mass_bounds.grams_center,
                 "grams_min": c.mass_bounds.grams_min,
                 "grams_max": c.mass_bounds.grams_max,
@@ -1377,7 +1509,7 @@ def _build_inventory_calculation_snapshot(
                 "estimation_method": getattr(c, "estimation_method", "conservative_interval"),
                 "uncertainty_model_type": getattr(getattr(c, "uncertainty_model_type", None), "value", str(getattr(c, "uncertainty_model_type", "CONSERVATIVE_INTERVAL"))),
             }
-            for c in meal_estimate.components
+            for itm, c in zip(deduped_items, meal_estimate.components)
         ],
     }
 
@@ -1453,6 +1585,7 @@ def _pending_inventory_from_food_vision(
     now: datetime | None = None,
     ttl: timedelta | None = None,
     inventory_id: str | None = None,
+    household_id: str | None = None,
 ) -> PendingFoodVisionInventory:
     created_at = _normalize_timestamp(now)
     expires_at = created_at + (ttl if ttl is not None else PENDING_MEAL_TTL)
@@ -1461,6 +1594,7 @@ def _pending_inventory_from_food_vision(
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
         sel_g = _maybe_proposed_selected_grams(g_min, g_max)
+        item_id = getattr(item, "item_id", "") or f"item_{index}"
         items.append(PendingFoodVisionItem(
             index=index,
             visible_name=item.visible_name,
@@ -1473,6 +1607,8 @@ def _pending_inventory_from_food_vision(
             is_sauce=item.is_sauce,
             uncertainty=item.uncertainty,
             user_modified=False,
+            item_id=item_id,
+            suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
         ))
     inventory_hash_payload = {
         "items": [{"name": item.normalized_name or item.visible_name, "grams_min": item.estimated_grams_min, "grams_max": item.estimated_grams_max} for item in items],
@@ -1495,6 +1631,7 @@ def _pending_inventory_from_food_vision(
         occurred_at=occurred_at,
         created_at=created_at,
         expires_at=expires_at,
+        household_id=household_id,
     )
     res.calculation_snapshot = _build_inventory_calculation_snapshot(res)
     return res
@@ -1520,6 +1657,8 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
             "is_sauce": item.is_sauce,
             "uncertainty": item.uncertainty,
             "user_modified": item.user_modified,
+            "item_id": getattr(item, "item_id", ""),
+            "suppressed_by_item_id": getattr(item, "suppressed_by_item_id", None),
         } for item in payload.items],
         "overall_confidence": payload.overall_confidence,
         "needs_user_confirmation": payload.needs_user_confirmation,
@@ -1527,6 +1666,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "image_ref": payload.image_ref,
         "occurred_at": _sqlite_timestamp(payload.occurred_at),
         "calculation_snapshot": payload.calculation_snapshot,
+        "household_id": payload.household_id,
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -1556,6 +1696,8 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             is_sauce=bool(item_payload.get("is_sauce")),
             uncertainty=_normalize_optional_text(item_payload.get("uncertainty"), _MAX_FOOD_VISION_UNCERTAINTY_LENGTH),
             user_modified=bool(item_payload.get("user_modified")),
+            item_id=str(item_payload.get("item_id") or f"item_{position}"),
+            suppressed_by_item_id=str(item_payload.get("suppressed_by_item_id")) if item_payload.get("suppressed_by_item_id") else None,
         ))
     return PendingFoodVisionInventory(
         kind=PENDING_INVENTORY_KIND,
@@ -1573,6 +1715,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         created_at=created_at,
         expires_at=expires_at,
         calculation_snapshot=payload.get("calculation_snapshot"),
+        household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
     )
 
 
@@ -1584,7 +1727,21 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         schema_version=payload.schema_version,
         user_id=payload.user_id,
         source=payload.source,
-        items=[PendingFoodVisionItem(index=item.index, visible_name=item.visible_name, normalized_name=item.normalized_name, confidence=item.confidence, estimated_grams_min=item.estimated_grams_min, estimated_grams_max=item.estimated_grams_max, selected_grams=item.selected_grams, preparation=item.preparation, is_sauce=item.is_sauce, uncertainty=item.uncertainty, user_modified=item.user_modified) for item in payload.items],
+        items=[PendingFoodVisionItem(
+            index=item.index,
+            visible_name=item.visible_name,
+            normalized_name=item.normalized_name,
+            confidence=item.confidence,
+            estimated_grams_min=item.estimated_grams_min,
+            estimated_grams_max=item.estimated_grams_max,
+            selected_grams=item.selected_grams,
+            preparation=item.preparation,
+            is_sauce=item.is_sauce,
+            uncertainty=item.uncertainty,
+            user_modified=item.user_modified,
+            item_id=getattr(item, "item_id", ""),
+            suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
+        ) for item in payload.items],
         overall_confidence=payload.overall_confidence,
         needs_user_confirmation=payload.needs_user_confirmation,
         warnings=list(payload.warnings),
@@ -1593,6 +1750,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         created_at=payload.created_at,
         expires_at=payload.expires_at,
         calculation_snapshot=dict(payload.calculation_snapshot) if payload.calculation_snapshot else None,
+        household_id=payload.household_id,
     )
 
 
@@ -1618,9 +1776,30 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
     has_any_nutrition = False
 
     snap_comps = snapshot.get("components", []) if snapshot else []
+    snap_comps_by_id = {
+        c.get("item_id"): c
+        for c in snap_comps
+        if c.get("item_id")
+    }
 
     for idx, item in enumerate(pending_inventory.items):
-        detail = f"{item.index}. {html.escape(item.visible_name)} — {_format_food_vision_grams(item)}"
+        if getattr(item, "suppressed_by_item_id", None):
+            parent_item = next((it for it in pending_inventory.items if getattr(it, "item_id", None) == item.suppressed_by_item_id), None)
+            parent_name = parent_item.visible_name if parent_item else "составного блюда"
+            lines.append(f"{item.index}. {html.escape(item.visible_name)} — в составе «{html.escape(parent_name)}» (учтено в блюде)")
+            continue
+
+        comp_info = snap_comps_by_id.get(getattr(item, "item_id", None))
+        if comp_info is None and not snap_comps_by_id and idx < len(snap_comps):
+            comp_info = snap_comps[idx]
+
+        grams_str = _format_food_vision_grams(item)
+        if (item.estimated_grams_min is None and item.estimated_grams_max is None) and comp_info is not None:
+            est_g = comp_info.get("estimated_weight_g") or comp_info.get("grams")
+            if est_g:
+                grams_str = f"примерно {round(est_g):.0f} г"
+
+        detail = f"{item.index}. {html.escape(item.visible_name)} — {grams_str}"
         extras: list[str] = []
         if item.preparation:
             extras.append(html.escape(item.preparation))
@@ -1634,13 +1813,15 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
             mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
             extras.append(f"расчётный вес: ~{_format_grams(mid)}")
+        elif comp_info is not None and (comp_info.get("estimated_weight_g") or comp_info.get("grams")):
+            est_g = comp_info.get("estimated_weight_g") or comp_info.get("grams")
+            extras.append(f"расчётный вес: ~{_format_grams(est_g)}")
         else:
             extras.append("вес не подтверждён")
             all_weights_present = False
         if extras:
             detail += f" ({'; '.join(extras)})"
 
-        comp_info = snap_comps[idx] if idx < len(snap_comps) else None
         if comp_info is not None:
             if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
                 cal = comp_info.get("calories_kcal")
@@ -2743,10 +2924,13 @@ class HealBiteNutritionDiary:
                         "is_sauce": item.is_sauce,
                         "uncertainty": item.uncertainty,
                         "user_modified": item.user_modified,
+                        "item_id": getattr(item, "item_id", ""),
+                        "suppressed_by_item_id": getattr(item, "suppressed_by_item_id", None),
                     }
                     for item in payload.items
                 ],
                 "calculation_snapshot": payload.calculation_snapshot,
+                "household_id": payload.household_id,
             },
             ensure_ascii=False,
         )
@@ -2763,6 +2947,7 @@ class HealBiteNutritionDiary:
         ttl: timedelta | None = None,
         expires_at: datetime | None = None,
         inventory_id: str | None = None,
+        household_id: str | None = None,
     ) -> PendingFoodVisionInventory:
         payload = _pending_inventory_from_food_vision(
             int(user_id),
@@ -2772,6 +2957,7 @@ class HealBiteNutritionDiary:
             now=now,
             ttl=ttl,
             inventory_id=inventory_id,
+            household_id=household_id,
         )
         if expires_at is not None:
             payload.expires_at = _normalize_timestamp(expires_at)
@@ -3269,6 +3455,8 @@ class HealBiteNutritionDiary:
                     is_sauce=bool(raw_item.get("is_sauce")),
                     uncertainty=_bounded_text(raw_item.get("uncertainty", ""), max_length=_MAX_FOOD_VISION_UNCERTAINTY_LENGTH) or "",
                     user_modified=bool(raw_item.get("user_modified")),
+                    item_id=str(raw_item.get("item_id") or f"item_{position}"),
+                    suppressed_by_item_id=str(raw_item.get("suppressed_by_item_id")) if raw_item.get("suppressed_by_item_id") else None,
                 )
             )
         return PendingFoodVisionInventory(
@@ -3285,6 +3473,7 @@ class HealBiteNutritionDiary:
             image_ref=str(payload.get("image_ref")) if payload.get("image_ref") is not None else None,
             occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
             calculation_snapshot=payload.get("calculation_snapshot"),
+            household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
         )
 
     def _deserialize_pending_meal(

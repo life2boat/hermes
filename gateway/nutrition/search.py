@@ -188,3 +188,40 @@ def match_query_against_aliases(
                 break
 
     return None, 0.0, "none", tuple(suggestions)
+
+
+# Alias for compatibility
+normalize_russian_food_query = normalize_russian_food_text
+
+
+def find_candidate_suggestions(
+    query: str,
+    candidate_names: Iterable[str],
+    limit: int = 5,
+) -> list[str]:
+    """Finds top candidate suggestions for an unresolved query from candidate names."""
+    norm_query = normalize_russian_food_text(query)
+    query_stems = set(extract_stemmed_tokens(norm_query))
+
+    scored: list[tuple[float, str]] = []
+    for cand in candidate_names:
+        norm_cand = normalize_russian_food_text(cand)
+        ratio = difflib.SequenceMatcher(None, norm_query, norm_cand).ratio()
+        if query_stems:
+            cand_stems = set(extract_stemmed_tokens(norm_cand))
+            overlap = len(query_stems & cand_stems)
+            if overlap:
+                ratio = max(ratio, 0.50 + 0.15 * overlap)
+        if ratio >= 0.40:
+            scored.append((ratio, cand))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    seen = set()
+    out = []
+    for _, name in scored:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+            if len(out) >= limit:
+                break
+    return out

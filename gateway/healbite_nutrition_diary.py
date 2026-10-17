@@ -29,6 +29,7 @@ from gateway.healbite_food_composition import (
     normalize_food_lookup_key,
     resolve_food_composition,
 )
+from gateway.nutrition.diary_schema_v2 import ensure_nutrition_diary_v2_schema
 from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,17 @@ CREATE TABLE IF NOT EXISTS {NUTRITION_LOG_TABLE} (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     raw_summary TEXT NOT NULL,
     image_ref TEXT,
-    qdrant_indexed INTEGER NOT NULL DEFAULT 0
+    qdrant_indexed INTEGER NOT NULL DEFAULT 0,
+    calories_min REAL,
+    calories_max REAL,
+    protein_min REAL,
+    protein_max REAL,
+    fat_min REAL,
+    fat_max REAL,
+    carbs_min REAL,
+    carbs_max REAL,
+    uncertainty_model_type TEXT,
+    is_approximate_range INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_{NUTRITION_LOG_TABLE}_user_occurred_at
     ON {NUTRITION_LOG_TABLE}(user_id, occurred_at);
@@ -229,6 +240,16 @@ class NutritionRecord:
     confidence: float
     raw_summary: str
     display_name: str = ""
+    calories_min: float | None = None
+    calories_max: float | None = None
+    protein_min: float | None = None
+    protein_max: float | None = None
+    fat_min: float | None = None
+    fat_max: float | None = None
+    carbs_min: float | None = None
+    carbs_max: float | None = None
+    uncertainty_model_type: str | None = None
+    is_approximate_range: bool | None = None
 
 
 @dataclass(slots=True)
@@ -2047,6 +2068,18 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
             or total_carbs is not None
         )
 
+    calories_min = _to_float(payload.get("calories_min"))
+    calories_max = _to_float(payload.get("calories_max"))
+    protein_min = _to_float(payload.get("protein_min"))
+    protein_max = _to_float(payload.get("protein_max"))
+    fat_min = _to_float(payload.get("fat_min"))
+    fat_max = _to_float(payload.get("fat_max"))
+    carbs_min = _to_float(payload.get("carbs_min"))
+    carbs_max = _to_float(payload.get("carbs_max"))
+    uncertainty_model_type = payload.get("uncertainty_model_type")
+    is_approx_raw = payload.get("is_approximate_range")
+    is_approximate_range = bool(is_approx_raw) if is_approx_raw is not None else None
+
     return NutritionRecord(
         is_food=is_food,
         meal_name=meal_name,
@@ -2058,6 +2091,16 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
         confidence=confidence,
         raw_summary=raw_summary,
         display_name=display_name,
+        calories_min=calories_min,
+        calories_max=calories_max,
+        protein_min=protein_min,
+        protein_max=protein_max,
+        fat_min=fat_min,
+        fat_max=fat_max,
+        carbs_min=carbs_min,
+        carbs_max=carbs_max,
+        uncertainty_model_type=str(uncertainty_model_type) if uncertainty_model_type else None,
+        is_approximate_range=is_approximate_range,
     )
 
 
@@ -2129,6 +2172,7 @@ class HealBiteNutritionDiary:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
+            ensure_nutrition_diary_v2_schema(conn)
 
     async def analyze_and_maybe_log(
         self,
@@ -2842,9 +2886,19 @@ class HealBiteNutritionDiary:
             confidence=_coerce_confidence(record_payload.get("confidence")),
             raw_summary=str(record_payload.get("raw_summary") or record_payload.get("meal_name") or "Meal"),
             display_name=_normalize_meal_name_text(
-                record_payload.get("display_name") or record_payload.get("meal_name") or "\u0411\u043b\u044e\u0434\u043e",
-                "\u0411\u043b\u044e\u0434\u043e",
+                record_payload.get("display_name") or record_payload.get("meal_name") or "Блюдо",
+                "Блюдо",
             ),
+            calories_min=_to_float(record_payload.get("calories_min")),
+            calories_max=_to_float(record_payload.get("calories_max")),
+            protein_min=_to_float(record_payload.get("protein_min")),
+            protein_max=_to_float(record_payload.get("protein_max")),
+            fat_min=_to_float(record_payload.get("fat_min")),
+            fat_max=_to_float(record_payload.get("fat_max")),
+            carbs_min=_to_float(record_payload.get("carbs_min")),
+            carbs_max=_to_float(record_payload.get("carbs_max")),
+            uncertainty_model_type=str(record_payload.get("uncertainty_model_type")) if record_payload.get("uncertainty_model_type") else None,
+            is_approximate_range=bool(record_payload.get("is_approximate_range")) if record_payload.get("is_approximate_range") is not None else None,
         )
         return PendingMealPayload(
             user_id=int(user_id),
@@ -2878,6 +2932,10 @@ class HealBiteNutritionDiary:
         occurred_at_sql = _sqlite_timestamp(occurred_at)
         stored_meal_name = _record_display_name(record)
         items_json = json.dumps(record.items, ensure_ascii=False)
+        is_approx = (
+            1 if record.is_approximate_range is True
+            else (0 if record.is_approximate_range is False else None)
+        )
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
@@ -2894,9 +2952,19 @@ class HealBiteNutritionDiary:
                     occurred_at,
                     raw_summary,
                     image_ref,
-                    qdrant_indexed
+                    qdrant_indexed,
+                    calories_min,
+                    calories_max,
+                    protein_min,
+                    protein_max,
+                    fat_min,
+                    fat_max,
+                    carbs_min,
+                    carbs_max,
+                    uncertainty_model_type,
+                    is_approximate_range
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_user_id,
@@ -2911,6 +2979,16 @@ class HealBiteNutritionDiary:
                     occurred_at_sql,
                     record.raw_summary,
                     image_ref,
+                    record.calories_min,
+                    record.calories_max,
+                    record.protein_min,
+                    record.protein_max,
+                    record.fat_min,
+                    record.fat_max,
+                    record.carbs_min,
+                    record.carbs_max,
+                    record.uncertainty_model_type,
+                    is_approx,
                 ),
             )
             sqlite_id = int(cursor.lastrowid)
@@ -3227,6 +3305,28 @@ class HealBiteNutritionDiary:
             "fat_g": fat_total,
             "carbs_g": carbs_total,
         }
+        has_intervals = any(
+            row["calories_min"] is not None or row["calories_max"] is not None
+            for row in rows
+        )
+        if has_intervals:
+            cal_min = sum(float(row["calories_min"] if row["calories_min"] is not None else (row["calories_kcal"] or 0.0)) for row in rows)
+            cal_max = sum(float(row["calories_max"] if row["calories_max"] is not None else (row["calories_kcal"] or 0.0)) for row in rows)
+            prot_min = sum(float(row["protein_min"] if row["protein_min"] is not None else (row["protein_g"] or 0.0)) for row in rows)
+            prot_max = sum(float(row["protein_max"] if row["protein_max"] is not None else (row["protein_g"] or 0.0)) for row in rows)
+            fat_min = sum(float(row["fat_min"] if row["fat_min"] is not None else (row["fat_g"] or 0.0)) for row in rows)
+            fat_max = sum(float(row["fat_max"] if row["fat_max"] is not None else (row["fat_g"] or 0.0)) for row in rows)
+            carbs_min = sum(float(row["carbs_min"] if row["carbs_min"] is not None else (row["carbs_g"] or 0.0)) for row in rows)
+            carbs_max = sum(float(row["carbs_max"] if row["carbs_max"] is not None else (row["carbs_g"] or 0.0)) for row in rows)
+            intervals: dict[str, dict[str, float]] | None = {
+                "calories_kcal": {"min": round(cal_min, 1), "center": round(calories_total, 1), "max": round(cal_max, 1)},
+                "protein_g": {"min": round(prot_min, 1), "center": round(protein_total, 1), "max": round(prot_max, 1)},
+                "fat_g": {"min": round(fat_min, 1), "center": round(fat_total, 1), "max": round(fat_max, 1)},
+                "carbs_g": {"min": round(carbs_min, 1), "center": round(carbs_total, 1), "max": round(carbs_max, 1)},
+            }
+        else:
+            intervals = None
+
         return {
             "entries": entries,
             "entry_count": len(entries),
@@ -3239,6 +3339,8 @@ class HealBiteNutritionDiary:
             "incomplete_entry_count": incomplete_entry_count,
             "complete_entry_count": complete_entry_count,
             "known_subtotal": known_subtotal,
+            "has_intervals": has_intervals,
+            "intervals": intervals,
             "days": normalized_days,
             "period_key": period_key,
             "period_label": period_label,

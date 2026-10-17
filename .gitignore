@@ -143,3 +143,7 @@ memory_capsules/
 *.db
 *.sqlite3
 recipe_corpus/reports/*.db
+nutrition_catalog_v2.db*
+*.db-shm
+*.db-wal
+tests/benchmarks/photo_kbzhu_v1/images/

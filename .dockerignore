@@ -80,6 +80,8 @@ System Volume Information/
 *.sqlite3
 *.sqlite-wal
 *.sqlite-shm
+nutrition_catalog_v2.db*
+tests/benchmarks/photo_kbzhu_v1/images/
 data/
 .hermes-docker/
 .notebooklm-home/

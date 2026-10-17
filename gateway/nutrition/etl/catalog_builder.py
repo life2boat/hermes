@@ -27,6 +27,8 @@ def build_nutrition_catalog(
     output_db_path: Path | str,
     output_manifest_path: Path | str | None = None,
     extra_items: Sequence[ETLFoodItem] | None = None,
+    usda_source_path: Path | str | None = None,
+    fineli_source_path: Path | str | None = None,
 ) -> tuple[HFKBCatalog, CatalogManifest]:
     """
     Builds nutrition_catalog_v2.db and corresponding manifest.
@@ -38,8 +40,8 @@ def build_nutrition_catalog(
     catalog = HFKBCatalog.initialize_database(db_path)
 
     # 1. Extract from all sources
-    usda_items = extract_usda_items()
-    fineli_items = extract_fineli_items()
+    usda_items = extract_usda_items(Path(usda_source_path) if usda_source_path else None)
+    fineli_items = extract_fineli_items(Path(fineli_source_path) if fineli_source_path else None)
     skurikhin_items = extract_skurikhin_items()
 
     all_items: list[ETLFoodItem] = []

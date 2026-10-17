@@ -450,11 +450,183 @@ _VERIFIED_USDA_SEED_RECORDS: tuple[dict[str, Any], ...] = (
 )
 
 
+def _parse_usda_json(path: Path) -> list[ETLFoodItem]:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    raw_list: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        raw_list = data
+    elif isinstance(data, dict):
+        for key in ("FoundationFoods", "SRLegacyFoods", "SurveyFoods", "foods", "items"):
+            if key in data and isinstance(data[key], list):
+                raw_list.extend(data[key])
+        if not raw_list and ("fdcId" in data or "fdc_id" in data):
+            raw_list = [data]
+
+    items: list[ETLFoodItem] = []
+    for raw in raw_list:
+        if not isinstance(raw, dict):
+            continue
+        fdc_id = str(raw.get("fdcId") or raw.get("fdc_id") or raw.get("id") or "").strip()
+        if not fdc_id:
+            continue
+        desc = str(raw.get("description") or raw.get("name_en") or raw.get("name") or "").strip()
+        name_ru = str(raw.get("name_ru") or raw.get("description_ru") or desc).strip()
+        category = "general"
+        food_cat = raw.get("foodCategory") or raw.get("category")
+        if isinstance(food_cat, dict):
+            category = str(food_cat.get("description") or "general").strip()
+        elif food_cat:
+            category = str(food_cat).strip()
+
+        cals = 0.0
+        prot = 0.0
+        fat = 0.0
+        carbs = 0.0
+        fiber = 0.0
+        sugars = 0.0
+
+        if "calories_kcal" in raw:
+            cals = float(raw["calories_kcal"])
+            prot = float(raw.get("protein_g", 0.0))
+            fat = float(raw.get("fat_g", 0.0))
+            carbs = float(raw.get("carbs_g", 0.0))
+            fiber = float(raw.get("fiber_g", 0.0))
+            sugars = float(raw.get("sugars_g", 0.0))
+        elif "foodNutrients" in raw and isinstance(raw["foodNutrients"], list):
+            for n in raw["foodNutrients"]:
+                if not isinstance(n, dict):
+                    continue
+                nutr_name = ""
+                nutr_id = n.get("nutrientId") or (n.get("nutrient", {}).get("id") if isinstance(n.get("nutrient"), dict) else None)
+                if "nutrientName" in n:
+                    nutr_name = str(n["nutrientName"]).lower()
+                elif isinstance(n.get("nutrient"), dict) and "name" in n["nutrient"]:
+                    nutr_name = str(n["nutrient"]["name"]).lower()
+                amount = float(n.get("amount") or n.get("value") or 0.0)
+
+                if nutr_id == 1008 or "energy" in nutr_name or "kcal" in nutr_name:
+                    cals = amount
+                elif nutr_id == 1003 or "protein" in nutr_name:
+                    prot = amount
+                elif nutr_id == 1004 or "total lipid" in nutr_name or nutr_name == "fat":
+                    fat = amount
+                elif nutr_id == 1005 or "carbohydrate" in nutr_name:
+                    carbs = amount
+                elif nutr_id == 1079 or "fiber" in nutr_name:
+                    fiber = amount
+                elif nutr_id == 2000 or "sugars" in nutr_name:
+                    sugars = amount
+
+        aliases = list(raw.get("aliases", []))
+        if not aliases and name_ru:
+            aliases.append(name_ru.casefold())
+
+        portions = []
+        for p in raw.get("portions", []):
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                portions.append((str(p[0]), float(p[1])))
+            elif isinstance(p, dict):
+                portions.append((str(p.get("name") or "порция"), float(p.get("grams") or 100.0)))
+
+        item = ETLFoodItem(
+            food_id=f"usda-{fdc_id}",
+            name_ru=name_ru,
+            name_en=desc,
+            category=category,
+            cooking_state=str(raw.get("cooking_state") or "raw"),
+            source_dataset="USDA_SR_LEGACY",
+            source_id=f"USDA-FDC-{fdc_id}",
+            dataset_version=str(raw.get("dataset_version") or "USDA-FDC-2024"),
+            source_provenance=f"USDA FoodData Central, FDC ID {fdc_id}: {desc}",
+            calories_kcal=round(cals, 1),
+            protein_g=round(prot, 1),
+            fat_g=round(fat, 1),
+            carbs_g=round(carbs, 1),
+            fiber_g=round(fiber, 1),
+            sugars_g=round(sugars, 1),
+            reference_confidence=float(raw.get("reference_confidence", 0.95)),
+            aliases=tuple(aliases),
+            portions=tuple(portions),
+        )
+        items.append(item)
+    return items
+
+
+def _parse_usda_csv(path: Path) -> list[ETLFoodItem]:
+    import csv
+    items: list[ETLFoodItem] = []
+    with path.open("r", encoding="utf-8") as f:
+        sample = f.read(2048)
+        f.seek(0)
+        delimiter = ";" if ";" in sample and "," not in sample else ","
+        reader = csv.DictReader(f, delimiter=delimiter)
+        for row in reader:
+            fdc_id = str(row.get("fdc_id") or row.get("fdcId") or row.get("id") or "").strip()
+            if not fdc_id:
+                continue
+            desc = str(row.get("description") or row.get("name_en") or row.get("name") or "").strip()
+            name_ru = str(row.get("name_ru") or desc).strip()
+            category = str(row.get("category") or row.get("food_category") or "general").strip()
+
+            cals = float(row.get("calories") or row.get("calories_kcal") or row.get("energy") or 0.0)
+            prot = float(row.get("protein") or row.get("protein_g") or 0.0)
+            fat = float(row.get("fat") or row.get("fat_g") or row.get("lipid") or 0.0)
+            carbs = float(row.get("carbohydrates") or row.get("carbs_g") or row.get("carbs") or 0.0)
+            fiber = float(row.get("fiber") or row.get("fiber_g") or 0.0)
+            sugars = float(row.get("sugars") or row.get("sugars_g") or 0.0)
+
+            raw_aliases = row.get("aliases", "")
+            aliases = tuple(a.strip() for a in raw_aliases.split(";") if a.strip()) if raw_aliases else (name_ru.casefold(),)
+
+            item = ETLFoodItem(
+                food_id=f"usda-{fdc_id}",
+                name_ru=name_ru,
+                name_en=desc,
+                category=category,
+                cooking_state=str(row.get("cooking_state") or "raw"),
+                source_dataset="USDA_SR_LEGACY",
+                source_id=f"USDA-FDC-{fdc_id}",
+                dataset_version=str(row.get("dataset_version") or "USDA-FDC-2024"),
+                source_provenance=f"USDA FoodData Central, FDC ID {fdc_id}: {desc}",
+                calories_kcal=round(cals, 1),
+                protein_g=round(prot, 1),
+                fat_g=round(fat, 1),
+                carbs_g=round(carbs, 1),
+                fiber_g=round(fiber, 1),
+                sugars_g=round(sugars, 1),
+                reference_confidence=float(row.get("reference_confidence") or 0.95),
+                aliases=aliases,
+                portions=(),
+            )
+            items.append(item)
+    return items
+
+
 def extract_usda_items(custom_source_path: Path | None = None) -> list[ETLFoodItem]:
     """
     Extracts and standardizes USDA FoodData Central items into ETLFoodItem records.
     If custom_source_path is provided, reads raw USDA export JSON/CSV; otherwise uses verified seed set.
     """
+    if custom_source_path is not None:
+        p = Path(custom_source_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Custom USDA source path not found: {p}")
+        if p.is_dir():
+            json_files = list(p.glob("*.json"))
+            if json_files:
+                return _parse_usda_json(json_files[0])
+            csv_files = list(p.glob("*.csv"))
+            if csv_files:
+                return _parse_usda_csv(csv_files[0])
+            raise ValueError(f"No JSON or CSV files found in USDA directory: {p}")
+        if p.suffix.lower() == ".json":
+            return _parse_usda_json(p)
+        if p.suffix.lower() == ".csv":
+            return _parse_usda_csv(p)
+        raise ValueError(f"Unsupported USDA source format: {p.suffix}")
+
     items: list[ETLFoodItem] = []
 
     for raw in _VERIFIED_USDA_SEED_RECORDS:

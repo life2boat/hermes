@@ -182,29 +182,37 @@ def load_and_verify_catalog_binding(
         )
 
     manifest: CatalogManifest | None = None
-    if manifest_path is not None and manifest_path.exists():
-        try:
-            with manifest_path.open("r", encoding="utf-8") as f:
-                manifest_data = json.load(f)
-            manifest = validate_catalog_manifest(manifest_data)
-        except Exception as exc:
-            return RuntimeCatalogBinding(
-                catalog_path=catalog_file,
-                manifest_path=manifest_path,
-                manifest=None,
-                is_verified=False,
-                verification_error=f"Failed to load or parse manifest: {exc}",
-            )
+    if manifest_path is None or not manifest_path.exists():
+        return RuntimeCatalogBinding(
+            catalog_path=catalog_file,
+            manifest_path=manifest_path,
+            manifest=None,
+            is_verified=False,
+            verification_error=f"Catalog manifest not found at {manifest_path or 'expected colocated path'}",
+        )
 
-        ok, err = verify_catalog_artifact(catalog_file, manifest)
-        if not ok:
-            return RuntimeCatalogBinding(
-                catalog_path=catalog_file,
-                manifest_path=manifest_path,
-                manifest=manifest,
-                is_verified=False,
-                verification_error=err,
-            )
+    try:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+        manifest = validate_catalog_manifest(manifest_data)
+    except Exception as exc:
+        return RuntimeCatalogBinding(
+            catalog_path=catalog_file,
+            manifest_path=manifest_path,
+            manifest=None,
+            is_verified=False,
+            verification_error=f"Failed to load or parse manifest: {exc}",
+        )
+
+    ok, err = verify_catalog_artifact(catalog_file, manifest)
+    if not ok:
+        return RuntimeCatalogBinding(
+            catalog_path=catalog_file,
+            manifest_path=manifest_path,
+            manifest=manifest,
+            is_verified=False,
+            verification_error=err,
+        )
 
     # Verify SQLite integrity
     try:

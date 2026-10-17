@@ -352,6 +352,7 @@ class PendingFoodVisionInventory:
     occurred_at: datetime | None = None
     kind: str = PENDING_INVENTORY_KIND
     needs_user_confirmation: bool = False
+    calculation_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -385,6 +386,18 @@ class NutritionComponentEstimate:
     source_id: str = ""
     cooking_state: str = ""
     source_provenance: str = ""
+    catalog_version: str = ""
+    estimation_method: str = ""
+    uncertainty_model_type: str = ""
+    calories_min: float | None = None
+    calories_max: float | None = None
+    protein_min: float | None = None
+    protein_max: float | None = None
+    fat_min: float | None = None
+    fat_max: float | None = None
+    carbs_min: float | None = None
+    carbs_max: float | None = None
+    is_user_confirmed: bool = False
 
 
 @dataclass(slots=True)
@@ -1186,7 +1199,7 @@ def _maybe_proposed_selected_grams(grams_min: float | None, grams_max: float | N
 
 def _infer_inventory_sauce_flag(name: str) -> bool:
     normalized = _normalize_meal_name_text(name, "").casefold()
-    return any(token in normalized for token in ("\u0441\u043e\u0443\u0441", "\u043c\u0430\u0439\u043e\u043d\u0435\u0437", "\u043a\u0435\u0442\u0447\u0443\u043f", "\u0433\u043e\u0440\u0447\u0438\u0446", "\u0437\u0430\u043f\u0440\u0430\u0432\u043a"))
+    return any(token in normalized for token in ("соус", "майонез", "кетчуп", "горчиц", "заправк"))
 
 
 def _normalize_inventory_item_name(value: Any, *, fallback: str = "") -> str:
@@ -1194,6 +1207,241 @@ def _normalize_inventory_item_name(value: Any, *, fallback: str = "") -> str:
     if not normalized:
         return fallback
     return normalized[:_MAX_PENDING_INVENTORY_NAME_LENGTH]
+
+
+def _detect_and_deduplicate_composite_inventory(
+    items: list[PendingFoodVisionItem],
+) -> tuple[list[PendingFoodVisionItem], Any | None]:
+    if len(items) <= 1:
+        return list(items), None
+
+    from gateway.nutrition.contracts import RecipeMassConstraint
+    from gateway.nutrition.search import normalize_russian_food_query
+
+    for i, candidate in enumerate(items):
+        cand_norm = normalize_russian_food_query(candidate.normalized_name or candidate.visible_name)
+        connectors = (" с ", " со ", " из ", " под ")
+        has_connector = any(conn in cand_norm for conn in connectors)
+        has_dish_word = any(
+            w in cand_norm
+            for w in ("суп", "борщ", "салат", "паста", "макароны", "пицца", "каша", "рагу", "плов", "бутерброд", "омлет", "яичница")
+        )
+        if not (has_connector or has_dish_word):
+            continue
+
+        other_items = [it for j, it in enumerate(items) if j != i]
+        matching_others = []
+        for other in other_items:
+            other_norm = normalize_russian_food_query(other.normalized_name or other.visible_name)
+            other_tokens = [tok for tok in other_norm.split() if len(tok) > 2]
+            def _stem(t: str) -> str:
+                return t[:-2] if len(t) > 5 else (t[:-1] if len(t) > 4 else t)
+            if other_tokens and any(_stem(tok) in cand_norm for tok in other_tokens):
+                matching_others.append(other)
+
+        if matching_others:
+            parent_min = candidate.estimated_grams_min
+            parent_max = candidate.estimated_grams_max
+            if parent_min is None and parent_max is None and candidate.selected_grams:
+                parent_min = candidate.selected_grams * 0.8
+                parent_max = candidate.selected_grams * 1.2
+            elif parent_min is not None and parent_max is not None:
+                pass
+            else:
+                parent_min = (candidate.selected_grams or 200.0) * 0.8
+                parent_max = (candidate.selected_grams or 200.0) * 1.2
+
+            constraint = RecipeMassConstraint(
+                total_dish_mass_min_g=parent_min,
+                total_dish_mass_max_g=parent_max,
+                recipe_ingredient_names=frozenset(
+                    (it.normalized_name or it.visible_name).casefold() for it in matching_others
+                ),
+            )
+            deduped = [it for it in items if it is not candidate]
+            return deduped, constraint
+
+    return list(items), None
+
+
+def _build_inventory_calculation_snapshot(
+    inventory: PendingFoodVisionInventory,
+) -> dict[str, Any] | None:
+    if not inventory.items:
+        return None
+
+    from gateway.nutrition.contracts import MassBounds
+    from gateway.nutrition.engine import calculate_meal_nutrition, resolve_and_calculate_component
+    from gateway.nutrition.hipe import estimate_portion_mass
+
+    deduped_items, recipe_constraint = _detect_and_deduplicate_composite_inventory(inventory.items)
+
+    components = []
+    for item in deduped_items:
+        if item.selected_grams is not None:
+            if getattr(item, "user_modified", False):
+                bounds = MassBounds(
+                    grams_min=float(item.selected_grams),
+                    grams_center=float(item.selected_grams),
+                    grams_max=float(item.selected_grams),
+                    is_approximate_plausible_range=False,
+                    is_user_confirmed=True,
+                )
+            else:
+                min_g = float(item.estimated_grams_min) if item.estimated_grams_min is not None else float(item.selected_grams) * 0.8
+                max_g = float(item.estimated_grams_max) if item.estimated_grams_max is not None else float(item.selected_grams) * 1.2
+                bounds = MassBounds(
+                    grams_min=round(min_g, 1),
+                    grams_center=float(item.selected_grams),
+                    grams_max=round(max_g, 1),
+                    is_approximate_plausible_range=True,
+                    is_user_confirmed=False,
+                )
+        elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            center_g = (float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0
+            bounds = MassBounds(
+                grams_min=float(item.estimated_grams_min),
+                grams_center=round(center_g, 1),
+                grams_max=float(item.estimated_grams_max),
+                is_approximate_plausible_range=True,
+                is_user_confirmed=False,
+            )
+        else:
+            bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
+
+        comp = resolve_and_calculate_component(
+            item.normalized_name or item.visible_name,
+            bounds,
+            cooking_state=getattr(item, "preparation", "") or "cooked",
+        )
+        components.append(comp)
+
+    meal_names = [it.visible_name for it in deduped_items if it.visible_name]
+    meal_name = ", ".join(meal_names[:3]) if meal_names else "Прием пищи"
+
+    meal_estimate = calculate_meal_nutrition(
+        components,
+        meal_name=meal_name,
+        recipe_constraint=recipe_constraint,
+    )
+
+    has_unmapped = any(not c.nutrition_available for c in meal_estimate.components)
+
+    cal_int = meal_estimate.total_intervals.calories_kcal
+    prot_int = meal_estimate.total_intervals.protein_g
+    fat_int = meal_estimate.total_intervals.fat_g
+    carbs_int = meal_estimate.total_intervals.carbs_g
+
+    return {
+        "version": 1,
+        "meal_name": meal_estimate.meal_name,
+        "has_unmapped_components": has_unmapped,
+        "calories_kcal": cal_int.center_value if cal_int else None,
+        "protein_g": prot_int.center_value if prot_int else None,
+        "fat_g": fat_int.center_value if fat_int else None,
+        "carbs_g": carbs_int.center_value if carbs_int else None,
+        "calories_min": cal_int.min_value if cal_int else None,
+        "calories_max": cal_int.max_value if cal_int else None,
+        "protein_min": prot_int.min_value if prot_int else None,
+        "protein_max": prot_int.max_value if prot_int else None,
+        "fat_min": fat_int.min_value if fat_int else None,
+        "fat_max": fat_int.max_value if fat_int else None,
+        "carbs_min": carbs_int.min_value if carbs_int else None,
+        "carbs_max": carbs_int.max_value if carbs_int else None,
+        "uncertainty_model_type": getattr(meal_estimate.uncertainty_model_type, "value", str(meal_estimate.uncertainty_model_type)),
+        "is_approximate_range": bool(meal_estimate.is_approximate_plausible_range),
+        "components": [
+            {
+                "name": c.name,
+                "estimated_weight_g": c.mass_bounds.grams_center,
+                "grams_min": c.mass_bounds.grams_min,
+                "grams_max": c.mass_bounds.grams_max,
+                "is_user_confirmed": c.mass_bounds.is_user_confirmed,
+                "calories_kcal": c.intervals.calories_kcal.center_value if c.intervals and c.intervals.calories_kcal else None,
+                "protein_g": c.intervals.protein_g.center_value if c.intervals and c.intervals.protein_g else None,
+                "fat_g": c.intervals.fat_g.center_value if c.intervals and c.intervals.fat_g else None,
+                "carbs_g": c.intervals.carbs_g.center_value if c.intervals and c.intervals.carbs_g else None,
+                "calories_min": c.intervals.calories_kcal.min_value if c.intervals and c.intervals.calories_kcal else None,
+                "calories_max": c.intervals.calories_kcal.max_value if c.intervals and c.intervals.calories_kcal else None,
+                "protein_min": c.intervals.protein_g.min_value if c.intervals and c.intervals.protein_g else None,
+                "protein_max": c.intervals.protein_g.max_value if c.intervals and c.intervals.protein_g else None,
+                "fat_min": c.intervals.fat_g.min_value if c.intervals and c.intervals.fat_g else None,
+                "fat_max": c.intervals.fat_g.max_value if c.intervals and c.intervals.fat_g else None,
+                "carbs_min": c.intervals.carbs_g.min_value if c.intervals and c.intervals.carbs_g else None,
+                "carbs_max": c.intervals.carbs_g.max_value if c.intervals and c.intervals.carbs_g else None,
+                "nutrition_available": c.nutrition_available,
+                "source_id": getattr(c, "source_id", "") or "",
+                "catalog_version": getattr(c, "catalog_version", "hfkb_v2"),
+                "source_provenance": getattr(c, "source_provenance", "") or "",
+                "cooking_state": getattr(c, "cooking_state", "raw") or "",
+                "estimation_method": getattr(c, "estimation_method", "conservative_interval"),
+                "uncertainty_model_type": getattr(getattr(c, "uncertainty_model_type", None), "value", str(getattr(c, "uncertainty_model_type", "CONSERVATIVE_INTERVAL"))),
+            }
+            for c in meal_estimate.components
+        ],
+    }
+
+
+def _nutrition_record_from_snapshot(
+    snapshot: dict[str, Any],
+    inventory: PendingFoodVisionInventory,
+) -> NutritionRecord:
+    comps = snapshot.get("components") or []
+    items = []
+    for c in comps:
+        items.append({
+            "name": c.get("name"),
+            "estimated_weight_g": c.get("estimated_weight_g"),
+            "grams_min": c.get("grams_min"),
+            "grams_max": c.get("grams_max"),
+            "is_user_confirmed": c.get("is_user_confirmed"),
+            "calories_kcal": c.get("calories_kcal"),
+            "protein_g": c.get("protein_g"),
+            "fat_g": c.get("fat_g"),
+            "carbs_g": c.get("carbs_g"),
+            "calories_min": c.get("calories_min"),
+            "calories_max": c.get("calories_max"),
+            "protein_min": c.get("protein_min"),
+            "protein_max": c.get("protein_max"),
+            "fat_min": c.get("fat_min"),
+            "fat_max": c.get("fat_max"),
+            "carbs_min": c.get("carbs_min"),
+            "carbs_max": c.get("carbs_max"),
+            "nutrition_available": c.get("nutrition_available"),
+            "source_id": c.get("source_id"),
+            "catalog_version": c.get("catalog_version"),
+            "source_provenance": c.get("source_provenance"),
+            "cooking_state": c.get("cooking_state"),
+            "estimation_method": c.get("estimation_method"),
+            "uncertainty_model_type": c.get("uncertainty_model_type"),
+        })
+    cal = snapshot.get("calories_kcal")
+    cal_str = f"{int(round(cal))} ккал" if cal is not None else "КБЖУ не найдено"
+    raw_summary = (
+        f"{snapshot.get('meal_name', 'Прием пищи')}: {cal_str}"
+    )
+    return NutritionRecord(
+        is_food=True,
+        meal_name=snapshot.get("meal_name", "Прием пищи"),
+        display_name=snapshot.get("meal_name", "Прием пищи"),
+        items=items,
+        calories_kcal=snapshot.get("calories_kcal"),
+        protein_g=snapshot.get("protein_g"),
+        fat_g=snapshot.get("fat_g"),
+        carbs_g=snapshot.get("carbs_g"),
+        calories_min=snapshot.get("calories_min"),
+        calories_max=snapshot.get("calories_max"),
+        protein_min=snapshot.get("protein_min"),
+        protein_max=snapshot.get("protein_max"),
+        fat_min=snapshot.get("fat_min"),
+        fat_max=snapshot.get("fat_max"),
+        carbs_min=snapshot.get("carbs_min"),
+        carbs_max=snapshot.get("carbs_max"),
+        confidence=inventory.overall_confidence,
+        raw_summary=raw_summary,
+        uncertainty_model_type=snapshot.get("uncertainty_model_type"),
+        is_approximate_range=snapshot.get("is_approximate_range"),
+    )
 
 
 def _pending_inventory_from_food_vision(
@@ -1210,14 +1458,17 @@ def _pending_inventory_from_food_vision(
     expires_at = created_at + (ttl if ttl is not None else PENDING_MEAL_TTL)
     items: list[PendingFoodVisionItem] = []
     for index, item in enumerate(inventory.items, start=1):
+        g_min = item.estimated_grams_min
+        g_max = item.estimated_grams_max
+        sel_g = _maybe_proposed_selected_grams(g_min, g_max)
         items.append(PendingFoodVisionItem(
             index=index,
             visible_name=item.visible_name,
             normalized_name=item.normalized_name,
             confidence=item.confidence,
-            estimated_grams_min=item.estimated_grams_min,
-            estimated_grams_max=item.estimated_grams_max,
-            selected_grams=_maybe_proposed_selected_grams(item.estimated_grams_min, item.estimated_grams_max),
+            estimated_grams_min=g_min,
+            estimated_grams_max=g_max,
+            selected_grams=sel_g,
             preparation=item.preparation,
             is_sauce=item.is_sauce,
             uncertainty=item.uncertainty,
@@ -1229,7 +1480,7 @@ def _pending_inventory_from_food_vision(
         "occurred_at": _sqlite_timestamp(occurred_at),
     }
     inventory_id = inventory_id or hashlib.sha256(json.dumps(inventory_hash_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    return PendingFoodVisionInventory(
+    res = PendingFoodVisionInventory(
         kind=PENDING_INVENTORY_KIND,
         state=PENDING_INVENTORY_STATE,
         inventory_id=inventory_id,
@@ -1245,6 +1496,8 @@ def _pending_inventory_from_food_vision(
         created_at=created_at,
         expires_at=expires_at,
     )
+    res.calculation_snapshot = _build_inventory_calculation_snapshot(res)
+    return res
 
 
 def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
@@ -1273,6 +1526,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "warnings": payload.warnings,
         "image_ref": payload.image_ref,
         "occurred_at": _sqlite_timestamp(payload.occurred_at),
+        "calculation_snapshot": payload.calculation_snapshot,
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -1318,6 +1572,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
         created_at=created_at,
         expires_at=expires_at,
+        calculation_snapshot=payload.get("calculation_snapshot"),
     )
 
 
@@ -1337,6 +1592,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         occurred_at=payload.occurred_at,
         created_at=payload.created_at,
         expires_at=payload.expires_at,
+        calculation_snapshot=dict(payload.calculation_snapshot) if payload.calculation_snapshot else None,
     )
 
 
@@ -1348,6 +1604,10 @@ def _pending_inventory_notice_lines(notice: str | None) -> list[str]:
 
 def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingFoodVisionInventory, *, notice: str | None = None) -> str:
     pending_inventory = inventory if isinstance(inventory, PendingFoodVisionInventory) else _pending_inventory_from_food_vision(0, inventory)
+    if pending_inventory.calculation_snapshot is None:
+        pending_inventory.calculation_snapshot = _build_inventory_calculation_snapshot(pending_inventory)
+    snapshot = pending_inventory.calculation_snapshot
+
     lines = ["Я вижу:", ""]
     has_unmapped_component = False
     all_weights_present = True
@@ -1357,7 +1617,9 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
     total_carbs = 0.0
     has_any_nutrition = False
 
-    for item in pending_inventory.items:
+    snap_comps = snapshot.get("components", []) if snapshot else []
+
+    for idx, item in enumerate(pending_inventory.items):
         detail = f"{item.index}. {html.escape(item.visible_name)} — {_format_food_vision_grams(item)}"
         extras: list[str] = []
         if item.preparation:
@@ -1369,36 +1631,61 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
                 extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
             else:
                 extras.append(f"расчётный вес: ~{_format_grams(item.selected_grams)}")
+        elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
+            extras.append(f"расчётный вес: ~{_format_grams(mid)}")
         else:
             extras.append("вес не подтверждён")
             all_weights_present = False
         if extras:
             detail += f" ({'; '.join(extras)})"
 
-        comp_estimate = _estimate_component_nutrition(item)
-        if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
-            detail += (
-                f" · ~{int(round(comp_estimate.calories_kcal))} ккал "
-                f"· Б {_format_grams(comp_estimate.protein_g)} "
-                f"· Ж {_format_grams(comp_estimate.fat_g)} "
-                f"· У {_format_grams(comp_estimate.carbs_g)}"
-            )
-            total_calories += comp_estimate.calories_kcal
-            total_protein += comp_estimate.protein_g or 0.0
-            total_fat += comp_estimate.fat_g or 0.0
-            total_carbs += comp_estimate.carbs_g or 0.0
-            has_any_nutrition = True
-        elif comp_estimate is not None and not comp_estimate.nutrition_available:
-            detail += " · (КБЖУ не найдено)"
-            has_unmapped_component = True
+        comp_info = snap_comps[idx] if idx < len(snap_comps) else None
+        if comp_info is not None:
+            if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
+                cal = comp_info.get("calories_kcal")
+                prot = comp_info.get("protein_g")
+                fat = comp_info.get("fat_g")
+                carbs = comp_info.get("carbs_g")
+                detail += (
+                    f" · ~{int(round(cal))} ккал "
+                    f"· Б {_format_grams(prot)} "
+                    f"· Ж {_format_grams(fat)} "
+                    f"· У {_format_grams(carbs)}"
+                )
+                has_any_nutrition = True
+            elif not comp_info.get("nutrition_available"):
+                detail += " · (КБЖУ не найдено)"
+                has_unmapped_component = True
+        else:
+            comp_estimate = _estimate_component_nutrition(item)
+            if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
+                detail += (
+                    f" · ~{int(round(comp_estimate.calories_kcal))} ккал "
+                    f"· Б {_format_grams(comp_estimate.protein_g)} "
+                    f"· Ж {_format_grams(comp_estimate.fat_g)} "
+                    f"· У {_format_grams(comp_estimate.carbs_g)}"
+                )
+                has_any_nutrition = True
+            elif comp_estimate is not None and not comp_estimate.nutrition_available:
+                detail += " · (КБЖУ не найдено)"
+                has_unmapped_component = True
 
         lines.append(detail)
+
+    if snapshot:
+        total_calories = float(snapshot.get("calories_kcal") or 0.0)
+        total_protein = float(snapshot.get("protein_g") or 0.0)
+        total_fat = float(snapshot.get("fat_g") or 0.0)
+        total_carbs = float(snapshot.get("carbs_g") or 0.0)
+        has_unmapped_component = bool(snapshot.get("has_unmapped_components"))
+        has_any_nutrition = total_calories > 0.0 or has_any_nutrition
 
     if pending_inventory.warnings:
         lines.extend(["", "Уточнения:"])
         lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
 
-    if all_weights_present and has_any_nutrition:
+    if (all_weights_present or (snapshot and total_calories > 0.0)) and has_any_nutrition:
         total_label = "Итого (частично)" if has_unmapped_component else "Итого"
         lines.extend([
             "",
@@ -1407,6 +1694,12 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             f"Ж {_format_grams(round(total_fat, 1))} · "
             f"У {_format_grams(round(total_carbs, 1))}",
         ])
+        if snapshot and snapshot.get("is_approximate_range") and snapshot.get("calories_min") and snapshot.get("calories_max"):
+            c_min = int(round(snapshot["calories_min"]))
+            c_max = int(round(snapshot["calories_max"]))
+            if c_min != c_max:
+                lines.append(f"Ориентировочный диапазон: ~{c_min}–{c_max} ккал (приблизительный интервал)")
+
     if has_unmapped_component:
         lines.extend([
             "",
@@ -1438,14 +1731,19 @@ def calculate_food_vision_meal_nutrition(
 ) -> Any:
     """
     Computes MealNutritionEstimate from a FoodVisionInventory or PendingFoodVisionInventory
-    using HIPE portion priors and the Nutrition Calculation Engine.
+    using HIPE portion priors, composite deduplication, and the Nutrition Calculation Engine.
     """
     from gateway.nutrition.contracts import MassBounds
     from gateway.nutrition.engine import calculate_meal_nutrition, resolve_and_calculate_component
     from gateway.nutrition.hipe import estimate_portion_mass
 
+    items = list(inventory.items) if hasattr(inventory, "items") else []
+    if recipe_constraint is None:
+        deduped_items, auto_constraint = _detect_and_deduplicate_composite_inventory(items)
+        items = deduped_items
+        recipe_constraint = auto_constraint
+
     components = []
-    items = inventory.items if hasattr(inventory, "items") else []
     for item in items:
         if item.selected_grams is not None:
             if getattr(item, "user_modified", False):
@@ -1498,10 +1796,13 @@ def build_food_vision_inventory_keyboard(
 ) -> list[list[dict[str, str]]]:
     user_id = int(inventory.user_id or 0)
     inv_id = str(inventory.inventory_id or "")
-    has_unmapped = any(
-        (comp := _estimate_component_nutrition(item)) is not None and not comp.nutrition_available
-        for item in inventory.items
-    )
+    if inventory.calculation_snapshot is not None:
+        has_unmapped = bool(inventory.calculation_snapshot.get("has_unmapped_components"))
+    else:
+        has_unmapped = any(
+            (comp := _estimate_component_nutrition(item)) is not None and not comp.nutrition_available
+            for item in inventory.items
+        )
     if has_unmapped:
         save_button = {
             "text": "✅ Сохранить без КБЖУ",
@@ -1782,16 +2083,69 @@ def _build_component_record(
     )
 
 
-def calculate_inventory_nutrition(inventory: PendingFoodVisionInventory) -> InventoryNutritionCalculationResult:
-    readiness, missing_indexes = _pending_inventory_readiness(inventory)
-    if readiness != READY_FOR_NUTRITION_CALCULATION:
+def calculate_inventory_nutrition(
+    inventory: PendingFoodVisionInventory,
+    *,
+    require_weights: bool = False,
+) -> InventoryNutritionCalculationResult:
+    snapshot = inventory.calculation_snapshot
+    if snapshot is None:
+        snapshot = _build_inventory_calculation_snapshot(inventory)
+        inventory.calculation_snapshot = snapshot
+
+    if require_weights or snapshot is None:
+        readiness, missing_indexes = _pending_inventory_readiness(inventory)
+        if readiness != READY_FOR_NUTRITION_CALCULATION:
+            return InventoryNutritionCalculationResult(
+                status=readiness,
+                components=[],
+                missing_indexes=missing_indexes,
+                blocked_indexes=[],
+                reason="weights_missing" if missing_indexes else "invalid_inventory_state",
+            )
+
+    if snapshot is not None:
+        blocked_indexes = []
+        components = []
+        for idx, c in enumerate(snapshot.get("components", [])):
+            if not c.get("nutrition_available"):
+                blocked_indexes.append(idx + 1)
+            components.append(
+                NutritionComponentEstimate(
+                    name=c.get("name", ""),
+                    grams=float(c.get("estimated_weight_g") or 0.0),
+                    calories_kcal=c.get("calories_kcal"),
+                    protein_g=c.get("protein_g"),
+                    fat_g=c.get("fat_g"),
+                    carbs_g=c.get("carbs_g"),
+                    nutrition_available=bool(c.get("nutrition_available")),
+                    source_id=c.get("source_id"),
+                    catalog_version=c.get("catalog_version"),
+                    source_provenance=c.get("source_provenance"),
+                    cooking_state=c.get("cooking_state"),
+                    estimation_method=c.get("estimation_method"),
+                    uncertainty_model_type=c.get("uncertainty_model_type"),
+                )
+            )
+
+        record = _nutrition_record_from_snapshot(snapshot, inventory)
+        if blocked_indexes:
+            return InventoryNutritionCalculationResult(
+                status=UNKNOWN_COMPONENT_BLOCKED,
+                components=components,
+                missing_indexes=[],
+                blocked_indexes=blocked_indexes,
+                reason="unknown_component",
+                record=record,
+            )
         return InventoryNutritionCalculationResult(
-            status=readiness,
-            components=[],
-            missing_indexes=missing_indexes,
+            status=READY_FOR_NUTRITION_CALCULATION,
+            components=components,
+            missing_indexes=[],
             blocked_indexes=[],
-            reason="weights_missing" if missing_indexes else "invalid_inventory_state",
+            record=record,
         )
+
     components: list[NutritionComponentEstimate] = []
     blocked_indexes: list[int] = []
     for item in inventory.items:
@@ -2392,6 +2746,7 @@ class HealBiteNutritionDiary:
                     }
                     for item in payload.items
                 ],
+                "calculation_snapshot": payload.calculation_snapshot,
             },
             ensure_ascii=False,
         )
@@ -2558,7 +2913,7 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
-        calculation = calculate_inventory_nutrition(payload)
+        calculation = calculate_inventory_nutrition(payload, require_weights=True)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
             return PendingInventoryReplyResult(
                 status="needs_weight_confirmation",
@@ -2618,13 +2973,14 @@ class HealBiteNutritionDiary:
         if updated is None:
             return PendingInventoryReplyResult(
                 status="invalid_action",
-                reply_text=format_food_vision_inventory_reply(payload, notice=error or "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0438\u0441\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435."),
+                reply_text=format_food_vision_inventory_reply(payload, notice=error or "Не удалось применить исправление."),
                 inventory=payload,
             )
+        updated.calculation_snapshot = _build_inventory_calculation_snapshot(updated)
         self._store_pending_inventory(updated)
         return PendingInventoryReplyResult(
             status="updated",
-            reply_text=format_food_vision_inventory_reply(updated, notice="\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0441\u0442\u0430\u0432 \u0435\u0449\u0451 \u0440\u0430\u0437."),
+            reply_text=format_food_vision_inventory_reply(updated, notice="Изменения сохранены. Проверьте состав ещё раз."),
             inventory=updated,
         )
 
@@ -2651,7 +3007,7 @@ class HealBiteNutritionDiary:
             self.clear_pending_state(user_id)
             return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
         if action.kind == "save":
-            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now)
+            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
         if action.kind == "save_without_kbzhu":
             return self.save_pending_inventory_without_kbzhu(user_id, expected_inventory_id=expected_inventory_id, now=now)
         if action.kind == "confirm":
@@ -2664,6 +3020,7 @@ class HealBiteNutritionDiary:
         *,
         expected_inventory_id: str | None = None,
         now: datetime | None = None,
+        require_weights: bool = False,
     ) -> PendingInventoryReplyResult:
         normalized_user_id = int(user_id)
         payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
@@ -2685,7 +3042,7 @@ class HealBiteNutritionDiary:
                 reply_text=format_pending_inventory_expired_reply(),
             )
 
-        calculation = calculate_inventory_nutrition(payload)
+        calculation = calculate_inventory_nutrition(payload, require_weights=require_weights)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
             return PendingInventoryReplyResult(
                 status="needs_weight_confirmation",
@@ -2927,6 +3284,7 @@ class HealBiteNutritionDiary:
             state=str(payload.get("state") or PENDING_INVENTORY_STATE),
             image_ref=str(payload.get("image_ref")) if payload.get("image_ref") is not None else None,
             occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
+            calculation_snapshot=payload.get("calculation_snapshot"),
         )
 
     def _deserialize_pending_meal(

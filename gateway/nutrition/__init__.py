@@ -59,6 +59,7 @@ from gateway.nutrition.hipe import (
     PortionPrior,
     VisualAnchorSpec,
     VisualAnchorType,
+    convert_volume_to_grams,
     estimate_portion_mass,
     get_anchor_spec,
     get_food_density,

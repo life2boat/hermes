@@ -347,3 +347,15 @@ def estimate_portion_mass(
         is_approximate_plausible_range=True,
         is_user_confirmed=False,
     )
+
+
+def convert_volume_to_grams(
+    volume_ml: float,
+    food_name: str,
+    explicit_category: str | None = None,
+) -> float:
+    """
+    Converts volume in milliliters (cm³) to grams using the calibrated food density table.
+    """
+    density = get_food_density(food_name, explicit_category=explicit_category)
+    return round(float(volume_ml) * density.density_center, 1)

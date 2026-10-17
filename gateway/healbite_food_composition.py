@@ -244,7 +244,7 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         dataset_version='Skurikhin-2008-Curated',
         cooking_state='boiled',
         source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Крупы и каши', поз. 50 (каша гречневая рассыпчатая)",
-        aliases=('гречка', 'гречневая каша', 'отварная гречка', 'гречка отварная'),
+        aliases=('гречка', 'греча', 'гречневая каша', 'отварная гречка', 'гречка отварная'),
     ),
     FoodNutrientProfile(
         canonical_id='butter',

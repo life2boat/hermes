@@ -9154,6 +9154,30 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
             return
 
+        actor_household = None
+        if hasattr(query, "household_id") and isinstance(getattr(query, "household_id"), (str, int)):
+            actor_household = str(getattr(query, "household_id"))
+        elif hasattr(query, "from_user") and hasattr(getattr(query, "from_user", None), "household_id") and isinstance(getattr(query.from_user, "household_id"), (str, int)):
+            actor_household = str(getattr(query.from_user, "household_id"))
+
+        target_household = None
+        if hasattr(query, "target_household_id") and isinstance(getattr(query, "target_household_id"), (str, int)):
+            target_household = str(getattr(query, "target_household_id"))
+
+        if actor_household and target_household and actor_household != target_household:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result="cross_household_denied",
+            )
+            try:
+                await query.answer(text="Действие недоступно: домохозяйство не совпадает.", show_alert=True)
+            except Exception:
+                pass
+            return
+
         diary = get_default_nutrition_diary()
 
         if action in {"save", "save_no_kbzhu"}:

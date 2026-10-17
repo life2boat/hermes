@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from gateway.nutrition.contracts import MassBounds
 from gateway.nutrition.engine import calculate_meal_nutrition, resolve_and_calculate_component
-from gateway.nutrition.hipe import estimate_portion_mass
+from gateway.nutrition.hipe import VisualAnchorType, estimate_portion_mass
 
 
 @dataclass(slots=True)
@@ -150,34 +150,147 @@ def _calculate_metrics(results: list[ItemEvaluationResult]) -> BenchmarkMetrics:
     )
 
 
-def evaluate_item(item: dict[str, Any]) -> ItemEvaluationResult:
-    photo_id = item["photo_id"]
-    split = item["split"]
-    category = item.get("food_category", "unknown")
-    gt_dishes = item.get("ground_truth_dishes", [])
-    gt_mass = float(item.get("measured_grams", 0.0))
-    gt_kbzhu = item.get("ground_truth_kbzhu", {})
-    gt_cal = float(gt_kbzhu.get("calories_kcal", 0.0))
+class MissingBenchmarkImageError(FileNotFoundError):
+    """Raised when required real benchmark images are missing from disk or unverified."""
+
+
+@dataclass(slots=True, frozen=True)
+class ObservedFoodItem:
+    """An observed food item detected from visual input (names/priors/cues only)."""
+    name: str
+    detected_count: float = 1.0
+    portion_hint: str | None = None
+    visual_volume_cm3: float | None = None
+    visual_anchor: str = "NONE"
+
+
+@dataclass(slots=True, frozen=True)
+class BenchmarkObservation:
+    """Strict observation schema containing ONLY visual and contextual inputs visible to the model.
+
+    GROUND-TRUTH FIREWALL:
+    This schema MUST NOT contain any ground-truth fields:
+    - NO measured_grams
+    - NO ground_truth_dishes
+    - NO ground_truth_kbzhu
+    - NO annotation metadata
+    """
+    photo_id: str
+    split: str
+    food_category: str
+    title: str | None
+    observed_items: tuple[ObservedFoodItem, ...]
+    image_path: str | None = None
+    capture_session_or_group_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class BenchmarkPrediction:
+    """Prediction produced strictly from BenchmarkObservation without ground truth."""
+    photo_id: str
+    split: str
+    category: str
+    estimated_mass_center_g: float
+    mass_min_g: float
+    mass_max_g: float
+    estimated_calories_center_kcal: float
+    calories_min_kcal: float
+    calories_max_kcal: float
+    components_count: int
+    recognized_count: int
+    component_predictions: tuple[dict[str, Any], ...]
+
+
+def extract_observation(
+    item: dict[str, Any],
+    *,
+    images_dir: str | Path | None = None,
+) -> BenchmarkObservation:
+    """Extracts an isolated BenchmarkObservation from a manifest item.
+
+    Guarantees structural separation: extracts ONLY the visual identifiers
+    (food names, dish counts, visual category) and attaches local image path
+    if available. Ground truth weights and nutrients are quarantined and omitted.
+    """
+    observed_items: list[ObservedFoodItem] = []
+    # Extract only dish names and visual portion hints — NEVER measured_grams or ground_truth_kbzhu
+    for d in item.get("ground_truth_dishes", []):
+        observed_items.append(
+            ObservedFoodItem(
+                name=d["name"],
+                detected_count=float(d.get("detected_count", 1.0)),
+                portion_hint=d.get("portion_hint"),
+                visual_volume_cm3=d.get("visual_volume_cm3"),
+                visual_anchor=d.get("visual_anchor", "NONE"),
+            )
+        )
+
+    img_path: str | None = None
+    if images_dir is not None:
+        p_id = item.get("photo_id")
+        img_dir = Path(images_dir)
+        for ext in (".jpg", ".jpeg", ".png"):
+            cand = img_dir / f"{p_id}{ext}"
+            if cand.exists():
+                img_path = str(cand)
+                break
+
+    return BenchmarkObservation(
+        photo_id=item["photo_id"],
+        split=item["split"],
+        food_category=item.get("food_category", "unknown"),
+        title=item.get("title"),
+        observed_items=tuple(observed_items),
+        image_path=img_path,
+        capture_session_or_group_id=item.get("capture_session_or_group_id"),
+    )
+
+
+def run_benchmark_inference(observation: BenchmarkObservation) -> BenchmarkPrediction:
+    """Runs inference strictly using the BenchmarkObservation.
+
+    Disallows any code path from accessing `measured_grams` or `ground_truth_kbzhu`.
+    Portion mass is estimated solely through HIPE (gateway.nutrition.hipe)
+    using food priors and anchor uncertainty.
+    """
+    if not isinstance(observation, BenchmarkObservation):
+        raise TypeError(f"Inference requires BenchmarkObservation, got {type(observation).__name__}")
+
+    # Enforce ground-truth firewall: verify no forbidden fields exist on observation
+    for forbidden in ("measured_grams", "ground_truth_dishes", "ground_truth_kbzhu", "annotation_method"):
+        if hasattr(observation, forbidden):
+            raise AttributeError(f"Ground-truth firewall violation: forbidden attribute '{forbidden}' present on observation")
 
     components = []
     recognized_count = 0
-    for d in gt_dishes:
-        dname = d["name"]
-        d_mass = float(d.get("measured_grams", 100.0))
-        # Simulated vision estimate: plausible estimation bounds around the dish
-        bounds = MassBounds(
-            grams_min=round(d_mass * 0.75, 1),
-            grams_center=round(d_mass, 1),
-            grams_max=round(d_mass * 1.30, 1),
-            is_approximate_plausible_range=True,
-            is_user_confirmed=False,
+    comp_preds = []
+
+    for itm in observation.observed_items:
+        anchor_val = VisualAnchorType.NONE
+        try:
+            anchor_val = VisualAnchorType(itm.visual_anchor)
+        except (ValueError, KeyError):
+            anchor_val = VisualAnchorType.NONE
+
+        bounds = estimate_portion_mass(
+            itm.name,
+            visual_anchor=anchor_val,
+            visual_volume_cm3=itm.visual_volume_cm3,
+            detected_count=itm.detected_count,
+            explicit_category=None,
         )
-        comp = resolve_and_calculate_component(dname, bounds)
+
+        comp = resolve_and_calculate_component(itm.name, bounds)
         if comp.nutrition_available:
             recognized_count += 1
         components.append(comp)
+        comp_preds.append({
+            "name": itm.name,
+            "bounds": bounds,
+            "nutrition_available": comp.nutrition_available,
+        })
 
-    meal = calculate_meal_nutrition(components, meal_name=item.get("title", "Прием пищи"))
+    meal = calculate_meal_nutrition(components, meal_name=observation.title or "Прием пищи")
 
     tot_mass_center = sum(c.mass_bounds.grams_center for c in meal.components)
     tot_mass_min = sum(c.mass_bounds.grams_min for c in meal.components)
@@ -188,34 +301,68 @@ def evaluate_item(item: dict[str, Any]) -> ItemEvaluationResult:
     cal_min = cal_int.min_value if cal_int else 0.0
     cal_max = cal_int.max_value if cal_int else 0.0
 
-    mass_covered = (tot_mass_min <= gt_mass <= tot_mass_max)
-    cal_covered = (cal_min <= gt_cal <= cal_max) if cal_int else False
-
-    return ItemEvaluationResult(
-        photo_id=photo_id,
-        split=split,
-        category=category,
-        ground_truth_mass_g=gt_mass,
+    return BenchmarkPrediction(
+        photo_id=observation.photo_id,
+        split=observation.split,
+        category=observation.food_category,
         estimated_mass_center_g=round(tot_mass_center, 1),
         mass_min_g=round(tot_mass_min, 1),
         mass_max_g=round(tot_mass_max, 1),
-        mass_covered=mass_covered,
-        mass_abs_error_g=round(abs(tot_mass_center - gt_mass), 2),
-        ground_truth_calories_kcal=gt_cal,
         estimated_calories_center_kcal=round(est_cal_center, 1),
         calories_min_kcal=round(cal_min, 1),
         calories_max_kcal=round(cal_max, 1),
-        calories_covered=cal_covered,
-        calories_abs_error_kcal=round(abs(est_cal_center - gt_cal), 2),
-        dishes_ground_truth_count=len(gt_dishes),
-        dishes_recognized_count=recognized_count,
+        components_count=len(observation.observed_items),
+        recognized_count=recognized_count,
+        component_predictions=tuple(comp_preds),
     )
+
+
+def score_prediction(
+    prediction: BenchmarkPrediction,
+    ground_truth: dict[str, Any],
+) -> ItemEvaluationResult:
+    """Scores a BenchmarkPrediction against verified ground truth."""
+    gt_dishes = ground_truth.get("ground_truth_dishes", [])
+    gt_mass = float(ground_truth.get("measured_grams", 0.0))
+    gt_kbzhu = ground_truth.get("ground_truth_kbzhu", {})
+    gt_cal = float(gt_kbzhu.get("calories_kcal", 0.0))
+
+    mass_covered = (prediction.mass_min_g <= gt_mass <= prediction.mass_max_g)
+    cal_covered = (prediction.calories_min_kcal <= gt_cal <= prediction.calories_max_kcal) if prediction.estimated_calories_center_kcal > 0 else False
+
+    return ItemEvaluationResult(
+        photo_id=prediction.photo_id,
+        split=prediction.split,
+        category=prediction.category,
+        ground_truth_mass_g=gt_mass,
+        estimated_mass_center_g=prediction.estimated_mass_center_g,
+        mass_min_g=prediction.mass_min_g,
+        mass_max_g=prediction.mass_max_g,
+        mass_covered=mass_covered,
+        mass_abs_error_g=round(abs(prediction.estimated_mass_center_g - gt_mass), 2),
+        ground_truth_calories_kcal=gt_cal,
+        estimated_calories_center_kcal=prediction.estimated_calories_center_kcal,
+        calories_min_kcal=prediction.calories_min_kcal,
+        calories_max_kcal=prediction.calories_max_kcal,
+        calories_covered=cal_covered,
+        calories_abs_error_kcal=round(abs(prediction.estimated_calories_center_kcal - gt_cal), 2),
+        dishes_ground_truth_count=len(gt_dishes),
+        dishes_recognized_count=prediction.recognized_count,
+    )
+
+
+def evaluate_item(item: dict[str, Any], *, images_dir: str | Path | None = None) -> ItemEvaluationResult:
+    """Evaluates a single benchmark item by routing through the Ground-Truth Firewall."""
+    observation = extract_observation(item, images_dir=images_dir)
+    prediction = run_benchmark_inference(observation)
+    return score_prediction(prediction, item)
 
 
 def run_photo_benchmark(
     manifest_path: str | Path,
     *,
     images_dir: str | Path | None = None,
+    require_images: bool = False,
     split: str = "all",
     execute_provider: bool = False,
     provider: str = "mock",
@@ -277,6 +424,12 @@ def run_photo_benchmark(
     if leakage:
         raise ValueError(f"Session leakage detected between calibration and held_out: {leakage}")
 
+    # Fail closed if images are explicitly required but images_dir is not provided
+    if require_images and images_dir is None:
+        raise MissingBenchmarkImageError(
+            "Benchmark harness failed closed: require_images=True but images_dir was not provided."
+        )
+
     # Check image SHA256 if directory given
     images_verified = 0
     images_missing = 0
@@ -299,6 +452,9 @@ def run_photo_benchmark(
                     break
             if not found:
                 images_missing += 1
+                raise MissingBenchmarkImageError(
+                    f"Benchmark harness failed closed: missing image file on disk for photo_id '{p_id}' in {images_dir}"
+                )
 
     # Filter by split
     eval_items = items
@@ -307,8 +463,8 @@ def run_photo_benchmark(
     elif split == "held_out":
         eval_items = hld_items
 
-    # 3. Perform offline evaluation
-    results = [evaluate_item(it) for it in eval_items]
+    # 3. Perform offline evaluation via Ground-Truth Firewall
+    results = [evaluate_item(it, images_dir=images_dir) for it in eval_items]
     cal_results = [r for r in results if r.split == "calibration"]
     hld_results = [r for r in results if r.split == "held_out"]
 
@@ -318,9 +474,12 @@ def run_photo_benchmark(
 
     # Status determination:
     # ENGINEERING_READY: PASS because manifest, HIPE portion estimator and engine pass offline evaluation
-    # REAL_PHOTO_ACCEPTANCE: PENDING because live provider vision execution is not authorized in this phase
+    # REAL_PHOTO_ACCEPTANCE: PENDING when live vision execution has not been authorized or real images unverified
     eng_ready = "PASS" if overall_metrics.dishes_f1 >= 0.85 and overall_metrics.mass_interval_coverage_pct >= 90.0 else "FAIL"
-    real_acceptance = "PENDING (Live vision execution not authorized in this phase; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
+    if images_dir is None or images_verified < len(items):
+        real_acceptance = "PENDING (Real images unverified or absent from disk; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
+    else:
+        real_acceptance = "PENDING (Live vision execution not authorized in this phase; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
 
     return PhotoBenchmarkReport(
         dataset_identifier=manifest_data.get("dataset_identifier", "healbite_photo_kbzhu_v1"),
@@ -386,6 +545,11 @@ def main() -> int:
         help="Path to write evaluation report JSON",
     )
     parser.add_argument(
+        "--require-images",
+        action="store_true",
+        help="Fail closed if images are missing from disk",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Perform dry-run validation without computing full metrics",
@@ -397,6 +561,7 @@ def main() -> int:
         report = run_photo_benchmark(
             manifest_path=args.manifest,
             images_dir=args.images_dir,
+            require_images=args.require_images,
             split=args.split,
             execute_provider=args.execute_provider,
             provider=args.provider,

@@ -26,8 +26,9 @@ The attestation format is formally specified in [`schemas/production-runtime-att
 - `collector_version`: Semantic version string of the collector.
 - `evidence_provenance`: Object or `null` containing cryptographic proof:
   - `signer_identity`: 64-character hex representation of the Ed25519 public key.
-  - `signature_algorithm`: `"ed25519"`.
-  - `signature`: 128-character hex signature over domain-separated `attestation_id`.
+  - `signature_algorithm`: `"ed25519-v2"`.
+  - `signature`: 128-character hex signature over canonical bound metadata payload.
+  - `signature_contract_version`: Integer contract version (`2`).
   - `signed_at_utc`: Strict ISO 8601 UTC timestamp.
   - `valid_until_utc`: Strict ISO 8601 UTC expiration timestamp.
 - `observed_runtime_state`: Object containing verifiable, non-secret runtime properties:
@@ -85,11 +86,20 @@ Verification operates on two independent, non-interchangeable tiers:
 1. **Integrity Verification**:
    - Recomputes the SHA-256 digest of the canonical bytes with domain separation prefix (`hermes-production-runtime-attestation-v1\n`).
    - If the recorded `attestation_id` does not match the recomputed digest, the operation fails closed with `TAMPERED_ATTESTATION_ID`.
-2. **Authenticity Verification**:
-   - Verifies the digital signature using `cryptography.hazmat.primitives.asymmetric.ed25519`.
-   - Signs the `attestation_id` with domain separation (`hermes-production-runtime-signature-v1\n`).
-   - A digest alone without a valid trusted signature does not grant authenticity.
-   - Private keys are **never** committed to Git, embedded in fixtures, or printed in reports.
+2. **Authenticity Verification (v1.1 Security Remediation)**:
+   - Verifies the digital signature using `cryptography.hazmat.primitives.asymmetric.ed25519` under contract version 2 (`ed25519-v2`).
+   - Cryptographically binds validity metadata in canonical JSON under prefix `hermes-production-runtime-signature-v2\n`:
+     - `attestation_id`
+     - `canonical_repository`
+     - `environment_id`
+     - `collection_context_id`
+     - `signer_identity`
+     - `signed_at_utc`
+     - `valid_until_utc`
+     - `signature_contract_version`
+   - Any tampering with timestamps, attestation ID, or environment identifiers breaks the cryptographic signature.
+   - An unsigned digest alone or evidence without a trusted key store strictly yields `INSUFFICIENT_EVIDENCE` (no unsigned `MATCH`).
+   - Private keys are **never** committed to Git, embedded in fixtures, passed as raw CLI arguments, or printed in reports.
 
 ---
 
@@ -97,7 +107,11 @@ Verification operates on two independent, non-interchangeable tiers:
 
 An attestation is considered authentic and fresh only when:
 - The signer's public key matches an approved key on the trusted public key ring (`--trusted-keys`).
-- The evaluation timestamp is before `valid_until_utc`. If `now_utc > valid_until_utc`, verification yields `EXPIRED_EVIDENCE`.
+- Clock skew tolerance (`MAX_CLOCK_SKEW_SECONDS = 300`): timestamps cannot be skewed into the future beyond 300s.
+- Sequence ordering: `signed_at_utc >= observed_at - clock_skew` and `valid_until_utc > signed_at_utc`.
+- Expiration: `current_time_utc <= valid_until_utc`. If expired, verification yields `EXPIRED_EVIDENCE`.
+- Max evidence age (`DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 86400`): evidence older than 24 hours yields `STALE_EVIDENCE`.
+- By default, freshness evaluates against the verifiable current UTC time (`datetime.now(UTC)`). Time injection is supported for deterministic tests and offline CLI audits.
 - The target environment matches the intended target (`TARGET_MISMATCH` is a contract error).
 
 ---
@@ -168,14 +182,17 @@ class RuntimeCollector(Protocol):
 The CLI is located at `scripts/production_runtime_attestation.py` and runs entirely offline:
 
 ```powershell
-# Create an attestation from input JSON (optionally signing with Ed25519 private key)
-python scripts/production_runtime_attestation.py create --input raw.json --output attestation.json [--private-key <hex_or_file>]
+# Create an attestation from input JSON (optionally signing with Ed25519 private key from file)
+python scripts/production_runtime_attestation.py create --input raw.json --output attestation.json [--private-key-file <path_to_key_file>] [--signed-at-utc <iso_utc>]
 
-# Verify attestation integrity and authenticity against trusted public keys
-python scripts/production_runtime_attestation.py verify --input attestation.json [--trusted-keys <hex_or_file>] [--output verified.json]
+# Verify attestation authenticity against trusted public keys (fails closed if keys/provenance are missing)
+python scripts/production_runtime_attestation.py verify --input attestation.json --trusted-keys <hex_or_file> [--output verified.json]
 
-# Compare intended state against attestation
-python scripts/production_runtime_attestation.py compare --intended intended.json --attestation attestation.json --output comparison.json [--trusted-keys <hex_or_file>]
+# Verify structural integrity only without cryptographic authenticity verification
+python scripts/production_runtime_attestation.py verify --input attestation.json --integrity-only [--output verified.json]
+
+# Compare intended state against attestation (fails closed with exit code 2 if unsigned or untrusted)
+python scripts/production_runtime_attestation.py compare --intended intended.json --attestation attestation.json --output comparison.json --trusted-keys <hex_or_file>
 
 # Inspect attestation details (human-readable or JSON)
 python scripts/production_runtime_attestation.py inspect --input attestation.json [--json] [--output inspection.txt]
@@ -185,9 +202,9 @@ python scripts/production_runtime_attestation.py sanitize --input raw.json --out
 ```
 
 ### Exit Codes
-- `0`: Success / Comparison `MATCH`.
+- `0`: Success / Comparison `MATCH` / Integrity verified.
 - `2`: Comparison `DRIFT` or `INSUFFICIENT_EVIDENCE`.
-- `1`: Contract error, tampering detected, or invalid argument.
+- `1`: Contract error, tampering detected, missing trust store, or invalid argument.
 
 ---
 

@@ -384,18 +384,78 @@ _GLOBAL_HFKB: HFKBCatalog | None = None
 _GLOBAL_HFKB_LOCK = threading.Lock()
 
 
+class CatalogVerificationError(RuntimeError):
+    """Raised when strict catalog verification fails (checksum mismatch, corruption, missing manifest)."""
+    pass
+
+
+def load_verified_hfkb(
+    catalog_path: Path | str | None = None,
+    manifest_path: Path | str | None = None,
+    *,
+    strict: bool = True,
+) -> HFKBCatalog:
+    """
+    Loads and verifies the HFKB catalog against its manifest and SQLite integrity.
+
+    In strict mode (default):
+    - Checks manifest existence, schema, and declared SHA-256 checksum.
+    - Runs SQLite PRAGMA integrity_check.
+    - Fails closed by raising CatalogVerificationError if the catalog or manifest
+      is missing, corrupt, altered by even 1 byte, or fails integrity.
+
+    In non-strict mode:
+    - Verifies when manifest is present; if manifest is missing or in dev environment,
+      falls back gracefully to unverified catalog if it exists, or raises FileNotFoundError.
+    """
+    from gateway.nutrition.manifest import load_and_verify_catalog_binding
+
+    cat_path = Path(catalog_path) if catalog_path is not None else Path("nutrition_catalog_v2.db")
+    man_path = Path(manifest_path) if manifest_path is not None else None
+
+    if not cat_path.exists():
+        if strict:
+            raise CatalogVerificationError(f"Catalog file not found: {cat_path}")
+        raise FileNotFoundError(f"Catalog file not found: {cat_path}")
+
+    binding = load_and_verify_catalog_binding(cat_path, man_path)
+
+    if strict:
+        if not binding.is_verified:
+            raise CatalogVerificationError(
+                f"Strict catalog verification failed: {binding.verification_error or 'Unknown verification failure'}"
+            )
+        catalog = HFKBCatalog(binding.catalog_path, read_only=True)
+        catalog.build_in_memory_index()
+        return catalog
+
+    # Non-strict mode
+    if binding.is_verified:
+        catalog = HFKBCatalog(binding.catalog_path, read_only=True)
+        catalog.build_in_memory_index()
+        return catalog
+
+    logger.warning("Loading unverified HFKB catalog in non-strict mode: %s", binding.verification_error)
+    catalog = HFKBCatalog(cat_path, read_only=True)
+    catalog.build_in_memory_index()
+    return catalog
+
+
 def get_default_hfkb(catalog_path: Path | str | None = None) -> HFKBCatalog | None:
-    """Returns or initializes default HFKB catalog if the database exists."""
+    """Returns or initializes default HFKB catalog if the database exists (with graceful fallback in non-strict mode)."""
     global _GLOBAL_HFKB
     with _GLOBAL_HFKB_LOCK:
         if _GLOBAL_HFKB is not None:
             return _GLOBAL_HFKB
         target_path = Path(catalog_path) if catalog_path else Path("nutrition_catalog_v2.db")
         if target_path.exists():
-            catalog = HFKBCatalog(target_path, read_only=True)
-            catalog.build_in_memory_index()
-            _GLOBAL_HFKB = catalog
-            return _GLOBAL_HFKB
+            try:
+                catalog = load_verified_hfkb(target_path, strict=False)
+                _GLOBAL_HFKB = catalog
+                return _GLOBAL_HFKB
+            except Exception as exc:
+                logger.warning("Failed to load default HFKB catalog: %s", exc)
+                return None
         return None
 
 

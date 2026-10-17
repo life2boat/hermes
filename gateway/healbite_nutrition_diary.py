@@ -1398,15 +1398,16 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         lines.extend(["", "Уточнения:"])
         lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
 
-    if all_weights_present and not has_unmapped_component and has_any_nutrition:
+    if all_weights_present and has_any_nutrition:
+        total_label = "Итого (частично)" if has_unmapped_component else "Итого"
         lines.extend([
             "",
-            f"Итого: ~{_format_kcal(round(total_calories, 1))} · "
+            f"{total_label}: ~{_format_kcal(round(total_calories, 1))} · "
             f"Б {_format_grams(round(total_protein, 1))} · "
             f"Ж {_format_grams(round(total_fat, 1))} · "
             f"У {_format_grams(round(total_carbs, 1))}",
         ])
-    elif has_unmapped_component:
+    if has_unmapped_component:
         lines.extend([
             "",
             "⚠️ Для некоторых компонентов справочные данные не найдены.",
@@ -1426,6 +1427,70 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         "• Вес 3: 80 г",
     ])
     return "\n".join(lines)
+
+
+def calculate_food_vision_meal_nutrition(
+    inventory: FoodVisionInventory | PendingFoodVisionInventory,
+    *,
+    meal_name: str = "Прием пищи",
+    recipe_constraint: Any | None = None,
+    shared_scale: Any | None = None,
+) -> Any:
+    """
+    Computes MealNutritionEstimate from a FoodVisionInventory or PendingFoodVisionInventory
+    using HIPE portion priors and the Nutrition Calculation Engine.
+    """
+    from gateway.nutrition.contracts import MassBounds
+    from gateway.nutrition.engine import calculate_meal_nutrition, resolve_and_calculate_component
+    from gateway.nutrition.hipe import estimate_portion_mass
+
+    components = []
+    items = inventory.items if hasattr(inventory, "items") else []
+    for item in items:
+        if item.selected_grams is not None:
+            if getattr(item, "user_modified", False):
+                bounds = MassBounds(
+                    grams_min=float(item.selected_grams),
+                    grams_center=float(item.selected_grams),
+                    grams_max=float(item.selected_grams),
+                    is_approximate_plausible_range=False,
+                    is_user_confirmed=True,
+                )
+            else:
+                min_g = float(item.estimated_grams_min) if item.estimated_grams_min is not None else float(item.selected_grams) * 0.8
+                max_g = float(item.estimated_grams_max) if item.estimated_grams_max is not None else float(item.selected_grams) * 1.2
+                bounds = MassBounds(
+                    grams_min=round(min_g, 1),
+                    grams_center=float(item.selected_grams),
+                    grams_max=round(max_g, 1),
+                    is_approximate_plausible_range=True,
+                    is_user_confirmed=False,
+                )
+        elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            center_g = (float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0
+            bounds = MassBounds(
+                grams_min=float(item.estimated_grams_min),
+                grams_center=round(center_g, 1),
+                grams_max=float(item.estimated_grams_max),
+                is_approximate_plausible_range=True,
+                is_user_confirmed=False,
+            )
+        else:
+            bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
+
+        comp = resolve_and_calculate_component(
+            item.normalized_name or item.visible_name,
+            bounds,
+            cooking_state=getattr(item, "preparation", "") or "cooked",
+        )
+        components.append(comp)
+
+    return calculate_meal_nutrition(
+        components,
+        meal_name=meal_name,
+        recipe_constraint=recipe_constraint,
+        shared_scale=shared_scale,
+    )
 
 
 def build_food_vision_inventory_keyboard(

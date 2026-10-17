@@ -24,9 +24,16 @@ MAX_DOCUMENT_BYTES = 1_048_576
 REDACTED = "<REDACTED>"
 
 DOMAIN_SEPARATOR_ATTESTATION = b"hermes-production-runtime-attestation-v1\n"
-DOMAIN_SEPARATOR_SIGNATURE = b"hermes-production-runtime-signature-v1\n"
+DOMAIN_SEPARATOR_SIGNATURE_V1 = b"hermes-production-runtime-signature-v1\n"
+DOMAIN_SEPARATOR_SIGNATURE_V2 = b"hermes-production-runtime-signature-v2\n"
+DOMAIN_SEPARATOR_SIGNATURE = DOMAIN_SEPARATOR_SIGNATURE_V2
 DOMAIN_SEPARATOR_INTENDED = b"hermes-production-runtime-intended-v1\n"
 DOMAIN_SEPARATOR_COMPARISON = b"hermes-production-runtime-comparison-v1\n"
+
+SIGNATURE_CONTRACT_VERSION = 2
+SIGNATURE_ALGORITHM_V2 = "ed25519-v2"
+MAX_CLOCK_SKEW_SECONDS = 300
+DEFAULT_MAX_EVIDENCE_AGE_SECONDS = 86400
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -93,6 +100,7 @@ class EvidenceProvenance:
     signature: str
     signed_at_utc: str
     valid_until_utc: str
+    signature_contract_version: int = SIGNATURE_CONTRACT_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +625,31 @@ def import_public_key_hex(hex_str: str) -> ed25519.Ed25519PublicKey:
         raise ProductionRuntimeAttestationError("PUBLIC_KEY_INVALID") from exc
 
 
+def compute_signature_payload(
+    *,
+    attestation_id: str,
+    canonical_repository: str,
+    environment_id: str,
+    collection_context_id: str,
+    signer_identity: str,
+    signed_at_utc: str,
+    valid_until_utc: str,
+    signature_contract_version: int = SIGNATURE_CONTRACT_VERSION,
+) -> bytes:
+    payload = {
+        "attestation_id": attestation_id,
+        "canonical_repository": canonical_repository,
+        "collection_context_id": collection_context_id,
+        "domain": "hermes-production-runtime-signature-v2",
+        "environment_id": environment_id,
+        "signature_contract_version": signature_contract_version,
+        "signed_at_utc": signed_at_utc,
+        "signer_identity": signer_identity,
+        "valid_until_utc": valid_until_utc,
+    }
+    return DOMAIN_SEPARATOR_SIGNATURE_V2 + _canonical_bytes(payload)
+
+
 def sign_attestation(
     attestation: ProductionRuntimeAttestation,
     signing_key: ed25519.Ed25519PrivateKey | str,
@@ -645,16 +678,30 @@ def sign_attestation(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    sig_payload = DOMAIN_SEPARATOR_SIGNATURE + attestation.attestation_id.encode("utf-8")
+    env_id = attestation.environment_id or attestation.target or "synthetic-prod"
+    repo = attestation.canonical_repository or "https://github.com/life2boat/hermes.git"
+    ctx_id = attestation.collection_context_id or "default-ctx"
+
+    sig_payload = compute_signature_payload(
+        attestation_id=attestation.attestation_id,
+        canonical_repository=repo,
+        environment_id=env_id,
+        collection_context_id=ctx_id,
+        signer_identity=signer_identity,
+        signed_at_utc=signed_at,
+        valid_until_utc=valid_until,
+        signature_contract_version=SIGNATURE_CONTRACT_VERSION,
+    )
     sig_bytes = priv.sign(sig_payload)
     sig_hex = sig_bytes.hex()
 
     provenance = EvidenceProvenance(
         signer_identity=signer_identity,
-        signature_algorithm="ed25519",
+        signature_algorithm=SIGNATURE_ALGORITHM_V2,
         signature=sig_hex,
         signed_at_utc=signed_at,
         valid_until_utc=valid_until,
+        signature_contract_version=SIGNATURE_CONTRACT_VERSION,
     )
 
     return replace(attestation, evidence_provenance=provenance)
@@ -665,13 +712,21 @@ def verify_attestation_signature(
     trusted_public_keys: Sequence[str | ed25519.Ed25519PublicKey],
     *,
     current_time_utc: datetime | str | None = None,
+    max_clock_skew_seconds: int = MAX_CLOCK_SKEW_SECONDS,
+    max_evidence_age_seconds: int = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
 ) -> tuple[bool, str]:
     if attestation.evidence_provenance is None:
         return False, "MISSING_EVIDENCE_PROVENANCE"
 
     prov = attestation.evidence_provenance
-    if prov.signature_algorithm != "ed25519":
-        return False, "UNSUPPORTED_SIGNATURE_ALGORITHM"
+    if (
+        prov.signature_algorithm != SIGNATURE_ALGORITHM_V2
+        or getattr(prov, "signature_contract_version", 0) != SIGNATURE_CONTRACT_VERSION
+    ):
+        return False, "UNSUPPORTED_SIGNATURE_CONTRACT"
+
+    if not trusted_public_keys:
+        return False, "MISSING_TRUST_STORE"
 
     trusted_hex_keys: set[str] = set()
     for item in trusted_public_keys:
@@ -683,6 +738,7 @@ def verify_attestation_signature(
     if prov.signer_identity.lower() not in trusted_hex_keys:
         return False, "UNTRUSTED_SIGNATURE_KEY"
 
+    # Mandatory evidence freshness check (defaults to datetime.now(UTC))
     if current_time_utc is not None:
         curr_dt = (
             current_time_utc
@@ -691,18 +747,66 @@ def verify_attestation_signature(
                 tzinfo=UTC
             )
         )
+    else:
+        curr_dt = datetime.now(UTC)
+
+    try:
+        signed_at_dt = datetime.strptime(
+            prov.signed_at_utc, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=UTC)
         valid_until_dt = datetime.strptime(
             prov.valid_until_utc, "%Y-%m-%dT%H:%M:%SZ"
         ).replace(tzinfo=UTC)
-        if curr_dt > valid_until_dt:
-            return False, "EXPIRED_EVIDENCE"
+        observed_at_str = attestation.observed_at or attestation.collected_at_utc
+        observed_at_dt = datetime.strptime(
+            observed_at_str, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=UTC)
+    except Exception:
+        return False, "TIMESTAMP_PARSE_ERROR"
+
+    if valid_until_dt <= signed_at_dt:
+        return False, "INVALID_VALIDITY_INTERVAL"
+
+    from datetime import timedelta
+
+    # Clock skew into future
+    if signed_at_dt > curr_dt + timedelta(seconds=max_clock_skew_seconds):
+        return False, "EVIDENCE_CLOCK_SKEW_FUTURE"
+
+    if observed_at_dt > curr_dt + timedelta(seconds=max_clock_skew_seconds):
+        return False, "EVIDENCE_CLOCK_SKEW_FUTURE"
+
+    # Signed before observation (modulo clock skew)
+    if signed_at_dt < observed_at_dt - timedelta(seconds=max_clock_skew_seconds):
+        return False, "INVALID_SIGNATURE_TIMESTAMP"
+
+    # Expiration
+    if curr_dt > valid_until_dt:
+        return False, "EXPIRED_EVIDENCE"
+
+    # Max evidence age
+    if curr_dt - observed_at_dt > timedelta(seconds=max_evidence_age_seconds):
+        return False, "STALE_EVIDENCE"
+
+    # Cryptographic signature verification over bound metadata
+    env_id = attestation.environment_id or attestation.target or "synthetic-prod"
+    repo = attestation.canonical_repository or "https://github.com/life2boat/hermes.git"
+    ctx_id = attestation.collection_context_id or "default-ctx"
+
+    sig_payload = compute_signature_payload(
+        attestation_id=attestation.attestation_id,
+        canonical_repository=repo,
+        environment_id=env_id,
+        collection_context_id=ctx_id,
+        signer_identity=prov.signer_identity,
+        signed_at_utc=prov.signed_at_utc,
+        valid_until_utc=prov.valid_until_utc,
+        signature_contract_version=prov.signature_contract_version,
+    )
 
     try:
         pub = import_public_key_hex(prov.signer_identity)
         sig_bytes = bytes.fromhex(prov.signature)
-        sig_payload = DOMAIN_SEPARATOR_SIGNATURE + attestation.attestation_id.encode(
-            "utf-8"
-        )
         pub.verify(sig_bytes, sig_payload)
         return True, "SIGNATURE_VALID"
     except InvalidSignature:
@@ -872,6 +976,7 @@ def normalize_attestation(value: ProductionRuntimeAttestation) -> dict[str, obje
                 {
                     "signature": value.evidence_provenance.signature,
                     "signature_algorithm": value.evidence_provenance.signature_algorithm,
+                    "signature_contract_version": value.evidence_provenance.signature_contract_version,
                     "signed_at_utc": value.evidence_provenance.signed_at_utc,
                     "signer_identity": value.evidence_provenance.signer_identity,
                     "valid_until_utc": value.evidence_provenance.valid_until_utc,
@@ -906,6 +1011,7 @@ def normalize_attestation(value: ProductionRuntimeAttestation) -> dict[str, obje
         res["evidence_provenance"] = {
             "signature": value.evidence_provenance.signature,
             "signature_algorithm": value.evidence_provenance.signature_algorithm,
+            "signature_contract_version": value.evidence_provenance.signature_contract_version,
             "signed_at_utc": value.evidence_provenance.signed_at_utc,
             "signer_identity": value.evidence_provenance.signer_identity,
             "valid_until_utc": value.evidence_provenance.valid_until_utc,
@@ -960,6 +1066,9 @@ def validate_attestation(
                 signature=str(prov_dict["signature"]),
                 signed_at_utc=_canonical_timestamp(prov_dict["signed_at_utc"]),
                 valid_until_utc=_canonical_timestamp(prov_dict["valid_until_utc"]),
+                signature_contract_version=int(
+                    prov_dict.get("signature_contract_version", SIGNATURE_CONTRACT_VERSION)
+                ),
             )
 
         obs_dict = _mapping(payload.get("observed_runtime_state", {}))
@@ -1036,6 +1145,9 @@ def validate_attestation(
             signature=str(prov_dict["signature"]),
             signed_at_utc=_canonical_timestamp(prov_dict["signed_at_utc"]),
             valid_until_utc=_canonical_timestamp(prov_dict["valid_until_utc"]),
+            signature_contract_version=int(
+                prov_dict.get("signature_contract_version", SIGNATURE_CONTRACT_VERSION)
+            ),
         )
 
     result = ProductionRuntimeAttestation(
@@ -1136,6 +1248,7 @@ def normalize_intended_state(value: IntendedProductionState) -> dict[str, object
         "intended_main_sha": value.intended_main_sha,
         "intended_oci_revision": value.intended_oci_revision,
         "schema_version": value.schema_version,
+        "target": value.target,
     }
 
 
@@ -1144,13 +1257,19 @@ def validate_intended_state(
 ) -> IntendedProductionState:
     if isinstance(value, IntendedProductionState):
         payload = normalize_intended_state(value)
-    else:
-        mapping = _mapping(value)
-        if "expected_collectors" in mapping:
-            payload = dict(_exact_fields(mapping, _LEGACY_INTENDED_FIELDS))
-        else:
-            payload = dict(_exact_fields(mapping, _V1_INTENDED_FIELDS))
         verify_sanitized_evidence(payload)
+        return value
+
+    mapping = _mapping(value)
+    if "expected_collectors" in mapping:
+        payload = dict(_exact_fields(mapping, _LEGACY_INTENDED_FIELDS))
+    else:
+        allowed = _V1_INTENDED_FIELDS | {"target"}
+        keys = frozenset(mapping.keys())
+        if not _V1_INTENDED_FIELDS.issubset(keys) or not keys.issubset(allowed):
+            _fail("DOCUMENT_FIELD_MISMATCH")
+        payload = dict(mapping)
+    verify_sanitized_evidence(payload)
 
     schema_ver = payload.get("schema_version")
     if schema_ver != SCHEMA_VERSION or isinstance(schema_ver, bool):
@@ -1174,7 +1293,9 @@ def validate_intended_state(
         verify_sanitized_evidence(normalize_intended_state(result))
         return result
 
+    tgt = payload.get("target") or payload["canonical_repository"]
     return create_intended_state(
+        target=_identifier(tgt),
         canonical_repository=_identifier(payload["canonical_repository"]),
         intended_main_sha=str(payload["intended_main_sha"]),
         intended_image_digest=_digest_or_sha(payload["intended_image_digest"]),
@@ -1228,6 +1349,8 @@ def compare_production_runtime(
     *,
     trusted_public_keys: Sequence[str | ed25519.Ed25519PublicKey] | None = None,
     current_time_utc: datetime | str | None = None,
+    max_clock_skew_seconds: int = MAX_CLOCK_SKEW_SECONDS,
+    max_evidence_age_seconds: int = DEFAULT_MAX_EVIDENCE_AGE_SECONDS,
 ) -> ProductionRuntimeComparison:
     intended = validate_intended_state(intended)
     attestation = validate_attestation(attestation)
@@ -1240,17 +1363,23 @@ def compare_production_runtime(
     reasons: list[str] = []
 
     # Signature / provenance check
-    if trusted_public_keys is not None:
-        if attestation.evidence_provenance is None:
-            missing.append("evidence_provenance")
-            reasons.append("MISSING_EVIDENCE_PROVENANCE")
-        else:
-            valid_sig, sig_reason = verify_attestation_signature(
-                attestation, trusted_public_keys, current_time_utc=current_time_utc
-            )
-            if not valid_sig:
-                missing.append("signature_verification")
-                reasons.append(sig_reason)
+    if not trusted_public_keys:
+        missing.append("trusted_public_keys")
+        reasons.append("MISSING_TRUST_STORE")
+    elif attestation.evidence_provenance is None:
+        missing.append("evidence_provenance")
+        reasons.append("MISSING_EVIDENCE_PROVENANCE")
+    else:
+        valid_sig, sig_reason = verify_attestation_signature(
+            attestation,
+            trusted_public_keys,
+            current_time_utc=current_time_utc,
+            max_clock_skew_seconds=max_clock_skew_seconds,
+            max_evidence_age_seconds=max_evidence_age_seconds,
+        )
+        if not valid_sig:
+            missing.append("signature_verification")
+            reasons.append(sig_reason)
 
     # Legacy expected collectors check
     if intended.expected_collectors:
@@ -1299,15 +1428,7 @@ def compare_production_runtime(
                 missing.append(f"service:{expected_svc}")
 
     # Determine comparison status
-    if any(
-        r in reasons
-        for r in (
-            "UNTRUSTED_SIGNATURE_KEY",
-            "EXPIRED_EVIDENCE",
-            "INVALID_CRYPTOGRAPHIC_SIGNATURE",
-            "MISSING_EVIDENCE_PROVENANCE",
-        )
-    ):
+    if reasons:
         status = ComparisonStatus.INSUFFICIENT_EVIDENCE
     elif drifted:
         status = ComparisonStatus.DRIFT

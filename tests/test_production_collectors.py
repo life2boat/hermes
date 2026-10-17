@@ -18,6 +18,9 @@ from ai_engineering.production_runtime_attestation import (
     compare_production_runtime,
     create_intended_state,
     create_collector_result,
+    export_public_key_hex,
+    generate_keypair,
+    sign_attestation,
 )
 
 
@@ -230,11 +233,15 @@ def test_comparison_match():
             return create_collector_result("test_col", "AVAILABLE", {"val": 1})
 
     att = collect_production_attestation("prod", [DummyCollector()])
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv)
 
     intended = create_intended_state(
         target="prod", expected_observations={"test_col": {"val": 1}}
     )
-    comp = compare_production_runtime(intended, att)
+    comp = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[export_public_key_hex(pub)]
+    )
 
     assert comp.status == ComparisonStatus.MATCH
 
@@ -247,11 +254,15 @@ def test_comparison_drift():
             return create_collector_result("test_col", "AVAILABLE", {"val": 2})
 
     att = collect_production_attestation("prod", [DummyCollector()])
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv)
 
     intended = create_intended_state(
         target="prod", expected_observations={"test_col": {"val": 1}}
     )
-    comp = compare_production_runtime(intended, att)
+    comp = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[export_public_key_hex(pub)]
+    )
 
     assert comp.status == ComparisonStatus.DRIFT
     assert "test_col.val" in comp.drifted_observations
@@ -265,11 +276,15 @@ def test_comparison_insufficient():
             return create_collector_result("test_col", "UNAVAILABLE", {})
 
     att = collect_production_attestation("prod", [DummyCollector()])
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv)
 
     intended = create_intended_state(
         target="prod", expected_observations={"test_col": {"val": 1}}
     )
-    comp = compare_production_runtime(intended, att)
+    comp = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[export_public_key_hex(pub)]
+    )
 
     assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
     assert "test_col.val" in comp.missing_observations

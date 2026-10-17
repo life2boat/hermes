@@ -22,6 +22,8 @@ from ai_engineering.production_runtime_attestation import (
     ProductionRuntimeAttestationError,
     ProductionRuntimeComparison,
     RuntimeCollector,
+    SIGNATURE_ALGORITHM_V2,
+    SIGNATURE_CONTRACT_VERSION,
     StaticFixtureCollector,
     compare_production_runtime,
     compute_attestation_id,
@@ -164,11 +166,14 @@ def test_signature_verification() -> None:
         collected_at_utc="2026-01-02T03:04:05Z",
         collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
     )
-    signed_att = sign_attestation(att, priv_hex)
+    signed_att = sign_attestation(att, priv_hex, signed_at_utc="2026-01-02T03:04:05Z")
     assert signed_att.evidence_provenance is not None
     assert signed_att.evidence_provenance.signer_identity == pub_hex
+    assert signed_att.evidence_provenance.signature_algorithm == SIGNATURE_ALGORITHM_V2
 
-    is_valid, reason = verify_attestation_signature(signed_att, [pub_hex])
+    is_valid, reason = verify_attestation_signature(
+        signed_att, [pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
     assert is_valid is True
     assert reason == "SIGNATURE_VALID"
 
@@ -185,23 +190,30 @@ def test_untrusted_signature_rejection() -> None:
         collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
     )
     # Signed by key1
-    signed_att = sign_attestation(att, export_private_key_hex(priv_key1))
+    signed_att = sign_attestation(
+        att, export_private_key_hex(priv_key1), signed_at_utc="2026-01-02T03:04:05Z"
+    )
 
     # Verification against key2 only should be rejected
-    is_valid, reason = verify_attestation_signature(signed_att, [pub_hex2])
+    is_valid, reason = verify_attestation_signature(
+        signed_att, [pub_hex2], current_time_utc="2026-01-02T03:10:00Z"
+    )
     assert is_valid is False
     assert reason == "UNTRUSTED_SIGNATURE_KEY"
 
     # Corrupted signature
     tampered_prov = EvidenceProvenance(
         signer_identity=pub_hex1,
-        signature_algorithm="ed25519",
+        signature_algorithm=SIGNATURE_ALGORITHM_V2,
         signature="0" * 128,
         signed_at_utc=signed_att.evidence_provenance.signed_at_utc,
         valid_until_utc=signed_att.evidence_provenance.valid_until_utc,
+        signature_contract_version=SIGNATURE_CONTRACT_VERSION,
     )
     tampered_att = replace(signed_att, evidence_provenance=tampered_prov)
-    is_valid, reason = verify_attestation_signature(tampered_att, [pub_hex1])
+    is_valid, reason = verify_attestation_signature(
+        tampered_att, [pub_hex1], current_time_utc="2026-01-02T03:10:00Z"
+    )
     assert is_valid is False
     assert reason in ("INVALID_CRYPTOGRAPHIC_SIGNATURE", "SIGNATURE_VERIFICATION_ERROR")
 
@@ -240,7 +252,15 @@ def test_expired_evidence() -> None:
 
 def test_match() -> None:
     # Scenario 1 — MATCH: authentic runtime evidence matches intended state
-    result = compare_production_runtime(_intended(), _attestation("evidence_match.json"))
+    att = _attestation("evidence_match.json")
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    result = compare_production_runtime(
+        _intended(),
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
     assert result.status == ComparisonStatus.MATCH
     assert result.drifted_observations == ()
     assert result.missing_observations == ()
@@ -248,7 +268,15 @@ def test_match() -> None:
 
 def test_drift() -> None:
     # Scenario 2 — DRIFT: authentic runtime evidence contains mismatch in image digest / revision
-    result = compare_production_runtime(_intended(), _attestation("evidence_drift.json"))
+    att = _attestation("evidence_drift.json")
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    result = compare_production_runtime(
+        _intended(),
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
     assert result.status == ComparisonStatus.DRIFT
     assert "runtime.image_revision" in result.drifted_observations
 
@@ -317,11 +345,22 @@ def test_offline_cli(tmp_path: Path) -> None:
     inspected = tmp_path / "inspected.json"
     unsafe = tmp_path / "unsafe.json"
     safe = tmp_path / "safe.json"
+    priv_file = tmp_path / "priv_key.txt"
+    key_file = tmp_path / "trusted_keys.txt"
+
+    # Generate keypair for CLI signing/verification test
+    priv_key, pub_key = generate_keypair()
+    priv_hex = export_private_key_hex(priv_key)
+    pub_hex = export_public_key_hex(pub_key)
+    priv_file.write_text(priv_hex + "\n", encoding="utf-8")
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw.write_text(
         json.dumps(
             {
                 "target": "synthetic-prod",
-                "collected_at_utc": "2026-01-02T03:04:05Z",
+                "collected_at_utc": now_utc_str,
                 "collectors": [
                     {
                         "collector_id": "runtime",
@@ -337,14 +376,7 @@ def test_offline_cli(tmp_path: Path) -> None:
         json.dumps({"service_token": "fixture-placeholder-value"}), encoding="utf-8"
     )
 
-    # Generate keypair for CLI signing/verification test
-    priv_key, pub_key = generate_keypair()
-    priv_hex = export_private_key_hex(priv_key)
-    pub_hex = export_public_key_hex(pub_key)
-    key_file = tmp_path / "trusted_keys.txt"
-    key_file.write_text(pub_hex + "\n", encoding="utf-8")
-
-    # CLI create with private key
+    # CLI create with private key file
     assert (
         run(
             [
@@ -353,8 +385,8 @@ def test_offline_cli(tmp_path: Path) -> None:
                 str(raw),
                 "--output",
                 str(created),
-                "--private-key",
-                priv_hex,
+                "--private-key-file",
+                str(priv_file),
             ]
         )
         == 0
@@ -398,8 +430,8 @@ def test_offline_cli(tmp_path: Path) -> None:
     assert run(["sanitize", "--input", str(unsafe), "--output", str(safe)]) == 0
     assert json.loads(safe.read_bytes()) == {"service_token": "<REDACTED>"}
 
-    # CLI compare
-    comp_output = tmp_path / "comparison.json"
+    # CLI compare: unsigned fixture without trust store returns non-zero (exit code 2)
+    comp_unsigned_output = tmp_path / "comparison_unsigned.json"
     assert (
         run(
             [
@@ -409,7 +441,42 @@ def test_offline_cli(tmp_path: Path) -> None:
                 "--attestation",
                 str(FIXTURES / "evidence_match.json"),
                 "--output",
+                str(comp_unsigned_output),
+            ]
+        )
+        == 2
+    )
+
+    # CLI compare: signed and matching with trusted keys returns 0
+    comp_output = tmp_path / "comparison.json"
+    intended_file = tmp_path / "intended.json"
+    intended_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": "synthetic-prod",
+                "expected_collectors": [
+                    {
+                        "collector_id": "runtime",
+                        "observations": {"running": True},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        run(
+            [
+                "compare",
+                "--intended",
+                str(intended_file),
+                "--attestation",
+                str(created),
+                "--output",
                 str(comp_output),
+                "--trusted-keys",
+                str(key_file),
             ]
         )
         == 0
@@ -452,9 +519,10 @@ def test_no_network_access(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(socket, "socket", blocked_socket)
 
+    now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     att = create_attestation(
         target="synthetic-prod",
-        collected_at_utc="2026-01-02T03:04:05Z",
+        collected_at_utc=now_str,
         collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
     )
     priv_key, pub_key = generate_keypair()
@@ -538,3 +606,315 @@ def test_collector_status_contract() -> None:
     assert result.status == CollectorStatus.UNAVAILABLE
     with pytest.raises(ProductionRuntimeAttestationError, match="UNAVAILABLE"):
         create_collector_result("runtime", "UNAVAILABLE", {"running": False})
+
+
+# ---------------------------------------------------------------------------
+# FIX-5: Required Security Remediation Regression Tests (10 tests)
+# ---------------------------------------------------------------------------
+
+
+def test_regression_unsigned_evidence_yields_insufficient_evidence() -> None:
+    # 1. Unsigned evidence → INSUFFICIENT_EVIDENCE
+    intended = _intended()
+    unsigned_att = _attestation("evidence_match.json")
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    comp = compare_production_runtime(
+        intended, unsigned_att, trusted_public_keys=[pub_hex]
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_EVIDENCE_PROVENANCE" in comp.reason_codes
+    assert "evidence_provenance" in comp.missing_observations
+
+
+def test_regression_missing_trust_store_yields_insufficient_evidence() -> None:
+    # 2. Missing trust store → INSUFFICIENT_EVIDENCE
+    intended = _intended()
+    att = _attestation("evidence_match.json")
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+
+    # Passing None for trusted_public_keys
+    comp1 = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=None
+    )
+    assert comp1.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_TRUST_STORE" in comp1.reason_codes
+    assert "trusted_public_keys" in comp1.missing_observations
+
+    # Passing empty sequence for trusted_public_keys
+    comp2 = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[]
+    )
+    assert comp2.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "MISSING_TRUST_STORE" in comp2.reason_codes
+
+
+def test_regression_expired_signed_evidence_yields_insufficient_evidence() -> None:
+    # 3. Expired signed evidence → INSUFFICIENT_EVIDENCE
+    intended = _intended()
+    att = _attestation("evidence_match.json")
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    t0 = "2026-01-02T03:04:05Z"
+    signed_att = sign_attestation(
+        att, priv, valid_duration_seconds=60, signed_at_utc=t0
+    )
+    # Evaluated after expiration
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[pub_hex],
+        current_time_utc="2026-01-02T04:00:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "EXPIRED_EVIDENCE" in comp.reason_codes
+
+
+def test_regression_tampered_validity_timestamp_breaks_signature() -> None:
+    # 4. Tampered validity timestamp → invalid signature
+    att = _attestation("evidence_match.json")
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    t0 = "2026-01-02T03:04:05Z"
+    signed_att = sign_attestation(
+        att, priv, valid_duration_seconds=3600, signed_at_utc=t0
+    )
+    assert signed_att.evidence_provenance is not None
+
+    # Tamper valid_until_utc: metadata bound in signature payload breaks signature
+    tampered_prov = replace(
+        signed_att.evidence_provenance,
+        valid_until_utc="2026-01-02T03:30:00Z",
+    )
+    tampered_att = replace(signed_att, evidence_provenance=tampered_prov)
+
+    is_valid, reason = verify_attestation_signature(
+        tampered_att, [pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
+    assert is_valid is False
+    assert reason == "INVALID_CRYPTOGRAPHIC_SIGNATURE"
+
+    # Also tamper signed_at_utc
+    tampered_signed_at = replace(
+        signed_att.evidence_provenance,
+        signed_at_utc="2026-01-02T03:05:00Z",
+    )
+    tampered_att2 = replace(signed_att, evidence_provenance=tampered_signed_at)
+    is_valid2, reason2 = verify_attestation_signature(
+        tampered_att2, [pub_hex], current_time_utc="2026-01-02T03:10:00Z"
+    )
+    assert is_valid2 is False
+    assert reason2 == "INVALID_CRYPTOGRAPHIC_SIGNATURE"
+
+
+def test_regression_untrusted_signer_yields_insufficient_evidence() -> None:
+    # 5. Untrusted signer → INSUFFICIENT_EVIDENCE
+    intended = _intended()
+    att = _attestation("evidence_match.json")
+    priv_a, pub_a = generate_keypair()
+    priv_b, pub_b = generate_keypair()
+    signed_att = sign_attestation(
+        att, priv_a, signed_at_utc="2026-01-02T03:04:05Z"
+    )
+    # Trust store only contains pub_b
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub_b)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "UNTRUSTED_SIGNATURE_KEY" in comp.reason_codes
+
+
+def test_regression_authenticated_image_mismatch_yields_drift() -> None:
+    # 6. Authenticated image mismatch → DRIFT
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "2" * 64,  # mismatched image digest
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(
+        att, priv, signed_at_utc="2026-01-02T03:04:05Z"
+    )
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.DRIFT
+    assert any("image_digest" in d for d in comp.drifted_observations)
+    assert comp.reason_codes == ()
+
+
+def test_regression_valid_signed_and_matching_state_yields_match() -> None:
+    # 7. Valid signed and matching state → MATCH
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+    )
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(
+        att, priv, signed_at_utc="2026-01-02T03:04:05Z"
+    )
+    comp = compare_production_runtime(
+        intended,
+        signed_att,
+        trusted_public_keys=[export_public_key_hex(pub)],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.drifted_observations == ()
+    assert comp.missing_observations == ()
+    assert comp.reason_codes == ()
+
+
+def test_regression_legacy_unsigned_fixture_never_authorizes_production_match() -> None:
+    # 8. Legacy unsigned fixture never authorizes production MATCH
+    intended = _intended()
+    unsigned_att = _attestation("evidence_match.json")
+
+    # Call without trust store
+    comp_no_store = compare_production_runtime(intended, unsigned_att)
+    assert comp_no_store.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp_no_store.status != ComparisonStatus.MATCH
+
+    # Call with a valid trust store
+    priv, pub = generate_keypair()
+    comp_with_store = compare_production_runtime(
+        intended, unsigned_att, trusted_public_keys=[export_public_key_hex(pub)]
+    )
+    assert comp_with_store.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp_with_store.status != ComparisonStatus.MATCH
+    assert "MISSING_EVIDENCE_PROVENANCE" in comp_with_store.reason_codes
+
+
+def test_regression_cli_verification_cannot_succeed_without_authenticity(
+    tmp_path: Path,
+) -> None:
+    # 9. CLI verification cannot succeed without authenticity
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    key_file = tmp_path / "trusted_keys.txt"
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+
+    # Unsigned attestation file
+    unsigned_path = tmp_path / "unsigned.json"
+    unsigned_path.write_bytes(serialize_attestation(_attestation("evidence_match.json")))
+
+    # Verify without --trusted-keys fails closed (non-zero)
+    ret_no_keys = run(["verify", "--input", str(unsigned_path)])
+    assert ret_no_keys != 0
+
+    # Verify unsigned evidence with --trusted-keys fails closed (non-zero)
+    ret_unsigned = run(
+        ["verify", "--input", str(unsigned_path), "--trusted-keys", str(key_file)]
+    )
+    assert ret_unsigned != 0
+
+    # Verify with --integrity-only succeeds for structurally valid unsigned evidence
+    ret_integrity = run(["verify", "--input", str(unsigned_path), "--integrity-only"])
+    assert ret_integrity == 0
+
+
+def test_regression_no_private_key_leakage_via_cli_logs_or_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 10. No private-key leakage via CLI, logs, or artifacts
+    priv, pub = generate_keypair()
+    priv_hex = export_private_key_hex(priv)
+    priv_file = tmp_path / "secret_key.txt"
+    priv_file.write_text(priv_hex + "\n", encoding="utf-8")
+
+    raw_file = tmp_path / "raw.json"
+    now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw_file.write_text(
+        json.dumps(
+            {
+                "target": "synthetic-prod",
+                "collected_at_utc": now_str,
+                "collectors": [
+                    {
+                        "collector_id": "runtime",
+                        "status": "AVAILABLE",
+                        "observations": {"running": True},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_file = tmp_path / "created.json"
+
+    # Reject raw hex argument `--private-key` (CLI fails with unknown argument)
+    with pytest.raises(SystemExit):
+        run(
+            [
+                "create",
+                "--input",
+                str(raw_file),
+                "--output",
+                str(out_file),
+                "--private-key",
+                priv_hex,
+            ]
+        )
+
+    # Clear captured stderr from the rejected command invocation
+    capsys.readouterr()
+
+    # Valid execution using `--private-key-file`
+    ret = run(
+        [
+            "create",
+            "--input",
+            str(raw_file),
+            "--output",
+            str(out_file),
+            "--private-key-file",
+            str(priv_file),
+        ]
+    )
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    # Check stdout and stderr never leak private key hex
+    assert priv_hex not in captured.out
+    assert priv_hex not in captured.err
+
+    # Check serialized artifact never leaks private key hex
+    artifact_bytes = out_file.read_bytes()
+    assert priv_hex.encode("utf-8") not in artifact_bytes
+    assert bytes.fromhex(priv_hex) not in artifact_bytes

@@ -57,7 +57,12 @@ def _parse_trusted_keys(trusted_arg: str | None) -> list[str] | None:
     return [k.strip() for k in trusted_arg.split(",") if k.strip()]
 
 
-def _create(input_path: Path, output_path: Path, private_key_hex: str | None = None) -> int:
+def _create(
+    input_path: Path,
+    output_path: Path,
+    private_key_file: Path | None = None,
+    signed_at_utc: str | None = None,
+) -> int:
     raw = parse_json_document(_read(input_path))
     if not isinstance(raw, dict):
         raise ProductionRuntimeAttestationError("CREATE_INPUT_INVALID")
@@ -116,24 +121,48 @@ def _create(input_path: Path, output_path: Path, private_key_hex: str | None = N
             collectors=collectors,
         )
 
-    if private_key_hex:
-        key_str = private_key_hex.strip()
-        p = Path(key_str)
-        if p.is_file():
-            key_str = p.read_text(encoding="utf-8").strip()
-        attestation = sign_attestation(attestation, key_str)
+    if private_key_file is not None:
+        if not private_key_file.is_file() or private_key_file.is_symlink():
+            raise ProductionRuntimeAttestationError("PRIVATE_KEY_FILE_INVALID")
+        key_str = private_key_file.read_text(encoding="utf-8").strip()
+        attestation = sign_attestation(
+            attestation, key_str, signed_at_utc=signed_at_utc
+        )
 
     _write_new(output_path, serialize_attestation(attestation))
     return 0
 
 
-def _verify(input_path: Path, output_path: Path | None = None, trusted_keys: str | None = None) -> int:
+def _verify(
+    input_path: Path,
+    output_path: Path | None = None,
+    trusted_keys: str | None = None,
+    integrity_only: bool = False,
+    current_time_utc: str | None = None,
+    max_age_seconds: int | None = None,
+) -> int:
     attestation = deserialize_attestation(_read(input_path))
+    if integrity_only:
+        if output_path is not None:
+            _write_new(output_path, serialize_attestation(attestation))
+        return 0
+
     keys = _parse_trusted_keys(trusted_keys)
-    if keys and attestation.evidence_provenance:
-        valid_sig, reason = verify_attestation_signature(attestation, keys)
-        if not valid_sig:
-            raise ProductionRuntimeAttestationError(f"SIGNATURE_VERIFICATION_FAILED: {reason}")
+    if not keys:
+        raise ProductionRuntimeAttestationError("MISSING_TRUST_STORE")
+    if attestation.evidence_provenance is None:
+        raise ProductionRuntimeAttestationError("MISSING_EVIDENCE_PROVENANCE")
+
+    kwargs: dict[str, object] = {}
+    if current_time_utc is not None:
+        kwargs["current_time_utc"] = current_time_utc
+    if max_age_seconds is not None:
+        kwargs["max_evidence_age_seconds"] = max_age_seconds
+
+    valid_sig, reason = verify_attestation_signature(attestation, keys, **kwargs)
+    if not valid_sig:
+        raise ProductionRuntimeAttestationError(f"SIGNATURE_VERIFICATION_FAILED: {reason}")
+
     if output_path is not None:
         _write_new(output_path, serialize_attestation(attestation))
     return 0
@@ -144,11 +173,22 @@ def _compare(
     attestation_path: Path,
     output_path: Path,
     trusted_keys: str | None = None,
+    current_time_utc: str | None = None,
+    max_age_seconds: int | None = None,
 ) -> int:
     intended = deserialize_intended_state(_read(intended_path))
     attestation = deserialize_attestation(_read(attestation_path))
     keys = _parse_trusted_keys(trusted_keys)
-    comparison = compare_production_runtime(intended, attestation, trusted_public_keys=keys)
+
+    kwargs: dict[str, object] = {}
+    if current_time_utc is not None:
+        kwargs["current_time_utc"] = current_time_utc
+    if max_age_seconds is not None:
+        kwargs["max_evidence_age_seconds"] = max_age_seconds
+
+    comparison = compare_production_runtime(
+        intended, attestation, trusted_public_keys=keys, **kwargs
+    )
     _write_new(output_path, serialize_comparison(comparison))
     return 0 if comparison.status == ComparisonStatus.MATCH else 2
 
@@ -214,31 +254,81 @@ def _sanitize(input_path: Path, output_path: Path) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    create_cmd = commands.add_parser("create", help="Create attestation from input JSON")
+    create_cmd = commands.add_parser(
+        "create", allow_abbrev=False, help="Create attestation from input JSON"
+    )
     create_cmd.add_argument("--input", required=True, type=Path)
     create_cmd.add_argument("--output", required=True, type=Path)
-    create_cmd.add_argument("--private-key", required=False, type=str, help="Ed25519 private key hex for signing")
+    create_cmd.add_argument(
+        "--private-key-file",
+        required=False,
+        type=Path,
+        help="Path to file containing Ed25519 private key hex for signing",
+    )
+    create_cmd.add_argument(
+        "--signed-at-utc",
+        required=False,
+        type=str,
+        help="Optional canonical UTC timestamp for signing",
+    )
 
-    verify_cmd = commands.add_parser("verify", help="Verify attestation integrity and signature")
+    verify_cmd = commands.add_parser(
+        "verify", allow_abbrev=False, help="Verify attestation integrity and signature"
+    )
     verify_cmd.add_argument("--input", required=True, type=Path)
     verify_cmd.add_argument("--output", required=False, type=Path)
     verify_cmd.add_argument("--trusted-keys", required=False, type=str, help="Trusted public key hex or file")
+    verify_cmd.add_argument(
+        "--integrity-only",
+        action="store_true",
+        help="Verify structural integrity only without verifying signature",
+    )
+    verify_cmd.add_argument(
+        "--current-time-utc",
+        required=False,
+        type=str,
+        help="Reference UTC time for freshness evaluation",
+    )
+    verify_cmd.add_argument(
+        "--max-age-seconds",
+        required=False,
+        type=int,
+        help="Max evidence age in seconds",
+    )
 
-    compare_cmd = commands.add_parser("compare", help="Compare intended state with attestation")
+    compare_cmd = commands.add_parser(
+        "compare", allow_abbrev=False, help="Compare intended state with attestation"
+    )
     compare_cmd.add_argument("--intended", required=True, type=Path)
     compare_cmd.add_argument("--attestation", required=True, type=Path)
     compare_cmd.add_argument("--output", required=True, type=Path)
     compare_cmd.add_argument("--trusted-keys", required=False, type=str, help="Trusted public key hex or file")
+    compare_cmd.add_argument(
+        "--current-time-utc",
+        required=False,
+        type=str,
+        help="Reference UTC time for freshness evaluation",
+    )
+    compare_cmd.add_argument(
+        "--max-age-seconds",
+        required=False,
+        type=int,
+        help="Max evidence age in seconds",
+    )
 
-    inspect_cmd = commands.add_parser("inspect", help="Inspect attestation structure and provenance")
+    inspect_cmd = commands.add_parser(
+        "inspect", allow_abbrev=False, help="Inspect attestation structure and provenance"
+    )
     inspect_cmd.add_argument("--input", required=True, type=Path)
     inspect_cmd.add_argument("--output", required=False, type=Path, help="Optional output path")
     inspect_cmd.add_argument("--json", action="store_true", help="Output raw JSON")
 
-    sanitize_cmd = commands.add_parser("sanitize", help="Sanitize JSON evidence document")
+    sanitize_cmd = commands.add_parser(
+        "sanitize", allow_abbrev=False, help="Sanitize JSON evidence document"
+    )
     sanitize_cmd.add_argument("--input", required=True, type=Path)
     sanitize_cmd.add_argument("--output", required=True, type=Path)
 
@@ -249,11 +339,30 @@ def run(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "create":
-            return _create(args.input, args.output, private_key_hex=args.private_key)
+            return _create(
+                args.input,
+                args.output,
+                private_key_file=args.private_key_file,
+                signed_at_utc=args.signed_at_utc,
+            )
         if args.command == "verify":
-            return _verify(args.input, args.output, trusted_keys=args.trusted_keys)
+            return _verify(
+                args.input,
+                args.output,
+                trusted_keys=args.trusted_keys,
+                integrity_only=args.integrity_only,
+                current_time_utc=args.current_time_utc,
+                max_age_seconds=args.max_age_seconds,
+            )
         if args.command == "compare":
-            return _compare(args.intended, args.attestation, args.output, trusted_keys=args.trusted_keys)
+            return _compare(
+                args.intended,
+                args.attestation,
+                args.output,
+                trusted_keys=args.trusted_keys,
+                current_time_utc=args.current_time_utc,
+                max_age_seconds=args.max_age_seconds,
+            )
         if args.command == "inspect":
             return _inspect(args.input, output_path=args.output, as_json=args.json)
         if args.command == "sanitize":

@@ -1185,6 +1185,16 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     Extensible, deterministic food composition lookup layer.
     Enforces fail-closed matching without silent product or percentage substitution.
     """
+    try:
+        from gateway.nutrition.hfkb import get_default_hfkb
+        hfkb = get_default_hfkb()
+        if hfkb is not None:
+            hfkb_res = hfkb.resolve(query)
+            if hfkb_res.matched:
+                return hfkb_res
+    except Exception:
+        pass
+
     raw_normalized = normalize_food_lookup_key(query)
     if not raw_normalized:
         return FoodLookupResult(matched=False, match_type="empty")

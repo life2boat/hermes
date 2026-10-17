@@ -110,7 +110,7 @@ async def test_wide_range_portion_calculates_and_saves_without_manual_grams(test
 
     pending = _stage_inventory(isolated_diary, user_id, inv_id, [item])
 
-    assert pending.items[0].selected_grams == 200.0
+    assert pending.items[0].selected_grams is None
     assert pending.items[0].user_modified is False
     assert pending.calculation_snapshot is not None
     assert pending.calculation_snapshot.get("calories_kcal") is not None
@@ -168,10 +168,8 @@ async def test_missing_vision_grams_with_hipe_prior_calculates_and_saves(test_ad
 
     pending = _stage_inventory(isolated_diary, user_id, inv_id, [item])
 
-    # HIPE prior should assign default portion
-    assert pending.items[0].selected_grams is not None
-    assert pending.items[0].selected_grams > 0.0
-    assert pending.items[0].user_modified is False
+    # HIPE prior should calculate portion in snapshot without forcing selected_grams
+    assert pending.items[0].selected_grams is None
     assert pending.calculation_snapshot is not None
     assert pending.calculation_snapshot.get("calories_kcal") is not None
 

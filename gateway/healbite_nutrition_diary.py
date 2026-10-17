@@ -1191,6 +1191,8 @@ def _maybe_proposed_selected_grams(grams_min: float | None, grams_max: float | N
         return None
     if grams_max < grams_min:
         return None
+    if (grams_max - grams_min) > _AUTO_PROPOSE_WEIGHT_SPAN_G:
+        return None
     midpoint = (float(grams_min) + float(grams_max)) / 2.0
     return max(_MIN_SELECTED_GRAMS, min(_MAX_SELECTED_GRAMS, _round_selected_grams(midpoint)))
 
@@ -1459,16 +1461,6 @@ def _pending_inventory_from_food_vision(
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
         sel_g = _maybe_proposed_selected_grams(g_min, g_max)
-        if sel_g is None and g_min is None and g_max is None:
-            try:
-                from gateway.nutrition.hipe import estimate_portion_mass
-                hipe_bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
-                if hipe_bounds is not None and hipe_bounds.grams_center > 0:
-                    g_min = hipe_bounds.grams_min
-                    g_max = hipe_bounds.grams_max
-                    sel_g = hipe_bounds.grams_center
-            except Exception:
-                pass
         items.append(PendingFoodVisionItem(
             index=index,
             visible_name=item.visible_name,
@@ -1639,6 +1631,9 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
                 extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
             else:
                 extras.append(f"расчётный вес: ~{_format_grams(item.selected_grams)}")
+        elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
+            extras.append(f"расчётный вес: ~{_format_grams(mid)}")
         else:
             extras.append("вес не подтверждён")
             all_weights_present = False
@@ -1690,7 +1685,7 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         lines.extend(["", "Уточнения:"])
         lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
 
-    if all_weights_present and has_any_nutrition:
+    if (all_weights_present or (snapshot and total_calories > 0.0)) and has_any_nutrition:
         total_label = "Итого (частично)" if has_unmapped_component else "Итого"
         lines.extend([
             "",
@@ -2088,21 +2083,26 @@ def _build_component_record(
     )
 
 
-def calculate_inventory_nutrition(inventory: PendingFoodVisionInventory) -> InventoryNutritionCalculationResult:
-    readiness, missing_indexes = _pending_inventory_readiness(inventory)
-    if readiness != READY_FOR_NUTRITION_CALCULATION:
-        return InventoryNutritionCalculationResult(
-            status=readiness,
-            components=[],
-            missing_indexes=missing_indexes,
-            blocked_indexes=[],
-            reason="weights_missing" if missing_indexes else "invalid_inventory_state",
-        )
-
+def calculate_inventory_nutrition(
+    inventory: PendingFoodVisionInventory,
+    *,
+    require_weights: bool = False,
+) -> InventoryNutritionCalculationResult:
     snapshot = inventory.calculation_snapshot
     if snapshot is None:
         snapshot = _build_inventory_calculation_snapshot(inventory)
         inventory.calculation_snapshot = snapshot
+
+    if require_weights or snapshot is None:
+        readiness, missing_indexes = _pending_inventory_readiness(inventory)
+        if readiness != READY_FOR_NUTRITION_CALCULATION:
+            return InventoryNutritionCalculationResult(
+                status=readiness,
+                components=[],
+                missing_indexes=missing_indexes,
+                blocked_indexes=[],
+                reason="weights_missing" if missing_indexes else "invalid_inventory_state",
+            )
 
     if snapshot is not None:
         blocked_indexes = []
@@ -2913,7 +2913,7 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
-        calculation = calculate_inventory_nutrition(payload)
+        calculation = calculate_inventory_nutrition(payload, require_weights=True)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
             return PendingInventoryReplyResult(
                 status="needs_weight_confirmation",
@@ -3007,7 +3007,7 @@ class HealBiteNutritionDiary:
             self.clear_pending_state(user_id)
             return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
         if action.kind == "save":
-            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now)
+            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
         if action.kind == "save_without_kbzhu":
             return self.save_pending_inventory_without_kbzhu(user_id, expected_inventory_id=expected_inventory_id, now=now)
         if action.kind == "confirm":
@@ -3020,6 +3020,7 @@ class HealBiteNutritionDiary:
         *,
         expected_inventory_id: str | None = None,
         now: datetime | None = None,
+        require_weights: bool = False,
     ) -> PendingInventoryReplyResult:
         normalized_user_id = int(user_id)
         payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
@@ -3041,7 +3042,7 @@ class HealBiteNutritionDiary:
                 reply_text=format_pending_inventory_expired_reply(),
             )
 
-        calculation = calculate_inventory_nutrition(payload)
+        calculation = calculate_inventory_nutrition(payload, require_weights=require_weights)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
             return PendingInventoryReplyResult(
                 status="needs_weight_confirmation",

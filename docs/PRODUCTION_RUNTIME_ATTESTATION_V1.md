@@ -39,6 +39,7 @@ The attestation format is formally specified in [`schemas/production-runtime-att
   - `schema_version`: Database/system schema version.
   - `active_services`: Sorted sequence of active service names.
   - `configuration_contract_version`: Contract configuration version string.
+  - `release_identity`: Verified release identity string (e.g. `hermes-v2-prod`).
   - `raw_observations`: Optional key-value dictionary of non-secret observations.
 - `verification_metadata`: Object or `null` tracking offline verification receipts.
 
@@ -133,15 +134,38 @@ Credential values, private keys, environment secrets, and secret lengths are str
 
 ---
 
-## 6. Comparison Status Semantics
+## 6. Comparison Status Semantics & Evaluation Modes
 
 Comparison between `IntendedProductionState` and `ProductionRuntimeAttestation` returns strictly one of three statuses:
 
 | Status | Meaning | Preconditions |
 | :--- | :--- | :--- |
 | `MATCH` | Complete alignment | Valid integrity, authentic signature, fresh timestamp, and all observed properties match expected state. |
-| `DRIFT` | Proven divergence | Valid evidence proves a discrepancy in image digest, revision SHA, active services, or runtime contract. |
-| `INSUFFICIENT_EVIDENCE` | Incomplete or unverified proof | Missing evidence, unavailable collectors, expired timestamp, or untrusted/invalid cryptographic signature. |
+| `DRIFT` | Proven divergence | Valid evidence proves a discrepancy in image digest, revision SHA, active services, release identity, or runtime contract. |
+| `INSUFFICIENT_EVIDENCE` | Incomplete or unverified proof | Missing evidence, unavailable collectors, missing mandatory invariants, expired timestamp, or untrusted/invalid signature. |
+
+### Evaluation Modes and Authority
+- **Authoritative Mode (`AUTHORITATIVE_PRODUCTION`)**:
+  - Activated when `current_time_utc is None` (evaluating against current system UTC).
+  - Yields `authoritative_for_production = True` only upon authentic `MATCH` with non-dummy observed runtime state.
+  - Required for production release-gating.
+- **Diagnostic Mode (`DIAGNOSTIC_TIME_OVERRIDE`)**:
+  - Activated whenever a manual reference time (`current_time_utc`) is supplied for testing or forensic replay.
+  - Strictly enforces `authoritative_for_production = False` regardless of whether invariants match.
+  - Release-gating tools reject non-authoritative comparisons (CLI exits with code `3`).
+
+### Strict Reason Codes and Co-Occurrence Invariants
+All comparison results record stable, programmatic reason codes:
+- Missing invariant: `MISSING_OBSERVED_INVARIANT:<field>`
+- Invariant drift: `INVARIANT_DRIFT:<field>`
+- Service mismatch: `MISSING_SERVICE:<name>`, `EXTRA_SERVICE_DETECTED`, `EXTRA_SERVICE:<name>`
+- Policy violations: `UNTRUSTED_FRESHNESS_POLICY`, `EMPTY_RUNTIME_OBSERVATIONS`
+- Signature verification: `MISSING_TRUST_STORE`, `MISSING_EVIDENCE_PROVENANCE`, `UNTRUSTED_SIGNATURE_KEY`, `EXPIRED_EVIDENCE`, `STALE_EVIDENCE`
+
+> **Fail-Closed Co-Occurrence Rule**: If missing invariants and drift co-occur in the same evaluation, the comparison status **strictly resolves to `INSUFFICIENT_EVIDENCE`**. Proven divergence cannot override incomplete proof.
+
+### Cryptographic Comparison ID Binding (v1.2)
+All semantically significant comparison fields (`attestation_id`, `authoritative_for_production`, `drifted_observations`, `evaluation_mode`, `intended_digest`, `missing_observations`, `reason_codes`, `schema_version`, `status`, `target`) are canonicalized and bound into `comparison_id` under domain prefix `hermes-production-runtime-comparison-v2\n`. Tampering with authority flags, evaluation modes, or reason codes fails closed with `TAMPERED_COMPARISON_ID`.
 
 ---
 
@@ -191,8 +215,8 @@ python scripts/production_runtime_attestation.py verify --input attestation.json
 # Verify structural integrity only without cryptographic authenticity verification
 python scripts/production_runtime_attestation.py verify --input attestation.json --integrity-only [--output verified.json]
 
-# Compare intended state against attestation (fails closed with exit code 2 if unsigned or untrusted)
-python scripts/production_runtime_attestation.py compare --intended intended.json --attestation attestation.json --output comparison.json --trusted-keys <hex_or_file>
+# Compare intended state against attestation (fails closed with exit code 2 if unsigned or untrusted; exit code 3 on diagnostic match)
+python scripts/production_runtime_attestation.py compare --intended intended.json --attestation attestation.json --output comparison.json --trusted-keys <hex_or_file> [--current-time-utc <iso_utc>]
 
 # Inspect attestation details (human-readable or JSON)
 python scripts/production_runtime_attestation.py inspect --input attestation.json [--json] [--output inspection.txt]
@@ -202,7 +226,8 @@ python scripts/production_runtime_attestation.py sanitize --input raw.json --out
 ```
 
 ### Exit Codes
-- `0`: Success / Comparison `MATCH` / Integrity verified.
+- `0`: Authoritative `MATCH` (authentic, fresh evidence verified without time override) / Integrity verified.
+- `3`: Diagnostic `MATCH` with time override (fails release-gating to prevent unearned production authority).
 - `2`: Comparison `DRIFT` or `INSUFFICIENT_EVIDENCE`.
 - `1`: Contract error, tampering detected, missing trust store, or invalid argument.
 

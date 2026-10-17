@@ -9154,14 +9154,53 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
             return
 
+        diary = get_default_nutrition_diary()
+        pending = diary.get_pending_inventory(target_user_id, include_expired=True)
+
+        # Atomic ownership validation against SQLite
+        if pending is not None and pending.user_id != actor_user_id:
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result="cross_user_denied",
+            )
+            try:
+                await query.answer(text="Это действие доступно только автору фото.", show_alert=True)
+            except Exception:
+                pass
+            return
+
         actor_household = None
-        if hasattr(query, "household_id") and isinstance(getattr(query, "household_id"), (str, int)):
+        target_household = None
+
+        # Authoritative SQLite household resolution
+        try:
+            from gateway.healbite_households import HealBiteHouseholdService, HealBiteHouseholdStore
+            db_path = getattr(diary, "db_path", None)
+            if db_path:
+                hh_service = HealBiteHouseholdService(
+                    HealBiteHouseholdStore(db_path=db_path, ensure_schema_on_init=False)
+                )
+                try:
+                    actor_ctx = hh_service.resolve_existing_actor_household_context(actor_user_id)
+                    actor_household = actor_ctx.household_id
+                except Exception:
+                    actor_household = None
+        except Exception:
+            actor_household = None
+
+        if pending is not None and getattr(pending, "household_id", None):
+            target_household = str(pending.household_id)
+
+        # Compatibility check for query attributes if test mocks them
+        if actor_household is None and hasattr(query, "household_id") and isinstance(getattr(query, "household_id"), (str, int)):
             actor_household = str(getattr(query, "household_id"))
-        elif hasattr(query, "from_user") and hasattr(getattr(query, "from_user", None), "household_id") and isinstance(getattr(query.from_user, "household_id"), (str, int)):
+        elif actor_household is None and hasattr(query, "from_user") and hasattr(getattr(query, "from_user", None), "household_id") and isinstance(getattr(query.from_user, "household_id"), (str, int)):
             actor_household = str(getattr(query.from_user, "household_id"))
 
-        target_household = None
-        if hasattr(query, "target_household_id") and isinstance(getattr(query, "target_household_id"), (str, int)):
+        if target_household is None and hasattr(query, "target_household_id") and isinstance(getattr(query, "target_household_id"), (str, int)):
             target_household = str(getattr(query, "target_household_id"))
 
         if actor_household and target_household and actor_household != target_household:
@@ -9177,8 +9216,6 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             return
-
-        diary = get_default_nutrition_diary()
 
         if action in {"save", "save_no_kbzhu"}:
             if action == "save":

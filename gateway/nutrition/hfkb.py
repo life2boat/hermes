@@ -103,6 +103,27 @@ class HFKBFoodItem:
     aliases: tuple[str, ...] = ()
     portions: tuple[tuple[str, float], ...] = ()
 
+    @property
+    def canonical_name(self) -> str:
+        return self.name_ru
+
+    @property
+    def preparation_state(self) -> str:
+        return self.cooking_state
+
+    @property
+    def nutrient_profile(self) -> HFKBFoodItem:
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class HFKBSearchResult:
+    best_item: HFKBFoodItem | None
+    confidence: float
+    matched: bool
+    candidate_suggestions: tuple[str, ...] = ()
+    match_type: str = "none"
+
 
 def hfkb_item_to_nutrient_profile(item: HFKBFoodItem) -> FoodNutrientProfile:
     """Converts HFKBFoodItem to the canonical FoodNutrientProfile contract."""
@@ -139,6 +160,10 @@ class HFKBCatalog:
         self._id_to_stemmed_tokens: dict[str, tuple[str, ...]] = {}
         self._food_cache: dict[str, HFKBFoodItem] = {}
         self._is_indexed = False
+
+    @property
+    def is_open(self) -> bool:
+        return self.db_path.exists()
 
     def connect(self) -> sqlite3.Connection:
         if self.read_only:
@@ -372,6 +397,26 @@ class HFKBCatalog:
             source_provenance=profile.source_provenance,
         )
 
+    def search(self, query: str, limit: int = 5) -> HFKBSearchResult:
+        """Compatibility search method returning HFKBSearchResult."""
+        res = self.resolve(query)
+        if res.matched and res.profile:
+            item = self.get_food_by_id(res.profile.canonical_id)
+            return HFKBSearchResult(
+                best_item=item,
+                confidence=res.confidence,
+                matched=True,
+                candidate_suggestions=tuple(res.candidate_suggestions[:limit]),
+                match_type=res.match_type,
+            )
+        return HFKBSearchResult(
+            best_item=None,
+            confidence=0.0,
+            matched=False,
+            candidate_suggestions=tuple(res.candidate_suggestions[:limit]),
+            match_type="none",
+        )
+
     def count_records(self) -> int:
         if not self.db_path.exists():
             return 0
@@ -387,6 +432,28 @@ _GLOBAL_HFKB_LOCK = threading.Lock()
 class CatalogVerificationError(RuntimeError):
     """Raised when strict catalog verification fails (checksum mismatch, corruption, missing manifest)."""
     pass
+
+
+def _resolve_catalog_path(explicit_path: Path | str | None = None) -> Path:
+    if explicit_path is not None:
+        return Path(explicit_path)
+
+    # Search candidates in priority order:
+    # 1. Working directory
+    # 2. Repository root (two levels above gateway/)
+    # 3. gateway/nutrition/data/
+    # 4. Fallback to nutrition_catalog_v2.db in CWD
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        Path("nutrition_catalog_v2.db"),
+        repo_root / "nutrition_catalog_v2.db",
+        Path(__file__).resolve().parent / "data" / "nutrition_catalog_v2.db",
+        Path.cwd() / "nutrition_catalog_v2.db",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return Path("nutrition_catalog_v2.db")
 
 
 def load_verified_hfkb(
@@ -410,7 +477,7 @@ def load_verified_hfkb(
     """
     from gateway.nutrition.manifest import load_and_verify_catalog_binding
 
-    cat_path = Path(catalog_path) if catalog_path is not None else Path("nutrition_catalog_v2.db")
+    cat_path = _resolve_catalog_path(catalog_path)
     man_path = Path(manifest_path) if manifest_path is not None else None
 
     if not cat_path.exists():
@@ -447,7 +514,7 @@ def get_default_hfkb(catalog_path: Path | str | None = None) -> HFKBCatalog | No
     with _GLOBAL_HFKB_LOCK:
         if _GLOBAL_HFKB is not None:
             return _GLOBAL_HFKB
-        target_path = Path(catalog_path) if catalog_path else Path("nutrition_catalog_v2.db")
+        target_path = _resolve_catalog_path(catalog_path)
         if target_path.exists():
             try:
                 catalog = load_verified_hfkb(target_path, strict=False)

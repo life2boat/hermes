@@ -214,7 +214,7 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         dataset_version='Skurikhin-2008-Curated',
         cooking_state='boiled',
         source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Первые блюда (супы)', поз. 701",
-        aliases=('борщ', 'украинский борщ', 'красный борщ'),
+        aliases=('борщ', 'украинский борщ', 'красный борщ', 'борщ с говядиной', 'борщ со сметаной', 'борщ с мясом', 'борщ мясной', 'тарелка борща с говядиной'),
     ),
     FoodNutrientProfile(
         canonical_id='bread',
@@ -860,7 +860,7 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         dataset_version='Skurikhin-2008-Curated',
         cooking_state='prepared',
         source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Вторые блюда из риса и мяса', поз. 710",
-        aliases=('плов', 'узбекский плов'),
+        aliases=('плов', 'узбекский плов', 'плов с курицей', 'плов с говядиной', 'плов с мясом'),
     ),
     FoodNutrientProfile(
         canonical_id='pork',

@@ -50,34 +50,62 @@ def resolve_and_calculate_component(
     catalog = hfkb or get_default_hfkb()
 
     # Step 1: Query HFKB if bound
-    if catalog is not None and catalog.is_open:
-        match_result = catalog.search(food_name, limit=5)
-        if match_result.best_item is not None and match_result.confidence >= 0.70:
-            item = match_result.best_item
-            profile = item.nutrient_profile
-            intervals = calculate_component_macronutrient_intervals(
-                mass_bounds,
-                profile.calories_kcal,
-                profile.protein_g,
-                profile.fat_g,
-                profile.carbs_g,
-            )
-            return ComponentNutritionEstimate(
-                name=item.canonical_name,
-                mass_bounds=mass_bounds,
-                intervals=intervals,
-                source_id=item.source_id,
-                cooking_state=item.preparation_state or cooking_state,
-                source_provenance=item.source_provenance,
-                per_100g_calories_kcal=profile.calories_kcal,
-                per_100g_protein_g=profile.protein_g,
-                per_100g_fat_g=profile.fat_g,
-                per_100g_carbs_g=profile.carbs_g,
-                uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
-                is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
-                nutrition_available=True,
-                candidate_suggestions=(),
-            )
+    if catalog is not None and getattr(catalog, "is_open", True):
+        if hasattr(catalog, "resolve"):
+            match_res = catalog.resolve(food_name, preferred_cooking_state=cooking_state)
+            if match_res.matched and match_res.profile is not None and match_res.confidence >= 0.70:
+                profile = match_res.profile
+                intervals = calculate_component_macronutrient_intervals(
+                    mass_bounds,
+                    profile.calories_kcal,
+                    profile.protein_g,
+                    profile.fat_g,
+                    profile.carbs_g,
+                )
+                return ComponentNutritionEstimate(
+                    name=profile.display_name,
+                    mass_bounds=mass_bounds,
+                    intervals=intervals,
+                    source_id=profile.source_id,
+                    cooking_state=profile.cooking_state or cooking_state,
+                    source_provenance=profile.source_provenance,
+                    per_100g_calories_kcal=profile.calories_kcal,
+                    per_100g_protein_g=profile.protein_g,
+                    per_100g_fat_g=profile.fat_g,
+                    per_100g_carbs_g=profile.carbs_g,
+                    uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
+                    is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
+                    nutrition_available=True,
+                    candidate_suggestions=tuple(match_res.candidate_suggestions),
+                )
+        elif hasattr(catalog, "search"):
+            match_result = catalog.search(food_name, limit=5)
+            if match_result.best_item is not None and match_result.confidence >= 0.70:
+                item = match_result.best_item
+                profile = item.nutrient_profile
+                intervals = calculate_component_macronutrient_intervals(
+                    mass_bounds,
+                    profile.calories_kcal,
+                    profile.protein_g,
+                    profile.fat_g,
+                    profile.carbs_g,
+                )
+                return ComponentNutritionEstimate(
+                    name=item.canonical_name,
+                    mass_bounds=mass_bounds,
+                    intervals=intervals,
+                    source_id=item.source_id,
+                    cooking_state=item.preparation_state or cooking_state,
+                    source_provenance=item.source_provenance,
+                    per_100g_calories_kcal=profile.calories_kcal,
+                    per_100g_protein_g=profile.protein_g,
+                    per_100g_fat_g=profile.fat_g,
+                    per_100g_carbs_g=profile.carbs_g,
+                    uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
+                    is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
+                    nutrition_available=True,
+                    candidate_suggestions=(),
+                )
 
     # Step 2: Fall back to in-memory verified catalog / alias index
     legacy_result = resolve_food_composition(food_name)
@@ -149,7 +177,7 @@ def _matches_any_ingredient(name: str, candidate_set: set[str]) -> bool:
         if cand in norm_name or norm_name in cand:
             return True
         cand_stems = set(extract_stemmed_tokens(cand))
-        if cand_stems and (cand_stems.issubset(name_stems) or name_stems.issubset(cand_stems)):
+        if cand_stems and (cand_stems.issubset(name_stems) or name_stems.issubset(cand_stems) or bool(cand_stems & name_stems)):
             return True
     return False
 

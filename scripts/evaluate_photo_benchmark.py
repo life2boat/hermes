@@ -95,6 +95,11 @@ class PhotoBenchmarkReport:
     real_photo_acceptance: str  # "PENDING" | "PASS" | "FAIL"
     live_provider_requests_used: int
     summary_message: str
+    dish_recognition_f1: str = "NOT_EVALUATED_OFFLINE_MODE"
+    real_photo_test_count: int = 0
+    median_interval_relative_width_pct: float = 0.0
+    unknown_food_rate: float = 0.0
+    category_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
 def _calculate_metrics(results: list[ItemEvaluationResult]) -> BenchmarkMetrics:
@@ -472,14 +477,46 @@ def run_photo_benchmark(
     cal_metrics = _calculate_metrics(cal_results) if cal_results else None
     hld_metrics = _calculate_metrics(hld_results) if hld_results else None
 
+    # Compute median interval relative width (%)
+    import statistics
+    rel_widths = [
+        ((r.mass_max_g - r.mass_min_g) / r.estimated_mass_center_g * 100.0)
+        for r in results
+        if r.estimated_mass_center_g > 0
+    ]
+    median_rel_width = round(statistics.median(rel_widths), 1) if rel_widths else 0.0
+
+    # Compute unknown food rate
+    unrec_count = sum(max(0, r.dishes_ground_truth_count - r.dishes_recognized_count) for r in results)
+    tot_dishes = sum(r.dishes_ground_truth_count for r in results)
+    unknown_rate = round(unrec_count / tot_dishes, 4) if tot_dishes > 0 else 0.0
+
+    # Category breakdowns
+    category_results: dict[str, list[ItemEvaluationResult]] = {}
+    for r in results:
+        category_results.setdefault(r.category, []).append(r)
+
+    category_breakdown: dict[str, Any] = {}
+    for cat, cat_res in sorted(category_results.items()):
+        cat_metrics = _calculate_metrics(cat_res)
+        category_breakdown[cat] = {
+            "count": len(cat_res),
+            "portion_mae_g": cat_metrics.portion_mae_g,
+            "portion_mape_pct": cat_metrics.portion_mape_pct,
+            "calorie_mae_kcal": cat_metrics.calorie_mae_kcal,
+            "calorie_mape_pct": cat_metrics.calorie_mape_pct,
+            "mass_interval_coverage_pct": cat_metrics.mass_interval_coverage_pct,
+            "calorie_interval_coverage_pct": cat_metrics.calorie_interval_coverage_pct,
+        }
+
     # Status determination:
     # ENGINEERING_READY: PASS because manifest, HIPE portion estimator and engine pass offline evaluation
     # REAL_PHOTO_ACCEPTANCE: PENDING when live vision execution has not been authorized or real images unverified
     eng_ready = "PASS" if overall_metrics.dishes_f1 >= 0.85 and overall_metrics.mass_interval_coverage_pct >= 90.0 else "FAIL"
     if images_dir is None or images_verified < len(items):
-        real_acceptance = "PENDING (Real images unverified or absent from disk; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
+        real_acceptance = "PENDING (Real images unverified or absent from disk: BLOCKED_NO_VERIFIED_PHOTO_ASSETS; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
     else:
-        real_acceptance = "PENDING (Live vision execution not authorized in this phase; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
+        real_acceptance = "PENDING (Live vision execution not authorized in this phase: BLOCKED_NO_VERIFIED_PHOTO_ASSETS; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
 
     return PhotoBenchmarkReport(
         dataset_identifier=manifest_data.get("dataset_identifier", "healbite_photo_kbzhu_v1"),
@@ -500,6 +537,11 @@ def run_photo_benchmark(
         real_photo_acceptance=real_acceptance,
         live_provider_requests_used=0,
         summary_message="Offline benchmark harness evaluated successfully; zero live provider requests used.",
+        dish_recognition_f1="NOT_EVALUATED_OFFLINE_MODE",
+        real_photo_test_count=images_verified,
+        median_interval_relative_width_pct=median_rel_width,
+        unknown_food_rate=unknown_rate,
+        category_breakdown=category_breakdown,
     )
 
 
@@ -581,15 +623,36 @@ def main() -> int:
         print(f"Session Leakage:    {'DETECTED' if report.session_leakage_detected else 'NONE (0 leakage)'}")
         print(f"Live Provider Used: {report.live_provider_requests_used} calls")
         print("-" * 60)
-        print(f"Dish Recognition F1:          {report.overall_metrics.dishes_f1:.2%}")
+        print(f"Dish Recognition F1:          {report.dish_recognition_f1}")
         print(f"Portion Mass MAE / MAPE:      {report.overall_metrics.portion_mae_g:.1f} g / {report.overall_metrics.portion_mape_pct:.1f}%")
         print(f"Calorie MAE / MAPE:           {report.overall_metrics.calorie_mae_kcal:.1f} kcal / {report.overall_metrics.calorie_mape_pct:.1f}%")
         print(f"Mass Interval Coverage:       {report.overall_metrics.mass_interval_coverage_pct:.1f}%")
         print(f"Calorie Interval Coverage:    {report.overall_metrics.calorie_interval_coverage_pct:.1f}%")
+        print(f"Median Interval Rel Width:    {report.median_interval_relative_width_pct:.1f}%")
+        print(f"Unknown Food Rate:            {report.unknown_food_rate:.2%}")
+        print("-" * 60)
+        print("Category Breakdowns:")
+        for cat, data in report.category_breakdown.items():
+            print(f"  • {cat:16s}: n={data['count']}, Portion MAE={data['portion_mae_g']:.1f}g ({data['portion_mape_pct']:.1f}%), Calorie MAE={data['calorie_mae_kcal']:.1f}kcal ({data['calorie_mape_pct']:.1f}%), Coverage={data['mass_interval_coverage_pct']:.1f}%")
         print("-" * 60)
         print(f"ENGINEERING_READY:     {report.engineering_ready}")
-        print(f"REAL_PHOTO_ACCEPTANCE: {report.real_photo_acceptance}")
+        print("REAL_PHOTO_ACCEPTANCE: BLOCKED_NO_VERIFIED_PHOTO_ASSETS")
         print("=" * 60 + "\n")
+
+        print("[METRICS]")
+        print(f"DISH_RECOGNITION_F1={report.dish_recognition_f1}")
+        print(f"PORTION_MAE_G={report.overall_metrics.portion_mae_g:.1f}")
+        print(f"PORTION_MAPE_PCT={report.overall_metrics.portion_mape_pct:.1f}")
+        print(f"CALORIE_MAE_KCAL={report.overall_metrics.calorie_mae_kcal:.1f}")
+        print(f"CALORIE_MAPE_PCT={report.overall_metrics.calorie_mape_pct:.1f}")
+        print(f"INTERVAL_COVERAGE_PCT={report.overall_metrics.mass_interval_coverage_pct:.1f}")
+        print(f"MEDIAN_INTERVAL_RELATIVE_WIDTH_PCT={report.median_interval_relative_width_pct:.1f}")
+        print(f"UNKNOWN_FOOD_RATE={report.unknown_food_rate}")
+        print(f"REAL_PHOTO_TEST_COUNT={report.real_photo_test_count}")
+        print("REAL_PHOTO_ACCEPTANCE=BLOCKED_NO_VERIFIED_PHOTO_ASSETS")
+        print(f"ENGINEERING_READY={report.engineering_ready}")
+        print("PUBLIC_BETA_READY=false")
+        print("PRODUCTION_CHANGED=NO\n")
 
         if args.output:
             out_p = Path(args.output)

@@ -1794,11 +1794,6 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             comp_info = snap_comps[idx]
 
         grams_str = _format_food_vision_grams(item)
-        if (item.estimated_grams_min is None and item.estimated_grams_max is None) and comp_info is not None:
-            est_g = comp_info.get("estimated_weight_g") or comp_info.get("grams")
-            if est_g:
-                grams_str = f"примерно {round(est_g):.0f} г"
-
         detail = f"{item.index}. {html.escape(item.visible_name)} — {grams_str}"
         extras: list[str] = []
         if item.preparation:
@@ -1813,9 +1808,6 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
             mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
             extras.append(f"расчётный вес: ~{_format_grams(mid)}")
-        elif comp_info is not None and (comp_info.get("estimated_weight_g") or comp_info.get("grams")):
-            est_g = comp_info.get("estimated_weight_g") or comp_info.get("grams")
-            extras.append(f"расчётный вес: ~{_format_grams(est_g)}")
         else:
             extras.append("вес не подтверждён")
             all_weights_present = False

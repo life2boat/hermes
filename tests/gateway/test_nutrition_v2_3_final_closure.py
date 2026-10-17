@@ -31,6 +31,7 @@ from gateway.healbite_nutrition_diary import (
     PendingFoodVisionInventory,
     format_food_vision_inventory_reply,
 )
+from gateway.nutrition.etl.catalog_builder import build_nutrition_catalog
 from gateway.nutrition.hfkb import (
     HFKBCatalog,
     get_default_hfkb,
@@ -230,10 +231,11 @@ async def test_missing_grams_uses_hipe_portion_priors_and_saves(test_adapter, is
     assert snapshot["calories_min"] < snapshot["calories_kcal"] < snapshot["calories_max"]
     assert snapshot["protein_min"] < snapshot["protein_g"] < snapshot["protein_max"]
 
-    # Formatting shows ~250g calculated weight and approximate badge
+    # Formatting shows unconfirmed weight badge and calculated approximate KBZHU interval
     reply_text = format_food_vision_inventory_reply(pending)
-    assert "расчётный вес: ~250 г" in reply_text
+    assert "вес не подтверждён" in reply_text
     assert "Ориентировочный диапазон:" in reply_text
+    assert snapshot["components"][0]["estimated_weight_g"] == 250.0
 
     # One-click direct save persists snapshot without blocking
     query = _make_callback_query(user_id=user_id, data=f"food_inv:save:{user_id}:{inv_id}")
@@ -252,10 +254,13 @@ async def test_missing_grams_uses_hipe_portion_priors_and_saves(test_adapter, is
 # -----------------------------------------------------------------------------
 # 3. Expanded Russian national culinary database in HFKB
 # -----------------------------------------------------------------------------
-def test_expanded_russian_national_dishes_hfkb_resolution():
+def test_expanded_russian_national_dishes_hfkb_resolution(tmp_path):
     catalog = get_default_hfkb()
     if catalog is None:
-        catalog = load_verified_hfkb(strict=False)
+        db_path = tmp_path / "test_closure_catalog.db"
+        manifest_path = tmp_path / "test_closure_catalog.manifest.json"
+        build_nutrition_catalog(db_path, manifest_path)
+        catalog = load_verified_hfkb(db_path, manifest_path, strict=False)
 
     dishes_to_test = [
         # Soups

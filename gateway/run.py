@@ -7617,9 +7617,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._release_running_agent_state(_quick_key)
 
         if _quick_key in self._running_agents:
-            if event.get_command() == "status":
-                return await self._handle_status_command(event)
-
             # Resolve the command once for all early-intercept checks below.
             from hermes_cli.commands import (
                 ACTIVE_SESSION_BYPASS_COMMANDS as _DEDICATED_HANDLERS,
@@ -7628,16 +7625,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _evt_cmd = event.get_command()
             _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
 
+            # Expand quick_commands aliases on the running-agent path if not a built-in
+            if _evt_cmd and _cmd_def_inner is None:
+                if isinstance(self.config, dict):
+                    _quick_cmds = self.config.get("quick_commands", {}) or {}
+                else:
+                    _quick_cmds = getattr(self.config, "quick_commands", {}) or {}
+                if isinstance(_quick_cmds, dict) and _evt_cmd in _quick_cmds:
+                    _qcmd = _quick_cmds[_evt_cmd]
+                    if isinstance(_qcmd, dict) and _qcmd.get("type") == "alias":
+                        _target = _qcmd.get("target", "").strip()
+                        if _target:
+                            _target = _target if _target.startswith("/") else f"/{_target}"
+                            _target_cmd = _target.lstrip("/")
+                            _user_args = event.get_command_args().strip()
+                            event.text = f"{_target} {_user_args}".strip()
+                            _evt_cmd = _target_cmd.split()[0] if _target_cmd else _target_cmd
+                            _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
+
             # Slash command access control on the running-agent fast-path.
             # Mirrors the cold-path gate further below so non-admin users
             # can't bypass gating just because an agent happens to be busy.
-            # /status above is intentionally pre-gate so users always see
-            # session state. /help and /whoami fall under the always-allowed
-            # floor inside _check_slash_access.
+            # /status is an admin command and strictly gated; /help and /whoami
+            # fall under the always-allowed floor inside _check_slash_access.
             if _evt_cmd and _cmd_def_inner is not None:
                 _denied = self._check_slash_access(source, _cmd_def_inner.name)
                 if _denied is not None:
                     return _denied
+
+            # Dedicated status handler for verified admins while agent is active
+            if _cmd_def_inner and _cmd_def_inner.name == "status":
+                return await self._handle_status_command(event)
 
             # Telegram sends /start for bot launches/deep-links. Treat it as a
             # platform ping, not a user command: no help dump, no agent

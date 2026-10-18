@@ -35,7 +35,8 @@
           "pattern": "^([0-9a-f]{40})?$"
         },
         "intended_image_digest": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^((sha256:)?[0-9a-f]{64})?$"
         },
         "intended_oci_revision": {
           "type": "string",
@@ -54,6 +55,7 @@
         "expected_release_identity": {"type": "string"},
         "expected_collectors": {
           "type": "array",
+          "uniqueItems": true,
           "items": {"$ref": "#/$defs/collector_expectation"}
         }
       }
@@ -75,6 +77,7 @@
         },
         "expected_collectors": {
           "type": "array",
+          "uniqueItems": true,
           "items": {"$ref": "#/$defs/collector_expectation"}
         }
       }

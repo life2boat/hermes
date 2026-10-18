@@ -1058,6 +1058,41 @@ def validate_attestation(
     value: ProductionRuntimeAttestation | Mapping[str, object],
 ) -> ProductionRuntimeAttestation:
     if isinstance(value, ProductionRuntimeAttestation):
+        if value.schema_version != SCHEMA_VERSION or isinstance(value.schema_version, bool):
+            _fail("SCHEMA_VERSION_INVALID")
+        _identifier(value.target)
+        if value.canonical_repository:
+            _identifier(value.canonical_repository)
+        if value.collectors:
+            cids: list[str] = []
+            for item in value.collectors:
+                cid = _identifier(item.collector_id)
+                if cid in cids:
+                    _fail("DUPLICATE_COLLECTOR")
+                cids.append(cid)
+            if cids != sorted(cids):
+                _fail("COLLECTOR_ORDER_INVALID")
+        if value.observed_runtime_state is not None:
+            obs = value.observed_runtime_state
+            if obs.image_digest and obs.image_digest not in ("0" * 64, "sha256:" + "0" * 64):
+                _digest_or_sha(obs.image_digest)
+            if obs.oci_revision and obs.oci_revision != "0" * 40:
+                if not _SHA_RE.fullmatch(obs.oci_revision):
+                    _fail("REVISION_INVALID")
+            if obs.release_sha and obs.release_sha != "0" * 40:
+                if not _SHA_RE.fullmatch(obs.release_sha):
+                    _fail("SHA_INVALID")
+            if (
+                isinstance(obs.schema_version, bool)
+                or not isinstance(obs.schema_version, int)
+                or obs.schema_version < 0
+            ):
+                _fail("SCHEMA_VERSION_INVALID")
+            if not isinstance(obs.active_services, tuple):
+                _fail("SERVICE_SET_INVALID")
+            for svc in obs.active_services:
+                _identifier(svc)
+
         normalized = normalize_attestation(value)
         verify_sanitized_evidence(normalized)
         if value.observed_runtime_state is not None:
@@ -1099,15 +1134,40 @@ def validate_attestation(
             )
 
         obs_dict = _mapping(payload.get("observed_runtime_state", {}))
+        raw_services = obs_dict.get("active_services", ())
+        if not isinstance(raw_services, (list, tuple)):
+            _fail("SERVICE_SET_INVALID")
+        clean_services = tuple(sorted([_identifier(str(s)) for s in raw_services]))
+
+        raw_rel_sha = str(obs_dict.get("release_sha", ""))
+        if raw_rel_sha and raw_rel_sha != "0" * 40:
+            if not _SHA_RE.fullmatch(raw_rel_sha):
+                _fail("SHA_INVALID")
+
+        raw_oci = str(obs_dict.get("oci_revision", ""))
+        if raw_oci and raw_oci != "0" * 40:
+            if not _SHA_RE.fullmatch(raw_oci):
+                _fail("REVISION_INVALID")
+
+        raw_digest = str(obs_dict.get("image_digest", ""))
+        if raw_digest and raw_digest not in ("0" * 64, "sha256:" + "0" * 64):
+            clean_digest = _digest_or_sha(raw_digest)
+        else:
+            clean_digest = raw_digest
+
+        raw_schema_ver = obs_dict.get("schema_version", 0)
+        if isinstance(raw_schema_ver, bool) or not isinstance(raw_schema_ver, int) or raw_schema_ver < 0:
+            _fail("SCHEMA_VERSION_INVALID")
+
         observed_state = ObservedRuntimeState(
-            image_digest=_digest_or_sha(obs_dict["image_digest"]),
-            oci_revision=str(obs_dict["oci_revision"]),
-            release_sha=str(obs_dict["release_sha"]),
-            runtime_contract=str(obs_dict["runtime_contract"]),
-            schema_version=int(obs_dict["schema_version"]),
-            active_services=tuple(sorted(list(obs_dict["active_services"]))),
+            image_digest=clean_digest,
+            oci_revision=raw_oci,
+            release_sha=raw_rel_sha,
+            runtime_contract=str(obs_dict.get("runtime_contract", "")),
+            schema_version=int(raw_schema_ver),
+            active_services=clean_services,
             configuration_contract_version=str(
-                obs_dict["configuration_contract_version"]
+                obs_dict.get("configuration_contract_version", "")
             ),
             release_identity=str(obs_dict.get("release_identity", "")),
             raw_observations=_mapping(obs_dict.get("raw_observations", {})),
@@ -1115,14 +1175,20 @@ def validate_attestation(
 
         collectors_raw = payload.get("collectors", [])
         collectors_list: list[CollectorResult] = []
+        ordered_cids: list[str] = []
         if isinstance(collectors_raw, (list, tuple)):
             for c_item in collectors_raw:
                 if isinstance(c_item, Mapping):
                     cid = _identifier(c_item.get("collector_id", ""))
+                    if cid in ordered_cids:
+                        _fail("DUPLICATE_COLLECTOR")
+                    ordered_cids.append(cid)
                     status = str(c_item.get("status", "AVAILABLE"))
                     obs = _mapping(c_item.get("observations", {}))
                     collectors_list.append(create_collector_result(cid, status, obs))
-        collectors_tuple = tuple(sorted(collectors_list, key=lambda c: c.collector_id))
+            if ordered_cids != sorted(ordered_cids):
+                _fail("COLLECTOR_ORDER_INVALID")
+        collectors_tuple = tuple(collectors_list)
 
         env_id = _identifier(payload.get("environment_id", payload.get("target", "synthetic-prod")))
         obs_at = _canonical_timestamp(payload.get("observed_at", payload.get("collected_at_utc")))

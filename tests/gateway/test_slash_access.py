@@ -27,12 +27,18 @@ class TestPolicyFromExtra:
         assert p.admin_user_ids == frozenset()
         assert p.user_allowed_commands == frozenset()
 
-    def test_disabled_policy_treats_anyone_as_admin(self):
-        # When gating is off, downstream code uses is_admin/can_run uniformly.
-        # Both must short-circuit to True so existing behavior is preserved.
+    def test_disabled_policy_fails_closed_for_admin_commands(self):
+        # When gating is unconfigured/empty, positive administrative proof is required.
+        # Arbitrary users are NOT admins, and admin commands fail closed.
         p = policy_from_extra({}, "dm")
-        assert p.is_admin("anyone") is True
-        assert p.can_run("anyone", "stop") is True
+        assert p.is_admin("anyone") is False
+        assert p.can_run("anyone", "stop") is False
+        assert p.can_run("anyone", "restart") is False
+        # Public user commands remain accessible.
+        assert p.can_run("anyone", "help") is True
+        assert p.can_run("anyone", "whoami") is True
+        assert p.can_run("anyone", "diary") is True
+        assert p.can_run("anyone", "profile") is True
 
     def test_dm_admin_list_only(self):
         p = policy_from_extra({"allow_admin_from": ["111", "222"]}, "dm")
@@ -169,7 +175,9 @@ class TestPolicyForSource:
     def test_no_config_returns_disabled(self):
         p = policy_for_source(None, None)
         assert p.enabled is False
-        assert p.is_admin("anyone") is True
+        assert p.is_admin("anyone") is False
+        assert p.can_run("anyone", "stop") is False
+        assert p.can_run("anyone", "help") is True
 
     def test_no_platform_config_returns_disabled(self):
         cfg = GatewayConfig(platforms={})
@@ -249,7 +257,7 @@ class TestPolicyForSource:
             assert p.is_admin("111") is False, f"chat_type={ct} should not see DM admins"
 
     def test_no_admin_list_for_dm_means_unrestricted_in_dm(self):
-        # Group has admin list, DM does not → DM gating disabled, group active.
+        # Group has admin list, DM does not → DM gating unconfigured, group active.
         cfg = GatewayConfig(
             platforms={
                 Platform.DISCORD: PlatformConfig(
@@ -267,12 +275,14 @@ class TestPolicyForSource:
         dm_p = policy_for_source(cfg, dm_src)
         grp_p = policy_for_source(cfg, grp_src)
         assert dm_p.enabled is False
-        assert dm_p.can_run("999", "stop") is True  # backward compat
+        assert dm_p.is_admin("999") is False
+        assert dm_p.can_run("999", "stop") is False  # admin commands fail-closed
+        assert dm_p.can_run("999", "help") is True   # public user commands allowed
         assert grp_p.enabled is True
         assert grp_p.can_run("999", "stop") is False  # gated
 
     def test_per_platform_isolation(self):
-        # Discord has gating, Telegram doesn't → Telegram is unaffected.
+        # Discord has gating, Telegram doesn't → Telegram admin commands fail closed.
         cfg = GatewayConfig(
             platforms={
                 Platform.DISCORD: PlatformConfig(
@@ -287,7 +297,9 @@ class TestPolicyForSource:
         )
         p = policy_for_source(cfg, tg_src)
         assert p.enabled is False
-        assert p.can_run("999", "stop") is True
+        assert p.is_admin("999") is False
+        assert p.can_run("999", "stop") is False      # admin commands fail-closed
+        assert p.can_run("999", "help") is True       # public user commands allowed
 
 
 def test_load_gateway_config_preserves_nested_telegram_admin_acl(tmp_path, monkeypatch):

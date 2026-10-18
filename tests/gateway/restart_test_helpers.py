@@ -52,7 +52,7 @@ def make_restart_runner(
 ) -> tuple[GatewayRunner, BasePlatformAdapter]:
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***", extra={"allow_admin_from": ["u1"]})}
     )
     runner._running = True
     runner._shutdown_event = asyncio.Event()

@@ -82,9 +82,18 @@
             "configuration_contract_version"
           ],
           "properties": {
-            "image_digest": {"type": "string"},
-            "oci_revision": {"type": "string"},
-            "release_sha": {"type": "string"},
+            "image_digest": {
+              "type": "string",
+              "pattern": "^((sha256:)?[0-9a-f]{64})?$"
+            },
+            "oci_revision": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40})?$"
+            },
+            "release_sha": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40})?$"
+            },
             "runtime_contract": {"type": "string"},
             "schema_version": {"type": "integer"},
             "active_services": {
@@ -98,6 +107,7 @@
         },
         "collectors": {
           "type": "array",
+          "uniqueItems": true,
           "items": {"$ref": "#/$defs/collector"}
         },
         "verification_metadata": {
@@ -147,6 +157,7 @@
         },
         "collectors": {
           "type": "array",
+          "uniqueItems": true,
           "items": {"$ref": "#/$defs/collector"}
         }
       }

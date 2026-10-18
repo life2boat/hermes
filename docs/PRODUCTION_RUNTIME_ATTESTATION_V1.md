@@ -196,15 +196,24 @@ All semantically significant comparison fields (`attestation_id`, `authoritative
   - `reason_codes` contains zero diagnostic or legacy codes (otherwise `DIAGNOSTIC_REASON_CANNOT_AUTHORIZE_MATCH`)
 - **Legacy Comparison Exclusion**: Legacy comparisons hashed with domain prefix v1 or v2 cannot authorize production. If evaluated or validated with `authoritative_for_production = True`, validation fails closed with `LEGACY_COMPARISON_CANNOT_BE_AUTHORITATIVE`.
 
-### Formal JSON Schemas (v1.2.3)
+### Formal JSON Schemas (v1.2.3 / v1.2.4)
 Formal JSON Schema Draft 2020-12 definitions are maintained in `schemas/`:
-- `schemas/production-runtime-intended-v1.schema.json`: Enforces strict types and formats for intended state, requiring `schema_version = 1`, 40-hex commit SHAs, canonical digest patterns, unique sorted collector IDs, and rejection of unknown properties.
+- `schemas/production-runtime-intended-v1.schema.json`: Enforces strict types and formats for intended state, requiring `schema_version = 1`, 40-hex commit SHAs, canonical digest patterns (`^((sha256:)?[0-9a-f]{64})?$`), `uniqueItems: true` for collector arrays, and rejection of unknown properties.
+- `schemas/production-runtime-attestation-v1.schema.json`: Formal schema for attestation payloads, enforcing 40-hex SHAs, canonical image digests, `uniqueItems: true` on collector sequences, and valid RFC 3339 timestamps.
 - `schemas/production-runtime-comparison-v3.schema.json`: Formal schema for comparison results supporting canonical v3 and legacy v1 compact representations. For canonical v3 results, conditional validation (`allOf` / `if-then`) strictly enforces that when `authoritative_for_production: true`:
   - `status` MUST be `"MATCH"`
   - `evaluation_mode` MUST be `"AUTHORITATIVE_PRODUCTION"`
   - `drifted_observations` and `missing_observations` MUST be empty (`maxItems: 0`)
   - Evaluation mode must be one of `["AUTHORITATIVE_PRODUCTION", "DIAGNOSTIC_TIME_OVERRIDE", "LEGACY_UNSPECIFIED"]`
 - `schemas/production-runtime-comparison-v1.schema.json`: Alias schema referencing comparison definitions aligned with schema version 1.
+
+### Multi-Tiered Collector Uniqueness Model (v1.2.4)
+Standard JSON Schema Draft 2020-12 specification lacks syntax to enforce uniqueness of an inner object property (`collector_id`) across elements of an array (its `uniqueItems` keyword only evaluates whole-item value equality). The repository establishes an explicit two-tiered validation architecture:
+1. **Tier 1 (Syntactic Schema)**: Standard Draft 2020-12 schemas validate structural types, formats, required properties, and exact duplicate element rejection via `uniqueItems: true`.
+2. **Tier 2 (Semantic Domain)**: Python validators (`validate_intended_state`, `validate_attestation`, `create_intended_state`, `create_attestation`) strictly enforce property-level uniqueness (`DUPLICATE_COLLECTOR`) and ascending alphanumeric sorting (`COLLECTOR_ORDER_INVALID`).
+
+### Empty and Zero Digest Prohibition
+Empty strings (`""`), all-zero digests (`"0" * 64`), and sha256-prefixed all-zero digests (`"sha256:" + "0" * 64`), as well as all-zero commit SHAs (`"0" * 40`), are unconditionally rejected from authorizing production. Even if both intended state and observed state specify matching empty or zero placeholders, the comparison independently records missing invariants, strictly resolves to `INSUFFICIENT_EVIDENCE`, and enforces `authoritative_for_production = False`.
 
 ---
 

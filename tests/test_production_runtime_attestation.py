@@ -1996,20 +1996,34 @@ def test_regression_missing_structured_state_in_v1_intended_contract_denies_auth
 # ---------------------------------------------------------------------------
 
 
-def _valid_signed_attestation() -> tuple[ProductionRuntimeAttestation, str]:
+def _valid_signed_attestation(
+    *,
+    image_digest: str = "sha256:" + "1" * 64,
+    oci_revision: str = "b" * 40,
+    release_sha: str = "a" * 40,
+    canonical_main_sha: str = "a" * 40,
+    runtime_contract: str = "hermes-runtime-v1",
+    schema_version: int = 1,
+    active_services: tuple[str, ...] = ("gateway",),
+    configuration_contract_version: str = "v1",
+    release_identity: str = "hermes-release-1",
+    collectors: Sequence[CollectorResult] | None = None,
+) -> tuple[ProductionRuntimeAttestation, str]:
     now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     att = create_attestation(
         target="synthetic-prod",
         observed_at=now_utc_str,
+        canonical_main_sha=canonical_main_sha,
+        collectors=collectors,
         observed_runtime_state=ObservedRuntimeState(
-            image_digest="sha256:" + "1" * 64,
-            oci_revision="b" * 40,
-            release_sha="a" * 40,
-            runtime_contract="hermes-runtime-v1",
-            schema_version=1,
-            active_services=("gateway",),
-            configuration_contract_version="v1",
-            release_identity="hermes-release-1",
+            image_digest=image_digest,
+            oci_revision=oci_revision,
+            release_sha=release_sha,
+            runtime_contract=runtime_contract,
+            schema_version=schema_version,
+            active_services=active_services,
+            configuration_contract_version=configuration_contract_version,
+            release_identity=release_identity,
         ),
     )
     priv, pub = generate_keypair()
@@ -3013,3 +3027,200 @@ def test_intended_schema_v1_invalid_missing_fields() -> None:
     del intended_dict["canonical_repository"]
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance=intended_dict, schema=schema)
+
+
+# ---------------------------------------------------------------------------
+# Sprint B1.2.4: Schema Contract Parity & Digest Integrity Tests
+# ---------------------------------------------------------------------------
+
+
+def test_empty_or_zero_digest_never_authorizes_match_both_empty() -> None:
+    """Prove that empty digest on both intended and observed fails closed to INSUFFICIENT_EVIDENCE."""
+    intended = _complete_intended_state(intended_image_digest="")
+    att, pub_hex = _valid_signed_attestation(image_digest="")
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_image_digest" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:image_digest" in comp.reason_codes
+
+
+def test_empty_or_zero_digest_never_authorizes_match_both_zero_64() -> None:
+    """Prove that all-zero 64-hex digest on both intended and observed fails closed."""
+    intended = _complete_intended_state(intended_image_digest="0" * 64)
+    att, pub_hex = _valid_signed_attestation(image_digest="0" * 64)
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_image_digest" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:image_digest" in comp.reason_codes
+
+
+def test_empty_or_zero_digest_never_authorizes_match_both_prefixed_zero_64() -> None:
+    """Prove that sha256-prefixed all-zero digest on both intended and observed fails closed."""
+    intended = _complete_intended_state(intended_image_digest="sha256:" + "0" * 64)
+    att, pub_hex = _valid_signed_attestation(image_digest="sha256:" + "0" * 64)
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_image_digest" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:image_digest" in comp.reason_codes
+
+
+def test_empty_or_zero_digest_never_authorizes_match_empty_and_prefixed_zero() -> None:
+    """Prove that empty intended and zero observed fails closed."""
+    intended = _complete_intended_state(intended_image_digest="")
+    att, pub_hex = _valid_signed_attestation(image_digest="sha256:" + "0" * 64)
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+
+
+def test_zero_commit_sha_never_authorizes_match_both_zero() -> None:
+    """Prove that all-zero 40-hex commit SHA on both intended and observed fails closed."""
+    intended = _complete_intended_state(intended_main_sha="0" * 40)
+    att, pub_hex = _valid_signed_attestation(release_sha="0" * 40, canonical_main_sha="0" * 40)
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_main_sha" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:release_sha" in comp.reason_codes
+
+
+def test_zero_oci_revision_never_authorizes_match_both_zero() -> None:
+    """Prove that all-zero 40-hex oci_revision on both intended and observed fails closed."""
+    intended = _complete_intended_state(intended_oci_revision="0" * 40)
+    att, pub_hex = _valid_signed_attestation(oci_revision="0" * 40)
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_oci_revision" in comp.reason_codes
+    assert "MISSING_OBSERVED_INVARIANT:oci_revision" in comp.reason_codes
+
+
+def test_collector_id_uniqueness_draft202012_limitation_and_domain_enforcement() -> None:
+    """Prove that standard Draft 2020-12 permits distinct objects sharing collector_id,
+
+    while Python domain validation strictly rejects them with DUPLICATE_COLLECTOR.
+    """
+    intended_schema = json.loads(INTENDED_SCHEMA_V1.read_text(encoding="utf-8"))
+    payload = {
+        "schema_version": 1,
+        "target": "synthetic-prod",
+        "expected_collectors": [
+            {"collector_id": "runtime", "observations": {"metric": "cpu"}},
+            {"collector_id": "runtime", "observations": {"metric": "mem"}},
+        ],
+    }
+    # Draft 2020-12 standard validator passes because the two objects are distinct
+    jsonschema.validate(instance=payload, schema=intended_schema)
+
+    # Domain validator strictly rejects with DUPLICATE_COLLECTOR
+    with pytest.raises(ProductionRuntimeAttestationError, match="DUPLICATE_COLLECTOR"):
+        validate_intended_state(payload)
+
+
+def test_collector_id_uniqueness_exact_duplicates_rejected_by_schema() -> None:
+    """Prove that exact duplicate objects are rejected by Draft 2020-12 via uniqueItems: true."""
+    intended_schema = json.loads(INTENDED_SCHEMA_V1.read_text(encoding="utf-8"))
+    payload = {
+        "schema_version": 1,
+        "target": "synthetic-prod",
+        "expected_collectors": [
+            {"collector_id": "runtime", "observations": {"metric": "cpu"}},
+            {"collector_id": "runtime", "observations": {"metric": "cpu"}},
+        ],
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=payload, schema=intended_schema)
+
+
+def test_attestation_full_shape_duplicate_collectors_raises() -> None:
+    """Prove that full-shape attestation deserialization rejects duplicate collector IDs."""
+    att, _ = _valid_signed_attestation()
+    data = json.loads(serialize_attestation(att).decode("utf-8"))
+    data["collectors"] = [
+        {"collector_id": "collector-a", "status": "AVAILABLE", "observations": {"x": 1}},
+        {"collector_id": "collector-a", "status": "AVAILABLE", "observations": {"x": 2}},
+    ]
+    with pytest.raises(ProductionRuntimeAttestationError, match="DUPLICATE_COLLECTOR"):
+        deserialize_attestation(json.dumps(data))
+
+
+def test_attestation_full_shape_unsorted_collectors_raises() -> None:
+    """Prove that full-shape attestation deserialization rejects unsorted collectors."""
+    att, _ = _valid_signed_attestation()
+    data = json.loads(serialize_attestation(att).decode("utf-8"))
+    data["collectors"] = [
+        {"collector_id": "collector-z", "status": "AVAILABLE", "observations": {"x": 1}},
+        {"collector_id": "collector-a", "status": "AVAILABLE", "observations": {"x": 2}},
+    ]
+    with pytest.raises(ProductionRuntimeAttestationError, match="COLLECTOR_ORDER_INVALID"):
+        deserialize_attestation(json.dumps(data))
+
+
+def test_attestation_dataclass_duplicate_and_unsorted_collectors_raises() -> None:
+    """Prove that direct ProductionRuntimeAttestation dataclass with duplicates/unsorted collectors fails validation."""
+    att, _ = _valid_signed_attestation()
+    c1 = CollectorResult("c-dup", CollectorStatus.AVAILABLE, {"a": 1})
+    c2 = CollectorResult("c-dup", CollectorStatus.AVAILABLE, {"a": 2})
+    bad_att = replace(att, collectors=(c1, c2))
+    with pytest.raises(ProductionRuntimeAttestationError, match="DUPLICATE_COLLECTOR"):
+        validate_attestation(bad_att)
+
+    c_z = CollectorResult("z-coll", CollectorStatus.AVAILABLE, {"a": 1})
+    c_a = CollectorResult("a-coll", CollectorStatus.AVAILABLE, {"a": 1})
+    unsorted_att = replace(att, collectors=(c_z, c_a))
+    with pytest.raises(ProductionRuntimeAttestationError, match="COLLECTOR_ORDER_INVALID"):
+        validate_attestation(unsorted_att)
+
+
+def test_attestation_dataclass_invalid_observed_state_types_raises() -> None:
+    """Prove that dataclass validation catches malformed types in observed_runtime_state."""
+    att, _ = _valid_signed_attestation()
+    assert att.observed_runtime_state is not None
+
+    # Invalid release_sha
+    bad_sha_obs = replace(att.observed_runtime_state, release_sha="invalid-sha")
+    with pytest.raises(ProductionRuntimeAttestationError, match="SHA_INVALID"):
+        validate_attestation(replace(att, observed_runtime_state=bad_sha_obs))
+
+    # Invalid oci_revision
+    bad_oci_obs = replace(att.observed_runtime_state, oci_revision="invalid-oci")
+    with pytest.raises(ProductionRuntimeAttestationError, match="REVISION_INVALID"):
+        validate_attestation(replace(att, observed_runtime_state=bad_oci_obs))
+
+    # Invalid image_digest
+    bad_digest_obs = replace(att.observed_runtime_state, image_digest="invalid-digest")
+    with pytest.raises(ProductionRuntimeAttestationError, match="DIGEST_INVALID"):
+        validate_attestation(replace(att, observed_runtime_state=bad_digest_obs))
+
+    # Bool schema_version
+    bad_ver_obs = replace(att.observed_runtime_state, schema_version=True)  # type: ignore[arg-type]
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        validate_attestation(replace(att, observed_runtime_state=bad_ver_obs))
+
+
+def test_schema_attestation_v1_rejects_malformed_hashes() -> None:
+    """Prove that production-runtime-attestation-v1 schema rejects malformed digests and SHAs."""
+    schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
+    att, _ = _valid_signed_attestation()
+    data = json.loads(serialize_attestation(att).decode("utf-8"))
+
+    # Bad image_digest in observed_runtime_state
+    bad_data = json.loads(json.dumps(data))
+    bad_data["observed_runtime_state"]["image_digest"] = "not-a-digest"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_data, schema=schema)
+
+    # Bad oci_revision in observed_runtime_state
+    bad_data = json.loads(json.dumps(data))
+    bad_data["observed_runtime_state"]["oci_revision"] = "bad-revision"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_data, schema=schema)
+
+    # Bad release_sha in observed_runtime_state
+    bad_data = json.loads(json.dumps(data))
+    bad_data["observed_runtime_state"]["release_sha"] = "bad-sha"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_data, schema=schema)

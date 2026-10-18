@@ -447,10 +447,10 @@ def test_offline_cli(tmp_path: Path) -> None:
         == 2
     )
 
-    # CLI compare: signed and matching with trusted keys returns 0
-    comp_output = tmp_path / "comparison.json"
-    intended_file = tmp_path / "intended.json"
-    intended_file.write_text(
+    # CLI compare: signed legacy evidence without structured invariants returns 2 (LEGACY_CONTRACT_NOT_AUTHORITATIVE)
+    comp_legacy_output = tmp_path / "comparison_legacy.json"
+    intended_legacy_file = tmp_path / "intended_legacy.json"
+    intended_legacy_file.write_text(
         json.dumps(
             {
                 "schema_version": 1,
@@ -470,9 +470,84 @@ def test_offline_cli(tmp_path: Path) -> None:
             [
                 "compare",
                 "--intended",
-                str(intended_file),
+                str(intended_legacy_file),
                 "--attestation",
                 str(created),
+                "--output",
+                str(comp_legacy_output),
+                "--trusted-keys",
+                str(key_file),
+            ]
+        )
+        == 3
+    )
+
+    # CLI compare: signed and matching with complete structured invariants returns 0
+    comp_output = tmp_path / "comparison.json"
+    intended_v1_file = tmp_path / "intended_v1.json"
+    intended_v1_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target": "synthetic-prod",
+                "canonical_repository": "https://github.com/life2boat/hermes.git",
+                "intended_main_sha": "a" * 40,
+                "intended_image_digest": "sha256:" + "1" * 64,
+                "intended_oci_revision": "b" * 40,
+                "expected_service_set": ["gateway"],
+                "expected_runtime_contract": "hermes-runtime-v1",
+                "expected_schema_version": 1,
+                "expected_configuration_contract_version": "v1",
+                "expected_release_identity": "hermes-release-1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    raw_v1 = tmp_path / "raw_v1.json"
+    created_v1 = tmp_path / "created_v1.json"
+    raw_v1.write_text(
+        json.dumps(
+            {
+                "target": "synthetic-prod",
+                "collected_at_utc": now_utc_str,
+                "canonical_repository": "https://github.com/life2boat/hermes.git",
+                "canonical_main_sha": "a" * 40,
+                "observed_runtime_state": {
+                    "image_digest": "sha256:" + "1" * 64,
+                    "oci_revision": "b" * 40,
+                    "release_sha": "a" * 40,
+                    "runtime_contract": "hermes-runtime-v1",
+                    "schema_version": 1,
+                    "active_services": ["gateway"],
+                    "configuration_contract_version": "v1",
+                    "release_identity": "hermes-release-1",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        run(
+            [
+                "create",
+                "--input",
+                str(raw_v1),
+                "--output",
+                str(created_v1),
+                "--private-key-file",
+                str(priv_file),
+            ]
+        )
+        == 0
+    )
+    assert (
+        run(
+            [
+                "compare",
+                "--intended",
+                str(intended_v1_file),
+                "--attestation",
+                str(created_v1),
                 "--output",
                 str(comp_output),
                 "--trusted-keys",
@@ -1684,3 +1759,212 @@ def test_regression_valid_signed_complete_match() -> None:
     assert comp.drifted_observations == ()
     assert comp.missing_observations == ()
     assert comp.reason_codes == ()
+
+
+# ---------------------------------------------------------------------------
+# ProductionRuntimeAttestation v1.2.1 Regression Tests
+# ---------------------------------------------------------------------------
+
+
+def test_regression_signed_valid_legacy_evidence_never_authorizes_production(
+    tmp_path: Path,
+) -> None:
+    # SIGNED_VALID_LEGACY_EVIDENCE + MATCHING_LEGACY_COLLECTOR_EXPECTATIONS + NO_STRUCTURED_INVARIANTS
+    # -> authoritative_for_production=false
+    # -> production gate DENIED
+    intended = create_intended_state(
+        target="synthetic-prod",
+        expected_observations={"runtime": {"running": True}},
+        has_structured_invariants=False,
+    )
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        collected_at_utc=now_utc_str,
+        collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
+    )
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+
+    # 1. Comparison with legacy contract (without time override)
+    comp_prod = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[pub_hex]
+    )
+    assert comp_prod.status == ComparisonStatus.MATCH
+    assert "LEGACY_CONTRACT_NOT_AUTHORITATIVE" in comp_prod.reason_codes
+    assert comp_prod.authoritative_for_production is False
+
+    # CLI compare returns exit code 3 (DENIED because authoritative_for_production is False)
+    int_file = tmp_path / "legacy_intended.json"
+    att_file = tmp_path / "legacy_attestation.json"
+    key_file = tmp_path / "trusted_keys.txt"
+    comp_file = tmp_path / "comp.json"
+    int_file.write_bytes(serialize_intended_state(intended))
+    att_file.write_bytes(serialize_attestation(signed_att))
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+
+    exit_code_prod = run(
+        [
+            "compare",
+            "--intended",
+            str(int_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+        ]
+    )
+    assert exit_code_prod == 3
+
+    # 2. Diagnostic comparison (current_time_utc override)
+    comp_diag = compare_production_runtime(
+        intended, signed_att, trusted_public_keys=[pub_hex], current_time_utc=now_utc_str
+    )
+    assert comp_diag.status == ComparisonStatus.MATCH
+    assert comp_diag.authoritative_for_production is False
+
+    comp_file_diag = tmp_path / "comp_diag.json"
+    exit_code_diag = run(
+        [
+            "compare",
+            "--intended",
+            str(int_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file_diag),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            now_utc_str,
+        ]
+    )
+    assert exit_code_diag == 3
+
+
+def test_regression_cli_verify_exit_code_3_on_diagnostic_time_override(
+    tmp_path: Path,
+) -> None:
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    key_file = tmp_path / "keys.txt"
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+
+    historical_time = "2026-01-02T03:04:05Z"
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=historical_time,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    signed_att = sign_attestation(att, priv, signed_at_utc=historical_time)
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    # Diagnostic verify with valid historical time override returns 3 (not 0)
+    ret_valid_override = run(
+        [
+            "verify",
+            "--input",
+            str(att_file),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            "2026-01-02T03:05:00Z",
+        ]
+    )
+    assert ret_valid_override == 3
+
+    # Diagnostic verify with expired/invalid time override returns non-zero error (1)
+    ret_expired_override = run(
+        [
+            "verify",
+            "--input",
+            str(att_file),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            "2026-01-05T03:05:00Z",
+        ]
+    )
+    assert ret_expired_override == 1
+
+
+def test_regression_cli_verify_exit_code_0_on_authoritative_system_time(
+    tmp_path: Path,
+) -> None:
+    priv, pub = generate_keypair()
+    pub_hex = export_public_key_hex(pub)
+    key_file = tmp_path / "keys.txt"
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    att_file = tmp_path / "att_fresh.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    # Authoritative verify using real system time returns 0
+    ret_authoritative = run(
+        [
+            "verify",
+            "--input",
+            str(att_file),
+            "--trusted-keys",
+            str(key_file),
+        ]
+    )
+    assert ret_authoritative == 0
+
+
+def test_regression_missing_structured_state_in_v1_intended_contract_denies_authority() -> None:
+    intended = create_intended_state(
+        target="synthetic-prod",
+        intended_image_digest="sha256:" + "1" * 64,
+        intended_main_sha="a" * 40,
+        intended_oci_revision="b" * 40,
+        expected_release_identity="hermes-release-1",
+        has_structured_invariants=True,
+    )
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Legacy evidence: only collectors, no observed_runtime_state
+    att_legacy = create_attestation(
+        target="synthetic-prod",
+        collected_at_utc=now_utc_str,
+        collectors=[create_collector_result("runtime", "AVAILABLE", {"running": True})],
+    )
+    priv, pub = generate_keypair()
+    signed_legacy = sign_attestation(att_legacy, priv, signed_at_utc=now_utc_str)
+    comp = compare_production_runtime(
+        intended,
+        signed_legacy,
+        trusted_public_keys=[export_public_key_hex(pub)],
+    )
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert "LEGACY_CONTRACT_NOT_AUTHORITATIVE" in comp.reason_codes
+    assert "MISSING_OBSERVED_RUNTIME_STATE" in comp.reason_codes
+    assert comp.authoritative_for_production is False

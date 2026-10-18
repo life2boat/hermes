@@ -146,7 +146,7 @@ def _verify(
     if integrity_only:
         if output_path is not None:
             _write_new(output_path, serialize_attestation(attestation))
-        return 0
+        return 3 if current_time_utc is not None else 0
 
     keys = _parse_trusted_keys(trusted_keys)
     if not keys:
@@ -166,7 +166,7 @@ def _verify(
 
     if output_path is not None:
         _write_new(output_path, serialize_attestation(attestation))
-    return 0
+    return 3 if current_time_utc is not None else 0
 
 
 def _compare(

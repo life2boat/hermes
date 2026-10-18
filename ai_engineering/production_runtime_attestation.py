@@ -1590,6 +1590,7 @@ def compare_production_runtime(
         if attestation.observed_runtime_state is None:
             missing.append("observed_runtime_state")
             reasons.append("MISSING_OBSERVED_RUNTIME_STATE")
+            reasons.append("LEGACY_CONTRACT_NOT_AUTHORITATIVE")
         else:
             obs = attestation.observed_runtime_state
 
@@ -1719,6 +1720,7 @@ def compare_production_runtime(
                 "INVALID_CRYPTOGRAPHIC_SIGNATURE",
                 "SIGNATURE_VERIFICATION_ERROR",
                 "UNSUPPORTED_SIGNATURE_CONTRACT",
+                "LEGACY_CONTRACT_NOT_AUTHORITATIVE",
             )
             for r in reasons
         )
@@ -1737,6 +1739,7 @@ def compare_production_runtime(
             status = ComparisonStatus.MATCH
     else:
         # Legacy collector evaluation
+        reasons.append("LEGACY_CONTRACT_NOT_AUTHORITATIVE")
         if any(
             r in (
                 "MISSING_TRUST_STORE",
@@ -1765,10 +1768,17 @@ def compare_production_runtime(
             status = ComparisonStatus.MATCH
 
     # 8. Authoritative for production
+    has_mandatory_structured_state = (
+        intended.has_structured_invariants
+        and attestation.observed_runtime_state is not None
+        and not missing
+        and not drifted
+    )
     authoritative_for_production = (
         status == ComparisonStatus.MATCH
         and evaluation_mode == "AUTHORITATIVE_PRODUCTION"
         and attestation.evidence_provenance is not None
+        and has_mandatory_structured_state
     )
 
     # 9. Packaging

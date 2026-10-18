@@ -38,19 +38,65 @@ from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, Optional, Tuple
 
 
-# Slash commands that MUST stay reachable for any allowed user, even when
-# slash gating is enabled and the user has no commands listed. Without this
-# carve-out, a non-admin user has no way to discover what they can or
-# can't do (``/help``, ``/whoami``) and no way to see what state the agent
-# is in (``/status``). These mirror the smallest set of read-only commands
-# we'd hand to a guest. Operators can still narrow this further by writing
-# their own ``user_allowed_commands`` (this set is only the implicit
-# fallback floor — anything in ``user_allowed_commands`` overrides it
-# additively, never restrictively).
-_ALWAYS_ALLOWED_FOR_USERS: FrozenSet[str] = frozenset({
+# Commands that require administrative privileges and must never be run by non-admins
+# or when admin configuration is absent/empty/invalid.
+ADMIN_COMMANDS: FrozenSet[str] = frozenset({
+    # System / gateway lifecycle & process control
+    "restart",
+    "stop",
+    "platform",
+    "platforms",
+    "rollback",
+    # Model & configuration
+    "model",
+    "codex-runtime",
+    "codex_runtime",
+    "config",
+    "yolo",
+    "sethome",
+    "set-home",
+    # Approvals & security
+    "approve",
+    "deny",
+    # Tools, skills, reload
+    "reload",
+    "reload-mcp",
+    "reload_mcp",
+    "reload-skills",
+    "reload_skills",
+    "plugins",
+    "tools",
+    "toolsets",
+    "skills",
+    "cron",
+    # Memory OS admin
+    "memory",
+    "memory_stats",
+    # Work tracking admin
+    "kanban",
+})
+
+# Public and user floor commands that must always remain accessible to any authorized
+# platform user even when admin gating is enabled with empty user_allowed_commands,
+# or when admin gating is unconfigured.
+PUBLIC_USER_COMMANDS: FrozenSet[str] = frozenset({
+    # Platform discovery / read-only floor
     "help",
     "whoami",
+    # HealBite product domain: navigation, nutrition diary, profile, metrics
+    "start",
+    "menu",
+    "diary",
+    "stats",
+    "undo_meal",
+    "diary_undo",
+    "weight",
+    "water",
+    "profile",
 })
+
+# Backward-compatibility alias for the floor set
+_ALWAYS_ALLOWED_FOR_USERS: FrozenSet[str] = PUBLIC_USER_COMMANDS
 
 
 @dataclass(frozen=True)
@@ -67,25 +113,58 @@ class SlashAccessPolicy:
     user_allowed_commands: FrozenSet[str]
 
     def is_admin(self, user_id: Optional[str]) -> bool:
-        if not self.enabled:
-            # Gating disabled → treat every allowed user as admin so
-            # downstream code can keep using ``is_admin`` / ``can_run``
-            # uniformly.
-            return True
+        """Check whether user_id has administrative authority.
+
+        Fail-closed invariant: Administrative privileges strictly require positive
+        confirmation in admin_user_ids. Unconfigured, empty, or invalid policies
+        never grant administrative authority to any user.
+        """
         if not user_id:
             return False
-        return str(user_id) in self.admin_user_ids
+        return str(user_id).strip() in self.admin_user_ids
 
     def can_run(self, user_id: Optional[str], canonical_cmd: str) -> bool:
-        if not self.enabled:
-            return True
-        if self.is_admin(user_id):
-            return True
+        """Check whether user_id is permitted to execute canonical_cmd.
+
+        Rules:
+        1. Verified administrators (positive proof in admin_user_ids) can run all commands.
+        2. Public and user floor commands (help, whoami, diary, profile, start, menu, etc.)
+           are always accessible to any authorized user.
+        3. Administrative operations strictly require admin authority. When gating is not
+           configured, administrative commands fail closed and are denied to everyone.
+           When gating is active, an operator can explicitly whitelist a diagnostic command
+           in user_allowed_commands.
+        4. When gating is enabled, non-admins can only run explicitly allowed user commands
+           plus the public floor.
+        5. When gating is not configured, standard non-administrative session commands
+           (e.g. /new, /retry) remain usable for ordinary chat.
+        """
         if not canonical_cmd:
             return False
-        if canonical_cmd in _ALWAYS_ALLOWED_FOR_USERS:
+        cmd = str(canonical_cmd).strip().lstrip("/").lower()
+        if not cmd:
+            return False
+
+        # 1. Verified administrators can run all commands.
+        if self.is_admin(user_id):
             return True
-        return canonical_cmd in self.user_allowed_commands
+
+        # 2. Public and user floor commands are always reachable.
+        if cmd in PUBLIC_USER_COMMANDS:
+            return True
+
+        # 3. Administrative operations strictly require positive admin authorization.
+        if cmd in ADMIN_COMMANDS:
+            if self.enabled and cmd in self.user_allowed_commands:
+                return True
+            return False
+
+        # 4. When gating is enabled, non-admins are restricted to user_allowed_commands.
+        if self.enabled:
+            return cmd in self.user_allowed_commands
+
+        # 5. When gating is not configured, standard non-admin commands remain available.
+        return True
 
 
 _DM_CHAT_TYPES = frozenset({"dm", "direct", "private", ""})
@@ -94,43 +173,55 @@ _DM_CHAT_TYPES = frozenset({"dm", "direct", "private", ""})
 def _coerce_id_list(raw: Any) -> FrozenSet[str]:
     """Normalize a YAML-loaded admin/user list into a frozenset of strings.
 
-    Accepts ``None``, list, tuple, or comma-separated string. Stringifies
-    each entry and strips whitespace; empty entries are dropped.
+    Accepts list, tuple, set, comma-separated string, or scalar int/str identifier.
+    Safely rejects booleans, mappings, wildcards, and malformed inputs to ensure
+    fail-closed security.
     """
-    if raw is None:
+    if raw is None or isinstance(raw, bool) or isinstance(raw, (dict, bytes)):
         return frozenset()
+
     if isinstance(raw, (list, tuple, set, frozenset)):
         items: Iterable[Any] = raw
     elif isinstance(raw, str):
         items = (s for s in raw.split(",") if s.strip())
+    elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        items = (int(raw),)
     else:
-        # single scalar (int user id, etc.)
-        items = (raw,)
+        return frozenset()
+
     out: list[str] = []
     for it in items:
+        if it is None or isinstance(it, bool) or isinstance(it, (dict, list, tuple, set, bytes)):
+            continue
         s = str(it).strip()
-        if s:
-            out.append(s)
+        if not s or s == "*":
+            continue
+        out.append(s)
     return frozenset(out)
 
 
 def _coerce_command_list(raw: Any) -> FrozenSet[str]:
-    """Normalize a slash command allowlist.
+    """Normalize a slash command allowlist into a frozenset of lowercase strings.
 
-    Strips leading slashes so YAML can read either ``["help", "status"]``
-    or ``["/help", "/status"]``. Lowercase canonicalization matches how
-    ``resolve_command()`` stores names.
+    Strips leading slashes and whitespace. Safely rejects booleans, mappings,
+    and invalid types.
     """
-    if raw is None:
+    if raw is None or isinstance(raw, bool) or isinstance(raw, (dict, bytes)):
         return frozenset()
+
     if isinstance(raw, (list, tuple, set, frozenset)):
         items: Iterable[Any] = raw
     elif isinstance(raw, str):
         items = (s for s in raw.split(",") if s.strip())
+    elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        items = (str(int(raw)),)
     else:
-        items = (raw,)
+        return frozenset()
+
     out: list[str] = []
     for it in items:
+        if it is None or isinstance(it, bool) or isinstance(it, (dict, list, tuple, set, bytes)):
+            continue
         s = str(it).strip().lstrip("/").lower()
         if s:
             out.append(s)
@@ -223,6 +314,8 @@ def policy_for_source(gateway_config: Any, source: Any) -> SlashAccessPolicy:
 
 
 __all__ = [
+    "ADMIN_COMMANDS",
+    "PUBLIC_USER_COMMANDS",
     "SlashAccessPolicy",
     "policy_from_extra",
     "policy_for_source",

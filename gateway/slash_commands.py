@@ -265,7 +265,7 @@ class GatewaySlashCommandsMixin:
                 f"**You** — {platform} ({scope})\n"
                 f"User ID: `{user_id}`\n"
                 f"Tier: unrestricted (no admin list configured for this scope)\n"
-                f"Slash commands: all available"
+                f"Slash commands: standard user commands available (admin commands restricted)"
             )
 
         if policy.is_admin(user_id):

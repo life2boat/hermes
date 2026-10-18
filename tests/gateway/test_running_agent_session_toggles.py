@@ -50,7 +50,7 @@ def _make_runner():
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***", extra={"allow_admin_from": ["u1"]})}
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()

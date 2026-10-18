@@ -159,7 +159,7 @@ All comparison results record stable, programmatic reason codes:
 - Missing invariant: `MISSING_OBSERVED_INVARIANT:<field>`
 - Invariant drift: `INVARIANT_DRIFT:<field>`
 - Service mismatch: `MISSING_SERVICE:<name>`, `EXTRA_SERVICE_DETECTED`, `EXTRA_SERVICE:<name>`
-- Policy violations: `UNTRUSTED_FRESHNESS_POLICY`, `EMPTY_RUNTIME_OBSERVATIONS`
+- Policy violations: `UNTRUSTED_FRESHNESS_POLICY`, `EMPTY_RUNTIME_OBSERVATIONS`, `LEGACY_CONTRACT_NOT_AUTHORITATIVE`
 - Signature verification: `MISSING_TRUST_STORE`, `MISSING_EVIDENCE_PROVENANCE`, `UNTRUSTED_SIGNATURE_KEY`, `EXPIRED_EVIDENCE`, `STALE_EVIDENCE`
 
 > **Fail-Closed Co-Occurrence Rule**: If missing invariants and drift co-occur in the same evaluation, the comparison status **strictly resolves to `INSUFFICIENT_EVIDENCE`**. Proven divergence cannot override incomplete proof.
@@ -226,8 +226,8 @@ python scripts/production_runtime_attestation.py sanitize --input raw.json --out
 ```
 
 ### Exit Codes
-- `0`: Authoritative `MATCH` (authentic, fresh evidence verified without time override) / Integrity verified.
-- `3`: Diagnostic `MATCH` with time override (fails release-gating to prevent unearned production authority).
+- `0`: Authoritative `MATCH` or Authoritative `verify` (authentic, fresh evidence verified with system UTC without time override).
+- `3`: Diagnostic `MATCH` or Diagnostic `verify` with manual time override (non-authoritative result; fails release-gating to prevent unearned production authority).
 - `2`: Comparison `DRIFT` or `INSUFFICIENT_EVIDENCE`.
 - `1`: Contract error, tampering detected, missing trust store, or invalid argument.
 

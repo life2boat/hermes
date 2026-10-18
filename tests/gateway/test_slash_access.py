@@ -59,15 +59,20 @@ class TestPolicyFromExtra:
         p = policy_from_extra(
             {
                 "allow_admin_from": ["111"],
-                "user_allowed_commands": ["status", "model"],
+                "user_allowed_commands": ["clear", "topic", "status", "model"],
             },
             "dm",
         )
         assert p.is_admin("999") is False
-        assert p.can_run("999", "status") is True
-        assert p.can_run("999", "model") is True
+        # Listed non-admin commands are allowed
+        assert p.can_run("999", "clear") is True
+        assert p.can_run("999", "topic") is True
+        # Administrative commands in user_allowed_commands are stripped and blocked
+        assert p.can_run("999", "status") is False
+        assert p.can_run("999", "model") is False
         assert p.can_run("999", "stop") is False
         assert p.can_run("999", "kanban") is False
+        assert p.user_allowed_commands == frozenset({"clear", "topic"})
 
     def test_always_allowed_floor_for_non_admin(self):
         # /help and /whoami always reachable so users can see what they can do.
@@ -82,11 +87,12 @@ class TestPolicyFromExtra:
     def test_unknown_user_id_blocked(self):
         # Empty/None user_id → no admin status, no command access (except floor).
         p = policy_from_extra(
-            {"allow_admin_from": ["111"], "user_allowed_commands": ["status"]},
+            {"allow_admin_from": ["111"], "user_allowed_commands": ["clear"]},
             "dm",
         )
         assert p.is_admin(None) is False
-        assert p.can_run(None, "status") is True  # listed command works
+        assert p.can_run(None, "clear") is True  # listed safe command works
+        assert p.can_run(None, "status") is False
         assert p.can_run(None, "stop") is False
         assert p.can_run("", "stop") is False
 
@@ -105,26 +111,26 @@ class TestPolicyFromExtra:
         p = policy_from_extra(
             {
                 "allow_admin_from": ["111"],
-                "user_allowed_commands": ["/Status", "MODEL", "/help"],
+                "user_allowed_commands": ["/Clear", "TOPIC", "/help"],
             },
             "dm",
         )
-        assert p.user_allowed_commands == frozenset({"status", "model", "help"})
+        assert p.user_allowed_commands == frozenset({"clear", "topic", "help"})
 
     def test_command_coercion_csv_string(self):
         p = policy_from_extra(
             {
                 "allow_admin_from": ["111"],
-                "user_allowed_commands": "status, model , /help",
+                "user_allowed_commands": "clear, topic , /help",
             },
             "dm",
         )
-        assert p.user_allowed_commands == frozenset({"status", "model", "help"})
+        assert p.user_allowed_commands == frozenset({"clear", "topic", "help"})
 
     def test_group_scope_uses_group_keys(self):
         extra = {
             "allow_admin_from": ["111"],          # DM admins
-            "user_allowed_commands": ["status"],  # DM commands
+            "user_allowed_commands": ["clear"],   # DM commands
             "group_allow_admin_from": ["222"],
             "group_user_allowed_commands": ["help"],
         }
@@ -132,7 +138,7 @@ class TestPolicyFromExtra:
         gp = policy_from_extra(extra, "group")
         assert dm.admin_user_ids == frozenset({"111"})
         assert gp.admin_user_ids == frozenset({"222"})
-        assert dm.user_allowed_commands == frozenset({"status"})
+        assert dm.user_allowed_commands == frozenset({"clear"})
         # group's user_allowed_commands does not leak into DM's allowed list
         # except via the explicit fallback rule (only when DM list is unset).
         assert "help" in gp.user_allowed_commands
@@ -142,10 +148,10 @@ class TestPolicyFromExtra:
         # they should only have to list it once on the group keys.
         extra = {
             "allow_admin_from": ["111"],
-            "group_user_allowed_commands": ["status", "model"],
+            "group_user_allowed_commands": ["clear", "topic"],
         }
         dm = policy_from_extra(extra, "dm")
-        assert dm.user_allowed_commands == frozenset({"status", "model"})
+        assert dm.user_allowed_commands == frozenset({"clear", "topic"})
 
     def test_dm_admin_does_not_imply_group_admin(self):
         # Admin lists are scope-specific. DM admin must not auto-promote in groups.
@@ -194,7 +200,7 @@ class TestPolicyForSource:
                     enabled=True,
                     extra={
                         "allow_admin_from": ["111"],
-                        "user_allowed_commands": ["status"],
+                        "user_allowed_commands": ["clear"],
                         "group_allow_admin_from": ["222"],
                         "group_user_allowed_commands": ["help"],
                     },
@@ -206,8 +212,9 @@ class TestPolicyForSource:
         )
         p = policy_for_source(cfg, dm_src)
         assert p.is_admin("111") is True
-        assert p.can_run("999", "status") is True
+        assert p.can_run("999", "clear") is True
         assert p.can_run("999", "help") is True  # always-allowed floor
+        assert p.can_run("999", "status") is False
         assert p.can_run("999", "kanban") is False
 
     def test_group_chat_type_resolves_to_group_scope(self):
@@ -217,7 +224,7 @@ class TestPolicyForSource:
                     enabled=True,
                     extra={
                         "allow_admin_from": ["111"],
-                        "user_allowed_commands": ["status"],
+                        "user_allowed_commands": ["clear"],
                         "group_allow_admin_from": ["222"],
                         "group_user_allowed_commands": ["help"],
                     },
@@ -230,9 +237,10 @@ class TestPolicyForSource:
         p = policy_for_source(cfg, grp_src)
         assert p.is_admin("222") is True
         assert p.is_admin("111") is False  # DM admin, not group admin
-        # In group scope, the only listed user command is "help"; "status"
+        # In group scope, the only listed user command is "help"; "clear"
         # is not in the group list and should be denied for non-admins.
         assert p.can_run("999", "help") is True
+        assert p.can_run("999", "clear") is False
         assert p.can_run("999", "status") is False
 
     def test_channel_thread_chat_types_treated_as_group_scope(self):

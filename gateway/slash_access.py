@@ -42,11 +42,16 @@ from typing import Any, FrozenSet, Iterable, Optional, Tuple
 # or when admin configuration is absent/empty/invalid.
 ADMIN_COMMANDS: FrozenSet[str] = frozenset({
     # System / gateway lifecycle & process control
+    "status",
     "restart",
     "stop",
     "platform",
     "platforms",
     "rollback",
+    "snapshot",
+    "update",
+    "debug",
+    "agents",
     # Model & configuration
     "model",
     "codex-runtime",
@@ -130,12 +135,12 @@ class SlashAccessPolicy:
         1. Verified administrators (positive proof in admin_user_ids) can run all commands.
         2. Public and user floor commands (help, whoami, diary, profile, start, menu, etc.)
            are always accessible to any authorized user.
-        3. Administrative operations strictly require admin authority. When gating is not
-           configured, administrative commands fail closed and are denied to everyone.
-           When gating is active, an operator can explicitly whitelist a diagnostic command
-           in user_allowed_commands.
+        3. Administrative operations strictly require positive admin authority.
+           user_allowed_commands can NEVER authorize any command from ADMIN_COMMANDS.
+           When gating is not configured or user is not a verified admin, administrative
+           commands fail closed and are denied to everyone.
         4. When gating is enabled, non-admins can only run explicitly allowed user commands
-           plus the public floor.
+           plus the public floor (excluding any admin commands).
         5. When gating is not configured, standard non-administrative session commands
            (e.g. /new, /retry) remain usable for ordinary chat.
         """
@@ -154,9 +159,8 @@ class SlashAccessPolicy:
             return True
 
         # 3. Administrative operations strictly require positive admin authorization.
+        # user_allowed_commands can NEVER authorize an admin command.
         if cmd in ADMIN_COMMANDS:
-            if self.enabled and cmd in self.user_allowed_commands:
-                return True
             return False
 
         # 4. When gating is enabled, non-admins are restricted to user_allowed_commands.
@@ -269,12 +273,16 @@ def policy_from_extra(extra: dict, scope: str) -> SlashAccessPolicy:
     """
     admin_key, cmd_key = _keys_for_scope(scope)
     admin_ids = _coerce_id_list(extra.get(admin_key))
-    cmds = _coerce_command_list(extra.get(cmd_key))
+    raw_cmds = _coerce_command_list(extra.get(cmd_key))
 
-    if scope == "dm" and not cmds:
+    if scope == "dm" and not raw_cmds:
         # DM didn't specify — let group's user_allowed_commands fall through
         # so operators only need to list it once if it's the same.
-        cmds = _coerce_command_list(extra.get("group_user_allowed_commands"))
+        raw_cmds = _coerce_command_list(extra.get("group_user_allowed_commands"))
+
+    # user_allowed_commands can NEVER permit administrative commands.
+    # Strip any administrative command to ensure strict fail-closed security.
+    cmds = frozenset(c for c in raw_cmds if c not in ADMIN_COMMANDS)
 
     enabled = bool(admin_ids)
     return SlashAccessPolicy(

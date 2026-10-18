@@ -137,15 +137,15 @@ async def test_whoami_non_admin_lists_runnable_commands():
     runner = _make_runner(
         platform_extra={
             "allow_admin_from": ["111"],
-            "user_allowed_commands": ["status", "model"],
+            "user_allowed_commands": ["clear", "topic"],
         }
     )
     result = await runner._handle_message(_make_event("/whoami", _make_source(user_id="999")))
     assert "Tier: user" in result
     assert "/help" in result      # always-allowed floor
     assert "/whoami" in result    # always-allowed floor
-    assert "/status" in result
-    assert "/model" in result
+    assert "/clear" in result
+    assert "/topic" in result
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ async def test_non_admin_denied_for_unlisted_command():
     runner = _make_runner(
         platform_extra={
             "allow_admin_from": ["111"],
-            "user_allowed_commands": ["status"],
+            "user_allowed_commands": ["clear"],
         }
     )
     # /stop is NOT in user_allowed_commands and not in the always-allowed floor.
@@ -166,7 +166,7 @@ async def test_non_admin_denied_for_unlisted_command():
     assert result is not None
     assert "⛔" in result
     assert "/stop is admin-only here" in result
-    assert "/status" in result  # denial preview shows what they CAN run
+    assert "/clear" in result  # denial preview shows what they CAN run
 
 
 @pytest.mark.asyncio
@@ -372,9 +372,9 @@ async def test_running_agent_fastpath_allows_admin_command():
 
 
 @pytest.mark.asyncio
-async def test_running_agent_fastpath_status_always_works():
-    """/status is intentionally pre-gate on the fast-path so users can
-    always see session state, even non-admins."""
+async def test_running_agent_fastpath_status_denied_for_non_admin():
+    """/status is an admin command; on the running-agent fast-path, non-admins
+    are denied access fail-closed without calling _handle_status_command."""
     runner = _make_runner(
         platform_extra={
             "allow_admin_from": ["111"],
@@ -388,8 +388,31 @@ async def test_running_agent_fastpath_status_always_works():
     runner._handle_status_command = AsyncMock(return_value="status-handled")
 
     result = await runner._handle_message(_make_event("/status", src))
+    assert result is not None
+    assert "⛔" in result
+    assert "/status is admin-only here" in result
+    runner._handle_status_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_running_agent_fastpath_status_allowed_for_admin():
+    """Verified admins can execute /status on the running-agent fast-path."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    src = _make_source(user_id="111")  # admin
+    sk = build_session_key(src)
+    runner._running_agents[sk] = MagicMock()
+    runner._running_agents_ts[sk] = 0
+    runner._handle_status_command = AsyncMock(return_value="status-handled")
+
+    result = await runner._handle_message(_make_event("/status", src))
     assert result == "status-handled"
     assert "⛔" not in (result or "")
+    runner._handle_status_command.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +487,7 @@ async def test_dm_admin_blocked_in_group_with_separate_admin_list():
         platform_extra={
             "allow_admin_from": ["111"],          # DM admin
             "group_allow_admin_from": ["222"],    # group admin
-            "group_user_allowed_commands": ["status"],
+            "group_user_allowed_commands": ["clear"],
         }
     )
     # User 111 is DM admin. In a group, they're a non-admin and can only

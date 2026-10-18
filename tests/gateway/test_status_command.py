@@ -35,7 +35,13 @@ def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.T
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={platform: PlatformConfig(enabled=True, token="***")}
+        platforms={
+            platform: PlatformConfig(
+                enabled=True,
+                token="***",
+                extra={"allow_admin_from": ["u1"]},
+            )
+        }
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()

@@ -404,3 +404,187 @@ def test_existing_authorizations_parity():
     # Target ID is denied
     assert policy_dm.is_admin(target_id) is False
     assert policy_grp.is_admin(target_id) is False
+
+
+# ---------------------------------------------------------------------------
+# 11. ADDENDUM — Status Command Security, Aliases & Dynamic Registration
+# ---------------------------------------------------------------------------
+
+
+def test_status_and_sensitive_diagnostics_classified_as_admin_commands():
+    """Verify /status and sensitive diagnostic commands are strictly ADMIN_COMMANDS."""
+    for cmd in ("status", "agents", "snapshot", "update", "debug", "restart", "stop"):
+        assert cmd in ADMIN_COMMANDS, f"{cmd} must be in ADMIN_COMMANDS"
+
+    assert "status" not in PUBLIC_USER_COMMANDS
+    assert "status" not in SlashAccessPolicy._ALWAYS_ALLOWED_FOR_USERS if hasattr(SlashAccessPolicy, "_ALWAYS_ALLOWED_FOR_USERS") else True
+
+
+def test_user_allowed_commands_cannot_permit_admin_commands():
+    """Prove user_allowed_commands CANNOT permit any command from ADMIN_COMMANDS."""
+    owner_id = "968323641"
+    target_id = "248875361"
+
+    extra = {
+        "allow_admin_from": [owner_id],
+        "user_allowed_commands": [
+            "status",
+            "restart",
+            "stop",
+            "model",
+            "config",
+            "yolo",
+            "clear",
+            "topic",
+            "menu",
+        ],
+    }
+
+    policy = policy_from_extra(extra, "dm")
+
+    # 1. user_allowed_commands must be stripped of all ADMIN_COMMANDS
+    for admin_cmd in ("status", "restart", "stop", "model", "config", "yolo"):
+        assert admin_cmd not in policy.user_allowed_commands, f"{admin_cmd} must be stripped"
+
+    # 2. Legitimate user commands remain permitted
+    assert "clear" in policy.user_allowed_commands
+    assert "topic" in policy.user_allowed_commands
+
+    # 3. Non-admin execution is strictly denied for admin commands
+    for admin_cmd in ("status", "restart", "stop", "model", "config", "yolo"):
+        assert policy.can_run(target_id, admin_cmd) is False
+        assert policy.can_run("synthetic_user_999", admin_cmd) is False
+
+    # 4. Non-admin execution is permitted for safe listed commands and floor
+    assert policy.can_run(target_id, "clear") is True
+    assert policy.can_run(target_id, "topic") is True
+    assert policy.can_run(target_id, "menu") is True
+    assert policy.can_run(target_id, "help") is True
+
+    # 5. Direct defense-in-depth: Even if a manual policy object is created with admin commands
+    manual_policy = SlashAccessPolicy(
+        enabled=True,
+        admin_user_ids=frozenset([owner_id]),
+        user_allowed_commands=frozenset({"status", "restart"}),
+    )
+    assert manual_policy.can_run(target_id, "status") is False
+    assert manual_policy.can_run(target_id, "restart") is False
+    assert manual_policy.can_run(owner_id, "status") is True
+    assert manual_policy.can_run(owner_id, "restart") is True
+
+
+@pytest.mark.asyncio
+async def test_aliases_and_quick_commands_cannot_bypass_admin_restrictions():
+    """Prove quick_commands and aliases targeting admin commands cannot bypass access gating."""
+    owner_id = "968323641"
+    target_id = "248875361"
+
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": [owner_id],
+            "user_allowed_commands": ["s", "r", "clear"],  # Even if alias names are listed!
+        }
+    )
+    runner.config.quick_commands = {
+        "s": {"type": "alias", "target": "/status"},
+        "r": {"type": "alias", "target": "/restart"},
+    }
+    runner._handle_status_command = AsyncMock(return_value="status-handled")
+    runner._handle_restart_command = AsyncMock(return_value="restart-handled")
+
+    non_admin_src = _make_source(user_id=target_id)
+    admin_src = _make_source(user_id=owner_id)
+
+    # 1. Cold path: Non-admin denied aliases
+    res_s = await runner._handle_message(_make_event("/s", non_admin_src))
+    assert res_s is not None and "⛔" in res_s and "/status is admin-only here" in res_s
+    runner._handle_status_command.assert_not_called()
+
+    res_r = await runner._handle_message(_make_event("/r", non_admin_src))
+    assert res_r is not None and "⛔" in res_r and "/restart is admin-only here" in res_r
+    runner._handle_restart_command.assert_not_called()
+
+    # 2. Cold path: Admin allowed aliases
+    admin_res_s = await runner._handle_message(_make_event("/s", admin_src))
+    assert admin_res_s == "status-handled"
+    runner._handle_status_command.assert_awaited_once()
+
+    runner._handle_status_command.reset_mock()
+
+    # 3. Mid-run running agent fast-path: Non-admin denied aliases and direct status
+    sk = runner.session_store.get_or_create_session.return_value.session_key
+    runner._running_agents[sk] = MagicMock()
+    runner._running_agents_ts[sk] = 0
+
+    res_mid_status = await runner._handle_message(_make_event("/status", non_admin_src))
+    assert res_mid_status is not None and "⛔" in res_mid_status and "/status is admin-only here" in res_mid_status
+    runner._handle_status_command.assert_not_called()
+
+    res_mid_s = await runner._handle_message(_make_event("/s", non_admin_src))
+    assert res_mid_s is not None and "⛔" in res_mid_s and "/status is admin-only here" in res_mid_s
+    runner._handle_status_command.assert_not_called()
+
+    # 4. Mid-run running agent fast-path: Admin allowed
+    admin_mid_status = await runner._handle_message(_make_event("/status", admin_src))
+    assert admin_mid_status == "status-handled"
+    runner._handle_status_command.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_dynamic_registration_and_hooks_cannot_bypass_slash_access_gate():
+    """Prove dynamic command registration and command hooks cannot bypass gating."""
+    owner_id = "968323641"
+    target_id = "248875361"
+
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": [owner_id],
+            "user_allowed_commands": ["clear"],
+        }
+    )
+    # Even if a hook attempts to allow or handle the command
+    runner.hooks.emit_collect = AsyncMock(return_value=[{"decision": "allow"}])
+    runner._handle_status_command = AsyncMock(return_value="status-handled")
+
+    non_admin_src = _make_source(user_id=target_id)
+    res = await runner._handle_message(_make_event("/status", non_admin_src))
+
+    assert res is not None
+    assert "⛔" in res
+    assert "/status is admin-only here" in res
+    # Hook must not have been able to bypass the gate
+    runner._handle_status_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_command_admin_only_in_all_scopes():
+    """Verify /status is admin-only across DM and group scopes."""
+    owner_id = "968323641"
+    target_id = "248875361"
+
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": [owner_id],
+            "group_allow_admin_from": [owner_id],
+            "user_allowed_commands": [],
+            "group_user_allowed_commands": [],
+        }
+    )
+    runner._handle_status_command = AsyncMock(return_value="status-ok")
+
+    # DM scope
+    dm_target = _make_source(user_id=target_id, chat_type="dm")
+    dm_res = await runner._handle_message(_make_event("/status", dm_target))
+    assert dm_res is not None and "⛔" in dm_res and "/status is admin-only here" in dm_res
+
+    # Group scope
+    grp_target = _make_source(user_id=target_id, chat_type="group", chat_id="grp_99")
+    grp_res = await runner._handle_message(_make_event("/status", grp_target))
+    assert grp_res is not None and "⛔" in grp_res and "/status is admin-only here" in grp_res
+
+    # Admin access in both scopes
+    dm_owner = _make_source(user_id=owner_id, chat_type="dm")
+    assert await runner._handle_message(_make_event("/status", dm_owner)) == "status-ok"
+
+    grp_owner = _make_source(user_id=owner_id, chat_type="group", chat_id="grp_99")
+    assert await runner._handle_message(_make_event("/status", grp_owner)) == "status-ok"

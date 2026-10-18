@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/life2boat/hermes/schemas/production-runtime-intended-v1.schema.json",
+  "title": "IntendedProductionState v1",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "IntendedProductionState v1 (Canonical Full)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "canonical_repository",
+        "intended_main_sha",
+        "intended_image_digest",
+        "intended_oci_revision",
+        "expected_service_set",
+        "expected_runtime_contract",
+        "expected_schema_version",
+        "expected_configuration_contract_version",
+        "expected_release_identity"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "target": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "canonical_repository": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "intended_main_sha": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40})?$"
+        },
+        "intended_image_digest": {
+          "type": "string"
+        },
+        "intended_oci_revision": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40})?$"
+        },
+        "expected_service_set": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+          }
+        },
+        "expected_runtime_contract": {"type": "string"},
+        "expected_schema_version": {"type": "integer", "minimum": 0},
+        "expected_configuration_contract_version": {"type": "string"},
+        "expected_release_identity": {"type": "string"},
+        "expected_collectors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/collector_expectation"}
+        }
+      }
+    },
+    {
+      "title": "IntendedProductionState v1 (Compact / Legacy)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "target",
+        "expected_collectors"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "target": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "expected_collectors": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/collector_expectation"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "collector_expectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collector_id", "observations"],
+      "properties": {
+        "collector_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "observations": {"type": "object"}
+      }
+    }
+  }
+}

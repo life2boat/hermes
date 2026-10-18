@@ -59,6 +59,9 @@ UTC = timezone.utc
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "production_runtime_attestation"
 SCHEMA_FILE = ROOT / "schemas" / "production-runtime-attestation-v1.schema.json"
+COMPARISON_SCHEMA_V1 = ROOT / "schemas" / "production-runtime-comparison-v1.schema.json"
+COMPARISON_SCHEMA_V3 = ROOT / "schemas" / "production-runtime-comparison-v3.schema.json"
+INTENDED_SCHEMA_V1 = ROOT / "schemas" / "production-runtime-intended-v1.schema.json"
 
 
 def _fixture(name: str) -> bytes:
@@ -2649,3 +2652,364 @@ def test_cli_compare_drift_or_insufficient_exit_code_2(tmp_path: Path) -> None:
         ]
     )
     assert exit_code == 2
+
+
+# ===========================================================================
+# Sprint B1.2.3 Tests: Strict Intended Validation & Comparison v3 JSON Schema
+# ===========================================================================
+
+
+def test_intended_state_schema_version_invalid_raises() -> None:
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, schema_version=2)
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_bool_schema_version_raises() -> None:
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, schema_version=True)  # type: ignore[arg-type]
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_invalid_target_raises() -> None:
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, target="invalid target with spaces!")
+    with pytest.raises(ProductionRuntimeAttestationError, match="IDENTIFIER_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_invalid_main_sha_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="SHA_INVALID"):
+        create_intended_state(intended_main_sha="not-a-40-hex-sha")
+
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, intended_main_sha="zzzz" * 10)
+    with pytest.raises(ProductionRuntimeAttestationError, match="SHA_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_invalid_image_digest_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="DIGEST_INVALID"):
+        create_intended_state(intended_image_digest="not-a-digest")
+
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, intended_image_digest="bad:digest")
+    with pytest.raises(ProductionRuntimeAttestationError, match="DIGEST_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_invalid_oci_revision_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="REVISION_INVALID"):
+        create_intended_state(intended_oci_revision="not-a-revision")
+
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, intended_oci_revision="invalid:oci")
+    with pytest.raises(ProductionRuntimeAttestationError, match="REVISION_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_negative_expected_schema_version_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        create_intended_state(expected_schema_version=-1)
+
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, expected_schema_version=-5)
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_bool_expected_schema_version_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        create_intended_state(expected_schema_version=True)  # type: ignore[arg-type]
+
+    intended = _complete_intended_state()
+    invalid_intended = replace(intended, expected_schema_version=True)  # type: ignore[arg-type]
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        validate_intended_state(invalid_intended)
+
+
+def test_intended_state_invalid_service_set_type_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="SERVICE_SET_INVALID"):
+        create_intended_state(expected_service_set="not-a-sequence")  # type: ignore[arg-type]
+
+
+def test_intended_state_invalid_service_name_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="IDENTIFIER_INVALID"):
+        create_intended_state(expected_service_set=["invalid service name!"])
+
+
+def test_intended_state_duplicate_collector_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="DUPLICATE_COLLECTOR"):
+        validate_intended_state(
+            {
+                "schema_version": 1,
+                "target": "synthetic-prod",
+                "expected_collectors": [
+                    {"collector_id": "alpha", "observations": {"k": "v"}},
+                    {"collector_id": "alpha", "observations": {"k": "v2"}},
+                ],
+            }
+        )
+
+
+def test_intended_state_unsorted_collectors_raises() -> None:
+    with pytest.raises(ProductionRuntimeAttestationError, match="COLLECTOR_ORDER_INVALID"):
+        validate_intended_state(
+            {
+                "schema_version": 1,
+                "target": "synthetic-prod",
+                "expected_collectors": [
+                    {"collector_id": "zeta", "observations": {"k": "v"}},
+                    {"collector_id": "alpha", "observations": {"k": "v2"}},
+                ],
+            }
+        )
+
+
+def test_intended_state_deserialization_strict_validation() -> None:
+    intended = _complete_intended_state()
+    data = json.loads(serialize_intended_state(intended).decode("utf-8"))
+
+    # Malformed SHA
+    bad_sha_dict = dict(data)
+    bad_sha_dict["intended_main_sha"] = "invalid-sha-xyz"
+    with pytest.raises(ProductionRuntimeAttestationError, match="SHA_INVALID"):
+        deserialize_intended_state(json.dumps(bad_sha_dict))
+
+    # Malformed image digest
+    bad_digest_dict = dict(data)
+    bad_digest_dict["intended_image_digest"] = "invalid-digest"
+    with pytest.raises(ProductionRuntimeAttestationError, match="DIGEST_INVALID"):
+        deserialize_intended_state(json.dumps(bad_digest_dict))
+
+    # Malformed OCI revision
+    bad_oci_dict = dict(data)
+    bad_oci_dict["intended_oci_revision"] = "bad revision"
+    with pytest.raises(ProductionRuntimeAttestationError, match="REVISION_INVALID"):
+        deserialize_intended_state(json.dumps(bad_oci_dict))
+
+    # Malformed schema version (bool)
+    bad_ver_dict = dict(data)
+    bad_ver_dict["schema_version"] = True
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        deserialize_intended_state(json.dumps(bad_ver_dict))
+
+    # Malformed expected_schema_version (negative)
+    bad_exp_ver_dict = dict(data)
+    bad_exp_ver_dict["expected_schema_version"] = -1
+    with pytest.raises(ProductionRuntimeAttestationError, match="SCHEMA_VERSION_INVALID"):
+        deserialize_intended_state(json.dumps(bad_exp_ver_dict))
+
+
+def test_comparison_invalid_evaluation_mode_raises() -> None:
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    bad_comp = replace(comp, evaluation_mode="UNKNOWN_CUSTOM_MODE")
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_EVALUATION_MODE"):
+        validate_comparison(bad_comp)
+
+
+def test_comparison_mapping_invalid_evaluation_mode_raises() -> None:
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    comp_data = json.loads(serialize_comparison(comp).decode("utf-8"))
+    comp_data["evaluation_mode"] = "INVALID_MODE"
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_EVALUATION_MODE"):
+        deserialize_comparison(json.dumps(comp_data))
+
+
+# --- JSON Schema Tests ---
+
+
+def test_comparison_schema_v3_valid_authoritative_match() -> None:
+    schema_v3 = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    schema_v1 = json.loads(COMPARISON_SCHEMA_V1.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.authoritative_for_production is True
+    assert comp.status == ComparisonStatus.MATCH
+
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    jsonschema.validate(instance=comp_dict, schema=schema_v3)
+    jsonschema.validate(instance=comp_dict, schema=schema_v1)
+
+
+def test_comparison_schema_v3_valid_diagnostic_override() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(
+        intended,
+        att,
+        trusted_public_keys=[pub_hex],
+        current_time_utc="2026-01-02T03:10:00Z",
+    )
+    assert comp.authoritative_for_production is False
+    assert comp.evaluation_mode == "DIAGNOSTIC_TIME_OVERRIDE"
+
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_valid_drift() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state(intended_image_digest="sha256:" + "f" * 64)
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.DRIFT
+
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_valid_insufficient_evidence() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, _ = _valid_signed_attestation()
+    # No trusted keys yields INSUFFICIENT_EVIDENCE
+    comp = compare_production_runtime(intended, att)
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v1_valid_legacy_shape() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V1.read_text(encoding="utf-8"))
+    legacy_data = {
+        "schema_version": 1,
+        "comparison_id": "a" * 64,
+        "target": "synthetic-prod",
+        "attestation_id": "b" * 64,
+        "intended_digest": "c" * 64,
+        "status": "MATCH",
+        "drifted_observations": [],
+        "missing_observations": [],
+    }
+    jsonschema.validate(instance=legacy_data, schema=schema)
+
+
+def test_comparison_schema_v3_authoritative_with_drift_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    comp_dict = {
+        "schema_version": 1,
+        "comparison_id": "a" * 64,
+        "target": "synthetic-prod",
+        "attestation_id": "b" * 64,
+        "intended_digest": "c" * 64,
+        "status": "DRIFT",
+        "drifted_observations": ["service:extra"],
+        "missing_observations": [],
+        "reason_codes": ["INVARIANT_DRIFT"],
+        "evaluated_at_utc": "2026-01-02T03:04:05Z",
+        "evaluation_mode": "AUTHORITATIVE_PRODUCTION",
+        "authoritative_for_production": True,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_authoritative_with_drifted_observations_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    comp_dict = {
+        "schema_version": 1,
+        "comparison_id": "a" * 64,
+        "target": "synthetic-prod",
+        "attestation_id": "b" * 64,
+        "intended_digest": "c" * 64,
+        "status": "MATCH",
+        "drifted_observations": ["some.drift"],
+        "missing_observations": [],
+        "reason_codes": [],
+        "evaluated_at_utc": "2026-01-02T03:04:05Z",
+        "evaluation_mode": "AUTHORITATIVE_PRODUCTION",
+        "authoritative_for_production": True,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_authoritative_with_diagnostic_mode_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    comp_dict = {
+        "schema_version": 1,
+        "comparison_id": "a" * 64,
+        "target": "synthetic-prod",
+        "attestation_id": "b" * 64,
+        "intended_digest": "c" * 64,
+        "status": "MATCH",
+        "drifted_observations": [],
+        "missing_observations": [],
+        "reason_codes": [],
+        "evaluated_at_utc": "2026-01-02T03:04:05Z",
+        "evaluation_mode": "DIAGNOSTIC_TIME_OVERRIDE",
+        "authoritative_for_production": True,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_missing_required_field_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    del comp_dict["evaluated_at_utc"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_invalid_status_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    comp_dict["status"] = "INVALID_STATUS"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_comparison_schema_v3_additional_properties_fails_schema() -> None:
+    schema = json.loads(COMPARISON_SCHEMA_V3.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    comp_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    comp_dict["unexpected_property"] = "sneaky"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=comp_dict, schema=schema)
+
+
+def test_intended_schema_v1_valid_canonical_full() -> None:
+    schema = json.loads(INTENDED_SCHEMA_V1.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    intended_dict = json.loads(serialize_intended_state(intended).decode("utf-8"))
+    jsonschema.validate(instance=intended_dict, schema=schema)
+
+
+def test_intended_schema_v1_valid_legacy() -> None:
+    schema = json.loads(INTENDED_SCHEMA_V1.read_text(encoding="utf-8"))
+    legacy_data = {
+        "schema_version": 1,
+        "target": "synthetic-prod",
+        "expected_collectors": [
+            {"collector_id": "runtime", "observations": {"running": True}}
+        ],
+    }
+    jsonschema.validate(instance=legacy_data, schema=schema)
+
+
+def test_intended_schema_v1_invalid_missing_fields() -> None:
+    schema = json.loads(INTENDED_SCHEMA_V1.read_text(encoding="utf-8"))
+    intended = _complete_intended_state()
+    intended_dict = json.loads(serialize_intended_state(intended).decode("utf-8"))
+    del intended_dict["canonical_repository"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=intended_dict, schema=schema)

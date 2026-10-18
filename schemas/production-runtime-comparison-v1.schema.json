@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/life2boat/hermes/schemas/production-runtime-comparison-v1.schema.json",
+  "title": "ProductionRuntimeComparison v1",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "ProductionRuntimeComparison v3 (Authoritative / Diagnostic)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "comparison_id",
+        "target",
+        "attestation_id",
+        "intended_digest",
+        "status",
+        "drifted_observations",
+        "missing_observations",
+        "reason_codes",
+        "evaluated_at_utc",
+        "evaluation_mode",
+        "authoritative_for_production"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "comparison_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "attestation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "intended_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["MATCH", "DRIFT", "INSUFFICIENT_EVIDENCE"]
+        },
+        "drifted_observations": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "missing_observations": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "evaluated_at_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "evaluation_mode": {
+          "type": "string",
+          "enum": [
+            "AUTHORITATIVE_PRODUCTION",
+            "DIAGNOSTIC_TIME_OVERRIDE",
+            "LEGACY_UNSPECIFIED"
+          ]
+        },
+        "authoritative_for_production": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "authoritative_for_production": {"const": true}
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {"const": "MATCH"},
+              "evaluation_mode": {"const": "AUTHORITATIVE_PRODUCTION"},
+              "drifted_observations": {"maxItems": 0},
+              "missing_observations": {"maxItems": 0}
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "ProductionRuntimeComparison v1 (Legacy Compact)",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "comparison_id",
+        "target",
+        "attestation_id",
+        "intended_digest",
+        "status",
+        "drifted_observations",
+        "missing_observations"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "comparison_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+        },
+        "attestation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "intended_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["MATCH", "DRIFT", "INSUFFICIENT_EVIDENCE"]
+        },
+        "drifted_observations": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "missing_observations": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

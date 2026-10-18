@@ -142,11 +142,15 @@ def _verify(
     current_time_utc: str | None = None,
     max_age_seconds: int | None = None,
 ) -> int:
+    if integrity_only and current_time_utc is not None:
+        raise ProductionRuntimeAttestationError("CONFLICTING_CLI_OPTIONS")
+
     attestation = deserialize_attestation(_read(input_path))
     if integrity_only:
         if output_path is not None:
             _write_new(output_path, serialize_attestation(attestation))
-        return 3 if current_time_utc is not None else 0
+        print("verification_mode=INTEGRITY_ONLY: INTEGRITY_ONLY_UNAUTHENTICATED")
+        return 4
 
     keys = _parse_trusted_keys(trusted_keys)
     if not keys:
@@ -166,7 +170,13 @@ def _verify(
 
     if output_path is not None:
         _write_new(output_path, serialize_attestation(attestation))
-    return 3 if current_time_utc is not None else 0
+
+    if current_time_utc is not None:
+        print("verification_mode=DIAGNOSTIC_TIME_OVERRIDE")
+        return 3
+    else:
+        print("verification_mode=AUTHORITATIVE_UTC")
+        return 0
 
 
 def _compare(

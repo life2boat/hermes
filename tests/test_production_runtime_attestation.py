@@ -48,6 +48,7 @@ from ai_engineering.production_runtime_attestation import (
     serialize_intended_state,
     sign_attestation,
     validate_attestation,
+    validate_comparison,
     validate_intended_state,
     verify_attestation_signature,
     verify_sanitized_evidence,
@@ -66,6 +67,23 @@ def _fixture(name: str) -> bytes:
 
 def _intended() -> IntendedProductionState:
     return deserialize_intended_state(_fixture("intended.json"))
+
+
+def _complete_intended_state(**kwargs: object) -> IntendedProductionState:
+    defaults: dict[str, object] = {
+        "target": "synthetic-prod",
+        "canonical_repository": "https://github.com/life2boat/hermes.git",
+        "intended_main_sha": "a" * 40,
+        "intended_image_digest": "sha256:" + "1" * 64,
+        "intended_oci_revision": "b" * 40,
+        "expected_service_set": ("gateway",),
+        "expected_runtime_contract": "hermes-runtime-v1",
+        "expected_schema_version": 1,
+        "expected_configuration_contract_version": "v1",
+        "expected_release_identity": "hermes-release-1",
+    }
+    defaults.update(kwargs)
+    return create_intended_state(**defaults)  # type: ignore[arg-type]
 
 
 def _attestation(name: str) -> ProductionRuntimeAttestation:
@@ -805,7 +823,7 @@ def test_regression_untrusted_signer_yields_insufficient_evidence() -> None:
 
 def test_regression_authenticated_image_mismatch_yields_drift() -> None:
     # 6. Authenticated image mismatch → DRIFT
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -842,7 +860,7 @@ def test_regression_authenticated_image_mismatch_yields_drift() -> None:
 
 def test_regression_valid_signed_and_matching_state_yields_match() -> None:
     # 7. Valid signed and matching state → MATCH
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -921,9 +939,9 @@ def test_regression_cli_verification_cannot_succeed_without_authenticity(
     )
     assert ret_unsigned != 0
 
-    # Verify with --integrity-only succeeds for structurally valid unsigned evidence
+    # Verify with --integrity-only succeeds for structurally valid unsigned evidence with exit code 4
     ret_integrity = run(["verify", "--input", str(unsigned_path), "--integrity-only"])
-    assert ret_integrity == 0
+    assert ret_integrity == 4
 
 
 def test_regression_no_private_key_leakage_via_cli_logs_or_artifacts(
@@ -1105,7 +1123,7 @@ def test_regression_drift_and_missing_cooccurrence_insufficient_evidence() -> No
 
 # 4. EXTRA_SERVICE_DETECTED_DRIFT
 def test_regression_extra_service_detected_drift() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1143,7 +1161,7 @@ def test_regression_extra_service_detected_drift() -> None:
 
 # 5. CANONICAL_PROVENANCE_MISMATCH_DRIFT_OR_INSUFFICIENT
 def test_regression_canonical_provenance_mismatch_drift_or_insufficient() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1217,7 +1235,7 @@ def test_regression_zero_placeholder_hash_rejected() -> None:
 
 # 7. AUTHORITATIVE_MODE_TRUE_ON_FRESH_SIGNED_MATCH
 def test_regression_authoritative_mode_true_on_fresh_signed_match() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1254,7 +1272,7 @@ def test_regression_authoritative_mode_true_on_fresh_signed_match() -> None:
 
 # 8. DIAGNOSTIC_TIME_OVERRIDE_NOT_AUTHORITATIVE
 def test_regression_diagnostic_time_override_not_authoritative() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1291,7 +1309,7 @@ def test_regression_diagnostic_time_override_not_authoritative() -> None:
 # 9. CLI_COMPARE_EXIT_CODE_3_ON_DIAGNOSTIC_MATCH
 def test_regression_cli_compare_exit_code_3_on_diagnostic_match(tmp_path: Path) -> None:
     intended_file = tmp_path / "intended.json"
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1344,7 +1362,7 @@ def test_regression_cli_compare_exit_code_3_on_diagnostic_match(tmp_path: Path) 
 # 10. CLI_COMPARE_EXIT_CODE_0_ON_AUTHORITATIVE_MATCH
 def test_regression_cli_compare_exit_code_0_on_authoritative_match(tmp_path: Path) -> None:
     intended_file = tmp_path / "intended.json"
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1395,7 +1413,7 @@ def test_regression_cli_compare_exit_code_0_on_authoritative_match(tmp_path: Pat
 
 # 11. UNTRUSTED_FRESHNESS_POLICY_REJECTED
 def test_regression_untrusted_freshness_policy_rejected() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1442,7 +1460,7 @@ def test_regression_untrusted_freshness_policy_rejected() -> None:
 
 # 12. INDEPENDENT_EVALUATION_OF_COLLECTORS_AND_STRUCTURED_STATE
 def test_regression_independent_evaluation_of_collectors_and_structured_state() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         expected_observations={"runtime": {"running": True}},
         intended_image_digest="sha256:" + "1" * 64,
@@ -1525,7 +1543,7 @@ def test_regression_independent_evaluation_of_collectors_and_structured_state() 
 
 # 13. RELEASE_IDENTITY_MISMATCH_DRIFT
 def test_regression_release_identity_mismatch_drift() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1561,7 +1579,7 @@ def test_regression_release_identity_mismatch_drift() -> None:
 
 # 14. RELEASE_IDENTITY_MISSING_INSUFFICIENT_EVIDENCE
 def test_regression_release_identity_missing_insufficient_evidence() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1596,7 +1614,7 @@ def test_regression_release_identity_missing_insufficient_evidence() -> None:
 
 # 15. REASON_CODES_SERIALIZED_AND_BOUND_IN_COMPARISON_ID
 def test_regression_reason_codes_serialized_and_bound_in_comparison_id() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1684,7 +1702,7 @@ def test_regression_legacy_comparison_deserialization_not_authoritative() -> Non
 
 # 17. UNSIGNED_OR_TAMPERED_EVIDENCE_NO_MATCH
 def test_regression_unsigned_or_tampered_evidence_no_match() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1726,7 +1744,7 @@ def test_regression_unsigned_or_tampered_evidence_no_match() -> None:
 
 # 18. VALID_SIGNED_COMPLETE_MATCH
 def test_regression_valid_signed_complete_match() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1942,7 +1960,7 @@ def test_regression_cli_verify_exit_code_0_on_authoritative_system_time(
 
 
 def test_regression_missing_structured_state_in_v1_intended_contract_denies_authority() -> None:
-    intended = create_intended_state(
+    intended = _complete_intended_state(
         target="synthetic-prod",
         intended_image_digest="sha256:" + "1" * 64,
         intended_main_sha="a" * 40,
@@ -1968,3 +1986,666 @@ def test_regression_missing_structured_state_in_v1_intended_contract_denies_auth
     assert "LEGACY_CONTRACT_NOT_AUTHORITATIVE" in comp.reason_codes
     assert "MISSING_OBSERVED_RUNTIME_STATE" in comp.reason_codes
     assert comp.authoritative_for_production is False
+
+
+# ---------------------------------------------------------------------------
+# ProductionRuntimeAttestation v1.2.2 Regression Tests
+# ---------------------------------------------------------------------------
+
+
+def _valid_signed_attestation() -> tuple[ProductionRuntimeAttestation, str]:
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    return signed_att, export_public_key_hex(pub)
+
+
+# --- FIX-1 Mandatory Tests (10 tests) ---
+
+
+def test_intended_state_missing_main_sha_fails_closed() -> None:
+    intended = _complete_intended_state(intended_main_sha="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_main_sha" in comp.reason_codes
+
+
+def test_intended_state_zero_main_sha_fails_closed() -> None:
+    intended = _complete_intended_state(intended_main_sha="0" * 40)
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_main_sha" in comp.reason_codes
+
+
+def test_intended_state_missing_image_digest_fails_closed() -> None:
+    intended = _complete_intended_state(intended_image_digest="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_image_digest" in comp.reason_codes
+
+
+def test_intended_state_zero_image_digest_fails_closed() -> None:
+    intended = _complete_intended_state(intended_image_digest="sha256:" + "0" * 64)
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_image_digest" in comp.reason_codes
+
+
+def test_intended_state_missing_oci_revision_fails_closed() -> None:
+    intended = _complete_intended_state(intended_oci_revision="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:intended_oci_revision" in comp.reason_codes
+
+
+def test_intended_state_missing_service_set_fails_closed() -> None:
+    intended = _complete_intended_state(expected_service_set=())
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:expected_service_set" in comp.reason_codes
+
+
+def test_intended_state_missing_runtime_contract_fails_closed() -> None:
+    intended = _complete_intended_state(expected_runtime_contract="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:expected_runtime_contract" in comp.reason_codes
+
+
+def test_intended_state_missing_schema_version_fails_closed() -> None:
+    intended = _complete_intended_state(expected_schema_version=0)
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:expected_schema_version" in comp.reason_codes
+
+
+def test_intended_state_missing_config_contract_version_fails_closed() -> None:
+    intended = _complete_intended_state(expected_configuration_contract_version="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:expected_configuration_contract_version" in comp.reason_codes
+
+
+def test_intended_state_missing_release_identity_fails_closed() -> None:
+    intended = _complete_intended_state(expected_release_identity="")
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.INSUFFICIENT_EVIDENCE
+    assert comp.authoritative_for_production is False
+    assert "MISSING_INTENDED_INVARIANT:expected_release_identity" in comp.reason_codes
+
+
+# --- FIX-2 Mandatory Tests (9 tests) ---
+
+
+def test_comparison_v3_domain_binding() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        DOMAIN_SEPARATOR_COMPARISON_V3,
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    assert comp.status == ComparisonStatus.MATCH
+    assert comp.authoritative_for_production is True
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=comp.authoritative_for_production,
+        drifted=comp.drifted_observations,
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode=comp.evaluation_mode,
+        intended_digest=comp.intended_digest,
+        missing=comp.missing_observations,
+        reason_codes=comp.reason_codes,
+        schema_version=comp.schema_version,
+        status=comp.status,
+        target=comp.target,
+    )
+    assert content["domain"] == "hermes-production-runtime-comparison-v3"
+    assert comp.comparison_id == compute_comparison_id(content)
+
+
+def test_comparison_tampered_evaluated_at_utc_raises() -> None:
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    raw_dict = json.loads(serialize_comparison(comp).decode("utf-8"))
+    raw_dict["evaluated_at_utc"] = "2020-01-01T00:00:00Z"
+    with pytest.raises(ProductionRuntimeAttestationError, match="TAMPERED_COMPARISON_ID"):
+        deserialize_comparison(json.dumps(raw_dict))
+
+    tampered_comp = replace(comp, evaluated_at_utc="2020-01-01T00:00:00Z")
+    with pytest.raises(ProductionRuntimeAttestationError, match="TAMPERED_COMPARISON_ID"):
+        validate_comparison(tampered_comp)
+
+
+def test_comparison_authoritative_with_drift_raises() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=True,
+        drifted=("drifted.key",),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        intended_digest=comp.intended_digest,
+        missing=(),
+        reason_codes=(),
+        schema_version=1,
+        status=ComparisonStatus.MATCH,
+        target=comp.target,
+    )
+    forged_id = compute_comparison_id(content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=forged_id,
+        target=comp.target,
+        attestation_id=comp.attestation_id,
+        intended_digest=comp.intended_digest,
+        status=ComparisonStatus.MATCH,
+        drifted_observations=("drifted.key",),
+        missing_observations=(),
+        reason_codes=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_STATUS_AUTHORITY"):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_authoritative_with_missing_raises() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=True,
+        drifted=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        intended_digest=comp.intended_digest,
+        missing=("missing.key",),
+        reason_codes=(),
+        schema_version=1,
+        status=ComparisonStatus.MATCH,
+        target=comp.target,
+    )
+    forged_id = compute_comparison_id(content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=forged_id,
+        target=comp.target,
+        attestation_id=comp.attestation_id,
+        intended_digest=comp.intended_digest,
+        status=ComparisonStatus.MATCH,
+        drifted_observations=(),
+        missing_observations=("missing.key",),
+        reason_codes=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_STATUS_AUTHORITY"):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_authoritative_with_diagnostic_mode_raises() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=True,
+        drifted=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="DIAGNOSTIC_TIME_OVERRIDE",
+        intended_digest=comp.intended_digest,
+        missing=(),
+        reason_codes=(),
+        schema_version=1,
+        status=ComparisonStatus.MATCH,
+        target=comp.target,
+    )
+    forged_id = compute_comparison_id(content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=forged_id,
+        target=comp.target,
+        attestation_id=comp.attestation_id,
+        intended_digest=comp.intended_digest,
+        status=ComparisonStatus.MATCH,
+        drifted_observations=(),
+        missing_observations=(),
+        reason_codes=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="DIAGNOSTIC_TIME_OVERRIDE",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_EVALUATION_MODE"):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_authoritative_with_legacy_reason_raises() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=True,
+        drifted=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        intended_digest=comp.intended_digest,
+        missing=(),
+        reason_codes=("LEGACY_CONTRACT_NOT_AUTHORITATIVE",),
+        schema_version=1,
+        status=ComparisonStatus.MATCH,
+        target=comp.target,
+    )
+    forged_id = compute_comparison_id(content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=forged_id,
+        target=comp.target,
+        attestation_id=comp.attestation_id,
+        intended_digest=comp.intended_digest,
+        status=ComparisonStatus.MATCH,
+        drifted_observations=(),
+        missing_observations=(),
+        reason_codes=("LEGACY_CONTRACT_NOT_AUTHORITATIVE",),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(
+        ProductionRuntimeAttestationError, match="DIAGNOSTIC_REASON_CANNOT_AUTHORIZE_MATCH"
+    ):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_authoritative_with_insufficient_evidence_raises() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _comparison_content,
+        compute_comparison_id,
+    )
+
+    intended = _complete_intended_state()
+    att, pub_hex = _valid_signed_attestation()
+    comp = compare_production_runtime(intended, att, trusted_public_keys=[pub_hex])
+    content = _comparison_content(
+        attestation_id=comp.attestation_id,
+        authoritative_for_production=True,
+        drifted=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        intended_digest=comp.intended_digest,
+        missing=(),
+        reason_codes=(),
+        schema_version=1,
+        status=ComparisonStatus.INSUFFICIENT_EVIDENCE,
+        target=comp.target,
+    )
+    forged_id = compute_comparison_id(content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=forged_id,
+        target=comp.target,
+        attestation_id=comp.attestation_id,
+        intended_digest=comp.intended_digest,
+        status=ComparisonStatus.INSUFFICIENT_EVIDENCE,
+        drifted_observations=(),
+        missing_observations=(),
+        reason_codes=(),
+        evaluated_at_utc=comp.evaluated_at_utc,
+        evaluation_mode="AUTHORITATIVE_PRODUCTION",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(ProductionRuntimeAttestationError, match="INCONSISTENT_STATUS_AUTHORITY"):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_v1_legacy_cannot_be_authoritative() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        _digest,
+        _legacy_comparison_content,
+    )
+
+    legacy_content = _legacy_comparison_content(
+        target="synthetic-prod",
+        attestation_id="a" * 64,
+        intended_digest="b" * 64,
+        status=ComparisonStatus.MATCH,
+        drifted=(),
+        missing=(),
+    )
+    legacy_id = _digest(legacy_content)
+    comp_obj = ProductionRuntimeComparison(
+        schema_version=1,
+        comparison_id=legacy_id,
+        target="synthetic-prod",
+        attestation_id="a" * 64,
+        intended_digest="b" * 64,
+        status=ComparisonStatus.MATCH,
+        drifted_observations=(),
+        missing_observations=(),
+        reason_codes=(),
+        evaluated_at_utc="",
+        evaluation_mode="LEGACY_UNSPECIFIED",
+        authoritative_for_production=True,
+    )
+    with pytest.raises(
+        ProductionRuntimeAttestationError, match="LEGACY_COMPARISON_CANNOT_BE_AUTHORITATIVE"
+    ):
+        validate_comparison(comp_obj)
+
+
+def test_comparison_v2_legacy_cannot_be_authoritative() -> None:
+    from ai_engineering.production_runtime_attestation import (
+        DOMAIN_SEPARATOR_COMPARISON_V2,
+        _canonical_bytes,
+        compute_comparison_id,
+    )
+
+    v2_content = {
+        "attestation_id": "a" * 64,
+        "authoritative_for_production": True,
+        "domain": "hermes-production-runtime-comparison-v2",
+        "drifted_observations": [],
+        "evaluation_mode": "AUTHORITATIVE_PRODUCTION",
+        "intended_digest": "b" * 64,
+        "missing_observations": [],
+        "reason_codes": [],
+        "schema_version": 1,
+        "status": "MATCH",
+        "target": "synthetic-prod",
+    }
+    v2_id = compute_comparison_id(v2_content)
+    v2_dict = dict(v2_content)
+    v2_dict["comparison_id"] = v2_id
+    v2_dict["evaluated_at_utc"] = "2026-01-02T03:04:05Z"
+    del v2_dict["domain"]
+    with pytest.raises(
+        ProductionRuntimeAttestationError, match="LEGACY_COMPARISON_CANNOT_BE_AUTHORITATIVE"
+    ):
+        deserialize_comparison(json.dumps(v2_dict))
+
+
+# --- FIX-3 CLI Tests ---
+
+
+def test_cli_verify_integrity_only_exit_code_4(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    att, _ = _valid_signed_attestation()
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(att))
+    exit_code = run(["verify", "--input", str(att_file), "--integrity-only"])
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    assert (
+        "verification_mode=INTEGRITY_ONLY: INTEGRITY_ONLY_UNAUTHENTICATED" in captured.out
+    )
+
+
+def test_cli_verify_conflicting_options_exit_code_1(tmp_path: Path) -> None:
+    att, _ = _valid_signed_attestation()
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(att))
+    exit_code = run(
+        [
+            "verify",
+            "--input",
+            str(att_file),
+            "--integrity-only",
+            "--current-time-utc",
+            "2026-01-02T03:10:00Z",
+        ]
+    )
+    assert exit_code == 1
+
+
+def test_cli_verify_authoritative_exit_code_0(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+    key_file = tmp_path / "keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    exit_code = run(
+        ["verify", "--input", str(att_file), "--trusted-keys", str(key_file)]
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "verification_mode=AUTHORITATIVE_UTC" in captured.out
+
+
+def test_cli_verify_diagnostic_time_exit_code_3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+    key_file = tmp_path / "keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    exit_code = run(
+        [
+            "verify",
+            "--input",
+            str(att_file),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            "2026-01-02T03:10:00Z",
+        ]
+    )
+    assert exit_code == 3
+    captured = capsys.readouterr()
+    assert "verification_mode=DIAGNOSTIC_TIME_OVERRIDE" in captured.out
+
+
+def test_cli_compare_authoritative_match_exit_code_0(tmp_path: Path) -> None:
+    intended_file = tmp_path / "intended.json"
+    intended = _complete_intended_state()
+    intended_file.write_bytes(serialize_intended_state(intended))
+
+    now_utc_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at=now_utc_str,
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc=now_utc_str)
+    att_file = tmp_path / "attestation.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    key_file = tmp_path / "trusted_keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    comp_file = tmp_path / "comparison.json"
+
+    exit_code = run(
+        [
+            "compare",
+            "--intended",
+            str(intended_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+        ]
+    )
+    assert exit_code == 0
+
+
+def test_cli_compare_diagnostic_match_exit_code_3(tmp_path: Path) -> None:
+    intended_file = tmp_path / "intended.json"
+    intended = _complete_intended_state()
+    intended_file.write_bytes(serialize_intended_state(intended))
+
+    att = create_attestation(
+        target="synthetic-prod",
+        observed_at="2026-01-02T03:04:05Z",
+        observed_runtime_state=ObservedRuntimeState(
+            image_digest="sha256:" + "1" * 64,
+            oci_revision="b" * 40,
+            release_sha="a" * 40,
+            runtime_contract="hermes-runtime-v1",
+            schema_version=1,
+            active_services=("gateway",),
+            configuration_contract_version="v1",
+            release_identity="hermes-release-1",
+        ),
+    )
+    priv, pub = generate_keypair()
+    signed_att = sign_attestation(att, priv, signed_at_utc="2026-01-02T03:04:05Z")
+    att_file = tmp_path / "attestation.json"
+    att_file.write_bytes(serialize_attestation(signed_att))
+
+    key_file = tmp_path / "trusted_keys.txt"
+    key_file.write_text(export_public_key_hex(pub) + "\n", encoding="utf-8")
+    comp_file = tmp_path / "comparison.json"
+
+    exit_code = run(
+        [
+            "compare",
+            "--intended",
+            str(intended_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+            "--current-time-utc",
+            "2026-01-02T03:10:00Z",
+        ]
+    )
+    assert exit_code == 3
+
+
+def test_cli_compare_drift_or_insufficient_exit_code_2(tmp_path: Path) -> None:
+    intended = _complete_intended_state(intended_image_digest="sha256:" + "2" * 64)
+    intended_file = tmp_path / "intended.json"
+    intended_file.write_bytes(serialize_intended_state(intended))
+
+    att, pub_hex = _valid_signed_attestation()
+    att_file = tmp_path / "att.json"
+    att_file.write_bytes(serialize_attestation(att))
+
+    key_file = tmp_path / "keys.txt"
+    key_file.write_text(pub_hex + "\n", encoding="utf-8")
+    comp_file = tmp_path / "comp.json"
+
+    exit_code = run(
+        [
+            "compare",
+            "--intended",
+            str(intended_file),
+            "--attestation",
+            str(att_file),
+            "--output",
+            str(comp_file),
+            "--trusted-keys",
+            str(key_file),
+        ]
+    )
+    assert exit_code == 2

@@ -120,15 +120,21 @@ An attestation is considered authentic and fresh only when:
 ## 5. IntendedProductionState Model
 
 `IntendedProductionState` specifies the expected verifiable invariants derived from approved release artifacts:
-- `canonical_repository`: Approved source repository.
-- `intended_main_sha`: Approved commit SHA.
-- `intended_image_digest`: Approved container image digest.
-- `intended_oci_revision`: Expected revision tag.
-- `expected_service_set`: Expected active services (e.g. `("gateway",)`).
-- `expected_runtime_contract`: Target runtime contract identifier.
-- `expected_schema_version`: Target schema version.
-- `expected_configuration_contract_version`: Target configuration version.
-- `expected_release_identity`: Target release identifier.
+- `canonical_repository`: Approved source repository URI (non-empty).
+- `intended_main_sha`: Approved 40-character commit SHA (non-empty, non-zero).
+- `intended_image_digest`: Approved container image digest (`sha256:...`, non-empty, non-zero).
+- `intended_oci_revision`: Expected 40-character commit or OCI revision tag (non-empty, non-zero).
+- `expected_service_set`: Expected active services sequence (non-empty tuple, e.g. `("gateway",)`).
+- `expected_runtime_contract`: Target runtime contract identifier (non-empty).
+- `expected_schema_version`: Target schema version (integer > 0).
+- `expected_configuration_contract_version`: Target configuration version (non-empty).
+- `expected_release_identity`: Target release identifier (non-empty).
+
+All 9 fields are mandatory for production authorization. No fallback placeholder defaults (e.g. `"0"*40` or dummy digests) are substituted. If any required invariant is missing, empty, or a zero-placeholder, `compare_production_runtime()` fails closed with:
+- `status = ComparisonStatus.INSUFFICIENT_EVIDENCE`
+- `authoritative_for_production = False`
+- `reason_codes` containing `MISSING_INTENDED_INVARIANT:<field>`
+- `missing_observations` containing `intended_invariant:<field>`
 
 Credential values, private keys, environment secrets, and secret lengths are strictly excluded.
 
@@ -164,8 +170,15 @@ All comparison results record stable, programmatic reason codes:
 
 > **Fail-Closed Co-Occurrence Rule**: If missing invariants and drift co-occur in the same evaluation, the comparison status **strictly resolves to `INSUFFICIENT_EVIDENCE`**. Proven divergence cannot override incomplete proof.
 
-### Cryptographic Comparison ID Binding (v1.2)
-All semantically significant comparison fields (`attestation_id`, `authoritative_for_production`, `drifted_observations`, `evaluation_mode`, `intended_digest`, `missing_observations`, `reason_codes`, `schema_version`, `status`, `target`) are canonicalized and bound into `comparison_id` under domain prefix `hermes-production-runtime-comparison-v2\n`. Tampering with authority flags, evaluation modes, or reason codes fails closed with `TAMPERED_COMPARISON_ID`.
+### Cryptographic Comparison ID Binding & Consistency Rules (v1.2.2)
+All semantically significant comparison fields (`attestation_id`, `authoritative_for_production`, `drifted_observations`, `evaluated_at_utc`, `evaluation_mode`, `intended_digest`, `missing_observations`, `reason_codes`, `schema_version`, `status`, `target`) are canonicalized and bound into `comparison_id` under domain prefix `hermes-production-runtime-comparison-v3\n` (`DOMAIN_SEPARATOR_COMPARISON_V3`).
+- **Timestamp Integrity**: `evaluated_at_utc` is bound into the comparison hash. Any tampering with timestamps raises `TAMPERED_COMPARISON_ID`.
+- **Authority Consistency**: If `authoritative_for_production` is `True`, validation strictly requires:
+  - `status == ComparisonStatus.MATCH` (otherwise `INCONSISTENT_STATUS_AUTHORITY`)
+  - `evaluation_mode == "AUTHORITATIVE_PRODUCTION"` (otherwise `INCONSISTENT_EVALUATION_MODE`)
+  - `drifted_observations` is empty and `missing_observations` is empty (otherwise `INCONSISTENT_STATUS_AUTHORITY`)
+  - `reason_codes` contains zero diagnostic or legacy codes (otherwise `DIAGNOSTIC_REASON_CANNOT_AUTHORIZE_MATCH`)
+- **Legacy Comparison Exclusion**: Legacy comparisons hashed with domain prefix v1 or v2 cannot authorize production. If evaluated or validated with `authoritative_for_production = True`, validation fails closed with `LEGACY_COMPARISON_CANNOT_BE_AUTHORITATIVE`.
 
 ---
 
@@ -226,10 +239,11 @@ python scripts/production_runtime_attestation.py sanitize --input raw.json --out
 ```
 
 ### Exit Codes
-- `0`: Authoritative `MATCH` or Authoritative `verify` (authentic, fresh evidence verified with system UTC without time override).
-- `3`: Diagnostic `MATCH` or Diagnostic `verify` with manual time override (non-authoritative result; fails release-gating to prevent unearned production authority).
+- `0`: Authoritative `MATCH` or Authoritative `verify` (authentic, fresh evidence verified with system UTC without time override; outputs `verification_mode=AUTHORITATIVE_UTC`).
+- `4`: `verify --integrity-only` (integrity verified, unauthenticated/non-authoritative proof; outputs `verification_mode=INTEGRITY_ONLY: INTEGRITY_ONLY_UNAUTHENTICATED`).
+- `3`: Diagnostic `MATCH` or Diagnostic `verify` with manual time override (non-authoritative result; outputs `verification_mode=DIAGNOSTIC_TIME_OVERRIDE`; fails release-gating to prevent unearned production authority).
 - `2`: Comparison `DRIFT` or `INSUFFICIENT_EVIDENCE`.
-- `1`: Contract error, tampering detected, missing trust store, or invalid argument.
+- `1`: Contract error, tampering detected, missing trust store, conflicting CLI options (e.g. `--integrity-only` with `--current-time-utc`), or invalid argument.
 
 ---
 

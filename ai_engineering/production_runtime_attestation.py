@@ -1268,27 +1268,49 @@ def create_intended_state(
     if clean_repo:
         clean_repo = _identifier(clean_repo)
 
+    raw_sha = str(intended_main_sha or "")
+    if raw_sha and raw_sha != "0" * 40:
+        if not _SHA_RE.fullmatch(raw_sha):
+            _fail("SHA_INVALID")
+
     clean_digest = str(intended_image_digest or "")
     if clean_digest and clean_digest not in ("0" * 64, "sha256:" + "0" * 64):
         clean_digest = _digest_or_sha(clean_digest)
+
+    raw_oci = str(intended_oci_revision or "")
+    if raw_oci and raw_oci != "0" * 40:
+        if not _SHA_RE.fullmatch(raw_oci):
+            _fail("REVISION_INVALID")
+
+    if expected_schema_version is not None:
+        if (
+            isinstance(expected_schema_version, bool)
+            or not isinstance(expected_schema_version, int)
+            or expected_schema_version < 0
+        ):
+            _fail("SCHEMA_VERSION_INVALID")
+        clean_schema_ver = int(expected_schema_version)
+    else:
+        clean_schema_ver = 0
+
+    if expected_service_set is not None:
+        if not isinstance(expected_service_set, (list, tuple)):
+            _fail("SERVICE_SET_INVALID")
+        clean_services = tuple(sorted([_identifier(str(s)) for s in expected_service_set]))
+    else:
+        clean_services = ()
 
     return IntendedProductionState(
         schema_version=SCHEMA_VERSION,
         target=normalized_target,
         expected_collectors=tuple(expectations),
         canonical_repository=clean_repo,
-        intended_main_sha=str(intended_main_sha or ""),
+        intended_main_sha=raw_sha,
         intended_image_digest=clean_digest,
-        intended_oci_revision=str(intended_oci_revision or ""),
-        expected_service_set=(
-            tuple(sorted(list(expected_service_set)))
-            if expected_service_set is not None
-            else ()
-        ),
+        intended_oci_revision=raw_oci,
+        expected_service_set=clean_services,
         expected_runtime_contract=str(expected_runtime_contract or ""),
-        expected_schema_version=(
-            int(expected_schema_version) if expected_schema_version is not None else 0
-        ),
+        expected_schema_version=clean_schema_ver,
         expected_configuration_contract_version=str(
             expected_configuration_contract_version or ""
         ),
@@ -1338,6 +1360,38 @@ def validate_intended_state(
     value: IntendedProductionState | Mapping[str, object],
 ) -> IntendedProductionState:
     if isinstance(value, IntendedProductionState):
+        if value.schema_version != SCHEMA_VERSION or isinstance(value.schema_version, bool):
+            _fail("SCHEMA_VERSION_INVALID")
+        _identifier(value.target)
+        if value.canonical_repository:
+            _identifier(value.canonical_repository)
+        if value.intended_main_sha and value.intended_main_sha != "0" * 40:
+            if not _SHA_RE.fullmatch(value.intended_main_sha):
+                _fail("SHA_INVALID")
+        if value.intended_image_digest and value.intended_image_digest not in ("0" * 64, "sha256:" + "0" * 64):
+            _digest_or_sha(value.intended_image_digest)
+        if value.intended_oci_revision and value.intended_oci_revision != "0" * 40:
+            if not _SHA_RE.fullmatch(value.intended_oci_revision):
+                _fail("REVISION_INVALID")
+        if (
+            isinstance(value.expected_schema_version, bool)
+            or not isinstance(value.expected_schema_version, int)
+            or value.expected_schema_version < 0
+        ):
+            _fail("SCHEMA_VERSION_INVALID")
+        if not isinstance(value.expected_service_set, tuple):
+            _fail("SERVICE_SET_INVALID")
+        for s in value.expected_service_set:
+            _identifier(s)
+        if value.expected_collectors:
+            cids: list[str] = []
+            for item in value.expected_collectors:
+                cid = _identifier(item.collector_id)
+                if cid in cids:
+                    _fail("DUPLICATE_COLLECTOR")
+                cids.append(cid)
+            if cids != sorted(cids):
+                _fail("COLLECTOR_ORDER_INVALID")
         payload = normalize_intended_state(value)
         verify_sanitized_evidence(payload)
         return value
@@ -1382,14 +1436,26 @@ def validate_intended_state(
     tgt = payload.get("target") or payload.get("canonical_repository") or "synthetic-prod"
     expectations: dict[str, Mapping[str, object]] = {}
     if "expected_collectors" in payload:
+        ordered_cids: list[str] = []
         for item in _items(payload["expected_collectors"]):
             exp_dict = _mapping(item)
             cid = _identifier(exp_dict["collector_id"])
+            if cid in expectations:
+                _fail("DUPLICATE_COLLECTOR")
             expectations[cid] = _mapping(exp_dict["observations"])
+            ordered_cids.append(cid)
+        if ordered_cids != sorted(ordered_cids):
+            _fail("COLLECTOR_ORDER_INVALID")
 
     clean_repo = str(payload.get("canonical_repository", ""))
     if clean_repo:
         clean_repo = _identifier(clean_repo)
+
+    raw_sha = str(payload.get("intended_main_sha", ""))
+    if raw_sha and raw_sha != "0" * 40:
+        if not _SHA_RE.fullmatch(raw_sha):
+            _fail("SHA_INVALID")
+    clean_sha = raw_sha
 
     raw_digest = str(payload.get("intended_image_digest", ""))
     if raw_digest and raw_digest not in ("0" * 64, "sha256:" + "0" * 64):
@@ -1397,19 +1463,31 @@ def validate_intended_state(
     else:
         clean_digest = raw_digest
 
+    raw_oci = str(payload.get("intended_oci_revision", ""))
+    if raw_oci and raw_oci != "0" * 40:
+        if not _SHA_RE.fullmatch(raw_oci):
+            _fail("REVISION_INVALID")
+    clean_oci = raw_oci
+
     raw_services = payload.get("expected_service_set", ())
-    services = list(raw_services) if isinstance(raw_services, (list, tuple)) else []
+    if not isinstance(raw_services, (list, tuple)):
+        _fail("SERVICE_SET_INVALID")
+    services = [_identifier(str(s)) for s in raw_services]
+
+    raw_exp_ver = payload.get("expected_schema_version", 0)
+    if isinstance(raw_exp_ver, bool) or not isinstance(raw_exp_ver, int) or raw_exp_ver < 0:
+        _fail("SCHEMA_VERSION_INVALID")
 
     return create_intended_state(
         target=_identifier(tgt),
         expected_observations=expectations if expectations else None,
         canonical_repository=clean_repo,
-        intended_main_sha=str(payload.get("intended_main_sha", "")),
+        intended_main_sha=clean_sha,
         intended_image_digest=clean_digest,
-        intended_oci_revision=str(payload.get("intended_oci_revision", "")),
+        intended_oci_revision=clean_oci,
         expected_service_set=services,
         expected_runtime_contract=str(payload.get("expected_runtime_contract", "")),
-        expected_schema_version=int(payload.get("expected_schema_version", 0)),
+        expected_schema_version=int(raw_exp_ver),
         expected_configuration_contract_version=str(
             payload.get("expected_configuration_contract_version", "")
         ),
@@ -1956,6 +2034,15 @@ def validate_comparison(
                 _fail("TAMPERED_COMPARISON_ID")
             return value
 
+        if value.evaluation_mode not in (
+            "AUTHORITATIVE_PRODUCTION",
+            "DIAGNOSTIC_TIME_OVERRIDE",
+            "LEGACY_UNSPECIFIED",
+        ):
+            _fail("INCONSISTENT_EVALUATION_MODE")
+        if value.evaluated_at_utc:
+            _canonical_timestamp(value.evaluated_at_utc)
+
         # Consistency checks
         if value.authoritative_for_production:
             if value.status != ComparisonStatus.MATCH:
@@ -2070,8 +2157,16 @@ def validate_comparison(
     _exact_fields(mapping, _COMPARISON_FIELDS)
     authoritative = bool(mapping["authoritative_for_production"])
     eval_mode = str(mapping["evaluation_mode"])
+    if eval_mode not in (
+        "AUTHORITATIVE_PRODUCTION",
+        "DIAGNOSTIC_TIME_OVERRIDE",
+        "LEGACY_UNSPECIFIED",
+    ):
+        _fail("INCONSISTENT_EVALUATION_MODE")
     reasons = tuple(str(x) for x in _items(mapping.get("reason_codes", ())))
     evaluated_at = str(mapping.get("evaluated_at_utc", ""))
+    if evaluated_at:
+        _canonical_timestamp(evaluated_at)
 
     content = _comparison_content(
         attestation_id=att_id,

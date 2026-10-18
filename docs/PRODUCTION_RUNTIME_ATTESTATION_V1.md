@@ -10,9 +10,14 @@ Sprint B1 implements the schema, canonical serialization, cryptographic signatur
 
 ---
 
-## 1. Schema Specification
+## 1. Schema Specifications
 
-The attestation format is formally specified in [`schemas/production-runtime-attestation-v1.schema.json`](../schemas/production-runtime-attestation-v1.schema.json). It supports two shapes:
+The contracts are formally specified across dedicated JSON schemas:
+- **Attestation Schema**: [`schemas/production-runtime-attestation-v1.schema.json`](../schemas/production-runtime-attestation-v1.schema.json)
+- **Comparison v3 Schema**: [`schemas/production-runtime-comparison-v1.schema.json`](../schemas/production-runtime-comparison-v1.schema.json) (alias [`schemas/production-runtime-comparison-v3.schema.json`](../schemas/production-runtime-comparison-v3.schema.json))
+- **Intended State Schema**: [`schemas/production-runtime-intended-v1.schema.json`](../schemas/production-runtime-intended-v1.schema.json)
+
+### Attestation Schema Shapes
 
 ### Canonical Full v1 Shape
 - `schema_version`: Must be integer `1`.
@@ -136,6 +141,17 @@ All 9 fields are mandatory for production authorization. No fallback placeholder
 - `reason_codes` containing `MISSING_INTENDED_INVARIANT:<field>`
 - `missing_observations` containing `intended_invariant:<field>`
 
+### Strict Intended State Validation (v1.2.3)
+Both direct dataclass instantiation via `validate_intended_state()` and JSON deserialization via `deserialize_intended_state()` strictly enforce structural integrity:
+- `schema_version`: Must be integer `1` (booleans strictly rejected).
+- `target`: Must be a valid identifier (`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`).
+- `intended_main_sha`: If non-empty, must match 40-character hex pattern (`^[0-9a-f]{40}$`), or raise `SHA_INVALID`.
+- `intended_image_digest`: If non-empty, must match 64-hex digest or `sha256:<64-hex>`, or raise `DIGEST_INVALID`.
+- `intended_oci_revision`: If non-empty, must match 40-character hex pattern, or raise `REVISION_INVALID`.
+- `expected_schema_version`: Must be non-negative integer (booleans and negative values raise `SCHEMA_VERSION_INVALID`).
+- `expected_service_set`: Must be a sequence of valid identifiers (invalid types raise `SERVICE_SET_INVALID`).
+- `expected_collectors`: Duplicate collector IDs raise `DUPLICATE_COLLECTOR`, unsorted IDs raise `COLLECTOR_ORDER_INVALID`.
+
 Credential values, private keys, environment secrets, and secret lengths are strictly excluded.
 
 ---
@@ -179,6 +195,16 @@ All semantically significant comparison fields (`attestation_id`, `authoritative
   - `drifted_observations` is empty and `missing_observations` is empty (otherwise `INCONSISTENT_STATUS_AUTHORITY`)
   - `reason_codes` contains zero diagnostic or legacy codes (otherwise `DIAGNOSTIC_REASON_CANNOT_AUTHORIZE_MATCH`)
 - **Legacy Comparison Exclusion**: Legacy comparisons hashed with domain prefix v1 or v2 cannot authorize production. If evaluated or validated with `authoritative_for_production = True`, validation fails closed with `LEGACY_COMPARISON_CANNOT_BE_AUTHORITATIVE`.
+
+### Formal JSON Schemas (v1.2.3)
+Formal JSON Schema Draft 2020-12 definitions are maintained in `schemas/`:
+- `schemas/production-runtime-intended-v1.schema.json`: Enforces strict types and formats for intended state, requiring `schema_version = 1`, 40-hex commit SHAs, canonical digest patterns, unique sorted collector IDs, and rejection of unknown properties.
+- `schemas/production-runtime-comparison-v3.schema.json`: Formal schema for comparison results supporting canonical v3 and legacy v1 compact representations. For canonical v3 results, conditional validation (`allOf` / `if-then`) strictly enforces that when `authoritative_for_production: true`:
+  - `status` MUST be `"MATCH"`
+  - `evaluation_mode` MUST be `"AUTHORITATIVE_PRODUCTION"`
+  - `drifted_observations` and `missing_observations` MUST be empty (`maxItems: 0`)
+  - Evaluation mode must be one of `["AUTHORITATIVE_PRODUCTION", "DIAGNOSTIC_TIME_OVERRIDE", "LEGACY_UNSPECIFIED"]`
+- `schemas/production-runtime-comparison-v1.schema.json`: Alias schema referencing comparison definitions aligned with schema version 1.
 
 ---
 

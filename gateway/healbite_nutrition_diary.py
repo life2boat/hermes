@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import atexit
 import hashlib
 import html
@@ -2789,7 +2790,29 @@ class HealBiteNutritionDiary:
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
 
-        result_json = await vision_analyze_tool(image_url=image_path, user_prompt=prompt)
+        timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
+        try:
+            result_json = await asyncio.wait_for(
+                vision_analyze_tool(image_url=image_path, user_prompt=prompt),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs", timeout_s)
+            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_timeout")
+            logger.info("[HealBite][vision_pending_staged] staged=false")
+            return NutritionDiaryOutcome(
+                available=False,
+                validation_status="PROVIDER_TIMEOUT",
+            )
+        except Exception as exc:
+            logger.warning("[HealBite][vision_error] vision_analyze_tool error=%s", exc.__class__.__name__)
+            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_exception")
+            logger.info("[HealBite][vision_pending_staged] staged=false")
+            return NutritionDiaryOutcome(
+                available=False,
+                validation_status="PROVIDER_ERROR",
+            )
+
         result = safe_json_loads(result_json, {})
         if not isinstance(result, dict) or not result.get("success"):
             logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_result_non_success")

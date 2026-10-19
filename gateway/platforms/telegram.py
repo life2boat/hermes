@@ -778,6 +778,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._healbite_log_correlations: Dict[tuple[str, Any], str] = {}
+        from gateway.platforms.helpers import MessageDeduplicator
+        self._update_dedup = MessageDeduplicator(max_size=2000, ttl_seconds=300)
         self._in_flight_ptb_updates: Dict[int, Dict[str, Any]] = {}
         self._weight_reminder_drafts: Dict[int, weight_reminder_ui.WeightReminderDraft] = {}
         self._family_telegram = build_family_telegram_controller()
@@ -10648,15 +10650,62 @@ class TelegramAdapter(BasePlatformAdapter):
         current_task = asyncio.current_task()
         event = None
         handed_off = False
+        ack_task = None
         try:
             await asyncio.sleep(self._media_batch_delay_seconds)
             event = self._pending_photo_batches.pop(batch_key, None)
             if not event:
                 return
             logger.info("[Telegram] Flushing photo batch media_count=%d", len(event.media_urls))
-            await self.handle_message(event)
-            handed_off = True
+
+            chat_id = str(getattr(event.source, "chat_id", "") or "")
+            thread_id = getattr(event.source, "thread_id", None)
+            if chat_id:
+                async def _delayed_ack():
+                    try:
+                        await asyncio.sleep(1.5)
+                        await self.send_typing(chat_id, metadata={"thread_id": thread_id} if thread_id else None)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+                ack_task = asyncio.create_task(_delayed_ack())
+
+            try:
+                await self.handle_message(event)
+                handed_off = True
+            except asyncio.CancelledError:
+                logger.info("[Telegram][photo_batch_cancelled] batch_key=%s", batch_key)
+                raise
+            except Exception as exc:
+                logger.error(
+                    "[Telegram][photo_batch_exception] batch_key=%s error=%s",
+                    batch_key,
+                    exc.__class__.__name__,
+                    exc_info=True,
+                )
+                if chat_id:
+                    from gateway.run import _vision_safe_fallback_text, _healbite_event_correlation_id
+                    corr = _healbite_event_correlation_id(event)
+                    try:
+                        await self.send(
+                            chat_id,
+                            _vision_safe_fallback_text(),
+                            metadata={"thread_id": thread_id} if thread_id else None,
+                        )
+                        logger.info(
+                            "[Gateway][telegram_delivery] corr=%s status=ANSWER_DELIVERED route=photo_batch_exception",
+                            corr,
+                        )
+                    except Exception as send_exc:
+                        logger.error(
+                            "[Gateway][telegram_delivery] corr=%s status=SEND_FAILED route=photo_batch_exception error=%s",
+                            corr,
+                            send_exc.__class__.__name__,
+                        )
         finally:
+            if ack_task and not ack_task.done():
+                ack_task.cancel()
             if (
                 event is not None
                 and not handed_off
@@ -10698,6 +10747,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if not update.message:
             return
         media_kind = "document" if getattr(update.message, "document", None) else "photo"
+        if update.update_id is not None and getattr(self, "_update_dedup", None) is not None:
+            if self._update_dedup.is_duplicate(f"media:{update.update_id}"):
+                logger.info("[Telegram][duplicate_update_dropped] update_id=%s kind=%s", update.update_id, media_kind)
+                return
         self._log_healbite_marker(
             "telegram_update_received",
             msg=update.message,
@@ -10781,6 +10834,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     batch_key = self._photo_batch_key(event, msg)
                     self._enqueue_photo_event(batch_key, event)
                 return
+            corr = self._healbite_correlation_id(msg, update_id=update.update_id)
+            logger.warning("[Telegram][photo_download_failed] corr=%s update_id=%s", corr, update.update_id)
             event.text = (
                 "The image could not be processed safely. "
                 "Ask the user to send a smaller supported image or provide text instead."

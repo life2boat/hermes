@@ -8705,12 +8705,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     is_explicit_generic = self._is_explicit_generic_image_authorization(source, event)
 
                     if not is_explicit_generic:
-                        message_text, vision_success, pending_reply, outcome = await self._try_enrich_message_with_healbite_nutrition(
-                            event=event,
-                            source=source,
-                            user_text=message_text,
-                            image_paths=image_paths,
-                        )
+                        photo_turn_timeout_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"))
+                        corr = _healbite_event_correlation_id(event)
+                        try:
+                            message_text, vision_success, pending_reply, outcome = await asyncio.wait_for(
+                                self._try_enrich_message_with_healbite_nutrition(
+                                    event=event,
+                                    source=source,
+                                    user_text=message_text,
+                                    image_paths=image_paths,
+                                ),
+                                timeout=photo_turn_timeout_s,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "[Gateway][vision_timeout] corr=%s timeout_s=%.1f",
+                                corr,
+                                photo_turn_timeout_s,
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
+                        except Exception as exc:
+                            logger.error(
+                                "[Gateway][vision_exception] corr=%s error=%s",
+                                corr,
+                                exc.__class__.__name__,
+                                exc_info=True,
+                            )
+                            await self._send_vision_unavailable_reply(source=source, event=event)
+                            return None
+
                         if pending_reply:
                             adapter = self.adapters.get(source.platform)
                             metadata = self._thread_metadata_for_source(
@@ -8730,14 +8754,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 from gateway.healbite_nutrition_diary import build_food_vision_inventory_keyboard
                                 metadata["reply_markup"] = build_food_vision_inventory_keyboard(pending_inv)
                             if adapter and source.chat_id:
-                                await adapter.send(
-                                    source.chat_id,
-                                    pending_reply,
-                                    metadata=metadata,
-                                )
+                                try:
+                                    await adapter.send(
+                                        source.chat_id,
+                                        pending_reply,
+                                        metadata=metadata,
+                                    )
+                                    logger.info(
+                                        "[Gateway][telegram_delivery] corr=%s status=ANSWER_DELIVERED route=healbite_nutrition",
+                                        corr,
+                                    )
+                                except Exception as exc:
+                                    logger.error(
+                                        "[Gateway][telegram_delivery] corr=%s status=SEND_FAILED route=healbite_nutrition error=%s",
+                                        corr,
+                                        exc.__class__.__name__,
+                                    )
                             return None
-
-                        corr = _healbite_event_correlation_id(event)
 
                         # Public (non-admin / unpaired) users MUST fail closed on any vision failure or non-food.
                         if not is_authorized:
@@ -12827,6 +12860,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         *,
         source: SessionSource,
         event: MessageEvent,
+        custom_text: Optional[str] = None,
     ) -> None:
         adapter = self.adapters.get(source.platform)
         if not adapter or not source.chat_id:
@@ -12835,21 +12869,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source,
             self._reply_anchor_for_event(event),
         )
+        corr = _healbite_event_correlation_id(event)
+        text_to_send = custom_text or _vision_safe_fallback_text()
         try:
             logger.info(
-                "[Gateway][vision_unavailable] sending_safe_fallback platform=%s",
+                "[Gateway][vision_unavailable] sending_safe_fallback platform=%s corr=%s",
                 getattr(source.platform, "value", source.platform),
-            )
-            logger.info(
-                "[Gateway][vision_safe_fallback_sent] platform=%s",
-                getattr(source.platform, "value", source.platform),
+                corr,
             )
             await adapter.send(
                 source.chat_id,
-                _vision_safe_fallback_text(),
+                text_to_send,
                 metadata=metadata,
             )
+            logger.info(
+                "[Gateway][telegram_delivery] corr=%s status=ANSWER_DELIVERED route=vision_unavailable_fallback",
+                corr,
+            )
+            logger.info(
+                "[Gateway][vision_safe_fallback_sent] platform=%s corr=%s",
+                getattr(source.platform, "value", source.platform),
+                corr,
+            )
         except Exception as exc:
+            logger.error(
+                "[Gateway][telegram_delivery] corr=%s status=SEND_FAILED route=vision_unavailable_fallback error=%s",
+                corr,
+                exc.__class__.__name__,
+            )
             logger.warning(
                 "Failed to deliver vision-unavailable fallback: %s",
                 exc,
@@ -13239,7 +13286,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "[Gateway][vision_failed] nutrition diary analysis error_type=%s",
                 exc.__class__.__name__,
             )
-            return user_text, False, None, NutritionDiaryOutcome(available=False, validation_status="PROVIDER_ERROR")
+        if outcome is None:
+            return user_text, False, None, NutritionDiaryOutcome(available=False, validation_status="RESULT_NONE")
         if not outcome.available:
             return user_text, False, None, outcome
         if outcome.clarification_text:

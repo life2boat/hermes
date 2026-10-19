@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ai_engineering.production_collectors import (
     DockerRuntimeCollector,
@@ -45,10 +46,27 @@ def check_source_identity(expected_sha: str) -> None:
         print("SOURCE_IDENTITY=FAIL: Git commands failed")
         sys.exit(1)
 
+def load_production_manifest() -> dict[str, Any]:
+    manifest_path = (
+        Path(__file__).resolve().parents[1] / "deploy" / "hermes-production.json"
+    )
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+    return {}
 
-def save_evidence(data: bytes, prefix: str, sha: str) -> Path:
+
+def save_evidence(
+    data: bytes, prefix: str, sha: str, evidence_dir: Path | None = None
+) -> Path:
     timestamp = int(time.time())
-    evidence_dir = Path("/home/hermes/private_backups/hermes-agent")
+    if evidence_dir is None:
+        evidence_dir = Path("/home/hermes/private_backups/hermes-agent")
     evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     filename = f"{prefix}_{sha}_{timestamp}.json"
@@ -67,7 +85,24 @@ def main():
     parser.add_argument(
         "--expected-source-sha", required=True, help="Expected 40-hex Git SHA"
     )
+    parser.add_argument(
+        "--compose-project",
+        default=None,
+        help="Compose project name override (defaults to canonical manifest or hermes-agent)",
+    )
+    parser.add_argument(
+        "--qdrant-collection",
+        default=None,
+        help="Qdrant collection name override",
+    )
+    parser.add_argument(
+        "--evidence-dir",
+        default=None,
+        help="Optional evidence output directory override",
+    )
     args = parser.parse_args()
+
+    evidence_base_dir = Path(args.evidence_dir) if args.evidence_dir else None
 
     print("Running B2 preflight checks...")
 
@@ -86,15 +121,40 @@ def main():
 
     print("Preflight passed. Starting collectors...")
 
-    # Define targets and baselines
+    # Define targets and baselines from manifest and verified container labels
+    manifest = load_production_manifest()
+    manifest_compose = (
+        manifest.get("compose", {}) if isinstance(manifest, dict) else {}
+    )
+    manifest_db = (
+        manifest.get("database_mount", {}) if isinstance(manifest, dict) else {}
+    )
+    manifest_secrets = (
+        manifest.get("secrets", {}) if isinstance(manifest, dict) else {}
+    )
+    manifest_bindings = (
+        manifest.get("runtime_bindings", {}) if isinstance(manifest, dict) else {}
+    )
+
     TARGET = "HOME_WSL2/Ubuntu"
-    COMPOSE_PROJECT = "healbite-s72-family-invite-main"
-    SERVICE = "hermes-bot"
-    DB_PATH = "/var/lib/hermes/production-db/healbite.db"
-    CONTAINER_DB_MOUNT = "/home/hermes/healbite.db"
+    COMPOSE_PROJECT = (
+        args.compose_project
+        or manifest_compose.get("project_name")
+        or "hermes-agent"
+    )
+    SERVICE = manifest_compose.get("target_service") or "hermes-bot"
+    DB_PATH = manifest_db.get("source") or "/var/lib/hermes/production-db/healbite.db"
+    CONTAINER_DB_MOUNT = manifest_db.get("target") or "/home/hermes/healbite.db"
     QDRANT_URL = "http://localhost:6333"
-    QDRANT_COLLECTION = "healbite_memory_os"
-    SECRET_SOURCE = "/etc/hermes/hermes-production.env"
+    QDRANT_COLLECTION = (
+        args.qdrant_collection
+        or manifest_bindings.get("QDRANT_COLLECTION")
+        or "healbite_memory_os"
+    )
+    SECRET_SOURCE = (
+        manifest_secrets.get("approved_source_path")
+        or "/etc/hermes/hermes-production.env"
+    )
     LEGACY_SECRET_SOURCE = "/home/hermes/.hermes/.env"
 
     collectors = [
@@ -110,7 +170,10 @@ def main():
     attestation = collect_production_attestation(TARGET, collectors)
 
     evidence_path = save_evidence(
-        serialize_attestation(attestation), "attestation_b2", args.expected_source_sha
+        serialize_attestation(attestation),
+        "attestation_b2",
+        args.expected_source_sha,
+        evidence_dir=evidence_base_dir,
     )
     print(f"Attestation collected and saved to {evidence_path}")
     print(f"Attestation ID: {attestation.attestation_id}")
@@ -146,7 +209,10 @@ def main():
     comparison = compare_production_runtime(intended, attestation)
 
     comp_evidence_path = save_evidence(
-        serialize_comparison(comparison), "comparison_b2", args.expected_source_sha
+        serialize_comparison(comparison),
+        "comparison_b2",
+        args.expected_source_sha,
+        evidence_dir=evidence_base_dir,
     )
     print(f"Comparison saved to {comp_evidence_path}")
 

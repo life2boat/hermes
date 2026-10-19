@@ -33,6 +33,7 @@ def test_full_registry_is_preserved_while_effective_scope_is_narrow() -> None:
         "fridge_menu",
         "memory_convergence",
         "memory_convergence_v2",
+        "nutrition_diary_v2",
     ]
     assert production._derive_effective_mutation_components(states, COMPONENTS) == [
         "fridge_menu"

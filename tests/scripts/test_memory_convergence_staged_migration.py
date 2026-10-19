@@ -97,11 +97,12 @@ def test_t01_t03_registry_identity_order_and_digest_are_deterministic() -> None:
         "fridge_menu",
         "memory_convergence",
         "memory_convergence_v2",
+        "nutrition_diary_v2",
     ]
     assert names.count("memory_convergence") == 1
     assert first == second
-    assert first[-2]["migration_sha256"] == MEMORY_CONVERGENCE_MIGRATION_SHA256
-    canonical = json.dumps(first[:-1], sort_keys=True, separators=(",", ":")).encode()
+    assert first[-3]["migration_sha256"] == MEMORY_CONVERGENCE_MIGRATION_SHA256
+    canonical = json.dumps(first[:-2], sort_keys=True, separators=(",", ":")).encode()
     assert hashlib.sha256(canonical).hexdigest() == (
         "5deb406918e3283c301e0ae7cdfe4275faa0ac6140f19dde10614dc2ba902dba"
     )

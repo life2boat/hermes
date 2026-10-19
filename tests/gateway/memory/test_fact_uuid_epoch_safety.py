@@ -431,15 +431,20 @@ def test_clean_collection_recovery_never_reuses_existing_name():
 
 def test_migration_v1_checksum_unchanged_new_v2_registry_entry():
     registry = migration_registry_manifest()
-    assert registry[-1]["component"] == "memory_convergence_v2"
-    assert registry[-1]["migration_sha256"] == MIGRATION_SHA256
+    entry = next(item for item in registry if item["component"] == "memory_convergence_v2")
+    assert entry["migration_sha256"] == MIGRATION_SHA256
     # Exact historic v1 registry list still has its pre-v2 content digest.
     import hashlib
     import json
 
+    historic_v1 = [
+        item
+        for item in registry
+        if item["component"] not in ("memory_convergence_v2", "nutrition_diary_v2")
+    ]
     assert (
         hashlib.sha256(
-            json.dumps(registry[:-1], sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(historic_v1, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         == "5deb406918e3283c301e0ae7cdfe4275faa0ac6140f19dde10614dc2ba902dba"
     )

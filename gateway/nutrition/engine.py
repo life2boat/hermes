@@ -49,10 +49,10 @@ def resolve_and_calculate_component(
     """
     catalog = hfkb or get_default_hfkb()
 
-    # Step 1: Query HFKB if bound
-    if catalog is not None and getattr(catalog, "is_open", True):
-        if hasattr(catalog, "resolve"):
-            match_res = catalog.resolve(food_name, preferred_cooking_state=cooking_state)
+    # Step 1: Query custom HFKB if explicitly passed
+    if hfkb is not None and getattr(hfkb, "is_open", True):
+        if hasattr(hfkb, "resolve"):
+            match_res = hfkb.resolve(food_name, preferred_cooking_state=cooking_state)
             if match_res.matched and match_res.profile is not None and match_res.confidence >= 0.70:
                 profile = match_res.profile
                 intervals = calculate_component_macronutrient_intervals(
@@ -78,8 +78,8 @@ def resolve_and_calculate_component(
                     nutrition_available=True,
                     candidate_suggestions=tuple(match_res.candidate_suggestions),
                 )
-        elif hasattr(catalog, "search"):
-            match_result = catalog.search(food_name, limit=5)
+        elif hasattr(hfkb, "search"):
+            match_result = hfkb.search(food_name, limit=5)
             if match_result.best_item is not None and match_result.confidence >= 0.70:
                 item = match_result.best_item
                 profile = item.nutrient_profile
@@ -107,39 +107,39 @@ def resolve_and_calculate_component(
                     candidate_suggestions=(),
                 )
 
-    # Step 2: Fall back to in-memory verified catalog / alias index
-    legacy_result = resolve_food_composition(food_name)
-    if legacy_result is not None and legacy_result.matched and legacy_result.profile is not None:
-        legacy_profile = legacy_result.profile
+    # Step 2: Use unified food resolution (exact alias in built-in catalog -> HFKB -> modifiers)
+    lookup_res = resolve_food_composition(food_name)
+    if lookup_res is not None and lookup_res.matched and lookup_res.profile is not None:
+        profile = lookup_res.profile
         intervals = calculate_component_macronutrient_intervals(
             mass_bounds,
-            legacy_profile.calories_kcal,
-            legacy_profile.protein_g,
-            legacy_profile.fat_g,
-            legacy_profile.carbs_g,
+            profile.calories_kcal,
+            profile.protein_g,
+            profile.fat_g,
+            profile.carbs_g,
         )
         return ComponentNutritionEstimate(
-            name=legacy_profile.display_name,
+            name=profile.display_name,
             mass_bounds=mass_bounds,
             intervals=intervals,
-            source_id=legacy_profile.source_id,
-            cooking_state=legacy_profile.cooking_state or cooking_state,
-            source_provenance=legacy_profile.dataset_version,
-            per_100g_calories_kcal=legacy_profile.calories_kcal,
-            per_100g_protein_g=legacy_profile.protein_g,
-            per_100g_fat_g=legacy_profile.fat_g,
-            per_100g_carbs_g=legacy_profile.carbs_g,
+            source_id=profile.source_id,
+            cooking_state=profile.cooking_state or cooking_state,
+            source_provenance=profile.source_provenance or profile.dataset_version,
+            per_100g_calories_kcal=profile.calories_kcal,
+            per_100g_protein_g=profile.protein_g,
+            per_100g_fat_g=profile.fat_g,
+            per_100g_carbs_g=profile.carbs_g,
             uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
             is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
             nutrition_available=True,
-            candidate_suggestions=(),
+            candidate_suggestions=tuple(lookup_res.candidate_suggestions) if hasattr(lookup_res, "candidate_suggestions") else (),
         )
 
     # Step 3: Unresolved query — provide candidate suggestions
     suggestions: list[str] = []
-    if legacy_result is not None and legacy_result.candidate_suggestions:
-        suggestions = list(legacy_result.candidate_suggestions)
-    elif catalog is not None and catalog.is_open:
+    if lookup_res is not None and lookup_res.candidate_suggestions:
+        suggestions = list(lookup_res.candidate_suggestions)
+    elif (catalog := hfkb or get_default_hfkb()) is not None and getattr(catalog, "is_open", False):
         search_res = catalog.search(food_name, limit=3)
         suggestions = list(search_res.candidate_suggestions)
     if not suggestions:

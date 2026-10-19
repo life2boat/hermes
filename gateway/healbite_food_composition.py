@@ -1117,201 +1117,6 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 40",
         aliases=('вафли', 'вафля', 'бельгийские вафли'),
     ),
-    FoodNutrientProfile(
-        canonical_id='tvorozhnaya_zapekanka',
-        display_name='Творожная запеканка',
-        category='dairy_dishes',
-        calories_kcal=168.0,
-        protein_g=16.2,
-        fat_g=6.0,
-        carbs_g=12.3,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0125',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='baked',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из творога', поз. 125",
-        aliases=('творожная запеканка', 'запеканка из творога', 'запеканка творожная', 'творожная запеканка с изюмом'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='kartofelnaya_zapekanka_s_myasom',
-        display_name='Картофельная запеканка с мясом',
-        category='main_courses',
-        calories_kcal=152.0,
-        protein_g=7.8,
-        fat_g=6.9,
-        carbs_g=14.8,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0310',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='baked',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из картофеля и овощей', поз. 310",
-        aliases=('картофельная запеканка с мясом', 'запеканка картофельная с фаршем', 'картофельная запеканка', 'запеканка из картофеля с мясом'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='beef_stroganoff',
-        display_name='Бефстроганов',
-        category='main_courses',
-        calories_kcal=195.0,
-        protein_g=14.8,
-        fat_g=14.2,
-        carbs_g=2.8,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0612',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='stewed',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из мяса и мясных продуктов', поз. 612",
-        aliases=('бефстроганов', 'бефстроганов из говядины', 'говядина по-строгановски', 'бефстроганов со сметанным соусом'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='pasta_bolognese',
-        display_name='Паста болоньезе',
-        category='main_courses',
-        calories_kcal=162.0,
-        protein_g=7.5,
-        fat_g=6.2,
-        carbs_g=19.1,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0620',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='prepared',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Макаронные изделия с мясными соусами', поз. 620",
-        aliases=('паста болоньезе', 'макароны с мясным соусом', 'спагетти болоньезе', 'паста с фаршем'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='meatballs_in_tomato_sauce',
-        display_name='Тефтели в томатном соусе',
-        category='main_courses',
-        calories_kcal=158.0,
-        protein_g=11.2,
-        fat_g=9.4,
-        carbs_g=7.2,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0625',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='stewed',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из мясного фарша', поз. 625",
-        aliases=('тефтели в томатном соусе', 'тефтели с рисом в соусе', 'тефтели мясные в соусе', 'фрикадельки в томатном соусе'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='pelmeni',
-        display_name='Пельмени с мясом',
-        category='dumplings',
-        calories_kcal=275.0,
-        protein_g=11.9,
-        fat_g=12.4,
-        carbs_g=29.0,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0710',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='boiled',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Изделия из теста с мясным фаршем', поз. 710",
-        aliases=('пельмени', 'пельмени с мясом', 'пельмени домашние', 'порция пельменей', 'вареные пельмени'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='vareniki_potato',
-        display_name='Вареники с картофелем',
-        category='dumplings',
-        calories_kcal=185.0,
-        protein_g=4.5,
-        fat_g=3.8,
-        carbs_g=33.2,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0715',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='boiled',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Изделия из теста с овощными фаршами', поз. 715",
-        aliases=('вареники с картофелем', 'вареники с картошкой', 'вареники с картошкой и луком'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='shawarma_chicken',
-        display_name='Шаурма с курицей',
-        category='fast_food',
-        calories_kcal=215.0,
-        protein_g=9.8,
-        fat_g=8.5,
-        carbs_g=24.8,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0720',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='prepared',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Сложные блюда фаст-фуда', поз. 720",
-        aliases=('шаурма', 'шаурма с курицей', 'шаверма', 'шаурма классическая', 'донер с курицей'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='baked_salmon',
-        display_name='Лосось запеченный',
-        category='fish_seafood',
-        calories_kcal=197.0,
-        protein_g=21.5,
-        fat_g=12.3,
-        carbs_g=0.0,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0450',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='baked',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из рыбы и морепродуктов', поз. 450",
-        aliases=('лосось запеченный', 'запеченный лосось', 'семга запеченная', 'стейк из лосося'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='steamed_trout',
-        display_name='Форель на пару',
-        category='fish_seafood',
-        calories_kcal=142.0,
-        protein_g=19.8,
-        fat_g=7.0,
-        carbs_g=0.0,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0455',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='steamed',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из рыбы и морепродуктов', поз. 455",
-        aliases=('форель на пару', 'паровая форель', 'форель отварная'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='chicken_noodle_soup',
-        display_name='Куриный суп с вермишелью',
-        category='soups',
-        calories_kcal=42.0,
-        protein_g=3.2,
-        fat_g=1.8,
-        carbs_g=3.4,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0205',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='boiled',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Первые блюда (супы)', поз. 205",
-        aliases=('куриный суп с вермишелью', 'суп куриный с лапшой', 'суп-лапша куриный', 'бульон куриный с вермишелью'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='greek_salad',
-        display_name='Салат Греческий',
-        category='salads',
-        calories_kcal=88.0,
-        protein_g=2.1,
-        fat_g=7.5,
-        carbs_g=3.1,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0370',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='raw',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Холодные блюда и закуски', поз. 370",
-        aliases=('салат греческий', 'греческий салат', 'греческий салат с оливками'),
-    ),
-    FoodNutrientProfile(
-        canonical_id='crepes_with_cottage_cheese',
-        display_name='Блины с творогом',
-        category='dairy_dishes',
-        calories_kcal=195.0,
-        protein_g=8.9,
-        fat_g=6.7,
-        carbs_g=24.8,
-        reference_confidence=0.9,
-        source_id='INTERNAL-SKURIKHIN-2008-0810',
-        dataset_version='Skurikhin-2008-Curated',
-        cooking_state='prepared',
-        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из теста с творогом', поз. 810",
-        aliases=('блины с творогом', 'блинчики с творогом', 'налисники с творогом'),
-    ),
 )
 
 
@@ -1380,21 +1185,11 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     Extensible, deterministic food composition lookup layer.
     Enforces fail-closed matching without silent product or percentage substitution.
     """
-    try:
-        from gateway.nutrition.hfkb import get_default_hfkb
-        hfkb = get_default_hfkb()
-        if hfkb is not None:
-            hfkb_res = hfkb.resolve(query)
-            if hfkb_res.matched:
-                return hfkb_res
-    except Exception:
-        pass
-
     raw_normalized = normalize_food_lookup_key(query)
     if not raw_normalized:
         return FoodLookupResult(matched=False, match_type="empty")
 
-    # 1. Exact match on normalized full alias
+    # 1. Exact match on normalized full alias in built-in reference catalog
     if raw_normalized in _ALIAS_INDEX:
         profile = _ALIAS_INDEX[raw_normalized]
         return FoodLookupResult(
@@ -1407,6 +1202,17 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             cooking_state=profile.cooking_state,
             source_provenance=profile.source_provenance,
         )
+
+    # 2. Check authoritative SQLite HFKB catalog (multi-dataset expansion)
+    try:
+        from gateway.nutrition.hfkb import get_default_hfkb
+        hfkb = get_default_hfkb()
+        if hfkb is not None:
+            hfkb_res = hfkb.resolve(query)
+            if hfkb_res.matched:
+                return hfkb_res
+    except Exception:
+        pass
 
     # 2. Match after stripping harmless modifiers (e.g. "свежая руккола" -> "руккола", "яблоки кусочками" -> "яблоки")
     # Does NOT strip cooking states or percentages.

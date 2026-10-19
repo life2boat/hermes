@@ -591,6 +591,7 @@ def test_nutrition_diary_v2_migration_corrupt_database(tmp_path: Path) -> None:
     assert result.schema_changed is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX path validation requires POSIX platform")
 def test_nutrition_diary_v2_migration_unsafe_path() -> None:
     result = healbite_schema_migrate.run_migration(
         db_path="/tmp/../etc/passwd",

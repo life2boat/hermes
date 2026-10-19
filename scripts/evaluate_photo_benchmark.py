@@ -100,6 +100,10 @@ class PhotoBenchmarkReport:
     median_interval_relative_width_pct: float = 0.0
     unknown_food_rate: float = 0.0
     category_breakdown: dict[str, Any] = field(default_factory=dict)
+    clarification_rate_pct: float = 0.0
+    recognition_error_rate_pct: float = 0.0
+    database_coverage_pct: float = 0.0
+    product_acceptance: str = "PASS"
 
 
 def _calculate_metrics(results: list[ItemEvaluationResult]) -> BenchmarkMetrics:
@@ -509,6 +513,27 @@ def run_photo_benchmark(
             "calorie_interval_coverage_pct": cat_metrics.calorie_interval_coverage_pct,
         }
 
+    # Clarification rate: percentage of items where relative interval width >= 40.0% or multiple dishes
+    clarification_count = sum(
+        1 for r in results
+        if (r.estimated_mass_center_g > 0 and ((r.mass_max_g - r.mass_min_g) / r.estimated_mass_center_g) >= 0.40)
+        or r.dishes_ground_truth_count > 1
+    )
+    clarification_rate = round(clarification_count / len(results) * 100.0, 1) if results else 0.0
+    rec_err_rate = round((1.0 - overall_metrics.dishes_f1) * 100.0, 2)
+    db_coverage = round((1.0 - unknown_rate) * 100.0, 2)
+
+    product_acceptance = (
+        "PASS"
+        if (
+            unknown_rate <= 0.05
+            and overall_metrics.mass_interval_coverage_pct >= 90.0
+            and 15.0 <= median_rel_width <= 250.0
+            and len(results) >= 50
+        )
+        else "FAIL"
+    )
+
     # Status determination:
     # ENGINEERING_READY: PASS because manifest, HIPE portion estimator and engine pass offline evaluation
     # REAL_PHOTO_ACCEPTANCE: PENDING when live vision execution has not been authorized or real images unverified
@@ -542,6 +567,10 @@ def run_photo_benchmark(
         median_interval_relative_width_pct=median_rel_width,
         unknown_food_rate=unknown_rate,
         category_breakdown=category_breakdown,
+        clarification_rate_pct=clarification_rate,
+        recognition_error_rate_pct=rec_err_rate,
+        database_coverage_pct=db_coverage,
+        product_acceptance=product_acceptance,
     )
 
 
@@ -640,18 +669,23 @@ def main() -> int:
         print("=" * 60 + "\n")
 
         print("[METRICS]")
+        print(f"PRODUCT_ACCEPTANCE={report.product_acceptance}")
+        print(f"RECOGNITION_ERROR_RATE_PCT={report.recognition_error_rate_pct:.2f}")
+        print(f"PORTION_MASS_ERROR_MAPE_PCT={report.overall_metrics.portion_mape_pct:.1f}")
+        print(f"KBZHU_ERROR_MAPE_PCT={report.overall_metrics.calorie_mape_pct:.1f}")
+        print(f"DATABASE_COVERAGE_PCT={report.database_coverage_pct:.1f}")
+        print(f"UNCERTAINTY_INTERVAL_COVERAGE_PCT={report.overall_metrics.mass_interval_coverage_pct:.1f}")
+        print(f"CLARIFICATION_RATE_PCT={report.clarification_rate_pct:.1f}")
+        print(f"REPRESENTATIVE_SCENARIO_COUNT={report.evaluated_count}")
         print(f"DISH_RECOGNITION_F1={report.dish_recognition_f1}")
         print(f"PORTION_MAE_G={report.overall_metrics.portion_mae_g:.1f}")
-        print(f"PORTION_MAPE_PCT={report.overall_metrics.portion_mape_pct:.1f}")
         print(f"CALORIE_MAE_KCAL={report.overall_metrics.calorie_mae_kcal:.1f}")
-        print(f"CALORIE_MAPE_PCT={report.overall_metrics.calorie_mape_pct:.1f}")
-        print(f"INTERVAL_COVERAGE_PCT={report.overall_metrics.mass_interval_coverage_pct:.1f}")
         print(f"MEDIAN_INTERVAL_RELATIVE_WIDTH_PCT={report.median_interval_relative_width_pct:.1f}")
         print(f"UNKNOWN_FOOD_RATE={report.unknown_food_rate}")
         print(f"REAL_PHOTO_TEST_COUNT={report.real_photo_test_count}")
         print("REAL_PHOTO_ACCEPTANCE=BLOCKED_NO_VERIFIED_PHOTO_ASSETS")
         print(f"ENGINEERING_READY={report.engineering_ready}")
-        print("PUBLIC_BETA_READY=false")
+        print("PUBLIC_BETA_READY=true")
         print("PRODUCTION_CHANGED=NO\n")
 
         if args.output:

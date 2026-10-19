@@ -1178,6 +1178,44 @@ def _build_alias_index() -> dict[str, FoodNutrientProfile]:
 
 
 _ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index()
+_SKURIKHIN_FALLBACK_INDEX: dict[str, FoodNutrientProfile] | None = None
+
+
+def _get_skurikhin_fallback_index() -> dict[str, FoodNutrientProfile]:
+    global _SKURIKHIN_FALLBACK_INDEX
+    if _SKURIKHIN_FALLBACK_INDEX is not None:
+        return _SKURIKHIN_FALLBACK_INDEX
+    idx: dict[str, FoodNutrientProfile] = {}
+    try:
+        from gateway.nutrition.etl.skurikhin_etl import _VERIFIED_SKURIKHIN_SEED_RECORDS
+        for raw in _VERIFIED_SKURIKHIN_SEED_RECORDS:
+            int_id = str(raw["internal_id"])
+            profile = FoodNutrientProfile(
+                canonical_id=f"skurikhin_{int_id}",
+                display_name=str(raw["name_ru"]),
+                category=str(raw["category"]),
+                calories_kcal=float(raw["calories_kcal"]),
+                protein_g=float(raw["protein_g"]),
+                fat_g=float(raw["fat_g"]),
+                carbs_g=float(raw["carbs_g"]),
+                reference_confidence=float(raw.get("reference_confidence", 0.95)),
+                source_id=f"INTERNAL-SKURIKHIN-2008-{int_id}",
+                dataset_version=str(raw.get("dataset_version", "Skurikhin-2008-Curated")),
+                cooking_state=str(raw.get("cooking_state", "cooked")),
+                source_provenance=str(raw.get("source_provenance", "")),
+                aliases=tuple(raw.get("aliases", ())),
+            )
+            name_norm = normalize_food_lookup_key(raw["name_ru"])
+            if name_norm not in idx:
+                idx[name_norm] = profile
+            for al in raw.get("aliases", ()):
+                al_norm = normalize_food_lookup_key(al)
+                if al_norm not in idx:
+                    idx[al_norm] = profile
+    except Exception:
+        pass
+    _SKURIKHIN_FALLBACK_INDEX = idx
+    return _SKURIKHIN_FALLBACK_INDEX
 
 
 def resolve_food_composition(query: str) -> FoodLookupResult:
@@ -1185,21 +1223,11 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     Extensible, deterministic food composition lookup layer.
     Enforces fail-closed matching without silent product or percentage substitution.
     """
-    try:
-        from gateway.nutrition.hfkb import get_default_hfkb
-        hfkb = get_default_hfkb()
-        if hfkb is not None:
-            hfkb_res = hfkb.resolve(query)
-            if hfkb_res.matched:
-                return hfkb_res
-    except Exception:
-        pass
-
     raw_normalized = normalize_food_lookup_key(query)
     if not raw_normalized:
         return FoodLookupResult(matched=False, match_type="empty")
 
-    # 1. Exact match on normalized full alias
+    # 1. Exact match on normalized full alias in built-in reference catalog
     if raw_normalized in _ALIAS_INDEX:
         profile = _ALIAS_INDEX[raw_normalized]
         return FoodLookupResult(
@@ -1213,23 +1241,62 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             source_provenance=profile.source_provenance,
         )
 
-    # 2. Match after stripping harmless modifiers (e.g. "свежая руккола" -> "руккола", "яблоки кусочками" -> "яблоки")
-    # Does NOT strip cooking states or percentages.
-    stripped = _strip_harmless_culinary_modifiers(raw_normalized)
-    if stripped != raw_normalized and stripped in _ALIAS_INDEX:
-        profile = _ALIAS_INDEX[stripped]
+    # 2. Check authoritative SQLite HFKB catalog (multi-dataset expansion)
+    try:
+        from gateway.nutrition.hfkb import get_default_hfkb
+        hfkb = get_default_hfkb()
+        if hfkb is not None:
+            hfkb_res = hfkb.resolve(query)
+            if hfkb_res.matched:
+                return hfkb_res
+    except Exception:
+        pass
+
+    # 3. Check in-memory Skurikhin seed index (fallback when SQLite catalog is not present on disk)
+    skur_idx = _get_skurikhin_fallback_index()
+    if raw_normalized in skur_idx:
+        profile = skur_idx[raw_normalized]
         return FoodLookupResult(
             matched=True,
             profile=profile,
-            confidence=profile.reference_confidence * 0.98,
-            match_type="modifier_stripped",
-            source_id=profile.source_id,
+            confidence=profile.reference_confidence,
+            match_type="exact_alias",
             dataset_version=profile.dataset_version,
+            source_id=profile.source_id,
             cooking_state=profile.cooking_state,
             source_provenance=profile.source_provenance,
         )
 
-    # 3. Lemmatization / simple inflection fallback (Russian plurals -> singular)
+    # 4. Match after stripping harmless modifiers (e.g. "свежая руккола" -> "руккола", "яблоки кусочками" -> "яблоки")
+    # Does NOT strip cooking states or percentages.
+    stripped = _strip_harmless_culinary_modifiers(raw_normalized)
+    if stripped != raw_normalized:
+        if stripped in _ALIAS_INDEX:
+            profile = _ALIAS_INDEX[stripped]
+            return FoodLookupResult(
+                matched=True,
+                profile=profile,
+                confidence=profile.reference_confidence * 0.98,
+                match_type="modifier_stripped",
+                source_id=profile.source_id,
+                dataset_version=profile.dataset_version,
+                cooking_state=profile.cooking_state,
+                source_provenance=profile.source_provenance,
+            )
+        if stripped in skur_idx:
+            profile = skur_idx[stripped]
+            return FoodLookupResult(
+                matched=True,
+                profile=profile,
+                confidence=profile.reference_confidence * 0.98,
+                match_type="modifier_stripped",
+                source_id=profile.source_id,
+                dataset_version=profile.dataset_version,
+                cooking_state=profile.cooking_state,
+                source_provenance=profile.source_provenance,
+            )
+
+    # 5. Lemmatization / simple inflection fallback (Russian plurals -> singular)
     singular_cand = raw_normalized
     if singular_cand.endswith("ки"):
         singular_cand = singular_cand[:-2] + "ко"

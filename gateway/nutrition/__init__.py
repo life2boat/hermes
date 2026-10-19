@@ -19,9 +19,19 @@ from gateway.nutrition.contracts import (
     calculate_conservative_nutrient_interval,
 )
 from gateway.nutrition.diary_schema_v2 import (
+    BASE_NUTRITION_LOG_COLUMNS,
+    NUTRITION_DIARY_V2_MIGRATION_ID,
+    NUTRITION_DIARY_V2_MIGRATION_SHA256,
+    NUTRITION_DIARY_V2_MIGRATION_SOURCE,
+    NUTRITION_DIARY_V2_SCHEMA_STATEMENTS,
+    NUTRITION_LOG_CREATE_SQL,
+    NutritionDiarySchemaClassification,
     V2_NUTRITION_DIARY_COLUMNS,
+    classify_nutrition_diary_v2_schema,
     ensure_nutrition_diary_v2_schema,
     extract_macronutrient_intervals_from_row,
+    migrate_nutrition_diary_v2_schema,
+    nutrition_diary_v2_schema_statements,
 )
 from gateway.nutrition.etl import (
     ETLFoodItem,
@@ -73,6 +83,7 @@ from gateway.nutrition.search import (
 )
 
 __all__ = [
+    "BASE_NUTRITION_LOG_COLUMNS",
     "CalibratedQuantileSpec",
     "CatalogManifest",
     "ComponentNutritionEstimate",
@@ -82,7 +93,13 @@ __all__ = [
     "MacronutrientIntervals",
     "MassBounds",
     "MealNutritionEstimate",
+    "NUTRITION_DIARY_V2_MIGRATION_ID",
+    "NUTRITION_DIARY_V2_MIGRATION_SHA256",
+    "NUTRITION_DIARY_V2_MIGRATION_SOURCE",
+    "NUTRITION_DIARY_V2_SCHEMA_STATEMENTS",
+    "NUTRITION_LOG_CREATE_SQL",
     "NutrientInterval",
+    "NutritionDiarySchemaClassification",
     "RecipeMassConstraint",
     "RuntimeCatalogBinding",
     "SharedVisualScaleUncertainty",
@@ -92,6 +109,7 @@ __all__ = [
     "build_nutrition_catalog",
     "calculate_component_macronutrient_intervals",
     "calculate_conservative_nutrient_interval",
+    "classify_nutrition_diary_v2_schema",
     "compute_file_sha256",
     "ensure_nutrition_diary_v2_schema",
     "extract_fineli_items",
@@ -103,7 +121,9 @@ __all__ = [
     "hfkb_item_to_nutrient_profile",
     "load_and_verify_catalog_binding",
     "match_query_against_aliases",
+    "migrate_nutrition_diary_v2_schema",
     "normalize_russian_food_text",
+    "nutrition_diary_v2_schema_statements",
     "reduce_russian_stem",
     "set_default_hfkb",
     "FoodDensity",

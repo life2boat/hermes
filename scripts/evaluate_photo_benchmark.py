@@ -92,7 +92,7 @@ class PhotoBenchmarkReport:
     calibration_metrics: BenchmarkMetrics | None
     held_out_metrics: BenchmarkMetrics | None
     engineering_ready: str  # "PASS" | "FAIL"
-    real_photo_acceptance: str  # "PENDING" | "PASS" | "FAIL"
+    real_photo_acceptance: str  # "PENDING" | "PASS" | "FAIL" | "BLOCKED..."
     live_provider_requests_used: int
     summary_message: str
     dish_recognition_f1: str = "NOT_EVALUATED_OFFLINE_MODE"
@@ -101,9 +101,13 @@ class PhotoBenchmarkReport:
     unknown_food_rate: float = 0.0
     category_breakdown: dict[str, Any] = field(default_factory=dict)
     clarification_rate_pct: float = 0.0
-    recognition_error_rate_pct: float = 0.0
+    recognition_error_rate_pct: str | float = "NOT_EVALUATED_OFFLINE_MODE"
     database_coverage_pct: float = 0.0
-    product_acceptance: str = "PASS"
+    product_acceptance: str = "NOT_PASSED"
+    offline_engineering_acceptance: str = "NOT_PASSED"
+    public_beta_ready: bool = False
+    offline_testset_database_coverage_pct: float = 0.0
+    modeled_clarification_rate_pct: float = 0.0
 
 
 def _calculate_metrics(results: list[ItemEvaluationResult]) -> BenchmarkMetrics:
@@ -393,13 +397,13 @@ def run_photo_benchmark(
             file=sys.stderr,
         )
         return PhotoBenchmarkReport(
-            dataset_identifier=manifest_data.get("dataset_identifier", "unknown"),
-            version=manifest_data.get("version", "unknown"),
+            dataset_identifier=manifest_data.get("dataset_identifier", "unknown") if isinstance(manifest_data, dict) else "unknown",
+            version=manifest_data.get("version", "unknown") if isinstance(manifest_data, dict) else "unknown",
             manifest_path=str(manifest_p),
             split=split,
-            total_items_in_manifest=len(manifest_data.get("items", [])),
-            calibration_count=manifest_data.get("calibration_count", 0),
-            held_out_count=manifest_data.get("held_out_count", 0),
+            total_items_in_manifest=len(manifest_data.get("items", [])) if isinstance(manifest_data, dict) else 0,
+            calibration_count=manifest_data.get("calibration_count", 0) if isinstance(manifest_data, dict) else 0,
+            held_out_count=manifest_data.get("held_out_count", 0) if isinstance(manifest_data, dict) else 0,
             evaluated_count=0,
             images_verified_on_disk=0,
             images_missing_on_disk=0,
@@ -411,9 +415,27 @@ def run_photo_benchmark(
             real_photo_acceptance="BLOCKED (Live provider requests unauthorized; limit is 0)",
             live_provider_requests_used=0,
             summary_message="Live vision execution blocked by policy.",
+            dish_recognition_f1="NOT_EVALUATED_OFFLINE_MODE",
+            real_photo_test_count=0,
+            median_interval_relative_width_pct=0.0,
+            unknown_food_rate=1.0,
+            category_breakdown={},
+            clarification_rate_pct=0.0,
+            recognition_error_rate_pct="NOT_EVALUATED_OFFLINE_MODE",
+            database_coverage_pct=0.0,
+            product_acceptance="NOT_PASSED",
+            offline_engineering_acceptance="FAIL",
+            public_beta_ready=False,
+            offline_testset_database_coverage_pct=0.0,
+            modeled_clarification_rate_pct=0.0,
         )
 
     # 2. Validate manifest structure & metadata invariants
+    if not isinstance(manifest_data, dict):
+        raise ValueError(f"Manifest must be a JSON object, got {type(manifest_data).__name__}")
+    if "items" not in manifest_data or not isinstance(manifest_data["items"], list):
+        raise ValueError("Manifest missing required 'items' array")
+
     items: list[dict[str, Any]] = manifest_data.get("items", [])
     if len(items) < 200:
         raise ValueError(f"Manifest must contain at least 200 items, found {len(items)}")
@@ -520,28 +542,39 @@ def run_photo_benchmark(
         or r.dishes_ground_truth_count > 1
     )
     clarification_rate = round(clarification_count / len(results) * 100.0, 1) if results else 0.0
-    rec_err_rate = round((1.0 - overall_metrics.dishes_f1) * 100.0, 2)
+    rec_err_rate_display = "NOT_EVALUATED_OFFLINE_MODE"
     db_coverage = round((1.0 - unknown_rate) * 100.0, 2)
 
-    product_acceptance = (
-        "PASS"
-        if (
-            unknown_rate <= 0.05
-            and overall_metrics.mass_interval_coverage_pct >= 90.0
-            and 15.0 <= median_rel_width <= 250.0
-            and len(results) >= 50
-        )
-        else "FAIL"
-    )
-
     # Status determination:
-    # ENGINEERING_READY: PASS because manifest, HIPE portion estimator and engine pass offline evaluation
-    # REAL_PHOTO_ACCEPTANCE: PENDING when live vision execution has not been authorized or real images unverified
-    eng_ready = "PASS" if overall_metrics.dishes_f1 >= 0.85 and overall_metrics.mass_interval_coverage_pct >= 90.0 else "FAIL"
+    # OFFLINE_ENGINEERING_ACCEPTANCE / ENGINEERING_READY:
+    # PASS if offline algorithms (HIPE portion estimator, database resolution, conservative intervals) pass offline criteria
+    offline_eng_pass = (
+        unknown_rate <= 0.05
+        and overall_metrics.mass_interval_coverage_pct >= 90.0
+        and 15.0 <= median_rel_width <= 250.0
+        and len(results) >= 50
+        and overall_metrics.dishes_f1 >= 0.85
+    )
+    eng_ready = "PASS" if offline_eng_pass else "FAIL"
+    offline_eng_acceptance = "PASS" if offline_eng_pass else "FAIL"
+
+    # REAL_PHOTO_ACCEPTANCE:
+    # PENDING / BLOCKED when live vision execution has not been authorized or real images unverified
     if images_dir is None or images_verified < len(items):
         real_acceptance = "PENDING (Real images unverified or absent from disk: BLOCKED_NO_VERIFIED_PHOTO_ASSETS; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
     else:
         real_acceptance = "PENDING (Live vision execution not authorized in this phase: BLOCKED_NO_VERIFIED_PHOTO_ASSETS; LIVE_PROVIDER_REQUESTS_ALLOWED=0)"
+
+    # real_photo_test_count counts ONLY photos that actually underwent live vision inference with independent evaluation
+    # In offline mode, this is strictly 0.
+    real_photo_test_count = 0
+
+    # PRODUCT_ACCEPTANCE:
+    # In offline mode, product acceptance is strictly NOT_PASSED.
+    # PUBLIC_BETA_READY:
+    # In offline mode, public_beta_ready is strictly False.
+    product_acceptance = "NOT_PASSED"
+    public_beta_ready = False
 
     return PhotoBenchmarkReport(
         dataset_identifier=manifest_data.get("dataset_identifier", "healbite_photo_kbzhu_v1"),
@@ -563,14 +596,18 @@ def run_photo_benchmark(
         live_provider_requests_used=0,
         summary_message="Offline benchmark harness evaluated successfully; zero live provider requests used.",
         dish_recognition_f1="NOT_EVALUATED_OFFLINE_MODE",
-        real_photo_test_count=images_verified,
+        real_photo_test_count=real_photo_test_count,
         median_interval_relative_width_pct=median_rel_width,
         unknown_food_rate=unknown_rate,
         category_breakdown=category_breakdown,
         clarification_rate_pct=clarification_rate,
-        recognition_error_rate_pct=rec_err_rate,
+        recognition_error_rate_pct=rec_err_rate_display,
         database_coverage_pct=db_coverage,
         product_acceptance=product_acceptance,
+        offline_engineering_acceptance=offline_eng_acceptance,
+        public_beta_ready=public_beta_ready,
+        offline_testset_database_coverage_pct=db_coverage,
+        modeled_clarification_rate_pct=clarification_rate,
     )
 
 
@@ -653,29 +690,39 @@ def main() -> int:
         print(f"Live Provider Used: {report.live_provider_requests_used} calls")
         print("-" * 60)
         print(f"Dish Recognition F1:          {report.dish_recognition_f1}")
+        print(f"Recognition Error Rate:       {report.recognition_error_rate_pct}")
         print(f"Portion Mass MAE / MAPE:      {report.overall_metrics.portion_mae_g:.1f} g / {report.overall_metrics.portion_mape_pct:.1f}%")
         print(f"Calorie MAE / MAPE:           {report.overall_metrics.calorie_mae_kcal:.1f} kcal / {report.overall_metrics.calorie_mape_pct:.1f}%")
         print(f"Mass Interval Coverage:       {report.overall_metrics.mass_interval_coverage_pct:.1f}%")
         print(f"Calorie Interval Coverage:    {report.overall_metrics.calorie_interval_coverage_pct:.1f}%")
         print(f"Median Interval Rel Width:    {report.median_interval_relative_width_pct:.1f}%")
         print(f"Unknown Food Rate:            {report.unknown_food_rate:.2%}")
+        print(f"Offline Testset DB Coverage:  {report.offline_testset_database_coverage_pct:.1f}%")
+        print(f"Modeled Clarification Rate:   {report.modeled_clarification_rate_pct:.1f}% (proxy)")
         print("-" * 60)
         print("Category Breakdowns:")
         for cat, data in report.category_breakdown.items():
             print(f"  • {cat:16s}: n={data['count']}, Portion MAE={data['portion_mae_g']:.1f}g ({data['portion_mape_pct']:.1f}%), Calorie MAE={data['calorie_mae_kcal']:.1f}kcal ({data['calorie_mape_pct']:.1f}%), Coverage={data['mass_interval_coverage_pct']:.1f}%")
         print("-" * 60)
-        print(f"ENGINEERING_READY:     {report.engineering_ready}")
-        print("REAL_PHOTO_ACCEPTANCE: BLOCKED_NO_VERIFIED_PHOTO_ASSETS")
+        print(f"OFFLINE_ENGINEERING_ACCEPTANCE: {report.offline_engineering_acceptance}")
+        print(f"REAL_PHOTO_ACCEPTANCE:          {report.real_photo_acceptance}")
+        print(f"PRODUCT_ACCEPTANCE:             {report.product_acceptance}")
+        print(f"PUBLIC_BETA_READY:              {str(report.public_beta_ready).lower()}")
         print("=" * 60 + "\n")
 
         print("[METRICS]")
         print(f"PRODUCT_ACCEPTANCE={report.product_acceptance}")
-        print(f"RECOGNITION_ERROR_RATE_PCT={report.recognition_error_rate_pct:.2f}")
+        print(f"OFFLINE_ENGINEERING_ACCEPTANCE={report.offline_engineering_acceptance}")
+        print(f"REAL_PHOTO_ACCEPTANCE={report.real_photo_acceptance}")
+        print(f"PUBLIC_BETA_READY={str(report.public_beta_ready).lower()}")
+        print(f"RECOGNITION_ERROR_RATE_PCT={report.recognition_error_rate_pct}")
         print(f"PORTION_MASS_ERROR_MAPE_PCT={report.overall_metrics.portion_mape_pct:.1f}")
         print(f"KBZHU_ERROR_MAPE_PCT={report.overall_metrics.calorie_mape_pct:.1f}")
-        print(f"DATABASE_COVERAGE_PCT={report.database_coverage_pct:.1f}")
+        print(f"DATABASE_COVERAGE_PCT={report.database_coverage_pct:.1f} (offline testset coverage)")
+        print(f"OFFLINE_TESTSET_DATABASE_COVERAGE_PCT={report.offline_testset_database_coverage_pct:.1f}")
         print(f"UNCERTAINTY_INTERVAL_COVERAGE_PCT={report.overall_metrics.mass_interval_coverage_pct:.1f}")
-        print(f"CLARIFICATION_RATE_PCT={report.clarification_rate_pct:.1f}")
+        print(f"CLARIFICATION_RATE_PCT={report.clarification_rate_pct:.1f} (modeled proxy; not actual user frequency)")
+        print(f"MODELED_CLARIFICATION_RATE_PCT={report.modeled_clarification_rate_pct:.1f}")
         print(f"REPRESENTATIVE_SCENARIO_COUNT={report.evaluated_count}")
         print(f"DISH_RECOGNITION_F1={report.dish_recognition_f1}")
         print(f"PORTION_MAE_G={report.overall_metrics.portion_mae_g:.1f}")
@@ -683,9 +730,7 @@ def main() -> int:
         print(f"MEDIAN_INTERVAL_RELATIVE_WIDTH_PCT={report.median_interval_relative_width_pct:.1f}")
         print(f"UNKNOWN_FOOD_RATE={report.unknown_food_rate}")
         print(f"REAL_PHOTO_TEST_COUNT={report.real_photo_test_count}")
-        print("REAL_PHOTO_ACCEPTANCE=BLOCKED_NO_VERIFIED_PHOTO_ASSETS")
         print(f"ENGINEERING_READY={report.engineering_ready}")
-        print("PUBLIC_BETA_READY=true")
         print("PRODUCTION_CHANGED=NO\n")
 
         if args.output:

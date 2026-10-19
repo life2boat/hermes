@@ -2,9 +2,9 @@
   "dataset_identifier": "healbite_photo_kbzhu_v1",
   "version": "1.0.0",
   "created_at": "2026-10-17T00:00:00Z",
-  "total_count": 210,
+  "total_count": 220,
   "calibration_count": 84,
-  "held_out_count": 126,
+  "held_out_count": 136,
   "license_summary": "CC-BY-4.0-OPEN-FOOD / CC0-FOOD-LOG-V1 / INTERNAL-CALIBRATION-V1",
   "items": [
     {
@@ -8107,6 +8107,286 @@
         "protein_g": 23.1,
         "fat_g": 12.7,
         "carbs_g": 24.2
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_211",
+      "image_sha256": "8f399f92e92cbb4129930f78d462ba6e1bfa4910cf777e48602b9370cb860161",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "casseroles",
+      "title": "Творожная запеканка",
+      "capture_session_or_group_id": "session_hld_43",
+      "ground_truth_dishes": [
+        {
+          "name": "Творожная запеканка",
+          "measured_grams": 220.0,
+          "calories_kcal": 369.6,
+          "protein_g": 35.6,
+          "fat_g": 13.2,
+          "carbs_g": 27.1
+        }
+      ],
+      "measured_grams": 220.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 369.6,
+        "protein_g": 35.6,
+        "fat_g": 13.2,
+        "carbs_g": 27.1
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_212",
+      "image_sha256": "4b97d2e92f3903fa643a60dbba935e40a0cbe43b357e627ad2f267ec07328902",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "casseroles",
+      "title": "Картофельная запеканка с мясом",
+      "capture_session_or_group_id": "session_hld_43",
+      "ground_truth_dishes": [
+        {
+          "name": "Картофельная запеканка с мясом",
+          "measured_grams": 240.0,
+          "calories_kcal": 364.8,
+          "protein_g": 18.7,
+          "fat_g": 16.6,
+          "carbs_g": 35.5
+        }
+      ],
+      "measured_grams": 240.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 364.8,
+        "protein_g": 18.7,
+        "fat_g": 16.6,
+        "carbs_g": 35.5
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_213",
+      "image_sha256": "1653df32d439cf139da12f689e4cbfd895ba3ef816a70aefb4632db2f0bce423",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "sauced_dishes",
+      "title": "Бефстроганов",
+      "capture_session_or_group_id": "session_hld_44",
+      "ground_truth_dishes": [
+        {
+          "name": "Бефстроганов",
+          "measured_grams": 220.0,
+          "calories_kcal": 429.0,
+          "protein_g": 32.6,
+          "fat_g": 31.2,
+          "carbs_g": 6.2
+        }
+      ],
+      "measured_grams": 220.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 429.0,
+        "protein_g": 32.6,
+        "fat_g": 31.2,
+        "carbs_g": 6.2
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_214",
+      "image_sha256": "3cb49e89d1297d02eb321f526ebda5cf487532be9635fae1b93f61765db1e234",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "sauced_dishes",
+      "title": "Паста болоньезе",
+      "capture_session_or_group_id": "session_hld_44",
+      "ground_truth_dishes": [
+        {
+          "name": "Паста болоньезе",
+          "measured_grams": 280.0,
+          "calories_kcal": 453.6,
+          "protein_g": 21.0,
+          "fat_g": 17.4,
+          "carbs_g": 53.5
+        }
+      ],
+      "measured_grams": 280.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 453.6,
+        "protein_g": 21.0,
+        "fat_g": 17.4,
+        "carbs_g": 53.5
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_215",
+      "image_sha256": "25a816d82ea1cf37bf32d91b92e76ca4930129bcfe186e87d0fa049ebc23da45",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "sauced_dishes",
+      "title": "Тефтели в томатном соусе",
+      "capture_session_or_group_id": "session_hld_44",
+      "ground_truth_dishes": [
+        {
+          "name": "Тефтели в томатном соусе",
+          "measured_grams": 230.0,
+          "calories_kcal": 363.4,
+          "protein_g": 25.8,
+          "fat_g": 21.6,
+          "carbs_g": 16.6
+        }
+      ],
+      "measured_grams": 230.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 363.4,
+        "protein_g": 25.8,
+        "fat_g": 21.6,
+        "carbs_g": 16.6
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_216",
+      "image_sha256": "9b12e873acb56da239ef016a24589d31fbe84e62a197b3105dfb2642ce790156",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "mixed_dishes",
+      "title": "Блины с творогом",
+      "capture_session_or_group_id": "session_hld_45",
+      "ground_truth_dishes": [
+        {
+          "name": "Блины с творогом",
+          "measured_grams": 200.0,
+          "calories_kcal": 390.0,
+          "protein_g": 17.8,
+          "fat_g": 13.4,
+          "carbs_g": 49.6
+        }
+      ],
+      "measured_grams": 200.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 390.0,
+        "protein_g": 17.8,
+        "fat_g": 13.4,
+        "carbs_g": 49.6
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_217",
+      "image_sha256": "0981b23ca7914de13b6f9872e41a0e19bdc87e2b85127ab9634d081fca5e3967",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "salads",
+      "title": "Салат Греческий",
+      "capture_session_or_group_id": "session_hld_45",
+      "ground_truth_dishes": [
+        {
+          "name": "Салат Греческий",
+          "measured_grams": 220.0,
+          "calories_kcal": 193.6,
+          "protein_g": 4.6,
+          "fat_g": 16.5,
+          "carbs_g": 6.8
+        }
+      ],
+      "measured_grams": 220.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 193.6,
+        "protein_g": 4.6,
+        "fat_g": 16.5,
+        "carbs_g": 6.8
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_218",
+      "image_sha256": "5c98ba762d10398ef30921bad237190eb823fa1c97a29e46f0012e8316dfa789",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "partial_visibility",
+      "title": "Шаурма с курицей",
+      "capture_session_or_group_id": "session_hld_46",
+      "ground_truth_dishes": [
+        {
+          "name": "Шаурма с курицей",
+          "measured_grams": 320.0,
+          "calories_kcal": 688.0,
+          "protein_g": 31.4,
+          "fat_g": 27.2,
+          "carbs_g": 79.4
+        }
+      ],
+      "measured_grams": 320.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 688.0,
+        "protein_g": 31.4,
+        "fat_g": 27.2,
+        "carbs_g": 79.4
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_219",
+      "image_sha256": "81db432a187efb29cb198ef01923ca1029b38df920391ab6e1740921ef45ba01",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "partial_visibility",
+      "title": "Пельмени с мясом",
+      "capture_session_or_group_id": "session_hld_46",
+      "ground_truth_dishes": [
+        {
+          "name": "Пельмени с мясом",
+          "measured_grams": 240.0,
+          "calories_kcal": 660.0,
+          "protein_g": 28.6,
+          "fat_g": 29.8,
+          "carbs_g": 69.6
+        }
+      ],
+      "measured_grams": 240.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 660.0,
+        "protein_g": 28.6,
+        "fat_g": 29.8,
+        "carbs_g": 69.6
+      },
+      "annotation_method": "kitchen_scale_and_recipe_log",
+      "annotation_quality": "gold"
+    },
+    {
+      "photo_id": "photo_hb_220",
+      "image_sha256": "43ca91029e81bfa01924ef1240a1b2e38201fa29db483120ea93c20a1f092301",
+      "split": "held_out",
+      "rights_or_license_id": "INTERNAL-CALIBRATION-V1",
+      "food_category": "partial_visibility",
+      "title": "Вареники с картофелем",
+      "capture_session_or_group_id": "session_hld_46",
+      "ground_truth_dishes": [
+        {
+          "name": "Вареники с картофелем",
+          "measured_grams": 230.0,
+          "calories_kcal": 425.5,
+          "protein_g": 10.4,
+          "fat_g": 8.7,
+          "carbs_g": 76.4
+        }
+      ],
+      "measured_grams": 230.0,
+      "ground_truth_kbzhu": {
+        "calories_kcal": 425.5,
+        "protein_g": 10.4,
+        "fat_g": 8.7,
+        "carbs_g": 76.4
       },
       "annotation_method": "kitchen_scale_and_recipe_log",
       "annotation_quality": "gold"

@@ -49,6 +49,14 @@ from gateway.memory.schema import (
     migrate_memory_convergence_schema,
     schema_statements as memory_convergence_schema_statements,
 )
+from gateway.nutrition.diary_schema_v2 import (
+    NUTRITION_DIARY_V2_MIGRATION_ID,
+    NUTRITION_DIARY_V2_MIGRATION_SHA256,
+    NUTRITION_DIARY_V2_MIGRATION_SOURCE,
+    NUTRITION_DIARY_V2_SCHEMA_STATEMENTS,
+    classify_nutrition_diary_v2_schema,
+    migrate_nutrition_diary_v2_schema,
+)
 
 
 class ExitClassification(str, Enum):
@@ -778,6 +786,13 @@ def _component_registry() -> tuple[MigrationComponent, ...]:
                 source_sql=identity.MIGRATION_SOURCE,
                 expected_sha256=identity.MIGRATION_SHA256,
             ),
+            _component(
+                "nutrition_diary_v2",
+                NUTRITION_DIARY_V2_SCHEMA_STATEMENTS,
+                migration_id=NUTRITION_DIARY_V2_MIGRATION_ID,
+                source_sql=NUTRITION_DIARY_V2_MIGRATION_SOURCE,
+                expected_sha256=NUTRITION_DIARY_V2_MIGRATION_SHA256,
+            ),
         )
     )
 
@@ -813,6 +828,9 @@ def _preflight_all_schemas(conn: sqlite3.Connection) -> dict[str, SchemaClassifi
         classify_memory_convergence_schema(conn).value
     )
     plans["memory_convergence_v2"] = SchemaClassification(classify_identity_schema(conn).value)
+    plans["nutrition_diary_v2"] = SchemaClassification(
+        classify_nutrition_diary_v2_schema(conn).value
+    )
     weekly_state = detect_weekly_menu_schema_state(conn)
     if weekly_state is WeeklyMenuSchemaState.CANONICAL:
         plans["weekly"] = SchemaClassification.CURRENT
@@ -1036,26 +1054,29 @@ def _migrate_borrowed_connection(
                 elif name == "memory_convergence_v2":
                     from gateway.memory.identity import migrate_identity_schema
                     migrate_identity_schema(conn, legacy_epoch_uuid=legacy_epoch_uuid)
+                elif name == "nutrition_diary_v2":
+                    migrate_nutrition_diary_v2_schema(conn, commit=False)
                 else:
                     _apply_component(conn, name, statements_by_component[name])
-            after = (
-                SchemaClassification(classify_memory_convergence_schema(conn).value)
-                if name == "memory_convergence"
-                else _classify_component_schema(
-                    conn,
-                    name,
-                    statements_by_component[name],
-                )
-            )
-            if name == "memory_convergence_v2":
+            if name == "memory_convergence":
+                after = SchemaClassification(classify_memory_convergence_schema(conn).value)
+            elif name == "memory_convergence_v2":
                 from gateway.memory.identity import classify_identity_schema
                 after = SchemaClassification(classify_identity_schema(conn).value)
-            if (
+            elif name == "nutrition_diary_v2":
+                after = SchemaClassification(classify_nutrition_diary_v2_schema(conn).value)
+            elif (
                 name == "weekly"
                 and detect_weekly_menu_schema_state(conn)
                 is WeeklyMenuSchemaState.CANONICAL
             ):
                 after = SchemaClassification.CURRENT
+            else:
+                after = _classify_component_schema(
+                    conn,
+                    name,
+                    statements_by_component[name],
+                )
             if after is not SchemaClassification.CURRENT:
                 raise MigrationError(
                     ExitClassification.CONTRACT_DRIFT,
@@ -1397,7 +1418,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Migrate an existing disposable DB in an owned private 0700 directory",
     )
-    parser.add_argument("--components", help="Comma-separated ordered subset: household,weekly,shopping,inventory,fridge_menu")
+    parser.add_argument(
+        "--components",
+        help=f"Comma-separated ordered subset: {','.join(ALL_COMPONENTS)}",
+    )
     parser.add_argument("--json", action="store_true", help="Emit sanitized JSON output")
     parser.add_argument("--legacy-epoch-uuid", help="Consume the epoch pinned by planning authority; never generated here")
     return parser

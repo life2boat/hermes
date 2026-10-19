@@ -29,7 +29,6 @@ from gateway.healbite_food_composition import (
     normalize_food_lookup_key,
     resolve_food_composition,
 )
-from gateway.nutrition.diary_schema_v2 import ensure_nutrition_diary_v2_schema
 from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -2764,7 +2763,15 @@ class HealBiteNutritionDiary:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
-            ensure_nutrition_diary_v2_schema(conn)
+
+    def _has_v2_columns(self, conn: sqlite3.Connection) -> bool:
+        if getattr(self, "_cached_has_v2_columns", False):
+            return True
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({NUTRITION_LOG_TABLE})").fetchall()}
+        has_v2 = "calories_min" in cols
+        if has_v2:
+            self._cached_has_v2_columns = True
+        return has_v2
 
     async def analyze_and_maybe_log(
         self,
@@ -3541,60 +3548,96 @@ class HealBiteNutritionDiary:
             else (0 if record.is_approximate_range is False else None)
         )
         with self._connect() as conn:
-            cursor = conn.execute(
-                f"""
-                INSERT INTO {NUTRITION_LOG_TABLE}(
-                    user_id,
-                    source,
-                    meal_name,
-                    items_json,
-                    calories_kcal,
-                    protein_g,
-                    fat_g,
-                    carbs_g,
-                    confidence,
-                    occurred_at,
-                    raw_summary,
-                    image_ref,
-                    qdrant_indexed,
-                    calories_min,
-                    calories_max,
-                    protein_min,
-                    protein_max,
-                    fat_min,
-                    fat_max,
-                    carbs_min,
-                    carbs_max,
-                    uncertainty_model_type,
-                    is_approximate_range
+            if self._has_v2_columns(conn):
+                cursor = conn.execute(
+                    f"""
+                    INSERT INTO {NUTRITION_LOG_TABLE}(
+                        user_id,
+                        source,
+                        meal_name,
+                        items_json,
+                        calories_kcal,
+                        protein_g,
+                        fat_g,
+                        carbs_g,
+                        confidence,
+                        occurred_at,
+                        raw_summary,
+                        image_ref,
+                        qdrant_indexed,
+                        calories_min,
+                        calories_max,
+                        protein_min,
+                        protein_max,
+                        fat_min,
+                        fat_max,
+                        carbs_min,
+                        carbs_max,
+                        uncertainty_model_type,
+                        is_approximate_range
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_user_id,
+                        source,
+                        stored_meal_name,
+                        items_json,
+                        record.calories_kcal,
+                        record.protein_g,
+                        record.fat_g,
+                        record.carbs_g,
+                        record.confidence,
+                        occurred_at_sql,
+                        record.raw_summary,
+                        image_ref,
+                        record.calories_min,
+                        record.calories_max,
+                        record.protein_min,
+                        record.protein_max,
+                        record.fat_min,
+                        record.fat_max,
+                        record.carbs_min,
+                        record.carbs_max,
+                        record.uncertainty_model_type,
+                        is_approx,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    normalized_user_id,
-                    source,
-                    stored_meal_name,
-                    items_json,
-                    record.calories_kcal,
-                    record.protein_g,
-                    record.fat_g,
-                    record.carbs_g,
-                    record.confidence,
-                    occurred_at_sql,
-                    record.raw_summary,
-                    image_ref,
-                    record.calories_min,
-                    record.calories_max,
-                    record.protein_min,
-                    record.protein_max,
-                    record.fat_min,
-                    record.fat_max,
-                    record.carbs_min,
-                    record.carbs_max,
-                    record.uncertainty_model_type,
-                    is_approx,
-                ),
-            )
+            else:
+                cursor = conn.execute(
+                    f"""
+                    INSERT INTO {NUTRITION_LOG_TABLE}(
+                        user_id,
+                        source,
+                        meal_name,
+                        items_json,
+                        calories_kcal,
+                        protein_g,
+                        fat_g,
+                        carbs_g,
+                        confidence,
+                        occurred_at,
+                        raw_summary,
+                        image_ref,
+                        qdrant_indexed
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        normalized_user_id,
+                        source,
+                        stored_meal_name,
+                        items_json,
+                        record.calories_kcal,
+                        record.protein_g,
+                        record.fat_g,
+                        record.carbs_g,
+                        record.confidence,
+                        occurred_at_sql,
+                        record.raw_summary,
+                        image_ref,
+                    ),
+                )
             sqlite_id = int(cursor.lastrowid)
         self._schedule_qdrant_index(
             sqlite_id=sqlite_id,
@@ -3909,9 +3952,14 @@ class HealBiteNutritionDiary:
             "fat_g": fat_total,
             "carbs_g": carbs_total,
         }
-        has_intervals = any(
-            row["calories_min"] is not None or row["calories_max"] is not None
-            for row in rows
+        has_v2_cols = bool(rows and "calories_min" in rows[0].keys())
+        has_intervals = (
+            any(
+                row["calories_min"] is not None or row["calories_max"] is not None
+                for row in rows
+            )
+            if has_v2_cols
+            else False
         )
         if has_intervals:
             cal_min = sum(float(row["calories_min"] if row["calories_min"] is not None else (row["calories_kcal"] or 0.0)) for row in rows)

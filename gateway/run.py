@@ -1679,6 +1679,8 @@ _TELEGRAM_DIARY_SLASH_COMMANDS = frozenset({"/diary", "/stats", "/undo_meal", "/
 _TELEGRAM_WATER_SLASH_COMMANDS = frozenset({"/water"})
 _TELEGRAM_WEIGHT_SLASH_COMMANDS = frozenset({"/weight"})
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
+_HEALBITE_TESTER_USERS_ENV = "HEALBITE_TESTER_USERS"
+_HEALBITE_ALLOWED_USERS_ENV = "HEALBITE_ALLOWED_USERS"
 _TELEGRAM_DIARY_CONTEXT_HINTS = (
     "дневник",
     "статист",
@@ -1831,6 +1833,28 @@ def _healbite_public_onboarding_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _is_healbite_tester_user(user_id: Any) -> bool:
+    if user_id is None:
+        return False
+    raw = (
+        str(os.getenv(_HEALBITE_TESTER_USERS_ENV, "") or os.getenv(_HEALBITE_ALLOWED_USERS_ENV, "") or "")
+        .strip()
+    )
+    if not raw:
+        return False
+    target = str(user_id).strip()
+    if not target:
+        return False
+    testers = {t.strip() for t in raw.split(",") if t.strip()}
+    return target in testers
+
+
+def _healbite_public_lane_enabled_for_user(user_id: Any = None) -> bool:
+    if _healbite_public_onboarding_enabled():
+        return True
+    return _is_healbite_tester_user(user_id)
+
+
 _CORRELATION_HMAC_KEY: bytes = secrets.token_bytes(32)
 
 
@@ -1890,7 +1914,7 @@ def _healbite_public_lane_decision(
         is_healbite_profile_edit_intent,
     )
 
-    if not _healbite_public_onboarding_enabled():
+    if not _healbite_public_lane_enabled_for_user(getattr(source, "user_id", None)):
         return {"enabled": False, "action": "disabled", "route": "disabled"}
     if source.platform != Platform.TELEGRAM:
         return {"enabled": False, "action": "disabled", "route": "wrong_platform"}

@@ -423,6 +423,8 @@ def _is_private_chat_type(chat_type: Any) -> bool:
 HEALBITE_PLACEHOLDER_REPLY = "В разработке"
 HEALBITE_SINGLE_ACTION_REPLY = "Отправьте одну команду или нажмите одну кнопку за раз."
 _HEALBITE_PUBLIC_ONBOARDING_ENV = "HEALBITE_PUBLIC_ONBOARDING"
+_HEALBITE_TESTER_USERS_ENV = "HEALBITE_TESTER_USERS"
+_HEALBITE_ALLOWED_USERS_ENV = "HEALBITE_ALLOWED_USERS"
 
 
 def check_telegram_requirements() -> bool:
@@ -4189,7 +4191,9 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         self._record_handler_selection(getattr(update, "update_id", None), "callback_query")
         public_onboarding = self._healbite_public_onboarding_enabled()
-        auth_decision = "allowed" if query_is_authorized else ("public_bypass" if public_onboarding else "denied")
+        is_tester = self._is_healbite_tester_user(query_user_id)
+        lane_active = public_onboarding or is_tester
+        auth_decision = "allowed" if query_is_authorized else ("tester_bypass" if is_tester else ("public_bypass" if public_onboarding else "denied"))
         self._log_healbite_marker(
             "telegram_auth_decision",
             msg=query_message,
@@ -4210,7 +4214,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "water:",
             FOOD_INVENTORY_CALLBACK_ROOT,
         )
-        if not query_is_authorized and not self._healbite_public_onboarding_enabled():
+        if not query_is_authorized and not lane_active:
             if data.startswith(HEALBITE_LOCAL_CALLBACK_ROOTS):
                 try:
                     await query.answer(text="Действие недоступно.", show_alert=True)
@@ -4218,7 +4222,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     pass
                 return
 
-        if not query_is_authorized and self._healbite_public_onboarding_enabled():
+        if not query_is_authorized and lane_active:
             if data.startswith(("weight:", "water:")):
                 profile_store = get_default_healbite_user_profile()
                 if query_user_id is None or profile_store.get_user_profile(int(query_user_id)) is None:
@@ -6688,9 +6692,32 @@ class TelegramAdapter(BasePlatformAdapter):
         raw = str(os.getenv(_HEALBITE_PUBLIC_ONBOARDING_ENV, "") or "").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
+    @classmethod
+    def _is_healbite_tester_user(cls, user_id: Any) -> bool:
+        if user_id is None:
+            return False
+        raw = (
+            str(os.getenv(_HEALBITE_TESTER_USERS_ENV, "") or os.getenv(_HEALBITE_ALLOWED_USERS_ENV, "") or "")
+            .strip()
+        )
+        if not raw:
+            return False
+        target = str(user_id).strip()
+        if not target:
+            return False
+        testers = {t.strip() for t in raw.split(",") if t.strip()}
+        return target in testers
+
+    @classmethod
+    def _healbite_public_lane_enabled_for_user(cls, user_id: Any = None) -> bool:
+        if cls._healbite_public_onboarding_enabled():
+            return True
+        return cls._is_healbite_tester_user(user_id)
+
     @staticmethod
     def _healbite_public_lane_block_reason(msg: Message) -> str | None:
-        if not TelegramAdapter._healbite_public_onboarding_enabled():
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if not TelegramAdapter._healbite_public_lane_enabled_for_user(user_id):
             return None
         chat = getattr(msg, "chat", None)
         chat_type = str(getattr(chat, "type", "") or "").strip().lower()
@@ -6805,7 +6832,7 @@ class TelegramAdapter(BasePlatformAdapter):
         actor_user_id = getattr(getattr(query, "from_user", None), "id", None)
         if self._is_feature_allowlisted(feature_name, actor_user_id):
             return False
-        if not self._healbite_public_onboarding_enabled():
+        if not self._healbite_public_lane_enabled_for_user(actor_user_id):
             return False
         msg = getattr(query, "message", None)
         chat = getattr(msg, "chat", None) if msg is not None else None
@@ -7089,7 +7116,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=thread_id,
             user_name=self._healbite_sender_username(msg),
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
+        if not is_authorized and not self._healbite_public_lane_enabled_for_user(user_id):
             self._log_healbite_marker(
                 "healbite_onboarding_entry",
                 msg=msg,
@@ -9617,7 +9644,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
+        if not is_authorized and not self._healbite_public_lane_enabled_for_user(actor_user_id):
             return False
         normalized_action = action.split(maxsplit=1)[0].split("@", 1)[0].lower()
         original_text = (getattr(msg, "text", None) or "").strip()
@@ -9765,7 +9792,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if not is_authorized and not self._healbite_public_onboarding_enabled():
+        if not is_authorized and not self._healbite_public_lane_enabled_for_user(actor_user_id):
             return False
         return await self._dispatch_healbite_keyboard_action(msg, action=action)
 
@@ -9804,8 +9831,12 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=user_name,
         )
         public_onboarding = self._healbite_public_onboarding_enabled()
+        is_tester = self._is_healbite_tester_user(actor_user_id)
+        lane_active = public_onboarding or is_tester
         if is_authorized:
             auth_decision = "allowed"
+        elif is_tester:
+            auth_decision = "tester_bypass"
         elif public_onboarding:
             auth_decision = "public_bypass"
         else:
@@ -9817,7 +9848,7 @@ class TelegramAdapter(BasePlatformAdapter):
             auth_decision=auth_decision,
             public_onboarding=public_onboarding,
         )
-        if is_authorized or public_onboarding:
+        if is_authorized or lane_active:
             if await self._maybe_handle_healbite_menu_button(update, context):
                 return
         if not self._should_process_message(msg):
@@ -9833,7 +9864,7 @@ class TelegramAdapter(BasePlatformAdapter):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
             return
-        if is_authorized or self._healbite_public_onboarding_enabled():
+        if is_authorized or lane_active:
             if await self._maybe_handle_healbite_explicit_intent(msg):
                 return
             if await self._maybe_handle_healbite_onboarding_reply(msg):
@@ -10435,8 +10466,12 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=user_name,
         )
         public_onboarding = self._healbite_public_onboarding_enabled()
+        is_tester = self._is_healbite_tester_user(actor_user_id)
+        lane_active = public_onboarding or is_tester
         if is_authorized:
             auth_decision = "allowed"
+        elif is_tester:
+            auth_decision = "tester_bypass"
         elif public_onboarding:
             auth_decision = "public_bypass"
         else:
@@ -10449,7 +10484,7 @@ class TelegramAdapter(BasePlatformAdapter):
             public_onboarding=public_onboarding,
         )
         command = self._healbite_command_from_text(msg.text)
-        if is_authorized or public_onboarding:
+        if is_authorized or lane_active:
             if await self._maybe_handle_healbite_start_command(msg):
                 return
             dispatch_action = (getattr(msg, "text", None) or "").strip() if command.startswith("/") else command
@@ -10792,7 +10827,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=str(thread_id) if thread_id is not None else None,
             user_name=user_name,
         )
-        if msg.photo and (is_authorized or self._healbite_public_onboarding_enabled()):
+        if msg.photo and (is_authorized or self._healbite_public_lane_enabled_for_user(actor_user_id)):
             if await self._maybe_handle_healbite_fridge_menu_photo(msg):
                 return
             if await self._maybe_handle_healbite_inventory_photo(msg):

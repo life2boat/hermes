@@ -282,7 +282,10 @@ def _make_telegram_update(*, msg, update_id: int = 1):
 
 
 @pytest.mark.asyncio
-async def test_telegram_adapter_marks_tester_bypass(caplog, monkeypatch):
+async def test_telegram_adapter_marks_tester_bypass(tmp_path, caplog, monkeypatch):
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+    monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
     monkeypatch.delenv("HEALBITE_PUBLIC_ONBOARDING", raising=False)
     monkeypatch.setenv("HEALBITE_TESTER_USERS", str(TESTER_USER_ID))
 

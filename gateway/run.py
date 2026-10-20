@@ -13286,6 +13286,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "[Gateway][vision_failed] nutrition diary analysis error_type=%s",
                 exc.__class__.__name__,
             )
+            return (
+                user_text,
+                False,
+                None,
+                NutritionDiaryOutcome(
+                    available=False,
+                    validation_status="ENRICHMENT_EXCEPTION",
+                ),
+            )
         if outcome is None:
             return user_text, False, None, NutritionDiaryOutcome(available=False, validation_status="RESULT_NONE")
         if not outcome.available:

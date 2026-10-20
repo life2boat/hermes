@@ -37,7 +37,11 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import HealBiteUserProfileStore
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.platforms.telegram import TelegramAdapter
-from gateway.run import GatewayRunner, _vision_safe_fallback_text
+from gateway.run import (
+    GatewayRunner,
+    _healbite_public_lane_decision,
+    _vision_safe_fallback_text,
+)
 from gateway.session import SessionSource
 
 
@@ -503,3 +507,174 @@ async def test_scenario_12_save_record_without_manual_grams(tmp_path):
     assert diary.get_pending_inventory(300) is None
     assert diary.get_daily_summary(user_id=300)["entry_count"] == 1
 
+
+# -----------------------------------------------------------------------------
+# Scenario 13: UnboundLocalError regression - RuntimeError in diary analysis
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_unbound_local_error_runtime_error_in_diary_analysis(tmp_path, caplog):
+    runner, adapter = _make_runner(tmp_path)
+    runner._is_user_authorized = lambda s: False
+    source = _make_source(user_id=210, chat_id=210)
+    img_file = tmp_path / "crash.png"
+    img_file.write_bytes(_png_bytes())
+    event = _make_event(source, str(img_file), text="")
+
+    # Mock diary.analyze_and_maybe_log to raise RuntimeError
+    diary = runner._get_healbite_nutrition_diary()
+    diary.analyze_and_maybe_log = AsyncMock(side_effect=RuntimeError("simulated database failure"))
+
+    with caplog.at_level("INFO", logger="gateway.run"):
+        # 1. Direct call to _try_enrich_message_with_healbite_nutrition must not raise UnboundLocalError
+        user_text, success, pending_reply, outcome = await runner._try_enrich_message_with_healbite_nutrition(
+            event=event,
+            source=source,
+            user_text="",
+            image_paths=[str(img_file)],
+        )
+        assert success is False
+        assert pending_reply is None
+        assert outcome is not None
+        assert outcome.validation_status == "ENRICHMENT_EXCEPTION"
+        assert outcome.available is False
+
+        # 2. Call from _prepare_inbound_message_text must deliver safe fallback exactly once
+        result = await runner._prepare_inbound_message_text(event=event, source=source, history=[])
+        assert result is None
+        adapter.send.assert_awaited_once()
+        assert adapter.send.await_args.args[1] == _vision_safe_fallback_text()
+        assert "simulated database failure" not in adapter.send.await_args.args[1]
+        assert any("ENRICHMENT_EXCEPTION" in r.getMessage() for r in caplog.records)
+
+
+# -----------------------------------------------------------------------------
+# Scenario A: Public onboarding выключен, пользователь не авторизован -> deny/ignore
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_scenario_a_public_onboarding_off_unauthorized_denied(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "false")
+    source = _make_source(user_id=401, chat_id=401)
+    event = _make_event(source, "/tmp/fake.png", text="")
+
+    decision = _healbite_public_lane_decision(source=source, event=event, message="")
+    assert decision["enabled"] is False
+    assert decision["route"] == "disabled"
+
+    runner, adapter = _make_runner(tmp_path)
+    runner._is_user_authorized = lambda s: False
+    monkeypatch.setattr(runner, "_get_unauthorized_dm_behavior", lambda s: "ignore")
+
+    result = await runner._handle_message(event)
+    assert result is None
+    adapter.send.assert_not_awaited()
+
+
+# -----------------------------------------------------------------------------
+# Scenario B: Public onboarding включён, профиля нет -> подсказка /start
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_scenario_b_public_onboarding_on_no_profile_prompts_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    store = HealBiteUserProfileStore(db_path=tmp_path / "profiles.db")
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+
+    source = _make_source(user_id=402, chat_id=402)
+    event = _make_event(source, "/tmp/fake.png", text="")
+
+    decision = _healbite_public_lane_decision(source=source, event=event, message="")
+    assert decision["enabled"] is True
+    assert decision["action"] == "reply"
+    assert decision["route"] == "public_start_required"
+    assert "/start" in decision["reply"]
+
+
+# -----------------------------------------------------------------------------
+# Scenario C: Public onboarding включён, профиль создаётся -> предложение закончить onboarding
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_scenario_c_public_onboarding_on_incomplete_onboarding_prompts_completion(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    store = HealBiteUserProfileStore(db_path=tmp_path / "profiles.db")
+    store.begin_onboarding(user_id=403, username="tester")
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+
+    source = _make_source(user_id=403, chat_id=403)
+    event = _make_event(source, "/tmp/fake.png", text="")
+
+    decision = _healbite_public_lane_decision(source=source, event=event, message="")
+    assert decision["enabled"] is True
+    assert decision["action"] == "reply"
+    assert decision["route"] == "public_onboarding_required"
+    assert "анкет" in decision["reply"] or "профил" in decision["reply"]
+
+
+# -----------------------------------------------------------------------------
+# Scenario D: Пользователь зарегистрирован и допущен -> полноценный photo pipeline
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_scenario_d_public_onboarding_on_registered_user_full_photo_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    store = _seed_profile(tmp_path, user_id=404)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+
+    source = _make_source(user_id=404, chat_id=404)
+    event = _make_event(source, "/tmp/fake.png", text="")
+
+    decision = _healbite_public_lane_decision(source=source, event=event, message="")
+    assert decision["enabled"] is True
+    assert decision["action"] == "allow"
+    assert decision["route"] == "public_photo_flow"
+
+
+# -----------------------------------------------------------------------------
+# Scenario E: Пользователь с отозванными admin rights -> админские команды строго DENIED
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_scenario_e_revoked_admin_allowed_user_actions_denied_admin_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("HEALBITE_PUBLIC_ONBOARDING", "true")
+    store = _seed_profile(tmp_path, user_id=248875361)
+    monkeypatch.setattr("gateway.healbite_user_profile.get_default_healbite_user_profile", lambda: store)
+
+    source = _make_source(user_id=248875361, chat_id=248875361)
+    runner, adapter = _make_runner(tmp_path)
+    runner._is_user_authorized = lambda s: False
+
+    assert runner._is_user_authorized(source) is False
+
+    decision = _healbite_public_lane_decision(source=source, event=_make_event(source, "/tmp/fake.png"), message="")
+    assert decision["enabled"] is True
+    assert decision["route"] == "public_photo_flow"
+
+
+# -----------------------------------------------------------------------------
+# Batch Privacy: отсутствие raw batch_key (chat_id/user_id) в логах
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_photo_batch_cancelled_and_exception_logs_privacy_no_raw_batch_key(tmp_path, caplog):
+    cfg = PlatformConfig(enabled=True)
+    adapter = TelegramAdapter(cfg)
+    source = _make_source(user_id=987654321, chat_id=987654321)
+    event = _make_event(source, "/tmp/dummy.png", text="")
+    batch_key = "987654321:987654321:single:42"
+
+    # 1. Test Cancellation
+    adapter._pending_photo_batches[batch_key] = event
+    adapter.handle_message = AsyncMock(side_effect=asyncio.CancelledError())
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._flush_photo_batch(batch_key)
+        assert "987654321" not in caplog.text
+        assert "batch_key=987654321" not in caplog.text
+        assert "[Telegram][photo_batch_cancelled] corr=" in caplog.text
+
+    caplog.clear()
+
+    # 2. Test Exception
+    adapter._pending_photo_batches[batch_key] = event
+    adapter.handle_message = AsyncMock(side_effect=ValueError("simulated secret failure"))
+    adapter.send = AsyncMock()
+    with caplog.at_level("INFO", logger="gateway.platforms.telegram"):
+        await adapter._flush_photo_batch(batch_key)
+        assert "987654321" not in caplog.text
+        assert "batch_key=987654321" not in caplog.text
+        assert "[Telegram][photo_batch_exception] corr=" in caplog.text

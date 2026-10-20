@@ -10675,18 +10675,19 @@ class TelegramAdapter(BasePlatformAdapter):
                 await self.handle_message(event)
                 handed_off = True
             except asyncio.CancelledError:
-                logger.info("[Telegram][photo_batch_cancelled] batch_key=%s", batch_key)
+                from gateway.run import _healbite_event_correlation_id
+                corr = _healbite_event_correlation_id(event) if event else "unknown"
+                logger.info("[Telegram][photo_batch_cancelled] corr=%s", corr)
                 raise
             except Exception as exc:
+                from gateway.run import _healbite_event_correlation_id, _vision_safe_fallback_text
+                corr = _healbite_event_correlation_id(event) if event else "unknown"
                 logger.error(
-                    "[Telegram][photo_batch_exception] batch_key=%s error=%s",
-                    batch_key,
+                    "[Telegram][photo_batch_exception] corr=%s error=%s",
+                    corr,
                     exc.__class__.__name__,
-                    exc_info=True,
                 )
                 if chat_id:
-                    from gateway.run import _vision_safe_fallback_text, _healbite_event_correlation_id
-                    corr = _healbite_event_correlation_id(event)
                     try:
                         await self.send(
                             chat_id,

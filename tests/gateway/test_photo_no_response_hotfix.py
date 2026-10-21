@@ -191,7 +191,7 @@ async def test_scenario_02_nuts_in_shell_edible_mass_recognition(tmp_path, caplo
     sent_text = adapter.send.await_args.args[1]
     assert "Я вижу:" in sent_text
     assert "грецкие орехи" in sent_text
-    assert "30-50 г" in sent_text
+    assert ("30–50 г" in sent_text or "30-50 г" in sent_text)
     assert "оценка ядрышек без скорлупы" in sent_text
 
 

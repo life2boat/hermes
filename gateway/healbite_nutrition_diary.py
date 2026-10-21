@@ -2396,6 +2396,8 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
                 f"   Общий вес: {gross_range}.\n"
                 f"   Съедобная часть: {edible_range}."
             )
+            if item.uncertainty:
+                detail += f" ({html.escape(item.uncertainty)})"
             if comp_info is not None:
                 if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
                     cal = comp_info.get("calories_kcal")

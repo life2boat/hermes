@@ -10,6 +10,7 @@ from gateway.healbite_nutrition_diary import (
     PendingFoodVisionInventory,
     PendingFoodVisionItem,
     _aggregate_identical_food_vision_items,
+    _aggregate_multi_photo_batch,
     _build_inventory_calculation_snapshot,
     _deserialize_pending_inventory,
     _serialize_pending_inventory,
@@ -79,7 +80,7 @@ def test_req2_quantity_equals_five():
     assert result.inventory is not None
     item = result.inventory.items[0]
     assert item.quantity == 5
-    assert item.count_type == "COUNT_CONFIRMED"
+    assert item.count_type == "COUNT_ESTIMATED"
 
 
 # -----------------------------------------------------------------------------
@@ -434,6 +435,7 @@ def test_req10_quantity_correction_recalculates_mass_and_kbzhu(tmp_path):
 
     upd_item = res.inventory.items[0]
     assert upd_item.quantity == 7
+    assert upd_item.count_type == "COUNT_CONFIRMED"
     # 7 * 12g = 84g
     assert upd_item.selected_grams == pytest.approx(84.0)
 
@@ -597,7 +599,7 @@ def test_req13_backward_compatibility_old_pending_inventory():
     assert len(deserialized.items) == 1
     item = deserialized.items[0]
     assert item.quantity is None
-    assert item.count_type == "COUNT_CONFIRMED"
+    assert item.count_type == "COUNT_UNKNOWN"
     assert item.piece_grams is None
 
     # Reply formatting works without crash
@@ -743,7 +745,7 @@ def test_req16_unknown_count_does_not_invent_quantity():
 # 17. Multiple photos in a batch -> no double counting
 # -----------------------------------------------------------------------------
 def test_req17_multiple_photos_batch_no_double_counting():
-    # Photos in one batch detecting the same walnuts
+    # Photos in one batch detecting the same walnuts from two angles
     items_photo1 = [
         FoodVisionItem(
             visible_name="грецкий орех",
@@ -754,7 +756,7 @@ def test_req17_multiple_photos_batch_no_double_counting():
         )
         for _ in range(5)
     ]
-    # Photo 2 also sees the same walnuts as a group
+    # Photo 2 also sees the same walnuts as a group from a second angle
     items_photo2 = [
         FoodVisionItem(
             visible_name="грецкие орехи",
@@ -765,9 +767,26 @@ def test_req17_multiple_photos_batch_no_double_counting():
             quantity=5,
         )
     ]
-    # When combined into a single inventory, identical items aggregate
-    grouped = _aggregate_identical_food_vision_items(items_photo1)
+    # Case B: Both photos participate in multi-photo batch pipeline -> no double counting!
+    grouped = _aggregate_multi_photo_batch([items_photo1, items_photo2])
     assert len(grouped) == 1
     assert grouped[0].quantity == 5
     assert grouped[0].estimated_grams_min == pytest.approx(50.0)
     assert grouped[0].estimated_grams_max == pytest.approx(75.0)
+
+    # Case C: Photo 1 sees walnuts, Photo 2 sees distinct food (e.g. 2 apples) -> both retained!
+    items_photo2_distinct = [
+        FoodVisionItem(
+            visible_name="яблоки",
+            normalized_name="яблоко",
+            confidence=0.94,
+            estimated_grams_min=250.0,
+            estimated_grams_max=350.0,
+            quantity=2,
+        )
+    ]
+    combined = _aggregate_multi_photo_batch([items_photo1, items_photo2_distinct])
+    assert len(combined) == 2
+    names = {it.normalized_name for it in combined}
+    assert "грецкий орех в скорлупе" in names
+    assert "яблоко" in names

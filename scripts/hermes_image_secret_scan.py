@@ -515,8 +515,29 @@ def _docker_layout(
     return config, layers, safe_layers
 
 
+OCI_MANIFEST_MEDIA_TYPES: tuple[str, ...] = (
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+)
+OCI_CONFIG_MEDIA_TYPES: tuple[str, ...] = (
+    "application/vnd.oci.image.config.v1+json",
+    "application/vnd.docker.container.image.v1+json",
+)
+OCI_LAYER_MEDIA_TYPES: tuple[str, ...] = (
+    "application/vnd.oci.image.layer.v1.tar",
+    "application/vnd.oci.image.layer.v1.tar+gzip",
+    "application/vnd.oci.image.layer.nondistributable.v1.tar",
+    "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip",
+    "application/vnd.docker.image.rootfs.diff.tar.gzip",
+    "application/vnd.docker.image.rootfs.diff.tar",
+)
+
+
 def _oci_blob(
-    members: dict[str, Path], descriptor: Any, *, media_prefix: str
+    members: dict[str, Path],
+    descriptor: Any,
+    *,
+    allowed_media_types: tuple[str, ...] | set[str],
 ) -> tuple[Path, str]:
     if not isinstance(descriptor, dict):
         raise ImageScanError("OCI_DESCRIPTOR_INVALID")
@@ -530,7 +551,7 @@ def _oci_blob(
         or isinstance(size, bool)
         or size < 0
         or not isinstance(media_type, str)
-        or media_prefix not in media_type
+        or media_type not in allowed_media_types
     ):
         raise ImageScanError("OCI_DESCRIPTOR_INVALID")
     try:
@@ -555,14 +576,14 @@ def _oci_layout(
     if not isinstance(manifests, list) or len(manifests) != 1:
         raise ImageScanError("IMAGE_ARCHIVE_IDENTITY_AMBIGUOUS")
     manifest_path, _ = _oci_blob(
-        members, manifests[0], media_prefix="application/vnd.oci.image.manifest"
+        members, manifests[0], allowed_media_types=OCI_MANIFEST_MEDIA_TYPES
     )
     manifest = _json_object(
         _read_limited(manifest_path, "OCI_MANIFEST_INVALID"),
         "OCI_MANIFEST_INVALID",
     )
     config_path, _ = _oci_blob(
-        members, manifest.get("config"), media_prefix="application/vnd.oci.image.config"
+        members, manifest.get("config"), allowed_media_types=OCI_CONFIG_MEDIA_TYPES
     )
     config = _read_limited(config_path, "IMAGE_CONFIG_INVALID")
     descriptors = manifest.get("layers")
@@ -572,13 +593,17 @@ def _oci_layout(
     identities: list[str] = []
     for descriptor in descriptors:
         path, media_type = _oci_blob(
-            members, descriptor, media_prefix="application/vnd.oci.image.layer"
+            members, descriptor, allowed_media_types=OCI_LAYER_MEDIA_TYPES
         )
         digest = str(descriptor["digest"])
         if digest in identities:
             raise ImageScanError("IMAGE_ARCHIVE_LAYER_DUPLICATE")
         identities.append(digest)
-        if media_type.endswith("+gzip") or media_type.endswith("+zstd"):
+        if (
+            media_type.endswith("+gzip")
+            or media_type.endswith("+zstd")
+            or media_type == "application/vnd.docker.image.rootfs.diff.tar.gzip"
+        ):
             # containerd docker save writes uncompressed tarballs but keeps the original media_type!
             # so we check if it is really compressed
             import gzip
@@ -588,7 +613,7 @@ def _oci_layout(
                 is_gzip = True
             except OSError:
                 is_gzip = False
-            
+
             if is_gzip:
                 expanded = staging / f"layer-{len(layers):08d}.tar"
                 try:
@@ -600,6 +625,7 @@ def _oci_layout(
         elif media_type not in (
             "application/vnd.oci.image.layer.v1.tar",
             "application/vnd.oci.image.layer.nondistributable.v1.tar",
+            "application/vnd.docker.image.rootfs.diff.tar",
         ):
             raise ImageScanError("IMAGE_LAYER_MEDIA_TYPE_UNSUPPORTED")
         layers.append(path)
@@ -609,11 +635,11 @@ def _oci_layout(
 def _layout(
     members: dict[str, Path], staging: Path
 ) -> tuple[bytes, tuple[Path, ...], tuple[str, ...]]:
-    return (
-        _docker_layout(members)
-        if "oci-layout" in members and "index.json" in members
-        else _docker_layout(members)
-    )
+    if "oci-layout" in members and "index.json" in members:
+        return _oci_layout(members, staging)
+    if "manifest.json" in members:
+        return _docker_layout(members)
+    raise ImageScanError("IMAGE_ARCHIVE_FORMAT_UNSUPPORTED")
 
 
 def _config_identity(
@@ -843,46 +869,56 @@ def _analyze_image_archive_staged(
     members = _outer_members(archive, staging)
     is_oci = "oci-layout" in members and "index.json" in members
     config_bytes, layers, stored_ids = _layout(members, staging)
-    
+
     config = _json_object(config_bytes, "IMAGE_CONFIG_INVALID")
     # expected_image_id is NOT passed to _config_identity anymore, we check it explicitly
     # if it doesn't match the OCI_INDEX_DIGEST or CONFIG_IMAGE_ID
     image_id = "sha256:" + _sha256(config_bytes)
-    
+
     diff_ids_raw = config.get("rootfs", {}).get("diff_ids", [])
     if not isinstance(diff_ids_raw, list) or not all(isinstance(item, str) for item in diff_ids_raw):
         raise ImageScanError("IMAGE_CONFIG_INVALID")
     diff_ids = tuple(diff_ids_raw)
-    
+
     labels = config.get("config", {}).get("Labels", {})
     revision = labels.get("org.opencontainers.image.revision") if isinstance(labels, dict) else None
-    
+
     if expected_revision is not None and revision != expected_revision:
         raise ImageScanError("IMAGE_OCI_REVISION_MISMATCH")
-        
+
     if IMAGE_ID_RE.fullmatch(expected_image_id) is None:
         raise ImageScanError("IMAGE_IDENTITY_MISMATCH")
-        
+
     oci_index_digest = None
     platform_manifest_digest = None
     archive_config_identity = None
     compressed_blob_digests = ()
     uncompressed_diff_ids = diff_ids
-    
+
     if is_oci:
         oci_index_digest = "sha256:" + _hash_file(members["index.json"])
         index = _json_object(_read_limited(members["index.json"], "OCI_INDEX_INVALID"), "OCI_INDEX_INVALID")
         manifests = index.get("manifests", [])
         if len(manifests) == 1:
             platform_manifest_digest = manifests[0].get("digest")
-            manifest_path = staging / platform_manifest_digest.replace(":", "_")
-            if manifest_path.exists():
-                manifest = _json_object(_read_limited(manifest_path, "OCI_MANIFEST_INVALID"), "OCI_MANIFEST_INVALID")
+            manifest_blob_key = (
+                f"blobs/sha256/{platform_manifest_digest.removeprefix('sha256:')}"
+                if isinstance(platform_manifest_digest, str)
+                else None
+            )
+            if manifest_blob_key and manifest_blob_key in members:
+                manifest = _json_object(
+                    _read_limited(members[manifest_blob_key], "OCI_MANIFEST_INVALID"),
+                    "OCI_MANIFEST_INVALID",
+                )
                 archive_config_identity = manifest.get("config", {}).get("digest")
         compressed_blob_digests = stored_ids
-        
-        # Check expected image ID against ANY of these valid identities, avoiding conflation
-        if expected_image_id not in (image_id, archive_config_identity, oci_index_digest):
+
+        if archive_config_identity != image_id:
+            raise ImageScanError("IMAGE_CONFIG_DIGEST_MISMATCH")
+
+        valid_identities = {id for id in (image_id, platform_manifest_digest) if id is not None}
+        if expected_image_id not in valid_identities:
             raise ImageScanError("IMAGE_IDENTITY_MISMATCH")
     else:
         archive_config_identity = image_id

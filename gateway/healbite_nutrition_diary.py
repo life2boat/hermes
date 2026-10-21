@@ -294,6 +294,10 @@ class FoodVisionItem:
             self.item_id = f"item_{h}"
         if self.grouped_item_ids is None:
             self.grouped_item_ids = [self.item_id]
+        if self.quantity is None and self.count_type != "COUNT_ESTIMATED":
+            self.count_type = "COUNT_UNKNOWN"
+        elif self.quantity is not None and self.count_type == "COUNT_UNKNOWN":
+            self.count_type = "COUNT_ESTIMATED"
 
 
 @dataclass(slots=True)
@@ -365,6 +369,10 @@ class PendingFoodVisionItem:
             self.item_id = f"item_{self.index}"
         if self.grouped_item_ids is None:
             self.grouped_item_ids = [self.item_id]
+        if self.quantity is None and self.count_type != "COUNT_ESTIMATED":
+            self.count_type = "COUNT_UNKNOWN"
+        elif self.quantity is not None and self.count_type == "COUNT_UNKNOWN":
+            self.count_type = "COUNT_CONFIRMED" if self.user_modified else "COUNT_ESTIMATED"
 
 
 @dataclass(slots=True)
@@ -1031,6 +1039,22 @@ def _pluralize_food_name(name: str, quantity: int) -> str:
     return name
 
 
+_CONTINUOUS_FOOD_KEYWORDS = frozenset({
+    "сыр тертый", "тертый сыр", "тёртый сыр", "суп", "борщ", "щи", "бульон",
+    "каша", "овсянка", "гречка", "рис", "пюре", "творог", "сметана", "соус",
+    "майонез", "кетчуп", "масло", "варенье", "мед", "мёд", "джем", "паста",
+    "мука", "сахар", "соль", "рагу", "плов", "йогурт", "кефир", "молоко",
+    "вода", "чай", "кофе", "сок", "фарш",
+})
+
+
+def _is_continuous_food(name: str) -> bool:
+    if not name:
+        return False
+    norm = name.lower()
+    return any(kw in norm for kw in _CONTINUOUS_FOOD_KEYWORDS)
+
+
 def _populate_item_aggregation_fields(item: Any) -> None:
     vis = getattr(item, "visible_name", "") or ""
     norm = getattr(item, "normalized_name", "") or vis
@@ -1041,7 +1065,7 @@ def _populate_item_aggregation_fields(item: Any) -> None:
                 c = int(count_match.group("cnt"))
                 if 1 < c <= 100:
                     item.quantity = c
-                    item.count_type = "COUNT_CONFIRMED"
+                    item.count_type = "COUNT_ESTIMATED"
             except (ValueError, TypeError):
                 pass
     if getattr(item, "edible_yield_ratio", None) is None:
@@ -1100,16 +1124,24 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
             continue
 
         first = group[0]
-        total_quantity = sum(getattr(it, "quantity", 1) or 1 for it in group)
-        count_types = {getattr(it, "count_type", "COUNT_CONFIRMED") for it in group}
-        if len(group) > 1:
-            count_type = "COUNT_ESTIMATED" if "COUNT_ESTIMATED" in count_types else "COUNT_CONFIRMED"
+        canonical_name = key[0] if key else ""
+        continuous = _is_continuous_food(canonical_name) or _is_continuous_food(getattr(first, "visible_name", ""))
+
+        any_user_confirmed = any(
+            getattr(it, "count_type", "") == "COUNT_CONFIRMED" or getattr(it, "user_modified", False)
+            for it in group
+        )
+        has_quantities = any(getattr(it, "quantity", None) is not None for it in group)
+
+        if continuous and not any_user_confirmed:
+            total_quantity = None
+            count_type = "COUNT_UNKNOWN"
+        elif has_quantities:
+            total_quantity = sum(getattr(it, "quantity", None) or 1 for it in group)
+            count_type = "COUNT_CONFIRMED" if any_user_confirmed else "COUNT_ESTIMATED"
         else:
-            count_type = (
-                "COUNT_ESTIMATED"
-                if "COUNT_ESTIMATED" in count_types
-                else ("COUNT_UNKNOWN" if "COUNT_UNKNOWN" in count_types else "COUNT_CONFIRMED")
-            )
+            total_quantity = len(group)
+            count_type = "COUNT_CONFIRMED" if any_user_confirmed else "COUNT_ESTIMATED"
 
         has_min = any(it.estimated_grams_min is not None for it in group)
         total_min = sum(float(it.estimated_grams_min) for it in group if it.estimated_grams_min is not None) if has_min else None
@@ -1126,7 +1158,11 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
         if total_selected is None and total_min is not None and total_max is not None:
             total_selected = round((total_min + total_max) / 2.0, 1)
 
-        piece_grams = round(total_selected / total_quantity, 1) if total_selected and total_quantity > 0 else None
+        piece_grams = (
+            round(total_selected / total_quantity, 1)
+            if total_selected and total_quantity and total_quantity > 0
+            else None
+        )
         avg_confidence = round(sum(it.confidence for it in group) / len(group), 2)
         any_user_mod = any(getattr(it, "user_modified", False) for it in group)
         all_ids: list[str] = []
@@ -1136,8 +1172,9 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
                 all_ids.extend(ids)
             elif getattr(it, "item_id", None):
                 all_ids.append(it.item_id)
+        grouped_ids = list(dict.fromkeys(all_ids))
 
-        visible_name = _pluralize_food_name(first.visible_name, total_quantity)
+        visible_name = _pluralize_food_name(first.visible_name, total_quantity) if total_quantity and total_quantity > 1 else first.visible_name
         edible_ratio = _get_edible_yield_ratio(first.normalized_name or first.visible_name)
 
         if isinstance(first, PendingFoodVisionItem):
@@ -1159,7 +1196,7 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
                 count_type=count_type,
                 piece_grams=piece_grams,
                 edible_yield_ratio=edible_ratio,
-                grouped_item_ids=all_ids,
+                grouped_item_ids=grouped_ids,
             )
         else:
             agg_item = FoodVisionItem(
@@ -1177,13 +1214,103 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
                 count_type=count_type,
                 piece_grams=piece_grams,
                 edible_yield_ratio=edible_ratio,
-                grouped_item_ids=all_ids,
+                grouped_item_ids=grouped_ids,
             )
         aggregated_items.append(agg_item)
 
     if aggregated_items and isinstance(aggregated_items[0], PendingFoodVisionItem):
         return _reindex_pending_inventory_items(aggregated_items)
     return aggregated_items
+
+
+def _aggregate_multi_photo_batch(photo_item_lists: list[list[Any]]) -> list[Any]:
+    if not photo_item_lists:
+        return []
+    if len(photo_item_lists) == 1:
+        return _aggregate_identical_food_vision_items(photo_item_lists[0])
+
+    from gateway.nutrition.search import normalize_russian_food_query
+
+    per_photo_aggregated = [
+        _aggregate_identical_food_vision_items(items)
+        for items in photo_item_lists
+        if items
+    ]
+    if not per_photo_aggregated:
+        return []
+    if len(per_photo_aggregated) == 1:
+        return per_photo_aggregated[0]
+
+    combined_items: list[Any] = []
+
+    for photo_items in per_photo_aggregated:
+        for item in photo_items:
+            norm_name = _normalize_inventory_item_name(
+                getattr(item, "normalized_name", None) or getattr(item, "visible_name", ""),
+                fallback="",
+            )
+            canonical_stem = normalize_russian_food_query(norm_name)
+            prep = (getattr(item, "preparation", "") or "").strip().casefold()
+            edible_form = "in_shell" if _is_food_in_shell(norm_name) else "edible"
+
+            matched_idx = None
+            for idx, existing in enumerate(combined_items):
+                ex_norm = _normalize_inventory_item_name(
+                    getattr(existing, "normalized_name", None) or getattr(existing, "visible_name", ""),
+                    fallback="",
+                )
+                ex_stem = normalize_russian_food_query(ex_norm)
+                ex_prep = (getattr(existing, "preparation", "") or "").strip().casefold()
+                ex_form = "in_shell" if _is_food_in_shell(ex_norm) else "edible"
+
+                if (canonical_stem, prep, edible_form) == (ex_stem, ex_prep, ex_form):
+                    ex_qty = getattr(existing, "quantity", None)
+                    it_qty = getattr(item, "quantity", None)
+
+                    ex_min = existing.estimated_grams_min
+                    ex_max = existing.estimated_grams_max
+                    it_min = item.estimated_grams_min
+                    it_max = item.estimated_grams_max
+
+                    weights_overlap = False
+                    if ex_min is not None and ex_max is not None and it_min is not None and it_max is not None:
+                        if max(ex_min, it_min) <= min(ex_max, it_max) * 1.3:
+                            weights_overlap = True
+
+                    quantities_match = (
+                        (ex_qty is not None and it_qty is not None and ex_qty == it_qty)
+                        or (ex_qty is None and it_qty is None)
+                        or (ex_qty is not None and it_qty is None and weights_overlap)
+                        or (ex_qty is None and it_qty is not None and weights_overlap)
+                    )
+
+                    if quantities_match or weights_overlap:
+                        matched_idx = idx
+                        break
+
+            if matched_idx is not None:
+                existing = combined_items[matched_idx]
+                if item.confidence > existing.confidence:
+                    existing.visible_name = item.visible_name
+                    existing.normalized_name = item.normalized_name
+                    existing.confidence = item.confidence
+                    if item.quantity is not None:
+                        existing.quantity = item.quantity
+                        existing.count_type = item.count_type
+                    if item.estimated_grams_min is not None:
+                        existing.estimated_grams_min = item.estimated_grams_min
+                        existing.estimated_grams_max = item.estimated_grams_max
+                        if hasattr(existing, "selected_grams"):
+                            existing.selected_grams = getattr(item, "selected_grams", None)
+                ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
+                new_ids = list(getattr(item, "grouped_item_ids", []) or [])
+                existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
+            else:
+                combined_items.append(item)
+
+    if combined_items and isinstance(combined_items[0], PendingFoodVisionItem):
+        return _reindex_pending_inventory_items(combined_items)
+    return combined_items
 
 
 def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, str]:
@@ -1239,7 +1366,7 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     if count_type_val in ("COUNT_CONFIRMED", "COUNT_ESTIMATED", "COUNT_UNKNOWN"):
         count_type = str(count_type_val)
     else:
-        count_type = "COUNT_CONFIRMED" if quantity is not None else "COUNT_UNKNOWN"
+        count_type = "COUNT_ESTIMATED" if quantity is not None else "COUNT_UNKNOWN"
 
     piece_grams = _parse_optional_grams(raw_item.get("piece_grams"))
 
@@ -1250,7 +1377,7 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
                 c = int(count_match.group("cnt"))
                 if 1 < c <= 100:
                     quantity = c
-                    count_type = "COUNT_CONFIRMED"
+                    count_type = "COUNT_ESTIMATED"
             except (ValueError, TypeError):
                 pass
 
@@ -2009,7 +2136,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             item_id=str(item_payload.get("item_id") or f"item_{position}"),
             suppressed_by_item_id=str(item_payload.get("suppressed_by_item_id")) if item_payload.get("suppressed_by_item_id") else None,
             quantity=int(item_payload["quantity"]) if item_payload.get("quantity") is not None else None,
-            count_type=str(item_payload.get("count_type") or "COUNT_CONFIRMED"),
+            count_type=str(item_payload.get("count_type") or ("COUNT_CONFIRMED" if item_payload.get("user_modified") else ("COUNT_ESTIMATED" if item_payload.get("quantity") is not None else "COUNT_UNKNOWN"))),
             piece_grams=_to_float(item_payload.get("piece_grams")),
             edible_yield_ratio=_to_float(item_payload.get("edible_yield_ratio")),
             grouped_item_ids=list(item_payload.get("grouped_item_ids") or []),
@@ -3238,7 +3365,8 @@ class HealBiteNutritionDiary:
         self,
         *,
         user_id: int,
-        image_path: str,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
         user_text: str = "",
         source: str = "photo",
         image_ref: str | None = None,
@@ -3246,14 +3374,19 @@ class HealBiteNutritionDiary:
     ) -> NutritionDiaryOutcome:
         from tools.vision_tools import vision_analyze_tool
 
+        paths = list(image_paths) if image_paths else ([image_path] if image_path else [])
+        if not paths:
+            return NutritionDiaryOutcome(available=False, validation_status="MISSING_IMAGE")
+
         prompt = _VISION_PROMPT
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
 
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
+        primary_path = paths[0]
         try:
             result_json = await asyncio.wait_for(
-                vision_analyze_tool(image_url=image_path, user_prompt=prompt),
+                vision_analyze_tool(image_url=primary_path, user_prompt=prompt),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:

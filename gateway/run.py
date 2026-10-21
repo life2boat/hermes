@@ -13300,6 +13300,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             outcome = await diary.analyze_and_maybe_log(
                 user_id=int(source.user_id),
                 image_path=image_paths[0],
+                image_paths=image_paths,
                 user_text=user_text,
                 source="vision" if event.message_type == MessageType.PHOTO else "photo",
                 image_ref=self._healbite_image_ref(source, event),

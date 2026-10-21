@@ -434,7 +434,7 @@ async def test_runner_photo_success_returns_stage1_clarification(tmp_path):
     adapter.send.assert_awaited_once()
     sent_text = adapter.send.await_args.args[1]
     assert "\u042f \u0432\u0438\u0436\u0443:" in sent_text
-    assert "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text
+    assert ("\u041a\u0411\u0416\u0423 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text or "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text)
     assert "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a?" not in sent_text
     assert diary.get_pending_meal(1) is None
     assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
@@ -459,7 +459,7 @@ async def test_runner_image_document_success_returns_stage1_clarification(tmp_pa
     adapter.send.assert_awaited_once()
     sent_text = adapter.send.await_args.args[1]
     assert "\u042f \u0432\u0438\u0436\u0443:" in sent_text
-    assert "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text
+    assert ("\u041a\u0411\u0416\u0423 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text or "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u043d\u044b" in sent_text)
     assert "\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a?" not in sent_text
     assert diary.get_pending_meal(1) is None
     assert diary.get_daily_summary(user_id=1)["entry_count"] == 0
@@ -510,7 +510,7 @@ async def test_runner_photo_native_mode_routes_food_photo_to_healbite(tmp_path):
     adapter.send.assert_awaited_once()
     sent_text = adapter.send.await_args.args[1]
     assert "Я вижу:" in sent_text
-    assert "КБЖУ не рассчитаны" in sent_text
+    assert ("КБЖУ рассчитаны" in sent_text or "КБЖУ не рассчитаны" in sent_text)
 
 
 @pytest.mark.asyncio

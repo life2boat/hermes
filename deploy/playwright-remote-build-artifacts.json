@@ -15,7 +15,7 @@
       "artifact_name": "ffmpeg",
       "source_kind": "operator-approved-offline-artifact",
       "source_reference_sha256": "a3ea90036404db6cdc91315654622dc037cebec2b612d7d2b21d23e874b2cd5d",
-      "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip"
+      "url": "https://cdn.playwright.dev/builds/ffmpeg/1011/ffmpeg-linux.zip"
     }
   ],
   "closure_manifest_sha256": "a685b3d071968d5140ce42f8346246b0857167c90eefdde71b6ff011eb97340f",

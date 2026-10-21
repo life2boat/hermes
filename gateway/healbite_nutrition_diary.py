@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -403,6 +404,7 @@ class PendingFoodVisionInventory:
     needs_user_confirmation: bool = False
     calculation_snapshot: dict[str, Any] | None = None
     household_id: str | None = None
+    photo_count: int = 1
 
 
 @dataclass(slots=True)
@@ -1317,6 +1319,138 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
     return aggregated_items
 
 
+
+
+def _reconcile_multi_photo_inventories(
+    photo_item_lists: list[list[Any]],
+    *,
+    user_text: str = "",
+) -> tuple[list[Any], list[str], bool]:
+    """Reconcile items across multiple photos in an album with evidence classification.
+
+    Returns:
+        (reconciled_items, warnings, requires_confirmation)
+    """
+    from gateway.nutrition.search import normalize_russian_food_query
+
+    per_photo_aggregated = [
+        _aggregate_identical_food_vision_items(items)
+        for items in photo_item_lists
+        if items
+    ]
+    if not per_photo_aggregated:
+        return [], [], False
+    if len(per_photo_aggregated) == 1:
+        return per_photo_aggregated[0], [], False
+
+    user_note = (user_text or "").casefold()
+    same_portion_hints = {
+        "одна порция", "та же порция", "то же блюдо", "с разных ракурсов",
+        "ракурс сбоку", "вид сверху", "та же тарелка", "одна тарелка",
+        "same_portion", "тот же", "с разных сторон",
+    }
+    distinct_portion_hints = {
+        "разные порции", "две порции", "вторая порция", "еще одна",
+        "две тарелки", "разные блюда", "distinct_portions", "для двоих",
+    }
+
+    user_indicates_same = any(h in user_note for h in same_portion_hints)
+    user_indicates_distinct = any(h in user_note for h in distinct_portion_hints)
+
+    combined_items: list[Any] = []
+    warnings: list[str] = []
+    requires_confirmation = False
+
+    for photo_idx, photo_items in enumerate(per_photo_aggregated):
+        for item in photo_items:
+            norm_name = _normalize_inventory_item_name(
+                getattr(item, "normalized_name", None) or getattr(item, "visible_name", ""),
+                fallback="",
+            )
+            canonical_stem = normalize_russian_food_query(norm_name)
+            prep = (getattr(item, "preparation", "") or "").strip().casefold()
+            edible_form = "in_shell" if _is_food_in_shell(norm_name) else "edible"
+
+            # Check if this item is a recipe/packaging/receipt artifact (Scenario H)
+            if any(artifact in norm_name.casefold() for artifact in ["упаковка", "рецепт", "этикетка", "чек", "состав на упаковке"]):
+                logger.info("[HealBite][album_reconcile_skip_packaging] item=%s", norm_name)
+                continue
+
+            matched_idx = None
+            for idx, existing in enumerate(combined_items):
+                ex_norm = _normalize_inventory_item_name(
+                    getattr(existing, "normalized_name", None) or getattr(existing, "visible_name", ""),
+                    fallback="",
+                )
+                ex_stem = normalize_russian_food_query(ex_norm)
+                ex_prep = (getattr(existing, "preparation", "") or "").strip().casefold()
+                ex_form = "in_shell" if _is_food_in_shell(ex_norm) else "edible"
+
+                if (canonical_stem, prep, edible_form) == (ex_stem, ex_prep, ex_form):
+                    matched_idx = idx
+                    break
+
+            if matched_idx is None:
+                # Distinct dish across photos (Scenario D) -> preserve
+                combined_items.append(item)
+            else:
+                existing = combined_items[matched_idx]
+                item_note = (getattr(item, "uncertainty", "") or "").casefold() + " " + (getattr(item, "preparation", "") or "").casefold()
+
+                # Determine relationship
+                is_same = user_indicates_same or "same_portion" in item_note or "ракурс" in item_note
+                is_distinct = user_indicates_distinct or "distinct_portions" in item_note or "вторая порция" in item_note
+
+                if not is_same and not is_distinct:
+                    # Ambiguous overlap (Scenario E)
+                    requires_confirmation = True
+                    ambiguity_prompt = "На фотографиях одна и та же порция с разных ракурсов или две разные порции?"
+                    if ambiguity_prompt not in warnings:
+                        warnings.append(ambiguity_prompt)
+                    # Keep existing with note, do not double count automatically
+                    if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
+                        existing.visible_name = item.visible_name
+                        existing.confidence = item.confidence
+                    ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
+                    new_ids = list(getattr(item, "grouped_item_ids", []) or [])
+                    existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
+                elif is_same:
+                    # SAME_PORTION confirmed (Scenario B) -> deduplicate
+                    if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
+                        existing.visible_name = item.visible_name
+                        existing.normalized_name = item.normalized_name
+                        existing.confidence = item.confidence
+                        if getattr(item, "quantity", None) is not None:
+                            existing.quantity = item.quantity
+                            existing.count_type = getattr(item, "count_type", "COUNT_CONFIRMED")
+                        if getattr(item, "estimated_grams_min", None) is not None:
+                            existing.estimated_grams_min = item.estimated_grams_min
+                            existing.estimated_grams_max = item.estimated_grams_max
+                            if hasattr(existing, "selected_grams"):
+                                existing.selected_grams = getattr(item, "selected_grams", None)
+                    ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
+                    new_ids = list(getattr(item, "grouped_item_ids", []) or [])
+                    existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
+                else:
+                    # DISTINCT_PORTIONS confirmed (Scenario C) -> sum
+                    ex_qty = getattr(existing, "quantity", 1) or 1
+                    it_qty = getattr(item, "quantity", 1) or 1
+                    existing.quantity = ex_qty + it_qty
+                    existing.count_type = "COUNT_ESTIMATED"
+                    if existing.estimated_grams_min is not None and item.estimated_grams_min is not None:
+                        existing.estimated_grams_min = round(float(existing.estimated_grams_min) + float(item.estimated_grams_min), 1)
+                    if existing.estimated_grams_max is not None and item.estimated_grams_max is not None:
+                        existing.estimated_grams_max = round(float(existing.estimated_grams_max) + float(item.estimated_grams_max), 1)
+                    if hasattr(existing, "selected_grams") and existing.selected_grams is not None and getattr(item, "selected_grams", None) is not None:
+                        existing.selected_grams = round(float(existing.selected_grams) + float(item.selected_grams), 1)
+                    ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
+                    new_ids = list(getattr(item, "grouped_item_ids", []) or [])
+                    existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
+
+    if combined_items and isinstance(combined_items[0], PendingFoodVisionItem):
+        combined_items = _reindex_pending_inventory_items(combined_items)
+    return combined_items, warnings, requires_confirmation
+
 def _aggregate_multi_photo_batch(photo_item_lists: list[list[Any]]) -> list[Any]:
     if not photo_item_lists:
         return []
@@ -2130,6 +2264,7 @@ def _pending_inventory_from_food_vision(
     ttl: timedelta | None = None,
     inventory_id: str | None = None,
     household_id: str | None = None,
+    photo_count: int = 1,
 ) -> PendingFoodVisionInventory:
     created_at = _normalize_timestamp(now)
     expires_at = created_at + (ttl if ttl is not None else PENDING_MEAL_TTL)
@@ -2182,6 +2317,7 @@ def _pending_inventory_from_food_vision(
         created_at=created_at,
         expires_at=expires_at,
         household_id=household_id,
+        photo_count=max(1, int(photo_count)),
     )
     res.calculation_snapshot = _build_inventory_calculation_snapshot(res)
     return res
@@ -2222,6 +2358,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "occurred_at": _sqlite_timestamp(payload.occurred_at),
         "calculation_snapshot": payload.calculation_snapshot,
         "household_id": payload.household_id,
+        "photo_count": getattr(payload, "photo_count", 1) or 1,
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -2276,6 +2413,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         expires_at=expires_at,
         calculation_snapshot=payload.get("calculation_snapshot"),
         household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
+        photo_count=int(payload.get("photo_count") or 1),
     )
 
 
@@ -2316,13 +2454,21 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         expires_at=payload.expires_at,
         calculation_snapshot=dict(payload.calculation_snapshot) if payload.calculation_snapshot else None,
         household_id=payload.household_id,
+        photo_count=getattr(payload, "photo_count", 1) or 1,
     )
 
 
-def _pending_inventory_notice_lines(notice: str | None) -> list[str]:
-    if not notice:
-        return ["КБЖУ не рассчитаны окончательно: проверьте состав перед сохранением."]
-    return [notice]
+def _pending_inventory_notice_lines(
+    notice: str | None,
+    *,
+    has_any_nutrition: bool = False,
+    has_unmapped_component: bool = False,
+) -> list[str]:
+    if notice:
+        return [notice]
+    if has_any_nutrition and not has_unmapped_component:
+        return ["КБЖУ рассчитаны приблизительно. Проверьте количество и вес перед сохранением."]
+    return ["КБЖУ не рассчитаны окончательно: проверьте состав перед сохранением."]
 
 
 def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingFoodVisionInventory, *, notice: str | None = None) -> str:
@@ -2331,7 +2477,11 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         pending_inventory.calculation_snapshot = _build_inventory_calculation_snapshot(pending_inventory)
     snapshot = pending_inventory.calculation_snapshot
 
-    lines = ["Я вижу:", ""]
+    photo_count_val = getattr(pending_inventory, "photo_count", 1) or 1
+    if photo_count_val > 1:
+        lines = [f"Я вижу на {photo_count_val} фотографиях:", ""]
+    else:
+        lines = ["Я вижу:", ""]
     has_unmapped_component = False
     all_weights_present = True
     total_calories = 0.0
@@ -2514,7 +2664,7 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             "Можно исправить название или сохранить без КБЖУ.",
         ])
 
-    notice_lines = _pending_inventory_notice_lines(notice)
+    notice_lines = _pending_inventory_notice_lines(notice, has_any_nutrition=has_any_nutrition, has_unmapped_component=has_unmapped_component)
     if notice_lines:
         lines.extend(["", *notice_lines])
 
@@ -3218,7 +3368,7 @@ def _parse_single_pending_inventory_action(text: str) -> PendingInventoryActionP
         if action_kind in {"replace", "add", "weight"} and grams is None:
             return PendingInventoryActionParseResult(ok=False, error="\u0412\u0435\u0441 \u0434\u043e\u043b\u0436\u0435\u043d \u0431\u044b\u0442\u044c \u0431\u043e\u043b\u044c\u0448\u0435 0 \u0433 \u0438 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2000 \u0433.")
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind=action_kind, index=index, name=name, grams=grams))
-    return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u2705 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c, \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
+    return PendingInventoryActionParseResult(ok=False, error="Не понял команду. Используйте: ✅ Сохранить, Да, Нет, Исправить <номер>: <название>, <вес> г, Добавить: <название>, <вес> г, Удалить <номер> или Вес <номер>: <вес> г.")
 
 
 def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
@@ -3586,98 +3736,241 @@ class HealBiteNutritionDiary:
         if not paths:
             return NutritionDiaryOutcome(available=False, validation_status="MISSING_IMAGE")
 
+        max_album_images = int(os.getenv("HEALBITE_MAX_ALBUM_IMAGES", "5"))
+        if len(paths) > max_album_images:
+            logger.info(
+                "[HealBite][album_limit_exceeded] paths_count=%d max_album=%d",
+                len(paths),
+                max_album_images,
+            )
+            return NutritionDiaryOutcome(
+                available=True,
+                clarification_text=f"В одном приёме пищи поддерживается до {max_album_images} фотографий. Пожалуйста, отправьте альбом не более чем из {max_album_images} фото.",
+                validation_status="ALBUM_LIMIT_EXCEEDED",
+            )
+        photo_count = len(paths)
+
         prompt = _VISION_PROMPT
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
 
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
-        primary_path = paths[0]
         max_attempts = 2
-        result: dict[str, Any] = {}
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result_json = await asyncio.wait_for(
-                    vision_analyze_tool(image_url=primary_path, user_prompt=prompt),
-                    timeout=timeout_s,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs", timeout_s)
-                logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_timeout")
-                logger.info("[HealBite][vision_pending_staged] staged=false")
-                return NutritionDiaryOutcome(
-                    available=False,
-                    validation_status="PROVIDER_TIMEOUT",
-                )
-            except Exception as exc:
-                logger.warning("[HealBite][vision_error] vision_analyze_tool error=%s", exc.__class__.__name__)
-                logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_exception")
-                logger.info("[HealBite][vision_pending_staged] staged=false")
-                return NutritionDiaryOutcome(
-                    available=False,
-                    validation_status="PROVIDER_ERROR",
-                )
 
-            result = safe_json_loads(result_json, {})
-            if isinstance(result, dict) and not result.get("success"):
-                diag = result.get("diagnostic") or {}
-                if attempt < max_attempts and diag.get("retryable") is True:
-                    logger.warning(
-                        "[HealBite][vision_retry] Transient provider failure (%s); retrying attempt %d/%d",
-                        diag.get("category"),
-                        attempt + 1,
-                        max_attempts,
+        async def _analyze_one_path(path: str) -> tuple[dict[str, Any], str]:
+            """Analyze a single image path with retry. Returns (result_dict, raw_analysis)."""
+            result: dict[str, Any] = {}
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    result_json = await asyncio.wait_for(
+                        vision_analyze_tool(image_url=path, user_prompt=prompt),
+                        timeout=timeout_s,
                     )
-                    await asyncio.sleep(0.5)
-                    continue
-            break
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs path_index=%s",
+                        timeout_s,
+                        paths.index(path) if path in paths else -1,
+                    )
+                    return {"success": False, "_failure_reason": "PROVIDER_TIMEOUT"}, ""
+                except Exception as exc:
+                    logger.warning(
+                        "[HealBite][vision_error] vision_analyze_tool error=%s path_index=%s",
+                        exc.__class__.__name__,
+                        paths.index(path) if path in paths else -1,
+                    )
+                    return {"success": False, "_failure_reason": "PROVIDER_ERROR"}, ""
 
-        if not isinstance(result, dict) or not result.get("success"):
-            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_result_non_success")
-            logger.info("[HealBite][vision_pending_staged] staged=false")
-            return NutritionDiaryOutcome(
-                available=False,
-                raw_analysis=str(result.get("analysis", "") if isinstance(result, dict) else ""),
-                validation_status="PROVIDER_ERROR",
+                result = safe_json_loads(result_json, {})
+                if isinstance(result, dict) and not result.get("success"):
+                    diag = result.get("diagnostic") or {}
+                    if attempt < max_attempts and diag.get("retryable") is True:
+                        logger.warning(
+                            "[HealBite][vision_retry] Transient provider failure (%s); retrying attempt %d/%d",
+                            diag.get("category"),
+                            attempt + 1,
+                            max_attempts,
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
+                break
+            raw = str(result.get("analysis") or "").strip() if isinstance(result, dict) else ""
+            return result, raw
+
+        # Analyze all photos sequentially (shared deadline is handled by the
+        # outer photo_turn_timeout_s in gateway/run.py; per-image retries use
+        # the inner timeout_s budget).
+        logger.info(
+            "[HealBite][album_analysis_start] photo_count=%d max_album=%d",
+            photo_count,
+            max_album_images,
+        )
+        per_photo_inventories: list[FoodVisionInventory] = []
+        all_raw_analyses: list[str] = []
+        last_failure_reason: str = "PROVIDER_ERROR"
+        at_least_one_success = False
+        any_non_food = False
+
+        timeout_budget_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0")) - 2.0
+        deadline = time.monotonic() + timeout_budget_s
+
+        for photo_index, path in enumerate(paths):
+            remaining_s = deadline - time.monotonic()
+            if remaining_s < 2.0 and photo_index > 0:
+                logger.warning(
+                    "[HealBite][album_deadline_budget_exceeded] photo_index=%d remaining=%.1fs",
+                    photo_index,
+                    remaining_s,
+                )
+                last_failure_reason = "PROVIDER_TIMEOUT"
+                break
+            result, raw_analysis = await _analyze_one_path(path)
+
+            if not isinstance(result, dict) or not result.get("success"):
+                failure_reason = result.get("_failure_reason") if isinstance(result, dict) else "PROVIDER_ERROR"
+                last_failure_reason = failure_reason or "PROVIDER_ERROR"
+                logger.info(
+                    "[HealBite][album_photo_failed] photo_index=%d reason=%s",
+                    photo_index,
+                    last_failure_reason,
+                )
+                continue
+
+            all_raw_analyses.append(raw_analysis)
+            validation = validate_food_vision_inventory(raw_analysis)
+
+            if validation.status == "NON_FOOD":
+                logger.info(
+                    "[HealBite][album_photo_non_food] photo_index=%d",
+                    photo_index,
+                )
+                any_non_food = True
+                continue
+
+            if validation.inventory is None:
+                logger.info(
+                    "[HealBite][album_photo_invalid] photo_index=%d reason=%s",
+                    photo_index,
+                    validation.reason or "structured_json_missing",
+                )
+                continue
+
+            at_least_one_success = True
+            per_photo_inventories.append(validation.inventory)
+            logger.info(
+                "[HealBite][album_photo_ok] photo_index=%d items=%d confidence_bucket=%s",
+                photo_index,
+                len(validation.inventory.items),
+                _confidence_bucket(validation.inventory.overall_confidence),
             )
 
-        raw_analysis = str(result.get("analysis") or "").strip()
-        validation = validate_food_vision_inventory(raw_analysis)
-        if validation.status == "NON_FOOD":
+        combined_raw_analysis = "\n---\n".join(all_raw_analyses)
+
+        # ---- If all photos returned NON_FOOD ----
+        if not per_photo_inventories and any_non_food:
             logger.info("[HealBite][vision_parse_ok] ok=true is_food=false reason=not_food")
             logger.info("[HealBite][vision_pending_staged] staged=false")
             return NutritionDiaryOutcome(
                 available=False,
-                raw_analysis=raw_analysis,
+                raw_analysis=combined_raw_analysis,
                 validation_status="NON_FOOD",
             )
 
-        if validation.inventory is None:
-            logger.info("[HealBite][vision_parse_ok] ok=false reason=%s", validation.reason or "structured_json_missing")
-            logger.info("[HealBite][vision_pending_staged] staged=false")
-            return NutritionDiaryOutcome(
-                available=False,
-                raw_analysis=raw_analysis,
-                validation_status=validation.status,
+        # ---- Handle total failure ----
+        if not at_least_one_success:
+            if photo_count == 1:
+                # Single-photo failure: preserve existing exact validation status
+                if last_failure_reason == "PROVIDER_TIMEOUT":
+                    logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_timeout")
+                    logger.info("[HealBite][vision_pending_staged] staged=false")
+                    return NutritionDiaryOutcome(available=False, validation_status="PROVIDER_TIMEOUT")
+                logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_result_non_success")
+                logger.info("[HealBite][vision_pending_staged] staged=false")
+                return NutritionDiaryOutcome(
+                    available=False,
+                    raw_analysis=combined_raw_analysis,
+                    validation_status="PROVIDER_ERROR",
+                )
+            else:
+                # Multi-photo: all photos failed
+                logger.info(
+                    "[HealBite][vision_parse_ok] ok=false reason=all_album_photos_failed photo_count=%d",
+                    photo_count,
+                )
+                logger.info("[HealBite][vision_pending_staged] staged=false")
+                return NutritionDiaryOutcome(
+                    available=False,
+                    raw_analysis=combined_raw_analysis,
+                    validation_status="PROVIDER_ERROR",
+                )
+
+        # ---- Merge per-photo inventories ----
+        is_partial_album = len(per_photo_inventories) < photo_count
+        if is_partial_album:
+            logger.warning(
+                "[HealBite][partial_album_detected] ok_count=%d total=%d",
+                len(per_photo_inventories),
+                photo_count,
+            )
+
+        if len(per_photo_inventories) == 1 and not is_partial_album:
+            merged_inventory = per_photo_inventories[0]
+        else:
+            # Reconcile across photos
+            per_photo_item_lists = [inv.items for inv in per_photo_inventories]
+            merged_items, cross_warnings, requires_confirm = _reconcile_multi_photo_inventories(
+                per_photo_item_lists,
+                user_text=user_text,
+            )
+            avg_confidence = round(
+                sum(inv.overall_confidence for inv in per_photo_inventories) / len(per_photo_inventories),
+                3,
+            )
+            merged_warnings: list[str] = []
+            if is_partial_album:
+                merged_warnings.append(
+                    f"⚠️ Удалось распознать {len(per_photo_inventories)} из {photo_count} фото. Проверьте состав перед сохранением."
+                )
+            for inv in per_photo_inventories:
+                merged_warnings.extend(inv.warnings)
+            merged_warnings.extend(cross_warnings)
+            merged_warnings = list(dict.fromkeys(merged_warnings))
+            needs_confirm = requires_confirm or is_partial_album or any(inv.needs_user_confirmation for inv in per_photo_inventories)
+
+            merged_inventory = FoodVisionInventory(
+                schema_version=per_photo_inventories[0].schema_version,
+                items=merged_items,
+                overall_confidence=avg_confidence,
+                needs_user_confirmation=needs_confirm,
+                warnings=merged_warnings,
+            )
+            logger.info(
+                "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s",
+                len(per_photo_inventories),
+                len(merged_items),
+                avg_confidence,
+                is_partial_album,
             )
 
         pending_inventory = self.stage_pending_inventory(
             user_id=user_id,
             source=source,
-            inventory=validation.inventory,
+            inventory=merged_inventory,
             image_ref=image_ref,
             occurred_at=occurred_at,
+            photo_count=photo_count,
         )
         logger.info(
-            "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=%s",
-            _confidence_bucket(validation.inventory.overall_confidence),
-            validation.status,
+            "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=VALID photo_count=%d",
+            _confidence_bucket(merged_inventory.overall_confidence),
+            photo_count,
         )
         logger.info("[HealBite][vision_pending_staged] staged=true kind=inventory")
         return NutritionDiaryOutcome(
             available=True,
-            raw_analysis=raw_analysis,
+            raw_analysis=combined_raw_analysis,
             clarification_text=format_food_vision_inventory_reply(pending_inventory),
-            validation_status=validation.status,
+            validation_status="VALID",
             pending_inventory=pending_inventory,
         )
 
@@ -3792,6 +4085,7 @@ class HealBiteNutritionDiary:
         expires_at: datetime | None = None,
         inventory_id: str | None = None,
         household_id: str | None = None,
+        photo_count: int = 1,
     ) -> PendingFoodVisionInventory:
         payload = _pending_inventory_from_food_vision(
             int(user_id),
@@ -3802,6 +4096,7 @@ class HealBiteNutritionDiary:
             ttl=ttl,
             inventory_id=inventory_id,
             household_id=household_id,
+            photo_count=photo_count,
         )
         if expires_at is not None:
             payload.expires_at = _normalize_timestamp(expires_at)

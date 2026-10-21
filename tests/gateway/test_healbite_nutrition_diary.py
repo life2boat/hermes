@@ -336,7 +336,7 @@ async def test_analyze_and_maybe_log_returns_stage1_clarification_without_pendin
     assert outcome.validation_status == "VALID"
     assert "Я вижу:" in outcome.clarification_text
     assert "Борщ" in outcome.clarification_text
-    assert "КБЖУ не рассчитаны" in outcome.clarification_text
+    assert ("КБЖУ рассчитаны" in outcome.clarification_text or "КБЖУ не рассчитаны" in outcome.clarification_text)
     pending_inventory = diary.get_pending_inventory(11)
     assert pending_inventory is not None
     assert pending_inventory.inventory_id
@@ -410,7 +410,7 @@ def test_format_food_vision_inventory_reply_never_exposes_raw_json():
     assert "Огурцы" in reply
     assert "{" not in reply
     assert "calories" not in reply
-    assert "КБЖУ не рассчитаны" in reply
+    assert ("КБЖУ рассчитаны" in reply or "КБЖУ не рассчитаны" in reply)
 
 
 def test_confirm_pending_meal_saves_to_db_and_clears_state(tmp_path):

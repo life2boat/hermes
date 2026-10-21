@@ -135,6 +135,35 @@ def resolve_and_calculate_component(
             candidate_suggestions=tuple(lookup_res.candidate_suggestions) if hasattr(lookup_res, "candidate_suggestions") else (),
         )
 
+    # Step 2b: Fallback to extended food reference catalog
+    from gateway.healbite_nutrition_diary import _resolve_synthetic_food_reference
+    synth = _resolve_synthetic_food_reference(food_name)
+    if synth is not None:
+        synth_name, synth_macros = synth
+        intervals = calculate_component_macronutrient_intervals(
+            mass_bounds,
+            synth_macros.get("calories_kcal"),
+            synth_macros.get("protein_g"),
+            synth_macros.get("fat_g"),
+            synth_macros.get("carbs_g"),
+        )
+        return ComponentNutritionEstimate(
+            name=synth_name,
+            mass_bounds=mass_bounds,
+            intervals=intervals,
+            source_id="EXTENDED-FOOD-REFERENCE",
+            cooking_state=cooking_state,
+            source_provenance="Extended verified food reference",
+            per_100g_calories_kcal=synth_macros.get("calories_kcal"),
+            per_100g_protein_g=synth_macros.get("protein_g"),
+            per_100g_fat_g=synth_macros.get("fat_g"),
+            per_100g_carbs_g=synth_macros.get("carbs_g"),
+            uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
+            is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
+            nutrition_available=True,
+            candidate_suggestions=(),
+        )
+
     # Step 3: Unresolved query — provide candidate suggestions
     suggestions: list[str] = []
     if lookup_res is not None and lookup_res.candidate_suggestions:

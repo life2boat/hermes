@@ -399,3 +399,240 @@ def test_wrong_expected_image_identity_fails(tmp_path: Path) -> None:
     path, _image_id = _docker_archive(tmp_path, [_tar_bytes([("safe", b"safe")])])
     with pytest.raises(scanner.ImageScanError, match="IMAGE_IDENTITY_MISMATCH"):
         _scan(path, "sha256:" + "f" * 64)
+
+import gzip
+
+
+def _oci_archive(
+    tmp_path: Path,
+    layers: list[bytes],
+    *,
+    revision: str = REVISION,
+    compressed_layers: bool = True,
+    tamper_index_digest: bool = False,
+    tamper_index_size: bool = False,
+    tamper_manifest_digest: bool = False,
+    tamper_config_digest: bool = False,
+    tamper_layer_blob: bool = False,
+    missing_layer: bool = False,
+    secret_in_layer: bytes | None = None,
+    include_docker_manifest: bool = False,
+    file_name: str = "image.tar",
+) -> tuple[Path, str, str, str]:
+    """Build an OCI layout tar archive.
+    Returns: (archive_path, config_digest, manifest_digest, index_digest)
+    """
+    processed_layers: list[bytes] = []
+    layer_diff_ids: list[str] = []
+    layer_descriptors: list[dict[str, Any]] = []
+    layer_blobs: dict[str, bytes] = {}
+
+    for idx, raw_layer in enumerate(layers):
+        if idx == 0 and secret_in_layer is not None:
+            raw_layer = _tar_bytes([("opt/app/secret.env", secret_in_layer)])
+        diff_id = "sha256:" + hashlib.sha256(raw_layer).hexdigest()
+        layer_diff_ids.append(diff_id)
+
+        if compressed_layers:
+            blob = gzip.compress(raw_layer)
+            media_type = "application/vnd.oci.image.layer.v1.tar+gzip"
+        else:
+            blob = raw_layer
+            media_type = "application/vnd.oci.image.layer.v1.tar"
+
+        if tamper_layer_blob and idx == 0:
+            blob = b"tampered corrupt layer content"
+
+        blob_hash = hashlib.sha256(blob).hexdigest()
+        blob_digest = "sha256:" + blob_hash
+        layer_blobs[blob_hash] = blob
+        layer_descriptors.append({
+            "mediaType": media_type,
+            "digest": blob_digest,
+            "size": len(blob),
+        })
+
+    config = {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+            "Env": ["PATH=/usr/bin"],
+            "Labels": {"org.opencontainers.image.revision": revision},
+        },
+        "rootfs": {"type": "layers", "diff_ids": layer_diff_ids},
+    }
+    config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    config_hash = hashlib.sha256(config_bytes).hexdigest()
+    config_digest = "sha256:" + config_hash
+
+    cfg_desc_digest = "sha256:" + ("0" * 64) if tamper_config_digest else config_digest
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": cfg_desc_digest,
+            "size": len(config_bytes),
+        },
+        "layers": layer_descriptors,
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest_digest = "sha256:" + manifest_hash
+
+    man_desc_digest = "sha256:" + ("0" * 64) if tamper_manifest_digest else manifest_digest
+    index_desc_digest = "sha256:" + ("e" * 64) if tamper_index_digest else man_desc_digest
+    index_desc_size = len(manifest_bytes) + 100 if tamper_index_size else len(manifest_bytes)
+    index = {
+        "schemaVersion": 2,
+        "manifests": [
+            {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": index_desc_digest,
+                "size": index_desc_size,
+            }
+        ],
+    }
+    index_bytes = json.dumps(index, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    index_hash = hashlib.sha256(index_bytes).hexdigest()
+    index_digest = "sha256:" + index_hash
+
+    oci_layout_bytes = json.dumps({"imageLayoutVersion": "1.0.0"}).encode("utf-8")
+
+    archive_path = tmp_path / file_name
+    with tarfile.open(archive_path, mode="w") as outer:
+        _add_bytes(outer, "oci-layout", oci_layout_bytes)
+        _add_bytes(outer, "index.json", index_bytes)
+        _add_bytes(outer, f"blobs/sha256/{config_hash}", config_bytes)
+        _add_bytes(outer, f"blobs/sha256/{manifest_hash}", manifest_bytes)
+        for b_hash, b_data in layer_blobs.items():
+            if not missing_layer:
+                _add_bytes(outer, f"blobs/sha256/{b_hash}", b_data)
+
+        if include_docker_manifest:
+            layer_paths = [f"blobs/sha256/{h}" for h in layer_blobs]
+            docker_man = [{"Config": f"blobs/sha256/{config_hash}", "Layers": layer_paths}]
+            _add_bytes(outer, "manifest.json", json.dumps(docker_man).encode("utf-8"))
+
+    return archive_path, config_digest, manifest_digest, index_digest
+
+
+def test_oci_archive_passes(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/clean.txt", b"clean payload")])
+    path, config_digest, manifest_digest, index_digest = _oci_archive(
+        tmp_path, [layer_data], compressed_layers=True
+    )
+    # 1. Scanned with config digest as expected identity -> PASS
+    res1 = _scan(path, config_digest)
+    c1 = res1.contract()
+    assert c1["STATUS"] == "PASS"
+    assert c1["IMAGE_SECRET_FINDINGS"] == 0
+    assert c1["CONFIG_DIGEST"] == config_digest
+    assert len(c1["LAYER_DIGESTS"]) == 1
+
+    # 2. Scanned with manifest digest as expected identity -> PASS
+    res2 = _scan(path, manifest_digest)
+    c2 = res2.contract()
+    assert c2["STATUS"] == "PASS"
+    assert c2["IMAGE_SECRET_FINDINGS"] == 0
+
+
+def test_containerd_archive_passes(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/tool.sh", b"#!/bin/sh\necho ok")])
+    path, config_digest, manifest_digest, _ = _oci_archive(
+        tmp_path, [layer_data], include_docker_manifest=True, file_name="containerd.tar"
+    )
+    res = _scan(path, manifest_digest)
+    contract = res.contract()
+    assert contract["STATUS"] == "PASS"
+    assert contract["IMAGE_SECRET_FINDINGS"] == 0
+
+
+def test_oci_archive_uncompressed_layers_passes(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/plain.txt", b"plain uncompressed layer")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], compressed_layers=False, file_name="uncompressed.tar"
+    )
+    res = _scan(path, config_digest)
+    assert res.contract()["STATUS"] == "PASS"
+
+
+def test_oci_archive_tampered_index_digest_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], tamper_index_digest=True, file_name="tampered_idx.tar"
+    )
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_MEMBER_MISSING|OCI_BLOB_IDENTITY_MISMATCH"):
+        _scan(path, config_digest)
+
+
+def test_oci_archive_tampered_index_size_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], tamper_index_size=True, file_name="tampered_idx_size.tar"
+    )
+    with pytest.raises(scanner.ImageScanError, match="OCI_BLOB_IDENTITY_MISMATCH"):
+        _scan(path, config_digest)
+
+
+def test_oci_archive_tampered_config_digest_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], tamper_config_digest=True, file_name="tampered_cfg.tar"
+    )
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_MEMBER_MISSING|OCI_BLOB_IDENTITY_MISMATCH"):
+        _scan(path, config_digest)
+
+
+def test_oci_archive_tampered_layer_blob_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], tamper_layer_blob=True, file_name="corrupt_layer.tar"
+    )
+    with pytest.raises(scanner.ImageScanError, match="OCI_BLOB_IDENTITY_MISMATCH|IMAGE_LAYER_IDENTITY_MISMATCH"):
+        _scan(path, config_digest)
+
+
+def test_oci_archive_missing_layer_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], missing_layer=True, file_name="missing_layer.tar"
+    )
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_MEMBER_MISSING"):
+        _scan(path, config_digest)
+
+
+def test_oci_archive_wrong_digest_fails(tmp_path: Path) -> None:
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, _, _, _ = _oci_archive(tmp_path, [layer_data], file_name="wrong_digest.tar")
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_IDENTITY_MISMATCH"):
+        _scan(path, "sha256:" + "d" * 64)
+
+
+def test_oci_archive_index_digest_alone_fails_identity(tmp_path: Path) -> None:
+    # Local synthetic index.json hash is NOT an acceptable expected_image_id
+    layer_data = _tar_bytes([("opt/app/file", b"data")])
+    path, _, _, index_digest = _oci_archive(tmp_path, [layer_data], file_name="idx_identity.tar")
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_IDENTITY_MISMATCH"):
+        _scan(path, index_digest)
+
+
+def test_oci_archive_invalid_structure_fails(tmp_path: Path) -> None:
+    path = tmp_path / "invalid_archive.tar"
+    with tarfile.open(path, mode="w") as outer:
+        _add_bytes(outer, "random_file.txt", b"not an oci or docker image")
+    with pytest.raises(scanner.ImageScanError, match="IMAGE_ARCHIVE_FORMAT_UNSUPPORTED"):
+        _scan(path, "sha256:" + "0" * 64)
+
+
+def test_oci_archive_secret_in_layer_detected(tmp_path: Path) -> None:
+    secret_payload = f"TELEGRAM_BOT_TOKEN={TOKEN}\n".encode("utf-8")
+    layer_data = _tar_bytes([("opt/app/clean.txt", b"ok")])
+    path, config_digest, _, _ = _oci_archive(
+        tmp_path, [layer_data], secret_in_layer=secret_payload, file_name="secret_layer.tar"
+    )
+    res = _scan(path, config_digest)
+    contract = res.contract()
+    assert contract["STATUS"] == "FAIL"
+    assert contract["IMAGE_SECRET_FINDINGS"] >= 1
+    assert "PROTECTED_SECRET_MATERIAL" in [f["finding_class"] for f in contract["FINDINGS"]]

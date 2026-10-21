@@ -1117,6 +1117,25 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
         source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 40",
         aliases=('вафли', 'вафля', 'бельгийские вафли'),
     ),
+    FoodNutrientProfile(
+        canonical_id='walnut',
+        display_name='Грецкие орехи (ядра)',
+        category='nuts',
+        calories_kcal=654.0,
+        protein_g=15.2,
+        fat_g=65.2,
+        carbs_g=13.7,
+        reference_confidence=0.95,
+        source_id='INTERNAL-SKURIKHIN-2008-0380',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='raw',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Орехи', поз. 380; USDA Foundation Food 170187",
+        aliases=(
+            'грецкий орех', 'грецкие орехи', 'ядра грецких орехов', 'ядро грецкого ореха',
+            'орехи грецкие', 'орех грецкий', 'грецкий орех в скорлупе', 'грецкие орехи в скорлупе',
+            'walnut', 'walnuts', 'walnut kernel', 'walnut kernels', 'walnut in shell', 'walnuts in shell',
+        ),
+    ),
 )
 
 
@@ -1139,6 +1158,7 @@ _HARMLESS_CULINARY_MODIFIER_PREFIXES = (
 _HARMLESS_CULINARY_MODIFIER_SUFFIXES = (
     " по-домашнему", " соломкой", " кусочками", " ломтиками",
     " свежий", " свежая", " свежее", " свежие",
+    " в скорлупе", " в скорлупке", " в панцире", " in shell",
 )
 
 # Whitelisted harmless tokens that may be dropped in prefix matching (shapes/portions)
@@ -1149,6 +1169,7 @@ _HARMLESS_DROPPED_TOKENS = {
     "грамм", "грамма", "граммов", "г", "гр",
     "штука", "штуки", "штук", "шт",
     "по-домашнему",
+    "скорлупе", "скорлупке", "панцире", "shell",
 }
 
 

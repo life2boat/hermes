@@ -174,6 +174,9 @@ _FOOD_VISION_ALLOWED_ITEM_FIELDS = frozenset({
     "preparation",
     "is_sauce",
     "uncertainty",
+    "quantity",
+    "count_type",
+    "piece_grams",
 })
 _FOOD_VISION_REJECTED_FIELDS = frozenset({
     "meal_name",
@@ -218,13 +221,14 @@ _VISION_PROMPT = (
     "Return strict JSON only for schema food_vision_inventory_v1, no markdown. "
     "If not food, set is_food: false, items: []. "
     "Describe only separately visible food components in Russian. "
-    "One item per component; visible sauces as separate items. "
+    "Group multiple identical pieces into one item with quantity and combined weight. "
+    "One item per distinct component; visible sauces as separate items. "
     "Do not collapse a mixed plate into one dish title. "
     "Put uncertainty into uncertainty field when identity is uncertain. "
     "Do not invent hidden ingredients or fillings. "
     "Confidence and gram ranges only when visually supportable, else null. "
     "Never return calories, macros, or totals. "
-    "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty}], overall_confidence, needs_user_confirmation, warnings, is_food."
+    "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty, quantity}], overall_confidence, needs_user_confirmation, warnings, is_food."
 )
 
 
@@ -278,11 +282,18 @@ class FoodVisionItem:
     uncertainty: str = ""
     item_id: str = ""
     suppressed_by_item_id: str | None = None
+    quantity: int | None = None
+    count_type: str = "COUNT_CONFIRMED"
+    piece_grams: float | None = None
+    edible_yield_ratio: float | None = None
+    grouped_item_ids: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.item_id:
             h = hashlib.sha1(f"{self.visible_name}:{self.preparation}:{self.estimated_grams_min}:{self.estimated_grams_max}".encode()).hexdigest()[:8]
             self.item_id = f"item_{h}"
+        if self.grouped_item_ids is None:
+            self.grouped_item_ids = [self.item_id]
 
 
 @dataclass(slots=True)
@@ -343,10 +354,17 @@ class PendingFoodVisionItem:
     user_modified: bool = False
     item_id: str = ""
     suppressed_by_item_id: str | None = None
+    quantity: int | None = None
+    count_type: str = "COUNT_CONFIRMED"
+    piece_grams: float | None = None
+    edible_yield_ratio: float | None = None
+    grouped_item_ids: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.item_id:
             self.item_id = f"item_{self.index}"
+        if self.grouped_item_ids is None:
+            self.grouped_item_ids = [self.item_id]
 
 
 @dataclass(slots=True)
@@ -375,6 +393,7 @@ class PendingInventoryAction:
     index: int | None = None
     name: str = ""
     grams: float | None = None
+    count: int | None = None
     sub_actions: list[PendingInventoryAction] | None = None
 
 
@@ -943,6 +962,230 @@ def _looks_like_combined_dish_title(value: str) -> bool:
     )
 
 
+_EDIBLE_YIELD_RATIOS: dict[str, float] = {
+    "грецкий орех в скорлупе": 0.45,
+    "грецкие орехи в скорлупе": 0.45,
+    "орехи в скорлупе": 0.45,
+    "орех в скорлупе": 0.45,
+    "фисташки в скорлупе": 0.50,
+    "фисташка в скорлупе": 0.50,
+    "арахис в скорлупе": 0.70,
+    "семечки в скорлупе": 0.50,
+    "семечки подсолнечника в скорлупе": 0.50,
+    "семена подсолнечника в скорлупе": 0.50,
+    "фундук в скорлупе": 0.45,
+}
+
+
+def _get_edible_yield_ratio(food_name: str) -> float:
+    lowered = (food_name or "").strip().casefold()
+    for pattern, ratio in _EDIBLE_YIELD_RATIOS.items():
+        if pattern in lowered:
+            return ratio
+    return 1.0
+
+
+def _is_food_in_shell(food_name: str) -> bool:
+    lowered = (food_name or "").strip().casefold()
+    return "в скорлупе" in lowered or _get_edible_yield_ratio(food_name) < 0.99
+
+
+_PLURAL_FOOD_NAMES: dict[str, str] = {
+    "грецкий орех": "Грецкие орехи",
+    "грецкий орех в скорлупе": "Грецкие орехи в скорлупе",
+    "орех": "Орехи",
+    "орехи": "Орехи",
+    "помидор": "Помидоры",
+    "помидоры": "Помидоры",
+    "яблоко": "Яблоки",
+    "яблоки": "Яблоки",
+    "клубника": "Клубника",
+    "пельмень": "Пельмени",
+    "пельмени": "Пельмени",
+    "ломтик сыра": "Сыр",
+    "кусок сыра": "Сыр",
+    "сыр": "Сыр",
+    "огурец": "Огурцы",
+    "огурцы": "Огурцы",
+    "яйцо": "Яйца",
+    "яйца": "Яйца",
+    "котлета": "Котлеты",
+    "котлеты": "Котлеты",
+    "фисташка": "Фисташки",
+    "фисташки": "Фисташки",
+    "фисташка в скорлупе": "Фисташки в скорлупе",
+    "фисташки в скорлупе": "Фисташки в скорлупе",
+}
+
+
+def _pluralize_food_name(name: str, quantity: int) -> str:
+    if quantity <= 1:
+        return name
+    lowered = (name or "").strip().casefold()
+    if lowered in _PLURAL_FOOD_NAMES:
+        return _PLURAL_FOOD_NAMES[lowered]
+    if lowered.endswith(" в скорлупе"):
+        base = lowered[:-len(" в скорлупе")].strip()
+        if base in _PLURAL_FOOD_NAMES:
+            return f"{_PLURAL_FOOD_NAMES[base]} в скорлупе"
+    return name
+
+
+def _populate_item_aggregation_fields(item: Any) -> None:
+    vis = getattr(item, "visible_name", "") or ""
+    norm = getattr(item, "normalized_name", "") or vis
+    if getattr(item, "quantity", None) is None:
+        count_match = re.search(r'(?:^|[\s(])(?P<cnt>\d+)\s*(?:шт(?:ук[а-я]*)?)(?:[\s)]|$)', vis, re.I)
+        if count_match:
+            try:
+                c = int(count_match.group("cnt"))
+                if 1 < c <= 100:
+                    item.quantity = c
+                    item.count_type = "COUNT_CONFIRMED"
+            except (ValueError, TypeError):
+                pass
+    if getattr(item, "edible_yield_ratio", None) is None:
+        item.edible_yield_ratio = _get_edible_yield_ratio(norm or vis)
+    qty = getattr(item, "quantity", None)
+    if qty and qty > 0 and getattr(item, "piece_grams", None) is None:
+        sel = getattr(item, "selected_grams", None)
+        if sel is not None:
+            item.piece_grams = round(float(sel) / qty, 1)
+        elif getattr(item, "estimated_grams_min", None) is not None and getattr(item, "estimated_grams_max", None) is not None:
+            mid = (float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0
+            item.piece_grams = round(mid / qty, 1)
+    if not getattr(item, "grouped_item_ids", None) and getattr(item, "item_id", None):
+        item.grouped_item_ids = [item.item_id]
+
+
+def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
+    if not items or len(items) <= 1:
+        if items and len(items) == 1:
+            _populate_item_aggregation_fields(items[0])
+        return list(items)
+
+    from gateway.nutrition.search import normalize_russian_food_query
+
+    grouped: dict[tuple, list[Any]] = {}
+    order: list[tuple] = []
+
+    for item in items:
+        _populate_item_aggregation_fields(item)
+        norm_name = _normalize_inventory_item_name(
+            getattr(item, "normalized_name", None) or getattr(item, "visible_name", ""),
+            fallback="",
+        )
+        canonical_stem = normalize_russian_food_query(norm_name)
+        prep = (getattr(item, "preparation", "") or "").strip().casefold()
+        if not prep:
+            for cook_kw in ("жарен", "варен", "отварн", "запечен", "сыр", "свеж", "солен", "маринован", "гриль"):
+                if cook_kw in canonical_stem:
+                    prep = cook_kw
+                    break
+        edible_form = "in_shell" if _is_food_in_shell(norm_name) else "edible"
+        suppressed_by = getattr(item, "suppressed_by_item_id", None)
+        is_sauce = bool(getattr(item, "is_sauce", False))
+
+        key = (canonical_stem, prep, edible_form, suppressed_by, is_sauce)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(item)
+
+    aggregated_items = []
+    for key in order:
+        group = grouped[key]
+        if len(group) == 1:
+            aggregated_items.append(group[0])
+            continue
+
+        first = group[0]
+        total_quantity = sum(getattr(it, "quantity", 1) or 1 for it in group)
+        count_types = {getattr(it, "count_type", "COUNT_CONFIRMED") for it in group}
+        if len(group) > 1:
+            count_type = "COUNT_ESTIMATED" if "COUNT_ESTIMATED" in count_types else "COUNT_CONFIRMED"
+        else:
+            count_type = (
+                "COUNT_ESTIMATED"
+                if "COUNT_ESTIMATED" in count_types
+                else ("COUNT_UNKNOWN" if "COUNT_UNKNOWN" in count_types else "COUNT_CONFIRMED")
+            )
+
+        has_min = any(it.estimated_grams_min is not None for it in group)
+        total_min = sum(float(it.estimated_grams_min) for it in group if it.estimated_grams_min is not None) if has_min else None
+
+        has_max = any(it.estimated_grams_max is not None for it in group)
+        total_max = sum(float(it.estimated_grams_max) for it in group if it.estimated_grams_max is not None) if has_max else None
+
+        has_sel = any(getattr(it, "selected_grams", None) is not None for it in group)
+        total_selected = (
+            sum(float(it.selected_grams) for it in group if getattr(it, "selected_grams", None) is not None)
+            if has_sel
+            else None
+        )
+        if total_selected is None and total_min is not None and total_max is not None:
+            total_selected = round((total_min + total_max) / 2.0, 1)
+
+        piece_grams = round(total_selected / total_quantity, 1) if total_selected and total_quantity > 0 else None
+        avg_confidence = round(sum(it.confidence for it in group) / len(group), 2)
+        any_user_mod = any(getattr(it, "user_modified", False) for it in group)
+        all_ids: list[str] = []
+        for it in group:
+            ids = getattr(it, "grouped_item_ids", None)
+            if ids:
+                all_ids.extend(ids)
+            elif getattr(it, "item_id", None):
+                all_ids.append(it.item_id)
+
+        visible_name = _pluralize_food_name(first.visible_name, total_quantity)
+        edible_ratio = _get_edible_yield_ratio(first.normalized_name or first.visible_name)
+
+        if isinstance(first, PendingFoodVisionItem):
+            agg_item = PendingFoodVisionItem(
+                index=first.index,
+                visible_name=visible_name,
+                normalized_name=first.normalized_name,
+                confidence=avg_confidence,
+                estimated_grams_min=round(total_min, 1) if total_min is not None else None,
+                estimated_grams_max=round(total_max, 1) if total_max is not None else None,
+                selected_grams=round(total_selected, 1) if total_selected is not None else None,
+                preparation=first.preparation,
+                is_sauce=first.is_sauce,
+                uncertainty=first.uncertainty,
+                user_modified=any_user_mod,
+                item_id=first.item_id,
+                suppressed_by_item_id=first.suppressed_by_item_id,
+                quantity=total_quantity,
+                count_type=count_type,
+                piece_grams=piece_grams,
+                edible_yield_ratio=edible_ratio,
+                grouped_item_ids=all_ids,
+            )
+        else:
+            agg_item = FoodVisionItem(
+                visible_name=visible_name,
+                normalized_name=first.normalized_name,
+                confidence=avg_confidence,
+                estimated_grams_min=round(total_min, 1) if total_min is not None else None,
+                estimated_grams_max=round(total_max, 1) if total_max is not None else None,
+                preparation=first.preparation,
+                is_sauce=first.is_sauce,
+                uncertainty=first.uncertainty,
+                item_id=first.item_id,
+                suppressed_by_item_id=first.suppressed_by_item_id,
+                quantity=total_quantity,
+                count_type=count_type,
+                piece_grams=piece_grams,
+                edible_yield_ratio=edible_ratio,
+                grouped_item_ids=all_ids,
+            )
+        aggregated_items.append(agg_item)
+
+    if aggregated_items and isinstance(aggregated_items[0], PendingFoodVisionItem):
+        return _reindex_pending_inventory_items(aggregated_items)
+    return aggregated_items
+
+
 def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, str]:
     if not isinstance(raw_item, dict):
         return None, "item_not_object"
@@ -982,6 +1225,37 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     if _looks_like_combined_dish_title(visible_name) or _looks_like_combined_dish_title(normalized_name):
         return None, "combined_dish_title"
 
+    quantity_val = raw_item.get("quantity")
+    quantity: int | None = None
+    if quantity_val is not None:
+        try:
+            q = int(quantity_val)
+            if 0 < q <= 100:
+                quantity = q
+        except (ValueError, TypeError):
+            quantity = None
+
+    count_type_val = raw_item.get("count_type")
+    if count_type_val in ("COUNT_CONFIRMED", "COUNT_ESTIMATED", "COUNT_UNKNOWN"):
+        count_type = str(count_type_val)
+    else:
+        count_type = "COUNT_CONFIRMED" if quantity is not None else "COUNT_UNKNOWN"
+
+    piece_grams = _parse_optional_grams(raw_item.get("piece_grams"))
+
+    if quantity is None:
+        count_match = re.search(r'(?:^|[\s(])(?P<cnt>\d+)\s*(?:шт(?:ук[а-я]*)?)(?:[\s)]|$)', visible_name, re.I)
+        if count_match:
+            try:
+                c = int(count_match.group("cnt"))
+                if 1 < c <= 100:
+                    quantity = c
+                    count_type = "COUNT_CONFIRMED"
+            except (ValueError, TypeError):
+                pass
+
+    edible_yield_ratio = _get_edible_yield_ratio(normalized_name or visible_name)
+
     return FoodVisionItem(
         visible_name=visible_name,
         normalized_name=normalized_name,
@@ -991,6 +1265,10 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
         preparation=preparation,
         is_sauce=is_sauce,
         uncertainty=uncertainty,
+        quantity=quantity,
+        count_type=count_type,
+        piece_grams=piece_grams,
+        edible_yield_ratio=edible_yield_ratio,
     ), ""
 
 
@@ -1164,6 +1442,8 @@ def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationRes
         if item is None:
             return FoodVisionValidationResult(status="INVALID_PROVIDER_OUTPUT", reason=reason)
         items.append(item)
+
+    items = _aggregate_identical_food_vision_items(items)
 
     inventory = FoodVisionInventory(
         schema_version=FOOD_VISION_SCHEMA_VERSION,
@@ -1439,9 +1719,24 @@ def _build_inventory_calculation_snapshot(
         else:
             bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
 
+        edible_ratio = getattr(item, "edible_yield_ratio", None)
+        if edible_ratio is None:
+            edible_ratio = _get_edible_yield_ratio(item.normalized_name or item.visible_name)
+
+        if edible_ratio < 0.99:
+            calc_bounds = MassBounds(
+                grams_min=round(bounds.grams_min * edible_ratio, 1),
+                grams_center=round(bounds.grams_center * edible_ratio, 1),
+                grams_max=round(bounds.grams_max * edible_ratio, 1),
+                is_approximate_plausible_range=bounds.is_approximate_plausible_range,
+                is_user_confirmed=bounds.is_user_confirmed,
+            )
+        else:
+            calc_bounds = bounds
+
         comp = resolve_and_calculate_component(
             item.normalized_name or item.visible_name,
-            bounds,
+            calc_bounds,
             cooking_state=getattr(item, "preparation", "") or "cooked",
         )
         components.append(comp)
@@ -1508,6 +1803,10 @@ def _build_inventory_calculation_snapshot(
                 "cooking_state": getattr(c, "cooking_state", "raw") or "",
                 "estimation_method": getattr(c, "estimation_method", "conservative_interval"),
                 "uncertainty_model_type": getattr(getattr(c, "uncertainty_model_type", None), "value", str(getattr(c, "uncertainty_model_type", "CONSERVATIVE_INTERVAL"))),
+                "quantity": getattr(itm, "quantity", None),
+                "count_type": getattr(itm, "count_type", "COUNT_CONFIRMED"),
+                "piece_grams": getattr(itm, "piece_grams", None),
+                "edible_yield_ratio": getattr(itm, "edible_yield_ratio", None),
             }
             for itm, c in zip(deduped_items, meal_estimate.components)
         ],
@@ -1609,7 +1908,13 @@ def _pending_inventory_from_food_vision(
             user_modified=False,
             item_id=item_id,
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
+            quantity=getattr(item, "quantity", None),
+            count_type=getattr(item, "count_type", "COUNT_CONFIRMED"),
+            piece_grams=getattr(item, "piece_grams", None),
+            edible_yield_ratio=getattr(item, "edible_yield_ratio", None) or _get_edible_yield_ratio(item.normalized_name or item.visible_name),
+            grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or [item_id]),
         ))
+    items = _aggregate_identical_food_vision_items(items)
     inventory_hash_payload = {
         "items": [{"name": item.normalized_name or item.visible_name, "grams_min": item.estimated_grams_min, "grams_max": item.estimated_grams_max} for item in items],
         "image_ref": image_ref or "",
@@ -1659,6 +1964,11 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
             "user_modified": item.user_modified,
             "item_id": getattr(item, "item_id", ""),
             "suppressed_by_item_id": getattr(item, "suppressed_by_item_id", None),
+            "quantity": getattr(item, "quantity", None),
+            "count_type": getattr(item, "count_type", "COUNT_CONFIRMED"),
+            "piece_grams": getattr(item, "piece_grams", None),
+            "edible_yield_ratio": getattr(item, "edible_yield_ratio", None),
+            "grouped_item_ids": list(getattr(item, "grouped_item_ids", None) or ([item.item_id] if getattr(item, "item_id", None) else [])),
         } for item in payload.items],
         "overall_confidence": payload.overall_confidence,
         "needs_user_confirmation": payload.needs_user_confirmation,
@@ -1689,15 +1999,20 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             visible_name=visible_name,
             normalized_name=normalized_name,
             confidence=_coerce_confidence(item_payload.get("confidence")),
-            estimated_grams_min=_clamp_optional_food_grams(item_payload.get("estimated_grams_min")),
-            estimated_grams_max=_clamp_optional_food_grams(item_payload.get("estimated_grams_max")),
+            estimated_grams_min=_to_float(item_payload.get("estimated_grams_min")),
+            estimated_grams_max=_to_float(item_payload.get("estimated_grams_max")),
             selected_grams=_parse_selected_grams(item_payload.get("selected_grams")),
-            preparation=_normalize_optional_text(item_payload.get("preparation"), _MAX_FOOD_VISION_PREPARATION_LENGTH),
+            preparation=_bounded_text(item_payload.get("preparation", ""), max_length=_MAX_FOOD_VISION_PREPARATION_LENGTH) or "",
             is_sauce=bool(item_payload.get("is_sauce")),
-            uncertainty=_normalize_optional_text(item_payload.get("uncertainty"), _MAX_FOOD_VISION_UNCERTAINTY_LENGTH),
+            uncertainty=_bounded_text(item_payload.get("uncertainty", ""), max_length=_MAX_FOOD_VISION_UNCERTAINTY_LENGTH) or "",
             user_modified=bool(item_payload.get("user_modified")),
             item_id=str(item_payload.get("item_id") or f"item_{position}"),
             suppressed_by_item_id=str(item_payload.get("suppressed_by_item_id")) if item_payload.get("suppressed_by_item_id") else None,
+            quantity=int(item_payload["quantity"]) if item_payload.get("quantity") is not None else None,
+            count_type=str(item_payload.get("count_type") or "COUNT_CONFIRMED"),
+            piece_grams=_to_float(item_payload.get("piece_grams")),
+            edible_yield_ratio=_to_float(item_payload.get("edible_yield_ratio")),
+            grouped_item_ids=list(item_payload.get("grouped_item_ids") or []),
         ))
     return PendingFoodVisionInventory(
         kind=PENDING_INVENTORY_KIND,
@@ -1709,7 +2024,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         items=_reindex_pending_inventory_items(items),
         overall_confidence=_coerce_confidence(payload.get("overall_confidence")),
         needs_user_confirmation=bool(payload.get("needs_user_confirmation")),
-        warnings=_sanitize_food_vision_warning_list(payload.get("warnings")),
+        warnings=[_normalize_meal_name_text(w, "") for w in list(payload.get("warnings") or []) if _normalize_meal_name_text(w, "")],
         image_ref=str(payload.get("image_ref")) if payload.get("image_ref") is not None else None,
         occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
         created_at=created_at,
@@ -1741,6 +2056,11 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
             user_modified=item.user_modified,
             item_id=getattr(item, "item_id", ""),
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
+            quantity=getattr(item, "quantity", None),
+            count_type=getattr(item, "count_type", "COUNT_CONFIRMED"),
+            piece_grams=getattr(item, "piece_grams", None),
+            edible_yield_ratio=getattr(item, "edible_yield_ratio", None),
+            grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or []),
         ) for item in payload.items],
         overall_confidence=payload.overall_confidence,
         needs_user_confirmation=payload.needs_user_confirmation,
@@ -1794,55 +2114,118 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             comp_info = snap_comps[idx]
 
         grams_str = _format_food_vision_grams(item)
-        detail = f"{item.index}. {html.escape(item.visible_name)} — {grams_str}"
-        extras: list[str] = []
-        if item.preparation:
-            extras.append(html.escape(item.preparation))
-        if item.uncertainty:
-            extras.append(html.escape(item.uncertainty))
-        if item.selected_grams is not None:
-            if item.user_modified:
-                extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
-            else:
-                extras.append(f"расчётный вес: ~{_format_grams(item.selected_grams)}")
-        elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
-            mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
-            extras.append(f"расчётный вес: ~{_format_grams(mid)}")
-        else:
-            extras.append("вес не подтверждён")
-            all_weights_present = False
-        if extras:
-            detail += f" ({'; '.join(extras)})"
+        qty = getattr(item, "quantity", None)
+        cnt_type = getattr(item, "count_type", "COUNT_CONFIRMED")
+        edible_ratio = getattr(item, "edible_yield_ratio", None)
+        if edible_ratio is None:
+            edible_ratio = _get_edible_yield_ratio(item.normalized_name or item.visible_name)
 
-        if comp_info is not None:
-            if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
-                cal = comp_info.get("calories_kcal")
-                prot = comp_info.get("protein_g")
-                fat = comp_info.get("fat_g")
-                carbs = comp_info.get("carbs_g")
-                detail += (
-                    f" · ~{int(round(cal))} ккал "
-                    f"· Б {_format_grams(prot)} "
-                    f"· Ж {_format_grams(fat)} "
-                    f"· У {_format_grams(carbs)}"
-                )
-                has_any_nutrition = True
-            elif not comp_info.get("nutrition_available"):
-                detail += " · (КБЖУ не найдено)"
-                has_unmapped_component = True
+        count_suffix = ""
+        if qty is not None and qty > 1 and cnt_type != "COUNT_UNKNOWN":
+            count_suffix = f" — ~{qty} шт." if cnt_type == "COUNT_ESTIMATED" else f" — {qty} шт."
+
+        if edible_ratio < 0.99:
+            min_g = item.estimated_grams_min
+            max_g = item.estimated_grams_max
+            sel_g = item.selected_grams
+            gross_range = (
+                f"~{_format_grams(min_g)}–{_format_grams(max_g)} г"
+                if (min_g is not None and max_g is not None)
+                else f"~{_format_grams(sel_g)} г"
+            )
+            edible_min = round(float(min_g) * edible_ratio, 1) if min_g is not None else None
+            edible_max = round(float(max_g) * edible_ratio, 1) if max_g is not None else None
+            edible_sel = round(float(sel_g) * edible_ratio, 1) if sel_g is not None else None
+            edible_range = (
+                f"~{_format_grams(edible_min)}–{_format_grams(edible_max)} г (ядра)"
+                if (edible_min is not None and edible_max is not None)
+                else f"~{_format_grams(edible_sel)} г (ядра)"
+            )
+
+            detail = (
+                f"{item.index}. {html.escape(item.visible_name)}{count_suffix}\n"
+                f"   Общий вес: {gross_range} со скорлупой.\n"
+                f"   Съедобная часть: {edible_range}."
+            )
+            if comp_info is not None:
+                if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
+                    cal = comp_info.get("calories_kcal")
+                    prot = comp_info.get("protein_g")
+                    fat = comp_info.get("fat_g")
+                    carbs = comp_info.get("carbs_g")
+                    detail += (
+                        f"\n   КБЖУ (съедобная часть): ~{int(round(cal))} ккал "
+                        f"· Б {_format_grams(prot)} "
+                        f"· Ж {_format_grams(fat)} "
+                        f"· У {_format_grams(carbs)}"
+                    )
+                    has_any_nutrition = True
+                elif not comp_info.get("nutrition_available"):
+                    detail += "\n   КБЖУ: (КБЖУ не найдено)"
+                    has_unmapped_component = True
+            else:
+                comp_estimate = _estimate_component_nutrition(item)
+                if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
+                    detail += (
+                        f"\n   КБЖУ (съедобная часть): ~{int(round(comp_estimate.calories_kcal))} ккал "
+                        f"· Б {_format_grams(comp_estimate.protein_g)} "
+                        f"· Ж {_format_grams(comp_estimate.fat_g)} "
+                        f"· У {_format_grams(comp_estimate.carbs_g)}"
+                    )
+                    has_any_nutrition = True
+                elif comp_estimate is not None and not comp_estimate.nutrition_available:
+                    detail += "\n   КБЖУ: (КБЖУ не найдено)"
+                    has_unmapped_component = True
         else:
-            comp_estimate = _estimate_component_nutrition(item)
-            if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
-                detail += (
-                    f" · ~{int(round(comp_estimate.calories_kcal))} ккал "
-                    f"· Б {_format_grams(comp_estimate.protein_g)} "
-                    f"· Ж {_format_grams(comp_estimate.fat_g)} "
-                    f"· У {_format_grams(comp_estimate.carbs_g)}"
-                )
-                has_any_nutrition = True
-            elif comp_estimate is not None and not comp_estimate.nutrition_available:
-                detail += " · (КБЖУ не найдено)"
-                has_unmapped_component = True
+            detail = f"{item.index}. {html.escape(item.visible_name)}{count_suffix} — {grams_str}"
+            extras: list[str] = []
+            if item.preparation:
+                extras.append(html.escape(item.preparation))
+            if item.uncertainty:
+                extras.append(html.escape(item.uncertainty))
+            if item.selected_grams is not None:
+                if item.user_modified:
+                    extras.append(f"вес подтверждён: {_format_grams(item.selected_grams)}")
+                else:
+                    extras.append(f"расчётный вес: ~{_format_grams(item.selected_grams)}")
+            elif item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+                mid = round((float(item.estimated_grams_min) + float(item.estimated_grams_max)) / 2.0, 1)
+                extras.append(f"расчётный вес: ~{_format_grams(mid)}")
+            else:
+                extras.append("вес не подтверждён")
+                all_weights_present = False
+            if extras:
+                detail += f" ({'; '.join(extras)})"
+
+            if comp_info is not None:
+                if comp_info.get("nutrition_available") and comp_info.get("calories_kcal") is not None:
+                    cal = comp_info.get("calories_kcal")
+                    prot = comp_info.get("protein_g")
+                    fat = comp_info.get("fat_g")
+                    carbs = comp_info.get("carbs_g")
+                    detail += (
+                        f" · ~{int(round(cal))} ккал "
+                        f"· Б {_format_grams(prot)} "
+                        f"· Ж {_format_grams(fat)} "
+                        f"· У {_format_grams(carbs)}"
+                    )
+                    has_any_nutrition = True
+                elif not comp_info.get("nutrition_available"):
+                    detail += " · (КБЖУ не найдено)"
+                    has_unmapped_component = True
+            else:
+                comp_estimate = _estimate_component_nutrition(item)
+                if comp_estimate is not None and comp_estimate.nutrition_available and comp_estimate.calories_kcal is not None:
+                    detail += (
+                        f" · ~{int(round(comp_estimate.calories_kcal))} ккал "
+                        f"· Б {_format_grams(comp_estimate.protein_g)} "
+                        f"· Ж {_format_grams(comp_estimate.fat_g)} "
+                        f"· У {_format_grams(comp_estimate.carbs_g)}"
+                    )
+                    has_any_nutrition = True
+                elif comp_estimate is not None and not comp_estimate.nutrition_available:
+                    detail += " · (КБЖУ не найдено)"
+                    has_unmapped_component = True
 
         lines.append(detail)
 
@@ -1887,10 +2270,11 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
     lines.extend([
         "",
         "Можно сохранить кнопкой ниже или отправить исправление:",
+        "• Исправить 1: 7 шт",
+        "• Вес 1: 80 г (общий вес всей группы)",
         "• Исправить 2: куриная грудка, 120 г",
         "• Добавить: сыр, 30 г",
         "• Удалить 5",
-        "• Вес 3: 80 г",
     ])
     return "\n".join(lines)
 
@@ -1949,9 +2333,24 @@ def calculate_food_vision_meal_nutrition(
         else:
             bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
 
+        edible_ratio = getattr(item, "edible_yield_ratio", None)
+        if edible_ratio is None:
+            edible_ratio = _get_edible_yield_ratio(item.normalized_name or item.visible_name)
+
+        if edible_ratio < 0.99:
+            calc_bounds = MassBounds(
+                grams_min=round(bounds.grams_min * edible_ratio, 1),
+                grams_center=round(bounds.grams_center * edible_ratio, 1),
+                grams_max=round(bounds.grams_max * edible_ratio, 1),
+                is_approximate_plausible_range=bounds.is_approximate_plausible_range,
+                is_user_confirmed=bounds.is_user_confirmed,
+            )
+        else:
+            calc_bounds = bounds
+
         comp = resolve_and_calculate_component(
             item.normalized_name or item.visible_name,
-            bounds,
+            calc_bounds,
             cooking_state=getattr(item, "preparation", "") or "cooked",
         )
         components.append(comp)
@@ -2105,6 +2504,30 @@ _SYNTHETIC_FOOD_REFERENCE = {
         "aliases": ("\u0447\u0435\u0447\u0435\u0432\u0438\u0447\u043d\u044b\u0439 \u0441\u0443\u043f \u0441 \u043e\u0432\u043e\u0449\u0430\u043c\u0438", "\u0447\u0435\u0447\u0435\u0432\u0438\u0447\u043d\u044b\u0439 \u0441\u0443\u043f"),
         "display_name": "\u0427\u0435\u0447\u0435\u0432\u0438\u0447\u043d\u044b\u0439 \u0441\u0443\u043f \u0441 \u043e\u0432\u043e\u0449\u0430\u043c\u0438",
         "per_100g": {"calories_kcal": 72.0, "protein_g": 3.8, "fat_g": 1.9, "carbs_g": 10.2},
+    },
+    "Грецкие орехи (ядра)": {
+        "aliases": (
+            "грецкий орех", "грецкие орехи", "ядра грецких орехов", "ядро грецкого ореха",
+            "орехи грецкие", "орех грецкий", "грецкий орех в скорлупе", "грецкие орехи в скорлупе",
+            "орехи", "орех",
+        ),
+        "display_name": "Грецкие орехи (ядра)",
+        "per_100g": {"calories_kcal": 654.0, "protein_g": 15.2, "fat_g": 65.2, "carbs_g": 13.7},
+    },
+    "Клубника": {
+        "aliases": ("клубника", "земляника", "клубника свежая", "свежая клубника", "ягоды клубники", "клубника ягоды"),
+        "display_name": "Клубника",
+        "per_100g": {"calories_kcal": 32.0, "protein_g": 0.7, "fat_g": 0.3, "carbs_g": 7.7},
+    },
+    "Пельмени": {
+        "aliases": ("пельмени", "пельмени с мясом", "пельмени отварные", "пельмени мясные"),
+        "display_name": "Пельмени",
+        "per_100g": {"calories_kcal": 275.0, "protein_g": 12.0, "fat_g": 13.0, "carbs_g": 28.0},
+    },
+    "Помидоры": {
+        "aliases": ("помидоры", "помидор", "томат", "томаты", "свежие помидоры", "помидоры черри", "черри"),
+        "display_name": "Помидоры",
+        "per_100g": {"calories_kcal": 18.0, "protein_g": 0.9, "fat_g": 0.2, "carbs_g": 3.9},
     },
 }
 
@@ -2397,6 +2820,11 @@ _INVENTORY_REPLACE_RE = re.compile(rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u043
 _INVENTORY_ADD_RE = re.compile(rf"^(?:\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c)\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_REMOVE_RE = re.compile(r"^(?:\u0443\u0434\u0430\u043b\u0438\u0442\u044c)\s+(?P<index>\d{1,2})\s*$", re.IGNORECASE)
 _INVENTORY_WEIGHT_RE = re.compile(rf"^(?:\u0432\u0435\u0441)\s+(?P<index>\d{{1,2}})\s*:\s*(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
+_COUNT_SUFFIX_RE = r"(?:шт(?:ук[а-я]*)?|\u0448\u0442(?:\u0443\u043a[\u0430-\u044f]*)?)"
+_INVENTORY_COUNT_RE = re.compile(
+    rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c)\s+)?(?P<index>\d{{1,2}})\s*:\s*(?P<count>\d+)\s*{_COUNT_SUFFIX_RE}\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_ambiguous_inventory_command(text: str) -> bool:
@@ -2442,6 +2870,16 @@ def _parse_single_pending_inventory_action(text: str) -> PendingInventoryActionP
 
     if _is_ambiguous_inventory_command(normalized):
         return PendingInventoryActionParseResult(ok=False, error=_INVENTORY_AMBIGUOUS_ERROR)
+
+    count_match = _INVENTORY_COUNT_RE.match(normalized)
+    if count_match:
+        index = int(count_match.group("index")) if "index" in count_match.groupdict() and count_match.group("index") else None
+        count_val = int(count_match.group("count"))
+        if index is not None and index <= 0:
+            return PendingInventoryActionParseResult(ok=False, error="Номер компонента должен быть положительным.")
+        if count_val <= 0 or count_val > 100:
+            return PendingInventoryActionParseResult(ok=False, error="Количество должно быть от 1 до 100 шт.")
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="count", index=index, count=count_val))
 
     for regex, action_kind in ((_INVENTORY_REPLACE_RE, "replace"), (_INVENTORY_ADD_RE, "add"), (_INVENTORY_REMOVE_RE, "remove"), (_INVENTORY_WEIGHT_RE, "weight")):
         match = regex.match(normalized)
@@ -2523,11 +2961,33 @@ def _mutate_single_pending_inventory(inventory: PendingFoodVisionInventory, acti
         items.append(PendingFoodVisionItem(index=len(items) + 1, visible_name=action.name, normalized_name=action.name.casefold(), confidence=1.0, estimated_grams_min=action.grams, estimated_grams_max=action.grams, selected_grams=action.grams, preparation="", is_sauce=_infer_inventory_sauce_flag(action.name), uncertainty="", user_modified=True))
     elif action.kind == "remove" and target is not None:
         del items[action.index - 1]
+    elif action.kind == "count" and target is not None:
+        new_count = int(action.count or 1)
+        old_count = getattr(target, "quantity", 1) or 1
+        target.quantity = new_count
+        target.count_type = "COUNT_CONFIRMED"
+        target.user_modified = True
+
+        piece_g = getattr(target, "piece_grams", None)
+        if piece_g is None and target.selected_grams is not None:
+            piece_g = target.selected_grams / max(old_count, 1)
+            target.piece_grams = piece_g
+        elif piece_g is None and target.estimated_grams_min is not None and target.estimated_grams_max is not None:
+            piece_g = ((target.estimated_grams_min + target.estimated_grams_max) / 2.0) / max(old_count, 1)
+            target.piece_grams = piece_g
+
+        if piece_g is not None:
+            new_sel = round(piece_g * new_count, 1)
+            target.selected_grams = new_sel
+            target.estimated_grams_min = round(new_sel * 0.85, 1)
+            target.estimated_grams_max = round(new_sel * 1.15, 1)
     elif action.kind == "weight" and target is not None:
         target.selected_grams = action.grams
         target.estimated_grams_min = target.estimated_grams_min if target.estimated_grams_min is not None else action.grams
         target.estimated_grams_max = target.estimated_grams_max if target.estimated_grams_max is not None else action.grams
         target.user_modified = True
+        if getattr(target, "quantity", None) and target.quantity > 0:
+            target.piece_grams = round(action.grams / target.quantity, 1)
     else:
         return None, "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435."
     updated.items = _reindex_pending_inventory_items(items)
@@ -2948,6 +3408,11 @@ class HealBiteNutritionDiary:
                         "user_modified": item.user_modified,
                         "item_id": getattr(item, "item_id", ""),
                         "suppressed_by_item_id": getattr(item, "suppressed_by_item_id", None),
+                        "quantity": getattr(item, "quantity", None),
+                        "count_type": getattr(item, "count_type", "COUNT_CONFIRMED"),
+                        "piece_grams": getattr(item, "piece_grams", None),
+                        "edible_yield_ratio": getattr(item, "edible_yield_ratio", None),
+                        "grouped_item_ids": list(getattr(item, "grouped_item_ids", None) or ([item.item_id] if getattr(item, "item_id", None) else [])),
                     }
                     for item in payload.items
                 ],
@@ -3479,6 +3944,11 @@ class HealBiteNutritionDiary:
                     user_modified=bool(raw_item.get("user_modified")),
                     item_id=str(raw_item.get("item_id") or f"item_{position}"),
                     suppressed_by_item_id=str(raw_item.get("suppressed_by_item_id")) if raw_item.get("suppressed_by_item_id") else None,
+                    quantity=int(raw_item["quantity"]) if raw_item.get("quantity") is not None else None,
+                    count_type=str(raw_item.get("count_type") or "COUNT_CONFIRMED"),
+                    piece_grams=_to_float(raw_item.get("piece_grams")),
+                    edible_yield_ratio=_to_float(raw_item.get("edible_yield_ratio")),
+                    grouped_item_ids=list(raw_item.get("grouped_item_ids") or []),
                 )
             )
         return PendingFoodVisionInventory(

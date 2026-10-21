@@ -1016,7 +1016,7 @@ def write_evidence(
         if (
             stat.S_ISLNK(runtime_metadata.st_mode)
             or not stat.S_ISDIR(runtime_metadata.st_mode)
-            or stat.S_IMODE(runtime_metadata.st_mode) != 0o700
+            or (os.name == "posix" and stat.S_IMODE(runtime_metadata.st_mode) != 0o700)
         ):
             _fail("EVIDENCE_PATH_UNSAFE")
         name = f"runtime-attestation-{target_revision[:12]}-{time.time_ns()}.json"
@@ -1026,7 +1026,7 @@ def write_evidence(
             flags |= os.O_NOFOLLOW
         fd = os.open(path, flags, policy.evidence_mode)
         try:
-            os.fchmod(fd, policy.evidence_mode)
+            if hasattr(os, "fchmod"): os.fchmod(fd, policy.evidence_mode)
             written = 0
             while written < len(payload):
                 count = os.write(fd, payload[written:])
@@ -1036,13 +1036,14 @@ def write_evidence(
             os.fsync(fd)
         finally:
             os.close(fd)
-        if stat.S_IMODE(path.lstat().st_mode) != policy.evidence_mode:
+        if os.name == "posix" and stat.S_IMODE(path.lstat().st_mode) != policy.evidence_mode:
             _fail("EVIDENCE_MODE_INVALID")
-        directory_fd = os.open(runtime_directory, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if os.name == "posix":
+            directory_fd = os.open(runtime_directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except RuntimeAttestationError:
         raise
     except OSError:

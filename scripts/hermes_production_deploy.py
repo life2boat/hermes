@@ -387,8 +387,10 @@ def load_contract(
     secrets = _mapping(raw["secrets"], code="manifest-secrets")
     if secrets.get("source_type") != "explicit-protected-dotenv":
         _fail("secret-source-type")
-    approved_source = Path(_string(secrets.get("approved_source_path"), code="secret-source-path"))
-    if not approved_source.is_absolute() or approved_source.is_relative_to(root):
+    raw_source = _string(secrets.get("approved_source_path"), code="secret-source-path")
+    approved_source = Path(raw_source)
+    is_absolute_path = approved_source.is_absolute() or raw_source.startswith("/")
+    if not is_absolute_path or (approved_source.is_absolute() and approved_source.is_relative_to(root)):
         _fail("secret-source-path")
     if approved_source != Path("/etc/hermes/hermes-production.env"):
         _fail("secret-source-path")
@@ -556,7 +558,7 @@ def load_contract(
         canary_raw.get("source_environment_file"),
         code="manifest-canary-source",
     )
-    if canary_source_file != str(CANARY_AUTHORITY_PATH):
+    if canary_source_file != str(CANARY_AUTHORITY_PATH) and canary_source_file != CANARY_AUTHORITY_PATH.as_posix():
         _fail("manifest-canary-source")
     canary_authorized_features = tuple(_string(f, code="manifest-canary-feature") for f in canary_raw.get("authorized_features", []))
 

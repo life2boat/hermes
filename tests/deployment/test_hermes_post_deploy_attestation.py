@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import subprocess
@@ -684,7 +685,8 @@ def test_evidence_is_bounded_mode_0600_and_contains_no_raw_identity(
     )
     payload = path.read_bytes()
     assert len(payload) <= policy.evidence_max_bytes
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert TOKEN.encode() not in payload
     assert b"chat_id" not in payload
     assert b"qdrant-container" not in payload

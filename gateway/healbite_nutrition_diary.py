@@ -164,6 +164,9 @@ _FOOD_VISION_ALLOWED_TOP_LEVEL_FIELDS = frozenset({
     "needs_user_confirmation",
     "warnings",
     "is_food",
+    "notes",
+    "comments",
+    "food_detected",
 })
 _FOOD_VISION_ALLOWED_ITEM_FIELDS = frozenset({
     "visible_name",
@@ -177,6 +180,14 @@ _FOOD_VISION_ALLOWED_ITEM_FIELDS = frozenset({
     "quantity",
     "count_type",
     "piece_grams",
+    "count",
+    "unit",
+    "piece_weight",
+    "edible_yield_ratio",
+    "edible_portion_ratio",
+    "notes",
+    "comment",
+    "name",
 })
 _FOOD_VISION_REJECTED_FIELDS = frozenset({
     "meal_name",
@@ -193,7 +204,6 @@ _FOOD_VISION_REJECTED_FIELDS = frozenset({
     "description",
 })
 _FOOD_VISION_REJECTED_ITEM_FIELDS = frozenset({
-    "name",
     "estimated_weight_g",
     "weight_g",
     "calories_kcal",
@@ -1323,8 +1333,10 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     if unknown_keys:
         return None, "unknown_item_fields"
 
-    visible_name = _bounded_text(raw_item.get("visible_name"), max_length=_MAX_FOOD_VISION_NAME_LENGTH)
-    normalized_name = _bounded_text(raw_item.get("normalized_name"), max_length=_MAX_FOOD_VISION_NAME_LENGTH)
+    raw_visible = raw_item.get("visible_name") or raw_item.get("name")
+    raw_normalized = raw_item.get("normalized_name") or raw_item.get("name")
+    visible_name = _bounded_text(raw_visible, max_length=_MAX_FOOD_VISION_NAME_LENGTH)
+    normalized_name = _bounded_text(raw_normalized, max_length=_MAX_FOOD_VISION_NAME_LENGTH)
     preparation = _bounded_text(raw_item.get("preparation", ""), max_length=_MAX_FOOD_VISION_PREPARATION_LENGTH) or ""
     uncertainty = _bounded_text(raw_item.get("uncertainty", ""), max_length=_MAX_FOOD_VISION_UNCERTAINTY_LENGTH) or ""
     confidence = _parse_probability(raw_item.get("confidence"))
@@ -1352,7 +1364,7 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     if _looks_like_combined_dish_title(visible_name) or _looks_like_combined_dish_title(normalized_name):
         return None, "combined_dish_title"
 
-    quantity_val = raw_item.get("quantity")
+    quantity_val = raw_item.get("quantity") if raw_item.get("quantity") is not None else raw_item.get("count")
     quantity: int | None = None
     if quantity_val is not None:
         try:
@@ -1368,7 +1380,8 @@ def _validate_food_vision_item(raw_item: Any) -> tuple[FoodVisionItem | None, st
     else:
         count_type = "COUNT_ESTIMATED" if quantity is not None else "COUNT_UNKNOWN"
 
-    piece_grams = _parse_optional_grams(raw_item.get("piece_grams"))
+    piece_grams_raw = raw_item.get("piece_grams") if raw_item.get("piece_grams") is not None else raw_item.get("piece_weight")
+    piece_grams = _parse_optional_grams(piece_grams_raw)
 
     if quantity is None:
         count_match = re.search(r'(?:^|[\s(])(?P<cnt>\d+)\s*(?:шт(?:ук[а-я]*)?)(?:[\s)]|$)', visible_name, re.I)
@@ -3384,29 +3397,45 @@ class HealBiteNutritionDiary:
 
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
         primary_path = paths[0]
-        try:
-            result_json = await asyncio.wait_for(
-                vision_analyze_tool(image_url=primary_path, user_prompt=prompt),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs", timeout_s)
-            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_timeout")
-            logger.info("[HealBite][vision_pending_staged] staged=false")
-            return NutritionDiaryOutcome(
-                available=False,
-                validation_status="PROVIDER_TIMEOUT",
-            )
-        except Exception as exc:
-            logger.warning("[HealBite][vision_error] vision_analyze_tool error=%s", exc.__class__.__name__)
-            logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_exception")
-            logger.info("[HealBite][vision_pending_staged] staged=false")
-            return NutritionDiaryOutcome(
-                available=False,
-                validation_status="PROVIDER_ERROR",
-            )
+        max_attempts = 2
+        result: dict[str, Any] = {}
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result_json = await asyncio.wait_for(
+                    vision_analyze_tool(image_url=primary_path, user_prompt=prompt),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs", timeout_s)
+                logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_timeout")
+                logger.info("[HealBite][vision_pending_staged] staged=false")
+                return NutritionDiaryOutcome(
+                    available=False,
+                    validation_status="PROVIDER_TIMEOUT",
+                )
+            except Exception as exc:
+                logger.warning("[HealBite][vision_error] vision_analyze_tool error=%s", exc.__class__.__name__)
+                logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_exception")
+                logger.info("[HealBite][vision_pending_staged] staged=false")
+                return NutritionDiaryOutcome(
+                    available=False,
+                    validation_status="PROVIDER_ERROR",
+                )
 
-        result = safe_json_loads(result_json, {})
+            result = safe_json_loads(result_json, {})
+            if isinstance(result, dict) and not result.get("success"):
+                diag = result.get("diagnostic") or {}
+                if attempt < max_attempts and diag.get("retryable") is True:
+                    logger.warning(
+                        "[HealBite][vision_retry] Transient provider failure (%s); retrying attempt %d/%d",
+                        diag.get("category"),
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
+            break
+
         if not isinstance(result, dict) or not result.get("success"):
             logger.info("[HealBite][vision_parse_ok] ok=false reason=provider_result_non_success")
             logger.info("[HealBite][vision_pending_staged] staged=false")

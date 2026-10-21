@@ -23,7 +23,7 @@ from gateway.healbite_nutrition_diary import (
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent.parent.parent / "gateway" / "fixtures" / "food_reference_catalog_v1.json"
-EXPECTED_FIXTURE_SHA256 = "8abfcdf2fdf234ea7aa54d1300b28e690cd646012c45c45d8ca2c2fbedd66c13"
+EXPECTED_FIXTURE_SHA256 = "a582a36822022c3c35ec61e52b147a4202da4b3d1aa35cae66e22ad7c24fd8e3"
 
 
 def _install_target_tables(db_path):
@@ -127,7 +127,7 @@ def test_catalog_fixture_hash_and_value_verification():
             pytest.fail(f"Invalid source_id prefix: {profile.source_id}")
 
     assert usda_count == 18, f"Expected 18 USDA verified entries, got {usda_count}"
-    assert russian_count == 51, f"Expected 51 Russian reference entries, got {russian_count}"
+    assert russian_count == 52, f"Expected 52 Russian reference entries, got {russian_count}"
 
 
 def test_dairy_fat_percentages_distinct_profiles():

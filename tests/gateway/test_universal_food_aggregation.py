@@ -161,10 +161,10 @@ def test_req4_kbzhu_calculated_on_edible_mass():
     # Total calories in snapshot must match edible portion
     assert snapshot["calories_kcal"] == pytest.approx(comp["calories_kcal"])
 
-    # Reply format must mention shell and edible part
+    # Reply format must mention gross weight, edible part and KBZHU
     reply = format_food_vision_inventory_reply(inv)
     assert "Грецкие орехи в скорлупе — 5 шт." in reply
-    assert "со скорлупой" in reply
+    assert "Общий вес:" in reply
     assert "Съедобная часть:" in reply
     assert "КБЖУ" in reply
 

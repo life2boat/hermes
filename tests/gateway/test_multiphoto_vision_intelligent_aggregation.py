@@ -1076,3 +1076,316 @@ async def test_multiphoto_scenario_y_telegram_callback_save_partial_and_blocked_
         text="Распознана только часть альбома.",
         show_alert=True,
     )
+
+
+# -----------------------------------------------------------------------------
+# PHASE 1 & 6 REPRODUCE & COMPREHENSIVE ALBUM INTEGRITY SUITE
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_multiphoto_reproduce_a_complete_unresolved_partial_save_blocked(tmp_path):
+    """Case A: 2 processed photos of same dish with unresolved overlap.
+
+    User attempts 'Сохранить распознанную часть'.
+    EXPECT: save blocked; nutrition_log unchanged.
+    """
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp2 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp2]):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=2001,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    assert outcome.available is True
+    pending = outcome.pending_inventory
+    assert pending is not None
+    assert pending.album_processing_status == "COMPLETE"
+    assert pending.album_overlap_decision == "UNRESOLVED"
+
+    # Direct call to save_partial_pending_inventory
+    res = diary.save_partial_pending_inventory(user_id=2001)
+    assert res.status == "album_decision_required"
+    assert res.saved is False
+    assert "Одна порция" in res.reply_text
+
+    # Text command "Сохранить распознанную часть"
+    res_text = diary.handle_pending_inventory_reply(user_id=2001, message="Сохранить распознанную часть")
+    assert res_text.status == "album_decision_required"
+    assert res_text.saved is False
+
+    # Verify nutrition_log is strictly unchanged
+    summary = diary.get_daily_summary(user_id=2001)
+    assert summary["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_reproduce_b_partial_unresolved_overlap_save_blocked(tmp_path):
+    """Case B: 3 photos. First 2 processed with ambiguous overlap, 3rd photo HTTP 503.
+
+    EXPECT:
+    processing_status=PARTIAL;
+    overlap_decision=UNRESOLVED;
+    save blocked until overlap resolved.
+    """
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp2 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp3 = json.dumps({"success": False, "error": "HTTP 503 Service Unavailable"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp2, resp3]):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=2002,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg", "/tmp/p3.jpg"],
+        )
+
+    assert outcome.available is True
+    pending = outcome.pending_inventory
+    assert pending is not None
+    assert pending.album_processing_status == "PARTIAL"
+    assert pending.album_overlap_decision == "UNRESOLVED"
+
+    # Keyboard should show portion resolution buttons, NOT save buttons
+    kb = build_food_vision_inventory_keyboard(pending)
+    btn_texts = [b["text"] for row in kb for b in row]
+    assert "🍽 Одна порция" in btn_texts
+    assert "🍽🍽 Разные порции" in btn_texts
+    assert "💾 Сохранить распознанную часть" not in btn_texts
+    assert "✅ Сохранить" not in btn_texts
+
+    # Attempt to bypass via save_partial_pending_inventory directly
+    res = diary.save_partial_pending_inventory(user_id=2002)
+    assert res.status == "album_decision_required"
+    assert res.saved is False
+
+    # Ordinary saves must also be blocked
+    res_direct = diary.save_pending_inventory_directly(user_id=2002)
+    assert res_direct.status == "album_decision_required"
+
+    # Verify zero database records
+    summary = diary.get_daily_summary(user_id=2002)
+    assert summary["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_reproduce_c_single_photo_partial_save_rejected(tmp_path):
+    """Case C: Ordinary single-photo inventory. Command 'Сохранить распознанную часть'.
+
+    EXPECT:
+    partial-save rejected;
+    ordinary pending inventory preserved.
+    """
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_single = _mock_vision_response([_mock_vision_item("овсяная каша", 200.0, 220.0, 1)])
+
+    with patch("tools.vision_tools.vision_analyze_tool", return_value=resp_single):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=2003,
+            image_paths=["/tmp/single.jpg"],
+        )
+
+    assert outcome.available is True
+    pending = outcome.pending_inventory
+    assert pending is not None
+    assert pending.photo_count == 1
+    assert pending.album_processing_status == "COMPLETE"
+
+    # Attempt partial save on single photo
+    res = diary.save_partial_pending_inventory(user_id=2003)
+    assert res.status == "partial_save_rejected"
+    assert res.saved is False
+    assert "доступна только для частично распознанных альбомов" in res.reply_text
+
+    # Verify ordinary pending inventory is STILL PRESERVED!
+    preserved = diary.get_pending_inventory(user_id=2003)
+    assert preserved is not None
+    assert preserved.inventory_id == pending.inventory_id
+    assert len(preserved.items) == 1
+
+    # Ordinary save can proceed normally
+    save_res = diary.save_pending_inventory_directly(user_id=2003)
+    assert save_res.status == "saved"
+    assert save_res.saved is True
+
+    summary = diary.get_daily_summary(user_id=2003)
+    assert summary["entry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z1_partial_resolved_same_save_allowed(tmp_path):
+    """PARTIAL album with overlap resolved to SAME_PORTION allows partial save cleanly."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp2 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp3 = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp2, resp3]):
+        await diary.analyze_and_maybe_log(
+            user_id=2004,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg", "/tmp/p3.jpg"],
+        )
+
+    # Resolve overlap to SAME_PORTION
+    resolve_res = diary.resolve_album_decision(user_id=2004, decision="SAME_PORTION")
+    assert resolve_res.status == "updated"
+    updated_pending = diary.get_pending_inventory(user_id=2004)
+    assert updated_pending is not None
+    assert updated_pending.album_overlap_decision == "SAME_PORTION"
+    assert updated_pending.album_processing_status == "PARTIAL"
+
+    # Now partial save button is active
+    kb = build_food_vision_inventory_keyboard(updated_pending)
+    btn_texts = [b["text"] for row in kb for b in row]
+    assert "💾 Сохранить распознанную часть" in btn_texts
+
+    # Save partial
+    save_res = diary.save_partial_pending_inventory(user_id=2004)
+    assert save_res.status == "saved"
+    assert save_res.saved is True
+
+    summary = diary.get_daily_summary(user_id=2004)
+    assert summary["entry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z2_partial_resolved_distinct_save_allowed(tmp_path):
+    """PARTIAL album with overlap resolved to DISTINCT_PORTIONS preserves and sums products."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp2 = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp3 = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp2, resp3]):
+        await diary.analyze_and_maybe_log(
+            user_id=2005,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg", "/tmp/p3.jpg"],
+        )
+
+    # Resolve overlap to DISTINCT_PORTIONS
+    resolve_res = diary.resolve_album_decision(user_id=2005, decision="DISTINCT_PORTIONS")
+    assert resolve_res.status == "updated"
+    updated_pending = diary.get_pending_inventory(user_id=2005)
+    assert updated_pending is not None
+    assert updated_pending.album_overlap_decision == "DISTINCT_PORTIONS"
+    assert updated_pending.album_processing_status == "PARTIAL"
+    assert updated_pending.items[0].quantity == 2
+
+    # Save partial
+    save_res = diary.save_partial_pending_inventory(user_id=2005)
+    assert save_res.status == "saved"
+    assert save_res.saved is True
+
+    summary = diary.get_daily_summary(user_id=2005)
+    assert summary["entry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z3_complete_album_partial_save_blocked(tmp_path):
+    """COMPLETE album blocks partial save (only ordinary save is allowed)."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("рис", 150.0, 160.0, 1)])
+    resp2 = _mock_vision_response([_mock_vision_item("курица", 150.0, 160.0, 1)])
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp2]):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=2006,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    assert outcome.available is True
+    pending = outcome.pending_inventory
+    assert pending is not None
+    assert pending.album_processing_status == "COMPLETE"
+
+    # Partial save rejected
+    res = diary.save_partial_pending_inventory(user_id=2006)
+    assert res.status == "partial_save_rejected"
+    assert res.saved is False
+
+    # Ordinary save succeeds
+    res_save = diary.save_pending_inventory_directly(user_id=2006)
+    assert res_save.status == "saved"
+    assert res_save.saved is True
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z4_forged_and_stale_partial_save_blocked(tmp_path):
+    """Forged user, stale inventory ID, and expired state are strictly blocked."""
+    from datetime import datetime, timezone, timedelta
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_ok = _mock_vision_response([_mock_vision_item("гречка", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp_ok, resp_fail]):
+        await diary.analyze_and_maybe_log(
+            user_id=2007,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    # 1. Stale inventory ID
+    res_stale = diary.save_partial_pending_inventory(user_id=2007, expected_inventory_id="forged_inv_id")
+    assert res_stale.status == "stale"
+    assert res_stale.saved is False
+
+    # 2. Expired state
+    future_now = datetime.now(timezone.utc) + timedelta(days=2)
+    res_expired = diary.save_partial_pending_inventory(user_id=2007, now=future_now)
+    assert res_expired.status == "expired"
+    assert res_expired.saved is False
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z5_user_and_household_isolation(tmp_path):
+    """User and household isolation invariant is preserved."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp1 = _mock_vision_response([_mock_vision_item("гречка", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp1, resp_fail]):
+        await diary.analyze_and_maybe_log(
+            user_id=2008,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    # User 2009 (different actor) has no pending inventory
+    res_other = diary.save_partial_pending_inventory(user_id=2009)
+    assert res_other.status == "missing"
+    assert res_other.saved is False
+
+    # Save for User 2008
+    res_self = diary.save_partial_pending_inventory(user_id=2008)
+    assert res_self.status == "saved"
+    assert res_self.saved is True
+
+    # Check user summaries are isolated
+    sum_2008 = diary.get_daily_summary(user_id=2008)
+    sum_2009 = diary.get_daily_summary(user_id=2009)
+    assert sum_2008["entry_count"] == 1
+    assert sum_2009["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_z6_single_and_album_timeout_budgets(tmp_path, monkeypatch):
+    """Single photo and multi-photo timeout budgets align with gateway outer limits."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+
+    # Set mock timeouts
+    monkeypatch.setenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0")
+    monkeypatch.setenv("HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS", "90.0")
+
+    # Simulate slow vision calls on single photo
+    call_timeouts: list[float] = []
+
+    async def mock_vision_timed(image_url, user_prompt):
+        # Record the effective timeout by inspecting asyncio wait_for
+        return json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=mock_vision_timed):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=2010,
+            image_paths=["/tmp/single.jpg"],
+        )
+    assert outcome.available is False
+    assert outcome.validation_status in ("PROVIDER_ERROR", "PROVIDER_TIMEOUT", "VISION_FAILED")

@@ -9364,6 +9364,26 @@ class TelegramAdapter(BasePlatformAdapter):
                     pass
                 return
 
+            if result.status == "partial_save_rejected":
+                try:
+                    await query.answer(
+                        text=result.reply_text or "Команда частичного сохранения доступна только для частично распознанных альбомов.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+            if result.status == "forbidden":
+                try:
+                    await query.answer(
+                        text=result.reply_text or "Действие недоступно для этого пользователя.",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
+                return
+
             if result.status == "unknown_component":
                 try:
                     await query.answer(

@@ -8793,7 +8793,7 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = getattr(getattr(msg, "chat", None), "id", None)
         msg_id = getattr(msg, "message_id", None)
         batch_key = f"{actor_user_id}:{chat_id}:{media_group_id}" if media_group_id else f"{actor_user_id}:{chat_id}:single:{msg_id}"
-        
+
         for k, b in self._healbite_inventory_photo_batches.items():
             if k.startswith(f"{actor_user_id}:") and k != batch_key:
                 if b.status in ("COLLECTING", "PROCESSING"):
@@ -8820,10 +8820,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if batch is None:
             batch = _InventoryBatchState()
             self._healbite_inventory_photo_batches[batch_key] = batch
-            
+
         if msg_id in batch.seen_message_ids:
             return True
-            
+
         if batch.status != "COLLECTING":
             await self._send_message_with_thread_fallback(
                 chat_id=str(chat_id),
@@ -8831,13 +8831,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 message_thread_id=getattr(msg, "message_thread_id", None),
             )
             return True
-            
+
         batch.seen_message_ids.add(msg_id)
         batch.photos.append((msg, image_bytes))
-        
+
         if batch.timer_task and not batch.timer_task.done():
             batch.timer_task.cancel()
-            
+
         batch.timer_task = asyncio.create_task(
             self._flush_healbite_inventory_photo(batch_key, actor_user_id)
         )
@@ -8848,19 +8848,19 @@ class TelegramAdapter(BasePlatformAdapter):
             await asyncio.sleep(1.75)
         except asyncio.CancelledError:
             return
-            
+
         batch = self._healbite_inventory_photo_batches.get(batch_key)
         if not batch or batch.status != "COLLECTING":
             return
-            
+
         batch.status = "PROCESSING"
         photos = list(batch.photos)
-        
+
         if not photos:
             batch.status = "COMPLETED"
             asyncio.create_task(self._cleanup_healbite_batch(batch_key))
             return
-            
+
         if len(photos) > 5:
             photos = photos[:5]
             notice_msg = photos[0][0]
@@ -8869,7 +8869,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 text="За один раз можно обработать до 5 фото.\nПервые 5 отправлены на проверку.\nОстальные фото отправьте отдельной группой.",
                 message_thread_id=getattr(notice_msg, "message_thread_id", None),
             )
-            
+
         msgs, images = zip(*photos)
         try:
             result = await self._inventory_telegram.handle_photo_batch_bytes(
@@ -8887,7 +8887,7 @@ class TelegramAdapter(BasePlatformAdapter):
         finally:
             batch.status = "COMPLETED"
             asyncio.create_task(self._cleanup_healbite_batch(batch_key))
-            
+
     async def _cleanup_healbite_batch(self, batch_key: str) -> None:
         await asyncio.sleep(10.0)
         self._healbite_inventory_photo_batches.pop(batch_key, None)
@@ -9246,6 +9246,50 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
             return
 
+        if action in {"resolve_same", "resolve_distinct"}:
+            decision = (
+                "SAME_PORTION"
+                if action == "resolve_same"
+                else "DISTINCT_PORTIONS"
+            )
+            result = diary.resolve_album_decision(
+                user_id=target_user_id,
+                decision=decision,
+                expected_inventory_id=inventory_id,
+            )
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result=result.status,
+            )
+            if result.status == "updated" and result.inventory:
+                try:
+                    from gateway.healbite_nutrition_diary import build_food_vision_inventory_keyboard
+                    new_keyboard_rows = build_food_vision_inventory_keyboard(result.inventory)
+                    new_markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(b["text"], callback_data=b["callback_data"]) for b in row]
+                        for row in new_keyboard_rows
+                    ])
+                    await query.edit_message_text(
+                        text=result.reply_text,
+                        reply_markup=new_markup,
+                        parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                    )
+                except Exception:
+                    await self._send_food_inventory_callback_reply(query, result.reply_text)
+                try:
+                    await query.answer(text="Решение учтено!")
+                except Exception:
+                    pass
+                return
+            try:
+                await query.answer(text=result.reply_text or "Не удалось обновить решение.", show_alert=True)
+            except Exception:
+                pass
+            return
+
         if action in {"save", "save_no_kbzhu"}:
             if action == "save":
                 result = diary.save_pending_inventory_directly(
@@ -9291,6 +9335,16 @@ class TelegramAdapter(BasePlatformAdapter):
                     msg_text = "Запись уже сохранена или отменена."
                 try:
                     await query.answer(text=msg_text, show_alert=True)
+                except Exception:
+                    pass
+                return
+
+            if result.status == "album_decision_required":
+                try:
+                    await query.answer(
+                        text=result.reply_text or "Уточните: на фото одна порция или разные?",
+                        show_alert=True,
+                    )
                 except Exception:
                     pass
                 return

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import copy
 import hashlib
 import html
 import json
@@ -99,6 +100,12 @@ READY_FOR_NUTRITION_CALCULATION = "READY_FOR_NUTRITION_CALCULATION"
 NEEDS_WEIGHT_CONFIRMATION = "NEEDS_WEIGHT_CONFIRMATION"
 INVALID_INVENTORY_STATE = "INVALID_INVENTORY_STATE"
 UNKNOWN_COMPONENT_BLOCKED = "UNKNOWN_COMPONENT_BLOCKED"
+ALBUM_DECISION_SAME_PORTION = "SAME_PORTION"
+ALBUM_DECISION_DISTINCT_PORTIONS = "DISTINCT_PORTIONS"
+ALBUM_DECISION_PARTIAL_OVERLAP = "PARTIAL_OVERLAP"
+ALBUM_DECISION_UNRESOLVED = "UNRESOLVED"
+ALBUM_DECISION_REQUIRED_ERROR = "ALBUM_DECISION_REQUIRED"
+ALBUM_DECISION_PROMPT = "На фотографиях одна и та же порция с разных ракурсов или две разные порции? Пожалуйста, выберите: «Одна порция» или «Разные порции»."
 _MAX_FOOD_VISION_ITEMS = 12
 _MAX_FOOD_VISION_WARNINGS = 6
 _MAX_FOOD_VISION_NAME_LENGTH = 120
@@ -405,6 +412,8 @@ class PendingFoodVisionInventory:
     calculation_snapshot: dict[str, Any] | None = None
     household_id: str | None = None
     photo_count: int = 1
+    album_decision: str | None = None
+    album_raw_photo_items: list[list[dict[str, Any]]] | None = None
 
 
 @dataclass(slots=True)
@@ -1321,15 +1330,73 @@ def _aggregate_identical_food_vision_items(items: list[Any]) -> list[Any]:
 
 
 
+class ReconcileAlbumResult(tuple):
+    """3-tuple compatible result for multi-photo inventory reconciliation with album_decision."""
+    album_decision: str | None
+
+    def __new__(
+        cls,
+        items: list[Any],
+        warnings: list[str],
+        requires_confirmation: bool,
+        album_decision: str | None = None,
+    ):
+        inst = super().__new__(cls, (items, warnings, requires_confirmation))
+        inst.album_decision = album_decision
+        return inst
+
+
+def _item_to_raw_dict(item: Any) -> dict[str, Any]:
+    return {
+        "visible_name": getattr(item, "visible_name", ""),
+        "normalized_name": getattr(item, "normalized_name", None),
+        "confidence": getattr(item, "confidence", 0.0),
+        "estimated_grams_min": getattr(item, "estimated_grams_min", None),
+        "estimated_grams_max": getattr(item, "estimated_grams_max", None),
+        "selected_grams": getattr(item, "selected_grams", None),
+        "preparation": getattr(item, "preparation", ""),
+        "is_sauce": bool(getattr(item, "is_sauce", False)),
+        "uncertainty": getattr(item, "uncertainty", ""),
+        "item_id": getattr(item, "item_id", ""),
+        "suppressed_by_item_id": getattr(item, "suppressed_by_item_id", None),
+        "quantity": getattr(item, "quantity", None),
+        "count_type": getattr(item, "count_type", "COUNT_CONFIRMED"),
+        "piece_grams": getattr(item, "piece_grams", None),
+        "edible_yield_ratio": getattr(item, "edible_yield_ratio", None),
+        "grouped_item_ids": list(getattr(item, "grouped_item_ids", None) or []),
+    }
+
+
+def _raw_dict_to_item(data: dict[str, Any]) -> FoodVisionItem:
+    return FoodVisionItem(
+        visible_name=data.get("visible_name", ""),
+        normalized_name=data.get("normalized_name"),
+        confidence=float(data.get("confidence") or 0.0),
+        estimated_grams_min=_to_float(data.get("estimated_grams_min")),
+        estimated_grams_max=_to_float(data.get("estimated_grams_max")),
+        preparation=str(data.get("preparation") or ""),
+        is_sauce=bool(data.get("is_sauce")),
+        uncertainty=str(data.get("uncertainty") or ""),
+        item_id=str(data.get("item_id") or ""),
+        suppressed_by_item_id=data.get("suppressed_by_item_id"),
+        quantity=int(data["quantity"]) if data.get("quantity") is not None else None,
+        count_type=str(data.get("count_type") or "COUNT_CONFIRMED"),
+        piece_grams=_to_float(data.get("piece_grams")),
+        edible_yield_ratio=_to_float(data.get("edible_yield_ratio")),
+        grouped_item_ids=list(data.get("grouped_item_ids") or []),
+    )
+
+
 def _reconcile_multi_photo_inventories(
     photo_item_lists: list[list[Any]],
     *,
     user_text: str = "",
-) -> tuple[list[Any], list[str], bool]:
+    decision: str | None = None,
+) -> ReconcileAlbumResult:
     """Reconcile items across multiple photos in an album with evidence classification.
 
     Returns:
-        (reconciled_items, warnings, requires_confirmation)
+        ReconcileAlbumResult((reconciled_items, warnings, requires_confirmation), album_decision=...)
     """
     from gateway.nutrition.search import normalize_russian_food_query
 
@@ -1339,27 +1406,29 @@ def _reconcile_multi_photo_inventories(
         if items
     ]
     if not per_photo_aggregated:
-        return [], [], False
+        return ReconcileAlbumResult([], [], False, album_decision=None)
     if len(per_photo_aggregated) == 1:
-        return per_photo_aggregated[0], [], False
+        return ReconcileAlbumResult(per_photo_aggregated[0], [], False, album_decision=None)
 
     user_note = (user_text or "").casefold()
     same_portion_hints = {
-        "одна порция", "та же порция", "то же блюдо", "с разных ракурсов",
-        "ракурс сбоку", "вид сверху", "та же тарелка", "одна тарелка",
-        "same_portion", "тот же", "с разных сторон",
+        "одна порция", "1 порция", "та же порция", "то же блюдо",
+        "та же тарелка", "одна тарелка", "одна и та же",
+        "same_portion", "тот же", "одна",
     }
     distinct_portion_hints = {
-        "разные порции", "две порции", "вторая порция", "еще одна",
-        "две тарелки", "разные блюда", "distinct_portions", "для двоих",
+        "разные порции", "две порции", "2 порции", "вторая порция", "еще одна", "ещё одна",
+        "две тарелки", "разные блюда", "distinct_portions", "для двоих", "разные",
     }
 
-    user_indicates_same = any(h in user_note for h in same_portion_hints)
-    user_indicates_distinct = any(h in user_note for h in distinct_portion_hints)
+    user_indicates_same = (decision == ALBUM_DECISION_SAME_PORTION) or any(h in user_note for h in same_portion_hints)
+    user_indicates_distinct = (decision == ALBUM_DECISION_DISTINCT_PORTIONS) or any(h in user_note for h in distinct_portion_hints)
 
     combined_items: list[Any] = []
     warnings: list[str] = []
     requires_confirmation = False
+    had_ambiguous_overlap = False
+    had_overlap = False
 
     for photo_idx, photo_items in enumerate(per_photo_aggregated):
         for item in photo_items:
@@ -1391,22 +1460,23 @@ def _reconcile_multi_photo_inventories(
                     break
 
             if matched_idx is None:
-                # Distinct dish across photos (Scenario D) -> preserve
-                combined_items.append(item)
+                # Distinct dish across photos -> preserve
+                combined_items.append(copy.copy(item))
             else:
+                had_overlap = True
                 existing = combined_items[matched_idx]
                 item_note = (getattr(item, "uncertainty", "") or "").casefold() + " " + (getattr(item, "preparation", "") or "").casefold()
 
-                # Determine relationship
-                is_same = user_indicates_same or "same_portion" in item_note or "ракурс" in item_note
+                # Determine relationship: ONLY explicit affirmations or item_note tags count (NO 'ракурс' heuristic)
+                is_same = user_indicates_same or "same_portion" in item_note
                 is_distinct = user_indicates_distinct or "distinct_portions" in item_note or "вторая порция" in item_note
 
                 if not is_same and not is_distinct:
-                    # Ambiguous overlap (Scenario E)
+                    # Ambiguous overlap
+                    had_ambiguous_overlap = True
                     requires_confirmation = True
-                    ambiguity_prompt = "На фотографиях одна и та же порция с разных ракурсов или две разные порции?"
-                    if ambiguity_prompt not in warnings:
-                        warnings.append(ambiguity_prompt)
+                    if ALBUM_DECISION_PROMPT not in warnings:
+                        warnings.append(ALBUM_DECISION_PROMPT)
                     # Keep existing with note, do not double count automatically
                     if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
                         existing.visible_name = item.visible_name
@@ -1415,7 +1485,7 @@ def _reconcile_multi_photo_inventories(
                     new_ids = list(getattr(item, "grouped_item_ids", []) or [])
                     existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
                 elif is_same:
-                    # SAME_PORTION confirmed (Scenario B) -> deduplicate
+                    # SAME_PORTION confirmed -> deduplicate
                     if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
                         existing.visible_name = item.visible_name
                         existing.normalized_name = item.normalized_name
@@ -1432,7 +1502,7 @@ def _reconcile_multi_photo_inventories(
                     new_ids = list(getattr(item, "grouped_item_ids", []) or [])
                     existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
                 else:
-                    # DISTINCT_PORTIONS confirmed (Scenario C) -> sum
+                    # DISTINCT_PORTIONS confirmed -> sum
                     ex_qty = getattr(existing, "quantity", 1) or 1
                     it_qty = getattr(item, "quantity", 1) or 1
                     existing.quantity = ex_qty + it_qty
@@ -1449,7 +1519,20 @@ def _reconcile_multi_photo_inventories(
 
     if combined_items and isinstance(combined_items[0], PendingFoodVisionItem):
         combined_items = _reindex_pending_inventory_items(combined_items)
-    return combined_items, warnings, requires_confirmation
+
+    if had_ambiguous_overlap:
+        final_decision = ALBUM_DECISION_UNRESOLVED
+    elif had_overlap:
+        if user_indicates_same:
+            final_decision = ALBUM_DECISION_SAME_PORTION
+        elif user_indicates_distinct:
+            final_decision = ALBUM_DECISION_DISTINCT_PORTIONS
+        else:
+            final_decision = ALBUM_DECISION_UNRESOLVED
+    else:
+        final_decision = ALBUM_DECISION_DISTINCT_PORTIONS
+
+    return ReconcileAlbumResult(combined_items, warnings, requires_confirmation, album_decision=final_decision)
 
 def _aggregate_multi_photo_batch(photo_item_lists: list[list[Any]]) -> list[Any]:
     if not photo_item_lists:
@@ -2265,6 +2348,8 @@ def _pending_inventory_from_food_vision(
     inventory_id: str | None = None,
     household_id: str | None = None,
     photo_count: int = 1,
+    album_decision: str | None = None,
+    album_raw_photo_items: list[list[dict[str, Any]]] | None = None,
 ) -> PendingFoodVisionInventory:
     created_at = _normalize_timestamp(now)
     expires_at = created_at + (ttl if ttl is not None else PENDING_MEAL_TTL)
@@ -2318,6 +2403,8 @@ def _pending_inventory_from_food_vision(
         expires_at=expires_at,
         household_id=household_id,
         photo_count=max(1, int(photo_count)),
+        album_decision=album_decision,
+        album_raw_photo_items=album_raw_photo_items,
     )
     res.calculation_snapshot = _build_inventory_calculation_snapshot(res)
     return res
@@ -2359,6 +2446,8 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "calculation_snapshot": payload.calculation_snapshot,
         "household_id": payload.household_id,
         "photo_count": getattr(payload, "photo_count", 1) or 1,
+        "album_decision": getattr(payload, "album_decision", None),
+        "album_raw_photo_items": getattr(payload, "album_raw_photo_items", None),
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -2414,6 +2503,8 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         calculation_snapshot=payload.get("calculation_snapshot"),
         household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
         photo_count=int(payload.get("photo_count") or 1),
+        album_decision=str(payload["album_decision"]) if payload.get("album_decision") is not None else None,
+        album_raw_photo_items=payload.get("album_raw_photo_items"),
     )
 
 
@@ -2455,6 +2546,8 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         calculation_snapshot=dict(payload.calculation_snapshot) if payload.calculation_snapshot else None,
         household_id=payload.household_id,
         photo_count=getattr(payload, "photo_count", 1) or 1,
+        album_decision=payload.album_decision,
+        album_raw_photo_items=[[dict(it) for it in photo] for photo in payload.album_raw_photo_items] if payload.album_raw_photo_items is not None else None,
     )
 
 
@@ -2811,6 +2904,30 @@ def build_food_vision_inventory_keyboard(
 ) -> list[list[dict[str, str]]]:
     user_id = int(inventory.user_id or 0)
     inv_id = str(inventory.inventory_id or "")
+
+    edit_button = {
+        "text": "✏️ Исправить",
+        "callback_data": f"food_inv:edit:{user_id}:{inv_id}",
+    }
+    cancel_button = {
+        "text": "❌ Отмена",
+        "callback_data": f"food_inv:cancel:{user_id}:{inv_id}",
+    }
+
+    if getattr(inventory, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+        resolve_same_button = {
+            "text": "🍽 Одна порция",
+            "callback_data": f"food_inv:resolve_same:{user_id}:{inv_id}",
+        }
+        resolve_distinct_button = {
+            "text": "🍽🍽 Разные порции",
+            "callback_data": f"food_inv:resolve_distinct:{user_id}:{inv_id}",
+        }
+        return [
+            [resolve_same_button, resolve_distinct_button],
+            [edit_button, cancel_button],
+        ]
+
     if inventory.calculation_snapshot is not None:
         has_unmapped = bool(inventory.calculation_snapshot.get("has_unmapped_components"))
     else:
@@ -2828,14 +2945,6 @@ def build_food_vision_inventory_keyboard(
             "text": "✅ Сохранить",
             "callback_data": f"food_inv:save:{user_id}:{inv_id}",
         }
-    edit_button = {
-        "text": "✏️ Исправить",
-        "callback_data": f"food_inv:edit:{user_id}:{inv_id}",
-    }
-    cancel_button = {
-        "text": "❌ Отмена",
-        "callback_data": f"food_inv:cancel:{user_id}:{inv_id}",
-    }
     return [
         [save_button],
         [edit_button, cancel_button],
@@ -3271,6 +3380,30 @@ _RU_SAVE_WITHOUT_KBZHU_WORDS = {
 }
 _RU_CONFIRM_WORDS = {"\u0434\u0430", "\u0430\u0433\u0430", "\u043e\u043a", "\u043e\u043a\u0435\u0439", "yes", "y"}
 _RU_CANCEL_WORDS = {"\u043d\u0435\u0442", "\u043d\u0435\u0430", "\u043e\u0442\u043c\u0435\u043d\u0430", "\u043e\u0442\u043c\u0435\u043d\u0438", "cancel", "no", "n", "\u274c \u043e\u0442\u043c\u0435\u043d\u0430"}
+_RU_ALBUM_SAME_PORTION_WORDS = {
+    "одна порция",
+    "1 порция",
+    "одна",
+    "та же порция",
+    "то же блюдо",
+    "одна тарелка",
+    "та же тарелка",
+    "одна и та же",
+    "same_portion",
+    "🍽 одна порция",
+}
+_RU_ALBUM_DISTINCT_PORTIONS_WORDS = {
+    "разные порции",
+    "2 порции",
+    "две порции",
+    "разные",
+    "разные блюда",
+    "вторая порция",
+    "еще одна",
+    "ещё одна",
+    "distinct_portions",
+    "🍽🍽 разные порции",
+}
 _GRAM_SUFFIX_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?)"
 _WEIGHT_UNIT_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043a\u0433|\u043a\u0438\u043b\u043e\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043c\u043b|\u043c\u0438\u043b\u043b\u0438\u043b\u0438\u0442\u0440(?:\u0430|\u043e\u0432)?|g|gr|grams?|kg|ml)\.?"
 _EXPLICIT_WEIGHT_RE = re.compile(rf"\b\d+(?:[.,]\d+)?\s*{_WEIGHT_UNIT_RE}\b", re.IGNORECASE)
@@ -3337,6 +3470,10 @@ def _parse_single_pending_inventory_action(text: str) -> PendingInventoryActionP
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="confirm"))
     if lowered in _RU_CANCEL_WORDS:
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="cancel"))
+    if lowered in _RU_ALBUM_SAME_PORTION_WORDS:
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="album_resolve_same"))
+    if lowered in _RU_ALBUM_DISTINCT_PORTIONS_WORDS:
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="album_resolve_distinct"))
 
     if _is_ambiguous_inventory_command(normalized):
         return PendingInventoryActionParseResult(ok=False, error=_INVENTORY_AMBIGUOUS_ERROR)
@@ -3754,6 +3891,13 @@ class HealBiteNutritionDiary:
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
 
+        total_budget_s = float(
+            os.getenv(
+                "HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS",
+                os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"),
+            )
+        )
+        deadline = time.monotonic() + total_budget_s - 1.0
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
         max_attempts = 2
 
@@ -3761,15 +3905,24 @@ class HealBiteNutritionDiary:
             """Analyze a single image path with retry. Returns (result_dict, raw_analysis)."""
             result: dict[str, Any] = {}
             for attempt in range(1, max_attempts + 1):
+                remaining_s = deadline - time.monotonic() - 0.5
+                if remaining_s <= 1.0:
+                    logger.warning(
+                        "[HealBite][album_deadline_budget_exceeded] remaining=%.1fs path=%s",
+                        remaining_s,
+                        path,
+                    )
+                    return {"success": False, "_failure_reason": "PROVIDER_TIMEOUT"}, ""
+                effective_timeout = min(timeout_s, max(1.0, remaining_s))
                 try:
                     result_json = await asyncio.wait_for(
                         vision_analyze_tool(image_url=path, user_prompt=prompt),
-                        timeout=timeout_s,
+                        timeout=effective_timeout,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "[HealBite][vision_timeout] vision_analyze_tool timed out after %.1fs path_index=%s",
-                        timeout_s,
+                        effective_timeout,
                         paths.index(path) if path in paths else -1,
                     )
                     return {"success": False, "_failure_reason": "PROVIDER_TIMEOUT"}, ""
@@ -3797,9 +3950,6 @@ class HealBiteNutritionDiary:
             raw = str(result.get("analysis") or "").strip() if isinstance(result, dict) else ""
             return result, raw
 
-        # Analyze all photos sequentially (shared deadline is handled by the
-        # outer photo_turn_timeout_s in gateway/run.py; per-image retries use
-        # the inner timeout_s budget).
         logger.info(
             "[HealBite][album_analysis_start] photo_count=%d max_album=%d",
             photo_count,
@@ -3810,9 +3960,6 @@ class HealBiteNutritionDiary:
         last_failure_reason: str = "PROVIDER_ERROR"
         at_least_one_success = False
         any_non_food = False
-
-        timeout_budget_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0")) - 2.0
-        deadline = time.monotonic() + timeout_budget_s
 
         for photo_index, path in enumerate(paths):
             remaining_s = deadline - time.monotonic()
@@ -3913,15 +4060,24 @@ class HealBiteNutritionDiary:
                 photo_count,
             )
 
+        album_raw_items = [
+            [_item_to_raw_dict(item) for item in inv.items]
+            for inv in per_photo_inventories
+        ] if len(per_photo_inventories) > 1 or is_partial_album else None
+
+        album_decision = None
         if len(per_photo_inventories) == 1 and not is_partial_album:
             merged_inventory = per_photo_inventories[0]
+            album_decision = None
         else:
             # Reconcile across photos
             per_photo_item_lists = [inv.items for inv in per_photo_inventories]
-            merged_items, cross_warnings, requires_confirm = _reconcile_multi_photo_inventories(
+            reconcile_res = _reconcile_multi_photo_inventories(
                 per_photo_item_lists,
                 user_text=user_text,
             )
+            merged_items, cross_warnings, requires_confirm = reconcile_res
+            album_decision = reconcile_res.album_decision
             avg_confidence = round(
                 sum(inv.overall_confidence for inv in per_photo_inventories) / len(per_photo_inventories),
                 3,
@@ -3945,11 +4101,12 @@ class HealBiteNutritionDiary:
                 warnings=merged_warnings,
             )
             logger.info(
-                "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s",
+                "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s decision=%s",
                 len(per_photo_inventories),
                 len(merged_items),
                 avg_confidence,
                 is_partial_album,
+                album_decision,
             )
 
         pending_inventory = self.stage_pending_inventory(
@@ -3959,6 +4116,8 @@ class HealBiteNutritionDiary:
             image_ref=image_ref,
             occurred_at=occurred_at,
             photo_count=photo_count,
+            album_decision=album_decision,
+            album_raw_photo_items=album_raw_items,
         )
         logger.info(
             "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=VALID photo_count=%d",
@@ -4068,6 +4227,10 @@ class HealBiteNutritionDiary:
                 ],
                 "calculation_snapshot": payload.calculation_snapshot,
                 "household_id": payload.household_id,
+                "photo_count": getattr(payload, "photo_count", 1) or 1,
+                "album_decision": getattr(payload, "album_decision", None),
+                "album_raw_photo_items": getattr(payload, "album_raw_photo_items", None),
+                "needs_user_confirmation": getattr(payload, "needs_user_confirmation", False),
             },
             ensure_ascii=False,
         )
@@ -4086,6 +4249,8 @@ class HealBiteNutritionDiary:
         inventory_id: str | None = None,
         household_id: str | None = None,
         photo_count: int = 1,
+        album_decision: str | None = None,
+        album_raw_photo_items: list[list[dict[str, Any]]] | None = None,
     ) -> PendingFoodVisionInventory:
         payload = _pending_inventory_from_food_vision(
             int(user_id),
@@ -4097,6 +4262,8 @@ class HealBiteNutritionDiary:
             inventory_id=inventory_id,
             household_id=household_id,
             photo_count=photo_count,
+            album_decision=album_decision,
+            album_raw_photo_items=album_raw_photo_items,
         )
         if expires_at is not None:
             payload.expires_at = _normalize_timestamp(expires_at)
@@ -4215,6 +4382,96 @@ class HealBiteNutritionDiary:
         )
         return payload
 
+    def resolve_album_decision(
+        self,
+        user_id: str | int,
+        decision: str,
+        *,
+        expected_inventory_id: str | None = None,
+        now: datetime | None = None,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
+            )
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(
+                status="expired",
+                reply_text=format_pending_inventory_expired_reply(),
+            )
+
+        if decision not in {ALBUM_DECISION_SAME_PORTION, ALBUM_DECISION_DISTINCT_PORTIONS}:
+            return PendingInventoryReplyResult(
+                status="invalid_action",
+                reply_text=ALBUM_DECISION_PROMPT,
+                inventory=payload,
+            )
+
+        raw_lists = payload.album_raw_photo_items
+        if raw_lists and len(raw_lists) > 1:
+            reconstructed = [
+                [_raw_dict_to_item(d) for d in photo]
+                for photo in raw_lists
+            ]
+            reconcile_res = _reconcile_multi_photo_inventories(
+                reconstructed,
+                decision=decision,
+            )
+            reconciled_items, cross_warnings, requires_confirm = reconcile_res
+
+            pending_items = []
+            for index, item in enumerate(reconciled_items, start=1):
+                g_min = item.estimated_grams_min
+                g_max = item.estimated_grams_max
+                sel_g = _maybe_proposed_selected_grams(g_min, g_max)
+                item_id = getattr(item, "item_id", "") or f"item_{index}"
+                pending_items.append(PendingFoodVisionItem(
+                    index=index,
+                    visible_name=item.visible_name,
+                    normalized_name=item.normalized_name,
+                    confidence=item.confidence,
+                    estimated_grams_min=g_min,
+                    estimated_grams_max=g_max,
+                    selected_grams=sel_g,
+                    preparation=item.preparation,
+                    is_sauce=item.is_sauce,
+                    uncertainty=item.uncertainty,
+                    user_modified=False,
+                    item_id=item_id,
+                    suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
+                    quantity=getattr(item, "quantity", None),
+                    count_type=getattr(item, "count_type", "COUNT_CONFIRMED"),
+                    piece_grams=getattr(item, "piece_grams", None),
+                    edible_yield_ratio=getattr(item, "edible_yield_ratio", None) or _get_edible_yield_ratio(item.normalized_name, item.visible_name, preparation=item.preparation),
+                    grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or [item_id]),
+                ))
+            payload.items = _reindex_pending_inventory_items(pending_items)
+
+        payload.warnings = [
+            w for w in payload.warnings
+            if w != ALBUM_DECISION_PROMPT and "одна и та же порция" not in w.lower()
+        ]
+        payload.album_decision = decision
+        payload.needs_user_confirmation = bool(payload.warnings) or bool(_pending_inventory_missing_weight_indexes(payload))
+        payload.calculation_snapshot = _build_inventory_calculation_snapshot(payload)
+        self._store_pending_inventory(payload)
+
+        return PendingInventoryReplyResult(
+            status="updated",
+            reply_text=format_food_vision_inventory_reply(payload),
+            inventory=payload,
+        )
+
     def confirm_pending_inventory(
         self,
         user_id: str | int,
@@ -4237,6 +4494,12 @@ class HealBiteNutritionDiary:
             return PendingInventoryReplyResult(
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
+            )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+            return PendingInventoryReplyResult(
+                status="album_decision_required",
+                reply_text=ALBUM_DECISION_PROMPT,
+                inventory=payload,
             )
         calculation = calculate_inventory_nutrition(payload, require_weights=True)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
@@ -4331,6 +4594,18 @@ class HealBiteNutritionDiary:
         if action.kind == "cancel":
             self.clear_pending_state(user_id)
             return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+        if action.kind in {"album_resolve_same", "album_resolve_distinct"}:
+            decision = (
+                ALBUM_DECISION_SAME_PORTION
+                if action.kind == "album_resolve_same"
+                else ALBUM_DECISION_DISTINCT_PORTIONS
+            )
+            return self.resolve_album_decision(
+                user_id,
+                decision,
+                expected_inventory_id=expected_inventory_id,
+                now=now,
+            )
         if action.kind == "save":
             return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
         if action.kind == "save_without_kbzhu":
@@ -4365,6 +4640,12 @@ class HealBiteNutritionDiary:
             return PendingInventoryReplyResult(
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
+            )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+            return PendingInventoryReplyResult(
+                status="album_decision_required",
+                reply_text=ALBUM_DECISION_PROMPT,
+                inventory=payload,
             )
 
         calculation = calculate_inventory_nutrition(payload, require_weights=require_weights)
@@ -4439,6 +4720,12 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+            return PendingInventoryReplyResult(
+                status="album_decision_required",
+                reply_text=ALBUM_DECISION_PROMPT,
+                inventory=payload,
+            )
 
         calculation = calculate_inventory_nutrition(payload)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
@@ -4509,6 +4796,11 @@ class HealBiteNutritionDiary:
             return ConfirmPendingMealResult(
                 status="expired",
                 record=payload.record,
+            )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+            return ConfirmPendingMealResult(
+                status="album_decision_required",
+                record=payload.record if hasattr(payload, "record") else None,
             )
 
         sqlite_id, duplicate = self.save_record(
@@ -4618,6 +4910,10 @@ class HealBiteNutritionDiary:
             occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
             calculation_snapshot=payload.get("calculation_snapshot"),
             household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
+            photo_count=int(payload.get("photo_count") or 1),
+            album_decision=str(payload["album_decision"]) if payload.get("album_decision") is not None else None,
+            album_raw_photo_items=payload.get("album_raw_photo_items"),
+            needs_user_confirmation=bool(payload.get("needs_user_confirmation")),
         )
 
     def _deserialize_pending_meal(

@@ -100,11 +100,23 @@ READY_FOR_NUTRITION_CALCULATION = "READY_FOR_NUTRITION_CALCULATION"
 NEEDS_WEIGHT_CONFIRMATION = "NEEDS_WEIGHT_CONFIRMATION"
 INVALID_INVENTORY_STATE = "INVALID_INVENTORY_STATE"
 UNKNOWN_COMPONENT_BLOCKED = "UNKNOWN_COMPONENT_BLOCKED"
-ALBUM_DECISION_SAME_PORTION = "SAME_PORTION"
-ALBUM_DECISION_DISTINCT_PORTIONS = "DISTINCT_PORTIONS"
+
+# Album processing status (independent dimension: COMPLETE vs PARTIAL)
+ALBUM_PROCESSING_COMPLETE = "COMPLETE"
+ALBUM_PROCESSING_PARTIAL = "PARTIAL"
+
+# Album overlap decision (independent dimension: SAME_PORTION vs DISTINCT_PORTIONS vs UNRESOLVED vs NONE)
+ALBUM_OVERLAP_SAME_PORTION = "SAME_PORTION"
+ALBUM_OVERLAP_DISTINCT_PORTIONS = "DISTINCT_PORTIONS"
+ALBUM_OVERLAP_UNRESOLVED = "UNRESOLVED"
+ALBUM_OVERLAP_NONE = "NONE"
+
+# Backward compatibility aliases
+ALBUM_DECISION_SAME_PORTION = ALBUM_OVERLAP_SAME_PORTION
+ALBUM_DECISION_DISTINCT_PORTIONS = ALBUM_OVERLAP_DISTINCT_PORTIONS
 ALBUM_DECISION_PARTIAL_OVERLAP = "PARTIAL_OVERLAP"
-ALBUM_DECISION_UNRESOLVED = "UNRESOLVED"
-ALBUM_DECISION_PARTIAL = "PARTIAL"
+ALBUM_DECISION_UNRESOLVED = ALBUM_OVERLAP_UNRESOLVED
+ALBUM_DECISION_PARTIAL = ALBUM_PROCESSING_PARTIAL
 ALBUM_DECISION_REQUIRED_ERROR = "ALBUM_DECISION_REQUIRED"
 ALBUM_DECISION_PROMPT = "На фотографиях одна и та же порция с разных ракурсов или две разные порции? Пожалуйста, выберите: «Одна порция» или «Разные порции»."
 ALBUM_PARTIAL_PROMPT = "⚠️ Распознана только часть фото из альбома. Обычное сохранение заблокировано. Нажмите «Сохранить распознанную часть», чтобы сохранить распознанные блюда, или отправьте фото заново."
@@ -416,6 +428,14 @@ class PendingFoodVisionInventory:
     photo_count: int = 1
     album_decision: str | None = None
     album_raw_photo_items: list[list[dict[str, Any]]] | None = None
+    album_processing_status: str = ALBUM_PROCESSING_COMPLETE
+    album_overlap_decision: str = ALBUM_OVERLAP_NONE
+
+    def __post_init__(self) -> None:
+        if self.album_decision == ALBUM_PROCESSING_PARTIAL and self.album_processing_status == ALBUM_PROCESSING_COMPLETE:
+            self.album_processing_status = ALBUM_PROCESSING_PARTIAL
+        if self.album_decision in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED) and self.album_overlap_decision == ALBUM_OVERLAP_NONE:
+            self.album_overlap_decision = self.album_decision
 
 
 @dataclass(slots=True)
@@ -2352,6 +2372,8 @@ def _pending_inventory_from_food_vision(
     photo_count: int = 1,
     album_decision: str | None = None,
     album_raw_photo_items: list[list[dict[str, Any]]] | None = None,
+    album_processing_status: str | None = None,
+    album_overlap_decision: str | None = None,
 ) -> PendingFoodVisionInventory:
     created_at = _normalize_timestamp(now)
     expires_at = created_at + (ttl if ttl is not None else PENDING_MEAL_TTL)
@@ -2407,6 +2429,8 @@ def _pending_inventory_from_food_vision(
         photo_count=max(1, int(photo_count)),
         album_decision=album_decision,
         album_raw_photo_items=album_raw_photo_items,
+        album_processing_status=album_processing_status or (ALBUM_PROCESSING_PARTIAL if album_decision == ALBUM_PROCESSING_PARTIAL else ALBUM_PROCESSING_COMPLETE),
+        album_overlap_decision=album_overlap_decision or (album_decision if album_decision in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED) else ALBUM_OVERLAP_NONE),
     )
     res.calculation_snapshot = _build_inventory_calculation_snapshot(res)
     return res
@@ -2450,6 +2474,8 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "photo_count": getattr(payload, "photo_count", 1) or 1,
         "album_decision": getattr(payload, "album_decision", None),
         "album_raw_photo_items": getattr(payload, "album_raw_photo_items", None),
+        "album_processing_status": getattr(payload, "album_processing_status", ALBUM_PROCESSING_COMPLETE),
+        "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -2487,6 +2513,28 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             edible_yield_ratio=_to_float(item_payload.get("edible_yield_ratio")),
             grouped_item_ids=list(item_payload.get("grouped_item_ids") or []),
         ))
+
+    raw_proc = payload.get("album_processing_status")
+    raw_overlap = payload.get("album_overlap_decision")
+    legacy_decision = str(payload["album_decision"]) if payload.get("album_decision") is not None else None
+    photo_count = int(payload.get("photo_count") or 1)
+
+    if raw_proc in (ALBUM_PROCESSING_COMPLETE, ALBUM_PROCESSING_PARTIAL):
+        proc_status = raw_proc
+    elif legacy_decision == ALBUM_PROCESSING_PARTIAL:
+        proc_status = ALBUM_PROCESSING_PARTIAL
+    else:
+        proc_status = ALBUM_PROCESSING_COMPLETE
+
+    if raw_overlap in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED, ALBUM_OVERLAP_NONE):
+        overlap_decision = raw_overlap
+    elif legacy_decision in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED):
+        overlap_decision = legacy_decision
+    elif any(ALBUM_DECISION_PROMPT in str(w) for w in (payload.get("warnings") or [])):
+        overlap_decision = ALBUM_OVERLAP_UNRESOLVED
+    else:
+        overlap_decision = ALBUM_OVERLAP_NONE
+
     return PendingFoodVisionInventory(
         kind=PENDING_INVENTORY_KIND,
         state=str(payload.get("state") or PENDING_INVENTORY_STATE),
@@ -2504,9 +2552,11 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         expires_at=expires_at,
         calculation_snapshot=payload.get("calculation_snapshot"),
         household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
-        photo_count=int(payload.get("photo_count") or 1),
-        album_decision=str(payload["album_decision"]) if payload.get("album_decision") is not None else None,
+        photo_count=photo_count,
+        album_decision=legacy_decision,
         album_raw_photo_items=payload.get("album_raw_photo_items"),
+        album_processing_status=proc_status,
+        album_overlap_decision=overlap_decision,
     )
 
 
@@ -2550,6 +2600,8 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         photo_count=getattr(payload, "photo_count", 1) or 1,
         album_decision=payload.album_decision,
         album_raw_photo_items=[[dict(it) for it in photo] for photo in payload.album_raw_photo_items] if payload.album_raw_photo_items is not None else None,
+        album_processing_status=payload.album_processing_status,
+        album_overlap_decision=payload.album_overlap_decision,
     )
 
 
@@ -2916,7 +2968,17 @@ def build_food_vision_inventory_keyboard(
         "callback_data": f"food_inv:cancel:{user_id}:{inv_id}",
     }
 
-    if getattr(inventory, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+    overlap_decision = getattr(inventory, "album_overlap_decision", None)
+    if overlap_decision is None:
+        warnings = getattr(inventory, "warnings", []) or []
+        if getattr(inventory, "album_decision", "") == ALBUM_DECISION_UNRESOLVED or any(
+            ALBUM_DECISION_PROMPT in str(w) for w in warnings
+        ):
+            overlap_decision = ALBUM_OVERLAP_UNRESOLVED
+        else:
+            overlap_decision = ALBUM_OVERLAP_NONE
+
+    if overlap_decision == ALBUM_OVERLAP_UNRESOLVED:
         resolve_same_button = {
             "text": "🍽 Одна порция",
             "callback_data": f"food_inv:resolve_same:{user_id}:{inv_id}",
@@ -2930,7 +2992,14 @@ def build_food_vision_inventory_keyboard(
             [edit_button, cancel_button],
         ]
 
-    if getattr(inventory, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+    proc_status = getattr(inventory, "album_processing_status", None)
+    if proc_status is None:
+        if getattr(inventory, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            proc_status = ALBUM_PROCESSING_PARTIAL
+        else:
+            proc_status = ALBUM_PROCESSING_COMPLETE
+
+    if proc_status == ALBUM_PROCESSING_PARTIAL and getattr(inventory, "photo_count", 1) > 1:
         save_partial_button = {
             "text": "💾 Сохранить распознанную часть",
             "callback_data": f"food_inv:save_partial:{user_id}:{inv_id}",
@@ -3836,6 +3905,55 @@ def format_nutrition_context(record: NutritionRecord, *, saved: bool, duplicate:
     )
 
 
+def _check_album_state_save_block(
+    payload: Any,
+    *,
+    for_partial_save: bool = False,
+) -> tuple[str | None, str | None]:
+    """Check album processing status and overlap decision against save intent.
+
+    Returns (status, reply_text) if blocked, or (None, None) if allowed.
+    """
+    # 1. Resolve overlap decision
+    overlap_decision = getattr(payload, "album_overlap_decision", None)
+    if overlap_decision is None:
+        warnings = getattr(payload, "warnings", []) or []
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED or any(
+            ALBUM_DECISION_PROMPT in str(w) for w in warnings
+        ):
+            overlap_decision = ALBUM_OVERLAP_UNRESOLVED
+        else:
+            overlap_decision = ALBUM_OVERLAP_NONE
+
+    # Fail-closed: if portion overlap is UNRESOLVED, ALL save pathways are strictly blocked!
+    if overlap_decision == ALBUM_OVERLAP_UNRESOLVED:
+        return ("album_decision_required", ALBUM_DECISION_PROMPT)
+
+    # 2. Resolve processing status
+    proc_status = getattr(payload, "album_processing_status", None)
+    if proc_status is None:
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            proc_status = ALBUM_PROCESSING_PARTIAL
+        else:
+            proc_status = ALBUM_PROCESSING_COMPLETE
+
+    photo_count = getattr(payload, "photo_count", 1) or 1
+
+    if for_partial_save:
+        # Partial save is ONLY allowed if processing_status == PARTIAL and photo_count > 1
+        if proc_status != ALBUM_PROCESSING_PARTIAL or photo_count <= 1:
+            return (
+                "partial_save_rejected",
+                "Команда частичного сохранения доступна только для частично распознанных альбомов. Для сохранения используйте обычную кнопку «Сохранить».",
+            )
+    else:
+        # Ordinary save is BLOCKED if processing_status == PARTIAL
+        if proc_status == ALBUM_PROCESSING_PARTIAL:
+            return ("album_partial_blocked", ALBUM_PARTIAL_PROMPT)
+
+    return (None, None)
+
+
 class HealBiteNutritionDiary:
     def __init__(
         self,
@@ -3915,12 +4033,15 @@ class HealBiteNutritionDiary:
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
 
-        total_budget_s = float(
-            os.getenv(
-                "HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS",
-                os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "90.0"),
+        if photo_count > 1:
+            total_budget_s = float(
+                os.getenv(
+                    "HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS",
+                    os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "90.0"),
+                )
             )
-        )
+        else:
+            total_budget_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"))
         inner_budget_s = max(5.0, total_budget_s - 3.0)
         deadline = time.monotonic() + inner_budget_s
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
@@ -4091,9 +4212,14 @@ class HealBiteNutritionDiary:
         ] if len(per_photo_inventories) > 1 or is_partial_album else None
 
         album_decision = None
+        album_proc_status = ALBUM_PROCESSING_COMPLETE
+        album_overlap = ALBUM_OVERLAP_NONE
+
         if len(per_photo_inventories) == 1 and not is_partial_album:
             merged_inventory = per_photo_inventories[0]
             album_decision = None
+            album_proc_status = ALBUM_PROCESSING_COMPLETE
+            album_overlap = ALBUM_OVERLAP_NONE
         else:
             # Reconcile across photos
             per_photo_item_lists = [inv.items for inv in per_photo_inventories]
@@ -4102,10 +4228,16 @@ class HealBiteNutritionDiary:
                 user_text=user_text,
             )
             merged_items, cross_warnings, requires_confirm = reconcile_res
-            if is_partial_album:
+            album_proc_status = ALBUM_PROCESSING_PARTIAL if is_partial_album else ALBUM_PROCESSING_COMPLETE
+            album_overlap = reconcile_res.album_decision if len(per_photo_inventories) > 1 else ALBUM_OVERLAP_NONE
+
+            if album_overlap == ALBUM_OVERLAP_UNRESOLVED:
+                album_decision = ALBUM_DECISION_UNRESOLVED
+            elif is_partial_album:
                 album_decision = ALBUM_DECISION_PARTIAL
             else:
-                album_decision = reconcile_res.album_decision
+                album_decision = album_overlap
+
             avg_confidence = round(
                 sum(inv.overall_confidence for inv in per_photo_inventories) / len(per_photo_inventories),
                 3,
@@ -4129,12 +4261,14 @@ class HealBiteNutritionDiary:
                 warnings=merged_warnings,
             )
             logger.info(
-                "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s decision=%s",
+                "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s decision=%s proc_status=%s overlap=%s",
                 len(per_photo_inventories),
                 len(merged_items),
                 avg_confidence,
                 is_partial_album,
                 album_decision,
+                album_proc_status,
+                album_overlap,
             )
 
         pending_inventory = self.stage_pending_inventory(
@@ -4146,6 +4280,8 @@ class HealBiteNutritionDiary:
             photo_count=photo_count,
             album_decision=album_decision,
             album_raw_photo_items=album_raw_items,
+            album_processing_status=album_proc_status,
+            album_overlap_decision=album_overlap,
         )
         logger.info(
             "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=VALID photo_count=%d",
@@ -4258,6 +4394,8 @@ class HealBiteNutritionDiary:
                 "photo_count": getattr(payload, "photo_count", 1) or 1,
                 "album_decision": getattr(payload, "album_decision", None),
                 "album_raw_photo_items": getattr(payload, "album_raw_photo_items", None),
+                "album_processing_status": getattr(payload, "album_processing_status", ALBUM_PROCESSING_COMPLETE),
+                "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
                 "needs_user_confirmation": getattr(payload, "needs_user_confirmation", False),
             },
             ensure_ascii=False,
@@ -4279,6 +4417,8 @@ class HealBiteNutritionDiary:
         photo_count: int = 1,
         album_decision: str | None = None,
         album_raw_photo_items: list[list[dict[str, Any]]] | None = None,
+        album_processing_status: str | None = None,
+        album_overlap_decision: str | None = None,
     ) -> PendingFoodVisionInventory:
         payload = _pending_inventory_from_food_vision(
             int(user_id),
@@ -4292,6 +4432,8 @@ class HealBiteNutritionDiary:
             photo_count=photo_count,
             album_decision=album_decision,
             album_raw_photo_items=album_raw_photo_items,
+            album_processing_status=album_processing_status,
+            album_overlap_decision=album_overlap_decision,
         )
         if expires_at is not None:
             payload.expires_at = _normalize_timestamp(expires_at)
@@ -4489,7 +4631,15 @@ class HealBiteNutritionDiary:
             w for w in payload.warnings
             if w != ALBUM_DECISION_PROMPT and "одна и та же порция" not in w.lower()
         ]
-        payload.album_decision = decision
+        payload.album_overlap_decision = decision
+        if payload.album_processing_status == ALBUM_PROCESSING_PARTIAL:
+            payload.album_decision = ALBUM_DECISION_PARTIAL
+            if raw_lists:
+                partial_note = f"⚠️ Удалось распознать {len(raw_lists)} из {payload.photo_count} фото. Не забудьте сохранить распознанную часть."
+                if not any("Удалось распознать" in str(w) for w in payload.warnings):
+                    payload.warnings.insert(0, partial_note)
+        else:
+            payload.album_decision = decision
         payload.needs_user_confirmation = bool(payload.warnings) or bool(_pending_inventory_missing_weight_indexes(payload))
         payload.calculation_snapshot = _build_inventory_calculation_snapshot(payload)
         self._store_pending_inventory(payload)
@@ -4510,11 +4660,11 @@ class HealBiteNutritionDiary:
         normalized_user_id = int(user_id)
         payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
         if payload is None:
-            return PendingInventoryReplyResult(status="missing", reply_text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u043f\u043e \u0444\u043e\u0442\u043e. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.")
+            return PendingInventoryReplyResult(status="missing", reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.")
         if expected_inventory_id and payload.inventory_id != expected_inventory_id:
             return PendingInventoryReplyResult(
                 status="stale",
-                reply_text="\u042d\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u0443\u0436\u0435 \u0437\u0430\u043c\u0435\u043d\u0435\u043d\u043e \u043d\u043e\u0432\u044b\u043c \u0444\u043e\u0442\u043e. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
                 inventory=payload,
             )
         if self.is_pending_meal_expired(payload, now=now):
@@ -4523,16 +4673,11 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+        blocked_status, blocked_reply = _check_album_state_save_block(payload, for_partial_save=False)
+        if blocked_status:
             return PendingInventoryReplyResult(
-                status="album_decision_required",
-                reply_text=ALBUM_DECISION_PROMPT,
-                inventory=payload,
-            )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
-            return PendingInventoryReplyResult(
-                status="album_partial_blocked",
-                reply_text=ALBUM_PARTIAL_PROMPT,
+                status=blocked_status,
+                reply_text=blocked_reply,
                 inventory=payload,
             )
         calculation = calculate_inventory_nutrition(payload, require_weights=True)
@@ -4677,16 +4822,11 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+        blocked_status, blocked_reply = _check_album_state_save_block(payload, for_partial_save=False)
+        if blocked_status:
             return PendingInventoryReplyResult(
-                status="album_decision_required",
-                reply_text=ALBUM_DECISION_PROMPT,
-                inventory=payload,
-            )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
-            return PendingInventoryReplyResult(
-                status="album_partial_blocked",
-                reply_text=ALBUM_PARTIAL_PROMPT,
+                status=blocked_status,
+                reply_text=blocked_reply,
                 inventory=payload,
             )
 
@@ -4762,16 +4902,11 @@ class HealBiteNutritionDiary:
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
             )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+        blocked_status, blocked_reply = _check_album_state_save_block(payload, for_partial_save=False)
+        if blocked_status:
             return PendingInventoryReplyResult(
-                status="album_decision_required",
-                reply_text=ALBUM_DECISION_PROMPT,
-                inventory=payload,
-            )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
-            return PendingInventoryReplyResult(
-                status="album_partial_blocked",
-                reply_text=ALBUM_PARTIAL_PROMPT,
+                status=blocked_status,
+                reply_text=blocked_reply,
                 inventory=payload,
             )
 
@@ -4840,6 +4975,12 @@ class HealBiteNutritionDiary:
                 status="missing",
                 reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
             )
+        if payload.user_id != normalized_user_id:
+            return PendingInventoryReplyResult(
+                status="forbidden",
+                reply_text="Действие недоступно для этого пользователя.",
+                inventory=payload,
+            )
         if expected_inventory_id and payload.inventory_id != expected_inventory_id:
             return PendingInventoryReplyResult(
                 status="stale",
@@ -4851,6 +4992,14 @@ class HealBiteNutritionDiary:
             return PendingInventoryReplyResult(
                 status="expired",
                 reply_text=format_pending_inventory_expired_reply(),
+            )
+
+        blocked_status, blocked_reply = _check_album_state_save_block(payload, for_partial_save=True)
+        if blocked_status:
+            return PendingInventoryReplyResult(
+                status=blocked_status,
+                reply_text=blocked_reply,
+                inventory=payload,
             )
 
         calculation = calculate_inventory_nutrition(payload, require_weights=require_weights)
@@ -4883,6 +5032,9 @@ class HealBiteNutritionDiary:
                     )
             record = _build_component_record(payload, components, is_complete=False)
 
+        # Clear pending state immediately before saving to prevent concurrent duplicate saves
+        self.clear_pending_state(normalized_user_id)
+
         sqlite_id, duplicate = self.save_record(
             user_id=normalized_user_id,
             source=payload.source,
@@ -4890,7 +5042,6 @@ class HealBiteNutritionDiary:
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
         )
-        self.clear_pending_state(normalized_user_id)
         summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
         reply_text = format_pending_meal_saved_reply(
             summary,
@@ -4924,14 +5075,10 @@ class HealBiteNutritionDiary:
                 status="expired",
                 record=payload.record,
             )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
+        blocked_status, _ = _check_album_state_save_block(payload, for_partial_save=False)
+        if blocked_status:
             return ConfirmPendingMealResult(
-                status="album_decision_required",
-                record=payload.record if hasattr(payload, "record") else None,
-            )
-        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
-            return ConfirmPendingMealResult(
-                status="album_partial_blocked",
+                status=blocked_status,
                 record=payload.record if hasattr(payload, "record") else None,
             )
 
@@ -5027,6 +5174,27 @@ class HealBiteNutritionDiary:
                     grouped_item_ids=list(raw_item.get("grouped_item_ids") or []),
                 )
             )
+        raw_proc = payload.get("album_processing_status")
+        raw_overlap = payload.get("album_overlap_decision")
+        legacy_decision = str(payload["album_decision"]) if payload.get("album_decision") is not None else None
+        photo_count = int(payload.get("photo_count") or 1)
+
+        if raw_proc in (ALBUM_PROCESSING_COMPLETE, ALBUM_PROCESSING_PARTIAL):
+            proc_status = raw_proc
+        elif legacy_decision == ALBUM_PROCESSING_PARTIAL:
+            proc_status = ALBUM_PROCESSING_PARTIAL
+        else:
+            proc_status = ALBUM_PROCESSING_COMPLETE
+
+        if raw_overlap in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED, ALBUM_OVERLAP_NONE):
+            overlap_decision = raw_overlap
+        elif legacy_decision in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED):
+            overlap_decision = legacy_decision
+        elif any(ALBUM_DECISION_PROMPT in str(w) for w in (payload.get("warnings") or [])):
+            overlap_decision = ALBUM_OVERLAP_UNRESOLVED
+        else:
+            overlap_decision = ALBUM_OVERLAP_NONE
+
         return PendingFoodVisionInventory(
             user_id=int(user_id),
             inventory_id=_normalize_meal_name_text(payload.get("inventory_id") or "", "") or hashlib.sha1(f"{user_id}:{created_at}".encode("utf-8")).hexdigest()[:12],
@@ -5042,10 +5210,12 @@ class HealBiteNutritionDiary:
             occurred_at=_parse_sqlite_timestamp(payload.get("occurred_at")),
             calculation_snapshot=payload.get("calculation_snapshot"),
             household_id=str(payload.get("household_id")) if payload.get("household_id") else None,
-            photo_count=int(payload.get("photo_count") or 1),
-            album_decision=str(payload["album_decision"]) if payload.get("album_decision") is not None else None,
+            photo_count=photo_count,
+            album_decision=legacy_decision,
             album_raw_photo_items=payload.get("album_raw_photo_items"),
             needs_user_confirmation=bool(payload.get("needs_user_confirmation")),
+            album_processing_status=proc_status,
+            album_overlap_decision=overlap_decision,
         )
 
     def _deserialize_pending_meal(

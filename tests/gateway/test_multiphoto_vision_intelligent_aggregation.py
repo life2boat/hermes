@@ -910,3 +910,169 @@ async def test_multiphoto_scenario_t_full_end_to_end_flow(tmp_path):
     summary = diary.get_daily_summary(user_id=1020)
     assert summary["entry_count"] == 1
     assert summary["calories_kcal"] > 0
+
+
+# -----------------------------------------------------------------------------
+# SCENARIOS U - Y: PARTIAL Album Safety, Blocked Saves, and Dedup Guard
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_u_partial_album_decision_and_keyboard(tmp_path):
+    """Partially recognized album produces PARTIAL decision and specialized keyboard."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_ok = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp_ok, resp_fail]):
+        outcome = await diary.analyze_and_maybe_log(
+            user_id=1030,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    assert outcome.available is True
+    pending = outcome.pending_inventory
+    assert pending is not None
+    assert pending.album_decision == "PARTIAL"
+
+    # Verify keyboard has '💾 Сохранить распознанную часть' and lacks ordinary '✅ Сохранить'
+    kb = build_food_vision_inventory_keyboard(pending)
+    btn_texts = [b["text"] for row in kb for b in row]
+    assert "💾 Сохранить распознанную часть" in btn_texts
+    assert "✅ Сохранить" not in btn_texts
+    assert "🍽 Одна порция" not in btn_texts
+    assert "🍽🍽 Разные порции" not in btn_texts
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_v_partial_album_blocks_all_ordinary_saves(tmp_path):
+    """PARTIAL album strictly blocks all ordinary save paths, preventing unreviewed commits."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_ok = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp_ok, resp_fail]):
+        await diary.analyze_and_maybe_log(
+            user_id=1031,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    # 1. Direct save blocked
+    res1 = diary.save_pending_inventory_directly(user_id=1031)
+    assert res1.status == "album_partial_blocked"
+    assert "⚠️ Распознана только часть фото" in res1.reply_text
+
+    # 2. Confirm pending inventory blocked
+    res2 = diary.confirm_pending_inventory(user_id=1031)
+    assert res2.status == "album_partial_blocked"
+
+    # 3. Save without KBZHU blocked
+    res3 = diary.save_pending_inventory_without_kbzhu(user_id=1031)
+    assert res3.status == "album_partial_blocked"
+
+    # 4. Text command "✅ Сохранить" blocked
+    res4 = diary.handle_pending_inventory_reply(user_id=1031, message="✅ Сохранить")
+    assert res4.status == "album_partial_blocked"
+
+    # Verify zero database entries committed
+    summary = diary.get_daily_summary(user_id=1031)
+    assert summary["entry_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_w_explicit_partial_save_and_duplicate_guard(tmp_path):
+    """Explicit save_partial_pending_inventory commits once and guarantees zero duplicate records."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_ok = _mock_vision_response([_mock_vision_item("гречка отварная", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "timeout"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp_ok, resp_fail]):
+        await diary.analyze_and_maybe_log(
+            user_id=1032,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    # First explicit partial save succeeds
+    res = diary.save_partial_pending_inventory(user_id=1032)
+    assert res.status == "saved"
+    assert res.saved is True
+    assert "💾 Сохранена распознанная часть блюда" in res.reply_text
+
+    # Verify exactly 1 entry created
+    summary1 = diary.get_daily_summary(user_id=1032)
+    assert summary1["entry_count"] == 1
+    assert summary1["calories_kcal"] > 0
+
+    # Second call (replay / duplicate delivery) fails-closed to missing and does not duplicate
+    res_repeat = diary.save_partial_pending_inventory(user_id=1032)
+    assert res_repeat.status == "missing"
+    assert res_repeat.saved is False
+
+    # Verify still exactly 1 entry created (no duplication!)
+    summary2 = diary.get_daily_summary(user_id=1032)
+    assert summary2["entry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_x_text_action_save_partial(tmp_path):
+    """Text action '💾 Сохранить распознанную часть' triggers partial save cleanly."""
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test.db")
+    resp_ok = _mock_vision_response([_mock_vision_item("куриная грудка", 150.0, 160.0, 1)])
+    resp_fail = json.dumps({"success": False, "error": "network error"})
+
+    with patch("tools.vision_tools.vision_analyze_tool", side_effect=[resp_ok, resp_fail]):
+        await diary.analyze_and_maybe_log(
+            user_id=1033,
+            image_paths=["/tmp/p1.jpg", "/tmp/p2.jpg"],
+        )
+
+    res = diary.handle_pending_inventory_reply(user_id=1033, message="💾 Сохранить распознанную часть")
+    assert res.status == "saved"
+    assert res.saved is True
+
+    summary = diary.get_daily_summary(user_id=1033)
+    assert summary["entry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiphoto_scenario_y_telegram_callback_save_partial_and_blocked_alert():
+    """Telegram platform callback routing for save_partial and blocked alerts."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from gateway.platforms.telegram import TelegramAdapter
+
+    diary = MagicMock()
+    adapter = object.__new__(TelegramAdapter)
+    adapter._healbite_diary = diary
+    adapter._log_healbite_marker = MagicMock()
+
+    # 1. Test save_partial callback
+    query_save_partial = MagicMock()
+    query_save_partial.from_user.id = 1034
+    query_save_partial.data = "food_inv:save_partial:1034:inv123"
+    query_save_partial.edit_message_reply_markup = AsyncMock()
+    query_save_partial.answer = AsyncMock()
+    adapter._send_food_inventory_callback_reply = AsyncMock()
+
+    saved_res = MagicMock(status="saved", reply_text="💾 Сохранено!")
+    diary.get_pending_inventory.return_value = MagicMock(user_id=1034)
+    diary.save_partial_pending_inventory.return_value = saved_res
+
+    with patch("gateway.platforms.telegram.get_default_nutrition_diary", return_value=diary):
+        await adapter._handle_healbite_food_inventory_callback(query_save_partial, "food_inv:save_partial:1034:inv123")
+    diary.save_partial_pending_inventory.assert_called_once_with(user_id=1034, expected_inventory_id="inv123")
+    query_save_partial.answer.assert_called_with(text="Сохранено в дневник!")
+
+    # 2. Test standard save attempt on partial album -> blocked alert
+    query_save_blocked = MagicMock()
+    query_save_blocked.from_user.id = 1034
+    query_save_blocked.data = "food_inv:save:1034:inv123"
+    query_save_blocked.answer = AsyncMock()
+
+    blocked_res = MagicMock(status="album_partial_blocked", reply_text="Распознана только часть альбома.")
+    diary.save_pending_inventory_directly.return_value = blocked_res
+
+    with patch("gateway.platforms.telegram.get_default_nutrition_diary", return_value=diary):
+        await adapter._handle_healbite_food_inventory_callback(query_save_blocked, "food_inv:save:1034:inv123")
+    query_save_blocked.answer.assert_called_with(
+        text="Распознана только часть альбома.",
+        show_alert=True,
+    )

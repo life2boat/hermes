@@ -8729,7 +8729,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     is_explicit_generic = self._is_explicit_generic_image_authorization(source, event)
 
                     if not is_explicit_generic:
-                        photo_turn_timeout_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"))
+                        if len(image_paths) > 1:
+                            photo_turn_timeout_s = float(
+                                os.getenv(
+                                    "HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS",
+                                    os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "90.0"),
+                                )
+                            )
+                        else:
+                            photo_turn_timeout_s = float(os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"))
                         corr = _healbite_event_correlation_id(event)
                         try:
                             message_text, vision_success, pending_reply, outcome = await asyncio.wait_for(

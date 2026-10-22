@@ -104,8 +104,10 @@ ALBUM_DECISION_SAME_PORTION = "SAME_PORTION"
 ALBUM_DECISION_DISTINCT_PORTIONS = "DISTINCT_PORTIONS"
 ALBUM_DECISION_PARTIAL_OVERLAP = "PARTIAL_OVERLAP"
 ALBUM_DECISION_UNRESOLVED = "UNRESOLVED"
+ALBUM_DECISION_PARTIAL = "PARTIAL"
 ALBUM_DECISION_REQUIRED_ERROR = "ALBUM_DECISION_REQUIRED"
 ALBUM_DECISION_PROMPT = "На фотографиях одна и та же порция с разных ракурсов или две разные порции? Пожалуйста, выберите: «Одна порция» или «Разные порции»."
+ALBUM_PARTIAL_PROMPT = "⚠️ Распознана только часть фото из альбома. Обычное сохранение заблокировано. Нажмите «Сохранить распознанную часть», чтобы сохранить распознанные блюда, или отправьте фото заново."
 _MAX_FOOD_VISION_ITEMS = 12
 _MAX_FOOD_VISION_WARNINGS = 6
 _MAX_FOOD_VISION_NAME_LENGTH = 120
@@ -2928,6 +2930,16 @@ def build_food_vision_inventory_keyboard(
             [edit_button, cancel_button],
         ]
 
+    if getattr(inventory, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+        save_partial_button = {
+            "text": "💾 Сохранить распознанную часть",
+            "callback_data": f"food_inv:save_partial:{user_id}:{inv_id}",
+        }
+        return [
+            [save_partial_button],
+            [edit_button, cancel_button],
+        ]
+
     if inventory.calculation_snapshot is not None:
         has_unmapped = bool(inventory.calculation_snapshot.get("has_unmapped_components"))
     else:
@@ -3404,6 +3416,16 @@ _RU_ALBUM_DISTINCT_PORTIONS_WORDS = {
     "distinct_portions",
     "🍽🍽 разные порции",
 }
+_RU_ALBUM_SAVE_PARTIAL_WORDS = {
+    "сохранить часть",
+    "сохранить распознанную часть",
+    "сохранить распознанное",
+    "сохранить то что есть",
+    "сохранить то, что есть",
+    "сохранить часть блюда",
+    "save_partial",
+    "💾 сохранить распознанную часть",
+}
 _GRAM_SUFFIX_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?)"
 _WEIGHT_UNIT_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043a\u0433|\u043a\u0438\u043b\u043e\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?|\u043c\u043b|\u043c\u0438\u043b\u043b\u0438\u043b\u0438\u0442\u0440(?:\u0430|\u043e\u0432)?|g|gr|grams?|kg|ml)\.?"
 _EXPLICIT_WEIGHT_RE = re.compile(rf"\b\d+(?:[.,]\d+)?\s*{_WEIGHT_UNIT_RE}\b", re.IGNORECASE)
@@ -3474,6 +3496,8 @@ def _parse_single_pending_inventory_action(text: str) -> PendingInventoryActionP
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="album_resolve_same"))
     if lowered in _RU_ALBUM_DISTINCT_PORTIONS_WORDS:
         return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="album_resolve_distinct"))
+    if lowered in _RU_ALBUM_SAVE_PARTIAL_WORDS:
+        return PendingInventoryActionParseResult(ok=True, action=PendingInventoryAction(kind="album_save_partial"))
 
     if _is_ambiguous_inventory_command(normalized):
         return PendingInventoryActionParseResult(ok=False, error=_INVENTORY_AMBIGUOUS_ERROR)
@@ -3894,10 +3918,11 @@ class HealBiteNutritionDiary:
         total_budget_s = float(
             os.getenv(
                 "HEALBITE_ALBUM_TOTAL_TIMEOUT_SECONDS",
-                os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "45.0"),
+                os.getenv("HEALBITE_PHOTO_TURN_TIMEOUT", "90.0"),
             )
         )
-        deadline = time.monotonic() + total_budget_s - 1.0
+        inner_budget_s = max(5.0, total_budget_s - 3.0)
+        deadline = time.monotonic() + inner_budget_s
         timeout_s = float(os.getenv("HEALBITE_VISION_ANALYZE_TIMEOUT", "35.0"))
         max_attempts = 2
 
@@ -4077,7 +4102,10 @@ class HealBiteNutritionDiary:
                 user_text=user_text,
             )
             merged_items, cross_warnings, requires_confirm = reconcile_res
-            album_decision = reconcile_res.album_decision
+            if is_partial_album:
+                album_decision = ALBUM_DECISION_PARTIAL
+            else:
+                album_decision = reconcile_res.album_decision
             avg_confidence = round(
                 sum(inv.overall_confidence for inv in per_photo_inventories) / len(per_photo_inventories),
                 3,
@@ -4501,6 +4529,12 @@ class HealBiteNutritionDiary:
                 reply_text=ALBUM_DECISION_PROMPT,
                 inventory=payload,
             )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            return PendingInventoryReplyResult(
+                status="album_partial_blocked",
+                reply_text=ALBUM_PARTIAL_PROMPT,
+                inventory=payload,
+            )
         calculation = calculate_inventory_nutrition(payload, require_weights=True)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
             return PendingInventoryReplyResult(
@@ -4606,6 +4640,8 @@ class HealBiteNutritionDiary:
                 expected_inventory_id=expected_inventory_id,
                 now=now,
             )
+        if action.kind in {"album_save_partial", "save_partial"}:
+            return self.save_partial_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
         if action.kind == "save":
             return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
         if action.kind == "save_without_kbzhu":
@@ -4645,6 +4681,12 @@ class HealBiteNutritionDiary:
             return PendingInventoryReplyResult(
                 status="album_decision_required",
                 reply_text=ALBUM_DECISION_PROMPT,
+                inventory=payload,
+            )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            return PendingInventoryReplyResult(
+                status="album_partial_blocked",
+                reply_text=ALBUM_PARTIAL_PROMPT,
                 inventory=payload,
             )
 
@@ -4726,6 +4768,12 @@ class HealBiteNutritionDiary:
                 reply_text=ALBUM_DECISION_PROMPT,
                 inventory=payload,
             )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            return PendingInventoryReplyResult(
+                status="album_partial_blocked",
+                reply_text=ALBUM_PARTIAL_PROMPT,
+                inventory=payload,
+            )
 
         calculation = calculate_inventory_nutrition(payload)
         if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
@@ -4777,6 +4825,85 @@ class HealBiteNutritionDiary:
             saved=True,
         )
 
+    def save_partial_pending_inventory(
+        self,
+        user_id: str | int,
+        *,
+        expected_inventory_id: str | None = None,
+        now: datetime | None = None,
+        require_weights: bool = False,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
+            )
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(
+                status="expired",
+                reply_text=format_pending_inventory_expired_reply(),
+            )
+
+        calculation = calculate_inventory_nutrition(payload, require_weights=require_weights)
+        if calculation.status == NEEDS_WEIGHT_CONFIRMATION:
+            return PendingInventoryReplyResult(
+                status="needs_weight_confirmation",
+                reply_text=format_pending_inventory_missing_weight_reply(payload, calculation.missing_indexes),
+                inventory=payload,
+                missing_indexes=calculation.missing_indexes,
+            )
+
+        record = calculation.record
+        if record is None:
+            components = []
+            for item in payload.items:
+                est = _estimate_component_nutrition(item)
+                if est is not None:
+                    components.append(est)
+                else:
+                    components.append(
+                        NutritionComponentEstimate(
+                            name=item.visible_name,
+                            grams=float(item.selected_grams or 0.0),
+                            calories_kcal=None,
+                            protein_g=None,
+                            fat_g=None,
+                            carbs_g=None,
+                            nutrition_available=False,
+                        )
+                    )
+            record = _build_component_record(payload, components, is_complete=False)
+
+        sqlite_id, duplicate = self.save_record(
+            user_id=normalized_user_id,
+            source=payload.source,
+            record=record,
+            image_ref=payload.image_ref,
+            occurred_at=payload.occurred_at,
+        )
+        self.clear_pending_state(normalized_user_id)
+        summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
+        reply_text = format_pending_meal_saved_reply(
+            summary,
+            duplicate=bool(duplicate),
+        )
+        return PendingInventoryReplyResult(
+            status="saved",
+            reply_text=f"💾 Сохранена распознанная часть блюда.\n\n{reply_text}",
+            record=record,
+            sqlite_id=sqlite_id,
+            saved=True,
+        )
+
     def confirm_pending_meal(
         self,
         user_id: str | int,
@@ -4800,6 +4927,11 @@ class HealBiteNutritionDiary:
         if getattr(payload, "album_decision", "") == ALBUM_DECISION_UNRESOLVED:
             return ConfirmPendingMealResult(
                 status="album_decision_required",
+                record=payload.record if hasattr(payload, "record") else None,
+            )
+        if getattr(payload, "album_decision", "") == ALBUM_DECISION_PARTIAL:
+            return ConfirmPendingMealResult(
+                status="album_partial_blocked",
                 record=payload.record if hasattr(payload, "record") else None,
             )
 

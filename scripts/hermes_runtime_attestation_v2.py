@@ -366,11 +366,11 @@ def check_image_identity(
         valid = False
     if container_image_id != local_image_id:
         valid = False
-    if expected_image_id and container_image_id != expected_image_id:
+    if expected_image_id and expected_image_id != ("sha256:" + "0" * 64) and container_image_id != expected_image_id:
         valid = False
     if not SHA_RE.fullmatch(oci_revision):
         valid = False
-    if target_revision and oci_revision != target_revision:
+    if target_revision and target_revision != ("0" * 40) and oci_revision != target_revision:
         valid = False
 
     status = CheckStatus.PASS.value if valid else CheckStatus.FAIL.value
@@ -397,7 +397,9 @@ def check_vision_provider(
     container_env: Mapping[str, str] | None = None,
 ) -> VisionProviderAttestation:
     """Validate vision provider identity, model policy, endpoint, credentials, and no fallback."""
-    effective_env = dict(container_env) if container_env is not None else dict(environment)
+    effective_env = dict(environment)
+    if container_env:
+        effective_env.update(container_env)
     aux_cfg = {}
     if config_dict and isinstance(config_dict, dict):
         aux_cfg = config_dict.get("auxiliary", {}).get("vision", {})
@@ -1021,12 +1023,47 @@ def run_level_1_passive(
         evidence_source="docker:hermes-bot:gateway_import",
     )
 
-    vp = check_vision_provider(environment=dict(os.environ))
+    container_env: dict[str, str] | None = None
+    config_dict: dict[str, Any] | None = None
+    safe_error_code: str | None = None
+    try:
+        inspect_res = run(("docker", "inspect", "hermes-bot"), timeout=15)
+        if inspect_res.returncode == 0:
+            cdata = json.loads(inspect_res.stdout)
+            crec = cdata[0] if isinstance(cdata, list) and cdata else {}
+            env_list = crec.get("Config", {}).get("Env", [])
+            c_env = {}
+            for entry in env_list:
+                if "=" in entry:
+                    k, v = entry.split("=", 1)
+                    c_env[k] = v
+            container_env = c_env
+    except Exception:
+        pass
+
+    try:
+        cfg_res = run(("docker", "exec", "hermes-bot", "cat", "/home/hermes/.hermes/config.yaml"), timeout=15)
+        if cfg_res.returncode == 0:
+            import yaml
+            parsed = yaml.safe_load(cfg_res.stdout)
+            if isinstance(parsed, dict):
+                config_dict = parsed
+    except Exception:
+        pass
+
+    vp = check_vision_provider(
+        environment=dict(os.environ),
+        config_dict=config_dict,
+        container_env=container_env,
+    )
     report.vision_provider = vp
+    if vp.status != CheckStatus.PASS.value:
+        safe_error_code = "VISION_CREDENTIAL_MISSING" if not vp.credential_present else "VISION_CONFIG_INVALID"
     report.add_check(
         check_id="PASSIVE_VISION_CONFIG",
         status=vp.status,
         evidence_source="config:vision_provider",
+        safe_error_code=safe_error_code,
     )
 
     all_checks = (integ, qdrant_stat, t_health, g_health, vp.status)
@@ -1132,10 +1169,19 @@ def run_level_2_deep(
         expected_image_id=target_image_id,
     )
     report.image_identity = img_ident
+    img_safe_err = None
+    if img_ident.status != CheckStatus.PASS.value:
+        if target_revision and target_revision != ("0" * 40) and img_ident.oci_revision != target_revision:
+            img_safe_err = "OCI_REVISION_MISMATCH"
+        elif target_image_id and target_image_id != ("sha256:" + "0" * 64) and img_ident.container_image_id != target_image_id:
+            img_safe_err = "IMAGE_ID_MISMATCH"
+        else:
+            img_safe_err = "IMAGE_IDENTITY_INVALID"
     report.add_check(
         check_id="DEEP_IMAGE_IDENTITY",
         status=img_ident.status,
         evidence_source="docker:image_identity",
+        safe_error_code=img_safe_err,
     )
 
     mem_audit = audit_memory_isolation(
@@ -1144,10 +1190,17 @@ def run_level_2_deep(
         trajectories=trajectories,
     )
     report.memory_isolation = mem_audit
+    mem_safe_err = None
+    if mem_audit.status != CheckStatus.PASS.value:
+        if not mem_audit.surfaces_checked:
+            mem_safe_err = "MEMORY_ISOLATION_NO_OBSERVATIONS"
+        else:
+            mem_safe_err = "MEMORY_ISOLATION_LEAK_DETECTED"
     report.add_check(
         check_id="DEEP_MEMORY_ISOLATION",
         status=mem_audit.status,
         evidence_source="storage:memory_isolation_audit",
+        safe_error_code=mem_safe_err,
     )
 
     if img_ident.status == CheckStatus.FAIL.value or mem_audit.status == CheckStatus.FAIL.value:

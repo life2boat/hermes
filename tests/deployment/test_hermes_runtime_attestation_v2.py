@@ -478,3 +478,250 @@ def test_full_attestation_report_generation(synthetic_fixture: Path, tmp_path: P
     assert payload["STATUS"] == "PASS"
     assert len(payload["CHECKS"]) == 1
     assert payload["CHECKS"][0]["CHECK_ID"] == "SELF_TEST"
+
+
+# ==============================================================================
+# REPRODUCTION TESTS FOR 8 FALSE-PASS DEFECTS (V2.1 TRUTHFUL EVIDENCE)
+# ==============================================================================
+
+def test_reproduce_01_live_canary_without_real_provider_call_not_pass(synthetic_fixture: Path):
+    """Defect 1: Live canary without real provider call must not return PASS."""
+    # When live_allowed=False, run_live=True must return NOT_RUN, never PASS
+    canary_disallowed = attestation_v2.run_controlled_vision_canary(
+        fixture_path=synthetic_fixture,
+        run_live=True,
+        live_allowed=False,
+    )
+    assert canary_disallowed.canary_status == "NOT_RUN"
+    assert canary_disallowed.real_provider_call_verified is False
+    assert canary_disallowed.provider_calls == 0
+
+    # When live_allowed=True but no real_provider_executor is provided, must return FAIL, never PASS
+    canary_no_exec = attestation_v2.run_controlled_vision_canary(
+        fixture_path=synthetic_fixture,
+        run_live=True,
+        live_allowed=True,
+        real_provider_executor=None,
+    )
+    assert canary_no_exec.canary_status == "FAIL"
+    assert canary_no_exec.real_provider_call_verified is False
+
+
+def test_reproduce_02_memory_isolation_zero_sources_not_verified():
+    """Defect 2: Memory isolation with 0 sources must return NOT_VERIFIED, never PASS."""
+    audit_empty = attestation_v2.audit_memory_isolation()
+    assert audit_empty.status == "NOT_VERIFIED"
+    assert audit_empty.coverage == "NONE"
+    assert len(audit_empty.surfaces_checked) == 0
+
+    # Partial surface coverage (1 out of 3) must also be NOT_VERIFIED if clean
+    mock_trajectories = [{"turn": 1, "text": "clean user text without media"}]
+    audit_partial = attestation_v2.audit_memory_isolation(trajectories=mock_trajectories)
+    assert audit_partial.status == "NOT_VERIFIED"
+    assert audit_partial.coverage == "PARTIAL"
+
+
+def test_reproduce_03_deep_attestation_without_three_samples_not_pass():
+    """Defect 3: Deep attestation without 3 stability samples must not return PASS."""
+    contract = deploy_orchestrator.load_contract()
+    report = attestation_v2.AttestationReportV2(
+        target_revision=TEST_REVISION_1,
+        observed_revision=TEST_REVISION_1,
+        operation_status="PASS",
+    )
+    # Fewer than 3 samples must fail
+    res = attestation_v2.run_level_2_deep(
+        contract=contract,
+        report=report,
+        target_revision=TEST_REVISION_1,
+        target_image_id=IMAGE_ID_1,
+        stability_samples=2,  # < 3!
+    )
+    assert res == "FAIL"
+
+    # 3 samples where container restart count increments must fail
+    sample_calls = 0
+    def mock_run_flapping(argv, timeout=30):
+        nonlocal sample_calls
+        sample_calls += 1
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps([{
+                "Id": "container_123",
+                "State": {
+                    "Status": "running",
+                    "StartedAt": "2026-10-22T00:00:00Z",
+                    "RestartCount": sample_calls - 1,  # restarts increment!
+                },
+                "Config": {"Labels": {"org.opencontainers.image.revision": TEST_REVISION_1}},
+                "Image": IMAGE_ID_1,
+            }]),
+            "",
+        )
+
+    res_flap = attestation_v2.run_level_2_deep(
+        contract=contract,
+        report=report,
+        target_revision=TEST_REVISION_1,
+        target_image_id=IMAGE_ID_1,
+        stability_samples=3,
+        sample_interval_seconds=0,
+        run=mock_run_flapping,
+    )
+    assert res_flap == "FAIL"
+
+
+def test_reproduce_04_qdrant_mutations_without_baseline_not_verified():
+    """Defect 4: Qdrant mutations=0 without baseline must be NOT_VERIFIED, never PASS."""
+    def mock_run_qdrant(argv, timeout=30):
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps([{
+                "Id": "qdrant_123",
+                "Created": "2026-10-22T00:00:00Z",
+                "State": {"Status": "running", "StartedAt": "2026-10-22T00:00:00Z"},
+                "RestartCount": 0,
+                "Config": {
+                    "Labels": {},
+                    "Env": ["QDRANT_COLLECTION=healbite_memory_os_v2"],
+                },
+                "Image": IMAGE_ID_1,
+                "Mounts": [],
+            }]),
+            "",
+        )
+
+    stat, mut_count = attestation_v2.check_qdrant_health(
+        service_name="qdrant",
+        baseline=None,  # No baseline!
+        run=mock_run_qdrant,
+    )
+    assert stat == "PASS"
+    assert mut_count is None  # Unmeasured delta!
+
+
+def test_reproduce_05_telegram_pollers_unmeasured_not_verified():
+    """Defect 5: Telegram pollers=1 without measurement must be NOT_VERIFIED, never PASS."""
+    policy = deploy_orchestrator.load_contract().attestation_policy
+    def mock_run(argv, timeout=30):
+        return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+    t_health, g_health, sent, pollers = attestation_v2.check_telegram_gateway_health(
+        policy,
+        pollers_measured=None,  # unmeasured!
+        run=mock_run,
+    )
+    assert pollers is None  # must not be hardcoded 1!
+
+
+def test_reproduce_06_rollback_ready_unverified_is_false():
+    """Defect 6: Rollback ready with unverified prerequisites must be False and BLOCKED."""
+    ready, err = attestation_v2.verify_rollback_prerequisites(
+        previous_image_id=IMAGE_ID_1,
+        target_revision=TEST_REVISION_1,
+        rollback_image_available=False,
+    )
+    assert ready is False
+    assert err == "ROLLBACK_IMAGE_UNAVAILABLE"
+
+    contract = deploy_orchestrator.load_contract()
+    report = attestation_v2.AttestationReportV2(
+        target_revision=TEST_REVISION_1,
+        observed_revision=TEST_REVISION_1,
+        operation_status="PASS",
+    )
+    # Mock docker inspect failing for previous image
+    def mock_run_missing(argv, timeout=15):
+        return subprocess.CompletedProcess(argv, 1, "", "image not found")
+
+    res = attestation_v2.run_level_4_deploy_gate(
+        contract=contract,
+        report=report,
+        target_revision=TEST_REVISION_1,
+        target_image_id=IMAGE_ID_1,
+        previous_image_id=IMAGE_ID_2,
+        rollback_image_available=False,
+        run=mock_run_missing,
+    )
+    assert res == "BLOCKED"
+    assert report.rollback_ready is False
+
+
+def test_reproduce_07_oci_config_digest_from_layers_rejected():
+    """Defect 7: RootFS.Layers[-1] must not be treated as OCI config digest."""
+    container = {
+        "Image": IMAGE_ID_1,
+        "Config": {"Labels": {"org.opencontainers.image.revision": TEST_REVISION_1}},
+    }
+    local_image_with_layers_only = {
+        "Id": IMAGE_ID_1,
+        "RootFS": {"Layers": ["sha256:" + "d" * 64]},  # diff_id layer
+    }
+    ident = attestation_v2.check_image_identity(
+        container_record=container,
+        local_image_record=local_image_with_layers_only,
+        target_revision=TEST_REVISION_1,
+        expected_image_id=IMAGE_ID_1,
+    )
+    assert ident.oci_config_digest is None
+    assert ident.oci_config_digest != "sha256:" + "d" * 64
+
+
+def test_reproduce_08_overall_pass_forbidden_with_mandatory_not_run(synthetic_fixture: Path, clean_db: Path):
+    """Defect 8: Overall PASS is forbidden if any requested level is NOT_RUN or NOT_VERIFIED."""
+    contract = deploy_orchestrator.load_contract()
+    contract = deploy_orchestrator.replace(contract, database_source=clean_db)
+
+    def mock_run(argv, timeout=30):
+        cmd = " ".join(argv)
+        if "inspect" in cmd:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([{
+                    "Id": "cid_123",
+                    "Created": "2026-10-22T00:00:00Z",
+                    "State": {"Status": "running", "StartedAt": "2026-10-22T00:00:00Z"},
+                    "RestartCount": 0,
+                    "Config": {
+                        "Labels": {"org.opencontainers.image.revision": TEST_REVISION_1},
+                        "Env": ["QDRANT_COLLECTION=healbite_memory_os_v2"],
+                    },
+                    "Image": IMAGE_ID_1,
+                    "Mounts": [],
+                }]),
+                "",
+            )
+        if "getMe" in cmd:
+            return subprocess.CompletedProcess(argv, 0, "TELEGRAM_HEALTH=PASS\n", "")
+        if "gateway.run" in cmd:
+            return subprocess.CompletedProcess(
+                argv, 0, "GATEWAY_NO_SEND_SMOKE=PASS\nPROVIDER_REQUESTS=0\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "OK\n", "")
+
+    env_patch = {
+        "HERMES_VISION_PROVIDER": "alibaba",
+        "HERMES_VISION_MODEL": "qwen3-vl-8b-instruct",
+        "DASHSCOPE_API_KEY": "dummy_test_key",
+    }
+    with patch.dict(os.environ, env_patch), patch.object(attestation_v2.deploy_orchestrator, "load_contract", return_value=contract):
+        report = attestation_v2.run_full_attestation(
+            target_revision=TEST_REVISION_1,
+            target_image_id=IMAGE_ID_1,
+            previous_image_id=IMAGE_ID_1,
+            levels=["1", "2", "3", "4"],
+            run_live_canary=False,
+            live_allowed=False,
+            rollback_image_available=True,
+            schema_compatible=True,
+            protected_secrets_unchanged=True,
+            db_state_safe=True,
+            fixture_path=synthetic_fixture,
+            run=mock_run,
+        )
+    assert report.level_statuses["LEVEL_3"] == "NOT_RUN"
+    assert report.operation_status != "PASS"
+    assert report.operation_status == "BLOCKED"

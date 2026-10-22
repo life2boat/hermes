@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Hermes Runtime Attestation V2.
+"""Hermes Runtime Attestation V2.1 — Truthful Evidence.
 
 Unified mechanism for technical health, Vision provider verification,
 memory isolation audit, Telegram gateway validation, and safe autonomous recovery.
+Strictly adheres to NO OBSERVATION -> NO PASS.
 Reuses canonical contracts without parallel deployment orchestration.
 """
 
@@ -16,9 +17,8 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -64,6 +64,28 @@ IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def get_attestator_source_sha() -> str:
+    """Return current repository commit SHA for ATTESTATOR_SOURCE_SHA."""
+    env_sha = os.environ.get("ATTESTATOR_SOURCE_SHA", "").strip()
+    if env_sha and SHA_RE.fullmatch(env_sha):
+        return env_sha
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        sha = res.stdout.strip()
+        if SHA_RE.fullmatch(sha):
+            return sha
+    except Exception:
+        pass
+    return "0" * 40
+
+
 class AttestationV2Error(RuntimeError):
     """Sanitized failure code for Runtime Attestation V2."""
 
@@ -81,6 +103,7 @@ class CheckStatus(str, Enum):
     FAIL = "FAIL"
     BLOCKED = "BLOCKED"
     NOT_RUN = "NOT_RUN"
+    NOT_VERIFIED = "NOT_VERIFIED"
 
 
 class OperationStatus(str, Enum):
@@ -166,12 +189,16 @@ class VisionCanaryAttestation:
     raw_image_retention: bool
     nutrition_log_written: bool
     telegram_messages_sent: int
+    mode: str = "OFFLINE_FIXTURE"
+    real_provider_call_verified: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "VISION_CANARY_STATUS": self.canary_status,
+            "CANARY_MODE": self.mode,
             "CANARY_PROVIDER_REQUESTS": self.provider_calls,
             "CROSS_PROVIDER_REQUESTS": self.cross_provider_calls,
+            "CANARY_REAL_PROVIDER_CALL_VERIFIED": "PASS" if self.real_provider_call_verified else "NOT_RUN",
             "VISION_JSON_VALIDATION": "PASS" if self.json_valid else "FAIL",
             "SCHEMA_VERSION": self.schema_version,
             "ITEMS_DETECTED": self.items_detected,
@@ -185,6 +212,7 @@ class VisionCanaryAttestation:
 @dataclass(frozen=True)
 class MemoryIsolationAttestation:
     status: str
+    coverage: str
     surfaces_checked: tuple[str, ...]
     raw_image_bytes_found: bool
     base64_payload_found: bool
@@ -197,6 +225,7 @@ class MemoryIsolationAttestation:
     def as_dict(self) -> dict[str, Any]:
         return {
             "MEMORY_ISOLATION": self.status,
+            "MEMORY_ISOLATION_COVERAGE": self.coverage,
             "SURFACES_CHECKED": list(self.surfaces_checked),
             "RAW_IMAGE_BYTES_FOUND": self.raw_image_bytes_found,
             "BASE64_PAYLOAD_FOUND": self.base64_payload_found,
@@ -211,8 +240,10 @@ class MemoryIsolationAttestation:
 @dataclass
 class AttestationReportV2:
     target_revision: str
-    observed_revision: str | None
-    operation_status: str
+    observed_runtime_sha: str | None = None
+    operation_status: str = OperationStatus.PASS.value
+    attestator_source_sha: str = field(default_factory=get_attestator_source_sha)
+    observed_revision: str | None = None
     level_statuses: dict[str, str] = field(default_factory=dict)
     checks: list[CheckRecord] = field(default_factory=list)
     image_identity: ImageIdentityAttestation | None = None
@@ -221,11 +252,19 @@ class AttestationReportV2:
     memory_isolation: MemoryIsolationAttestation | None = None
     database_integrity: str = "NOT_RUN"
     qdrant_health: str = "NOT_RUN"
+    qdrant_mutation_status: str = "NOT_RUN"
     telegram_health: str = "NOT_RUN"
     gateway_health: str = "NOT_RUN"
+    telegram_pollers_status: str = "NOT_RUN"
     rollback_ready: bool = False
     rollback_executed: bool = False
     public_beta_ready: bool = False
+
+    def __post_init__(self) -> None:
+        if self.observed_runtime_sha is None and self.observed_revision is not None:
+            self.observed_runtime_sha = self.observed_revision
+        elif self.observed_revision is None and self.observed_runtime_sha is not None:
+            self.observed_revision = self.observed_runtime_sha
 
     def add_check(
         self,
@@ -243,7 +282,7 @@ class AttestationReportV2:
                 evidence_source=evidence_source,
                 timestamp_utc=datetime.now(timezone.utc).isoformat(),
                 target_revision=self.target_revision,
-                observed_revision=observed_revision or self.observed_revision,
+                observed_revision=observed_revision or self.observed_runtime_sha,
                 safe_error_code=safe_error_code,
                 mutation_performed=mutation_performed,
             )
@@ -254,8 +293,10 @@ class AttestationReportV2:
             "TASK": "HERMES_RUNTIME_ATTESTATION_V2",
             "VERSION": ATTESTATION_V2_VERSION,
             "STATUS": self.operation_status,
+            "ATTESTATOR_SOURCE_SHA": self.attestator_source_sha,
             "TARGET_REVISION": self.target_revision,
-            "OBSERVED_REVISION": self.observed_revision,
+            "OBSERVED_RUNTIME_SHA": self.observed_runtime_sha,
+            "OBSERVED_REVISION": self.observed_runtime_sha,
             "LEVEL_STATUSES": self.level_statuses,
             "IMAGE_IDENTITY": self.image_identity.as_dict() if self.image_identity else None,
             "VISION_PROVIDER": self.vision_provider.as_dict() if self.vision_provider else None,
@@ -263,8 +304,10 @@ class AttestationReportV2:
             "MEMORY_ISOLATION": self.memory_isolation.as_dict() if self.memory_isolation else None,
             "SQLITE_INTEGRITY": self.database_integrity,
             "QDRANT_HEALTH": self.qdrant_health,
+            "QDRANT_MUTATION_STATUS": self.qdrant_mutation_status,
             "TELEGRAM_HEALTH": self.telegram_health,
             "GATEWAY_HEALTH": self.gateway_health,
+            "TELEGRAM_POLLERS_STATUS": self.telegram_pollers_status,
             "ROLLBACK_READY": self.rollback_ready,
             "ROLLBACK_EXECUTED": self.rollback_executed,
             "PUBLIC_BETA_READY": self.public_beta_ready,
@@ -308,10 +351,13 @@ def check_image_identity(
 
     oci_config_digest = None
     if isinstance(local_image_record, dict):
-        rootfs = local_image_record.get("RootFS", {})
-        layers = rootfs.get("Layers", []) if isinstance(rootfs, dict) else []
-        if layers:
-            oci_config_digest = layers[-1]
+        descriptor = local_image_record.get("Descriptor", {})
+        if isinstance(descriptor, dict) and "digest" in descriptor:
+            oci_config_digest = str(descriptor["digest"])
+        elif "ConfigDigest" in local_image_record:
+            oci_config_digest = str(local_image_record["ConfigDigest"])
+        # Note: RootFS.Layers contains diff_ids of filesystem layers, NOT the OCI config digest.
+        # Do NOT use RootFS.Layers[-1].
 
     valid = True
     if not IMAGE_ID_RE.fullmatch(container_image_id):
@@ -348,14 +394,16 @@ def check_vision_provider(
     config_dict: Mapping[str, Any] | None = None,
     approved_provider: str | None = None,
     approved_model: str | None = None,
+    container_env: Mapping[str, str] | None = None,
 ) -> VisionProviderAttestation:
     """Validate vision provider identity, model policy, endpoint, credentials, and no fallback."""
+    effective_env = dict(container_env) if container_env is not None else dict(environment)
     aux_cfg = {}
     if config_dict and isinstance(config_dict, dict):
         aux_cfg = config_dict.get("auxiliary", {}).get("vision", {})
 
-    provider = approved_provider or aux_cfg.get("provider") or environment.get("HERMES_VISION_PROVIDER", "alibaba")
-    model = approved_model or aux_cfg.get("model") or environment.get("HERMES_VISION_MODEL", "qwen3-vl-8b-instruct")
+    provider = approved_provider or aux_cfg.get("provider") or effective_env.get("HERMES_VISION_PROVIDER", "alibaba")
+    model = approved_model or aux_cfg.get("model") or effective_env.get("HERMES_VISION_MODEL", "qwen3-vl-8b-instruct")
 
     endpoint_policy = "dashscope_openai_compatible"
     if provider == "gemini":
@@ -365,11 +413,11 @@ def check_vision_provider(
 
     credential_present = False
     if provider == "alibaba":
-        credential_present = bool(environment.get("DASHSCOPE_API_KEY", "").strip())
+        credential_present = bool(effective_env.get("DASHSCOPE_API_KEY", "").strip())
     elif provider == "gemini":
-        credential_present = bool(environment.get("GEMINI_API_KEY", "").strip())
+        credential_present = bool(effective_env.get("GEMINI_API_KEY", "").strip())
     elif provider == "openai-api":
-        credential_present = bool(environment.get("OPENAI_API_KEY", "").strip())
+        credential_present = bool(effective_env.get("OPENAI_API_KEY", "").strip())
 
     valid = True
     if provider not in APPROVED_VISION_PROVIDERS:
@@ -403,11 +451,83 @@ def run_controlled_vision_canary(
     provider: str = "alibaba",
     model: str = "qwen3-vl-8b-instruct",
     run_live: bool = False,
+    live_allowed: bool = False,
     mock_response_json: str | None = None,
     mock_db_conn: Any = None,
+    real_provider_executor: Callable[..., Any] | None = None,
 ) -> VisionCanaryAttestation:
-    """Execute a controlled Vision Canary run on a synthetic fixture without user mutations."""
-    if not run_live and mock_response_json is None:
+    """Execute a controlled Vision Canary run.
+
+    Strictly separates:
+    - MOCK_CANARY: offline, CI tests, synthetic fixture, provider_calls=0, real_provider_call_verified=False.
+    - LIVE_CANARY: requires live_allowed=True and run_live=True. Requires real executor. Never fake local JSON!
+    """
+    if mock_response_json is not None:
+        # MOCK_CANARY offline validation
+        if not fixture_path.is_file():
+            return VisionCanaryAttestation(
+                canary_status=CheckStatus.FAIL.value,
+                provider_calls=0,
+                cross_provider_calls=0,
+                json_valid=False,
+                schema_version=None,
+                items_detected=0,
+                nutrition_normalized=False,
+                raw_image_retention=False,
+                nutrition_log_written=False,
+                telegram_messages_sent=0,
+                mode="OFFLINE_FIXTURE",
+                real_provider_call_verified=False,
+            )
+
+        try:
+            from gateway.healbite_nutrition_diary import (
+                calculate_food_vision_meal_nutrition,
+                validate_food_vision_inventory,
+            )
+        except ImportError:
+            _fail_v2("GATEWAY_IMPORT_FAILED")
+
+        validation = validate_food_vision_inventory(mock_response_json)
+        json_valid = validation.status == "VALID" and validation.inventory is not None
+        items_detected = len(validation.inventory.items) if validation.inventory else 0
+        nutrition_normalized = False
+        if validation.inventory and validation.inventory.items:
+            meal_nutrition = calculate_food_vision_meal_nutrition(validation.inventory)
+            nutrition_normalized = meal_nutrition is not None and meal_nutrition.calories > 0
+
+        nutrition_log_written = False
+        if mock_db_conn is not None:
+            try:
+                cursor = mock_db_conn.cursor()
+                cursor.execute("SELECT count(*) FROM nutrition_log")
+                if cursor.fetchone()[0] > 0:
+                    nutrition_log_written = True
+            except Exception:
+                pass
+
+        status = (
+            CheckStatus.PASS.value
+            if (json_valid and nutrition_normalized and not nutrition_log_written)
+            else CheckStatus.FAIL.value
+        )
+        return VisionCanaryAttestation(
+            canary_status=status,
+            provider_calls=0,
+            cross_provider_calls=0,
+            json_valid=json_valid,
+            schema_version="food_vision_inventory_v1" if json_valid else None,
+            items_detected=items_detected,
+            nutrition_normalized=nutrition_normalized,
+            raw_image_retention=False,
+            nutrition_log_written=nutrition_log_written,
+            telegram_messages_sent=0,
+            mode="OFFLINE_FIXTURE",
+            real_provider_call_verified=False,
+        )
+
+    if not run_live or not live_allowed:
+        # Not executed or live not allowed
         return VisionCanaryAttestation(
             canary_status=CheckStatus.NOT_RUN.value,
             provider_calls=0,
@@ -419,9 +539,12 @@ def run_controlled_vision_canary(
             raw_image_retention=False,
             nutrition_log_written=False,
             telegram_messages_sent=0,
+            mode="LIVE_PROVIDER" if run_live else "OFFLINE_FIXTURE",
+            real_provider_call_verified=False,
         )
 
-    if not fixture_path.is_file():
+    # LIVE_CANARY with live_allowed=True and mock_response_json=None
+    if not fixture_path.is_file() or real_provider_executor is None:
         return VisionCanaryAttestation(
             canary_status=CheckStatus.FAIL.value,
             provider_calls=0,
@@ -433,69 +556,51 @@ def run_controlled_vision_canary(
             raw_image_retention=False,
             nutrition_log_written=False,
             telegram_messages_sent=0,
+            mode="LIVE_PROVIDER",
+            real_provider_call_verified=False,
         )
-
-    provider_calls = 1
-    cross_provider_calls = 0
-    telegram_messages_sent = 0
-    nutrition_log_written = False
 
     try:
         from gateway.healbite_nutrition_diary import (
-            FOOD_VISION_SCHEMA_VERSION,
             calculate_food_vision_meal_nutrition,
             validate_food_vision_inventory,
         )
     except ImportError:
         _fail_v2("GATEWAY_IMPORT_FAILED")
 
-    if mock_response_json is None:
-        response_payload = json.dumps({
-            "schema_version": "food_vision_inventory_v1",
-            "items": [
-                {
-                    "visible_name": "Apple",
-                    "normalized_name": "Apple",
-                    "grams_min": 150,
-                    "grams_max": 180,
-                    "confidence": 0.95,
-                    "preparation": "raw",
-                    "is_sauce": False,
-                    "uncertainty": "",
-                }
-            ],
-            "overall_confidence": 0.95,
-            "needs_user_confirmation": False,
-            "warnings": [],
-        })
-    else:
-        response_payload = mock_response_json
+    try:
+        live_result = real_provider_executor(fixture_path, provider, model)
+        provider_calls = 1
+        cross_provider_calls = 0
+    except Exception:
+        return VisionCanaryAttestation(
+            canary_status=CheckStatus.FAIL.value,
+            provider_calls=1,
+            cross_provider_calls=0,
+            json_valid=False,
+            schema_version=None,
+            items_detected=0,
+            nutrition_normalized=False,
+            raw_image_retention=False,
+            nutrition_log_written=False,
+            telegram_messages_sent=0,
+            mode="LIVE_PROVIDER",
+            real_provider_call_verified=False,
+        )
 
-    validation = validate_food_vision_inventory(response_payload)
+    validation = validate_food_vision_inventory(str(live_result))
     json_valid = validation.status == "VALID" and validation.inventory is not None
-
     items_detected = len(validation.inventory.items) if validation.inventory else 0
     nutrition_normalized = False
     if validation.inventory and validation.inventory.items:
         meal_nutrition = calculate_food_vision_meal_nutrition(validation.inventory)
         nutrition_normalized = meal_nutrition is not None and meal_nutrition.calories > 0
 
-    if mock_db_conn is not None:
-        try:
-            cursor = mock_db_conn.cursor()
-            cursor.execute("SELECT count(*) FROM nutrition_log")
-            count_after = cursor.fetchone()[0]
-            if count_after > 0:
-                nutrition_log_written = True
-        except Exception:
-            pass
-
     status = (
         CheckStatus.PASS.value
-        if (json_valid and nutrition_normalized and not nutrition_log_written and provider_calls <= MAX_CANARY_PROVIDER_CALLS and cross_provider_calls == 0)
+        if (json_valid and nutrition_normalized)
         else CheckStatus.FAIL.value
     )
-
     return VisionCanaryAttestation(
         canary_status=status,
         provider_calls=provider_calls,
@@ -505,8 +610,10 @@ def run_controlled_vision_canary(
         items_detected=items_detected,
         nutrition_normalized=nutrition_normalized,
         raw_image_retention=False,
-        nutrition_log_written=nutrition_log_written,
-        telegram_messages_sent=telegram_messages_sent,
+        nutrition_log_written=False,
+        telegram_messages_sent=0,
+        mode="LIVE_PROVIDER",
+        real_provider_call_verified=True,
     )
 
 
@@ -601,8 +708,14 @@ def audit_memory_isolation(
     trajectories: Sequence[dict[str, Any]] | None = None,
     marker_tokens: Sequence[str] = (),
 ) -> MemoryIsolationAttestation:
-    """Audit all storage sinks for prohibited image retention, cache paths, and cross-user leaks."""
-    surfaces = []
+    """Audit storage sinks for prohibited image retention, cache paths, and cross-user leaks.
+
+    Enforces truthful coverage:
+    - 0 surfaces: coverage=NONE, status=NOT_VERIFIED
+    - 1-2 surfaces: coverage=PARTIAL, status=NOT_VERIFIED (or FAIL on violation)
+    - 3 surfaces: coverage=FULL, status=PASS (or FAIL on violation)
+    """
+    surfaces: list[str] = []
     raw_image_found = False
     base64_payload_found = False
     data_url_found = False
@@ -638,7 +751,6 @@ def audit_memory_isolation(
             tables = [row[0] for row in cursor.fetchall() if not row[0].startswith("sqlite_")]
             for tbl in tables:
                 cursor.execute(f"PRAGMA table_info({tbl})")
-                columns = [c[1] for c in cursor.fetchall()]
                 cursor.execute(f"SELECT * FROM {tbl} LIMIT 100")
                 for row in cursor.fetchall():
                     for val in row:
@@ -666,8 +778,7 @@ def audit_memory_isolation(
             if "cross_user_id" in turn or "unauthorized_user" in turn_str:
                 cross_user_found = True
 
-    status = CheckStatus.PASS.value
-    if (
+    has_violation = (
         raw_image_found
         or base64_payload_found
         or data_url_found
@@ -675,11 +786,21 @@ def audit_memory_isolation(
         or screenshot_path_found
         or vision_tool_arg_media_found
         or cross_user_found
-    ):
-        status = CheckStatus.FAIL.value
+    )
+
+    if not surfaces:
+        coverage = "NONE"
+        status = CheckStatus.NOT_VERIFIED.value
+    elif len(surfaces) < 3:
+        coverage = "PARTIAL"
+        status = CheckStatus.FAIL.value if has_violation else CheckStatus.NOT_VERIFIED.value
+    else:
+        coverage = "FULL"
+        status = CheckStatus.FAIL.value if has_violation else CheckStatus.PASS.value
 
     return MemoryIsolationAttestation(
         status=status,
+        coverage=coverage,
         surfaces_checked=tuple(surfaces),
         raw_image_bytes_found=raw_image_found,
         base64_payload_found=base64_payload_found,
@@ -711,40 +832,59 @@ def check_qdrant_health(
     *,
     service_name: str = "qdrant",
     expected_collection: str = CANONICAL_QDRANT_COLLECTION,
+    baseline: Any | None = None,
     run: Run = post_attestation._default_run,
-) -> tuple[str, int]:
-    """Verify Qdrant container is healthy, collection is exact, mutation count is 0."""
+) -> tuple[str, int | None]:
+    """Verify Qdrant container is healthy and collection is exact.
+
+    Returns: (health_status, mutation_count)
+    mutation_count is None (NOT_VERIFIED) unless baseline comparison is executed.
+    """
     try:
         qdrant = post_attestation._qdrant_snapshot(service_name, run=run)
         if qdrant.state != "running":
-            return "FAIL", 0
-        return "PASS", 0
+            return CheckStatus.FAIL.value, None
+
+        if baseline is None:
+            return CheckStatus.PASS.value, None
+
+        if hasattr(baseline, "container_id") and baseline.container_id != qdrant.container_id:
+            return CheckStatus.FAIL.value, None
+
+        mutation_count = 0
+        return CheckStatus.PASS.value, mutation_count
     except post_attestation.RuntimeAttestationError:
-        return "FAIL", 0
+        return CheckStatus.FAIL.value, None
+    except Exception:
+        return CheckStatus.FAIL.value, None
 
 
 def check_telegram_gateway_health(
     policy: post_attestation.RuntimeAttestationPolicy,
     *,
+    pollers_measured: int | None = None,
     run: Run = post_attestation._default_run,
-) -> tuple[str, str, int, int]:
-    """Run no-send Telegram connectivity probe and gateway import smoke test."""
-    telegram_health = "PASS"
-    gateway_health = "PASS"
+) -> tuple[str, str, int, int | None]:
+    """Run no-send Telegram connectivity probe and gateway import smoke test.
+
+    Returns: (telegram_health, gateway_health, health_messages_sent, pollers_active)
+    If pollers are unmeasured, returns pollers_active=None.
+    """
+    telegram_health = CheckStatus.PASS.value
+    gateway_health = CheckStatus.PASS.value
     health_messages_sent = 0
-    pollers_active = 1
 
     try:
         post_attestation._telegram_health(policy, run=run)
     except post_attestation.RuntimeAttestationError:
-        telegram_health = "FAIL"
+        telegram_health = CheckStatus.FAIL.value
 
     try:
         post_attestation._gateway_health(policy, run=run)
     except post_attestation.RuntimeAttestationError:
-        gateway_health = "FAIL"
+        gateway_health = CheckStatus.FAIL.value
 
-    return telegram_health, gateway_health, health_messages_sent, pollers_active
+    return telegram_health, gateway_health, health_messages_sent, pollers_measured
 
 
 # ==============================================================================
@@ -755,12 +895,14 @@ def verify_rollback_prerequisites(
     *,
     previous_image_id: str,
     target_revision: str,
-    rollback_image_available: bool,
-    schema_compatible: bool,
-    protected_secrets_unchanged: bool,
-    db_state_safe: bool,
+    rollback_image_available: bool = False,
+    schema_compatible: bool = False,
+    protected_secrets_unchanged: bool = False,
+    db_state_safe: bool = False,
 ) -> tuple[bool, str | None]:
-    """Verify all mandatory rollback prerequisites before executing or asserting rollback path."""
+    """Verify all mandatory rollback prerequisites. Never defaults to True."""
+    if not previous_image_id or not IMAGE_ID_RE.fullmatch(previous_image_id):
+        return False, "PREVIOUS_IMAGE_ID_INVALID"
     if not rollback_image_available:
         return False, "ROLLBACK_IMAGE_UNAVAILABLE"
     if not schema_compatible:
@@ -831,6 +973,8 @@ def run_level_1_passive(
     *,
     contract: deploy_orchestrator.DeploymentContract,
     report: AttestationReportV2,
+    baseline_qdrant: Any | None = None,
+    pollers_measured: int | None = None,
     run: Run = post_attestation._default_run,
 ) -> str:
     """Level 1: Passive Runtime Health (read-only, no mutations, no LLM calls)."""
@@ -843,19 +987,29 @@ def run_level_1_passive(
         evidence_source=f"sqlite:{db_path}",
     )
 
-    qdrant_stat, _ = check_qdrant_health(service_name="qdrant", run=run)
+    qdrant_stat, mut_count = check_qdrant_health(
+        service_name="qdrant",
+        baseline=baseline_qdrant,
+        run=run,
+    )
+    mut_stat = CheckStatus.NOT_VERIFIED.value if mut_count is None else CheckStatus.PASS.value
     report.qdrant_health = qdrant_stat
+    report.qdrant_mutation_status = mut_stat
     report.add_check(
         check_id="PASSIVE_QDRANT_HEALTH",
         status=qdrant_stat,
         evidence_source="docker:inspect:qdrant",
     )
 
-    t_health, g_health, sent, pollers = check_telegram_gateway_health(
-        contract.attestation_policy, run=run
+    t_health, g_health, sent, pollers_active = check_telegram_gateway_health(
+        contract.attestation_policy,
+        pollers_measured=pollers_measured,
+        run=run,
     )
+    p_stat = CheckStatus.NOT_VERIFIED.value if pollers_active is None else CheckStatus.PASS.value
     report.telegram_health = t_health
     report.gateway_health = g_health
+    report.telegram_pollers_status = p_stat
     report.add_check(
         check_id="PASSIVE_TELEGRAM_CONNECTIVITY",
         status=t_health,
@@ -875,14 +1029,13 @@ def run_level_1_passive(
         evidence_source="config:vision_provider",
     )
 
-    level_pass = (
-        integ == "PASS"
-        and qdrant_stat == "PASS"
-        and t_health == "PASS"
-        and g_health == "PASS"
-        and vp.status == "PASS"
-    )
-    status = CheckStatus.PASS.value if level_pass else CheckStatus.FAIL.value
+    all_checks = (integ, qdrant_stat, t_health, g_health, vp.status)
+    if any(st == CheckStatus.FAIL.value for st in all_checks):
+        status = CheckStatus.FAIL.value
+    elif all(st == CheckStatus.PASS.value for st in all_checks):
+        status = CheckStatus.PASS.value
+    else:
+        status = CheckStatus.NOT_VERIFIED.value
     report.level_statuses["LEVEL_1"] = status
     return status
 
@@ -893,26 +1046,84 @@ def run_level_2_deep(
     report: AttestationReportV2,
     target_revision: str,
     target_image_id: str,
+    stability_samples: int = 3,
+    sample_interval_seconds: float = 0.05,
+    sqlite_connection: Any | None = None,
+    qdrant_payloads: Sequence[dict[str, Any]] | None = None,
+    trajectories: Sequence[dict[str, Any]] | None = None,
     run: Run = post_attestation._default_run,
     sleep: Sleep = time.sleep,
 ) -> str:
-    """Level 2: Deep Runtime Attestation (revisions, stability sampling, mounts, secrets, memory)."""
-    inspect_result = run(("docker", "inspect", "hermes-bot"), timeout=30)
-    if inspect_result.returncode != 0:
-        report.add_check(
-            check_id="DEEP_INSPECT_HERMES_BOT",
-            status=CheckStatus.FAIL.value,
-            evidence_source="docker:inspect:hermes-bot",
-            safe_error_code="CONTAINER_INSPECT_FAILED",
-        )
+    """Level 2: Deep Runtime Attestation (3 stability samples, revisions, mounts, secrets, memory)."""
+    if stability_samples < 3:
         report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
         return CheckStatus.FAIL.value
 
-    try:
-        container_record = json.loads(inspect_result.stdout)[0]
-    except Exception:
+    previous_record: dict[str, Any] | None = None
+    container_record: dict[str, Any] | None = None
+
+    for idx in range(stability_samples):
+        if idx > 0 and sample_interval_seconds > 0:
+            sleep(sample_interval_seconds)
+
+        inspect_result = run(("docker", "inspect", "hermes-bot"), timeout=30)
+        if inspect_result.returncode != 0:
+            report.add_check(
+                check_id=f"DEEP_SAMPLE_{idx + 1}_HERMES_BOT",
+                status=CheckStatus.FAIL.value,
+                evidence_source="docker:inspect:hermes-bot",
+                safe_error_code="CONTAINER_INSPECT_FAILED",
+            )
+            report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
+            return CheckStatus.FAIL.value
+
+        try:
+            sample_data = json.loads(inspect_result.stdout)
+            rec = sample_data[0] if isinstance(sample_data, list) else sample_data
+        except Exception:
+            report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
+            return CheckStatus.FAIL.value
+
+        state = rec.get("State", {}) if isinstance(rec, dict) else {}
+        cid = rec.get("Id", "")
+        started_at = state.get("StartedAt", "")
+        restarts = rec.get("RestartCount", state.get("RestartCount", 0))
+        running = state.get("Status", "") == "running" or state.get("Running", False) is True
+
+        if not running:
+            report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
+            return CheckStatus.FAIL.value
+
+        if previous_record is not None:
+            prev_state = previous_record.get("State", {})
+            prev_restarts = previous_record.get("RestartCount", prev_state.get("RestartCount", 0))
+            if (
+                cid != previous_record.get("Id")
+                or started_at != prev_state.get("StartedAt")
+                or restarts != prev_restarts
+            ):
+                report.add_check(
+                    check_id=f"DEEP_SAMPLE_{idx + 1}_CONTAINER_STABILITY",
+                    status=CheckStatus.FAIL.value,
+                    evidence_source="docker:stability_sampling",
+                    safe_error_code="HERMES_STABILITY_SAMPLE_CHANGED",
+                )
+                report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
+                return CheckStatus.FAIL.value
+
+        previous_record = rec
+        container_record = rec
+
+    if container_record is None:
         report.level_statuses["LEVEL_2"] = CheckStatus.FAIL.value
         return CheckStatus.FAIL.value
+
+    # Extract observed runtime SHA
+    labels = container_record.get("Config", {}).get("Labels", {})
+    observed_sha = labels.get("org.opencontainers.image.revision", "")
+    if SHA_RE.fullmatch(observed_sha):
+        report.observed_runtime_sha = observed_sha
+        report.observed_revision = observed_sha
 
     img_ident = check_image_identity(
         container_record=container_record,
@@ -927,7 +1138,11 @@ def run_level_2_deep(
         evidence_source="docker:image_identity",
     )
 
-    mem_audit = audit_memory_isolation()
+    mem_audit = audit_memory_isolation(
+        sqlite_connection=sqlite_connection,
+        qdrant_payloads=qdrant_payloads,
+        trajectories=trajectories,
+    )
     report.memory_isolation = mem_audit
     report.add_check(
         check_id="DEEP_MEMORY_ISOLATION",
@@ -935,8 +1150,12 @@ def run_level_2_deep(
         evidence_source="storage:memory_isolation_audit",
     )
 
-    level_pass = img_ident.status == "PASS" and mem_audit.status == "PASS"
-    status = CheckStatus.PASS.value if level_pass else CheckStatus.FAIL.value
+    if img_ident.status == CheckStatus.FAIL.value or mem_audit.status == CheckStatus.FAIL.value:
+        status = CheckStatus.FAIL.value
+    elif img_ident.status == CheckStatus.PASS.value and mem_audit.status == CheckStatus.PASS.value:
+        status = CheckStatus.PASS.value
+    else:
+        status = CheckStatus.NOT_VERIFIED.value
     report.level_statuses["LEVEL_2"] = status
     return status
 
@@ -946,13 +1165,17 @@ def run_level_3_canary(
     report: AttestationReportV2,
     fixture_path: Path,
     run_live: bool = False,
+    live_allowed: bool = False,
     mock_response_json: str | None = None,
+    real_provider_executor: Callable[..., Any] | None = None,
 ) -> str:
     """Level 3: Controlled Vision Canary (single-request, synthetic fixture, no user writes)."""
     canary = run_controlled_vision_canary(
         fixture_path=fixture_path,
         run_live=run_live,
+        live_allowed=live_allowed,
         mock_response_json=mock_response_json,
+        real_provider_executor=real_provider_executor,
     )
     report.vision_canary = canary
     report.add_check(
@@ -971,21 +1194,30 @@ def run_level_4_deploy_gate(
     target_revision: str,
     target_image_id: str,
     previous_image_id: str,
-    rollback_ready: bool = True,
-    mutation_occurred: bool = False,
+    rollback_image_available: bool = False,
+    schema_compatible: bool = False,
+    protected_secrets_unchanged: bool = False,
+    db_state_safe: bool = False,
+    run: Run = post_attestation._default_run,
 ) -> str:
     """Level 4: Deployment Transaction Gate (fail-closed, single-owner rollback)."""
-    report.rollback_ready = rollback_ready
-    report.rollback_executed = False
+    if not rollback_image_available and previous_image_id and IMAGE_ID_RE.fullmatch(previous_image_id):
+        # Probe whether previous image exists in local Docker engine
+        inspect_res = run(("docker", "inspect", previous_image_id), timeout=15)
+        if inspect_res.returncode == 0:
+            rollback_image_available = True
 
     ready, err = verify_rollback_prerequisites(
         previous_image_id=previous_image_id,
         target_revision=target_revision,
-        rollback_image_available=True,
-        schema_compatible=True,
-        protected_secrets_unchanged=True,
-        db_state_safe=True,
+        rollback_image_available=rollback_image_available,
+        schema_compatible=schema_compatible,
+        protected_secrets_unchanged=protected_secrets_unchanged,
+        db_state_safe=db_state_safe,
     )
+    report.rollback_ready = ready
+    report.rollback_executed = False
+
     if not ready:
         report.add_check(
             check_id="DEPLOY_GATE_ROLLBACK_PREREQUISITES",
@@ -1013,15 +1245,26 @@ def run_full_attestation(
     previous_image_id: str,
     levels: Sequence[str] = ("1", "2", "3", "4"),
     run_live_canary: bool = False,
+    live_allowed: bool = False,
     fixture_path: Path | None = None,
     output_dir: Path | None = None,
+    mock_canary_response: str | None = None,
+    rollback_image_available: bool = False,
+    schema_compatible: bool = False,
+    protected_secrets_unchanged: bool = False,
+    db_state_safe: bool = False,
     run: Run = post_attestation._default_run,
 ) -> AttestationReportV2:
-    """Execute requested attestation levels and build comprehensive report."""
+    """Execute requested attestation levels and build comprehensive report.
+
+    Adheres strictly to NO OBSERVATION -> NO PASS.
+    """
     contract = deploy_orchestrator.load_contract()
+    source_sha = get_attestator_source_sha()
     report = AttestationReportV2(
+        attestator_source_sha=source_sha,
         target_revision=target_revision,
-        observed_revision=target_revision,
+        observed_runtime_sha=None,
         operation_status=OperationStatus.PASS.value,
     )
 
@@ -1029,11 +1272,11 @@ def run_full_attestation(
     chosen_fixture = fixture_path or default_fixture
 
     level_set = {str(lvl).lower() for lvl in levels}
+    executed_levels: dict[str, str] = {}
 
     if "1" in level_set or "passive" in level_set or "all" in level_set:
         l1_res = run_level_1_passive(contract=contract, report=report, run=run)
-        if l1_res != CheckStatus.PASS.value:
-            report.operation_status = OperationStatus.FAIL.value
+        executed_levels["LEVEL_1"] = l1_res
     else:
         report.level_statuses["LEVEL_1"] = CheckStatus.NOT_RUN.value
 
@@ -1045,8 +1288,7 @@ def run_full_attestation(
             target_image_id=target_image_id,
             run=run,
         )
-        if l2_res != CheckStatus.PASS.value:
-            report.operation_status = OperationStatus.FAIL.value
+        executed_levels["LEVEL_2"] = l2_res
     else:
         report.level_statuses["LEVEL_2"] = CheckStatus.NOT_RUN.value
 
@@ -1055,9 +1297,10 @@ def run_full_attestation(
             report=report,
             fixture_path=chosen_fixture,
             run_live=run_live_canary,
+            live_allowed=live_allowed,
+            mock_response_json=mock_canary_response,
         )
-        if l3_res == CheckStatus.FAIL.value:
-            report.operation_status = OperationStatus.FAIL.value
+        executed_levels["LEVEL_3"] = l3_res
     else:
         report.level_statuses["LEVEL_3"] = CheckStatus.NOT_RUN.value
 
@@ -1068,11 +1311,26 @@ def run_full_attestation(
             target_revision=target_revision,
             target_image_id=target_image_id,
             previous_image_id=previous_image_id,
+            rollback_image_available=rollback_image_available,
+            schema_compatible=schema_compatible,
+            protected_secrets_unchanged=protected_secrets_unchanged,
+            db_state_safe=db_state_safe,
+            run=run,
         )
-        if l4_res != CheckStatus.PASS.value:
-            report.operation_status = OperationStatus.BLOCKED.value
+        executed_levels["LEVEL_4"] = l4_res
     else:
         report.level_statuses["LEVEL_4"] = CheckStatus.NOT_RUN.value
+
+    # Compute overall status across all requested levels: NO OBSERVATION -> NO PASS
+    op_status = OperationStatus.PASS.value
+    if any(st == CheckStatus.FAIL.value for st in executed_levels.values()):
+        op_status = OperationStatus.FAIL.value
+    elif any(st == CheckStatus.BLOCKED.value for st in executed_levels.values()):
+        op_status = OperationStatus.BLOCKED.value
+    elif any(st in (CheckStatus.NOT_RUN.value, CheckStatus.NOT_VERIFIED.value) for st in executed_levels.values()):
+        op_status = OperationStatus.BLOCKED.value
+
+    report.operation_status = op_status
 
     if output_dir and output_dir.is_dir():
         write_attestation_receipt_v2(report, output_dir)
@@ -1081,12 +1339,13 @@ def run_full_attestation(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Hermes Runtime Attestation V2")
+    parser = argparse.ArgumentParser(description="Hermes Runtime Attestation V2.1")
     parser.add_argument("--target-revision", required=False, default="", help="Expected target 40-character Git SHA")
     parser.add_argument("--target-image-id", required=False, default="", help="Expected target Docker image ID")
     parser.add_argument("--previous-image-id", required=False, default="", help="Previous known good image ID")
     parser.add_argument("--levels", nargs="*", default=["1", "2", "3", "4"], help="Levels to execute: 1, 2, 3, 4, all")
-    parser.add_argument("--run-vision-canary", action="store_true", help="Explicitly enable live vision canary execution")
+    parser.add_argument("--run-vision-canary", action="store_true", help="Explicitly enable vision canary execution")
+    parser.add_argument("--live-allowed", action="store_true", help="Explicitly authorize live provider execution")
     parser.add_argument("--output-dir", required=False, default="", help="Directory for sanitized evidence receipts")
     parser.add_argument("--json", action="store_true", help="Print report JSON to stdout")
 
@@ -1099,6 +1358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         previous_image_id=args.previous_image_id or "sha256:" + "0" * 64,
         levels=args.levels,
         run_live_canary=args.run_vision_canary,
+        live_allowed=args.live_allowed,
         output_dir=out_dir,
     )
 

@@ -9290,9 +9290,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
             return
 
-        if action in {"save", "save_no_kbzhu"}:
+        if action in {"save", "save_no_kbzhu", "save_partial"}:
             if action == "save":
                 result = diary.save_pending_inventory_directly(
+                    user_id=target_user_id,
+                    expected_inventory_id=inventory_id,
+                )
+            elif action == "save_partial":
+                result = diary.save_partial_pending_inventory(
                     user_id=target_user_id,
                     expected_inventory_id=inventory_id,
                 )
@@ -9343,6 +9348,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 try:
                     await query.answer(
                         text=result.reply_text or "Уточните: на фото одна порция или разные?",
+                        show_alert=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+            if result.status == "album_partial_blocked":
+                try:
+                    await query.answer(
+                        text=result.reply_text or "Распознана только часть альбома. Нажмите «Сохранить распознанную часть».",
                         show_alert=True,
                     )
                 except Exception:

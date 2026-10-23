@@ -1138,6 +1138,207 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
     ),
 )
 
+_COMPOSITE_DISH_CATALOG: tuple[FoodNutrientProfile, ...] = (
+    FoodNutrientProfile(
+        canonical_id='apple_pie',
+        display_name='Яблочный пирог',
+        category='grains_bakery',
+        calories_kcal=275.0,
+        protein_g=3.5,
+        fat_g=9.5,
+        carbs_g=44.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0412',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 412 (пирог с яблоками)",
+        aliases=(
+            'яблочный пирог', 'пирог с яблоками', 'пирог яблочный', 'шарлотка', 'штрудель',
+            'яблочная шарлотка', 'яблочный штрудель', 'кусок яблочного пирога', 'кусочек яблочного пирога',
+            'кусок пирога с яблоками', 'кусочек пирога с яблоками', 'сладкая выпечка с яблоком',
+            'apple pie', 'apple tart',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='sweet_pastry',
+        display_name='Сладкая выпечка',
+        category='grains_bakery',
+        calories_kcal=335.0,
+        protein_g=6.5,
+        fat_g=13.0,
+        carbs_g=48.0,
+        reference_confidence=0.90,
+        source_id='INTERNAL-SKURIKHIN-2008-0415',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 415 (сдобная выпечка)",
+        aliases=(
+            'сладкая выпечка', 'выпечка', 'сдоба', 'сдобная выпечка', 'булочка', 'булочки',
+            'слойка', 'слойки', 'ватрушка', 'ватрушки', 'круассан', 'круассаны',
+            'кекс', 'маффин', 'кусочки сладкой выпечки', 'кусок выпечки',
+            'sweet pastry', 'pastry', 'pastries',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='pie_general',
+        display_name='Пирог с начинкой',
+        category='grains_bakery',
+        calories_kcal=290.0,
+        protein_g=5.5,
+        fat_g=11.0,
+        carbs_g=42.0,
+        reference_confidence=0.90,
+        source_id='INTERNAL-SKURIKHIN-2008-0410',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 410 (пироги)",
+        aliases=(
+            'пирог', 'пироги', 'пирожок', 'пирожки', 'кусок пирога', 'кусочек пирога',
+            'пирог с начинкой', 'pie',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='pizza',
+        display_name='Пицца',
+        category='prepared_dishes',
+        calories_kcal=260.0,
+        protein_g=11.0,
+        fat_g=10.0,
+        carbs_g=31.0,
+        reference_confidence=0.92,
+        source_id='USDA-FDC-2708321',
+        dataset_version='USDA-Foundation',
+        cooking_state='cooked',
+        source_provenance="USDA FoodData Central SR Legacy FDC ID 2708321 ('Pizza, cheese, regular crust')",
+        aliases=(
+            'пицца', 'кусок пиццы', 'кусочек пиццы', 'пицца сырная', 'пицца пепперони',
+            'pizza', 'pizza slice',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='burger',
+        display_name='Бургер',
+        category='prepared_dishes',
+        calories_kcal=255.0,
+        protein_g=13.0,
+        fat_g=12.0,
+        carbs_g=23.0,
+        reference_confidence=0.92,
+        source_id='USDA-FDC-171954',
+        dataset_version='USDA-Foundation',
+        cooking_state='cooked',
+        source_provenance="USDA FoodData Central SR Legacy FDC ID 171954 ('Burger / Cheeseburger, single patty')",
+        aliases=(
+            'бургер', 'чизбургер', 'гамбургер', 'burger', 'cheeseburger',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='casserole',
+        display_name='Запеканка',
+        category='prepared_dishes',
+        calories_kcal=190.0,
+        protein_g=12.0,
+        fat_g=8.0,
+        carbs_g=18.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0125',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Блюда из творога', поз. 125 (запеканка)",
+        aliases=(
+            'запеканка', 'творожная запеканка', 'картофельная запеканка', 'кусок запеканки',
+            'casserole',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='fresh_salad',
+        display_name='Салат овощной',
+        category='vegetables',
+        calories_kcal=60.0,
+        protein_g=1.5,
+        fat_g=3.5,
+        carbs_g=5.5,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0706',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='raw',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Салаты', поз. 706 (салат из огурцов и томатов)",
+        aliases=(
+            'салат', 'салаты', 'овощной салат', 'греческий салат', 'свежий салат',
+            'салат из огурцов и помидоров', 'салат овощной с маслом', 'salad',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='pastry_dough_base',
+        display_name='Основа из теста',
+        category='grains_bakery',
+        calories_kcal=280.0,
+        protein_g=7.5,
+        fat_g=5.0,
+        carbs_g=51.0,
+        reference_confidence=0.88,
+        source_id='INTERNAL-SKURIKHIN-2008-0418',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные изделия', поз. 418 (печёное тесто)",
+        aliases=(
+            'основа из теста', 'печеное тесто', 'печёное тесто', 'тесто основа', 'pastry base',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='creamy_filling',
+        display_name='Кремовая начинка',
+        category='dairy',
+        calories_kcal=260.0,
+        protein_g=3.5,
+        fat_g=15.0,
+        carbs_g=28.0,
+        reference_confidence=0.88,
+        source_id='INTERNAL-SKURIKHIN-2008-0419',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные кондитерские изделия', поз. 419 (крем кондитерский)",
+        aliases=(
+            'кремовая начинка', 'заварной крем', 'крем кондитерский', 'творожная начинка', 'creamy filling',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='sunflower_seeds',
+        display_name='Семечки подсолнечника',
+        category='nuts',
+        calories_kcal=580.0,
+        protein_g=20.0,
+        fat_g=50.0,
+        carbs_g=15.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0385',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='raw',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Семена', поз. 385 (семена подсолнечника); USDA 170562",
+        aliases=(
+            'семечки подсолнечника', 'семечки', 'семена подсолнечника', 'семена', 'семена на выпечке',
+            'sunflower seeds', 'seeds',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='apple_slices',
+        display_name='Ломтики яблока',
+        category='fruits',
+        calories_kcal=52.0,
+        protein_g=0.3,
+        fat_g=0.2,
+        carbs_g=14.0,
+        reference_confidence=0.95,
+        source_id='INTERNAL-SKURIKHIN-2008-0350-S',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Фрукты', поз. 350 (яблоки печеные/ломтиками)",
+        aliases=(
+            'ломтики яблока', 'дольки яблока', 'кусочки яблока', 'печеное яблоко', 'apple slices',
+        ),
+    ),
+)
+
 
 def normalize_food_lookup_key(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", text.strip().lower())
@@ -1186,9 +1387,10 @@ def _strip_harmless_culinary_modifiers(text: str) -> str:
     return cleaned
 
 
-def _build_alias_index() -> dict[str, FoodNutrientProfile]:
+def _build_alias_index(catalog: tuple[FoodNutrientProfile, ...] | None = None) -> dict[str, FoodNutrientProfile]:
+    cat = catalog if catalog is not None else _FOOD_CATALOG
     index: dict[str, FoodNutrientProfile] = {}
-    for profile in _FOOD_CATALOG:
+    for profile in cat:
         canon_key = normalize_food_lookup_key(profile.display_name)
         index[canon_key] = profile
         index[profile.canonical_id] = profile
@@ -1198,7 +1400,9 @@ def _build_alias_index() -> dict[str, FoodNutrientProfile]:
     return index
 
 
-_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index()
+_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index(_FOOD_CATALOG)
+_COMPOSITE_DISH_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index(_COMPOSITE_DISH_CATALOG)
+_RESOLVER_ALIAS_INDEX: dict[str, FoodNutrientProfile] = {**_COMPOSITE_DISH_ALIAS_INDEX, **_ALIAS_INDEX}
 _SKURIKHIN_FALLBACK_INDEX: dict[str, FoodNutrientProfile] | None = None
 
 
@@ -1249,8 +1453,8 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
         return FoodLookupResult(matched=False, match_type="empty")
 
     # 1. Exact match on normalized full alias in built-in reference catalog
-    if raw_normalized in _ALIAS_INDEX:
-        profile = _ALIAS_INDEX[raw_normalized]
+    if raw_normalized in _RESOLVER_ALIAS_INDEX:
+        profile = _RESOLVER_ALIAS_INDEX[raw_normalized]
         return FoodLookupResult(
             matched=True,
             profile=profile,

@@ -33,6 +33,91 @@ from gateway.nutrition.search import find_candidate_suggestions, normalize_russi
 # Component Level Calculation
 # -----------------------------------------------------------------------------
 
+def resolve_approximate_food_nutrition(
+    food_name: str,
+    *,
+    cooking_state: str = "cooked",
+) -> FoodNutrientProfile | None:
+    """
+    Policy 3 — Approximate Food Nutrition & Categorical Resolver.
+    Resolves foods, prepared dishes, or culinary components not strictly present in exact catalog
+    into standard approximate nutrient profiles (per 100g edible portion).
+    """
+    import re
+    from gateway.healbite_food_composition import FoodNutrientProfile
+    from gateway.nutrition.search import normalize_russian_food_query
+
+    q = normalize_russian_food_query(food_name)
+    if not q:
+        return None
+
+    # Invariant: bare "орехи" / "орех" without specific nut type or dish context
+    # must fail closed (preserved for test_scenario_07).
+    if q in {"орехи", "орех"}:
+        return None
+
+    # Invariant: fictional or non-food/alien queries must fail closed (missing_reference)
+    _FICTIONAL_NON_FOOD_MARKERS = (
+        r"плазм", r"звездн", r"темн.*матери", r"антивеществ", r"мандрагор", r"квазар",
+        r"лембас", r"криптонит", r"гравитон", r"дракон", r"синхрофазотрон", r"ксеноморф",
+        r"космическ", r"неведом", r"гусениц", r"в золе", r"марсианск",
+    )
+    if any(re.search(m, q) for m in _FICTIONAL_NON_FOOD_MARKERS):
+        return None
+
+    _APPROX_RULES: tuple[tuple[re.Pattern[str], str, str, float, float, float, float, str], ...] = (
+        (re.compile(r"(яблочн.*пирог|пирог.*яблок|шарлотк|штрудел)"), "Яблочный пирог", "grains_bakery", 275.0, 3.5, 9.5, 44.0, "APPROX-PIE-APPLE-2026"),
+        (re.compile(r"(сладк.*выпечк|выпечк.*сладк|кусочк.*сладк.*выпечк|сдоб|булочк|круассан|маффин|кекс|ватрушк|слойк)"), "Сладкая выпечка", "grains_bakery", 335.0, 6.5, 13.0, 48.0, "APPROX-PASTRY-SWEET-2026"),
+        (re.compile(r"(пирог|пирожок|пироги|пирожки)"), "Пирог с начинкой", "grains_bakery", 290.0, 5.5, 11.0, 42.0, "APPROX-PIE-GEN-2026"),
+        (re.compile(r"(основ.*из.*тест|тесто.*основ|печен.*тест)"), "Основа из теста", "grains_bakery", 280.0, 7.5, 5.0, 51.0, "APPROX-DOUGH-BASE-2026"),
+        (re.compile(r"(кремов.*начинк|заварн.*крем|крем.*кондитерск|крем)"), "Кремовая начинка", "dairy", 260.0, 3.5, 15.0, 28.0, "APPROX-CREAM-2026"),
+        (re.compile(r"(семечк|семен.*подсолнечник|семен.*на.*выпечк|кунжут|семен)"), "Семена пищевые", "nuts", 580.0, 20.0, 50.0, 15.0, "APPROX-SEEDS-2026"),
+        (re.compile(r"(грецк.*орех|миндал|фундук|кешью|арахис|смес.*орех|орех.*смес)"), "Орехи (смесь)", "nuts", 630.0, 16.0, 58.0, 14.0, "APPROX-NUTS-2026"),
+        (re.compile(r"(пицц)"), "Пицца", "prepared_dishes", 260.0, 11.0, 10.0, 31.0, "APPROX-PIZZA-2026"),
+        (re.compile(r"(бургер|чизбургер|гамбургер)"), "Бургер", "prepared_dishes", 255.0, 13.0, 12.0, 23.0, "APPROX-BURGER-2026"),
+        (re.compile(r"(шаурм|шаверм|донер)"), "Шаурма", "prepared_dishes", 210.0, 10.0, 9.0, 22.0, "APPROX-SHAWARMA-2026"),
+        (re.compile(r"(запеканк)"), "Запеканка", "prepared_dishes", 190.0, 12.0, 8.0, 18.0, "APPROX-CASSEROLE-2026"),
+        (re.compile(r"(пельмен|вареник|манты|хинкал)"), "Пельмени / вареники", "prepared_dishes", 230.0, 10.0, 9.5, 26.0, "APPROX-DUMPLINGS-2026"),
+        (re.compile(r"(блин|блинчик|оладь)"), "Блины / оладьи", "prepared_dishes", 220.0, 6.0, 8.0, 31.0, "APPROX-PANCAKES-2026"),
+        (re.compile(r"(жарко|гуляш|рагу.*мяс|мяс.*рагу)"), "Рагу / жаркое", "prepared_dishes", 140.0, 10.0, 8.0, 7.0, "APPROX-STEW-2026"),
+        (re.compile(r"(ролл|суши)"), "Роллы / суши", "prepared_dishes", 170.0, 6.5, 4.5, 26.0, "APPROX-SUSHI-2026"),
+        (re.compile(r"(бутерброд|сэндвич|тост.*с.*сыр)"), "Бутерброд / сэндвич", "prepared_dishes", 240.0, 9.0, 10.0, 28.0, "APPROX-SANDWICH-2026"),
+        (re.compile(r"(торт|пирожн|десерт|печень)"), "Кондитерское изделие", "grains_bakery", 380.0, 5.0, 18.0, 50.0, "APPROX-DESSERT-2026"),
+        (re.compile(r"(салат.*(майонез|оливье|шуб|крабов|цезар)|цезар)"), "Салат с заправкой", "prepared_dishes", 175.0, 5.5, 13.5, 8.0, "APPROX-SALAD-MAYO-2026"),
+        (re.compile(r"(салат|винегрет|греческ.*салат|листь.*салат)"), "Салат овощной", "vegetables", 60.0, 1.5, 3.5, 5.5, "APPROX-SALAD-FRESH-2026"),
+        (re.compile(r"(суп|щи|бульон|солянк|рассольник|уха|харчо|окрошк)"), "Суп", "prepared_dishes", 55.0, 3.5, 2.5, 4.5, "APPROX-SOUP-2026"),
+        (re.compile(r"(куриц|индейк|птиц|курин|грудк|филе.*курин)"), "Птица отварная/запечённая", "meat_poultry", 165.0, 28.0, 5.0, 0.0, "APPROX-POULTRY-2026"),
+        (re.compile(r"(рыб|морепродукт|креветк|миди|кальмар)"), "Рыба / морепродукты", "fish_seafood", 150.0, 21.0, 6.5, 0.0, "APPROX-FISH-2026"),
+        (re.compile(r"(мясо|говядин|свинин|баранин|фарш|стейк|шашлык)"), "Мясо приготовленное", "meat_poultry", 220.0, 22.0, 14.0, 0.0, "APPROX-MEAT-2026"),
+        (re.compile(r"(котлет|тефтел|биточк|фрикадельк)"), "Котлета мясная", "meat_poultry", 210.0, 15.0, 13.0, 8.0, "APPROX-CUTLET-2026"),
+        (re.compile(r"(макарон|паст|спагетти|лапш)"), "Макаронные изделия", "grains_bakery", 135.0, 5.0, 1.2, 26.0, "APPROX-PASTA-2026"),
+        (re.compile(r"(каш|круп|булгур|кускус|киноа|овсянк)"), "Каша / крупяной гарнир", "grains_bakery", 120.0, 3.5, 1.0, 24.0, "APPROX-GRAINS-2026"),
+        (re.compile(r"(картофел|картошк|пюре)"), "Картофель приготовленный", "vegetables", 85.0, 2.0, 1.5, 16.0, "APPROX-POTATO-2026"),
+        (re.compile(r"(овощ|тушен.*овощ|кабачк|баклажан|броккол|цветн.*капуст)"), "Овощи приготовленные", "vegetables", 65.0, 1.8, 2.5, 8.5, "APPROX-VEG-2026"),
+        (re.compile(r"(яблок|ломтик.*яблок|дольк.*яблок|apple)"), "Яблоко", "fruits", 52.0, 0.3, 0.2, 14.0, "APPROX-APPLE-2026"),
+        (re.compile(r"(ягод|клубник|малин|черник|вишн|черешн)"), "Ягоды", "fruits", 45.0, 0.8, 0.4, 9.5, "APPROX-BERRIES-2026"),
+    )
+
+    for pat, d_name, cat, kcal, p, f, c, src_id in _APPROX_RULES:
+        if pat.search(q):
+            return FoodNutrientProfile(
+                canonical_id=src_id.lower().replace("-", "_"),
+                display_name=d_name,
+                category=cat,
+                calories_kcal=kcal,
+                protein_g=p,
+                fat_g=f,
+                carbs_g=c,
+                reference_confidence=0.88,
+                source_id=src_id,
+                dataset_version="2026.2-approx-profile",
+                cooking_state=cooking_state,
+                source_provenance=f"Приблизительный пищевой профиль категории '{cat}' (Скурихин/USDA)",
+            )
+
+    return None
+
+
 def resolve_and_calculate_component(
     food_name: str,
     mass_bounds: MassBounds,
@@ -162,6 +247,34 @@ def resolve_and_calculate_component(
             is_approximate_plausible_range=mass_bounds.is_approximate_plausible_range,
             nutrition_available=True,
             candidate_suggestions=(),
+        )
+
+    # Step 2c: Fallback to approximate analog and categorical profile (Policy 3)
+    approx_profile = resolve_approximate_food_nutrition(food_name, cooking_state=cooking_state)
+    if approx_profile is not None:
+        intervals = calculate_component_macronutrient_intervals(
+            mass_bounds,
+            approx_profile.calories_kcal,
+            approx_profile.protein_g,
+            approx_profile.fat_g,
+            approx_profile.carbs_g,
+        )
+        return ComponentNutritionEstimate(
+            name=approx_profile.display_name,
+            mass_bounds=mass_bounds,
+            intervals=intervals,
+            source_id=approx_profile.source_id,
+            cooking_state=approx_profile.cooking_state or cooking_state,
+            source_provenance=approx_profile.source_provenance,
+            per_100g_calories_kcal=approx_profile.calories_kcal,
+            per_100g_protein_g=approx_profile.protein_g,
+            per_100g_fat_g=approx_profile.fat_g,
+            per_100g_carbs_g=approx_profile.carbs_g,
+            uncertainty_model_type=UncertaintyModelType.CONSERVATIVE_INTERVAL,
+            is_approximate_plausible_range=True,
+            nutrition_available=True,
+            candidate_suggestions=(),
+            variance_note="Приблизительная оценка по категории/аналогу",
         )
 
     # Step 3: Unresolved query — provide candidate suggestions

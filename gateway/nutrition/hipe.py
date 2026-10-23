@@ -151,6 +151,10 @@ _PORTION_PRIORS_TABLE: dict[str, PortionPrior] = {
     "beverage_glass": PortionPrior(150.0, 200.0, 280.0, category="beverage_glass", typical_unit="стакан"),
     "sauce_spoon": PortionPrior(15.0, 25.0, 40.0, category="sauce_spoon", typical_unit="столовая ложка"),
     "fruit_piece": PortionPrior(80.0, 150.0, 220.0, category="fruit_piece", typical_unit="штука"),
+    "apple_pie": PortionPrior(120.0, 170.0, 220.0, category="apple_pie", typical_unit="кусок пирога"),
+    "sweet_pastry": PortionPrior(100.0, 160.0, 220.0, category="sweet_pastry", typical_unit="порция выпечки"),
+    "pizza": PortionPrior(100.0, 135.0, 180.0, category="pizza", typical_unit="кусок пиццы"),
+    "burger": PortionPrior(160.0, 220.0, 320.0, category="burger", typical_unit="бургер"),
     "dessert_pastry": PortionPrior(60.0, 100.0, 160.0, category="dessert_pastry", typical_unit="порция"),
     "syrniki": PortionPrior(100.0, 160.0, 240.0, category="сырники", typical_unit="порция (2-3 шт)"),
     "omelette": PortionPrior(100.0, 150.0, 220.0, category="omelette", typical_unit="порция"),
@@ -197,6 +201,10 @@ _PRIOR_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(сок|стакан|вод|компот|морс|молок|кефир)"), "beverage_glass"),
     (re.compile(r"(соус|майонез|кетчуп|ложк|сметан.*ложк)"), "sauce_spoon"),
     (re.compile(r"(яблок|груш|банан|апельсин)"), "fruit_piece"),
+    (re.compile(r"(яблочн.*пирог|пирог.*яблок|шарлотк|штрудел)"), "apple_pie"),
+    (re.compile(r"(пицц)"), "pizza"),
+    (re.compile(r"(бургер|чизбургер|гамбургер)"), "burger"),
+    (re.compile(r"(сладк.*выпечк|выпечк)"), "sweet_pastry"),
     (re.compile(r"(торт|пирожн|десерт|круассан|булочк|пирог|пирожок|пирожк)"), "dessert_pastry"),
 )
 

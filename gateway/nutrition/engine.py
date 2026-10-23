@@ -60,7 +60,7 @@ def resolve_approximate_food_nutrition(
     _FICTIONAL_NON_FOOD_MARKERS = (
         r"плазм", r"звездн", r"темн.*матери", r"антивеществ", r"мандрагор", r"квазар",
         r"лембас", r"криптонит", r"гравитон", r"дракон", r"синхрофазотрон", r"ксеноморф",
-        r"космическ", r"неведом", r"гусениц", r"в золе",
+        r"космическ", r"неведом", r"гусениц", r"в золе", r"марсианск",
     )
     if any(re.search(m, q) for m in _FICTIONAL_NON_FOOD_MARKERS):
         return None

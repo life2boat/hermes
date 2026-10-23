@@ -1136,6 +1136,9 @@ _FOOD_CATALOG: tuple[FoodNutrientProfile, ...] = (
             'walnut', 'walnuts', 'walnut kernel', 'walnut kernels', 'walnut in shell', 'walnuts in shell',
         ),
     ),
+)
+
+_COMPOSITE_DISH_CATALOG: tuple[FoodNutrientProfile, ...] = (
     FoodNutrientProfile(
         canonical_id='apple_pie',
         display_name='Яблочный пирог',
@@ -1384,9 +1387,10 @@ def _strip_harmless_culinary_modifiers(text: str) -> str:
     return cleaned
 
 
-def _build_alias_index() -> dict[str, FoodNutrientProfile]:
+def _build_alias_index(catalog: tuple[FoodNutrientProfile, ...] | None = None) -> dict[str, FoodNutrientProfile]:
+    cat = catalog if catalog is not None else _FOOD_CATALOG
     index: dict[str, FoodNutrientProfile] = {}
-    for profile in _FOOD_CATALOG:
+    for profile in cat:
         canon_key = normalize_food_lookup_key(profile.display_name)
         index[canon_key] = profile
         index[profile.canonical_id] = profile
@@ -1396,7 +1400,9 @@ def _build_alias_index() -> dict[str, FoodNutrientProfile]:
     return index
 
 
-_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index()
+_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index(_FOOD_CATALOG)
+_COMPOSITE_DISH_ALIAS_INDEX: dict[str, FoodNutrientProfile] = _build_alias_index(_COMPOSITE_DISH_CATALOG)
+_RESOLVER_ALIAS_INDEX: dict[str, FoodNutrientProfile] = {**_COMPOSITE_DISH_ALIAS_INDEX, **_ALIAS_INDEX}
 _SKURIKHIN_FALLBACK_INDEX: dict[str, FoodNutrientProfile] | None = None
 
 
@@ -1447,8 +1453,8 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
         return FoodLookupResult(matched=False, match_type="empty")
 
     # 1. Exact match on normalized full alias in built-in reference catalog
-    if raw_normalized in _ALIAS_INDEX:
-        profile = _ALIAS_INDEX[raw_normalized]
+    if raw_normalized in _RESOLVER_ALIAS_INDEX:
+        profile = _RESOLVER_ALIAS_INDEX[raw_normalized]
         return FoodLookupResult(
             matched=True,
             profile=profile,

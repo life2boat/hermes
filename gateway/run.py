@@ -1849,10 +1849,39 @@ def _is_healbite_tester_user(user_id: Any) -> bool:
     return target in testers
 
 
+def _is_healbite_registered_user(user_id: Any) -> bool:
+    if user_id is None:
+        return False
+    try:
+        uid = int(user_id)
+    except (ValueError, TypeError):
+        return False
+    try:
+        from gateway.healbite_user_profile import get_default_healbite_user_profile
+        store = get_default_healbite_user_profile()
+        if store.get_user_profile(uid) is not None:
+            return True
+        if store.get_onboarding_state(uid) is not None:
+            return True
+        return False
+    except Exception as exc:
+        logger.warning("[HealBite] Failed checking registered user status for %s: %s", uid, exc)
+        return False
+
+
+def _is_healbite_registered_user_allowed(user_id: Any) -> bool:
+    raw = str(os.getenv("HEALBITE_ALLOW_REGISTERED_USERS", "") or "").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return False
+    return _is_healbite_registered_user(user_id)
+
+
 def _healbite_public_lane_enabled_for_user(user_id: Any = None) -> bool:
     if _healbite_public_onboarding_enabled():
         return True
-    return _is_healbite_tester_user(user_id)
+    if _is_healbite_tester_user(user_id):
+        return True
+    return _is_healbite_registered_user_allowed(user_id)
 
 
 _CORRELATION_HMAC_KEY: bytes = secrets.token_bytes(32)
@@ -1915,6 +1944,18 @@ def _healbite_public_lane_decision(
     )
 
     if not _healbite_public_lane_enabled_for_user(getattr(source, "user_id", None)):
+        raw_notify = str(os.getenv("HEALBITE_NOTIFY_UNAUTHORIZED", "") or "").strip().lower()
+        if (
+            raw_notify in {"1", "true", "yes", "on"}
+            and source.platform == Platform.TELEGRAM
+            and str(getattr(source, "chat_type", "") or "").lower() in {"dm", "direct", "private"}
+        ):
+            return {
+                "enabled": True,
+                "action": "reply",
+                "route": "public_lane_restricted",
+                "reply": "HealBite сейчас доступен только для участников закрытого тестирования. Если вы участвуете в тестировании, свяжитесь с администратором для доступа.",
+            }
         return {"enabled": False, "action": "disabled", "route": "disabled"}
     if source.platform != Platform.TELEGRAM:
         return {"enabled": False, "action": "disabled", "route": "wrong_platform"}

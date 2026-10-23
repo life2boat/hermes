@@ -4192,8 +4192,18 @@ class TelegramAdapter(BasePlatformAdapter):
         self._record_handler_selection(getattr(update, "update_id", None), "callback_query")
         public_onboarding = self._healbite_public_onboarding_enabled()
         is_tester = self._is_healbite_tester_user(query_user_id)
-        lane_active = public_onboarding or is_tester
-        auth_decision = "allowed" if query_is_authorized else ("tester_bypass" if is_tester else ("public_bypass" if public_onboarding else "denied"))
+        is_registered = self._is_healbite_registered_user_allowed(query_user_id)
+        lane_active = public_onboarding or is_tester or is_registered
+        if query_is_authorized:
+            auth_decision = "allowed"
+        elif is_tester:
+            auth_decision = "tester_bypass"
+        elif is_registered:
+            auth_decision = "registered_user_bypass"
+        elif public_onboarding:
+            auth_decision = "public_bypass"
+        else:
+            auth_decision = "denied"
         self._log_healbite_marker(
             "telegram_auth_decision",
             msg=query_message,
@@ -6709,10 +6719,38 @@ class TelegramAdapter(BasePlatformAdapter):
         return target in testers
 
     @classmethod
+    def _is_healbite_registered_user(cls, user_id: Any) -> bool:
+        if user_id is None:
+            return False
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            return False
+        try:
+            store = get_default_healbite_user_profile()
+            if store.get_user_profile(uid) is not None:
+                return True
+            if store.get_onboarding_state(uid) is not None:
+                return True
+            return False
+        except Exception as exc:
+            logger.warning("[Telegram] Failed checking registered user profile for %s: %s", uid, exc)
+            return False
+
+    @classmethod
+    def _is_healbite_registered_user_allowed(cls, user_id: Any) -> bool:
+        raw = str(os.getenv("HEALBITE_ALLOW_REGISTERED_USERS", "") or "").strip().lower()
+        if raw not in {"1", "true", "yes", "on"}:
+            return False
+        return cls._is_healbite_registered_user(user_id)
+
+    @classmethod
     def _healbite_public_lane_enabled_for_user(cls, user_id: Any = None) -> bool:
         if cls._healbite_public_onboarding_enabled():
             return True
-        return cls._is_healbite_tester_user(user_id)
+        if cls._is_healbite_tester_user(user_id):
+            return True
+        return cls._is_healbite_registered_user_allowed(user_id)
 
     @staticmethod
     def _healbite_public_lane_block_reason(msg: Message) -> str | None:
@@ -9921,11 +9959,14 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         public_onboarding = self._healbite_public_onboarding_enabled()
         is_tester = self._is_healbite_tester_user(actor_user_id)
-        lane_active = public_onboarding or is_tester
+        is_registered = self._is_healbite_registered_user_allowed(actor_user_id)
+        lane_active = public_onboarding or is_tester or is_registered
         if is_authorized:
             auth_decision = "allowed"
         elif is_tester:
             auth_decision = "tester_bypass"
+        elif is_registered:
+            auth_decision = "registered_user_bypass"
         elif public_onboarding:
             auth_decision = "public_bypass"
         else:
@@ -10556,11 +10597,14 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         public_onboarding = self._healbite_public_onboarding_enabled()
         is_tester = self._is_healbite_tester_user(actor_user_id)
-        lane_active = public_onboarding or is_tester
+        is_registered = self._is_healbite_registered_user_allowed(actor_user_id)
+        lane_active = public_onboarding or is_tester or is_registered
         if is_authorized:
             auth_decision = "allowed"
         elif is_tester:
             auth_decision = "tester_bypass"
+        elif is_registered:
+            auth_decision = "registered_user_bypass"
         elif public_onboarding:
             auth_decision = "public_bypass"
         else:
@@ -11215,7 +11259,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 await self.handle_message(event)
                 handed_off = True
         except asyncio.CancelledError:
-            return
+            from gateway.run import _healbite_event_correlation_id
+            corr = _healbite_event_correlation_id(event) if event else "unknown"
+            logger.info("[Telegram][media_group_cancelled] corr=%s batch_key=%s", corr, batch_key)
+            raise
+        except Exception as exc:
+            from gateway.run import _healbite_event_correlation_id, _vision_safe_fallback_text
+            corr = _healbite_event_correlation_id(event) if event else "unknown"
+            logger.exception(
+                "[Telegram][media_group_flush_failed] corr=%s batch_key=%s error=%s",
+                corr,
+                batch_key,
+                exc.__class__.__name__,
+            )
+            if event is not None and getattr(event, "source", None) is not None:
+                chat_id = getattr(event.source, "chat_id", None)
+                if chat_id is not None:
+                    try:
+                        thread_id = getattr(event.source, "thread_id", None)
+                        await self.send(
+                            str(chat_id),
+                            _vision_safe_fallback_text(),
+                            metadata={"thread_id": thread_id} if thread_id else None,
+                        )
+                    except Exception:
+                        pass
         finally:
             if (
                 event is not None

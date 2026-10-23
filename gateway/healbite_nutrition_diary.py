@@ -2382,6 +2382,15 @@ def _pending_inventory_from_food_vision(
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
         sel_g = _maybe_proposed_selected_grams(g_min, g_max)
+        uncertainty = item.uncertainty
+        if g_min is None or g_max is None:
+            from gateway.nutrition.hipe import estimate_portion_mass
+            bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
+            g_min = bounds.grams_min
+            g_max = bounds.grams_max
+            sel_g = bounds.grams_center
+            if not uncertainty:
+                uncertainty = "приблизительная оценка порции"
         item_id = getattr(item, "item_id", "") or f"item_{index}"
         items.append(PendingFoodVisionItem(
             index=index,
@@ -2393,7 +2402,7 @@ def _pending_inventory_from_food_vision(
             selected_grams=sel_g,
             preparation=item.preparation,
             is_sauce=item.is_sauce,
-            uncertainty=item.uncertainty,
+            uncertainty=uncertainty,
             user_modified=False,
             item_id=item_id,
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
@@ -4795,6 +4804,142 @@ class HealBiteNutritionDiary:
             return self.confirm_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now)
         return self.apply_pending_inventory_action(user_id, action, expected_inventory_id=expected_inventory_id, now=now)
 
+    def _atomic_save_pending_record(
+        self,
+        *,
+        user_id: int,
+        source: str,
+        record: NutritionRecord,
+        image_ref: str | None,
+        occurred_at: datetime | None,
+        expected_inventory_id: str | None = None,
+        require_pending: bool = True,
+    ) -> tuple[int | None, bool, str]:
+        """Atomically commit a pending inventory or meal to the nutrition log and clear the pending state.
+
+        Returns (sqlite_id, duplicate, status) where status in ("saved", "duplicate", "missing", "stale").
+        If require_pending is True:
+          - Atomically checks and deletes the pending row from PENDING_MEALS_TABLE.
+          - If rowcount == 0, rolls back and returns (None, False, "missing").
+          - If expected_inventory_id does not match, rolls back and returns (None, False, "stale").
+          - Inserts the record into NUTRITION_LOG_TABLE in the SAME transaction.
+          - If any error occurs during insertion, the transaction is rolled back, preserving the pending state!
+        """
+        normalized_user_id = int(user_id)
+        occurred_at_sql = _sqlite_timestamp(occurred_at)
+        stored_meal_name = _record_display_name(record)
+        items_json = json.dumps(record.items, ensure_ascii=False)
+        is_approx = (
+            1 if record.is_approximate_range is True
+            else (0 if record.is_approximate_range is False else None)
+        )
+
+        conn = self._connect()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # 1. Deduplication check via image_ref
+            if image_ref:
+                existing = conn.execute(
+                    f"SELECT id FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND image_ref = ? ORDER BY id DESC LIMIT 1",
+                    (normalized_user_id, image_ref),
+                ).fetchone()
+                if existing is not None:
+                    if require_pending:
+                        conn.execute(
+                            f"DELETE FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                            (normalized_user_id,),
+                        )
+                    conn.execute("COMMIT")
+                    return int(existing["id"]), True, "duplicate"
+
+            # 2. Check pending state under the write lock if require_pending is True
+            if require_pending:
+                row = conn.execute(
+                    f"SELECT payload_json FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                    (normalized_user_id,),
+                ).fetchone()
+                if row is None:
+                    conn.execute("ROLLBACK")
+                    return None, False, "missing"
+
+                if expected_inventory_id:
+                    try:
+                        p_data = json.loads(row["payload_json"] or "{}")
+                        if p_data.get("inventory_id") and p_data.get("inventory_id") != expected_inventory_id:
+                            conn.execute("ROLLBACK")
+                            return None, False, "stale"
+                    except Exception:
+                        pass
+
+                del_cur = conn.execute(
+                    f"DELETE FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                    (normalized_user_id,),
+                )
+                if del_cur.rowcount == 0:
+                    conn.execute("ROLLBACK")
+                    return None, False, "missing"
+
+            # 3. Insert record into NUTRITION_LOG_TABLE
+            if self._has_v2_columns(conn):
+                cursor = conn.execute(
+                    f"""
+                    INSERT INTO {NUTRITION_LOG_TABLE}(
+                        user_id, source, meal_name, items_json,
+                        calories_kcal, protein_g, fat_g, carbs_g,
+                        confidence, occurred_at, raw_summary, image_ref,
+                        qdrant_indexed,
+                        calories_min, calories_max, protein_min, protein_max,
+                        fat_min, fat_max, carbs_min, carbs_max,
+                        uncertainty_model_type, is_approximate_range
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_user_id, source, stored_meal_name, items_json,
+                        record.calories_kcal, record.protein_g, record.fat_g, record.carbs_g,
+                        record.confidence, occurred_at_sql, record.raw_summary, image_ref,
+                        record.calories_min, record.calories_max, record.protein_min, record.protein_max,
+                        record.fat_min, record.fat_max, record.carbs_min, record.carbs_max,
+                        record.uncertainty_model_type, is_approx,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    f"""
+                    INSERT INTO {NUTRITION_LOG_TABLE}(
+                        user_id, source, meal_name, items_json,
+                        calories_kcal, protein_g, fat_g, carbs_g,
+                        confidence, occurred_at, raw_summary, image_ref,
+                        qdrant_indexed
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        normalized_user_id, source, stored_meal_name, items_json,
+                        record.calories_kcal, record.protein_g, record.fat_g, record.carbs_g,
+                        record.confidence, occurred_at_sql, record.raw_summary, image_ref,
+                    ),
+                )
+            sqlite_id = int(cursor.lastrowid)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+        self._schedule_qdrant_index(
+            sqlite_id=sqlite_id,
+            user_id=normalized_user_id,
+            record=record,
+            occurred_at=occurred_at_sql,
+        )
+        return sqlite_id, False, "saved"
+
     def save_pending_inventory_directly(
         self,
         user_id: str | int,
@@ -4855,14 +5000,26 @@ class HealBiteNutritionDiary:
                 inventory=payload,
             )
 
-        sqlite_id, duplicate = self.save_record(
+        sqlite_id, duplicate, save_status = self._atomic_save_pending_record(
             user_id=normalized_user_id,
             source=payload.source,
             record=calculation.record,
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
+            expected_inventory_id=expected_inventory_id,
+            require_pending=True,
         )
-        self.clear_pending_state(normalized_user_id)
+        if save_status == "missing":
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
+            )
+        if save_status == "stale":
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
         summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
         reply_text = format_pending_meal_saved_reply(
             summary,
@@ -4938,14 +5095,26 @@ class HealBiteNutritionDiary:
                 )
 
         record = _build_component_record(payload, components, is_complete=False)
-        sqlite_id, duplicate = self.save_record(
+        sqlite_id, duplicate, save_status = self._atomic_save_pending_record(
             user_id=normalized_user_id,
             source=payload.source,
             record=record,
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
+            expected_inventory_id=expected_inventory_id,
+            require_pending=True,
         )
-        self.clear_pending_state(normalized_user_id)
+        if save_status == "missing":
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
+            )
+        if save_status == "stale":
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
         summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
         reply_text = format_pending_meal_saved_without_kbzhu_reply(
             summary,
@@ -5032,16 +5201,26 @@ class HealBiteNutritionDiary:
                     )
             record = _build_component_record(payload, components, is_complete=False)
 
-        # Clear pending state immediately before saving to prevent concurrent duplicate saves
-        self.clear_pending_state(normalized_user_id)
-
-        sqlite_id, duplicate = self.save_record(
+        sqlite_id, duplicate, save_status = self._atomic_save_pending_record(
             user_id=normalized_user_id,
             source=payload.source,
             record=record,
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
+            expected_inventory_id=expected_inventory_id,
+            require_pending=True,
         )
+        if save_status == "missing":
+            return PendingInventoryReplyResult(
+                status="missing",
+                reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.",
+            )
+        if save_status == "stale":
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
         summary = self.get_daily_summary(user_id=normalized_user_id, now=now)
         reply_text = format_pending_meal_saved_reply(
             summary,
@@ -5082,14 +5261,16 @@ class HealBiteNutritionDiary:
                 record=payload.record if hasattr(payload, "record") else None,
             )
 
-        sqlite_id, duplicate = self.save_record(
+        sqlite_id, duplicate, save_status = self._atomic_save_pending_record(
             user_id=normalized_user_id,
             source=payload.source,
             record=payload.record,
             image_ref=payload.image_ref,
             occurred_at=payload.occurred_at,
+            require_pending=True,
         )
-        self.clear_pending_state(normalized_user_id)
+        if save_status == "missing":
+            return ConfirmPendingMealResult(status="missing")
         return ConfirmPendingMealResult(
             status="duplicate" if duplicate else "saved",
             record=payload.record,
@@ -5273,122 +5454,15 @@ class HealBiteNutritionDiary:
         image_ref: str | None,
         occurred_at: datetime | None,
     ) -> tuple[int | None, bool]:
-        normalized_user_id = int(user_id)
-        if image_ref:
-            with self._connect() as conn:
-                existing = conn.execute(
-                    f"SELECT id FROM {NUTRITION_LOG_TABLE} WHERE user_id = ? AND image_ref = ? ORDER BY id DESC LIMIT 1",
-                    (normalized_user_id, image_ref),
-                ).fetchone()
-                if existing is not None:
-                    return int(existing["id"]), True
-
-        occurred_at_sql = _sqlite_timestamp(occurred_at)
-        stored_meal_name = _record_display_name(record)
-        items_json = json.dumps(record.items, ensure_ascii=False)
-        is_approx = (
-            1 if record.is_approximate_range is True
-            else (0 if record.is_approximate_range is False else None)
-        )
-        with self._connect() as conn:
-            if self._has_v2_columns(conn):
-                cursor = conn.execute(
-                    f"""
-                    INSERT INTO {NUTRITION_LOG_TABLE}(
-                        user_id,
-                        source,
-                        meal_name,
-                        items_json,
-                        calories_kcal,
-                        protein_g,
-                        fat_g,
-                        carbs_g,
-                        confidence,
-                        occurred_at,
-                        raw_summary,
-                        image_ref,
-                        qdrant_indexed,
-                        calories_min,
-                        calories_max,
-                        protein_min,
-                        protein_max,
-                        fat_min,
-                        fat_max,
-                        carbs_min,
-                        carbs_max,
-                        uncertainty_model_type,
-                        is_approximate_range
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        normalized_user_id,
-                        source,
-                        stored_meal_name,
-                        items_json,
-                        record.calories_kcal,
-                        record.protein_g,
-                        record.fat_g,
-                        record.carbs_g,
-                        record.confidence,
-                        occurred_at_sql,
-                        record.raw_summary,
-                        image_ref,
-                        record.calories_min,
-                        record.calories_max,
-                        record.protein_min,
-                        record.protein_max,
-                        record.fat_min,
-                        record.fat_max,
-                        record.carbs_min,
-                        record.carbs_max,
-                        record.uncertainty_model_type,
-                        is_approx,
-                    ),
-                )
-            else:
-                cursor = conn.execute(
-                    f"""
-                    INSERT INTO {NUTRITION_LOG_TABLE}(
-                        user_id,
-                        source,
-                        meal_name,
-                        items_json,
-                        calories_kcal,
-                        protein_g,
-                        fat_g,
-                        carbs_g,
-                        confidence,
-                        occurred_at,
-                        raw_summary,
-                        image_ref,
-                        qdrant_indexed
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        normalized_user_id,
-                        source,
-                        stored_meal_name,
-                        items_json,
-                        record.calories_kcal,
-                        record.protein_g,
-                        record.fat_g,
-                        record.carbs_g,
-                        record.confidence,
-                        occurred_at_sql,
-                        record.raw_summary,
-                        image_ref,
-                    ),
-                )
-            sqlite_id = int(cursor.lastrowid)
-        self._schedule_qdrant_index(
-            sqlite_id=sqlite_id,
-            user_id=normalized_user_id,
+        sqlite_id, duplicate, _ = self._atomic_save_pending_record(
+            user_id=user_id,
+            source=source,
             record=record,
-            occurred_at=occurred_at_sql,
+            image_ref=image_ref,
+            occurred_at=occurred_at,
+            require_pending=False,
         )
-        return sqlite_id, False
+        return sqlite_id, duplicate
 
     def delete_last_meal(
         self,

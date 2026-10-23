@@ -41,6 +41,16 @@ _PIECE_WEIGHT_REFERENCE: dict[str, float] = {
     "ломтик": 30.0,
 }
 
+# Non-food prompt phrases / command triggers that should not be parsed as food
+_NON_FOOD_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:посчитай|рассчитай|оцени|посчитать)\s+(?:кбжу|калории|калорийность|порцию)?$", re.IGNORECASE),
+    re.compile(r"^(?:кбжу|калории|калорийность|бжу)$", re.IGNORECASE),
+    re.compile(r"^(?:count|calculate|estimate)\s*(?:calories|macros|kbzhu)?$", re.IGNORECASE),
+    re.compile(r"^(?:calories|calorie\s+count|macros)$", re.IGNORECASE),
+    re.compile(r"^(?:что\s+это|что\s+в\s+тарелке|что\s+на\s+фото|определи\s+еду)$", re.IGNORECASE),
+    re.compile(r"^(?:фото|photo|еда|блюдо|порция|завтрак|обед|ужин|перекус)$", re.IGNORECASE),
+)
+
 
 @dataclass(slots=True)
 class ParsedIngredient:
@@ -92,6 +102,11 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         return None
 
     cleaned = text.strip()
+    # Reject prompt commands or generic triggers
+    for pat in _NON_FOOD_COMMAND_PATTERNS:
+        if pat.match(cleaned):
+            return None
+
     # Normalize common quotes, em-dashes
     cleaned = cleaned.replace("«", "").replace("»", "").replace('"', "").replace("—", "-")
 

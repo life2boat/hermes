@@ -4394,8 +4394,8 @@ class HealBiteNutritionDiary:
 
         # ---- Handle total failure of vision models ----
         if not at_least_one_success:
-            # Check if user provided sufficient food description in text/caption (Caption-first fallback, Scenario T3)
-            if parsed_text and parsed_text.has_food_intent and parsed_text.ingredients:
+            # Check if user provided sufficient structured food description in text/caption (Caption-first fallback, Scenario T3)
+            if parsed_text and parsed_text.is_structured and parsed_text.ingredients:
                 text_items = []
                 for idx, ing in enumerate(parsed_text.ingredients, start=1):
                     min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0

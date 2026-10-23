@@ -56,6 +56,15 @@ def resolve_approximate_food_nutrition(
     if q in {"орехи", "орех"}:
         return None
 
+    # Invariant: fictional or non-food/alien queries must fail closed (missing_reference)
+    _FICTIONAL_NON_FOOD_MARKERS = (
+        r"плазм", r"звездн", r"темн.*матери", r"антивеществ", r"мандрагор", r"квазар",
+        r"лембас", r"криптонит", r"гравитон", r"дракон", r"синхрофазотрон", r"ксеноморф",
+        r"космическ", r"неведом", r"гусениц", r"в золе",
+    )
+    if any(re.search(m, q) for m in _FICTIONAL_NON_FOOD_MARKERS):
+        return None
+
     _APPROX_RULES: tuple[tuple[re.Pattern[str], str, str, float, float, float, float, str], ...] = (
         (re.compile(r"(яблочн.*пирог|пирог.*яблок|шарлотк|штрудел)"), "Яблочный пирог", "grains_bakery", 275.0, 3.5, 9.5, 44.0, "APPROX-PIE-APPLE-2026"),
         (re.compile(r"(сладк.*выпечк|выпечк.*сладк|кусочк.*сладк.*выпечк|сдоб|булочк|круассан|маффин|кекс|ватрушк|слойк)"), "Сладкая выпечка", "grains_bakery", 335.0, 6.5, 13.0, 48.0, "APPROX-PASTRY-SWEET-2026"),

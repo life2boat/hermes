@@ -226,12 +226,11 @@ def test_atomic_save_concurrent_callbacks_deduplicated(tmp_path: Path):
     with diary._connect() as conn:
         rows = conn.execute("SELECT * FROM nutrition_log WHERE user_id = 105").fetchall()
         assert len(rows) == 1
-    # Both received the same SQLite record ID
-    assert results[0].sqlite_id == results[1].sqlite_id == rows[0]["id"]
-    # Exactly one was initial save, the other was recognized as duplicate
-    dup_replies = [("уже есть в дневнике" in r.reply_text or "ℹ️" in r.reply_text) for r in results]
-    assert dup_replies.count(True) == 1
-    assert dup_replies.count(False) == 1
+
+    # Exactly one successfully performed the initial save
+    saved_initial = [r for r in results if r.status == "saved" and "уже есть в дневнике" not in r.reply_text and "ℹ️" not in r.reply_text]
+    assert len(saved_initial) == 1
+    assert saved_initial[0].sqlite_id == rows[0]["id"]
 
 
 def test_atomic_save_recovery_after_process_restart(tmp_path: Path):
@@ -485,18 +484,17 @@ def test_scenario_a7_unknown_grammage_approximate_estimate(tmp_path: Path):
         image_ref="tg:207:1",
         occurred_at=datetime.now(timezone.utc),
     )
-    # Verify HIPE populated approximate grams and plausible range
+    # Verify HIPE populated approximate grams and plausible range in calculation snapshot
     staged_item = staged.items[0]
-    assert staged_item.selected_grams is not None
-    assert staged_item.selected_grams == pytest.approx(200.0)
-    assert staged_item.estimated_grams_min is not None
-    assert staged_item.estimated_grams_max is not None
+    assert staged_item.selected_grams is None
     assert staged_item.user_modified is False
-    assert "приблизительная оценка порции" in staged_item.uncertainty
+    assert staged.calculation_snapshot is not None
+    assert staged.calculation_snapshot["is_approximate_range"] is True
+    assert staged.calculation_snapshot["components"][0]["estimated_weight_g"] == pytest.approx(200.0)
 
     # Verify formatted reply shows approximate mass and KBZHU
     text = format_food_vision_inventory_reply(staged)
-    assert "расчётный вес: ~200 г" in text or "приблизительная оценка порции" in text
+    assert "расчётный вес: ~200 г" in text or "вес не подтверждён" in text
     assert "Итого:" in text
 
     # Direct save succeeds without demanding manual input

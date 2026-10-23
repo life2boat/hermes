@@ -2382,15 +2382,6 @@ def _pending_inventory_from_food_vision(
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
         sel_g = _maybe_proposed_selected_grams(g_min, g_max)
-        uncertainty = item.uncertainty
-        if g_min is None or g_max is None:
-            from gateway.nutrition.hipe import estimate_portion_mass
-            bounds = estimate_portion_mass(item.normalized_name or item.visible_name)
-            g_min = bounds.grams_min
-            g_max = bounds.grams_max
-            sel_g = bounds.grams_center
-            if not uncertainty:
-                uncertainty = "приблизительная оценка порции"
         item_id = getattr(item, "item_id", "") or f"item_{index}"
         items.append(PendingFoodVisionItem(
             index=index,
@@ -2402,7 +2393,7 @@ def _pending_inventory_from_food_vision(
             selected_grams=sel_g,
             preparation=item.preparation,
             is_sauce=item.is_sauce,
-            uncertainty=uncertainty,
+            uncertainty=item.uncertainty,
             user_modified=False,
             item_id=item_id,
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),

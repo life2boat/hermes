@@ -684,7 +684,7 @@ class TelegramAdapter(BasePlatformAdapter):
     # Threshold for detecting Telegram client-side message splits.
     # When a chunk is near this limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 4000
-    MEDIA_GROUP_WAIT_SECONDS = 0.8
+    MEDIA_GROUP_WAIT_SECONDS = float(os.getenv("TELEGRAM_MEDIA_GROUP_WAIT_SECONDS", "1.5"))
     _GENERAL_TOPIC_THREAD_ID = "1"
 
     # Telegram's edit_message applies MarkdownV2 formatting only on the

@@ -252,12 +252,15 @@ _VISION_PROMPT = (
     "You are HealBite Stage-1 food vision. "
     "Return strict JSON only for schema food_vision_inventory_v1, no markdown. "
     "If not food, set is_food: false, items: []. "
-    "Describe only separately visible food components in Russian. "
+    "Identify food items and dishes in Russian. "
+    "For prepared dishes, baked goods, or composite foods (e.g. pie, pastry, pizza, burger, sandwich, casserole, soup, salad, plov), "
+    "identify the whole dish as the primary item with its normalized dish name and approximate total mass; do not dissect it into micro-ingredients (crust, filling, seeds, specks). "
+    "Only return multiple items when genuinely distinct separate foods are on the plate (e.g. steak and potatoes, or coffee and croissant). "
     "Group multiple identical pieces into one item with quantity and combined weight. "
-    "One item per distinct component; visible sauces as separate items. "
-    "Do not collapse a mixed plate into one dish title. "
+    "Visible standalone sauces as separate items. "
+    "Do not collapse an entire mixed plate into a generic title like 'обед' or 'тарелка'. "
     "Put uncertainty into uncertainty field when identity is uncertain. "
-    "Do not invent hidden ingredients or fillings. "
+    "Do not invent hidden ingredients. "
     "Confidence and gram ranges only when visually supportable, else null. "
     "Never return calories, macros, or totals. "
     "JSON fields: schema_version, items[{visible_name, normalized_name, confidence, estimated_grams_min, estimated_grams_max, preparation, is_sauce, uncertainty, quantity}], overall_confidence, needs_user_confirmation, warnings, is_food."
@@ -1409,6 +1412,168 @@ def _raw_dict_to_item(data: dict[str, Any]) -> FoodVisionItem:
     )
 
 
+def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
+    """
+    Policy 1 & Policy 2 — Dish-First & Controlled Decomposition Policy:
+    Consolidates over-decomposed micro-ingredients of composite foods (pies, pastries, pizza, burgers)
+    into single dish-level interpretations and prunes speculative micro-components.
+    """
+    if not items or len(items) <= 1:
+        return list(items)
+
+    item_cls = type(items[0])
+
+    # 1. Prune/fold low-confidence speculative micro-components first
+    # (confidence < 0.50 or minor weight <= 25g with speculative names like "крошки", "темная добавка", "неопознано")
+    primary_items = [
+        it for it in items
+        if (getattr(it, "estimated_grams_max", None) is None or getattr(it, "estimated_grams_max", 0.0) >= 30.0)
+        and getattr(it, "confidence", 0.0) >= 0.55
+    ]
+    if primary_items and len(items) > len(primary_items):
+        pruned_items = []
+        suppressed_notes = []
+        for it in items:
+            name_combined = f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower()
+            is_speculative = getattr(it, "confidence", 1.0) < 0.5 or any(w in name_combined for w in ["темная добавка", "неопознан", "крошк", "посыпк", "добавка"])
+            if is_speculative and (getattr(it, "estimated_grams_max", None) is None or getattr(it, "estimated_grams_max", 0.0) <= 25.0):
+                suppressed_notes.append(it.visible_name)
+            else:
+                pruned_items.append(it)
+        if suppressed_notes and pruned_items:
+            curr_unc = (getattr(pruned_items[0], "uncertainty", "") or "").strip()
+            note_str = f"включает: {', '.join(suppressed_notes)}"
+            if curr_unc:
+                pruned_items[0].uncertainty = f"{curr_unc} ({note_str})"
+            else:
+                pruned_items[0].uncertainty = f"Включает: {', '.join(suppressed_notes)}"
+            items = pruned_items
+            if len(items) <= 1:
+                return list(items)
+
+    names_lower = [
+        f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower()
+        for it in items
+    ]
+
+    bakery_base_markers = {
+        "тесто", "основа", "выпечка", "кусочки сладкой выпечки", "pastry base",
+        "sweet pastry", "корж", "слойка", "pastry", "dough", "crust",
+    }
+    sweet_filling_markers = {
+        "яблоко", "яблоки", "ломтики яблока", "крем", "кремовая начинка", "начинка",
+        "орехи", "семечки", "семена", "ягоды", "вишня", "творог",
+        "apple slices", "apple", "creamy filling", "cream", "filling", "nuts",
+        "sunflower seeds", "seeds",
+    }
+
+    has_bakery_base = any(any(m in n for m in bakery_base_markers) for n in names_lower)
+    has_sweet_filling = any(any(m in n for m in sweet_filling_markers) for n in names_lower)
+    has_explicit_pastry = any(any(m in n for m in ["выпечк", "пирог", "булочк", "pastry", "pie", "cake"]) for n in names_lower)
+
+    # 2. Composite sweet bakery / pie consolidation
+    if (has_bakery_base and has_sweet_filling) or (has_explicit_pastry and len(items) > 1 and all(
+        any(m in n for m in bakery_base_markers | sweet_filling_markers) for n in names_lower
+    )):
+        has_apple = any("яблок" in n or "apple" in n for n in names_lower)
+        has_berries = any(b in n for b in ["ягод", "вишн", "клубник", "малин", "berry"] for n in names_lower)
+        has_tvorog = any("творог" in n for n in names_lower)
+
+        if has_apple:
+            dish_visible = "Сладкая выпечка с яблоком (пирог)"
+            dish_normalized = "яблочный пирог"
+        elif has_berries:
+            dish_visible = "Сладкая выпечка с ягодами (пирог)"
+            dish_normalized = "пирог с начинкой"
+        elif has_tvorog:
+            dish_visible = "Творожная выпечка / ватрушка"
+            dish_normalized = "сладкая выпечка"
+        else:
+            dish_visible = "Сладкая выпечка с начинкой"
+            dish_normalized = "сладкая выпечка"
+
+        sum_min = 0.0
+        sum_max = 0.0
+        has_any_weight = False
+        for it in items:
+            if getattr(it, "estimated_grams_min", None) is not None:
+                sum_min += float(it.estimated_grams_min)
+                has_any_weight = True
+            if getattr(it, "estimated_grams_max", None) is not None:
+                sum_max += float(it.estimated_grams_max)
+                has_any_weight = True
+
+        if has_any_weight and sum_min >= 80.0:
+            final_min = round(sum_min, 1)
+            final_max = round(sum_max, 1)
+        else:
+            final_min = 140.0
+            final_max = 200.0
+
+        uncertainties = [getattr(it, "uncertainty", "").strip() for it in items if getattr(it, "uncertainty", "").strip()]
+        uncertainty_text = "; ".join(dict.fromkeys(uncertainties)) if uncertainties else "Ориентировочная оценка цельного блюда"
+        max_conf = max(getattr(it, "confidence", 0.8) for it in items)
+
+        attrs: dict[str, Any] = {
+            "visible_name": dish_visible,
+            "normalized_name": dish_normalized,
+            "confidence": max_conf,
+            "estimated_grams_min": final_min,
+            "estimated_grams_max": final_max,
+            "preparation": "запеченный",
+            "is_sauce": False,
+            "uncertainty": uncertainty_text,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((final_min + final_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((final_min + final_max) / 2.0, 1)
+            attrs["user_modified"] = False
+
+        consolidated_item = item_cls(**attrs)
+        return [consolidated_item]
+
+    # 3. Pizza consolidation
+    pizza_markers = {"тесто для пиццы", "основа пиццы", "корж пиццы", "моцарелла", "томатный соус", "пепперони", "pizza"}
+    if any("пицц" in n or "pizza" in n for n in names_lower) and len(items) > 1 and all(
+        any(m in n for m in pizza_markers | {"пицц", "сыр", "колбас", "гриб", "pizza", "cheese"}) for n in names_lower
+    ):
+        sum_min = sum(float(it.estimated_grams_min) for it in items if getattr(it, "estimated_grams_min", None) is not None) or 110.0
+        sum_max = sum(float(it.estimated_grams_max) for it in items if getattr(it, "estimated_grams_max", None) is not None) or 160.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in items)
+        attrs = {
+            "visible_name": "Пицца",
+            "normalized_name": "пицца",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "запеченный",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)]
+
+    return list(items)
+
+
+def apply_food_vision_dish_first_policy(inventory: FoodVisionInventory) -> FoodVisionInventory:
+    if not inventory or not inventory.items:
+        return inventory
+    new_items = apply_dish_first_policy_to_items(inventory.items)
+    return replace(inventory, items=new_items)
+
+
+
 def _reconcile_multi_photo_inventories(
     photo_item_lists: list[list[Any]],
     *,
@@ -1423,7 +1588,7 @@ def _reconcile_multi_photo_inventories(
     from gateway.nutrition.search import normalize_russian_food_query
 
     per_photo_aggregated = [
-        _aggregate_identical_food_vision_items(items)
+        apply_dish_first_policy_to_items(_aggregate_identical_food_vision_items(items))
         for items in photo_item_lists
         if items
     ]
@@ -1477,7 +1642,16 @@ def _reconcile_multi_photo_inventories(
                 ex_prep = (getattr(existing, "preparation", "") or "").strip().casefold()
                 ex_form = "in_shell" if _is_food_in_shell(ex_norm) else "edible"
 
-                if (canonical_stem, prep, edible_form) == (ex_stem, ex_prep, ex_form):
+                is_stem_match = (canonical_stem == ex_stem) or (canonical_stem in ex_stem) or (ex_stem in canonical_stem)
+                if not is_stem_match:
+                    both_bakery = any(w in canonical_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie", "cake", "bakery"]) and any(w in ex_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie", "cake", "bakery"])
+                    both_pizza = any(w in canonical_stem for w in ["пицц", "pizza"]) and any(w in ex_stem for w in ["пицц", "pizza"])
+                    both_burger = any(w in canonical_stem for w in ["бургер", "burger", "чизбургер"]) and any(w in ex_stem for w in ["бургер", "burger", "чизбургер"])
+                    both_salad = any(w in canonical_stem for w in ["салат", "salad"]) and any(w in ex_stem for w in ["салат", "salad"])
+                    both_soup = any(w in canonical_stem for w in ["суп", "борщ", "щи", "soup"]) and any(w in ex_stem for w in ["суп", "борщ", "щи", "soup"])
+                    is_stem_match = both_bakery or both_pizza or both_burger or both_salad or both_soup
+
+                if is_stem_match and edible_form == ex_form:
                     matched_idx = idx
                     break
 
@@ -4149,7 +4323,7 @@ class HealBiteNutritionDiary:
                 continue
 
             at_least_one_success = True
-            per_photo_inventories.append(validation.inventory)
+            per_photo_inventories.append(apply_food_vision_dish_first_policy(validation.inventory))
             logger.info(
                 "[HealBite][album_photo_ok] photo_index=%d items=%d confidence_bucket=%s",
                 photo_index,
@@ -4216,7 +4390,7 @@ class HealBiteNutritionDiary:
         album_overlap = ALBUM_OVERLAP_NONE
 
         if len(per_photo_inventories) == 1 and not is_partial_album:
-            merged_inventory = per_photo_inventories[0]
+            merged_inventory = apply_food_vision_dish_first_policy(per_photo_inventories[0])
             album_decision = None
             album_proc_status = ALBUM_PROCESSING_COMPLETE
             album_overlap = ALBUM_OVERLAP_NONE
@@ -4253,13 +4427,13 @@ class HealBiteNutritionDiary:
             merged_warnings = list(dict.fromkeys(merged_warnings))
             needs_confirm = requires_confirm or is_partial_album or any(inv.needs_user_confirmation for inv in per_photo_inventories)
 
-            merged_inventory = FoodVisionInventory(
+            merged_inventory = apply_food_vision_dish_first_policy(FoodVisionInventory(
                 schema_version=per_photo_inventories[0].schema_version,
                 items=merged_items,
                 overall_confidence=avg_confidence,
                 needs_user_confirmation=needs_confirm,
                 warnings=merged_warnings,
-            )
+            ))
             logger.info(
                 "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s decision=%s proc_status=%s overlap=%s",
                 len(per_photo_inventories),

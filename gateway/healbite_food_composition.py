@@ -1337,6 +1337,58 @@ _COMPOSITE_DISH_CATALOG: tuple[FoodNutrientProfile, ...] = (
             'ломтики яблока', 'дольки яблока', 'кусочки яблока', 'печеное яблоко', 'apple slices',
         ),
     ),
+    FoodNutrientProfile(
+        canonical_id='lavash',
+        display_name='Лаваш армянский',
+        category='grains_bakery',
+        calories_kcal=270.0,
+        protein_g=8.5,
+        fat_g=1.2,
+        carbs_g=54.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0422',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Хлебобулочные изделия', поз. 422 (лаваш армянский)",
+        aliases=(
+            'лаваш', 'армянский лаваш', 'тонкий лаваш', 'лаваш армянский', 'лаваш тонкий', 'лаваш армянский тонкий',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='poppy_roll',
+        display_name='Рулет творожно-маковый',
+        category='grains_bakery',
+        calories_kcal=310.0,
+        protein_g=11.5,
+        fat_g=11.0,
+        carbs_g=41.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0430',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='cooked',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Мучные изделия', поз. 430 (рулет с маком и творогом)",
+        aliases=(
+            'рулет', 'творожно-маковый рулет', 'маковый рулет', 'творожный рулет', 'рулет с маком',
+            'рулет с творогом', 'сладкий рулет', 'рулет творожно-маковый', 'творожно маковый рулет',
+        ),
+    ),
+    FoodNutrientProfile(
+        canonical_id='poppy_seeds',
+        display_name='Мак пищевой (семена)',
+        category='nuts',
+        calories_kcal=525.0,
+        protein_g=18.0,
+        fat_g=42.0,
+        carbs_g=28.0,
+        reference_confidence=0.92,
+        source_id='INTERNAL-SKURIKHIN-2008-0388',
+        dataset_version='Skurikhin-2008-Curated',
+        cooking_state='raw',
+        source_provenance="Скурихин И.М., Тутельян В.А. 2002/2008, Справочник, табл. 'Семена', поз. 388 (семена мака); USDA 171329",
+        aliases=(
+            'мак', 'семена мака', 'пищевой мак', 'мак пищевой', 'семена мака пищевые',
+        ),
+    ),
 )
 
 
@@ -1496,8 +1548,8 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     # Does NOT strip cooking states or percentages.
     stripped = _strip_harmless_culinary_modifiers(raw_normalized)
     if stripped != raw_normalized:
-        if stripped in _ALIAS_INDEX:
-            profile = _ALIAS_INDEX[stripped]
+        if stripped in _RESOLVER_ALIAS_INDEX:
+            profile = _RESOLVER_ALIAS_INDEX[stripped]
             return FoodLookupResult(
                 matched=True,
                 profile=profile,
@@ -1532,8 +1584,8 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
     elif singular_cand.endswith("ты"):
         singular_cand = singular_cand[:-2] + "т"
 
-    if singular_cand != raw_normalized and singular_cand in _ALIAS_INDEX:
-        profile = _ALIAS_INDEX[singular_cand]
+    if singular_cand != raw_normalized and singular_cand in _RESOLVER_ALIAS_INDEX:
+        profile = _RESOLVER_ALIAS_INDEX[singular_cand]
         return FoodLookupResult(
             matched=True,
             profile=profile,
@@ -1545,7 +1597,7 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             source_provenance=profile.source_provenance,
         )
 
-    # 4. Token prefix matching (e.g. "куриное филе кусочками" -> "куриное филе")
+    # 6. Token prefix matching (e.g. "куриное филе кусочками" -> "куриное филе")
     # Strictly fails closed: ONLY allows dropping whitelisted harmless shape/portion tokens.
     tokens = raw_normalized.split()
     if len(tokens) > 1:
@@ -1555,8 +1607,8 @@ def resolve_food_composition(query: str) -> FoodLookupResult:
             if not all(tok in _HARMLESS_DROPPED_TOKENS for tok in remaining_tokens):
                 continue
 
-            if sub_phrase in _ALIAS_INDEX:
-                profile = _ALIAS_INDEX[sub_phrase]
+            if sub_phrase in _RESOLVER_ALIAS_INDEX:
+                profile = _RESOLVER_ALIAS_INDEX[sub_phrase]
                 return FoodLookupResult(
                     matched=True,
                     profile=profile,

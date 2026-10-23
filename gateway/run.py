@@ -1818,6 +1818,18 @@ def _classify_telegram_diary_turn(
         return "ambiguous"
     if "дневник" in text or "статист" in text:
         return "summary"
+
+    try:
+        from gateway.nutrition.text_parser import parse_food_text_description
+        parsed = parse_food_text_description(text)
+        if parsed and parsed.has_food_intent and (
+            parsed.is_structured
+            or any(hint in text for hint in ["состав", "ингредиент", "съел", "завтрак", "обед", "ужин", "перекус", "грамм", "порци"])
+        ):
+            return "text_meal"
+    except Exception:
+        pass
+
     return "none"
 
 
@@ -2054,7 +2066,7 @@ def _healbite_public_lane_decision(
             "onboarding_active": False,
         }
 
-    if diary_turn in {"summary", "correction", "ambiguous"}:
+    if diary_turn in {"summary", "correction", "ambiguous", "text_meal"}:
         return {
             "enabled": True,
             "action": "allow",
@@ -4467,13 +4479,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
         # can inject messages into an active session they don't own.
         if not self._is_user_authorized(event.source):
-            logger.warning(
-                "active_session_message_dropped reason=unauthorized_user platform=%s has_user_name=%s has_session=%s",
-                event.source.platform.value if event.source.platform else "unknown",
-                _safe_log_bool(bool(event.source.user_name)),
-                _safe_log_bool(bool(session_key)),
+            is_healbite_public = (
+                getattr(event.source, "platform", None) == Platform.TELEGRAM
+                and str(getattr(event.source, "chat_type", "") or "").lower() in {"dm", "direct", "private"}
+                and _healbite_public_lane_enabled_for_user(getattr(event.source, "user_id", None))
             )
-            return True  # handled (silently dropped); do not fall through
+            if not is_healbite_public:
+                logger.warning(
+                    "active_session_message_dropped reason=unauthorized_user platform=%s has_user_name=%s has_session=%s",
+                    event.source.platform.value if event.source.platform else "unknown",
+                    _safe_log_bool(bool(event.source.user_name)),
+                    _safe_log_bool(bool(session_key)),
+                )
+                return True  # handled (silently dropped); do not fall through
 
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -13160,6 +13178,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Напиши конкретно, что поменять: например, «исправь последнюю запись на 400 ккал» "
                 "или «переименуй последнюю запись в борщ»."
             )
+        elif classification == "text_meal":
+            diary = self._get_healbite_nutrition_diary()
+            pending_inv = diary.stage_pending_inventory_from_text(
+                user_id=int(source.user_id),
+                text=message,
+            )
+            if pending_inv is not None:
+                from gateway.healbite_nutrition_diary import (
+                    format_food_vision_inventory_reply,
+                    build_food_vision_inventory_keyboard,
+                )
+                final_response = format_food_vision_inventory_reply(pending_inv)
+                adapter = self.adapters.get(source.platform)
+                if adapter and source.chat_id:
+                    meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    meta = dict(meta) if meta else {}
+                    meta["parse_mode"] = "HTML"
+                    meta["reply_markup"] = build_food_vision_inventory_keyboard(pending_inv)
+                    asyncio.create_task(adapter.send(source.chat_id, final_response, metadata=meta))
+                return {
+                    "final_response": final_response,
+                    "messages": [
+                        {"role": "user", "content": message},
+                        {"role": "assistant", "content": final_response},
+                    ],
+                    "api_calls": 0,
+                    "tools": [],
+                    "history_offset": len(history),
+                    "session_id": session_id,
+                    "completed": True,
+                    "response_previewed": False,
+                }
+            return None
         else:
             return None
 

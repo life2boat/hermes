@@ -1464,17 +1464,27 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
         "sunflower seeds", "seeds",
     }
 
-    has_bakery_base = any(any(m in n for m in bakery_base_markers) for n in names_lower)
-    has_sweet_filling = any(any(m in n for m in sweet_filling_markers) for n in names_lower)
-    has_explicit_pastry = any(any(m in n for m in ["выпечк", "пирог", "булочк", "pastry", "pie", "cake"]) for n in names_lower)
+    bakery_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in bakery_base_markers | sweet_filling_markers)
+    ]
+    non_bakery_items = [
+        it for it in items
+        if not any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in bakery_base_markers | sweet_filling_markers)
+    ]
+    cand_names_lower = [
+        f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower()
+        for it in bakery_candidates
+    ]
+    has_cand_base = any(any(m in n for m in bakery_base_markers) for n in cand_names_lower)
+    has_cand_filling = any(any(m in n for m in sweet_filling_markers) for n in cand_names_lower)
+    has_cand_explicit = any(any(m in n for m in ["выпечк", "пирог", "булочк", "pastry", "pie", "cake"]) for n in cand_names_lower)
 
     # 2. Composite sweet bakery / pie consolidation
-    if (has_bakery_base and has_sweet_filling) or (has_explicit_pastry and len(items) > 1 and all(
-        any(m in n for m in bakery_base_markers | sweet_filling_markers) for n in names_lower
-    )):
-        has_apple = any("яблок" in n or "apple" in n for n in names_lower)
-        has_berries = any(b in n for b in ["ягод", "вишн", "клубник", "малин", "berry"] for n in names_lower)
-        has_tvorog = any("творог" in n for n in names_lower)
+    if len(bakery_candidates) > 1 and ((has_cand_base and has_cand_filling) or has_cand_explicit):
+        has_apple = any("яблок" in n or "apple" in n for n in cand_names_lower)
+        has_berries = any(b in n for b in ["ягод", "вишн", "клубник", "малин", "berry"] for n in cand_names_lower)
+        has_tvorog = any("творог" in n for n in cand_names_lower)
 
         if has_apple:
             dish_visible = "Сладкая выпечка с яблоком (пирог)"
@@ -1492,7 +1502,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
         sum_min = 0.0
         sum_max = 0.0
         has_any_weight = False
-        for it in items:
+        for it in bakery_candidates:
             if getattr(it, "estimated_grams_min", None) is not None:
                 sum_min += float(it.estimated_grams_min)
                 has_any_weight = True
@@ -1507,9 +1517,9 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             final_min = 140.0
             final_max = 200.0
 
-        uncertainties = [getattr(it, "uncertainty", "").strip() for it in items if getattr(it, "uncertainty", "").strip()]
+        uncertainties = [getattr(it, "uncertainty", "").strip() for it in bakery_candidates if getattr(it, "uncertainty", "").strip()]
         uncertainty_text = "; ".join(dict.fromkeys(uncertainties)) if uncertainties else "Ориентировочная оценка цельного блюда"
-        max_conf = max(getattr(it, "confidence", 0.8) for it in items)
+        max_conf = max(getattr(it, "confidence", 0.8) for it in bakery_candidates)
 
         attrs: dict[str, Any] = {
             "visible_name": dish_visible,
@@ -1531,7 +1541,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             attrs["user_modified"] = False
 
         consolidated_item = item_cls(**attrs)
-        return [consolidated_item]
+        return [consolidated_item] + non_bakery_items
 
     # 3. Pizza consolidation
     pizza_markers = {"тесто для пиццы", "основа пиццы", "корж пиццы", "моцарелла", "томатный соус", "пепперони", "pizza"}
@@ -1639,14 +1649,26 @@ def _reconcile_multi_photo_inventories(
                 ex_prep = (getattr(existing, "preparation", "") or "").strip().casefold()
                 ex_form = "in_shell" if _is_food_in_shell(ex_norm) else "edible"
 
-                is_stem_match = (canonical_stem == ex_stem) or (canonical_stem in ex_stem) or (ex_stem in canonical_stem)
+                is_stem_match = (canonical_stem == ex_stem)
+                if not is_stem_match and (canonical_stem in ex_stem or ex_stem in canonical_stem):
+                    # Only match substring if sharing core specific dish identifier
+                    is_stem_match = (
+                        (any(w in canonical_stem for w in ["пирог", "шарлотк", "штрудел"]) and any(w in ex_stem for w in ["пирог", "шарлотк", "штрудел"]))
+                        or ("пицц" in canonical_stem and "пицц" in ex_stem)
+                        or ("бургер" in canonical_stem and "бургер" in ex_stem)
+                        or ("суп" in canonical_stem and "суп" in ex_stem and ("борщ" in canonical_stem) == ("борщ" in ex_stem))
+                    )
                 if not is_stem_match:
-                    both_bakery = any(w in canonical_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie", "cake", "bakery"]) and any(w in ex_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie", "cake", "bakery"])
-                    both_pizza = any(w in canonical_stem for w in ["пицц", "pizza"]) and any(w in ex_stem for w in ["пицц", "pizza"])
-                    both_burger = any(w in canonical_stem for w in ["бургер", "burger", "чизбургер"]) and any(w in ex_stem for w in ["бургер", "burger", "чизбургер"])
-                    both_salad = any(w in canonical_stem for w in ["салат", "salad"]) and any(w in ex_stem for w in ["салат", "salad"])
-                    both_soup = any(w in canonical_stem for w in ["суп", "борщ", "щи", "soup"]) and any(w in ex_stem for w in ["суп", "борщ", "щи", "soup"])
-                    is_stem_match = both_bakery or both_pizza or both_burger or both_salad or both_soup
+                    specific_distinct_pastries = {"рулет", "вафл", "блин", "торт", "печень"}
+                    has_specific_distinct = any(p in canonical_stem or p in ex_stem for p in specific_distinct_pastries)
+                    both_general_bakery = (
+                        not has_specific_distinct
+                        and any(w in canonical_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
+                        and any(w in ex_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
+                    )
+                    both_pizza = ("пицц" in canonical_stem or "pizza" in canonical_stem) and ("пицц" in ex_stem or "pizza" in ex_stem)
+                    both_burger = ("бургер" in canonical_stem or "burger" in canonical_stem) and ("бургер" in ex_stem or "burger" in ex_stem)
+                    is_stem_match = both_general_bakery or both_pizza or both_burger
 
                 if is_stem_match and edible_form == ex_form:
                     matched_idx = idx
@@ -2534,6 +2556,7 @@ def _pending_inventory_from_food_vision(
     user_id: int,
     inventory: FoodVisionInventory,
     *,
+    source: str = "vision",
     image_ref: str | None = None,
     occurred_at: datetime | None = None,
     now: datetime | None = None,
@@ -2552,7 +2575,7 @@ def _pending_inventory_from_food_vision(
     for index, item in enumerate(inventory.items, start=1):
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
-        sel_g = _maybe_proposed_selected_grams(g_min, g_max)
+        sel_g = getattr(item, "selected_grams", None) or _maybe_proposed_selected_grams(g_min, g_max)
         item_id = getattr(item, "item_id", "") or f"item_{index}"
         items.append(PendingFoodVisionItem(
             index=index,
@@ -2565,7 +2588,7 @@ def _pending_inventory_from_food_vision(
             preparation=item.preparation,
             is_sauce=item.is_sauce,
             uncertainty=item.uncertainty,
-            user_modified=False,
+            user_modified=getattr(item, "user_modified", False),
             item_id=item_id,
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
             quantity=getattr(item, "quantity", None),
@@ -2587,7 +2610,7 @@ def _pending_inventory_from_food_vision(
         inventory_id=inventory_id,
         schema_version=inventory.schema_version,
         user_id=int(user_id),
-        source="vision",
+        source=source,
         items=items,
         overall_confidence=inventory.overall_confidence,
         needs_user_confirmation=inventory.needs_user_confirmation,
@@ -2597,7 +2620,7 @@ def _pending_inventory_from_food_vision(
         created_at=created_at,
         expires_at=expires_at,
         household_id=household_id,
-        photo_count=max(1, int(photo_count)),
+        photo_count=max(0, int(photo_count)),
         album_decision=album_decision,
         album_raw_photo_items=album_raw_photo_items,
         album_processing_status=album_processing_status or (ALBUM_PROCESSING_PARTIAL if album_decision == ALBUM_PROCESSING_PARTIAL else ALBUM_PROCESSING_COMPLETE),
@@ -3434,6 +3457,32 @@ def _estimate_component_nutrition(item: PendingFoodVisionItem) -> NutritionCompo
             carbs_g=round(reference["carbs_g"] * multiplier, 1),
             nutrition_available=True,
             reference_confidence=0.90,
+        )
+
+    # Fallback to approximate category resolver (Policy 3)
+    from gateway.nutrition.engine import resolve_approximate_food_nutrition
+    approx = None
+    if getattr(item, "normalized_name", None):
+        approx = resolve_approximate_food_nutrition(item.normalized_name)
+    if approx is None and getattr(item, "visible_name", None):
+        approx = resolve_approximate_food_nutrition(item.visible_name)
+    if approx is None:
+        approx = resolve_approximate_food_nutrition(item.normalized_name or item.visible_name)
+
+    if approx is not None:
+        multiplier = calc_grams / 100.0
+        return NutritionComponentEstimate(
+            name=approx.display_name,
+            grams=float(grams),
+            calories_kcal=round(approx.calories_kcal * multiplier, 1),
+            protein_g=round(approx.protein_g * multiplier, 1),
+            fat_g=round(approx.fat_g * multiplier, 1),
+            carbs_g=round(approx.carbs_g * multiplier, 1),
+            nutrition_available=True,
+            reference_confidence=approx.reference_confidence,
+            variance_note="Приблизительная оценка по категории",
+            source_id=approx.source_id,
+            cooking_state=approx.cooking_state,
         )
 
     return NutritionComponentEstimate(
@@ -4340,8 +4389,68 @@ class HealBiteNutritionDiary:
                 validation_status="NON_FOOD",
             )
 
-        # ---- Handle total failure ----
+        from gateway.nutrition.text_parser import parse_food_text_description
+        parsed_text = parse_food_text_description(user_text) if user_text else None
+
+        # ---- Handle total failure of vision models ----
         if not at_least_one_success:
+            # Check if user provided sufficient structured food description in text/caption (Caption-first fallback, Scenario T3)
+            if parsed_text and parsed_text.is_structured and parsed_text.ingredients:
+                text_items = []
+                for idx, ing in enumerate(parsed_text.ingredients, start=1):
+                    min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
+                    max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+                    text_items.append(PendingFoodVisionItem(
+                        index=idx,
+                        visible_name=ing.name,
+                        normalized_name=ing.normalized_name,
+                        confidence=0.95,
+                        estimated_grams_min=min_g,
+                        estimated_grams_max=max_g,
+                        selected_grams=round(ing.grams, 1),
+                        user_modified=True,
+                        preparation="",
+                        is_sauce=False,
+                        uncertainty=ing.uncertainty,
+                        quantity=ing.quantity,
+                        count_type="COUNT_CONFIRMED",
+                        piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
+                        edible_yield_ratio=1.0,
+                    ))
+                dish_note = f"Распознано по описанию: {parsed_text.dish_title}" if parsed_text.dish_title else "Распознано по текстовому описанию"
+                text_inv = FoodVisionInventory(
+                    schema_version=FOOD_VISION_SCHEMA_VERSION,
+                    items=text_items,
+                    overall_confidence=0.95,
+                    needs_user_confirmation=False,
+                    warnings=[f"ℹ️ {dish_note}"],
+                )
+                pending_inventory = self.stage_pending_inventory(
+                    user_id=user_id,
+                    source=source,
+                    inventory=text_inv,
+                    image_ref=image_ref,
+                    occurred_at=occurred_at,
+                    photo_count=photo_count,
+                    album_decision=None,
+                    album_raw_photo_items=None,
+                    album_processing_status=ALBUM_PROCESSING_COMPLETE,
+                    album_overlap_decision=ALBUM_OVERLAP_NONE,
+                )
+                logger.info(
+                    "[HealBite][caption_fallback_staged] items=%d total_grams=%.1f dish=%s",
+                    len(text_items),
+                    parsed_text.total_grams,
+                    parsed_text.dish_title,
+                )
+                return NutritionDiaryOutcome(
+                    available=True,
+                    pending=True,
+                    pending_inventory=pending_inventory,
+                    record=None,
+                    validation_status="TEXT_FALLBACK_STAGED",
+                )
+
             if photo_count == 1:
                 # Single-photo failure: preserve existing exact validation status
                 if last_failure_reason == "PROVIDER_TIMEOUT":
@@ -4367,6 +4476,78 @@ class HealBiteNutritionDiary:
                     raw_analysis=combined_raw_analysis,
                     validation_status="PROVIDER_ERROR",
                 )
+
+        # ---- Disagreement check between Vision and Text (Scenario T7) ----
+        if per_photo_inventories and parsed_text and parsed_text.dish_title:
+            vision_names = [it.visible_name.lower() for inv in per_photo_inventories for it in inv.items]
+            text_title = parsed_text.dish_title.lower()
+            is_disagreement = (
+                (any(w in vision_names[0] for w in ["суп", "борщ", "щи", "солянк", "уха"]) and any(w in text_title for w in ["торт", "пирожн", "десерт", "рулет", "выпечк"]))
+                or (any(w in vision_names[0] for w in ["торт", "пирожн", "десерт", "рулет", "выпечк"]) and any(w in text_title for w in ["суп", "борщ", "щи", "солянк", "уха"]))
+            )
+            if is_disagreement:
+                return NutritionDiaryOutcome(
+                    available=True,
+                    clarification_text=f"На фото определено «{vision_names[0].capitalize()}», но в вашем сообщении указано «{parsed_text.dish_title}». Подскажите, что именно записать в дневник?",
+                    validation_status="DISAGREEMENT_CLARIFICATION",
+                )
+
+        # ---- Structured Caption-First Override (Scenario T1, T2, T9) ----
+        if parsed_text and parsed_text.is_structured and len(parsed_text.ingredients) >= 1:
+            text_items = []
+            for idx, ing in enumerate(parsed_text.ingredients, start=1):
+                min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
+                max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+                text_items.append(PendingFoodVisionItem(
+                    index=idx,
+                    visible_name=ing.name,
+                    normalized_name=ing.normalized_name,
+                    confidence=0.95,
+                    estimated_grams_min=min_g,
+                    estimated_grams_max=max_g,
+                    selected_grams=round(ing.grams, 1),
+                    user_modified=True,
+                    preparation="",
+                    is_sauce=False,
+                    uncertainty=ing.uncertainty,
+                    quantity=ing.quantity,
+                    count_type="COUNT_CONFIRMED",
+                    piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
+                    edible_yield_ratio=1.0,
+                ))
+            dish_note = f"Распознано по рецепту: {parsed_text.dish_title}" if parsed_text.dish_title else "Распознано по рецепту"
+            text_inv = FoodVisionInventory(
+                schema_version=FOOD_VISION_SCHEMA_VERSION,
+                items=text_items,
+                overall_confidence=0.95,
+                needs_user_confirmation=False,
+                warnings=[f"ℹ️ {dish_note}"],
+            )
+            pending_inventory = self.stage_pending_inventory(
+                user_id=user_id,
+                source=source,
+                inventory=text_inv,
+                image_ref=image_ref,
+                occurred_at=occurred_at,
+                photo_count=photo_count,
+                album_decision=None,
+                album_raw_photo_items=None,
+                album_processing_status=ALBUM_PROCESSING_COMPLETE,
+                album_overlap_decision=ALBUM_OVERLAP_NONE,
+            )
+            logger.info(
+                "[HealBite][caption_primary_staged] items=%d total_grams=%.1f dish=%s",
+                len(text_items),
+                parsed_text.total_grams,
+                parsed_text.dish_title,
+            )
+            return NutritionDiaryOutcome(
+                available=True,
+                pending=True,
+                pending_inventory=pending_inventory,
+                record=None,
+                validation_status="VALID",
+            )
 
         # ---- Merge per-photo inventories ----
         is_partial_album = len(per_photo_inventories) < photo_count
@@ -4424,13 +4605,13 @@ class HealBiteNutritionDiary:
             merged_warnings = list(dict.fromkeys(merged_warnings))
             needs_confirm = requires_confirm or is_partial_album or any(inv.needs_user_confirmation for inv in per_photo_inventories)
 
-            merged_inventory = apply_food_vision_dish_first_policy(FoodVisionInventory(
+            merged_inventory = FoodVisionInventory(
                 schema_version=per_photo_inventories[0].schema_version,
                 items=merged_items,
                 overall_confidence=avg_confidence,
                 needs_user_confirmation=needs_confirm,
                 warnings=merged_warnings,
-            ))
+            )
             logger.info(
                 "[HealBite][album_merge_ok] photos_ok=%d merged_items=%d overall_confidence=%.3f partial=%s decision=%s proc_status=%s overlap=%s",
                 len(per_photo_inventories),
@@ -4594,6 +4775,7 @@ class HealBiteNutritionDiary:
         payload = _pending_inventory_from_food_vision(
             int(user_id),
             inventory,
+            source=source,
             image_ref=image_ref,
             occurred_at=occurred_at,
             now=now,
@@ -4615,6 +4797,60 @@ class HealBiteNutritionDiary:
             expires_at=payload.expires_at or (_normalize_timestamp(now) + PENDING_MEAL_TTL),
         )
         return payload
+
+    def stage_pending_inventory_from_text(
+        self,
+        *,
+        user_id: int,
+        text: str,
+        occurred_at: datetime | None = None,
+    ) -> PendingFoodVisionInventory | None:
+        """Stage a pending food inventory directly from text input or caption."""
+        from gateway.nutrition.text_parser import parse_food_text_description
+        parsed = parse_food_text_description(text)
+        if not parsed or not parsed.has_food_intent or not parsed.ingredients:
+            return None
+        text_items = []
+        for idx, ing in enumerate(parsed.ingredients, start=1):
+            min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
+            max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+            text_items.append(PendingFoodVisionItem(
+                index=idx,
+                visible_name=ing.name,
+                normalized_name=ing.normalized_name,
+                confidence=0.95,
+                estimated_grams_min=min_g,
+                estimated_grams_max=max_g,
+                selected_grams=round(ing.grams, 1),
+                user_modified=True,
+                preparation="",
+                is_sauce=False,
+                uncertainty=ing.uncertainty,
+                quantity=ing.quantity,
+                count_type="COUNT_CONFIRMED",
+                piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
+                edible_yield_ratio=1.0,
+            ))
+        dish_note = f"Записано по описанию: {parsed.dish_title}" if parsed.dish_title else "Записано по тексту"
+        text_inv = FoodVisionInventory(
+            schema_version=FOOD_VISION_SCHEMA_VERSION,
+            items=text_items,
+            overall_confidence=0.95,
+            needs_user_confirmation=False,
+            warnings=[f"ℹ️ {dish_note}"],
+        )
+        return self.stage_pending_inventory(
+            user_id=user_id,
+            source="text",
+            inventory=text_inv,
+            image_ref=None,
+            occurred_at=occurred_at,
+            photo_count=0,
+            album_decision=None,
+            album_raw_photo_items=None,
+            album_processing_status=ALBUM_PROCESSING_COMPLETE,
+            album_overlap_decision=ALBUM_OVERLAP_NONE,
+        )
 
     def stage_pending_meal(
         self,

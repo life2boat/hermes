@@ -464,6 +464,18 @@ def parse_deterministic_action_plan(
                     clarification_question="Не понял команду. В одной команде можно указать только один компонент, например: Исправить 2: Сливочный сыр, 50 г или Вес 6: 200 г.",
                     raw_user_message=raw,
                 )
+            # If multiple weights in a single item edit without nutrition macros: ambiguous/invalid
+            if len(_GRAMS_TOKEN_RE.findall(body_to_parse)) > 1 and not (_CALORIE_TOKEN_RE.search(body_to_parse) or _PROTEIN_TOKEN_RE.search(body_to_parse)):
+                return StructuredActionPlan(
+                    inventory_id=inventory_id,
+                    inventory_version=inventory_version,
+                    user_id=user_id,
+                    actions=[],
+                    confidence=0.5,
+                    requires_clarification=True,
+                    clarification_question="Не понял команду. В одной команде можно указать только один компонент, например: Исправить 2: Сливочный сыр, 50 г или Вес 6: 200 г.",
+                    raw_user_message=raw,
+                )
 
         # Nutrition basis detection: "на 100 г" vs "в порции"
         basis = NutritionBasis.PER_100G.value if re.search(r"на\s+100\s*(?:г|грамм)\b", c_clean, re.IGNORECASE) else NutritionBasis.TOTAL_PORTION.value

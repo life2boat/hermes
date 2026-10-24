@@ -5371,6 +5371,8 @@ class HealBiteNutritionDiary:
                         item.selected_grams = action.grams
                         item.estimated_grams_min = action.grams
                         item.estimated_grams_max = action.grams
+                        if getattr(item, "quantity", None) and item.quantity > 0:
+                            item.piece_grams = round(action.grams / item.quantity, 1)
                         item.user_modified = True
 
             elif action.operation in (ActionOperation.SET_USER_NUTRITION, ActionOperation.SET_NUTRITION_VALUES):
@@ -5470,18 +5472,34 @@ class HealBiteNutritionDiary:
             self.clear_pending_state(normalized_user_id)
             return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
 
-        norm_msg = (message or "").strip().lower()
-
-        # 1. Quick confirmation / cancel words
-        if norm_msg in _RU_SAVE_WORDS:
-            return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
-        if norm_msg in _RU_CONFIRM_WORDS:
-            return self.confirm_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
-        if norm_msg in _RU_CANCEL_WORDS:
-            self.clear_pending_state(normalized_user_id)
-            return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
-        if norm_msg in _RU_SAVE_WITHOUT_KBZHU_WORDS:
-            return self.save_pending_inventory_without_kbzhu(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+        # 1. Try legacy action parser first for exact buttons, save, cancel, album decisions
+        parse_result = parse_pending_inventory_action(message)
+        if parse_result.ok and parse_result.action is not None:
+            action = parse_result.action
+            if action.kind == "cancel":
+                self.clear_pending_state(normalized_user_id)
+                return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+            if action.kind in {"album_resolve_same", "album_resolve_distinct"}:
+                decision = (
+                    ALBUM_DECISION_SAME_PORTION
+                    if action.kind == "album_resolve_same"
+                    else ALBUM_DECISION_DISTINCT_PORTIONS
+                )
+                return self.resolve_album_decision(
+                    normalized_user_id,
+                    decision,
+                    expected_inventory_id=expected_inventory_id,
+                    now=now,
+                )
+            if action.kind in {"album_save_partial", "save_partial"}:
+                return self.save_partial_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save":
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save_without_kbzhu":
+                return self.save_pending_inventory_without_kbzhu(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            if action.kind == "confirm":
+                return self.confirm_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            return self.apply_pending_inventory_action(normalized_user_id, action, expected_inventory_id=expected_inventory_id, now=now)
 
         # 2. Intelligent Natural Language Editing (Tier 1 deterministic + Tier 2 LLM fallback)
         plan = interpret_user_inventory_edit(
@@ -5516,7 +5534,7 @@ class HealBiteNutritionDiary:
             has_request_save = any(a.operation == ActionOperation.REQUEST_SAVE for a in plan.actions)
             if has_request_save:
                 self._store_pending_inventory(updated)
-                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=updated.inventory_id, now=now)
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=updated.inventory_id, now=now, require_weights=True)
 
             self._store_pending_inventory(updated)
             return PendingInventoryReplyResult(
@@ -5525,22 +5543,11 @@ class HealBiteNutritionDiary:
                 inventory=updated,
             )
 
-        # 3. Fallback to legacy single-action parser
-        parse_result = parse_pending_inventory_action(message)
-        if parse_result.ok and parse_result.action is not None:
-            action = parse_result.action
-            if action.kind == "save":
-                return self.confirm_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
-            if action.kind == "cancel":
-                self.clear_pending_state(normalized_user_id)
-                return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
-            return self.apply_pending_inventory_action(normalized_user_id, action, expected_inventory_id=expected_inventory_id, now=now)
-
         return PendingInventoryReplyResult(
             status="invalid_action",
             reply_text=format_food_vision_inventory_reply(
                 payload,
-                notice="Не удалось распознать изменения. Вы можете написать исправление свободным текстом, например:\n• Вафли 160 г, 248 ккал\n• Удали апельсин\n• Съела половину",
+                notice=parse_result.error or "Не удалось распознать изменения. Вы можете написать исправление свободным текстом, например:\n• Вафли 160 г, 248 ккал\n• Удали апельсин\n• Съела половину",
             ),
             inventory=payload,
         )

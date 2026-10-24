@@ -13151,6 +13151,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_id: str,
         event: Optional[MessageEvent],
     ) -> Optional[Dict[str, Any]]:
+        user_id = getattr(source, "user_id", None)
+        normalized_user_id = None
+        if user_id is not None:
+            try:
+                normalized_user_id = int(user_id)
+            except (TypeError, ValueError):
+                normalized_user_id = None
+
+        if normalized_user_id is not None:
+            from gateway.healbite_nutrition_diary import get_existing_nutrition_diary
+            diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
+            if diary is not None:
+                pending_inventory = diary.get_pending_inventory(normalized_user_id, include_expired=True)
+                if pending_inventory is not None:
+                    inventory_result = await diary.handle_pending_inventory_reply_async(normalized_user_id, message)
+                    final_response = inventory_result.reply_text
+                    return {
+                        "final_response": final_response,
+                        "messages": [
+                            {"role": "user", "content": message},
+                            {"role": "assistant", "content": final_response},
+                        ],
+                        "api_calls": 0,
+                        "tools": [],
+                        "history_offset": len(history),
+                        "session_id": session_id,
+                        "completed": True,
+                        "response_previewed": False,
+                    }
+
         pending_response = self._maybe_handle_healbite_pending_meal_confirmation(
             message=message,
             history=history,

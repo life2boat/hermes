@@ -602,25 +602,29 @@ def interpret_user_inventory_edit(
         inventory_id=inventory_id,
         inventory_version=inventory_version,
     )
-    if plan is not None:
+    if plan is not None and (plan.actions or plan.requires_clarification):
         return plan
 
-    if llm_caller:
-        try:
-            semantic_plan = _call_llm_interpreter(
-                text,
-                items,
-                user_id=user_id,
-                inventory_id=inventory_id,
-                inventory_version=inventory_version,
-                llm_caller=llm_caller,
-            )
-            if semantic_plan is not None:
-                return semantic_plan
-        except Exception as e:
-            logger.warning("[ActionInterpreter] Semantic fallback failed: %s", e)
+    caller = llm_caller
+    if caller is None:
+        caller = _default_sync_llm_caller
 
-    return StructuredActionPlan(
+    try:
+        prompt = _build_llm_prompt(text, items)
+        raw_resp = caller(prompt)
+        semantic_plan = _parse_llm_json_response(
+            raw_resp,
+            user_id=user_id,
+            inventory_id=inventory_id,
+            inventory_version=inventory_version,
+            text=text,
+        )
+        if semantic_plan is not None:
+            return semantic_plan
+    except Exception as e:
+        logger.warning("[ActionInterpreter] Semantic fallback failed: %s", e)
+
+    return plan or StructuredActionPlan(
         inventory_id=inventory_id,
         inventory_version=inventory_version,
         user_id=user_id,
@@ -631,20 +635,12 @@ def interpret_user_inventory_edit(
     )
 
 
-def _call_llm_interpreter(
-    text: str,
-    items: Sequence[Any],
-    *,
-    user_id: int,
-    inventory_id: str,
-    inventory_version: int,
-    llm_caller: Callable[[str], str],
-) -> StructuredActionPlan | None:
+def _build_llm_prompt(text: str, items: Sequence[Any]) -> str:
     items_desc = "\n".join(
         f"Item {idx}: {getattr(itm, 'visible_name', '')} (current grams: {getattr(itm, 'selected_grams', '')})"
         for idx, itm in enumerate(items, start=1)
     )
-    prompt = (
+    return (
         "You are an assistant that translates natural language corrections to food inventory into a structured JSON action plan.\n"
         "Current inventory:\n"
         f"{items_desc}\n\n"
@@ -672,7 +668,53 @@ def _call_llm_interpreter(
         "}"
     )
 
-    raw_resp = llm_caller(prompt)
+
+def _default_sync_llm_caller(prompt: str) -> str:
+    try:
+        from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+        response = call_llm(
+            task="nutrition_interpretation",
+            messages=[
+                {"role": "system", "content": "You are a precise nutrition inventory action plan parser. Output valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=600,
+            timeout=15.0,
+        )
+        return extract_content_or_reasoning(response)
+    except Exception as exc:
+        logger.warning("[ActionInterpreter] Default sync LLM call failed: %s", exc)
+        return ""
+
+
+async def _default_async_llm_caller(prompt: str) -> str:
+    try:
+        from agent.auxiliary_client import safe_async_call_llm, extract_content_or_reasoning
+        response = await safe_async_call_llm(
+            task="nutrition_interpretation",
+            messages=[
+                {"role": "system", "content": "You are a precise nutrition inventory action plan parser. Output valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=600,
+            timeout=15.0,
+        )
+        return extract_content_or_reasoning(response)
+    except Exception as exc:
+        logger.warning("[ActionInterpreter] Default async LLM call failed: %s", exc)
+        return ""
+
+
+def _parse_llm_json_response(
+    raw_resp: str,
+    *,
+    user_id: int,
+    inventory_id: str,
+    inventory_version: int,
+    text: str,
+) -> StructuredActionPlan | None:
     if not raw_resp:
         return None
 
@@ -680,48 +722,94 @@ def _call_llm_interpreter(
         clean_resp = re.sub(r"^```(?:json)?\s*", "", raw_resp.strip(), flags=re.MULTILINE)
         clean_resp = re.sub(r"\s*```$", "", clean_resp.strip(), flags=re.MULTILINE)
         data = json.loads(clean_resp)
-        actions = []
-        for raw_act in data.get("actions", []):
-            op_str = raw_act.get("operation")
-            try:
-                op = ActionOperation(op_str)
-            except ValueError:
-                continue
+        if not isinstance(data, dict):
+            return None
 
-            user_nutr = None
-            if any(k in raw_act for k in ("calories_kcal", "protein_g", "fat_g", "carbs_g")):
-                user_nutr = UserNutritionOverride(
+        raw_actions = data.get("actions")
+        actions: list[StructuredAction] = []
+        if isinstance(raw_actions, list):
+            for raw_act in raw_actions:
+                if not isinstance(raw_act, dict):
+                    continue
+                op_str = raw_act.get("operation")
+                try:
+                    op = ActionOperation(op_str)
+                except (ValueError, TypeError):
+                    continue
+
+                user_nutr = None
+                if any(k in raw_act and raw_act[k] is not None for k in ("calories_kcal", "protein_g", "fat_g", "carbs_g")):
+                    user_nutr = UserNutritionOverride(
+                        grams=_to_float(str(raw_act.get("grams")) if raw_act.get("grams") is not None else None),
+                        calories_kcal=_to_float(str(raw_act.get("calories_kcal")) if raw_act.get("calories_kcal") is not None else None),
+                        protein_g=_to_float(str(raw_act.get("protein_g")) if raw_act.get("protein_g") is not None else None),
+                        fat_g=_to_float(str(raw_act.get("fat_g")) if raw_act.get("fat_g") is not None else None),
+                        carbs_g=_to_float(str(raw_act.get("carbs_g")) if raw_act.get("carbs_g") is not None else None),
+                        nutrition_basis=str(raw_act.get("nutrition_basis") or "TOTAL_PORTION"),
+                    )
+
+                raw_target_idx = raw_act.get("target_index")
+                target_idx = None
+                if raw_target_idx is not None:
+                    try:
+                        target_idx = int(raw_target_idx)
+                    except (ValueError, TypeError):
+                        target_idx = None
+
+                actions.append(StructuredAction(
+                    operation=op,
+                    target_index=target_idx,
+                    target_name=str(raw_act.get("target_name")) if raw_act.get("target_name") is not None else None,
+                    name=str(raw_act.get("name")) if raw_act.get("name") is not None else None,
                     grams=_to_float(str(raw_act.get("grams")) if raw_act.get("grams") is not None else None),
-                    calories_kcal=_to_float(str(raw_act.get("calories_kcal")) if raw_act.get("calories_kcal") is not None else None),
-                    protein_g=_to_float(str(raw_act.get("protein_g")) if raw_act.get("protein_g") is not None else None),
-                    fat_g=_to_float(str(raw_act.get("fat_g")) if raw_act.get("fat_g") is not None else None),
-                    carbs_g=_to_float(str(raw_act.get("carbs_g")) if raw_act.get("carbs_g") is not None else None),
-                    nutrition_basis=str(raw_act.get("nutrition_basis") or "TOTAL_PORTION"),
-                )
+                    scale_factor=_to_float(str(raw_act.get("scale_factor")) if raw_act.get("scale_factor") is not None else None),
+                    user_nutrition=user_nutr,
+                ))
 
-            actions.append(StructuredAction(
-                operation=op,
-                target_index=raw_act.get("target_index"),
-                target_name=raw_act.get("target_name"),
-                name=raw_act.get("name"),
-                grams=_to_float(str(raw_act.get("grams")) if raw_act.get("grams") is not None else None),
-                scale_factor=_to_float(str(raw_act.get("scale_factor")) if raw_act.get("scale_factor") is not None else None),
-                user_nutrition=user_nutr,
-            ))
+        confidence_val = data.get("confidence", 0.9)
+        try:
+            confidence = float(confidence_val)
+        except (ValueError, TypeError):
+            confidence = 0.5
+
+        req_clarify = bool(data.get("requires_clarification", False))
+        clarify_q = data.get("clarification_question")
+        if clarify_q is not None:
+            clarify_q = str(clarify_q)
 
         return StructuredActionPlan(
             inventory_id=inventory_id,
             inventory_version=inventory_version,
             user_id=user_id,
             actions=actions,
-            confidence=float(data.get("confidence", 0.9)),
-            requires_clarification=bool(data.get("requires_clarification", False)),
-            clarification_question=data.get("clarification_question"),
+            confidence=confidence,
+            requires_clarification=req_clarify,
+            clarification_question=clarify_q,
             raw_user_message=text,
         )
     except Exception as ex:
         logger.warning("[ActionInterpreter] Failed to parse LLM JSON: %s", ex)
         return None
+
+
+def _call_llm_interpreter(
+    text: str,
+    items: Sequence[Any],
+    *,
+    user_id: int,
+    inventory_id: str,
+    inventory_version: int,
+    llm_caller: Callable[[str], str],
+) -> StructuredActionPlan | None:
+    prompt = _build_llm_prompt(text, items)
+    raw_resp = llm_caller(prompt)
+    return _parse_llm_json_response(
+        raw_resp,
+        user_id=user_id,
+        inventory_id=inventory_id,
+        inventory_version=inventory_version,
+        text=text,
+    )
 
 
 async def interpret_user_inventory_edit_async(
@@ -731,13 +819,50 @@ async def interpret_user_inventory_edit_async(
     user_id: int = 0,
     inventory_id: str = "",
     inventory_version: int = 1,
-    llm_caller: Callable[[str], str] | None = None,
+    llm_caller: Any = None,
 ) -> StructuredActionPlan:
-    return interpret_user_inventory_edit(
+    # 1. Tier 1: Fast deterministic parser
+    plan = parse_deterministic_action_plan(
         text,
         items,
         user_id=user_id,
         inventory_id=inventory_id,
         inventory_version=inventory_version,
-        llm_caller=llm_caller,
+    )
+    if plan is not None and (plan.actions or plan.requires_clarification):
+        return plan
+
+    # 2. Tier 2: LLM semantic fallback (async)
+    caller = llm_caller
+    prompt = _build_llm_prompt(text, items)
+    try:
+        if caller is not None:
+            import inspect
+            if inspect.iscoroutinefunction(caller):
+                raw_resp = await caller(prompt)
+            else:
+                raw_resp = caller(prompt)
+        else:
+            raw_resp = await _default_async_llm_caller(prompt)
+
+        semantic_plan = _parse_llm_json_response(
+            raw_resp,
+            user_id=user_id,
+            inventory_id=inventory_id,
+            inventory_version=inventory_version,
+            text=text,
+        )
+        if semantic_plan is not None:
+            return semantic_plan
+    except Exception as e:
+        logger.warning("[ActionInterpreter] Async semantic fallback failed: %s", e)
+
+    return plan or StructuredActionPlan(
+        inventory_id=inventory_id,
+        inventory_version=inventory_version,
+        user_id=user_id,
+        actions=[],
+        confidence=0.0,
+        requires_clarification=False,
+        raw_user_message=text,
     )

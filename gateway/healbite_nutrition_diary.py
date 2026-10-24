@@ -444,12 +444,18 @@ class PendingFoodVisionInventory:
     album_raw_photo_items: list[list[dict[str, Any]]] | None = None
     album_processing_status: str = ALBUM_PROCESSING_COMPLETE
     album_overlap_decision: str = ALBUM_OVERLAP_NONE
+    inventory_version: int = 1
 
     def __post_init__(self) -> None:
         if self.album_decision == ALBUM_PROCESSING_PARTIAL and self.album_processing_status == ALBUM_PROCESSING_COMPLETE:
             self.album_processing_status = ALBUM_PROCESSING_PARTIAL
         if self.album_decision in (ALBUM_OVERLAP_SAME_PORTION, ALBUM_OVERLAP_DISTINCT_PORTIONS, ALBUM_OVERLAP_UNRESOLVED) and self.album_overlap_decision == ALBUM_OVERLAP_NONE:
             self.album_overlap_decision = self.album_decision
+
+
+class ConcurrentEditConflict(RuntimeError):
+    """Raised when an inventory update fails atomic Compare-and-Swap due to version mismatch."""
+    pass
 
 
 @dataclass(slots=True)
@@ -2737,6 +2743,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "album_raw_photo_items": getattr(payload, "album_raw_photo_items", None),
         "album_processing_status": getattr(payload, "album_processing_status", ALBUM_PROCESSING_COMPLETE),
         "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
+        "inventory_version": getattr(payload, "inventory_version", 1),
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -2819,6 +2826,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         album_raw_photo_items=payload.get("album_raw_photo_items"),
         album_processing_status=proc_status,
         album_overlap_decision=overlap_decision,
+        inventory_version=int(payload.get("inventory_version") or 1),
     )
 
 
@@ -2865,6 +2873,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         album_raw_photo_items=[[dict(it) for it in photo] for photo in payload.album_raw_photo_items] if payload.album_raw_photo_items is not None else None,
         album_processing_status=payload.album_processing_status,
         album_overlap_decision=payload.album_overlap_decision,
+        inventory_version=getattr(payload, "inventory_version", 1),
     )
 
 
@@ -4873,6 +4882,7 @@ class HealBiteNutritionDiary:
                 "album_processing_status": getattr(payload, "album_processing_status", ALBUM_PROCESSING_COMPLETE),
                 "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
                 "needs_user_confirmation": getattr(payload, "needs_user_confirmation", False),
+                "inventory_version": getattr(payload, "inventory_version", 1),
             },
             ensure_ascii=False,
         )
@@ -5074,7 +5084,31 @@ class HealBiteNutritionDiary:
     def clear_pending_meal(self, user_id: str | int) -> bool:
         return self.clear_pending_state(user_id)
 
-    def _store_pending_inventory(self, payload: PendingFoodVisionInventory) -> PendingFoodVisionInventory:
+    def _store_pending_inventory(
+        self,
+        payload: PendingFoodVisionInventory,
+        *,
+        expected_version: int | None = None,
+    ) -> PendingFoodVisionInventory:
+        if expected_version is not None:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT payload_json FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
+                    (int(payload.user_id),),
+                )
+                row = cursor.fetchone()
+                if row:
+                    try:
+                        stored = json.loads(row[0])
+                        curr_ver = int(stored.get("inventory_version") or 1)
+                        curr_inv_id = stored.get("inventory_id")
+                        if curr_ver != expected_version or (payload.inventory_id and curr_inv_id != payload.inventory_id):
+                            raise ConcurrentEditConflict(
+                                f"Pending inventory version mismatch: expected {expected_version}, got {curr_ver}"
+                            )
+                    except json.JSONDecodeError:
+                        pass
         self._write_pending_state(
             user_id=payload.user_id,
             payload_json=self._serialize_pending_inventory(payload),
@@ -5289,6 +5323,15 @@ class HealBiteNutritionDiary:
         *,
         now: datetime | None = None,
     ) -> tuple[PendingFoodVisionInventory | None, str | None]:
+        if plan.user_id != 0 and plan.user_id != inventory.user_id:
+            return None, "Несоответствие идентификатора пользователя."
+
+        if plan.inventory_id and plan.inventory_id != inventory.inventory_id:
+            return None, "Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз."
+
+        if plan.inventory_version is not None and plan.inventory_version != getattr(inventory, "inventory_version", 1):
+            return None, "Данные были изменены другим действием. Пожалуйста, проверьте текущее состояние."
+
         if not plan.actions:
             return inventory, None
 
@@ -5297,7 +5340,55 @@ class HealBiteNutritionDiary:
         last_item_id = working.items[-1].item_id if working.items else None
         items_by_id = {item.item_id: item for item in working.items}
         removed_ids: set[str] = set()
+        modified_ids: set[str] = set()
 
+        # Step 1: Pre-validate all target references and check for batch conflicts
+        for action in plan.actions:
+            if action.operation in (ActionOperation.REQUEST_SAVE, ActionOperation.SCALE_PORTION, ActionOperation.ADD_ITEM):
+                continue
+
+            target_id = None
+            if action.target_item_id:
+                target_id = action.target_item_id
+            elif action.target_index == -1:
+                target_id = last_item_id
+            elif action.target_index is not None:
+                target_id = index_to_item_id.get(action.target_index)
+            elif action.target_name:
+                t_norm = action.target_name.casefold().strip()
+                t_prefix = t_norm[:3] if len(t_norm) >= 3 else t_norm
+                for itm in working.items:
+                    v_low = itm.visible_name.casefold()
+                    n_low = itm.normalized_name.casefold()
+                    if (
+                        t_norm in v_low
+                        or t_norm in n_low
+                        or v_low in t_norm
+                        or n_low in t_norm
+                        or v_low.startswith(t_prefix)
+                        or n_low.startswith(t_prefix)
+                        or t_norm.startswith(v_low[:4] if len(v_low) >= 4 else v_low)
+                    ):
+                        target_id = itm.item_id
+                        break
+
+            # Disallow silent skipping of missing items (Fail Closed)
+            if not target_id or target_id not in items_by_id:
+                target_label = f"номер {action.target_index}" if action.target_index is not None else f"'{action.target_name}'"
+                return None, f"Позиция {target_label} не найдена в текущем списке."
+
+            if action.operation == ActionOperation.REMOVE_ITEM:
+                if target_id in modified_ids:
+                    return None, "Конфликт действий в одном запросе: позиция одновременно удаляется и изменяется."
+                if target_id in removed_ids:
+                    return None, "Конфликт действий в одном запросе: повторное удаление позиции."
+                removed_ids.add(target_id)
+            else:
+                if target_id in removed_ids:
+                    return None, "Конфликт действий в одном запросе: позиция одновременно удаляется и изменяется."
+                modified_ids.add(target_id)
+
+        # Step 2: Apply actions safely to working clone
         for action in plan.actions:
             target_id = None
             if action.target_item_id:
@@ -5327,8 +5418,6 @@ class HealBiteNutritionDiary:
             if action.operation == ActionOperation.REMOVE_ITEM:
                 if target_id and target_id in items_by_id:
                     removed_ids.add(target_id)
-                elif action.target_index and action.target_index > len(inventory.items):
-                    return None, "Такого номера нет в текущем списке."
 
             elif action.operation == ActionOperation.REPLACE_ITEM:
                 if target_id and target_id in items_by_id:
@@ -5447,7 +5536,11 @@ class HealBiteNutritionDiary:
             itm.index = pos
         working.items = remaining
         working.calculation_snapshot = _build_inventory_calculation_snapshot(working)
-        self._store_pending_inventory(working)
+        working.inventory_version = getattr(working, "inventory_version", 1) + 1
+        try:
+            self._store_pending_inventory(working, expected_version=getattr(inventory, "inventory_version", 1))
+        except ConcurrentEditConflict:
+            return None, "Данные были изменены другим действием. Пожалуйста, проверьте текущее состояние."
         return working, None
 
     def handle_pending_inventory_reply(
@@ -5457,6 +5550,7 @@ class HealBiteNutritionDiary:
         *,
         now: datetime | None = None,
         expected_inventory_id: str | None = None,
+        llm_caller: Any = None,
     ) -> PendingInventoryReplyResult:
         normalized_user_id = int(user_id)
         payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
@@ -5507,6 +5601,8 @@ class HealBiteNutritionDiary:
             payload.items,
             user_id=normalized_user_id,
             inventory_id=payload.inventory_id,
+            inventory_version=getattr(payload, "inventory_version", 1),
+            llm_caller=llm_caller,
         )
         if plan.requires_clarification:
             if "В одной команде можно указать только один компонент" in (plan.clarification_question or ""):
@@ -5533,10 +5629,111 @@ class HealBiteNutritionDiary:
             # Check if user requested save in the same message (One Message, One Confirmation / Direct Save)
             has_request_save = any(a.operation == ActionOperation.REQUEST_SAVE for a in plan.actions)
             if has_request_save:
-                self._store_pending_inventory(updated)
                 return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=updated.inventory_id, now=now, require_weights=True)
 
-            self._store_pending_inventory(updated)
+            return PendingInventoryReplyResult(
+                status="updated",
+                reply_text=format_food_vision_inventory_reply(updated, notice="✅ Исправления подготовлены"),
+                inventory=updated,
+            )
+
+        return PendingInventoryReplyResult(
+            status="invalid_action",
+            reply_text=format_food_vision_inventory_reply(
+                payload,
+                notice=parse_result.error or "Не удалось распознать изменения. Вы можете написать исправление свободным текстом, например:\n• Вафли 160 г, 248 ккал\n• Удали апельсин\n• Съела половину",
+            ),
+            inventory=payload,
+        )
+
+    async def handle_pending_inventory_reply_async(
+        self,
+        user_id: str | int,
+        message: str,
+        *,
+        now: datetime | None = None,
+        expected_inventory_id: str | None = None,
+        llm_caller: Any = None,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(status="missing", reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.")
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
+
+        # 1. Try legacy action parser first for exact buttons, save, cancel, album decisions
+        parse_result = parse_pending_inventory_action(message)
+        if parse_result.ok and parse_result.action is not None:
+            action = parse_result.action
+            if action.kind == "cancel":
+                self.clear_pending_state(normalized_user_id)
+                return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+            if action.kind in {"album_resolve_same", "album_resolve_distinct"}:
+                decision = (
+                    ALBUM_DECISION_SAME_PORTION
+                    if action.kind == "album_resolve_same"
+                    else ALBUM_DECISION_DISTINCT_PORTIONS
+                )
+                return self.resolve_album_decision(
+                    normalized_user_id,
+                    decision,
+                    expected_inventory_id=expected_inventory_id,
+                    now=now,
+                )
+            if action.kind in {"album_save_partial", "save_partial"}:
+                return self.save_partial_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save":
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save_without_kbzhu":
+                return self.save_pending_inventory_without_kbzhu(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            if action.kind == "confirm":
+                return self.confirm_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            return self.apply_pending_inventory_action(normalized_user_id, action, expected_inventory_id=expected_inventory_id, now=now)
+
+        # 2. Intelligent Natural Language Editing (Tier 1 deterministic + Tier 2 async LLM fallback)
+        plan = await interpret_user_inventory_edit_async(
+            message,
+            payload.items,
+            user_id=normalized_user_id,
+            inventory_id=payload.inventory_id,
+            inventory_version=getattr(payload, "inventory_version", 1),
+            llm_caller=llm_caller,
+        )
+        if plan.requires_clarification:
+            if "В одной команде можно указать только один компонент" in (plan.clarification_question or ""):
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice=plan.clarification_question),
+                    inventory=payload,
+                )
+            return PendingInventoryReplyResult(
+                status="needs_clarification",
+                reply_text=plan.clarification_question or "Пожалуйста, уточните исправление.",
+                inventory=payload,
+            )
+
+        if plan.actions:
+            updated, err = self.apply_structured_action_plan(payload, plan, now=now)
+            if updated is None:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice=err or "Не удалось применить исправление."),
+                    inventory=payload,
+                )
+
+            # Check if user requested save in the same message (One Message, One Confirmation / Direct Save)
+            has_request_save = any(a.operation == ActionOperation.REQUEST_SAVE for a in plan.actions)
+            if has_request_save:
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=updated.inventory_id, now=now, require_weights=True)
+
             return PendingInventoryReplyResult(
                 status="updated",
                 reply_text=format_food_vision_inventory_reply(updated, notice="✅ Исправления подготовлены"),
@@ -6146,6 +6343,7 @@ class HealBiteNutritionDiary:
             needs_user_confirmation=bool(payload.get("needs_user_confirmation")),
             album_processing_status=proc_status,
             album_overlap_decision=overlap_decision,
+            inventory_version=int(payload.get("inventory_version") or 1),
         )
 
     def _deserialize_pending_meal(

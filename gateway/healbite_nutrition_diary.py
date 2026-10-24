@@ -32,6 +32,18 @@ from gateway.healbite_food_composition import (
     normalize_food_lookup_key,
     resolve_food_composition,
 )
+from gateway.nutrition.user_override import (
+    ActionOperation,
+    NutritionBasis,
+    StructuredAction,
+    StructuredActionPlan,
+    UserNutritionOverride,
+)
+from gateway.nutrition.action_interpreter import (
+    interpret_user_inventory_edit,
+    interpret_user_inventory_edit_async,
+    parse_deterministic_action_plan,
+)
 from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -319,6 +331,7 @@ class FoodVisionItem:
     piece_grams: float | None = None
     edible_yield_ratio: float | None = None
     grouped_item_ids: list[str] | None = None
+    user_nutrition: UserNutritionOverride | None = None
 
     def __post_init__(self) -> None:
         if not self.item_id:
@@ -395,6 +408,7 @@ class PendingFoodVisionItem:
     piece_grams: float | None = None
     edible_yield_ratio: float | None = None
     grouped_item_ids: list[str] | None = None
+    user_nutrition: UserNutritionOverride | None = None
 
     def __post_init__(self) -> None:
         if not self.item_id:
@@ -2395,27 +2409,75 @@ def _build_inventory_calculation_snapshot(
             calc_bounds = bounds
 
         comp = None
-        if getattr(item, "normalized_name", None):
-            comp = resolve_and_calculate_component(
-                item.normalized_name,
-                calc_bounds,
-                cooking_state=getattr(item, "preparation", "") or "cooked",
+        user_ov = getattr(item, "user_nutrition", None)
+        if user_ov is not None:
+            item_grams = float(item.selected_grams or user_ov.grams or bounds.grams_center or 100.0)
+            basis = getattr(user_ov, "nutrition_basis", "TOTAL_PORTION")
+            if basis == "TOTAL_PORTION":
+                cal_val = user_ov.calories_kcal
+                prot_val = user_ov.protein_g
+                fat_val = user_ov.fat_g
+                carbs_val = user_ov.carbs_g
+            elif basis == "PER_ITEM":
+                qty = float(getattr(item, "quantity", 1) or 1)
+                cal_val = round(user_ov.calories_kcal * qty, 1) if user_ov.calories_kcal is not None else None
+                prot_val = round(user_ov.protein_g * qty, 1) if user_ov.protein_g is not None else None
+                fat_val = round(user_ov.fat_g * qty, 1) if user_ov.fat_g is not None else None
+                carbs_val = round(user_ov.carbs_g * qty, 1) if user_ov.carbs_g is not None else None
+            else:  # PER_100G
+                ratio = item_grams / 100.0
+                cal_val = round(user_ov.calories_kcal * ratio, 1) if user_ov.calories_kcal is not None else None
+                prot_val = round(user_ov.protein_g * ratio, 1) if user_ov.protein_g is not None else None
+                fat_val = round(user_ov.fat_g * ratio, 1) if user_ov.fat_g is not None else None
+                carbs_val = round(user_ov.carbs_g * ratio, 1) if user_ov.carbs_g is not None else None
+
+            from gateway.nutrition.contracts import (
+                ComponentNutritionEstimate,
+                MacronutrientIntervals,
+                NutrientInterval,
             )
-        if comp is None or not comp.nutrition_available:
-            if getattr(item, "visible_name", None):
-                comp_vis = resolve_and_calculate_component(
-                    item.visible_name,
+            intervals = MacronutrientIntervals(
+                calories_kcal=NutrientInterval(cal_val, cal_val, cal_val) if cal_val is not None else None,
+                protein_g=NutrientInterval(prot_val, prot_val, prot_val) if prot_val is not None else None,
+                fat_g=NutrientInterval(fat_val, fat_val, fat_val) if fat_val is not None else None,
+                carbs_g=NutrientInterval(carbs_val, carbs_val, carbs_val) if carbs_val is not None else None,
+            )
+            comp = ComponentNutritionEstimate(
+                name=item.visible_name,
+                mass_bounds=calc_bounds,
+                intervals=intervals,
+                source_id="user_override",
+                cooking_state=getattr(item, "preparation", "") or "raw",
+                source_provenance="USER_SUPPLIED",
+                per_100g_calories_kcal=round(cal_val / (item_grams / 100.0), 1) if (cal_val is not None and item_grams > 0) else None,
+                per_100g_protein_g=round(prot_val / (item_grams / 100.0), 1) if (prot_val is not None and item_grams > 0) else None,
+                per_100g_fat_g=round(fat_val / (item_grams / 100.0), 1) if (fat_val is not None and item_grams > 0) else None,
+                per_100g_carbs_g=round(carbs_val / (item_grams / 100.0), 1) if (carbs_val is not None and item_grams > 0) else None,
+                is_approximate_plausible_range=False,
+                nutrition_available=True,
+            )
+        else:
+            if getattr(item, "normalized_name", None):
+                comp = resolve_and_calculate_component(
+                    item.normalized_name,
                     calc_bounds,
                     cooking_state=getattr(item, "preparation", "") or "cooked",
                 )
-                if comp is None or (comp_vis.nutrition_available and not comp.nutrition_available):
-                    comp = comp_vis
-        if comp is None:
-            comp = resolve_and_calculate_component(
-                item.normalized_name or item.visible_name,
-                calc_bounds,
-                cooking_state=getattr(item, "preparation", "") or "cooked",
-            )
+            if comp is None or not comp.nutrition_available:
+                if getattr(item, "visible_name", None):
+                    comp_vis = resolve_and_calculate_component(
+                        item.visible_name,
+                        calc_bounds,
+                        cooking_state=getattr(item, "preparation", "") or "cooked",
+                    )
+                    if comp is None or (comp_vis.nutrition_available and not comp.nutrition_available):
+                        comp = comp_vis
+            if comp is None:
+                comp = resolve_and_calculate_component(
+                    item.normalized_name or item.visible_name,
+                    calc_bounds,
+                    cooking_state=getattr(item, "preparation", "") or "cooked",
+                )
         components.append(comp)
 
     meal_names = [it.visible_name for it in deduped_items if it.visible_name]
@@ -2452,6 +2514,7 @@ def _build_inventory_calculation_snapshot(
         "carbs_max": carbs_int.max_value if carbs_int else None,
         "uncertainty_model_type": getattr(meal_estimate.uncertainty_model_type, "value", str(meal_estimate.uncertainty_model_type)),
         "is_approximate_range": bool(meal_estimate.is_approximate_plausible_range),
+        "is_complete": not has_unmapped and (cal_int is not None) and (prot_int is not None) and (fat_int is not None) and (carbs_int is not None),
         "components": [
             {
                 "item_id": getattr(itm, "item_id", ""),
@@ -2484,6 +2547,7 @@ def _build_inventory_calculation_snapshot(
                 "count_type": getattr(itm, "count_type", "COUNT_CONFIRMED"),
                 "piece_grams": getattr(itm, "piece_grams", None),
                 "edible_yield_ratio": getattr(itm, "edible_yield_ratio", None),
+                "user_nutrition": itm.user_nutrition.to_dict() if getattr(itm, "user_nutrition", None) else None,
             }
             for itm, c in zip(deduped_items, meal_estimate.components)
         ],
@@ -2522,6 +2586,7 @@ def _nutrition_record_from_snapshot(
             "cooking_state": c.get("cooking_state"),
             "estimation_method": c.get("estimation_method"),
             "uncertainty_model_type": c.get("uncertainty_model_type"),
+            "user_nutrition": c.get("user_nutrition"),
         })
     cal = snapshot.get("calories_kcal")
     cal_str = f"{int(round(cal))} ккал" if cal is not None else "КБЖУ не найдено"
@@ -2596,6 +2661,7 @@ def _pending_inventory_from_food_vision(
             piece_grams=getattr(item, "piece_grams", None),
             edible_yield_ratio=getattr(item, "edible_yield_ratio", None) or _get_edible_yield_ratio(item.normalized_name, item.visible_name, preparation=item.preparation),
             grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or [item_id]),
+            user_nutrition=getattr(item, "user_nutrition", None),
         ))
     items = _aggregate_identical_food_vision_items(items)
     inventory_hash_payload = {
@@ -2657,6 +2723,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
             "piece_grams": getattr(item, "piece_grams", None),
             "edible_yield_ratio": getattr(item, "edible_yield_ratio", None),
             "grouped_item_ids": list(getattr(item, "grouped_item_ids", None) or ([item.item_id] if getattr(item, "item_id", None) else [])),
+            "user_nutrition": item.user_nutrition.to_dict() if getattr(item, "user_nutrition", None) else None,
         } for item in payload.items],
         "overall_confidence": payload.overall_confidence,
         "needs_user_confirmation": payload.needs_user_confirmation,
@@ -2706,6 +2773,7 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             piece_grams=_to_float(item_payload.get("piece_grams")),
             edible_yield_ratio=_to_float(item_payload.get("edible_yield_ratio")),
             grouped_item_ids=list(item_payload.get("grouped_item_ids") or []),
+            user_nutrition=UserNutritionOverride.from_dict(item_payload.get("user_nutrition")),
         ))
 
     raw_proc = payload.get("album_processing_status")
@@ -2781,6 +2849,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
             piece_grams=getattr(item, "piece_grams", None),
             edible_yield_ratio=getattr(item, "edible_yield_ratio", None),
             grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or []),
+            user_nutrition=UserNutritionOverride.from_dict(item.user_nutrition.to_dict()) if getattr(item, "user_nutrition", None) else None,
         ) for item in payload.items],
         overall_confidence=payload.overall_confidence,
         needs_user_confirmation=payload.needs_user_confirmation,
@@ -2895,11 +2964,14 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
                     prot = comp_info.get("protein_g")
                     fat = comp_info.get("fat_g")
                     carbs = comp_info.get("carbs_g")
+                    prot_part = f"Б {_format_grams(prot)}" if prot is not None else "Б не указан"
+                    fat_part = f"Ж {_format_grams(fat)}" if fat is not None else "Ж не указан"
+                    carbs_part = f"У {_format_grams(carbs)}" if carbs is not None else "У не указаны"
                     detail += (
                         f"\n   КБЖУ: ~{int(round(cal))} ккал "
-                        f"· Б {_format_grams(prot)} "
-                        f"· Ж {_format_grams(fat)} "
-                        f"· У {_format_grams(carbs)}"
+                        f"· {prot_part} "
+                        f"· {fat_part} "
+                        f"· {carbs_part}"
                     )
                     has_any_nutrition = True
                 elif not comp_info.get("nutrition_available"):
@@ -2945,11 +3017,14 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
                     prot = comp_info.get("protein_g")
                     fat = comp_info.get("fat_g")
                     carbs = comp_info.get("carbs_g")
+                    prot_part = f"Б {_format_grams(prot)}" if prot is not None else "Б не указан"
+                    fat_part = f"Ж {_format_grams(fat)}" if fat is not None else "Ж не указан"
+                    carbs_part = f"У {_format_grams(carbs)}" if carbs is not None else "У не указаны"
                     detail += (
                         f" · ~{int(round(cal))} ккал "
-                        f"· Б {_format_grams(prot)} "
-                        f"· Ж {_format_grams(fat)} "
-                        f"· У {_format_grams(carbs)}"
+                        f"· {prot_part} "
+                        f"· {fat_part} "
+                        f"· {carbs_part}"
                     )
                     has_any_nutrition = True
                 elif not comp_info.get("nutrition_available"):
@@ -3116,27 +3191,75 @@ def calculate_food_vision_meal_nutrition(
             calc_bounds = bounds
 
         comp = None
-        if getattr(item, "normalized_name", None):
-            comp = resolve_and_calculate_component(
-                item.normalized_name,
-                calc_bounds,
-                cooking_state=getattr(item, "preparation", "") or "cooked",
+        user_ov = getattr(item, "user_nutrition", None)
+        if user_ov is not None:
+            item_grams = float(item.selected_grams or user_ov.grams or bounds.grams_center or 100.0)
+            basis = getattr(user_ov, "nutrition_basis", "TOTAL_PORTION")
+            if basis == "TOTAL_PORTION":
+                cal_val = user_ov.calories_kcal
+                prot_val = user_ov.protein_g
+                fat_val = user_ov.fat_g
+                carbs_val = user_ov.carbs_g
+            elif basis == "PER_ITEM":
+                qty = float(getattr(item, "quantity", 1) or 1)
+                cal_val = round(user_ov.calories_kcal * qty, 1) if user_ov.calories_kcal is not None else None
+                prot_val = round(user_ov.protein_g * qty, 1) if user_ov.protein_g is not None else None
+                fat_val = round(user_ov.fat_g * qty, 1) if user_ov.fat_g is not None else None
+                carbs_val = round(user_ov.carbs_g * qty, 1) if user_ov.carbs_g is not None else None
+            else:  # PER_100G
+                ratio = item_grams / 100.0
+                cal_val = round(user_ov.calories_kcal * ratio, 1) if user_ov.calories_kcal is not None else None
+                prot_val = round(user_ov.protein_g * ratio, 1) if user_ov.protein_g is not None else None
+                fat_val = round(user_ov.fat_g * ratio, 1) if user_ov.fat_g is not None else None
+                carbs_val = round(user_ov.carbs_g * ratio, 1) if user_ov.carbs_g is not None else None
+
+            from gateway.nutrition.contracts import (
+                ComponentNutritionEstimate,
+                MacronutrientIntervals,
+                NutrientInterval,
             )
-        if comp is None or not comp.nutrition_available:
-            if getattr(item, "visible_name", None):
-                comp_vis = resolve_and_calculate_component(
-                    item.visible_name,
+            intervals = MacronutrientIntervals(
+                calories_kcal=NutrientInterval(cal_val, cal_val, cal_val) if cal_val is not None else None,
+                protein_g=NutrientInterval(prot_val, prot_val, prot_val) if prot_val is not None else None,
+                fat_g=NutrientInterval(fat_val, fat_val, fat_val) if fat_val is not None else None,
+                carbs_g=NutrientInterval(carbs_val, carbs_val, carbs_val) if carbs_val is not None else None,
+            )
+            comp = ComponentNutritionEstimate(
+                name=item.visible_name,
+                mass_bounds=calc_bounds,
+                intervals=intervals,
+                source_id="user_override",
+                cooking_state=getattr(item, "preparation", "") or "raw",
+                source_provenance="USER_SUPPLIED",
+                per_100g_calories_kcal=round(cal_val / (item_grams / 100.0), 1) if (cal_val is not None and item_grams > 0) else None,
+                per_100g_protein_g=round(prot_val / (item_grams / 100.0), 1) if (prot_val is not None and item_grams > 0) else None,
+                per_100g_fat_g=round(fat_val / (item_grams / 100.0), 1) if (fat_val is not None and item_grams > 0) else None,
+                per_100g_carbs_g=round(carbs_val / (item_grams / 100.0), 1) if (carbs_val is not None and item_grams > 0) else None,
+                is_approximate_plausible_range=False,
+                nutrition_available=True,
+            )
+        else:
+            if getattr(item, "normalized_name", None):
+                comp = resolve_and_calculate_component(
+                    item.normalized_name,
                     calc_bounds,
                     cooking_state=getattr(item, "preparation", "") or "cooked",
                 )
-                if comp is None or (comp_vis.nutrition_available and not comp.nutrition_available):
-                    comp = comp_vis
-        if comp is None:
-            comp = resolve_and_calculate_component(
-                item.normalized_name or item.visible_name,
-                calc_bounds,
-                cooking_state=getattr(item, "preparation", "") or "cooked",
-            )
+            if comp is None or not comp.nutrition_available:
+                if getattr(item, "visible_name", None):
+                    comp_vis = resolve_and_calculate_component(
+                        item.visible_name,
+                        calc_bounds,
+                        cooking_state=getattr(item, "preparation", "") or "cooked",
+                    )
+                    if comp is None or (comp_vis.nutrition_available and not comp.nutrition_available):
+                        comp = comp_vis
+            if comp is None:
+                comp = resolve_and_calculate_component(
+                    item.normalized_name or item.visible_name,
+                    calc_bounds,
+                    cooking_state=getattr(item, "preparation", "") or "cooked",
+                )
         components.append(comp)
 
     return calculate_meal_nutrition(
@@ -4738,6 +4861,7 @@ class HealBiteNutritionDiary:
                         "piece_grams": getattr(item, "piece_grams", None),
                         "edible_yield_ratio": getattr(item, "edible_yield_ratio", None),
                         "grouped_item_ids": list(getattr(item, "grouped_item_ids", None) or ([item.item_id] if getattr(item, "item_id", None) else [])),
+                        "user_nutrition": item.user_nutrition.to_dict() if getattr(item, "user_nutrition", None) else None,
                     }
                     for item in payload.items
                 ],
@@ -5158,6 +5282,174 @@ class HealBiteNutritionDiary:
             inventory=updated,
         )
 
+    def apply_structured_action_plan(
+        self,
+        inventory: PendingFoodVisionInventory,
+        plan: StructuredActionPlan,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PendingFoodVisionInventory | None, str | None]:
+        if not plan.actions:
+            return inventory, None
+
+        working = _clone_pending_inventory(inventory)
+        index_to_item_id = {item.index: item.item_id for item in working.items}
+        last_item_id = working.items[-1].item_id if working.items else None
+        items_by_id = {item.item_id: item for item in working.items}
+        removed_ids: set[str] = set()
+
+        for action in plan.actions:
+            target_id = None
+            if action.target_item_id:
+                target_id = action.target_item_id
+            elif action.target_index == -1:
+                target_id = last_item_id
+            elif action.target_index is not None:
+                target_id = index_to_item_id.get(action.target_index)
+            elif action.target_name:
+                t_norm = action.target_name.casefold().strip()
+                t_prefix = t_norm[:3] if len(t_norm) >= 3 else t_norm
+                for itm in working.items:
+                    v_low = itm.visible_name.casefold()
+                    n_low = itm.normalized_name.casefold()
+                    if (
+                        t_norm in v_low
+                        or t_norm in n_low
+                        or v_low in t_norm
+                        or n_low in t_norm
+                        or v_low.startswith(t_prefix)
+                        or n_low.startswith(t_prefix)
+                        or t_norm.startswith(v_low[:4] if len(v_low) >= 4 else v_low)
+                    ):
+                        target_id = itm.item_id
+                        break
+
+            if action.operation == ActionOperation.REMOVE_ITEM:
+                if target_id and target_id in items_by_id:
+                    removed_ids.add(target_id)
+                elif action.target_index and action.target_index > len(inventory.items):
+                    return None, "Такого номера нет в текущем списке."
+
+            elif action.operation == ActionOperation.REPLACE_ITEM:
+                if target_id and target_id in items_by_id:
+                    item = items_by_id[target_id]
+                    if action.name:
+                        item.visible_name = action.name
+                        item.normalized_name = action.name.casefold()
+                    if action.grams is not None:
+                        item.selected_grams = action.grams
+                        item.estimated_grams_min = action.grams
+                        item.estimated_grams_max = action.grams
+                    if action.user_nutrition:
+                        action.user_nutrition.item_id = target_id
+                        item.user_nutrition = action.user_nutrition
+                    item.user_modified = True
+
+            elif action.operation == ActionOperation.UPDATE_WEIGHT:
+                if target_id and target_id in items_by_id:
+                    item = items_by_id[target_id]
+                    if action.quantity is not None:
+                        new_count = int(action.quantity)
+                        old_count = getattr(item, "quantity", 1) or 1
+                        item.quantity = new_count
+                        item.count_type = "COUNT_CONFIRMED"
+                        item.user_modified = True
+                        piece_g = getattr(item, "piece_grams", None)
+                        if piece_g is None and item.selected_grams is not None:
+                            piece_g = item.selected_grams / max(old_count, 1)
+                            item.piece_grams = piece_g
+                        elif piece_g is None and item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+                            piece_g = ((item.estimated_grams_min + item.estimated_grams_max) / 2.0) / max(old_count, 1)
+                            item.piece_grams = piece_g
+                        if piece_g is not None:
+                            item.selected_grams = round(piece_g * new_count, 1)
+                            if item.estimated_grams_min is not None:
+                                item.estimated_grams_min = round(piece_g * new_count * 0.9, 1)
+                            if item.estimated_grams_max is not None:
+                                item.estimated_grams_max = round(piece_g * new_count * 1.1, 1)
+                    if action.grams is not None:
+                        item.selected_grams = action.grams
+                        item.estimated_grams_min = action.grams
+                        item.estimated_grams_max = action.grams
+                        if getattr(item, "quantity", None) and item.quantity > 0:
+                            item.piece_grams = round(action.grams / item.quantity, 1)
+                        item.user_modified = True
+
+            elif action.operation in (ActionOperation.SET_USER_NUTRITION, ActionOperation.SET_NUTRITION_VALUES):
+                if target_id and target_id in items_by_id and action.user_nutrition:
+                    item = items_by_id[target_id]
+                    existing = getattr(item, "user_nutrition", None)
+                    if existing is not None:
+                        if action.user_nutrition.calories_kcal is not None:
+                            existing.calories_kcal = action.user_nutrition.calories_kcal
+                        if action.user_nutrition.protein_g is not None:
+                            existing.protein_g = action.user_nutrition.protein_g
+                        if action.user_nutrition.fat_g is not None:
+                            existing.fat_g = action.user_nutrition.fat_g
+                        if action.user_nutrition.carbs_g is not None:
+                            existing.carbs_g = action.user_nutrition.carbs_g
+                        if action.user_nutrition.grams is not None:
+                            existing.grams = action.user_nutrition.grams
+                        if action.user_nutrition.nutrition_basis:
+                            existing.nutrition_basis = action.user_nutrition.nutrition_basis
+                        item.user_nutrition = existing
+                    else:
+                        action.user_nutrition.item_id = target_id
+                        item.user_nutrition = action.user_nutrition
+                    item.user_modified = True
+
+            elif action.operation == ActionOperation.SCALE_PORTION:
+                factor = action.scale_factor or 0.5
+                for item in items_by_id.values():
+                    if item.item_id in removed_ids:
+                        continue
+                    if item.selected_grams is not None:
+                        item.selected_grams = round(item.selected_grams * factor, 1)
+                        if item.estimated_grams_min is not None:
+                            item.estimated_grams_min = round(item.estimated_grams_min * factor, 1)
+                        if item.estimated_grams_max is not None:
+                            item.estimated_grams_max = round(item.estimated_grams_max * factor, 1)
+                    if getattr(item, "user_nutrition", None) and item.user_nutrition.nutrition_basis == "TOTAL_PORTION":
+                        if item.user_nutrition.calories_kcal is not None:
+                            item.user_nutrition.calories_kcal = round(item.user_nutrition.calories_kcal * factor, 1)
+                        if item.user_nutrition.protein_g is not None:
+                            item.user_nutrition.protein_g = round(item.user_nutrition.protein_g * factor, 1)
+                        if item.user_nutrition.fat_g is not None:
+                            item.user_nutrition.fat_g = round(item.user_nutrition.fat_g * factor, 1)
+                        if item.user_nutrition.carbs_g is not None:
+                            item.user_nutrition.carbs_g = round(item.user_nutrition.carbs_g * factor, 1)
+                    item.user_modified = True
+
+            elif action.operation == ActionOperation.ADD_ITEM:
+                new_idx = len(items_by_id) + 1
+                new_id = f"item_add_{new_idx}"
+                new_itm = PendingFoodVisionItem(
+                    index=new_idx,
+                    visible_name=action.name or "Новый продукт",
+                    normalized_name=(action.name or "новый продукт").casefold(),
+                    confidence=1.0,
+                    estimated_grams_min=action.grams or 100.0,
+                    estimated_grams_max=action.grams or 100.0,
+                    selected_grams=action.grams or 100.0,
+                    preparation="",
+                    is_sauce=False,
+                    uncertainty="",
+                    user_modified=True,
+                    item_id=new_id,
+                )
+                if action.user_nutrition:
+                    action.user_nutrition.item_id = new_id
+                    new_itm.user_nutrition = action.user_nutrition
+                items_by_id[new_id] = new_itm
+
+        remaining = [itm for itm in items_by_id.values() if itm.item_id not in removed_ids]
+        for pos, itm in enumerate(remaining, start=1):
+            itm.index = pos
+        working.items = remaining
+        working.calculation_snapshot = _build_inventory_calculation_snapshot(working)
+        self._store_pending_inventory(working)
+        return working, None
+
     def handle_pending_inventory_reply(
         self,
         user_id: str | int,
@@ -5166,41 +5458,99 @@ class HealBiteNutritionDiary:
         now: datetime | None = None,
         expected_inventory_id: str | None = None,
     ) -> PendingInventoryReplyResult:
-        payload = self.get_pending_inventory(user_id, now=now, include_expired=True)
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
         if payload is None:
-            return PendingInventoryReplyResult(status="missing", reply_text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u043f\u043e \u0444\u043e\u0442\u043e. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.")
-        parse_result = parse_pending_inventory_action(message)
-        if not parse_result.ok or parse_result.action is None:
+            return PendingInventoryReplyResult(status="missing", reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.")
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
             return PendingInventoryReplyResult(
-                status="invalid_action",
-                reply_text=format_food_vision_inventory_reply(payload, notice=parse_result.error),
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
                 inventory=payload,
             )
-        action = parse_result.action
-        if action.kind == "cancel":
-            self.clear_pending_state(user_id)
-            return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
-        if action.kind in {"album_resolve_same", "album_resolve_distinct"}:
-            decision = (
-                ALBUM_DECISION_SAME_PORTION
-                if action.kind == "album_resolve_same"
-                else ALBUM_DECISION_DISTINCT_PORTIONS
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
+
+        # 1. Try legacy action parser first for exact buttons, save, cancel, album decisions
+        parse_result = parse_pending_inventory_action(message)
+        if parse_result.ok and parse_result.action is not None:
+            action = parse_result.action
+            if action.kind == "cancel":
+                self.clear_pending_state(normalized_user_id)
+                return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+            if action.kind in {"album_resolve_same", "album_resolve_distinct"}:
+                decision = (
+                    ALBUM_DECISION_SAME_PORTION
+                    if action.kind == "album_resolve_same"
+                    else ALBUM_DECISION_DISTINCT_PORTIONS
+                )
+                return self.resolve_album_decision(
+                    normalized_user_id,
+                    decision,
+                    expected_inventory_id=expected_inventory_id,
+                    now=now,
+                )
+            if action.kind in {"album_save_partial", "save_partial"}:
+                return self.save_partial_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save":
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
+            if action.kind == "save_without_kbzhu":
+                return self.save_pending_inventory_without_kbzhu(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            if action.kind == "confirm":
+                return self.confirm_pending_inventory(normalized_user_id, expected_inventory_id=expected_inventory_id, now=now)
+            return self.apply_pending_inventory_action(normalized_user_id, action, expected_inventory_id=expected_inventory_id, now=now)
+
+        # 2. Intelligent Natural Language Editing (Tier 1 deterministic + Tier 2 LLM fallback)
+        plan = interpret_user_inventory_edit(
+            message,
+            payload.items,
+            user_id=normalized_user_id,
+            inventory_id=payload.inventory_id,
+        )
+        if plan.requires_clarification:
+            if "В одной команде можно указать только один компонент" in (plan.clarification_question or ""):
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice=plan.clarification_question),
+                    inventory=payload,
+                )
+            return PendingInventoryReplyResult(
+                status="needs_clarification",
+                reply_text=plan.clarification_question or "Пожалуйста, уточните исправление.",
+                inventory=payload,
             )
-            return self.resolve_album_decision(
-                user_id,
-                decision,
-                expected_inventory_id=expected_inventory_id,
-                now=now,
+
+        if plan.actions:
+            updated, err = self.apply_structured_action_plan(payload, plan, now=now)
+            if updated is None:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice=err or "Не удалось применить исправление."),
+                    inventory=payload,
+                )
+
+            # Check if user requested save in the same message (One Message, One Confirmation / Direct Save)
+            has_request_save = any(a.operation == ActionOperation.REQUEST_SAVE for a in plan.actions)
+            if has_request_save:
+                self._store_pending_inventory(updated)
+                return self.save_pending_inventory_directly(normalized_user_id, expected_inventory_id=updated.inventory_id, now=now, require_weights=True)
+
+            self._store_pending_inventory(updated)
+            return PendingInventoryReplyResult(
+                status="updated",
+                reply_text=format_food_vision_inventory_reply(updated, notice="✅ Исправления подготовлены"),
+                inventory=updated,
             )
-        if action.kind in {"album_save_partial", "save_partial"}:
-            return self.save_partial_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
-        if action.kind == "save":
-            return self.save_pending_inventory_directly(user_id, expected_inventory_id=expected_inventory_id, now=now, require_weights=True)
-        if action.kind == "save_without_kbzhu":
-            return self.save_pending_inventory_without_kbzhu(user_id, expected_inventory_id=expected_inventory_id, now=now)
-        if action.kind == "confirm":
-            return self.confirm_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now)
-        return self.apply_pending_inventory_action(user_id, action, expected_inventory_id=expected_inventory_id, now=now)
+
+        return PendingInventoryReplyResult(
+            status="invalid_action",
+            reply_text=format_food_vision_inventory_reply(
+                payload,
+                notice=parse_result.error or "Не удалось распознать изменения. Вы можете написать исправление свободным текстом, например:\n• Вафли 160 г, 248 ккал\n• Удали апельсин\n• Съела половину",
+            ),
+            inventory=payload,
+        )
 
     def _atomic_save_pending_record(
         self,
@@ -5751,6 +6101,7 @@ class HealBiteNutritionDiary:
                     piece_grams=_to_float(raw_item.get("piece_grams")),
                     edible_yield_ratio=_to_float(raw_item.get("edible_yield_ratio")),
                     grouped_item_ids=list(raw_item.get("grouped_item_ids") or []),
+                    user_nutrition=UserNutritionOverride.from_dict(raw_item.get("user_nutrition")) if raw_item.get("user_nutrition") else None,
                 )
             )
         raw_proc = payload.get("album_processing_status")

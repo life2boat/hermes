@@ -5115,7 +5115,20 @@ class HealBiteNutritionDiary:
                     raise ConcurrentEditConflict(
                         f"Invalid pending inventory structure for user {payload.user_id}: expected dict, got {type(stored).__name__}"
                     )
-                curr_ver = int(stored.get("inventory_version") or 1)
+                raw_ver = stored.get("inventory_version")
+                if raw_ver is None:
+                    curr_ver = 1
+                else:
+                    try:
+                        curr_ver = int(raw_ver)
+                    except (ValueError, TypeError) as exc:
+                        raise ConcurrentEditConflict(
+                            f"Invalid pending inventory version in stored payload for user {payload.user_id}: {raw_ver!r}"
+                        ) from exc
+                if curr_ver < 1:
+                    raise ConcurrentEditConflict(
+                        f"Non-positive pending inventory version in stored payload for user {payload.user_id}: {curr_ver}"
+                    )
                 curr_inv_id = stored.get("inventory_id")
                 if curr_ver != expected_version:
                     raise ConcurrentEditConflict(

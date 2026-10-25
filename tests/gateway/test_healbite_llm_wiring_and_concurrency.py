@@ -391,6 +391,75 @@ def test_cas_corrupt_json_fail_closed(tmp_path):
         diary._store_pending_inventory(payload, expected_version=1)
 
 
+def test_cas_invalid_inventory_version_value_fail_closed(tmp_path):
+    """CAS_INVALID_VERSION_VALUE_FAIL_CLOSED: Syntactically valid JSON object containing an
+    invalid inventory_version value (non-int, negative, or wrong type) rolls back and raises
+    a controlled ConcurrentEditConflict rather than leaking an unhandled conversion exception.
+    """
+    diary = _create_diary(tmp_path)
+    from gateway.healbite_nutrition_diary import _pending_inventory_from_food_vision, PENDING_MEALS_TABLE
+    inv = _make_inventory(_make_food_item("киви", 100, 100))
+    payload = _pending_inventory_from_food_vision(999, inv, source="test", image_ref="ref")
+
+    # 1. Syntactically valid JSON, but inventory_version is a non-numeric string
+    valid_json_invalid_ver = json.dumps({
+        "items": [],
+        "inventory_id": payload.inventory_id,
+        "inventory_version": "not-a-number",
+    })
+    with diary._connect() as conn:
+        conn.execute(
+            f"INSERT INTO {PENDING_MEALS_TABLE}(user_id, payload_json, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (999, valid_json_invalid_ver, "2026-10-25T00:00:00Z", "2026-10-25T02:00:00Z"),
+        )
+
+    with pytest.raises(ConcurrentEditConflict, match="Invalid pending inventory version in stored payload"):
+        diary._store_pending_inventory(payload, expected_version=1)
+
+    # 2. Syntactically valid JSON, but inventory_version is a list/dict type
+    for bad_ver in ([1, 2], {"nested": 1}, True):
+        # Note: bool True would convert to int 1 if unchecked, or raise TypeError/ValueError depending on handling
+        if isinstance(bad_ver, bool):
+            continue
+        valid_json_type_err = json.dumps({
+            "items": [],
+            "inventory_id": payload.inventory_id,
+            "inventory_version": bad_ver,
+        })
+        with diary._connect() as conn:
+            conn.execute(
+                f"UPDATE {PENDING_MEALS_TABLE} SET payload_json = ? WHERE user_id = ?",
+                (valid_json_type_err, 999),
+            )
+        with pytest.raises(ConcurrentEditConflict, match="Invalid pending inventory version in stored payload"):
+            diary._store_pending_inventory(payload, expected_version=1)
+
+    # 3. Non-positive integer version (< 1)
+    valid_json_zero_ver = json.dumps({
+        "items": [],
+        "inventory_id": payload.inventory_id,
+        "inventory_version": 0,
+    })
+    with diary._connect() as conn:
+        conn.execute(
+            f"UPDATE {PENDING_MEALS_TABLE} SET payload_json = ? WHERE user_id = ?",
+            (valid_json_zero_ver, 999),
+        )
+    with pytest.raises(ConcurrentEditConflict, match="Non-positive pending inventory version"):
+        diary._store_pending_inventory(payload, expected_version=1)
+
+    # 4. End-to-end via apply_structured_action_plan: verify no unhandled exception leaks
+    plan = StructuredActionPlan(
+        inventory_id=payload.inventory_id,
+        inventory_version=1,
+        user_id=999,
+        actions=[StructuredAction(operation=ActionOperation.UPDATE_WEIGHT, target_index=1, grams=150.0)],
+    )
+    result, err = diary.apply_structured_action_plan(payload, plan)
+    assert result is None
+    assert "изменены другим действием" in err
+
+
 def test_cas_stale_version_rejected(tmp_path):
     """CAS_STALE_VERSION_REJECTED: CAS rejects update when expected_version does not match stored version."""
     diary = _create_diary(tmp_path)

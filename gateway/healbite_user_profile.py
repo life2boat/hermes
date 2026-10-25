@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS {USERS_TABLE} (
     nutrition_calculation_version TEXT,
     nutrition_calculated_at TEXT,
     target_source TEXT,
+    manual_protein_g REAL,
+    manual_fat_g REAL,
+    manual_carbs_g REAL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS {PROFILES_TABLE} (
@@ -170,6 +173,9 @@ _USER_COLUMNS = {
     "nutrition_calculation_version": "TEXT",
     "nutrition_calculated_at": "TEXT",
     "target_source": "TEXT",
+    "manual_protein_g": "REAL",
+    "manual_fat_g": "REAL",
+    "manual_carbs_g": "REAL",
 }
 
 _PROFILE_COLUMNS = {
@@ -192,6 +198,9 @@ class HealBiteUserProfile:
     goal: str | None = None
     activity_level: str | None = None
     manual_kcal_target: float | None = None
+    manual_protein_g: float | None = None
+    manual_fat_g: float | None = None
+    manual_carbs_g: float | None = None
     daily_kcal_target: float | None = None
     daily_protein_g: float | None = None
     daily_fat_g: float | None = None
@@ -326,9 +335,13 @@ def _manual_target_reply_hint(profile: HealBiteUserProfile | None) -> str:
     if profile is not None and profile.manual_kcal_target is not None:
         return (
             f"Сейчас сохранена ручная цель: <b>{_format_target(profile.manual_kcal_target, 'ккал')}</b>.\n\n"
-            "Отправьте новое число, нажмите «Оставить как есть» или «Рассчитать автоматически»."
+            "Отправьте новые значения (например, <code>2000</code> или <code>2000 140 65 210</code>), "
+            "нажмите «Оставить как есть» или «Рассчитать автоматически»."
         )
-    return "Если хотите, отправьте свою ручную цель калорий. Или нажмите «Пропустить» для автоматического расчёта."
+    return (
+        "Если хотите, отправьте свою норму калорий (например, <code>2000</code>) или КБЖУ (например, <code>2000 140 65 210</code>).\n"
+        "Или нажмите «Пропустить» для автоматического расчёта по формуле Миффлина-Сан Жеора."
+    )
 
 
 def onboarding_keyboard_rows(step: str, profile: HealBiteUserProfile | None = None) -> list[list[str]] | None:
@@ -422,6 +435,183 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def format_healbite_targets_report(profile: HealBiteUserProfile | None) -> str:
+    """Format dedicated daily nutrition targets report (R1-06)."""
+    if profile is None or profile.daily_kcal_target is None:
+        return (
+            "🎯 <b>Персональная норма питания</b>\n\n"
+            "Цели КБЖУ ещё не настроены.\n"
+            "Нажмите /start, чтобы настроить профиль и рассчитать норму."
+        )
+
+    kcal = profile.daily_kcal_target
+    p = profile.daily_protein_target or profile.daily_protein_g or 0.0
+    f = profile.daily_fat_target or profile.daily_fat_g or 0.0
+    c = profile.daily_carbs_target or profile.daily_carbs_g or 0.0
+
+    p_kcal = p * 4.0
+    f_kcal = f * 9.0
+    c_kcal = c * 4.0
+    total_energy = p_kcal + f_kcal + c_kcal
+    if total_energy > 0:
+        p_pct = round((p_kcal / total_energy) * 100)
+        f_pct = round((f_kcal / total_energy) * 100)
+        c_pct = round((c_kcal / total_energy) * 100)
+        macro_text = (
+            f"🥩 <b>Белки:</b> {_format_target(p, 'г')} ({int(round(p_kcal))} ккал • {p_pct}%)\n"
+            f"🥑 <b>Жиры:</b> {_format_target(f, 'г')} ({int(round(f_kcal))} ккал • {f_pct}%)\n"
+            f"🍚 <b>Углеводы:</b> {_format_target(c, 'г')} ({int(round(c_kcal))} ккал • {c_pct}%)"
+        )
+    else:
+        macro_text = (
+            f"🥩 <b>Белки:</b> {_format_target(p, 'г')}\n"
+            f"🥑 <b>Жиры:</b> {_format_target(f, 'г')}\n"
+            f"🍚 <b>Углеводы:</b> {_format_target(c, 'г')}"
+        )
+
+    is_manual = (profile.target_source == "manual")
+    if is_manual:
+        source_label = "Ручная настройка (пользовательские цели сохранены)"
+    else:
+        source_label = f"Автоматический расчёт ({format_calculation_version(profile.nutrition_calculation_version)})"
+
+    lines = [
+        "🎯 <b>Ваша суточная норма КБЖУ</b>",
+        "",
+        f"🔥 <b>Калории:</b> {_format_target(kcal, 'ккал')}",
+        macro_text,
+        "",
+        f"📌 <b>Источник:</b> {source_label}",
+        "",
+        PROFILE_CALCULATION_DISCLAIMER,
+    ]
+    return "\n".join(lines)
+
+
+def parse_manual_nutrition_targets(
+    text: str,
+) -> tuple[float | None, float | None, float | None, float | None, str | None]:
+    """Parse manual nutrition targets from text.
+
+    Supports:
+      - 4 numbers: '2000 140 65 210' or '2000/140/65/210'
+      - 1 number (calories only): '2000' or '2000 ккал'
+      - Labeled: 'ккал 2000, б 140, ж 65, у 210' or '2000 ккал, 140г белка, 65г жира, 210г углей'
+      - 3 numbers (P/F/C only): '140 65 210' -> calories derived
+
+    Returns:
+      (calories, protein, fat, carbs, error_message)
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None, None, None, None, "Пустой ввод. Укажите калории или КБЖУ."
+
+    cleaned = re.sub(
+        r"^(?:/(?:targets|norm|goals|кбжу|цели)\b|кбжу|цели|цель|норма|моя\s+норма|мои\s+цели|суточная\s+норма)\s*:?\s*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if not cleaned:
+        return None, None, None, None, "Укажите значения калорийности и БЖУ."
+
+    cal_m = re.search(r"(?:ккал|калори[йия]|к|cals?|calories?)\s*[:=]?\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+    p_m = re.search(r"(?:белк[иоа]|белок|б|protein|prot)\s*[:=]?\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+    f_m = re.search(r"(?:жир[ыаов]?|ж|fats?)\s*[:=]?\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+    c_m = re.search(r"(?:углевод[ыаов]?|углев|угли|у|carbs?)\s*[:=]?\s*(\d+(?:[.,]\d+)?)", cleaned, re.IGNORECASE)
+
+    if not cal_m:
+        cal_m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:ккал|калори[йия]|cals?|calories?)\b", cleaned, re.IGNORECASE)
+    if not p_m:
+        p_m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:г|g)?\s*(?:белк[иоа]|белок|protein)\b", cleaned, re.IGNORECASE)
+    if not f_m:
+        f_m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:г|g)?\s*(?:жир[ыаов]?|fats?)\b", cleaned, re.IGNORECASE)
+    if not c_m:
+        c_m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:г|g)?\s*(?:углевод[ыаов]?|углев|угли|carbs?)\b", cleaned, re.IGNORECASE)
+
+    if cal_m or p_m or f_m or c_m:
+        cal = float(cal_m.group(1).replace(",", ".")) if cal_m else None
+        p = float(p_m.group(1).replace(",", ".")) if p_m else None
+        f = float(f_m.group(1).replace(",", ".")) if f_m else None
+        c = float(c_m.group(1).replace(",", ".")) if c_m else None
+    else:
+        parts = [p_str.replace(",", ".") for p_str in re.split(r"[\s/,;]+", cleaned) if p_str]
+        nums: list[float] = []
+        for part in parts:
+            try:
+                nums.append(float(part))
+            except ValueError:
+                pass
+        if len(nums) == 4:
+            cal, p, f, c = nums
+        elif len(nums) == 1:
+            cal, p, f, c = nums[0], None, None, None
+        elif len(nums) == 3:
+            p, f, c = nums
+            cal = round(p * 4.0 + f * 9.0 + c * 4.0)
+        else:
+            return None, None, None, None, "Не удалось распознать значения. Отправьте числа в формате: «2000 140 65 210» или «2000 ккал»."
+
+    if cal is not None and not (500 <= cal <= 10000):
+        return None, None, None, None, f"Калорийность ({int(cal)} ккал) вне допустимого диапазона (500 – 10000 ккал)."
+    if p is not None and not (10 <= p <= 500):
+        return None, None, None, None, f"Белки ({_format_target(p, 'г')}) вне допустимого диапазона (10 – 500 г)."
+    if f is not None and not (5 <= f <= 300):
+        return None, None, None, None, f"Жиры ({_format_target(f, 'г')}) вне допустимого диапазона (5 – 300 г)."
+    if c is not None and not (10 <= c <= 1000):
+        return None, None, None, None, f"Углеводы ({_format_target(c, 'г')}) вне допустимого диапазона (10 – 1000 г)."
+
+    if cal is not None and p is not None and f is not None and c is not None:
+        energy = p * 4.0 + f * 9.0 + c * 4.0
+        delta = abs(cal - energy)
+        if delta > 250:
+            return None, None, None, None, (
+                f"Несоответствие калорий и макронутриентов: {int(p)}г Б ({int(p*4)} ккал) + "
+                f"{int(f)}г Ж ({int(f*9)} ккал) + {int(c)}г У ({int(c*4)} ккал) = {int(energy)} ккал, "
+                f"что отличается от указанных {int(cal)} ккал более чем на 250 ккал. Проверьте значения."
+            )
+
+    return cal, p, f, c, None
+
+
+def parse_profile_field_update(text: str) -> tuple[str, Any] | None:
+    """Parse declarative text updating a single profile parameter."""
+    cleaned = (text or "").strip().lower()
+    if not cleaned or len(cleaned) > 200:
+        return None
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?рост(?:\s*[:=]|\s+)\s*(\d+(?:[.,]\d+)?)(?:\s*см)?", cleaned)
+    if m:
+        return "height_cm", float(m.group(1).replace(",", "."))
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?возраст(?:\s*[:=]|\s+)\s*(\d+)(?:\s*(?:лет|года?))?", cleaned)
+    if not m:
+        m = re.fullmatch(r"мне\s+(\d+)(?:\s*(?:лет|года?))?", cleaned)
+    if m:
+        return "age", int(m.group(1))
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?пол(?:\s*[:=]|\s+)\s*(мужской|женский|муж|жен|м|ж)", cleaned)
+    if m:
+        sex_val = normalize_sex(m.group(1))
+        if sex_val:
+            return "sex", sex_val
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:моя\s+)?цель(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        goal_val = normalize_goal(m.group(1).strip())
+        if goal_val:
+            return "goal", goal_val
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:моя\s+)?активность(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        act_val = normalize_activity_level(m.group(1).strip())
+        if act_val:
+            return "activity_level", act_val
+
+    return None
 
 
 def format_healbite_onboarding_prompt(
@@ -608,6 +798,10 @@ class HealBiteUserProfileStore:
             if (not target_source or target_source == "manual") and not calc_version:
                 manual_kcal_target = _to_float(user_row["daily_kcal_target"])
 
+        manual_protein_g = _to_float(user_row["manual_protein_g"]) if user_row is not None and "manual_protein_g" in user_row.keys() else None
+        manual_fat_g = _to_float(user_row["manual_fat_g"]) if user_row is not None and "manual_fat_g" in user_row.keys() else None
+        manual_carbs_g = _to_float(user_row["manual_carbs_g"]) if user_row is not None and "manual_carbs_g" in user_row.keys() else None
+
         profile = HealBiteUserProfile(
             user_id=int(user_id),
             username=str((user_row["username"] if user_row is not None and "username" in user_row.keys() else "") or ""),
@@ -622,6 +816,9 @@ class HealBiteUserProfileStore:
                 else normalize_activity_level(profile_row["activity"]) if profile_row is not None and "activity" in profile_row.keys() else None
             ),
             manual_kcal_target=manual_kcal_target,
+            manual_protein_g=manual_protein_g,
+            manual_fat_g=manual_fat_g,
+            manual_carbs_g=manual_carbs_g,
             daily_kcal_target=effective_targets.calories_kcal,
             daily_protein_g=effective_targets.protein_g,
             daily_fat_g=effective_targets.fat_g,
@@ -760,10 +957,10 @@ class HealBiteUserProfileStore:
         *,
         user_id: int,
         username: str = "",
-        daily_kcal_target: float | None = None,
-        daily_protein_target: float | None = None,
-        daily_fat_target: float | None = None,
-        daily_carbs_target: float | None = None,
+        daily_kcal_target: float | None | object = _UNSET,
+        daily_protein_target: float | None | object = _UNSET,
+        daily_fat_target: float | None | object = _UNSET,
+        daily_carbs_target: float | None | object = _UNSET,
         daily_protein_g: float | None | object = _UNSET,
         daily_fat_g: float | None | object = _UNSET,
         daily_carbs_g: float | None | object = _UNSET,
@@ -774,6 +971,9 @@ class HealBiteUserProfileStore:
         goal: str | None | object = _UNSET,
         activity_level: str | None | object = _UNSET,
         manual_kcal_target: float | None | object = _UNSET,
+        manual_protein_g: float | None | object = _UNSET,
+        manual_fat_g: float | None | object = _UNSET,
+        manual_carbs_g: float | None | object = _UNSET,
         calculated_bmr_kcal: float | None | object = _UNSET,
         calculated_tdee_kcal: float | None | object = _UNSET,
         nutrition_calculation_version: str | None | object = _UNSET,
@@ -784,9 +984,9 @@ class HealBiteUserProfileStore:
         timestamp = created_at or _sqlite_timestamp()
         normalized_user_id = int(user_id)
         normalized_username = (username or "").strip()
-        effective_daily_protein_g = daily_protein_target if daily_protein_g is _UNSET else daily_protein_g
-        effective_daily_fat_g = daily_fat_target if daily_fat_g is _UNSET else daily_fat_g
-        effective_daily_carbs_g = daily_carbs_target if daily_carbs_g is _UNSET else daily_carbs_g
+        effective_daily_protein_g = daily_protein_g if daily_protein_g is not _UNSET else daily_protein_target
+        effective_daily_fat_g = daily_fat_g if daily_fat_g is not _UNSET else daily_fat_target
+        effective_daily_carbs_g = daily_carbs_g if daily_carbs_g is not _UNSET else daily_carbs_target
         with self._connect() as conn:
             self._ensure_user_row(conn, user_id=normalized_user_id, username=normalized_username)
             user_columns = self._table_columns(conn, USERS_TABLE)
@@ -803,6 +1003,9 @@ class HealBiteUserProfileStore:
                 ("daily_protein_g", effective_daily_protein_g),
                 ("daily_fat_g", effective_daily_fat_g),
                 ("daily_carbs_g", effective_daily_carbs_g),
+                ("manual_protein_g", manual_protein_g),
+                ("manual_fat_g", manual_fat_g),
+                ("manual_carbs_g", manual_carbs_g),
                 ("calculated_bmr_kcal", calculated_bmr_kcal),
                 ("calculated_tdee_kcal", calculated_tdee_kcal),
                 ("nutrition_calculation_version", nutrition_calculation_version),
@@ -1017,36 +1220,49 @@ class HealBiteUserProfileStore:
 
         existing_manual = profile.manual_kcal_target
         lowered = text.casefold()
-        manual_value: float | None = existing_manual
-        target_source = "manual" if existing_manual is not None else "calculated"
 
-        if text in {"Пропустить", "пропустить"} and existing_manual is None:
+        if lowered in {"пропустить", "авто", "автоматически"} and existing_manual is None:
             target_source = "calculated"
             manual_value = None
-        elif text in {"Оставить как есть", "оставить как есть"} and existing_manual is not None:
+        elif lowered in {"оставить как есть", "оставить"} and existing_manual is not None:
             target_source = "manual"
             manual_value = existing_manual
-        elif text in {"Рассчитать автоматически", "рассчитать автоматически"} and existing_manual is not None:
+        elif lowered in {"рассчитать автоматически", "рассчитать", "автоматически", "сбросить"} and existing_manual is not None:
             target_source = "calculated"
+            manual_value = None
         else:
-            parsed = _to_float(text)
-            if parsed is None or parsed <= 0:
+            cal, p, f, c, parse_err = parse_manual_nutrition_targets(text)
+            if parse_err is not None or cal is None:
                 return HealBiteOnboardingReply(
                     status="invalid",
-                    text=format_healbite_onboarding_invalid_reply(ONBOARDING_STEP_MANUAL_TARGET, profile),
+                    text=f"⚠️ {parse_err or 'Не удалось распознать цели.'}\n\n{_manual_target_reply_hint(profile)}",
                     profile=profile,
                     next_step=ONBOARDING_STEP_MANUAL_TARGET,
                 )
-            manual_value = parsed
+            if p is not None and f is not None and c is not None:
+                recalculated = self.set_manual_nutrition_targets(
+                    user_id=int(user_id),
+                    username=username,
+                    calories_kcal=cal,
+                    protein_g=p,
+                    fat_g=f,
+                    carbs_g=c,
+                )
+                self.clear_onboarding_state(int(user_id))
+                return HealBiteOnboardingReply(
+                    status="completed",
+                    text=format_healbite_onboarding_completed_reply(recalculated),
+                    profile=recalculated,
+                )
+            manual_value = cal
             target_source = "manual"
-            self.upsert_user_profile(user_id=int(user_id), username=username, manual_kcal_target=manual_value)
 
         try:
             recalculated = self.recalculate_profile_targets(
                 user_id=int(user_id),
                 username=username,
                 target_source=target_source,
-                manual_kcal_target=manual_value if target_source == "manual" else existing_manual,
+                manual_kcal_target=manual_value if target_source == "manual" else None,
             )
         except NutritionTargetValidationError:
             logger.info(
@@ -1068,6 +1284,146 @@ class HealBiteUserProfileStore:
             text=format_healbite_onboarding_completed_reply(recalculated),
             profile=recalculated,
         )
+
+    def set_manual_nutrition_targets(
+        self,
+        *,
+        user_id: int,
+        username: str = "",
+        calories_kcal: float,
+        protein_g: float | None = None,
+        fat_g: float | None = None,
+        carbs_g: float | None = None,
+    ) -> HealBiteUserProfile:
+        """Explicitly set manual nutrition targets (R1-04)."""
+        profile = self.get_user_profile(int(user_id))
+        if profile is None:
+            self.upsert_user_profile(user_id=int(user_id), username=username)
+            profile = self.get_user_profile(int(user_id))
+
+        cal = float(calories_kcal)
+        p = float(protein_g) if protein_g is not None else None
+        f = float(fat_g) if fat_g is not None else None
+        c = float(carbs_g) if carbs_g is not None else None
+
+        if p is not None and f is not None and c is not None:
+            return self.upsert_user_profile(
+                user_id=int(user_id),
+                username=username or (profile.username if profile else ""),
+                daily_kcal_target=cal,
+                daily_protein_target=p,
+                daily_fat_target=f,
+                daily_carbs_target=c,
+                daily_protein_g=p,
+                daily_fat_g=f,
+                daily_carbs_g=c,
+                manual_kcal_target=cal,
+                manual_protein_g=p,
+                manual_fat_g=f,
+                manual_carbs_g=c,
+                target_source="manual",
+                nutrition_calculation_version="manual_v1",
+                nutrition_calculated_at=_sqlite_timestamp(),
+            )
+
+        if profile is not None and not profile_missing_fields(profile):
+            return self.recalculate_profile_targets(
+                user_id=int(user_id),
+                username=username or profile.username,
+                target_source="manual",
+                manual_kcal_target=cal,
+            )
+
+        weight = profile.weight_kg if profile else None
+        if weight and weight > 0:
+            p = round(weight * 1.6, 1)
+            f = round(weight * 0.8, 1)
+            remaining_kcal = cal - (p * 4.0 + f * 9.0)
+            c = max(10.0, round(remaining_kcal / 4.0, 1))
+        else:
+            p = round((cal * 0.30) / 4.0, 1)
+            f = round((cal * 0.30) / 9.0, 1)
+            c = round((cal * 0.40) / 4.0, 1)
+
+        return self.upsert_user_profile(
+            user_id=int(user_id),
+            username=username or (profile.username if profile else ""),
+            daily_kcal_target=cal,
+            daily_protein_target=p,
+            daily_fat_target=f,
+            daily_carbs_target=c,
+            daily_protein_g=p,
+            daily_fat_g=f,
+            daily_carbs_g=c,
+            manual_kcal_target=cal,
+            manual_protein_g=p,
+            manual_fat_g=f,
+            manual_carbs_g=c,
+            target_source="manual",
+            nutrition_calculation_version="manual_v1",
+            nutrition_calculated_at=_sqlite_timestamp(),
+        )
+
+    def update_profile_field(
+        self,
+        *,
+        user_id: int,
+        username: str = "",
+        field: str,
+        value: Any,
+    ) -> tuple[HealBiteUserProfile, bool]:
+        """Update single profile field and recalculate targets if appropriate (R1-05)."""
+        valid_fields = {"sex", "age", "height_cm", "weight_kg", "goal", "activity_level"}
+        if field not in valid_fields:
+            raise ValueError(f"Недопустимое поле профиля: {field}")
+
+        norm_value: Any = value
+        if field == "sex":
+            norm_value = normalize_sex(value)
+            if norm_value is None:
+                raise ValueError("Укажите пол: мужской или женский.")
+        elif field == "age":
+            norm_value = _to_int(value)
+            if norm_value is None or not (18 <= norm_value <= 100):
+                raise ValueError("Возраст должен быть числом от 18 до 100 лет.")
+        elif field == "height_cm":
+            norm_value = _to_float(value)
+            if norm_value is None or not (120 <= norm_value <= 230):
+                raise ValueError("Рост должен быть числом от 120 до 230 см.")
+        elif field == "weight_kg":
+            norm_value = _to_float(value)
+            if norm_value is None or not (35 <= norm_value <= 300):
+                raise ValueError("Вес должен быть числом от 35 до 300 кг.")
+        elif field == "goal":
+            norm_value = normalize_goal(value)
+            if norm_value is None:
+                raise ValueError("Цель должна быть: снижение веса, поддержание веса или набор массы.")
+        elif field == "activity_level":
+            norm_value = normalize_activity_level(value)
+            if norm_value is None:
+                raise ValueError("Укажите корректный уровень активности.")
+
+        self.upsert_user_profile(user_id=int(user_id), username=username, **{field: norm_value})
+        updated = self.get_user_profile(int(user_id))
+        if updated is None:
+            raise RuntimeError("Failed to load updated profile")
+
+        if updated.target_source == "manual":
+            return updated, False
+
+        if not profile_missing_fields(updated):
+            try:
+                recalculated = self.recalculate_profile_targets(
+                    user_id=int(user_id),
+                    username=username,
+                    target_source="calculated",
+                )
+                return recalculated, True
+            except Exception as e:
+                logger.warning("Could not recalculate targets after profile update: %s", e)
+                return updated, False
+
+        return updated, False
 
     def recalculate_profile_targets(
         self,
@@ -1094,6 +1450,7 @@ class HealBiteUserProfileStore:
             manual_kcal_target=manual_kcal_target if target_source == "manual" else None,
             target_source=target_source,
         )
+        is_manual = (calculation.target_source == "manual")
         self.upsert_user_profile(
             user_id=int(user_id),
             username=username or profile.username,
@@ -1109,7 +1466,10 @@ class HealBiteUserProfileStore:
             nutrition_calculation_version=calculation.calculation_version,
             nutrition_calculated_at=_sqlite_timestamp(),
             target_source=calculation.target_source,
-            manual_kcal_target=manual_kcal_target if calculation.target_source == "manual" else _UNSET,
+            manual_kcal_target=manual_kcal_target if is_manual else None,
+            manual_protein_g=profile.manual_protein_g if is_manual else None,
+            manual_fat_g=profile.manual_fat_g if is_manual else None,
+            manual_carbs_g=profile.manual_carbs_g if is_manual else None,
         )
         logger.info(
             "[HealBite][nutrition_profile_recalculated] calculation_version=%s calculation_result=ok goal=%s activity_level=%s target_source=%s",

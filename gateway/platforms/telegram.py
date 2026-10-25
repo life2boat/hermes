@@ -125,10 +125,13 @@ FOOD_INVENTORY_CALLBACK_ROOT = "food_inv:"
 from gateway.healbite_user_profile import (
     _format_target,
     format_healbite_profile_report,
+    format_healbite_targets_report,
     get_default_healbite_user_profile,
     get_existing_healbite_user_profile,
     is_healbite_profile_edit_intent,
     onboarding_keyboard_rows,
+    parse_manual_nutrition_targets,
+    parse_profile_field_update,
     profile_missing_fields,
 )
 from gateway.healbite_weekly_menu_telegram import (
@@ -283,6 +286,12 @@ _HEALBITE_NORMALIZED_COMMAND_MAP = {
     "статистика": "/stats 7d",
     "ограничения": "__placeholder__:restrictions",
     "помощь": "/help",
+    "норма": "/targets",
+    "цели": "/targets",
+    "кбжу": "/targets",
+    "моя норма": "/targets",
+    "мои цели": "/targets",
+    "суточная норма": "/targets",
 }
 _WEEKLY_MENU_INTENT_PATTERNS = (
     re.compile(r"\bсоставить\s+меню\b", re.IGNORECASE),
@@ -358,7 +367,8 @@ def _is_structured_inventory_input(text: str) -> bool:
 # else instead of guessing a target or substituting the caller's own id.
 HEALBITE_PROFILE_CALLBACK_ROOT = "profile:"
 HEALBITE_PROFILE_CALLBACK_EDIT = "edit"
-HEALBITE_PROFILE_CALLBACK_ACTIONS = frozenset({HEALBITE_PROFILE_CALLBACK_EDIT})
+HEALBITE_PROFILE_CALLBACK_VIEW = "view"
+HEALBITE_PROFILE_CALLBACK_ACTIONS = frozenset({HEALBITE_PROFILE_CALLBACK_EDIT, HEALBITE_PROFILE_CALLBACK_VIEW})
 # Telegram caps callback_data at 64 bytes.  Bound it independently so an
 # oversized payload can never reach int(), whose 4300-digit cap raises
 # ValueError (the exact path that previously fell back to the caller's id).
@@ -369,6 +379,36 @@ HEALBITE_PROFILE_CALLBACK_STALE_REPLY = (
 HEALBITE_PROFILE_CALLBACK_PRIVATE_ONLY_REPLY = (
     "Изменить профиль можно только в личном чате с ботом."
 )
+
+HEALBITE_TARGETS_CALLBACK_ROOT = "targets:"
+HEALBITE_TARGETS_CALLBACK_VIEW = "view"
+HEALBITE_TARGETS_CALLBACK_EDIT = "edit"
+HEALBITE_TARGETS_CALLBACK_RECALC = "recalc"
+HEALBITE_TARGETS_CALLBACK_ACTIONS = frozenset({
+    HEALBITE_TARGETS_CALLBACK_VIEW,
+    HEALBITE_TARGETS_CALLBACK_EDIT,
+    HEALBITE_TARGETS_CALLBACK_RECALC,
+})
+
+
+def parse_healbite_targets_callback(data: Any) -> Optional[Tuple[str, int]]:
+    """Strictly parse targets callback payloads: targets:<action>:<user_id>."""
+    if not isinstance(data, str) or not data.startswith(HEALBITE_TARGETS_CALLBACK_ROOT):
+        return None
+    if len(data) > 64:
+        return None
+    parts = data.split(":")
+    if len(parts) != 3:
+        return None
+    _, action, raw_target = parts
+    if action not in HEALBITE_TARGETS_CALLBACK_ACTIONS:
+        return None
+    if not raw_target.isascii() or not raw_target.isdigit():
+        return None
+    target_user_id = int(raw_target)
+    if target_user_id <= 0:
+        return None
+    return action, target_user_id
 
 
 def parse_healbite_profile_callback(data: Any) -> Optional[Tuple[str, int]]:
@@ -4220,6 +4260,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "weekly:",
             SHOPPING_CALLBACK_ROOT,
             HEALBITE_PROFILE_CALLBACK_ROOT,
+            HEALBITE_TARGETS_CALLBACK_ROOT,
             "weight:",
             "water:",
             FOOD_INVENTORY_CALLBACK_ROOT,
@@ -4283,6 +4324,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite profile callbacks ---
         if data.startswith(HEALBITE_PROFILE_CALLBACK_ROOT):
             await self._handle_healbite_profile_callback(query, data)
+            return
+
+        # --- HealBite targets callbacks ---
+        if data.startswith(HEALBITE_TARGETS_CALLBACK_ROOT):
+            await self._handle_healbite_targets_callback(query, data)
             return
 
         # --- HealBite food vision inventory callbacks ---
@@ -7277,12 +7323,121 @@ class TelegramAdapter(BasePlatformAdapter):
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
+                    "🎯 Норма КБЖУ",
+                    callback_data=f"{HEALBITE_TARGETS_CALLBACK_ROOT}"
+                    f"{HEALBITE_TARGETS_CALLBACK_VIEW}:{user_id}",
+                ),
+                InlineKeyboardButton(
                     "✏️ Изменить профиль",
                     callback_data=f"{HEALBITE_PROFILE_CALLBACK_ROOT}"
                     f"{HEALBITE_PROFILE_CALLBACK_EDIT}:{user_id}",
-                )
+                ),
             ],
         ])
+
+    def _healbite_targets_keyboard(self, *, user_id: int, is_manual: bool = False) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        rows = []
+        if is_manual:
+            rows.append([
+                InlineKeyboardButton(
+                    "🔄 Рассчитать автоматически",
+                    callback_data=f"{HEALBITE_TARGETS_CALLBACK_ROOT}"
+                    f"{HEALBITE_TARGETS_CALLBACK_RECALC}:{user_id}",
+                )
+            ])
+        rows.append([
+            InlineKeyboardButton(
+                "✏️ Изменить норму",
+                callback_data=f"{HEALBITE_TARGETS_CALLBACK_ROOT}"
+                f"{HEALBITE_TARGETS_CALLBACK_EDIT}:{user_id}",
+            ),
+            InlineKeyboardButton(
+                "👤 Профиль",
+                callback_data=f"{HEALBITE_PROFILE_CALLBACK_ROOT}"
+                f"{HEALBITE_PROFILE_CALLBACK_VIEW}:{user_id}",
+            ),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    async def _maybe_handle_healbite_targets_command(
+        self,
+        msg: Message,
+        *,
+        text_override: str | None = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/targets", "/norm", "/goals", "/кбжу", "/цели"}:
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(
+                msg=msg,
+                route="targets",
+            )
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text="Не удалось определить пользователя для просмотра целей.",
+                message_thread_id=thread_id,
+            )
+            return True
+
+        remainder = text[len(command_token):].strip()
+        if remainder:
+            cal, p, f, c, parse_err = parse_manual_nutrition_targets(remainder)
+            if cal is not None:
+                store = get_default_healbite_user_profile()
+                updated = store.set_manual_nutrition_targets(
+                    user_id=int(user_id),
+                    username=self._healbite_sender_username(msg),
+                    calories_kcal=cal,
+                    protein_g=p,
+                    fat_g=f,
+                    carbs_g=c,
+                )
+                keyboard = self._healbite_targets_keyboard(user_id=int(user_id), is_manual=True)
+                reply_text = f"✅ Ваша персональная суточная норма сохранена!\n\n{format_healbite_targets_report(updated)}"
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=reply_text,
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                return True
+            elif parse_err:
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=f"⚠️ {parse_err}",
+                    message_thread_id=thread_id,
+                )
+                return True
+
+        profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
+        is_manual = bool(profile and profile.target_source == "manual")
+        keyboard = self._healbite_targets_keyboard(user_id=int(user_id), is_manual=is_manual)
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=format_healbite_targets_report(profile),
+            message_thread_id=thread_id,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+        )
+        self._log_healbite_marker(
+            "healbite_reply_sent",
+            msg=msg,
+            route="targets_command",
+            outcome="targets_rendered",
+        )
+        return True
 
     async def _handle_healbite_profile_callback(self, query: Any, data: str) -> None:
         caller_user_id = getattr(getattr(query, "from_user", None), "id", None)
@@ -7338,7 +7493,22 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return
 
-        if action != HEALBITE_PROFILE_CALLBACK_EDIT:  # unreachable while the parser is strict
+        if action == HEALBITE_PROFILE_CALLBACK_VIEW:
+            profile = get_default_healbite_user_profile().get_user_profile(int(target_user_id))
+            keyboard = self._healbite_profile_keyboard(user_id=int(target_user_id))
+            chat_id = str(getattr(getattr(message, "chat", None), "id", caller_user_id))
+            thread_id = getattr(message, "message_thread_id", None)
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=format_healbite_profile_report(profile),
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if action != HEALBITE_PROFILE_CALLBACK_EDIT:
             await query.answer(text=HEALBITE_PROFILE_CALLBACK_STALE_REPLY)
             return
 
@@ -7391,6 +7561,83 @@ class TelegramAdapter(BasePlatformAdapter):
             outcome="edit_started",
         )
         return
+
+    async def _handle_healbite_targets_callback(self, query: Any, data: str) -> None:
+        caller_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if caller_user_id is None:
+            await query.answer(text="Не удалось определить пользователя.")
+            return
+
+        message = getattr(query, "message", None)
+        parsed = parse_healbite_targets_callback(data)
+        if parsed is None:
+            await query.answer(text="Кнопка устарела. Откройте /targets заново.")
+            return
+        action, target_user_id = parsed
+
+        if caller_user_id != target_user_id:
+            await query.answer(text="Действие доступно только владельцу профиля.", show_alert=True)
+            return
+
+        store = get_default_healbite_user_profile()
+        profile = store.get_user_profile(int(target_user_id))
+        chat_id = str(getattr(getattr(message, "chat", None), "id", caller_user_id))
+        thread_id = getattr(message, "message_thread_id", None)
+
+        if action == HEALBITE_TARGETS_CALLBACK_VIEW:
+            is_manual = bool(profile and profile.target_source == "manual")
+            keyboard = self._healbite_targets_keyboard(user_id=int(target_user_id), is_manual=is_manual)
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=format_healbite_targets_report(profile),
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if action == HEALBITE_TARGETS_CALLBACK_RECALC:
+            try:
+                updated = store.recalculate_profile_targets(
+                    user_id=int(target_user_id),
+                    username=getattr(getattr(query, "from_user", None), "username", "") or "",
+                    target_source="calculated",
+                )
+                keyboard = self._healbite_targets_keyboard(user_id=int(target_user_id), is_manual=False)
+                reply_text = (
+                    "✅ <b>Норма пересчитана автоматически!</b>\n\n"
+                    + format_healbite_targets_report(updated)
+                )
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=reply_text,
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer(text="Норма пересчитана автоматически!")
+            except Exception:
+                await query.answer(text="Не удалось пересчитать норму. Проверьте данные профиля через /profile.", show_alert=True)
+            return
+
+        if action == HEALBITE_TARGETS_CALLBACK_EDIT:
+            hint_text = (
+                "✏️ <b>Настройка персональной нормы КБЖУ</b>\n\n"
+                "Отправьте сообщением ваши значения:\n"
+                "• <b>4 числа</b> (калории белки жиры углеводы): <code>2000 140 65 210</code>\n"
+                "• или <b>только калории</b>: <code>2000</code>\n"
+                "• или с подписями: <code>2000 ккал, 140г белка, 65г жира, 210г углей</code>\n\n"
+                "<i>Чтобы вернуться к автоматическому расчёту, используйте кнопку «Рассчитать автоматически» в /targets.</i>"
+            )
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=hint_text,
+                message_thread_id=thread_id,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
 
     async def _maybe_handle_healbite_profile_update(self, msg: Message) -> bool:
         from gateway.healbite_profile_conversation import (
@@ -9846,6 +10093,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,
             )
+        if normalized_action in {"/targets", "/norm", "/goals", "/кбжу", "/цели"}:
+            return await self._maybe_handle_healbite_targets_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action == FAMILY_COMMAND:
             return await self._maybe_handle_healbite_family_command(
                 msg,
@@ -10504,6 +10757,73 @@ class TelegramAdapter(BasePlatformAdapter):
                 msg, text_override="/start edit"
             )
 
+        norm_text = " ".join(text.lower().split())
+        if norm_text in {"моя норма", "цели", "мои цели", "кбжу", "моё кбжу", "мое кбжу", "суточная норма"}:
+            return await self._maybe_handle_healbite_targets_command(msg, text_override="/targets")
+
+        field_update = parse_profile_field_update(text)
+        if field_update is not None and actor_user_id is not None:
+            field, val = field_update
+            store = get_default_healbite_user_profile()
+            profile = store.get_user_profile(int(actor_user_id))
+            if profile is not None and not store.get_onboarding_state(int(actor_user_id)):
+                try:
+                    updated, recalc = store.update_profile_field(
+                        user_id=int(actor_user_id),
+                        username=self._healbite_sender_username(msg),
+                        field=field,
+                        value=val,
+                    )
+                    recalc_note = "\n🎯 Норма КБЖУ пересчитана автоматически!" if recalc else ""
+                    reply_text = f"✅ Параметр успешно обновлён!{recalc_note}\n\n{format_healbite_profile_report(updated)}"
+                    keyboard = self._healbite_profile_keyboard(user_id=int(actor_user_id))
+                    await self._send_message_with_thread_fallback(
+                        chat_id=str(getattr(getattr(msg, "chat", None), "id", "")),
+                        text=reply_text,
+                        message_thread_id=getattr(msg, "message_thread_id", None),
+                        reply_markup=keyboard,
+                        parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                    )
+                    return True
+                except ValueError as e:
+                    await self._send_message_with_thread_fallback(
+                        chat_id=str(getattr(getattr(msg, "chat", None), "id", "")),
+                        text=f"⚠️ {e}",
+                        message_thread_id=getattr(msg, "message_thread_id", None),
+                    )
+                    return True
+
+        lowered_text = text.lower().strip()
+        if lowered_text.startswith(("кбжу ", "цели ", "норма ", "цель ")):
+            cal, p, f, c, parse_err = parse_manual_nutrition_targets(text)
+            if cal is not None and actor_user_id is not None:
+                store = get_default_healbite_user_profile()
+                updated = store.set_manual_nutrition_targets(
+                    user_id=int(actor_user_id),
+                    username=self._healbite_sender_username(msg),
+                    calories_kcal=cal,
+                    protein_g=p,
+                    fat_g=f,
+                    carbs_g=c,
+                )
+                keyboard = self._healbite_targets_keyboard(user_id=int(actor_user_id), is_manual=True)
+                reply_text = f"✅ Ваша персональная суточная норма сохранена!\n\n{format_healbite_targets_report(updated)}"
+                await self._send_message_with_thread_fallback(
+                    chat_id=str(getattr(getattr(msg, "chat", None), "id", "")),
+                    text=reply_text,
+                    message_thread_id=getattr(msg, "message_thread_id", None),
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                return True
+            elif parse_err is not None:
+                await self._send_message_with_thread_fallback(
+                    chat_id=str(getattr(getattr(msg, "chat", None), "id", "")),
+                    text=f"⚠️ {parse_err}",
+                    message_thread_id=getattr(msg, "message_thread_id", None),
+                )
+                return True
+
         return False
 
     async def _maybe_handle_nutrition_diary_undo_command(
@@ -10628,6 +10948,8 @@ class TelegramAdapter(BasePlatformAdapter):
             if await self._maybe_handle_healbite_weight_command(msg):
                 return
             if await self._maybe_handle_healbite_profile_command(msg):
+                return
+            if await self._maybe_handle_healbite_targets_command(msg):
                 return
             if await self._maybe_handle_nutrition_diary_undo_command(msg):
                 return

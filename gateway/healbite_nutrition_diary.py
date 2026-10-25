@@ -4331,8 +4331,8 @@ class HealBiteNutritionDiary:
         if self._executor is not None:
             self._executor.shutdown(wait=True)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -5090,32 +5090,71 @@ class HealBiteNutritionDiary:
         *,
         expected_version: int | None = None,
     ) -> PendingFoodVisionInventory:
-        if expected_version is not None:
-            with self._connect() as conn:
+        conn = self._connect()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if expected_version is not None:
                 cursor = conn.cursor()
                 cursor.execute(
                     f"SELECT payload_json FROM {PENDING_MEALS_TABLE} WHERE user_id = ?",
                     (int(payload.user_id),),
                 )
                 row = cursor.fetchone()
-                if row:
-                    try:
-                        stored = json.loads(row[0])
-                        curr_ver = int(stored.get("inventory_version") or 1)
-                        curr_inv_id = stored.get("inventory_id")
-                        if curr_ver != expected_version or (payload.inventory_id and curr_inv_id != payload.inventory_id):
-                            raise ConcurrentEditConflict(
-                                f"Pending inventory version mismatch: expected {expected_version}, got {curr_ver}"
-                            )
-                    except json.JSONDecodeError:
-                        pass
-        self._write_pending_state(
-            user_id=payload.user_id,
-            payload_json=self._serialize_pending_inventory(payload),
-            created_at=payload.created_at or _normalize_timestamp(),
-            expires_at=payload.expires_at or (_normalize_timestamp() + PENDING_MEAL_TTL),
-        )
-        return payload
+                if row is None:
+                    raise ConcurrentEditConflict(
+                        f"Pending inventory for user {payload.user_id} does not exist (cannot match expected version {expected_version})"
+                    )
+                try:
+                    stored = json.loads(row[0])
+                except Exception as exc:
+                    raise ConcurrentEditConflict(
+                        f"Corrupt pending inventory JSON for user {payload.user_id}: {exc}"
+                    ) from exc
+                if not isinstance(stored, dict):
+                    raise ConcurrentEditConflict(
+                        f"Invalid pending inventory structure for user {payload.user_id}: expected dict, got {type(stored).__name__}"
+                    )
+                curr_ver = int(stored.get("inventory_version") or 1)
+                curr_inv_id = stored.get("inventory_id")
+                if curr_ver != expected_version:
+                    raise ConcurrentEditConflict(
+                        f"Pending inventory version mismatch: expected {expected_version}, got {curr_ver}"
+                    )
+                if (payload.inventory_id or curr_inv_id) and (payload.inventory_id != curr_inv_id):
+                    raise ConcurrentEditConflict(
+                        f"Pending inventory ID mismatch: expected {payload.inventory_id}, got {curr_inv_id}"
+                    )
+
+            payload_json = self._serialize_pending_inventory(payload)
+            created_at = payload.created_at or _normalize_timestamp()
+            expires_at = payload.expires_at or (_normalize_timestamp() + PENDING_MEAL_TTL)
+            conn.execute(
+                f"""
+                INSERT INTO {PENDING_MEALS_TABLE}(user_id, payload_json, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    int(payload.user_id),
+                    payload_json,
+                    _sqlite_timestamp(created_at),
+                    _sqlite_timestamp(expires_at),
+                ),
+            )
+            conn.execute("COMMIT")
+            return payload
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def resolve_album_decision(
         self,

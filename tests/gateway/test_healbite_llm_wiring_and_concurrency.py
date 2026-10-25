@@ -282,6 +282,157 @@ def test_concurrent_edit_conflict(tmp_path):
     assert "изменены другим действием" in err2
 
 
+def test_true_multithreaded_concurrent_cas_race(tmp_path):
+    """True multi-threaded concurrent CAS race: two threads read version 1,
+    attempt to write version 2 simultaneously; exactly one succeeds, exactly
+    one is rejected with ConcurrentEditConflict / conflict error, and version
+    increments to 2 without data corruption.
+    """
+    import threading
+
+    db_path = tmp_path / "healbite_race.db"
+    diary_setup = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    inv = _make_inventory(_make_food_item("гречка", 100, 100))
+    _stage_inventory(diary_setup, 777, inv, "img_race")
+
+    diary1 = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    diary2 = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+
+    inv1 = diary1.get_pending_inventory(777)
+    inv2 = diary2.get_pending_inventory(777)
+    assert inv1.inventory_version == 1
+    assert inv2.inventory_version == 1
+
+    plan1 = StructuredActionPlan(
+        inventory_id=inv1.inventory_id,
+        inventory_version=1,
+        user_id=777,
+        actions=[StructuredAction(operation=ActionOperation.UPDATE_WEIGHT, target_index=1, grams=150.0)],
+    )
+    plan2 = StructuredActionPlan(
+        inventory_id=inv2.inventory_id,
+        inventory_version=1,
+        user_id=777,
+        actions=[StructuredAction(operation=ActionOperation.UPDATE_WEIGHT, target_index=1, grams=250.0)],
+    )
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[Any, Any] | None] = [None, None]
+
+    def worker(idx: int, diary_inst: HealBiteNutritionDiary, pending_inv: Any, plan: StructuredActionPlan) -> None:
+        barrier.wait()
+        res, err = diary_inst.apply_structured_action_plan(pending_inv, plan)
+        results[idx] = (res, err)
+
+    t1 = threading.Thread(target=worker, args=(0, diary1, inv1, plan1))
+    t2 = threading.Thread(target=worker, args=(1, diary2, inv2, plan2))
+
+    t1.start()
+    t2.start()
+    t1.join(timeout=10.0)
+    t2.join(timeout=10.0)
+
+    # Exactly one succeeded and one failed
+    successes = [r for r in results if r and r[0] is not None and r[1] is None]
+    failures = [r for r in results if r and r[0] is None and r[1] is not None]
+
+    assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {results}"
+    assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {results}"
+    assert "изменены другим действием" in failures[0][1]
+
+    # Check DB state
+    diary_verify = HealBiteNutritionDiary(db_path=db_path, background_write=False)
+    final_inv = diary_verify.get_pending_inventory(777)
+    assert final_inv is not None
+    assert final_inv.inventory_version == 2
+    assert final_inv.items[0].selected_grams in (150.0, 250.0)
+
+
+def test_cas_missing_row_fail_closed(tmp_path):
+    """CAS_MISSING_ROW_FAIL_CLOSED: CAS fails closed if pending inventory row does not exist."""
+    diary = _create_diary(tmp_path)
+    inv = _make_inventory(_make_food_item("яблоко", 100, 100))
+    from gateway.healbite_nutrition_diary import _pending_inventory_from_food_vision, PENDING_MEALS_TABLE
+    payload = _pending_inventory_from_food_vision(999, inv, source="test", image_ref="ref")
+    payload.inventory_version = 2
+
+    with pytest.raises(ConcurrentEditConflict, match="does not exist"):
+        diary._store_pending_inventory(payload, expected_version=1)
+
+    # Verify no row was inserted
+    with diary._connect() as conn:
+        count = conn.execute(f"SELECT COUNT(*) FROM {PENDING_MEALS_TABLE} WHERE user_id = 999").fetchone()[0]
+        assert count == 0
+
+
+def test_cas_corrupt_json_fail_closed(tmp_path):
+    """CAS_CORRUPT_JSON_FAIL_CLOSED: CAS fails closed if payload is corrupt or not a valid JSON object."""
+    diary = _create_diary(tmp_path)
+    from gateway.healbite_nutrition_diary import _pending_inventory_from_food_vision, PENDING_MEALS_TABLE
+    inv = _make_inventory(_make_food_item("банан", 100, 100))
+    payload = _pending_inventory_from_food_vision(888, inv, source="test", image_ref="ref")
+
+    # 1. Corrupted JSON syntax
+    with diary._connect() as conn:
+        conn.execute(
+            f"INSERT INTO {PENDING_MEALS_TABLE}(user_id, payload_json, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (888, "{broken json syntax", "2026-10-25T00:00:00Z", "2026-10-25T02:00:00Z"),
+        )
+    with pytest.raises(ConcurrentEditConflict, match="Corrupt pending inventory JSON"):
+        diary._store_pending_inventory(payload, expected_version=1)
+
+    # 2. Non-dict JSON (e.g. JSON array or scalar)
+    with diary._connect() as conn:
+        conn.execute(
+            f"UPDATE {PENDING_MEALS_TABLE} SET payload_json = ? WHERE user_id = ?",
+            (json.dumps(["not", "a", "dict"]), 888),
+        )
+    with pytest.raises(ConcurrentEditConflict, match="Invalid pending inventory structure"):
+        diary._store_pending_inventory(payload, expected_version=1)
+
+
+def test_cas_stale_version_rejected(tmp_path):
+    """CAS_STALE_VERSION_REJECTED: CAS rejects update when expected_version does not match stored version."""
+    diary = _create_diary(tmp_path)
+    inv = _make_inventory(_make_food_item("суп", 250, 250))
+    _stage_inventory(diary, 777, inv, "img_soup")
+
+    pending = diary.get_pending_inventory(777)
+    assert pending is not None
+    assert pending.inventory_version == 1
+
+    # Simulate advance to version 2
+    pending.inventory_version = 2
+    diary._store_pending_inventory(pending, expected_version=1)
+
+    # Stale request expecting version 1 must raise ConcurrentEditConflict
+    stale_payload = diary.get_pending_inventory(777)
+    assert stale_payload is not None
+    stale_payload.inventory_version = 3
+    with pytest.raises(ConcurrentEditConflict, match="version mismatch"):
+        diary._store_pending_inventory(stale_payload, expected_version=1)
+
+
+def test_cas_inventory_id_mismatch(tmp_path):
+    """CAS_INVENTORY_ID_MISMATCH: CAS rejects update when inventory_id does not match active session."""
+    diary = _create_diary(tmp_path)
+    inv = _make_inventory(_make_food_item("салат", 200, 200))
+    _stage_inventory(diary, 666, inv, "img_salad")
+
+    pending = diary.get_pending_inventory(666)
+    assert pending is not None
+    assert pending.inventory_version == 1
+
+    # Attempt to update with a different inventory_id
+    foreign_payload = diary.get_pending_inventory(666)
+    assert foreign_payload is not None
+    foreign_payload.inventory_id = "completely_different_id_999"
+    foreign_payload.inventory_version = 2
+
+    with pytest.raises(ConcurrentEditConflict, match="ID mismatch"):
+        diary._store_pending_inventory(foreign_payload, expected_version=1)
+
+
 # =============================================================================
 # 6. Invalid Target Rejected
 # =============================================================================

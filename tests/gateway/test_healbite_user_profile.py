@@ -16,7 +16,10 @@ from gateway.healbite_nutrition_diary import (
 from gateway.healbite_user_profile import (
     HealBiteUserProfileStore,
     format_healbite_profile_report,
+    format_healbite_targets_report,
     is_healbite_profile_edit_intent,
+    parse_manual_nutrition_targets,
+    parse_profile_field_update,
 )
 from gateway.platforms.telegram import (
     HEALBITE_PUBLIC_REPLY_KEYBOARD_ROWS,
@@ -1145,3 +1148,308 @@ async def test_text_profile_edit_intent_requires_private_chat(tmp_path, monkeypa
 
     assert consumed_private is True
     assert store.get_onboarding_state(709) is not None
+
+
+# ==============================================================================
+# R1-01 .. R1-06 COMPREHENSIVE CONTRACT TESTS
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_r1_01_telegram_registration_and_idempotence(tmp_path, monkeypatch):
+    """R1-01: Telegram registration, ID binding, idempotency, and resume."""
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    adapter._healbite_main_menu_keyboard = TelegramAdapter._healbite_main_menu_keyboard.__get__(adapter, TelegramAdapter)
+    adapter._healbite_menu_rows = TelegramAdapter._healbite_menu_rows.__get__(adapter, TelegramAdapter)
+    adapter._is_feature_allowlisted = lambda feat, uid: False
+
+    # 1. New user starts via /start - no passwords, linked to Telegram ID 12345
+    await adapter._handle_command(_make_update("/start", user_id=12345, username="alice"), SimpleNamespace())
+    state = store.get_onboarding_state(12345)
+    assert state is not None
+    assert state.step == "sex"
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Давайте настроим профиль HealBite" in kwargs["text"]
+
+    # 2. Complete onboarding
+    _complete_onboarding(store, user_id=12345, username="alice", manual_target="пропустить")
+    profile = store.get_user_profile(12345)
+    assert profile is not None
+    assert profile.user_id == 12345
+    assert profile.username == "alice"
+    assert profile.target_source == "calculated"
+    assert profile.daily_kcal_target is not None
+
+    # 3. Repeated /start for existing user does not reset profile and returns dashboard
+    adapter._send_message_with_thread_fallback.reset_mock()
+    await adapter._handle_command(_make_update("/start", user_id=12345, username="alice"), SimpleNamespace())
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "С возвращением в HealBite!" in kwargs["text"]
+    assert str(int(profile.daily_kcal_target)) in kwargs["text"]
+    # Profile remains untouched
+    refreshed = store.get_user_profile(12345)
+    assert refreshed.daily_kcal_target == profile.daily_kcal_target
+
+    # 4. Partial onboarding resume: user stops at step 3, returns later
+    store.begin_onboarding(user_id=54321, username="bob")
+    store.handle_onboarding_reply(user_id=54321, text="Мужской")
+    store.handle_onboarding_reply(user_id=54321, text="28")
+    assert store.get_onboarding_state(54321).step == "height_cm"
+
+    # User sends /start again
+    adapter._send_message_with_thread_fallback.reset_mock()
+    await adapter._handle_command(_make_update("/start", user_id=54321, username="bob"), SimpleNamespace())
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Продолжаем настройку профиля" in kwargs["text"]
+    assert "Рост" in kwargs["text"]
+
+
+def test_r1_02_questionnaire_input_validation(tmp_path):
+    """R1-02: Initial questionnaire strictly validates bounds and rejects invalid inputs."""
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    uid = 202
+    store.begin_onboarding(user_id=uid, username="tester")
+
+    # Step 1: Sex
+    rep = store.handle_onboarding_reply(user_id=uid, text="что-то странное")
+    assert rep.status == "invalid"
+    assert "Не понял пол" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="Мужской")
+    assert rep.status == "next"
+    assert rep.next_step == "age"
+
+    # Step 2: Age (18-100)
+    rep = store.handle_onboarding_reply(user_id=uid, text="17")
+    assert rep.status == "invalid"
+    assert "Не понял возраст" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="101")
+    assert rep.status == "invalid"
+    rep = store.handle_onboarding_reply(user_id=uid, text="тридцать")
+    assert rep.status == "invalid"
+    rep = store.handle_onboarding_reply(user_id=uid, text="30")
+    assert rep.status == "next"
+    assert rep.next_step == "height_cm"
+
+    # Step 3: Height (120-230)
+    rep = store.handle_onboarding_reply(user_id=uid, text="115")
+    assert rep.status == "invalid"
+    assert "Не понял рост" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="240")
+    assert rep.status == "invalid"
+    rep = store.handle_onboarding_reply(user_id=uid, text="178")
+    assert rep.status == "next"
+    assert rep.next_step == "weight_kg"
+
+    # Step 4: Weight (35-300)
+    rep = store.handle_onboarding_reply(user_id=uid, text="30")
+    assert rep.status == "invalid"
+    assert "Не понял вес" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="350")
+    assert rep.status == "invalid"
+    rep = store.handle_onboarding_reply(user_id=uid, text="75.5")
+    assert rep.status == "next"
+    assert rep.next_step == "goal"
+
+    # Step 5: Goal
+    rep = store.handle_onboarding_reply(user_id=uid, text="хочу летать")
+    assert rep.status == "invalid"
+    assert "Не понял цель" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="Снижение веса")
+    assert rep.status == "next"
+    assert rep.next_step == "activity_level"
+
+    # Step 6: Activity
+    rep = store.handle_onboarding_reply(user_id=uid, text="непонятно")
+    assert rep.status == "invalid"
+    assert "Не понял активность" in rep.text
+    rep = store.handle_onboarding_reply(user_id=uid, text="Умеренная активность")
+    assert rep.status == "next"
+    assert rep.next_step == "manual_kcal_target"
+
+
+def test_r1_03_automatic_mifflin_calculation_and_macros(tmp_path):
+    """R1-03: Automatic Mifflin calculation, macros ratio and energy consistency."""
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    uid = 303
+    store.begin_onboarding(user_id=uid, username="mifflin_tester")
+    _complete_onboarding(store, user_id=uid, username="mifflin_tester", manual_target="пропустить")
+
+    profile = store.get_user_profile(uid)
+    assert profile is not None
+    assert profile.target_source == "calculated"
+    assert profile.nutrition_calculation_version == "mifflin_v1"
+
+    # Check macro distribution for weight 85kg:
+    # protein = 85 * 1.6 = 136g
+    # fat = 85 * 0.8 = 68g
+    assert profile.daily_protein_g == 136.0
+    assert profile.daily_fat_g == 68.0
+    assert profile.daily_carbs_g is not None and profile.daily_carbs_g > 0
+
+    # Check energy consistency: |kcal - (P*4 + F*9 + C*4)| <= 15 kcal
+    cal = profile.daily_kcal_target
+    macro_energy = profile.daily_protein_g * 4.0 + profile.daily_fat_g * 9.0 + profile.daily_carbs_g * 4.0
+    assert abs(cal - macro_energy) <= 15.0
+
+
+def test_r1_04_manual_kbju_settings_and_persistence(tmp_path):
+    """R1-04: Manual setting of calories AND macros, range/energy validation, and diary pickup."""
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    uid = 404
+    store.begin_onboarding(user_id=uid, username="manual_tester")
+    _complete_onboarding(store, user_id=uid, username="manual_tester", manual_target="пропустить")
+
+    # 1. Parse valid manual targets: 2100 kcal, 150g P, 70g F, 220g C
+    # 150*4 + 70*9 + 220*4 = 600 + 630 + 880 = 2110 kcal (delta 10 kcal <= 250 kcal)
+    cal, p, f, c, err = parse_manual_nutrition_targets("2100 150 70 220")
+    assert err is None
+    assert (cal, p, f, c) == (2100.0, 150.0, 70.0, 220.0)
+
+    # 2. Reject out of range calories
+    _, _, _, _, err_low = parse_manual_nutrition_targets("400")
+    assert err_low is not None and "вне допустимого диапазона" in err_low
+
+    # 3. Reject huge energy mismatch (>250 kcal)
+    # 2000 kcal vs 100g P, 30g F, 100g C = 400 + 270 + 400 = 1070 kcal (delta 930 kcal)
+    _, _, _, _, err_mismatch = parse_manual_nutrition_targets("2000 100 30 100")
+    assert err_mismatch is not None and "Несоответствие калорий" in err_mismatch
+
+    # 4. Save manual targets
+    saved_profile = store.set_manual_nutrition_targets(
+        user_id=uid,
+        username="manual_tester",
+        calories_kcal=2100.0,
+        protein_g=150.0,
+        fat_g=70.0,
+        carbs_g=220.0,
+    )
+    assert saved_profile.target_source == "manual"
+    assert saved_profile.daily_kcal_target == 2100.0
+    assert saved_profile.daily_protein_g == 150.0
+    assert saved_profile.daily_fat_g == 70.0
+    assert saved_profile.daily_carbs_g == 220.0
+    assert saved_profile.manual_protein_g == 150.0
+    assert saved_profile.manual_fat_g == 70.0
+    assert saved_profile.manual_carbs_g == 220.0
+
+    # 5. Persistence across new store instance
+    store2 = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    reloaded = store2.get_user_profile(uid)
+    assert reloaded.target_source == "manual"
+    assert reloaded.daily_kcal_target == 2100.0
+    assert reloaded.daily_protein_g == 150.0
+    assert reloaded.daily_fat_g == 70.0
+    assert reloaded.daily_carbs_g == 220.0
+
+    # 6. Verify diary directly reads these manual targets
+    from gateway.healbite_nutrition_diary import load_nutrition_targets
+    diary_targets = load_nutrition_targets(tmp_path / "healbite.db", user_id=uid)
+    assert diary_targets.calories_kcal == 2100.0
+    assert diary_targets.protein_g == 150.0
+    assert diary_targets.fat_g == 70.0
+    assert diary_targets.carbs_g == 220.0
+
+
+def test_r1_05_profile_editing_and_user_isolation(tmp_path):
+    """R1-05: Update profile parameters, strict user isolation, and target preservation."""
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+
+    # User A has calculated targets
+    store.begin_onboarding(user_id=501, username="user_a")
+    _complete_onboarding(store, user_id=501, username="user_a", manual_target="пропустить")
+    profile_a_before = store.get_user_profile(501)
+    assert profile_a_before.target_source == "calculated"
+    kcal_a_before = profile_a_before.daily_kcal_target
+
+    # User B has manual targets
+    store.begin_onboarding(user_id=502, username="user_b")
+    _complete_onboarding(store, user_id=502, username="user_b", manual_target="пропустить")
+    store.set_manual_nutrition_targets(user_id=502, calories_kcal=2500, protein_g=180, fat_g=80, carbs_g=265)
+    profile_b_before = store.get_user_profile(502)
+    assert profile_b_before.target_source == "manual"
+
+    # User A updates weight: 85 -> 95 kg
+    updated_a, recalculated = store.update_profile_field(user_id=501, field="weight_kg", value=95)
+    assert recalculated is True
+    assert updated_a.weight_kg == 95.0
+    # Because target_source was calculated, daily_kcal_target recalculates higher
+    assert updated_a.daily_kcal_target > kcal_a_before
+
+    # Verify strict user isolation: User B's profile was completely unaffected!
+    profile_b_after = store.get_user_profile(502)
+    assert profile_b_after.weight_kg == profile_b_before.weight_kg
+    assert profile_b_after.daily_kcal_target == 2500.0
+    assert profile_b_after.daily_protein_g == 180.0
+
+    # User B updates weight: 85 -> 80 kg
+    updated_b, recalculated_b = store.update_profile_field(user_id=502, field="weight_kg", value=80)
+    assert recalculated_b is False  # NOT recalculated because target_source == manual!
+    assert updated_b.weight_kg == 80.0
+    assert updated_b.daily_kcal_target == 2500.0  # Custom goals preserved!
+    assert updated_b.daily_protein_g == 180.0
+
+    # Declarative field parsing
+    assert parse_profile_field_update("рост 175") == ("height_cm", 175.0)
+    assert parse_profile_field_update("возраст 32 года") == ("age", 32)
+    assert parse_profile_field_update("цель похудение") == ("goal", "lose")
+    assert parse_profile_field_update("активность высокая") == ("activity_level", "high")
+    assert parse_profile_field_update("пол мужской") == ("sex", "male")
+
+
+@pytest.mark.asyncio
+async def test_r1_06_view_personal_norm_and_telegram_triggers(tmp_path, monkeypatch):
+    """R1-06: View targets via /targets, /norm, text triggers, report formatting and callbacks."""
+    adapter = _make_adapter()
+    store = HealBiteUserProfileStore(db_path=tmp_path / "healbite.db")
+    store.begin_onboarding(user_id=601, username="norm_user")
+    _complete_onboarding(store, user_id=601, username="norm_user", manual_target="пропустить")
+    _patch_telegram_profile_store(monkeypatch, store)
+
+    adapter._maybe_handle_healbite_targets_command = TelegramAdapter._maybe_handle_healbite_targets_command.__get__(adapter, TelegramAdapter)
+    adapter._healbite_targets_keyboard = TelegramAdapter._healbite_targets_keyboard.__get__(adapter, TelegramAdapter)
+    adapter._dispatch_healbite_keyboard_action = TelegramAdapter._dispatch_healbite_keyboard_action.__get__(adapter, TelegramAdapter)
+
+    # 1. View targets via /targets command
+    await adapter._handle_command(_make_update("/targets", user_id=601), SimpleNamespace())
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Ваша суточная норма КБЖУ" in kwargs["text"]
+    assert "Калории:" in kwargs["text"]
+    assert "Белки:" in kwargs["text"]
+    assert "Жиры:" in kwargs["text"]
+    assert "Углеводы:" in kwargs["text"]
+    assert "Mifflin v1" in kwargs["text"]
+
+    # 2. View targets via /norm alias
+    adapter._send_message_with_thread_fallback.reset_mock()
+    await adapter._handle_command(_make_update("/norm", user_id=601), SimpleNamespace())
+    assert "Ваша суточная норма КБЖУ" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+
+    # 3. View targets via text trigger "моя норма"
+    adapter._send_message_with_thread_fallback.reset_mock()
+    consumed = await adapter._maybe_handle_healbite_explicit_intent(_make_update("моя норма", user_id=601).message)
+    assert consumed is True
+    assert "Ваша суточная норма КБЖУ" in adapter._send_message_with_thread_fallback.await_args.kwargs["text"]
+
+    # 4. Set manual targets via text message: "кбжу 2200 160 70 230"
+    adapter._send_message_with_thread_fallback.reset_mock()
+    consumed_edit = await adapter._maybe_handle_healbite_explicit_intent(_make_update("кбжу 2200 160 70 230", user_id=601).message)
+    assert consumed_edit is True
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "Ваша персональная суточная норма сохранена!" in kwargs["text"]
+    assert "2200 ккал" in kwargs["text"]
+    assert "160" in kwargs["text"]
+    profile_updated = store.get_user_profile(601)
+    assert profile_updated.target_source == "manual"
+    assert profile_updated.daily_kcal_target == 2200.0
+
+    # 5. Targets callback: "targets:recalc:601" resets back to calculated
+    adapter._send_message_with_thread_fallback.reset_mock()
+    recalc_update = _make_callback_update(data="targets:recalc:601", user_id=601, chat_type="private")
+    await adapter._handle_callback_query(recalc_update, SimpleNamespace())
+    profile_recalculated = store.get_user_profile(601)
+    assert profile_recalculated.target_source == "calculated"
+    kwargs = adapter._send_message_with_thread_fallback.await_args.kwargs
+    assert "пересчитана автоматически" in kwargs["text"]

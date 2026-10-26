@@ -2129,7 +2129,15 @@ def validate_food_vision_inventory(payload_text: str) -> FoodVisionValidationRes
         warnings=warnings,
     )
     confirmation = derive_inventory_confirmation_requirement(inventory)
-    normalized_inventory = replace(inventory, needs_user_confirmation=confirmation.required)
+    effective_warnings = list(warnings)
+    if "low_overall_confidence" in confirmation.reasons or "low_item_confidence" in confirmation.reasons:
+        if not any("уверен" in w.lower() for w in effective_warnings):
+            effective_warnings.append("Не удалось уверенно распознать блюдо. Проверьте состав перед сохранением.")
+    normalized_inventory = replace(
+        inventory,
+        needs_user_confirmation=confirmation.required,
+        warnings=effective_warnings,
+    )
     return FoodVisionValidationResult(
         status="NEEDS_CLARIFICATION" if confirmation.required else "VALID",
         inventory=normalized_inventory,
@@ -2141,6 +2149,12 @@ def _format_food_vision_grams(item: FoodVisionItem | PendingFoodVisionItem) -> s
     grams_min = item.estimated_grams_min
     grams_max = item.estimated_grams_max
     if grams_min is None and grams_max is None:
+        if getattr(item, "selected_grams", None) is not None:
+            return f"~{item.selected_grams:.0f} \u0433"
+        from gateway.nutrition.hipe import estimate_portion_mass
+        prior = estimate_portion_mass(getattr(item, "normalized_name", None) or getattr(item, "visible_name", None) or "")
+        if prior and prior.grams_center:
+            return f"~{prior.grams_center:.0f} \u0433"
         return "\u0432\u0435\u0441 \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u0435\u043d"
     if grams_min is not None and grams_max is not None:
         if grams_min == grams_max:
@@ -4518,6 +4532,7 @@ class HealBiteNutritionDiary:
             return NutritionDiaryOutcome(
                 available=False,
                 raw_analysis=combined_raw_analysis,
+                clarification_text="Кажется, на этой фотографии нет еды. Отправьте, пожалуйста, фото блюда или продукта, либо опишите приём пищи текстом.",
                 validation_status="NON_FOOD",
             )
 

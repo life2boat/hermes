@@ -81,6 +81,9 @@ System Volume Information/
 *.sqlite-wal
 *.sqlite-shm
 nutrition_catalog_v2.db*
+!gateway/nutrition/data/
+!gateway/nutrition/data/nutrition_catalog_v2.db
+!gateway/nutrition/data/nutrition_catalog_v2.db.manifest.json
 tests/benchmarks/photo_kbzhu_v1/images/
 data/
 .hermes-docker/

@@ -33,6 +33,9 @@ _CANONICAL_BINARY_FIXTURE_SHA256 = {
     "tests/fixtures/food_vision_quality/v2/images/fixture_c.png": (
         "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd"
     ),
+    "gateway/nutrition/data/nutrition_catalog_v2.db": (
+        "2fbe95c69a15f122177322411b7888ef3020f884acd01eab6126358acbc9a3f7"
+    ),
 }
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 

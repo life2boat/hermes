@@ -51,6 +51,20 @@ _NON_FOOD_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:фото|photo|еда|блюдо|порция|завтрак|обед|ужин|перекус)$", re.IGNORECASE),
 )
 
+_META_INSTRUCTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)\s+(?:весит|вес|масса|здесь|тут)?\s*\d+(?:[.,]\d+)?\s*(?:г|гр|грам|грамм|граммов|кг|г\.)\b", re.IGNORECASE),
+    re.compile(r"^(?:весит|вес|масса|общий\s+вес|вес\s+блюда|вес\s+порции)\s*(?:составляет|:)?\s*\d+(?:[.,]\d+)?\s*(?:г|гр|грам|грамм|граммов|кг|г\.)\b", re.IGNORECASE),
+    re.compile(r"^(?:без|не\s+добавлять|убрать|исключить)\s+[а-яa-z\s]+$", re.IGNORECASE),
+)
+
+
+@dataclass(slots=True)
+class TextMealConstraint:
+    total_weight_g: float | None = None
+    excluded_ingredients: list[str] = field(default_factory=list)
+    partial_item_weights: dict[str, float] = field(default_factory=dict)
+    has_constraints: bool = False
+
 
 @dataclass(slots=True)
 class ParsedIngredient:
@@ -107,6 +121,11 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         if pat.match(cleaned):
             return None
 
+    # Reject pure meta-instructions (e.g. "Это блюдо весит 350 г" or "Без сметаны")
+    for pat in _META_INSTRUCTION_PATTERNS:
+        if pat.match(cleaned):
+            return None
+
     # Normalize common quotes, em-dashes
     cleaned = cleaned.replace("«", "").replace("»", "").replace('"', "").replace("—", "-")
 
@@ -146,6 +165,12 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         # Strip leading dashes / bullets
         part = re.sub(r"^[-–—\s*]+", "", part).strip()
         if not part:
+            continue
+
+        # Skip exclusions or meta-weight fragments
+        if re.match(r"^(?:без|не\s+добавлять|убрать|исключить)\b", part, re.IGNORECASE):
+            continue
+        if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)\s+(?:весит|вес|масса|здесь|тут)?\s*\d", part, re.IGNORECASE):
             continue
 
         # Check for fraction piece format, e.g. "1/2 яйца", "2 яйца", "1.5 яблока"
@@ -209,6 +234,8 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             clean_name = re.sub(r"\s+", " ", clean_name).strip()
 
             if clean_name:
+                if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", clean_name, re.IGNORECASE):
+                    continue
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,
@@ -226,6 +253,10 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         # If no explicit weight found, check if it's a known food ingredient or dish
         clean_text = part.strip()
         if len(clean_text) >= 2:
+            if re.match(r"^(?:без|убрать|не\s+добавлять|исключить)\b", clean_text, re.IGNORECASE):
+                continue
+            if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", clean_text, re.IGNORECASE):
+                continue
             ingredients.append(
                 ParsedIngredient(
                     raw_text=part,
@@ -242,6 +273,10 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         # Check single food item without recipe structure
         single_cand = cleaned.strip()
         if len(single_cand) >= 3 and not single_cand.startswith("/"):
+            if re.match(r"^(?:без|убрать|не\s+добавлять|исключить)\b", single_cand, re.IGNORECASE):
+                return None
+            if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", single_cand, re.IGNORECASE):
+                return None
             return ParsedFoodText(
                 dish_title=single_cand.capitalize(),
                 ingredients=[
@@ -262,6 +297,9 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             )
         return None
 
+    if not ingredients:
+        return None
+
     total_grams = round(sum(it.grams for it in ingredients), 1)
     is_structured = any(it.grams != 100.0 or it.is_piece or it.fat_percent is not None for it in ingredients) or len(ingredients) > 1
 
@@ -277,3 +315,137 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         has_food_intent=len(ingredients) > 0 or bool(dish_title),
         total_grams=total_grams,
     )
+
+
+def parse_text_meal_constraints(text: str) -> TextMealConstraint | None:
+    """
+    Parses user constraints and annotations from caption or text turn.
+    Extracts:
+      - total_weight_g: e.g. "Это блюдо весит 350 г", "Вес 350г", "Общий вес 400 грамм"
+      - excluded_ingredients: e.g. "Без сметаны", "убрать лук", "не добавлять майонез"
+      - partial_item_weights: e.g. "Курицы здесь 120 г", "Здесь 120 г курицы"
+    """
+    if not text or not text.strip():
+        return None
+
+    cleaned = text.strip()
+    total_weight: float | None = None
+    excluded: list[str] = []
+    partial_weights: dict[str, float] = {}
+
+    # 1. Total dish weight constraint
+    total_weight_patterns = [
+        r"(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)\s+(?:весит|вес|масса|здесь|тут)?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|граммов|кг|килограмм|г\.)\b",
+        r"\b(?:общий\s+вес|вес\s+блюда|вес\s+порции|масса\s+блюда|масса\s+порции)\s*(?:составляет|:)?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|граммов|кг|килограмм|г\.)\b",
+        r"\b(?:весит|вес|масса)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|граммов|кг|килограмм|г\.)\b",
+        r"^(?:здесь|тут|всего)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|граммов|кг|килограмм|г\.)\b",
+    ]
+    for pat in total_weight_patterns:
+        m = re.search(pat, cleaned, re.IGNORECASE)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", "."))
+                unit_matched = m.group(0).lower()
+                if "кг" in unit_matched or "килограмм" in unit_matched:
+                    val *= 1000.0
+                total_weight = round(val, 1)
+                break
+            except ValueError:
+                pass
+
+    # 2. Excluded ingredients ("без ...", "убрать ...", "не добавлять ...")
+    for m in re.finditer(r"\b(?:без|не\s+добавлять|убрать|исключить)\s+([^,.;\n]+)", cleaned, re.IGNORECASE):
+        phrase = m.group(1).strip()
+        parts = re.split(r"\b(?:и|или)\b|,", phrase, flags=re.IGNORECASE)
+        for p in parts:
+            clean = p.strip().lower()
+            clean = re.sub(r"\b(?:пожалуйста|совсем|вообще)\b", "", clean).strip()
+            if clean and len(clean) >= 2:
+                excluded.append(clean)
+
+    # 3. Partial item weights with explicit context indicators
+    # e.g. "курицы здесь 120 г", "курица здесь 120г", "здесь 120г курицы"
+    for m in re.finditer(
+        r"\b([а-яa-z]+(?:\s+[а-яa-z]+)?)\s+(?:здесь|тут)\s*(?:весит|вес)?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\b",
+        cleaned,
+        re.IGNORECASE,
+    ):
+        food_name = m.group(1).strip().lower()
+        if any(w in food_name for w in ["это блюдо", "блюдо", "порция", "еда", "тарелка", "всё", "всего", "общий вес"]):
+            continue
+        try:
+            val = float(m.group(2).replace(",", "."))
+            food_name = re.sub(r"\b(?:здесь|тут|примерно|около)\b", "", food_name).strip()
+            if food_name and len(food_name) >= 3:
+                partial_weights[food_name] = round(val, 1)
+        except ValueError:
+            pass
+
+    for m in re.finditer(
+        r"(?:здесь|тут)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\s+([а-яa-z]+(?:\s+[а-яa-z]+)?)\b",
+        cleaned,
+        re.IGNORECASE,
+    ):
+        food_name = m.group(2).strip().lower()
+        if any(w in food_name for w in ["это блюдо", "блюдо", "порция", "еда", "тарелка", "всё", "всего", "общий вес"]):
+            continue
+        try:
+            val = float(m.group(1).replace(",", "."))
+            food_name = re.sub(r"\b(?:здесь|тут|примерно|около)\b", "", food_name).strip()
+            if food_name and len(food_name) >= 3:
+                partial_weights[food_name] = round(val, 1)
+        except ValueError:
+            pass
+
+    has_constraints = bool(total_weight or excluded or partial_weights)
+    if not has_constraints:
+        return None
+
+    return TextMealConstraint(
+        total_weight_g=total_weight,
+        excluded_ingredients=excluded,
+        partial_item_weights=partial_weights,
+        has_constraints=has_constraints,
+    )
+
+
+def is_full_food_description(text_or_parsed: str | ParsedFoodText | None) -> bool:
+    """
+    Returns True if the text or parsed text contains a complete, self-contained food
+    description with explicit mass/quantity for all items, allowing Vision to be bypassed.
+    """
+    if not text_or_parsed:
+        return False
+
+    parsed: ParsedFoodText | None
+    if isinstance(text_or_parsed, str):
+        parsed = parse_food_text_description(text_or_parsed)
+        raw_text = text_or_parsed
+    else:
+        parsed = text_or_parsed
+        raw_text = parsed.raw_text
+
+    if not parsed or not parsed.has_food_intent or not parsed.ingredients:
+        return False
+
+    low_text = raw_text.lower()
+    # Explicit pointer to image (e.g. "здесь 120г" or "на фото курица 120г")
+    if re.search(r"\b(?:здесь|тут|на\s+фото|в\s+тарелке)\b", low_text):
+        return False
+
+    # Standalone exclusion without food ingredients
+    if re.match(r"^(?:без|убрать|не\s+добавлять|исключить)\b", low_text):
+        return False
+
+    # Every ingredient must have an explicit weight or piece count
+    for ing in parsed.ingredients:
+        if ing.unit == "порция" or "Вес не указан" in ing.uncertainty:
+            return False
+        if not ing.grams or ing.grams <= 0:
+            return False
+        if len(ing.normalized_name.strip()) < 2:
+            return False
+        if any(meta in ing.normalized_name for meta in ["блюдо весит", "весит", "общий вес"]):
+            return False
+
+    return True

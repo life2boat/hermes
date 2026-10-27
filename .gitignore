@@ -145,6 +145,9 @@ memory_capsules/
 recipe_corpus/reports/*.db
 nutrition_catalog_v2.db*
 nutrition_catalog_v2.manifest.json
+!gateway/nutrition/data/
+!gateway/nutrition/data/nutrition_catalog_v2.db
+!gateway/nutrition/data/nutrition_catalog_v2.db.manifest.json
 *.db-shm
 *.db-wal
 tests/benchmarks/photo_kbzhu_v1/images/

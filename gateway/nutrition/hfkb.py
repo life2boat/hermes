@@ -234,7 +234,7 @@ class HFKBCatalog:
             all_aliases = set(item.aliases) | {item.name_ru}
             for alias in all_aliases:
                 norm_alias = normalize_russian_food_text(alias)
-                if norm_alias:
+                if norm_alias and norm_alias not in ("орехи", "орех"):
                     c.execute(
                         """
                         INSERT INTO food_aliases (food_id, alias, normalized_alias, alias_type)
@@ -355,6 +355,15 @@ class HFKBCatalog:
         """
         Resolves a food name query into a deterministic FoodLookupResult.
         """
+        norm_q = normalize_russian_food_text(query)
+        if norm_q in ("орехи", "орех"):
+            return FoodLookupResult(
+                matched=False,
+                confidence=0.0,
+                match_type="ambiguous_category",
+                candidate_suggestions=("грецкий орех", "миндаль", "фундук", "кешью", "арахис"),
+            )
+
         if not self._is_indexed:
             self.build_in_memory_index()
 

@@ -20,6 +20,7 @@ from scripts.git_object_secret_policy import (
     GitObjectDescriptor,
     candidate_tree_entries,
     scan_descriptors,
+    _CANONICAL_BINARY_FIXTURE_SHA256,
 )
 from scripts.install_pinned_playwright_artifact import (
     ArtifactContractError,
@@ -361,7 +362,7 @@ def _assert_context_path_allowed(path: str) -> None:
     if any(part.endswith(".egg-info") for part in lowered):
         _fail("CONTEXT_LOCAL_ARTIFACT_DENIED")
     lower_path = path.lower()
-    if lower_path.endswith(_FORBIDDEN_SUFFIXES):
+    if path not in _CANONICAL_BINARY_FIXTURE_SHA256 and lower_path.endswith(_FORBIDDEN_SUFFIXES):
         _fail("CONTEXT_LOCAL_ARTIFACT_DENIED")
     basename = lowered[-1]
     if basename == ".env" or (

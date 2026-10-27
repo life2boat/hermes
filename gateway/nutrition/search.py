@@ -40,6 +40,22 @@ _RUSSIAN_SUFFIXES = (
 )
 
 
+_HARMLESS_CULINARY_WORDS = frozenset({
+    "свежий", "свежая", "свежее", "свежие",
+    "спелый", "спелая", "спелое", "спелые",
+    "домашний", "домашняя", "домашнее", "домашние", "по", "домашнему",
+    "нарезанный", "нарезанная", "нарезанное", "нарезанные",
+    "порезанный", "порезанная", "порезанное", "порезанные",
+    "соломкой", "кусочками", "ломтиками", "кубиками", "кружочками", "половинками",
+    "красный", "красная", "красное", "красные",
+    "зеленый", "зеленая", "зеленое", "зеленые",
+    "желтый", "желтая", "желтое", "желтые",
+    "белый", "белая", "белое", "белые",
+    "черный", "черная", "черное", "черные",
+    "цельный", "цельная", "цельное", "цельные",
+})
+
+
 def normalize_russian_food_text(text: str) -> str:
     """
     Normalizes Russian food text:
@@ -147,9 +163,14 @@ def match_query_against_aliases(
     # Stage 3: Substring match (whole word contained in query or alias)
     for alias, target_id in alias_map.items():
         if len(alias) >= 4:
-            if f" {alias} " in f" {norm_query} " or f" {norm_query} " in f" {alias} ":
-                confidence = 0.88 if len(norm_query) > len(alias) else 0.85
+            if f" {norm_query} " in f" {alias} ":
+                confidence = 0.85
                 return target_id, confidence, "substring", ()
+            if f" {alias} " in f" {norm_query} ":
+                extra = [w for w in norm_query.split() if w not in alias.split()]
+                if not extra or all(w in _HARMLESS_CULINARY_WORDS for w in extra):
+                    confidence = 0.88 if len(norm_query) > len(alias) else 0.85
+                    return target_id, confidence, "substring", ()
 
     # Stage 4: Fuzzy sequence matching
     best_fuzzy_id: str | None = None

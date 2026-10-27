@@ -1517,7 +1517,7 @@ CURATED_RUSSIAN_FOOD_MAPPINGS: list[dict[str, Any]] = [
 
     # FATS & OILS
     {
-        "pattern": "oil, olive, extra virgin",
+        "pattern": "oil, olive",
         "name_ru": "Оливковое масло",
         "category": "fats_oils",
         "cooking_state": "raw",

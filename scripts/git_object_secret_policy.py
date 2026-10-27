@@ -34,7 +34,7 @@ _CANONICAL_BINARY_FIXTURE_SHA256 = {
         "94ba73a38e715f300331d7b9616fb3fd9f31bee12b6dca2e267f882097176ccd"
     ),
     "gateway/nutrition/data/nutrition_catalog_v2.db": (
-        "2fbe95c69a15f122177322411b7888ef3020f884acd01eab6126358acbc9a3f7"
+        "0d3b63459218a231d54aaaf1fcf98c6d4839c361e484540d7dd9cab3e0e88f81"
     ),
 }
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"

@@ -44,6 +44,13 @@ from gateway.nutrition.action_interpreter import (
     interpret_user_inventory_edit_async,
     parse_deterministic_action_plan,
 )
+from gateway.nutrition.text_parser import (
+    ParsedFoodText,
+    TextMealConstraint,
+    is_full_food_description,
+    parse_food_text_description,
+    parse_text_meal_constraints,
+)
 from utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
@@ -2601,6 +2608,115 @@ def _detect_and_deduplicate_composite_inventory(
     return deduped, None
 
 
+def apply_text_meal_constraints(
+    inventory: FoodVisionInventory,
+    constraints: TextMealConstraint | None,
+) -> FoodVisionInventory:
+    """Applies text-based constraints (exclusions, partial weights, total weight) to vision inventory."""
+    if not constraints or not constraints.has_constraints or not inventory.items:
+        return inventory
+
+    def _stem(t: str) -> str:
+        s = t.strip().lower()
+        return s[:-2] if len(s) > 5 else (s[:-1] if len(s) > 4 else s)
+
+    items = list(inventory.items)
+    warnings = list(inventory.warnings)
+
+    # 1. Excluded ingredients ("без сметаны", "убрать майонез")
+    if constraints.excluded_ingredients:
+        kept_items: list[Any] = []
+        for it in items:
+            it_name = (getattr(it, "normalized_name", None) or getattr(it, "visible_name", "")).lower()
+            it_tokens = [tok.strip(" ,.-()") for tok in it_name.split() if tok.strip(" ,.-()")]
+            is_excluded = False
+            for excl in constraints.excluded_ingredients:
+                excl_stem = _stem(excl)
+                if not excl_stem:
+                    continue
+                if excl_stem in it_name or any(excl_stem in _stem(tok) or _stem(tok) in excl_stem for tok in it_tokens):
+                    is_excluded = True
+                    warnings.append(f"ℹ️ Исключено по указанию: {it.visible_name}")
+                    break
+            if not is_excluded:
+                kept_items.append(it)
+        items = kept_items
+
+    # 2. Partial item weights ("курицы здесь 120 г")
+    if constraints.partial_item_weights:
+        for it in items:
+            it_name = (getattr(it, "normalized_name", None) or getattr(it, "visible_name", "")).lower()
+            it_tokens = [tok.strip(" ,.-()") for tok in it_name.split() if tok.strip(" ,.-()")]
+            for food_key, weight_val in constraints.partial_item_weights.items():
+                food_stem = _stem(food_key)
+                if not food_stem:
+                    continue
+                if food_stem in it_name or any(food_stem in _stem(tok) or _stem(tok) in food_stem for tok in it_tokens):
+                    target_w = float(weight_val)
+                    it.estimated_grams_min = round(target_w * 0.95, 1)
+                    it.estimated_grams_max = round(target_w * 1.05, 1)
+                    it.uncertainty = f"{weight_val} г (указано пользователем)"
+                    break
+
+    # 3. Total dish weight constraint ("Это блюдо весит 350 г")
+    if constraints.total_weight_g and constraints.total_weight_g > 0 and items:
+        target_total = float(constraints.total_weight_g)
+
+        def _item_weight(it: Any) -> float:
+            min_g = getattr(it, "estimated_grams_min", None)
+            max_g = getattr(it, "estimated_grams_max", None)
+            if min_g is not None and max_g is not None:
+                return (float(min_g) + float(max_g)) / 2.0
+            return 100.0
+
+        def _is_user_modified(it: Any) -> bool:
+            return getattr(it, "user_modified", False) or "указано пользователем" in (getattr(it, "uncertainty", "") or "")
+
+        user_fixed = [it for it in items if _is_user_modified(it)]
+        user_fixed_sum = sum(_item_weight(it) for it in user_fixed)
+        variable_items = [it for it in items if not _is_user_modified(it)]
+
+        if not variable_items:
+            curr_sum = sum(_item_weight(it) for it in items)
+            if curr_sum > 0:
+                scale = target_total / curr_sum
+                for it in items:
+                    scaled = round(_item_weight(it) * scale, 1)
+                    it.estimated_grams_min = round(scaled * 0.95, 1)
+                    it.estimated_grams_max = round(scaled * 1.05, 1)
+                    it.uncertainty = f"{scaled} г (указано пользователем)"
+        elif len(variable_items) == 1:
+            rem = max(10.0, target_total - user_fixed_sum)
+            variable_items[0].estimated_grams_min = round(rem * 0.95, 1)
+            variable_items[0].estimated_grams_max = round(rem * 1.05, 1)
+            variable_items[0].uncertainty = f"{round(rem, 1)} г (указано пользователем)"
+        else:
+            rem = max(10.0, target_total - user_fixed_sum)
+            curr_var_sum = sum(_item_weight(it) for it in variable_items)
+            if curr_var_sum > 0:
+                scale = rem / curr_var_sum
+                for it in variable_items:
+                    scaled = round(_item_weight(it) * scale, 1)
+                    it.estimated_grams_min = round(scaled * 0.95, 1)
+                    it.estimated_grams_max = round(scaled * 1.05, 1)
+                    it.uncertainty = f"{scaled} г (указано пользователем)"
+
+    # Re-index remaining items
+    for idx, it in enumerate(items, start=1):
+        if hasattr(it, "index"):
+            it.index = idx
+        if hasattr(it, "item_id") and it.item_id:
+            it.item_id = f"item_{idx}"
+
+    return FoodVisionInventory(
+        schema_version=inventory.schema_version,
+        items=items,
+        overall_confidence=inventory.overall_confidence,
+        needs_user_confirmation=inventory.needs_user_confirmation,
+        warnings=list(dict.fromkeys(warnings)),
+    )
+
+
 def _build_inventory_calculation_snapshot(
     inventory: PendingFoodVisionInventory,
 ) -> dict[str, Any] | None:
@@ -2897,7 +3013,11 @@ def _pending_inventory_from_food_vision(
     for index, item in enumerate(inventory.items, start=1):
         g_min = item.estimated_grams_min
         g_max = item.estimated_grams_max
-        sel_g = getattr(item, "selected_grams", None) or _maybe_proposed_selected_grams(g_min, g_max)
+        is_user_spec = "указано пользователем" in (item.uncertainty or "") or getattr(item, "user_modified", False)
+        if is_user_spec and g_min is not None and g_max is not None:
+            sel_g = getattr(item, "selected_grams", None) or round((float(g_min) + float(g_max)) / 2.0, 1)
+        else:
+            sel_g = getattr(item, "selected_grams", None) or _maybe_proposed_selected_grams(g_min, g_max)
         item_id = getattr(item, "item_id", "") or f"item_{index}"
         items.append(PendingFoodVisionItem(
             index=index,
@@ -2910,7 +3030,7 @@ def _pending_inventory_from_food_vision(
             preparation=item.preparation,
             is_sauce=item.is_sauce,
             uncertainty=item.uncertainty,
-            user_modified=getattr(item, "user_modified", False),
+            user_modified=getattr(item, "user_modified", False) or "указано пользователем" in (item.uncertainty or ""),
             item_id=item_id,
             suppressed_by_item_id=getattr(item, "suppressed_by_item_id", None),
             quantity=getattr(item, "quantity", None),
@@ -4636,6 +4756,70 @@ class HealBiteNutritionDiary:
             )
         photo_count = len(paths)
 
+        parsed_text = parse_food_text_description(user_text) if user_text else None
+        text_constraints = parse_text_meal_constraints(user_text) if user_text else None
+
+        # ---- Text-First Food Recognition & Vision Bypass (R1-09) ----
+        # If user provided sufficient structured food description with masses,
+        # calculate meal directly from text WITHOUT sending image to Vision API.
+        if parsed_text and is_full_food_description(parsed_text):
+            text_items = []
+            for idx, ing in enumerate(parsed_text.ingredients, start=1):
+                min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
+                max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+                text_items.append(PendingFoodVisionItem(
+                    index=idx,
+                    visible_name=ing.name,
+                    normalized_name=ing.normalized_name,
+                    confidence=0.95,
+                    estimated_grams_min=min_g,
+                    estimated_grams_max=max_g,
+                    selected_grams=round(ing.grams, 1),
+                    user_modified=True,
+                    preparation="",
+                    is_sauce=False,
+                    uncertainty=ing.uncertainty,
+                    quantity=ing.quantity,
+                    count_type="COUNT_CONFIRMED",
+                    piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
+                    edible_yield_ratio=1.0,
+                ))
+            dish_note = f"Распознано по описанию: {parsed_text.dish_title}" if parsed_text.dish_title else "Распознано по текстовому описанию"
+            text_inv = FoodVisionInventory(
+                schema_version=FOOD_VISION_SCHEMA_VERSION,
+                items=text_items,
+                overall_confidence=0.95,
+                needs_user_confirmation=False,
+                warnings=[f"ℹ️ {dish_note}"],
+            )
+            # Stage pending inventory from text: image_ref=None (no photo stored in DB), photo_count=0
+            pending_inventory = self.stage_pending_inventory(
+                user_id=user_id,
+                source="text",
+                inventory=text_inv,
+                image_ref=None,
+                occurred_at=occurred_at,
+                photo_count=0,
+                album_decision=None,
+                album_raw_photo_items=None,
+                album_processing_status=ALBUM_PROCESSING_COMPLETE,
+                album_overlap_decision=ALBUM_OVERLAP_NONE,
+            )
+            logger.info(
+                "[HealBite][caption_primary_staged] items=%d total_grams=%.1f dish=%s vision_calls=0",
+                len(text_items),
+                parsed_text.total_grams,
+                parsed_text.dish_title,
+            )
+            return NutritionDiaryOutcome(
+                available=True,
+                pending=True,
+                pending_inventory=pending_inventory,
+                clarification_text=format_food_vision_inventory_reply(pending_inventory),
+                record=None,
+                validation_status="VALID",
+            )
+
         prompt = _VISION_PROMPT
         if user_text.strip():
             prompt += f" User note: {user_text.strip()}"
@@ -4776,9 +4960,6 @@ class HealBiteNutritionDiary:
                 clarification_text="Кажется, на этой фотографии нет еды. Отправьте, пожалуйста, фото блюда или продукта, либо опишите приём пищи текстом.",
                 validation_status="NON_FOOD",
             )
-
-        from gateway.nutrition.text_parser import parse_food_text_description
-        parsed_text = parse_food_text_description(user_text) if user_text else None
 
         # ---- Handle total failure of vision models ----
         if not at_least_one_success:
@@ -4933,6 +5114,7 @@ class HealBiteNutritionDiary:
                 available=True,
                 pending=True,
                 pending_inventory=pending_inventory,
+                clarification_text=format_food_vision_inventory_reply(pending_inventory),
                 record=None,
                 validation_status="VALID",
             )
@@ -5010,6 +5192,9 @@ class HealBiteNutritionDiary:
                 album_proc_status,
                 album_overlap,
             )
+
+        if text_constraints and text_constraints.has_constraints:
+            merged_inventory = apply_text_meal_constraints(merged_inventory, text_constraints)
 
         pending_inventory = self.stage_pending_inventory(
             user_id=user_id,

@@ -1432,10 +1432,16 @@ def _raw_dict_to_item(data: dict[str, Any]) -> FoodVisionItem:
 def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
     """
     Policy 1 & Policy 2 — Dish-First & Controlled Decomposition Policy:
-    Consolidates over-decomposed micro-ingredients of composite foods (pies, pastries, pizza, burgers)
-    into single dish-level interpretations and prunes speculative micro-components.
+    Consolidates over-decomposed micro-ingredients of composite foods (plov, borscht,
+    olivier, ragout, casserole, pies, pastries, pizza) into single dish-level
+    interpretations and prunes speculative micro-components.
+    Preserves distinct separate foods (e.g. chicken + buckwheat + salad, bread, drinks).
     """
     if not items or len(items) <= 1:
+        return list(items)
+
+    # Never rewrite or collapse existing user-modified items
+    if any(getattr(it, "user_modified", False) for it in items):
         return list(items)
 
     item_cls = type(items[0])
@@ -1564,13 +1570,23 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
         return [consolidated_item] + non_bakery_items
 
     # 3. Pizza consolidation
-    pizza_markers = {"тесто для пиццы", "основа пиццы", "корж пиццы", "моцарелла", "томатный соус", "пепперони", "pizza"}
-    if any("пицц" in n or "pizza" in n for n in names_lower) and len(items) > 1 and all(
-        any(m in n for m in pizza_markers | {"пицц", "сыр", "колбас", "гриб", "pizza", "cheese"}) for n in names_lower
-    ):
-        sum_min = sum(float(it.estimated_grams_min) for it in items if getattr(it, "estimated_grams_min", None) is not None) or 110.0
-        sum_max = sum(float(it.estimated_grams_max) for it in items if getattr(it, "estimated_grams_max", None) is not None) or 160.0
-        max_conf = max(getattr(it, "confidence", 0.85) for it in items)
+    pizza_base_markers = {"тесто для пиццы", "основа пиццы", "корж пиццы", "основа", "pizza"}
+    pizza_topping_markers = {"моцарелла", "томатный соус", "пепперони", "сыр моцарелла", "сыр", "колбаса", "ветчина", "шампиньоны", "базилик"}
+    pizza_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in pizza_base_markers | pizza_topping_markers | {"пицца", "пиццы", "pizza"})
+    ]
+    non_pizza_items = [
+        it for it in items
+        if it not in pizza_candidates
+    ]
+    p_names_lower = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in pizza_candidates]
+    has_pizza_explicit = any("пицц" in n or "pizza" in n for n in p_names_lower)
+    has_pizza_components = any(any(m in n for m in pizza_base_markers) for n in p_names_lower) and any(any(m in n for m in pizza_topping_markers) for n in p_names_lower)
+    if len(pizza_candidates) > 1 and (has_pizza_explicit or has_pizza_components):
+        sum_min = sum(float(it.estimated_grams_min) for it in pizza_candidates if getattr(it, "estimated_grams_min", None) is not None) or 150.0
+        sum_max = sum(float(it.estimated_grams_max) for it in pizza_candidates if getattr(it, "estimated_grams_max", None) is not None) or 250.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in pizza_candidates)
         attrs = {
             "visible_name": "Пицца",
             "normalized_name": "пицца",
@@ -1588,7 +1604,179 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             attrs["index"] = 1
             attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
             attrs["user_modified"] = False
-        return [item_cls(**attrs)]
+        return [item_cls(**attrs)] + non_pizza_items
+
+    # 4. Plov consolidation
+    plov_markers = {"плов", "узбекский плов"}
+    rice_markers = {"рис", "вареный рис", "рис отварной", "рис для плова", "рис с мясом"}
+    meat_markers = {"мясо", "говядина", "баранина", "курица", "свинина", "кусочки мяса", "кусочки говядины", "кусочки курицы"}
+    plov_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in plov_markers | rice_markers | meat_markers | {"морковь"})
+    ]
+    non_plov_items = [
+        it for it in items
+        if it not in plov_candidates
+    ]
+    plov_names_lower = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in plov_candidates]
+    has_plov_explicit = any(any(m in n for m in plov_markers) for n in plov_names_lower)
+    has_rice = any(any(m in n for m in rice_markers) for n in plov_names_lower)
+    has_meat = any(any(m in n for m in meat_markers) for n in plov_names_lower)
+    has_separate_garnish = any(
+        any(w in (getattr(it, "preparation", "") or "").casefold() or w in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower()
+            for w in ("на гарнир", "отдельно", "стейк", "отбивная", "гриль"))
+        for it in plov_candidates
+    )
+    if len(plov_candidates) > 1 and not has_separate_garnish and (has_plov_explicit or (has_rice and has_meat and (has_plov_explicit or any("морков" in n or "рис с мясом" in n for n in plov_names_lower)))):
+        sum_min = sum(float(it.estimated_grams_min) for it in plov_candidates if getattr(it, "estimated_grams_min", None) is not None) or 250.0
+        sum_max = sum(float(it.estimated_grams_max) for it in plov_candidates if getattr(it, "estimated_grams_max", None) is not None) or 350.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in plov_candidates)
+        attrs = {
+            "visible_name": "Плов",
+            "normalized_name": "плов",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "тушеный",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)] + non_plov_items
+
+    # 5. Casserole consolidation
+    casserole_markers = {"запеканка", "творожная запеканка"}
+    tvorog_markers = {"творог", "манка", "творожная основа", "творожная масса"}
+    cas_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in casserole_markers | tvorog_markers)
+    ]
+    non_cas_items = [
+        it for it in items
+        if it not in cas_candidates
+    ]
+    cas_names_lower = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in cas_candidates]
+    has_cas_explicit = any(any(m in n for m in casserole_markers) for n in cas_names_lower)
+    has_tvorog = any(any(m in n for m in tvorog_markers) for n in cas_names_lower)
+    has_baked = any("запеч" in (getattr(it, "preparation", "") or "").lower() for it in cas_candidates)
+    if len(cas_candidates) > 1 and (has_cas_explicit or (has_tvorog and has_baked)):
+        sum_min = sum(float(it.estimated_grams_min) for it in cas_candidates if getattr(it, "estimated_grams_min", None) is not None) or 150.0
+        sum_max = sum(float(it.estimated_grams_max) for it in cas_candidates if getattr(it, "estimated_grams_max", None) is not None) or 250.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in cas_candidates)
+        attrs = {
+            "visible_name": "Творожная запеканка" if (has_tvorog or "творог" in "".join(cas_names_lower)) else "Запеканка",
+            "normalized_name": "запеканка",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "запеченный",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)] + non_cas_items
+
+    # 6. Borscht consolidation
+    borscht_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in {"борщ", "свекла", "свёкла", "бульон", "капуста"})
+    ]
+    non_borscht_items = [it for it in items if it not in borscht_candidates]
+    b_names = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in borscht_candidates]
+    if len(borscht_candidates) > 1 and any("борщ" in n for n in b_names):
+        sum_min = sum(float(it.estimated_grams_min) for it in borscht_candidates if getattr(it, "estimated_grams_min", None) is not None) or 300.0
+        sum_max = sum(float(it.estimated_grams_max) for it in borscht_candidates if getattr(it, "estimated_grams_max", None) is not None) or 400.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in borscht_candidates)
+        attrs = {
+            "visible_name": "Борщ",
+            "normalized_name": "борщ",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "вареный",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)] + non_borscht_items
+
+    # 7. Olivier salad consolidation
+    olv_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in {"оливье", "салат оливье", "зеленый горошек", "вареная колбаса", "майонез"})
+    ]
+    non_olv_items = [it for it in items if it not in olv_candidates]
+    olv_names = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in olv_candidates]
+    if len(olv_candidates) > 1 and (any("оливье" in n for n in olv_names) or (any("горошек" in n for n in olv_names) and any("майонез" in n for n in olv_names))):
+        sum_min = sum(float(it.estimated_grams_min) for it in olv_candidates if getattr(it, "estimated_grams_min", None) is not None) or 150.0
+        sum_max = sum(float(it.estimated_grams_max) for it in olv_candidates if getattr(it, "estimated_grams_max", None) is not None) or 250.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in olv_candidates)
+        attrs = {
+            "visible_name": "Салат оливье",
+            "normalized_name": "салат оливье",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "готовый",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)] + non_olv_items
+
+    # 8. Ragout consolidation
+    rag_candidates = [
+        it for it in items
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in {"рагу", "овощное рагу", "кабачки", "баклажаны", "тушеные овощи"})
+    ]
+    non_rag_items = [it for it in items if it not in rag_candidates]
+    rag_names = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in rag_candidates]
+    if len(rag_candidates) > 1 and any("рагу" in n or "тушеные овощи" in n for n in rag_names):
+        sum_min = sum(float(it.estimated_grams_min) for it in rag_candidates if getattr(it, "estimated_grams_min", None) is not None) or 200.0
+        sum_max = sum(float(it.estimated_grams_max) for it in rag_candidates if getattr(it, "estimated_grams_max", None) is not None) or 300.0
+        max_conf = max(getattr(it, "confidence", 0.85) for it in rag_candidates)
+        attrs = {
+            "visible_name": "Овощное рагу",
+            "normalized_name": "овощное рагу",
+            "confidence": max_conf,
+            "estimated_grams_min": round(sum_min, 1),
+            "estimated_grams_max": round(sum_max, 1),
+            "preparation": "тушеный",
+            "is_sauce": False,
+            "quantity": 1,
+            "count_type": "COUNT_CONFIRMED",
+            "piece_grams": round((sum_min + sum_max) / 2.0, 1),
+            "edible_yield_ratio": 1.0,
+        }
+        if hasattr(items[0], "index"):
+            attrs["index"] = 1
+            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            attrs["user_modified"] = False
+        return [item_cls(**attrs)] + non_rag_items
 
     return list(items)
 
@@ -2225,7 +2413,7 @@ def _detect_and_deduplicate_composite_inventory(
         }),
         "запеканка": frozenset({
             "фарш", "мясо", "говядина", "свинина", "картофель", "картошка",
-            "сыр", "яйцо", "яйца", "лук", "творог", "манка",
+            "сыр", "яйцо", "яйца", "лук", "творог", "манка", "изюм", "сметана",
         }),
         "суп": frozenset({
             "картофель", "картошка", "морковь", "мясо", "говядина", "курица",
@@ -2245,21 +2433,49 @@ def _detect_and_deduplicate_composite_inventory(
         }),
         "рагу": frozenset({
             "мясо", "говядина", "свинина", "курица", "картофель", "картошка",
-            "кабачки", "морковь", "лук", "томат", "перец",
+            "кабачки", "морковь", "лук", "томат", "перец", "баклажаны",
+            "овощи", "зелень", "чеснок", "соус",
+        }),
+        "пицца": frozenset({
+            "сыр", "моцарелла", "тесто", "основа", "корж", "колбаса",
+            "пепперони", "ветчина", "томат", "томатная паста", "томатный соус",
+            "помидоры", "грибы", "шампиньоны", "базилик", "оливки", "маслины",
+            "соус", "пармезан", "салями",
+        }),
+        "пирог": frozenset({
+            "тесто", "основа", "мука", "печеное тесто", "печёное тесто",
+            "яблоко", "яблоки", "начинка", "ягоды", "вишня", "клубника",
+            "малина", "творог", "капуста", "мясо", "фарш", "грибы",
+            "крем", "кремовая начинка",
+        }),
+        "выпечка": frozenset({
+            "тесто", "основа", "печеное тесто", "печёное тесто", "крем",
+            "кремовая начинка", "начинка", "мак", "творог", "яблоко",
+            "яблоки", "ягоды", "семечки", "посыпка", "глазурь",
         }),
     }
 
     _SEPARATE_FOOD_MARKERS = frozenset({
-        "хлеб", "батон", "булочка", "лаваш", "гренки", "сухарики",
+        "хлеб", "батон", "булочка", "лаваш", "гренки", "сухарики", "хлебец", "чиабатта", "тост", "багет", "пита",
         "яблоко", "банан", "апельсин", "десерт", "пирожное", "печенье",
-        "чай", "кофе", "компот", "сок", "морс", "вода",
+        "чай", "кофе", "компот", "сок", "морс", "вода", "минеральная вода", "напиток", "квас",
+        "гречка", "макароны", "паста",
         "салат из помидоров", "салат из огурцов",
     })
 
     def _stem(t: str) -> str:
         return t[:-2] if len(t) > 5 else (t[:-1] if len(t) > 4 else t)
 
+    modified_any = False
+    all_matching_others: list[Any] = []
+    all_external_others: list[Any] = []
+    total_dish_min = 0.0
+    total_dish_max = 0.0
+
     for i, candidate in enumerate(items):
+        if getattr(candidate, "suppressed_by_item_id", None):
+            continue
+
         cand_norm = normalize_russian_food_query(candidate.normalized_name or candidate.visible_name)
         connectors = (" с ", " со ", " из ", " под ")
         has_connector = any(conn in cand_norm for conn in connectors)
@@ -2272,7 +2488,7 @@ def _detect_and_deduplicate_composite_inventory(
         if not (has_connector or matched_dish_type is not None):
             continue
 
-        other_items = [it for j, it in enumerate(items) if j != i]
+        other_items = [it for j, it in enumerate(items) if j != i and not getattr(it, "suppressed_by_item_id", None)]
         matching_others = []
         external_others = []
 
@@ -2293,16 +2509,29 @@ def _detect_and_deduplicate_composite_inventory(
             other_prep = (getattr(other, "preparation", "") or "").casefold()
             other_unc = (getattr(other, "uncertainty", "") or "").casefold()
 
+            # If the other item is itself an explicit composite dish (e.g. Borscht and Pie), do not suppress it
+            is_other_dish = any(d in other_norm for d in _KNOWN_RECIPE_INGREDIENTS if d != matched_dish_type)
+
+            # Independent salad should never be suppressed by a soup, hot dish, or bakery
+            is_independent_salad = (
+                matched_dish_type != "оливье"
+                and any(w in other_norm or w in other_vis for w in ("салат ", "салат", "овощной салат"))
+            )
+
             is_explicitly_separate = (
-                any(marker in other_norm or marker in other_vis for marker in _SEPARATE_FOOD_MARKERS)
-                or any(w in other_prep or w in other_unc or w in other_vis for w in ("отдельно", "рядом", "на гарнир", "отдельный"))
+                is_other_dish
+                or is_independent_salad
+                or any(marker in other_norm or marker in other_vis for marker in _SEPARATE_FOOD_MARKERS)
+                or any(w in other_prep or w in other_unc or w in other_vis for w in ("отдельно", "рядом", "на гарнир", "отдельный", "гарнир"))
             )
 
             is_separate_meat = (
-                matched_dish_type in ("борщ", "суп", "щи", "уха")
+                matched_dish_type in ("борщ", "суп", "щи", "уха", "плов")
                 and (
                     "стейк" in other_norm
                     or "отбивная" in other_norm
+                    or "шашлык" in other_norm
+                    or "котлета" in other_norm
                     or any(w in other_prep for w in ("жарен", "гриль", "запечен"))
                 )
             )
@@ -2316,14 +2545,14 @@ def _detect_and_deduplicate_composite_inventory(
             if connector_ingredient_terms and other_tokens:
                 matches_connector = any(
                     _stem(tok) in connector_ingredient_terms
-                    or any(_stem(t) in tok for t in connector_ingredient_terms)
+                    or any(_stem(t) == _stem(tok) for t in connector_ingredient_terms)
                     for tok in other_tokens
                 )
 
             matches_recipe = False
             if known_ingredients and other_tokens:
                 matches_recipe = any(
-                    tok in known_ingredients or any(_stem(ing) in tok for ing in known_ingredients)
+                    tok in known_ingredients or any(_stem(ing) == _stem(tok) for ing in known_ingredients)
                     for tok in other_tokens
                 )
 
@@ -2333,9 +2562,12 @@ def _detect_and_deduplicate_composite_inventory(
                 external_others.append(other)
 
         if matching_others:
+            modified_any = True
             candidate.suppressed_by_item_id = None
             for other in matching_others:
                 other.suppressed_by_item_id = candidate.item_id
+            all_matching_others.extend(matching_others)
+            all_external_others.extend(external_others)
 
             parent_min = candidate.estimated_grams_min
             parent_max = candidate.estimated_grams_max
@@ -2348,20 +2580,25 @@ def _detect_and_deduplicate_composite_inventory(
                 parent_min = (candidate.selected_grams or 300.0) * 0.8
                 parent_max = (candidate.selected_grams or 300.0) * 1.2
 
-            constraint = RecipeMassConstraint(
-                total_dish_mass_min_g=parent_min,
-                total_dish_mass_max_g=parent_max,
-                recipe_ingredient_names=frozenset(
-                    (it.normalized_name or it.visible_name).casefold() for it in matching_others
-                ),
-                external_ingredient_names=frozenset(
-                    (it.normalized_name or it.visible_name).casefold() for it in external_others
-                ),
-            )
-            deduped = [it for it in items if not getattr(it, "suppressed_by_item_id", None)]
-            return deduped, constraint
+            total_dish_min += parent_min
+            total_dish_max += parent_max
 
-    return list(items), None
+    if modified_any:
+        constraint = RecipeMassConstraint(
+            total_dish_mass_min_g=total_dish_min,
+            total_dish_mass_max_g=total_dish_max,
+            recipe_ingredient_names=frozenset(
+                (it.normalized_name or it.visible_name).casefold() for it in all_matching_others
+            ),
+            external_ingredient_names=frozenset(
+                (it.normalized_name or it.visible_name).casefold() for it in all_external_others
+            ),
+        )
+        deduped = [it for it in items if not getattr(it, "suppressed_by_item_id", None)]
+        return deduped, constraint
+
+    deduped = [it for it in items if not getattr(it, "suppressed_by_item_id", None)]
+    return deduped, None
 
 
 def _build_inventory_calculation_snapshot(
@@ -3160,9 +3397,13 @@ def calculate_food_vision_meal_nutrition(
         deduped_items, auto_constraint = _detect_and_deduplicate_composite_inventory(items)
         items = deduped_items
         recipe_constraint = auto_constraint
+    else:
+        items = [it for it in items if not getattr(it, "suppressed_by_item_id", None)]
 
     components = []
     for item in items:
+        if getattr(item, "suppressed_by_item_id", None):
+            continue
         if item.selected_grams is not None:
             if getattr(item, "user_modified", False):
                 bounds = MassBounds(

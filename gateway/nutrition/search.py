@@ -147,7 +147,9 @@ def match_query_against_aliases(
     # Stage 3: Substring match (whole word contained in query or alias)
     for alias, target_id in alias_map.items():
         if len(alias) >= 4:
-            if f" {alias} " in f" {norm_query} " or f" {norm_query} " in f" {alias} ":
+            if f" {norm_query} " in f" {alias} " or (
+                f" {alias} " in f" {norm_query} " and len(alias) / len(norm_query) >= 0.70
+            ):
                 confidence = 0.88 if len(norm_query) > len(alias) else 0.85
                 return target_id, confidence, "substring", ()
 

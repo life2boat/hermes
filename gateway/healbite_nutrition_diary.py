@@ -3683,7 +3683,7 @@ def build_food_vision_inventory_keyboard(
     inv_id = str(inventory.inventory_id or "")
 
     edit_button = {
-        "text": "✏️ Уточнить состав",
+        "text": "✏️ Исправить",
         "callback_data": f"food_inv:edit:{user_id}:{inv_id}",
     }
     cancel_button = {

@@ -322,15 +322,22 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             fat_percent = float(fat_match.group(1)) if fat_match else None
             clean_name = re.sub(r"\d+(?:\.\d+)?\s*%", "", name_part).strip()
             prep = _extract_preparation(part)
-            clean_name = re.sub(r"\b(?:запеч[её]нн?[а-я]*|отварн[а-я]*|жаренн?[а-я]*|туш[её]нн?[а-я]*|свеж[а-я]*|сыр[а-я]*)\b", "", clean_name, flags=re.IGNORECASE).strip()
             clean_name = re.sub(r"\s+", " ", clean_name).strip()
 
             if clean_name:
                 if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", clean_name, re.IGNORECASE):
                     continue
+                from gateway.healbite_food_composition import resolve_food_composition
                 from gateway.nutrition.household_measures import normalize_food_inflection
-                norm_key = re.sub(r"\b(?:стейк\s+(?:из|от)?|шницель\s+(?:из|от)?)\s*", "", clean_name, flags=re.IGNORECASE).strip()
-                norm_key = normalize_food_inflection(norm_key.lower()) if norm_key else clean_name.lower()
+                norm_key = clean_name.lower()
+                direct_match = resolve_food_composition(norm_key)
+                if not (direct_match and direct_match.matched):
+                    cut_stripped = re.sub(r"\b(?:стейк\s+(?:из|от)?|шницель\s+(?:из|от)?)\s*", "", clean_name, flags=re.IGNORECASE).strip()
+                    cand = normalize_food_inflection(cut_stripped.lower()) if cut_stripped else ""
+                    if cand:
+                        cand_res = resolve_food_composition(cand)
+                        if cand_res and cand_res.matched:
+                            norm_key = cand
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,

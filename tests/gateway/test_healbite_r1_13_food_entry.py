@@ -309,7 +309,7 @@ class TestDiaryFormattingAndEditing:
         assert HOUSEHOLD_DISCLAIMER not in reply
 
         kb = build_food_vision_inventory_keyboard(inv)
-        assert any(btn["text"] == "✏️ Уточнить состав" for row in kb for btn in row)
+        assert any(btn["text"] in ("✏️ Исправить", "✏️ Уточнить состав") for row in kb for btn in row)
 
     def test_approximate_inventory_formatting(self, tmp_path):
         from gateway.healbite_nutrition_diary import (

@@ -240,7 +240,7 @@ def parse_deterministic_action_plan(
 
     # Split into lines, distinct sentences, or comma/conjunction-separated actions
     action_trigger_re = re.compile(
-        r"(?:,\s*|\s+(?:а|и|но)\s+)(?=(?:добавь(?:те)?|добавить|убери(?:те)?|удали(?:ть)?|исключи(?:ть)?|вычеркни|замени(?:ть)?|исправь(?:ть)?|вместо|переименуй(?:те)?|назови|вес\s+(?:позиции\s+|строки\s+|номера\s+)?\d+\s*[:\.\-—]|вес\s*[:]\s*\d+)\b)",
+        r"(?:,\s*|\s+(?:а|и|но)\s+)(?=(?:добавь(?:те)?|добавить|убери(?:те)?|удали(?:ть)?|исключи(?:ть)?|вычеркни|замени(?:ть)?|исправь(?:ть)?|переименуй(?:те)?|назови|вес\s+(?:позиции\s+|строки\s+|номера\s+)?\d+\s*[:\.\-—]|вес\s*[:]\s*\d+)\b)",
         re.IGNORECASE,
     )
     major_clauses = re.split(r"[\n;]+|(?<=\w)[.!?]+(?=\s+|$)", protected)
@@ -256,6 +256,7 @@ def parse_deterministic_action_plan(
                 clauses.append(sp_clean)
 
     last_target_index: int | None = None
+    has_unparsed_clause = False
 
     for clause in clauses:
         c = clause.strip()
@@ -265,6 +266,9 @@ def parse_deterministic_action_plan(
         c_clean = re.sub(r"^[-–—•*\s]+", "", c).strip()
         if not c_clean:
             continue
+
+        act_count_before = len(actions)
+        save_before = request_save
 
         # A0. Check control clauses
         if _LEAVE_REST_RE.search(c_clean):
@@ -682,10 +686,13 @@ def parse_deterministic_action_plan(
                 ))
             continue
 
+        if not _LEAVE_REST_RE.search(c_clean) and len(c_clean.split()) >= 2:
+            has_unparsed_clause = True
+
     if request_save:
         actions.append(StructuredAction(operation=ActionOperation.REQUEST_SAVE))
 
-    if not actions:
+    if not actions or has_unparsed_clause:
         return None
 
     return StructuredActionPlan(

@@ -123,8 +123,12 @@ from gateway.healbite_nutrition_diary import (
 
 FOOD_INVENTORY_CALLBACK_ROOT = "food_inv:"
 from gateway.healbite_user_profile import (
+    UserDeleteBlockedActiveHouseholdRelationError,
     _format_target,
+    activity_level_label,
+    calculation_method_label,
     format_healbite_profile_report,
+    format_healbite_settings_report,
     format_healbite_targets_report,
     get_default_healbite_user_profile,
     get_existing_healbite_user_profile,
@@ -292,6 +296,11 @@ _HEALBITE_NORMALIZED_COMMAND_MAP = {
     "моя норма": "/targets",
     "мои цели": "/targets",
     "суточная норма": "/targets",
+    "настройки": "/settings",
+    "настройки профиля": "/settings",
+    "пригласить": "/invite",
+    "пригласить друга": "/invite",
+    "сброс профиля": "/reset_profile",
 }
 _WEEKLY_MENU_INTENT_PATTERNS = (
     re.compile(r"\bсоставить\s+меню\b", re.IGNORECASE),
@@ -4264,6 +4273,12 @@ class TelegramAdapter(BasePlatformAdapter):
             "weight:",
             "water:",
             FOOD_INVENTORY_CALLBACK_ROOT,
+            "settings:",
+            "act_set:",
+            "tz_set:",
+            "calc_set:",
+            "pref:",
+            "reset_do:",
         )
         if not query_is_authorized and not lane_active:
             if data.startswith(HEALBITE_LOCAL_CALLBACK_ROOTS):
@@ -4329,6 +4344,11 @@ class TelegramAdapter(BasePlatformAdapter):
         # --- HealBite targets callbacks ---
         if data.startswith(HEALBITE_TARGETS_CALLBACK_ROOT):
             await self._handle_healbite_targets_callback(query, data)
+            return
+
+        # --- HealBite settings callbacks (R1-12) ---
+        if data.startswith(("settings:", "act_set:", "tz_set:", "calc_set:", "pref:", "reset_do:")):
+            await self._handle_healbite_settings_callback(query, data)
             return
 
         # --- HealBite food vision inventory callbacks ---
@@ -7210,6 +7230,17 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
         profile_store = get_default_healbite_user_profile()
+        parts = text.split()
+        if len(parts) > 1 and parts[1].startswith("ref_"):
+            try:
+                referrer_str = parts[1][4:]
+                referrer_id = int(referrer_str)
+                if referrer_id != int(user_id):
+                    recorded = profile_store.record_referral(referrer_id=referrer_id, referred_id=int(user_id))
+                    if recorded:
+                        logger.info("Recorded referral attribution: referrer=%s, new_user=%s", referrer_id, user_id)
+            except Exception as e:
+                logger.warning("Referral recording ignored: %s", e)
         profile = profile_store.get_user_profile(int(user_id))
         edit_mode = text.casefold().startswith("/start edit")
         if (
@@ -7323,6 +7354,16 @@ class TelegramAdapter(BasePlatformAdapter):
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
+                    "⚙️ Настройки",
+                    callback_data=f"settings:view:{user_id}",
+                ),
+                InlineKeyboardButton(
+                    "👥 Пригласить",
+                    callback_data=f"settings:invite:{user_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     "🎯 Норма КБЖУ",
                     callback_data=f"{HEALBITE_TARGETS_CALLBACK_ROOT}"
                     f"{HEALBITE_TARGETS_CALLBACK_VIEW}:{user_id}",
@@ -7333,6 +7374,94 @@ class TelegramAdapter(BasePlatformAdapter):
                     f"{HEALBITE_PROFILE_CALLBACK_EDIT}:{user_id}",
                 ),
             ],
+        ])
+
+    def _healbite_settings_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🏃 Активность", callback_data=f"settings:act:{user_id}"),
+                InlineKeyboardButton("🕒 Часовой пояс", callback_data=f"settings:tz:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton("🥗 Питание и диета", callback_data=f"settings:pref:{user_id}"),
+                InlineKeyboardButton("🧮 Метод расчёта", callback_data=f"settings:calc:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton("👥 Пригласить друга", callback_data=f"settings:invite:{user_id}"),
+                InlineKeyboardButton("🗑 Сброс профиля", callback_data=f"settings:reset_ask:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👤 Профиль",
+                    callback_data=f"{HEALBITE_PROFILE_CALLBACK_ROOT}{HEALBITE_PROFILE_CALLBACK_VIEW}:{user_id}",
+                ),
+            ],
+        ])
+
+    def _healbite_activity_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("0: Минимальная (сидячий)", callback_data=f"act_set:0:{user_id}")],
+            [InlineKeyboardButton("1: Низкая (1-3 тренировки/нед)", callback_data=f"act_set:1:{user_id}")],
+            [InlineKeyboardButton("2: Средняя (3-5 тренировок/нед)", callback_data=f"act_set:2:{user_id}")],
+            [InlineKeyboardButton("3: Высокая (6-7 тренировок/нед)", callback_data=f"act_set:3:{user_id}")],
+            [InlineKeyboardButton("4: Экстремальная (тяжёлый труд)", callback_data=f"act_set:4:{user_id}")],
+            [InlineKeyboardButton("🔙 Назад к настройкам", callback_data=f"settings:view:{user_id}")],
+        ])
+
+    def _healbite_timezone_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Москва (UTC+3)", callback_data=f"tz_set:Europe/Moscow:{user_id}"),
+                InlineKeyboardButton("Калининград (UTC+2)", callback_data=f"tz_set:Europe/Kaliningrad:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton("Самара (UTC+4)", callback_data=f"tz_set:Europe/Samara:{user_id}"),
+                InlineKeyboardButton("Екатеринбург (UTC+5)", callback_data=f"tz_set:Asia/Yekaterinburg:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton("Новосибирск (UTC+7)", callback_data=f"tz_set:Asia/Novosibirsk:{user_id}"),
+                InlineKeyboardButton("Владивосток (UTC+10)", callback_data=f"tz_set:Asia/Vladivostok:{user_id}"),
+            ],
+            [InlineKeyboardButton("🔙 Назад к настройкам", callback_data=f"settings:view:{user_id}")],
+        ])
+
+    def _healbite_calc_method_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📐 Формула Миффлина (стандарт)", callback_data=f"calc_set:mifflin_v1:{user_id}")],
+            [InlineKeyboardButton("✏️ Ручные цели КБЖУ", callback_data=f"calc_set:manual:{user_id}")],
+            [InlineKeyboardButton("🔙 Назад к настройкам", callback_data=f"settings:view:{user_id}")],
+        ])
+
+    def _healbite_preferences_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🥗 Тип питания", callback_data=f"pref:diet:{user_id}"),
+                InlineKeyboardButton("⚠️ Аллергии", callback_data=f"pref:allergies:{user_id}"),
+            ],
+            [
+                InlineKeyboardButton("🚫 Стоп-продукты", callback_data=f"pref:stop:{user_id}"),
+                InlineKeyboardButton("💡 Предпочтения", callback_data=f"pref:like:{user_id}"),
+            ],
+            [InlineKeyboardButton("🧹 Очистить все ограничения", callback_data=f"pref:clear:{user_id}")],
+            [InlineKeyboardButton("🔙 Назад к настройкам", callback_data=f"settings:view:{user_id}")],
+        ])
+
+    def _healbite_reset_confirm_keyboard(self, *, user_id: int) -> Optional[Any]:
+        if not TELEGRAM_AVAILABLE:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚠️ Да, сбросить профиль", callback_data=f"reset_do:confirm:{user_id}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"settings:view:{user_id}")],
         ])
 
     def _healbite_targets_keyboard(self, *, user_id: int, is_manual: bool = False) -> Optional[Any]:
@@ -7639,6 +7768,389 @@ class TelegramAdapter(BasePlatformAdapter):
             await query.answer()
             return
 
+    async def _maybe_handle_healbite_settings_command(
+        self,
+        msg: Message,
+        *,
+        text_override: Optional[str] = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/settings", "/настройки"}:
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(msg=msg, route="settings_command")
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+
+        profile_store = get_default_healbite_user_profile()
+        profile = profile_store.get_user_profile(int(user_id))
+        ref_count = profile_store.get_referral_count(int(user_id))
+        ref_link = profile_store.get_referral_link(int(user_id))
+        keyboard = self._healbite_settings_keyboard(user_id=int(user_id))
+
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=format_healbite_settings_report(profile, referral_count=ref_count, referral_link=ref_link),
+            message_thread_id=thread_id,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+        )
+        return True
+
+    async def _maybe_handle_healbite_invite_command(
+        self,
+        msg: Message,
+        *,
+        text_override: Optional[str] = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/invite", "/пригласить"}:
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(msg=msg, route="invite_command")
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+
+        profile_store = get_default_healbite_user_profile()
+        ref_count = profile_store.get_referral_count(int(user_id))
+        ref_link = profile_store.get_referral_link(int(user_id))
+
+        reply_text = (
+            "👥 <b>Приглашение друзей в HealBite</b>\n\n"
+            "Поделитесь своей персональной ссылкой с друзьями:\n"
+            f"<code>{ref_link}</code>\n\n"
+            f"📊 <b>Приглашено пользователей:</b> {ref_count}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Настройки", callback_data=f"settings:view:{user_id}")],
+        ]) if TELEGRAM_AVAILABLE else None
+
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=reply_text,
+            message_thread_id=thread_id,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+        )
+        return True
+
+    async def _maybe_handle_healbite_reset_profile_command(
+        self,
+        msg: Message,
+        *,
+        text_override: Optional[str] = None,
+        emit_route_marker: bool = True,
+    ) -> bool:
+        text = (text_override if text_override is not None else getattr(msg, "text", None) or "").strip()
+        command_token = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
+        if command_token not in {"/reset_profile", "/reset"}:
+            return False
+        if emit_route_marker:
+            self._log_healbite_route_selected(msg=msg, route="reset_profile_command")
+
+        chat = getattr(msg, "chat", None)
+        chat_id = str(getattr(chat, "id", ""))
+        thread_id = getattr(msg, "message_thread_id", None)
+        user_id = getattr(getattr(msg, "from_user", None), "id", None)
+        if user_id is None:
+            return False
+
+        warning_text = (
+            "⚠️ <b>Сброс профиля HealBite</b>\n\n"
+            "Вы действительно хотите сбросить профиль?\n\n"
+            "• Параметры анкеты и цели КБЖУ будут удалены.\n"
+            "• Вы сможете пройти регистрацию заново через /start.\n"
+            "• История приёмов пищи в дневнике <b>сохраняется</b>.\n\n"
+            "Подтвердите действие:"
+        )
+        keyboard = self._healbite_reset_confirm_keyboard(user_id=int(user_id))
+
+        await self._send_message_with_thread_fallback(
+            chat_id=chat_id,
+            text=warning_text,
+            message_thread_id=thread_id,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+        )
+        return True
+
+    async def _handle_healbite_settings_callback(self, query: Any, data: str) -> None:
+        caller_user_id = getattr(getattr(query, "from_user", None), "id", None)
+        if caller_user_id is None:
+            await query.answer(text="Не удалось определить пользователя.")
+            return
+
+        message = getattr(query, "message", None)
+        chat = getattr(message, "chat", None)
+        if not _is_private_chat_type(getattr(chat, "type", None)):
+            await query.answer(text="Настройки доступны только в личном диалоге с ботом.", show_alert=True)
+            return
+
+        parts = data.split(":")
+        if len(parts) < 3:
+            await query.answer(text="Кнопка устарела.")
+            return
+        root, action = parts[0], parts[1]
+        raw_target = parts[2]
+        if not raw_target.isascii() or not raw_target.isdigit():
+            await query.answer(text="Некорректный идентификатор.")
+            return
+        target_user_id = int(raw_target)
+
+        if caller_user_id != target_user_id:
+            await query.answer(text="Действие доступно только владельцу профиля.", show_alert=True)
+            return
+
+        store = get_default_healbite_user_profile()
+        chat_id = str(getattr(chat, "id", caller_user_id))
+        thread_id = getattr(message, "message_thread_id", None)
+
+        if root == "settings":
+            if action == "view":
+                profile = store.get_user_profile(int(target_user_id))
+                ref_count = store.get_referral_count(int(target_user_id))
+                ref_link = store.get_referral_link(int(target_user_id))
+                keyboard = self._healbite_settings_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=format_healbite_settings_report(profile, referral_count=ref_count, referral_link=ref_link),
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "act":
+                keyboard = self._healbite_activity_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="🏃 <b>Выберите уровень физической активности:</b>\n\n"
+                         "0: Минимальная — сидячий образ жизни, без спорта\n"
+                         "1: Низкая — лёгкие тренировки 1-3 раза в неделю\n"
+                         "2: Средняя — умеренные тренировки 3-5 раз в неделю\n"
+                         "3: Высокая — интенсивные тренировки 6-7 раз в неделю\n"
+                         "4: Экстремальная — тяжёлый физический труд / спортсмены",
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "tz":
+                keyboard = self._healbite_timezone_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="🕒 <b>Выберите часовой пояс или укажите город:</b>\n\n"
+                         "Вы можете выбрать кнопку ниже или написать в чат:\n"
+                         "<code>часовой пояс Москва</code> или <code>город Екатеринбург</code>.",
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "calc":
+                keyboard = self._healbite_calc_method_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="🧮 <b>Метод расчёта суточной нормы КБЖУ:</b>\n\n"
+                         "• <b>Формула Миффлина-Сан Жеора</b> — международный стандарт ВОЗ для расчёта базового и поддерживающего обмена с учётом активности и цели.\n"
+                         "• <b>Ручные цели</b> — ваши собственные значения калорийности и БЖУ (сохраняются без перезаписи формулой).",
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "pref":
+                keyboard = self._healbite_preferences_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="🥗 <b>Настройки питания и ограничений:</b>\n\n"
+                         "Вы можете настроить тип диеты, аллергии, стоп-продукты или очистить их.",
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "invite":
+                ref_count = store.get_referral_count(int(target_user_id))
+                ref_link = store.get_referral_link(int(target_user_id))
+                reply_text = (
+                    "👥 <b>Приглашение друзей в HealBite</b>\n\n"
+                    "Поделитесь своей персональной ссылкой с друзьями:\n"
+                    f"<code>{ref_link}</code>\n\n"
+                    f"📊 <b>Приглашено пользователей:</b> {ref_count}"
+                )
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Назад к настройкам", callback_data=f"settings:view:{target_user_id}")],
+                ]) if TELEGRAM_AVAILABLE else None
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=reply_text,
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+            if action == "reset_ask":
+                keyboard = self._healbite_reset_confirm_keyboard(user_id=int(target_user_id))
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text="⚠️ <b>Сброс профиля</b>\n\n"
+                         "Вы уверены, что хотите сбросить профиль?\n\n"
+                         "• Анкета профиля и персональные цели будут удалены.\n"
+                         "• Вы сможете пройти регистрацию заново через /start.\n"
+                         "• История дневника питания и приёмов пищи <b>сохраняется</b>.\n\n"
+                         "Подтвердите действие:",
+                    message_thread_id=thread_id,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
+        if root == "act_set":
+            level = action
+            try:
+                updated, calc, is_conflict = store.update_activity_level(int(target_user_id), level)
+                if is_conflict and calc is not None:
+                    reply_text = (
+                        f"✅ Уровень активности обновлён на: <b>{activity_level_label(level)}</b>.\n\n"
+                        f"⚠️ <b>Внимание:</b> У вас установлены ручные цели КБЖУ ({int(round(updated.daily_kcal_target or 0))} ккал).\n"
+                        f"Они <b>не были перезаписаны</b>.\n\n"
+                        f"💡 Рекомендованная норма по формуле для вашей новой активности: "
+                        f"<b>{int(round(calc.daily_kcal_target))} ккал</b> "
+                        f"(Б: {calc.daily_protein_g}г, Ж: {calc.daily_fat_g}г, У: {calc.daily_carbs_g}г).\n\n"
+                        f"Чтобы применить автоматическую норму, нажмите «Рассчитать автоматически» в /targets."
+                    )
+                else:
+                    reply_text = (
+                        f"✅ Уровень активности обновлён на: <b>{activity_level_label(level)}</b>.\n\n"
+                        f"{format_healbite_profile_report(updated)}"
+                    )
+            except Exception as e:
+                reply_text = f"⚠️ Ошибка при обновлении активности: {e}"
+            keyboard = self._healbite_settings_keyboard(user_id=int(target_user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=reply_text,
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if root == "tz_set":
+            tz_val = action
+            try:
+                updated = store.update_location_and_timezone(int(target_user_id), timezone_name=tz_val)
+                reply_text = f"✅ Часовой пояс сохранён: <code>{html.escape(updated.timezone or tz_val)}</code>."
+            except Exception as e:
+                reply_text = f"⚠️ Ошибка установки часового пояса: {e}"
+            keyboard = self._healbite_settings_keyboard(user_id=int(target_user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=reply_text,
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if root == "calc_set":
+            calc_val = action
+            try:
+                updated = store.set_calculation_method(int(target_user_id), calc_val)
+                reply_text = f"✅ Метод расчёта сохранён: <b>{html.escape(calculation_method_label(calc_val))}</b>.\n\n{format_healbite_targets_report(updated)}"
+            except Exception as e:
+                reply_text = f"⚠️ Ошибка установки метода расчёта: {e}"
+            keyboard = self._healbite_settings_keyboard(user_id=int(target_user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=reply_text,
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if root == "pref":
+            if action == "clear":
+                updated = store.update_dietary_preferences(
+                    int(target_user_id),
+                    diet_type="",
+                    allergies="",
+                    stop_products="",
+                    preferences="",
+                )
+                reply_text = "✅ Все диетические ограничения и предпочтения очищены."
+            else:
+                field_hints = {
+                    "diet": "Напишите в ответ: <code>диета вегетарианство</code> или <code>диета кето</code>",
+                    "allergies": "Напишите в ответ: <code>аллергия на орехи, лактозу</code>",
+                    "stop": "Напишите в ответ: <code>стоп-продукты лук, кинза</code>",
+                    "like": "Напишите в ответ: <code>предпочтения итальянская кухня</code>",
+                }
+                reply_text = f"💡 {field_hints.get(action, 'Отправьте параметры в чат.')}"
+            keyboard = self._healbite_settings_keyboard(user_id=int(target_user_id))
+            await self._send_message_with_thread_fallback(
+                chat_id=chat_id,
+                text=reply_text,
+                message_thread_id=thread_id,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+            )
+            await query.answer()
+            return
+
+        if root == "reset_do":
+            if action == "confirm":
+                try:
+                    store.reset_user_profile(int(target_user_id))
+                    reply_text = (
+                        "✅ <b>Профиль успешно сброшен!</b>\n\n"
+                        "Данные регистрации удалены. История дневника сохранена.\n"
+                        "Чтобы настроить профиль заново, отправьте команду /start."
+                    )
+                except UserDeleteBlockedActiveHouseholdRelationError:
+                    reply_text = "❌ <b>Сброс заблокирован:</b> Вы состоите в активной семье/домохозяйстве. Сначала покиньте семью."
+                except Exception as e:
+                    reply_text = f"⚠️ Ошибка при сбросе профиля: {e}"
+                await self._send_message_with_thread_fallback(
+                    chat_id=chat_id,
+                    text=reply_text,
+                    message_thread_id=thread_id,
+                    parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                )
+                await query.answer()
+                return
+
     async def _maybe_handle_healbite_profile_update(self, msg: Message) -> bool:
         from gateway.healbite_profile_conversation import (
             ProfileUpdateValidationError, extract_profile_delta,
@@ -7650,7 +8162,7 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = getattr(getattr(msg, "chat", None), "id", None)
         if type(user_id) is not int or user_id <= 0 or chat_id != user_id:
             return False
-        if not self._is_callback_user_authorized(str(user_id), chat_id=str(chat_id), chat_type="private"):
+        if not self._is_callback_user_authorized(str(user_id), chat_id=str(chat_id), chat_type="private") and not self._healbite_public_lane_enabled_for_user(user_id):
             return False
         try:
             delta = extract_profile_delta(getattr(msg, "text", "") or "")
@@ -10099,6 +10611,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 text_override=action,
                 emit_route_marker=not is_keyboard_action,
             )
+        if normalized_action in {"/settings", "/настройки"}:
+            return await self._maybe_handle_healbite_settings_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if normalized_action in {"/invite", "/пригласить"}:
+            return await self._maybe_handle_healbite_invite_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
+        if normalized_action in {"/reset_profile", "/reset"}:
+            return await self._maybe_handle_healbite_reset_profile_command(
+                msg,
+                text_override=action,
+                emit_route_marker=not is_keyboard_action,
+            )
         if normalized_action == FAMILY_COMMAND:
             return await self._maybe_handle_healbite_family_command(
                 msg,
@@ -10950,6 +11480,12 @@ class TelegramAdapter(BasePlatformAdapter):
             if await self._maybe_handle_healbite_profile_command(msg):
                 return
             if await self._maybe_handle_healbite_targets_command(msg):
+                return
+            if await self._maybe_handle_healbite_settings_command(msg):
+                return
+            if await self._maybe_handle_healbite_invite_command(msg):
+                return
+            if await self._maybe_handle_healbite_reset_profile_command(msg):
                 return
             if await self._maybe_handle_nutrition_diary_undo_command(msg):
                 return

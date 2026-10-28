@@ -58,6 +58,21 @@ ACTIVITY_FACTORS = {
     ACTIVITY_VERY_HIGH: 1.90,
 }
 
+SUPPORTED_CALCULATION_METHODS = {"mifflin_v1", "manual"}
+
+CALCULATION_METHOD_LABELS_RU = {
+    "mifflin_v1": "Формула Миффлина-Сан Жеора (mifflin_v1)",
+    "manual": "Ручной ввод КБЖУ (manual)",
+}
+
+ACTIVITY_LEVEL_DESCRIPTIONS_RU = {
+    ACTIVITY_SEDENTARY: "Уровень 0 — активность не учитывается в расчёте калорий",
+    ACTIVITY_LIGHT: "Уровень 1 — лёгкая активность, 10 000 шагов в день",
+    ACTIVITY_MODERATE: "Уровень 2 — 10 000 шагов и две тренировки в неделю",
+    ACTIVITY_HIGH: "Уровень 3 — 10 000 шагов и четыре тренировки в неделю",
+    ACTIVITY_VERY_HIGH: "Уровень 4 — тренировки и работа на ногах",
+}
+
 # Product-level MVP configuration. These coefficients should be reviewed by a
 # nutrition specialist before any medical positioning of the product.
 GOAL_FACTORS = {
@@ -132,6 +147,8 @@ def normalize_goal(value: str | None) -> str | None:
     token = _normalize_token(value)
     mapping = {
         GOAL_LOSE: GOAL_LOSE,
+        "weight_loss": GOAL_LOSE,
+        "lose_weight": GOAL_LOSE,
         "снижение веса": GOAL_LOSE,
         "снизить вес": GOAL_LOSE,
         "похудеть": GOAL_LOSE,
@@ -139,12 +156,16 @@ def normalize_goal(value: str | None) -> str | None:
         "похудание": GOAL_LOSE,
         "сброс веса": GOAL_LOSE,
         GOAL_MAINTAIN: GOAL_MAINTAIN,
+        "maintenance": GOAL_MAINTAIN,
+        "maintain": GOAL_MAINTAIN,
         "поддержание веса": GOAL_MAINTAIN,
         "поддерживать вес": GOAL_MAINTAIN,
         "поддержание": GOAL_MAINTAIN,
         "удержание веса": GOAL_MAINTAIN,
         "сохранить вес": GOAL_MAINTAIN,
         GOAL_GAIN: GOAL_GAIN,
+        "weight_gain": GOAL_GAIN,
+        "gain_weight": GOAL_GAIN,
         "набор массы": GOAL_GAIN,
         "набрать массу": GOAL_GAIN,
         "набор веса": GOAL_GAIN,
@@ -158,20 +179,40 @@ def normalize_activity_level(value: str | None) -> str | None:
     token = _normalize_token(value)
     mapping = {
         ACTIVITY_SEDENTARY: ACTIVITY_SEDENTARY,
+        "0": ACTIVITY_SEDENTARY,
+        "1.2": ACTIVITY_SEDENTARY,
+        "уровень 0": ACTIVITY_SEDENTARY,
+        "level 0": ACTIVITY_SEDENTARY,
         "минимальная активность": ACTIVITY_SEDENTARY,
         "минимальная": ACTIVITY_SEDENTARY,
         ACTIVITY_LIGHT: ACTIVITY_LIGHT,
+        "1": ACTIVITY_LIGHT,
+        "1.375": ACTIVITY_LIGHT,
+        "уровень 1": ACTIVITY_LIGHT,
+        "level 1": ACTIVITY_LIGHT,
         "лёгкая активность": ACTIVITY_LIGHT,
         "легкая активность": ACTIVITY_LIGHT,
         "лёгкая": ACTIVITY_LIGHT,
         "легкая": ACTIVITY_LIGHT,
         ACTIVITY_MODERATE: ACTIVITY_MODERATE,
+        "2": ACTIVITY_MODERATE,
+        "1.55": ACTIVITY_MODERATE,
+        "уровень 2": ACTIVITY_MODERATE,
+        "level 2": ACTIVITY_MODERATE,
         "умеренная активность": ACTIVITY_MODERATE,
         "умеренная": ACTIVITY_MODERATE,
         ACTIVITY_HIGH: ACTIVITY_HIGH,
+        "3": ACTIVITY_HIGH,
+        "1.725": ACTIVITY_HIGH,
+        "уровень 3": ACTIVITY_HIGH,
+        "level 3": ACTIVITY_HIGH,
         "высокая активность": ACTIVITY_HIGH,
         "высокая": ACTIVITY_HIGH,
         ACTIVITY_VERY_HIGH: ACTIVITY_VERY_HIGH,
+        "4": ACTIVITY_VERY_HIGH,
+        "1.9": ACTIVITY_VERY_HIGH,
+        "уровень 4": ACTIVITY_VERY_HIGH,
+        "level 4": ACTIVITY_VERY_HIGH,
         "очень высокая активность": ACTIVITY_VERY_HIGH,
         "очень высокая": ACTIVITY_VERY_HIGH,
     }
@@ -191,6 +232,27 @@ def goal_label(value: str | None) -> str:
 def activity_level_label(value: str | None) -> str:
     normalized = normalize_activity_level(value)
     return ACTIVITY_LABELS_RU.get(normalized or "", "—")
+
+
+def activity_level_description(value: str | None) -> str:
+    normalized = normalize_activity_level(value)
+    return ACTIVITY_LEVEL_DESCRIPTIONS_RU.get(normalized or "", "—")
+
+
+def validate_calculation_method(method: str | None) -> str:
+    token = (method or "").strip().lower()
+    if token in {"миффлин", "миффлина", "mifflin", "стандарт", "mifflin_v1", "авто", "формула"}:
+        return "mifflin_v1"
+    if token in {"manual", "ручной", "ручные", "ручная"}:
+        return "manual"
+    if token in SUPPORTED_CALCULATION_METHODS:
+        return token
+    raise NutritionTargetValidationError("unsupported_calculation_method")
+
+
+def calculation_method_label(method: str | None) -> str:
+    token = (method or "").strip().lower()
+    return CALCULATION_METHOD_LABELS_RU.get(token, token or "—")
 
 
 def validate_profile_inputs(inputs: NutritionProfileInputs) -> None:

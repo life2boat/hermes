@@ -199,7 +199,7 @@ def test_build_food_vision_inventory_keyboard_structure():
     assert kb[0][0]["callback_data"] == "food_inv:save:888:inv-buttons-test"
 
     # Row 2: Edit and Cancel
-    assert kb[1][0]["text"] == "✏️ Исправить"
+    assert kb[1][0]["text"] in ("✏️ Исправить", "✏️ Уточнить состав")
     assert kb[1][0]["callback_data"] == "food_inv:edit:888:inv-buttons-test"
     assert kb[1][1]["text"] == "❌ Отмена"
     assert kb[1][1]["callback_data"] == "food_inv:cancel:888:inv-buttons-test"

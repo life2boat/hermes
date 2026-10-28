@@ -407,7 +407,29 @@ def _default_user_timezone_resolver(user_id: int) -> str | None:
     return profile.timezone if profile is not None else None
 
 
-def get_default_water_tracker() -> HealBiteWaterTracker:
+def get_default_water_tracker(db_path: str | Path | None = None) -> HealBiteWaterTracker:
+    if db_path is not None:
+        def _target_res(uid: int) -> int | None:
+            try:
+                from gateway.healbite_user_profile import HealBiteUserProfileStore
+                return HealBiteUserProfileStore(db_path=db_path).get_water_target_ml(int(uid))
+            except Exception:
+                return None
+
+        def _tz_res(uid: int) -> str | None:
+            try:
+                from gateway.healbite_user_profile import HealBiteUserProfileStore
+                p = HealBiteUserProfileStore(db_path=db_path).get_user_profile(int(uid))
+                return p.timezone if p is not None else None
+            except Exception:
+                return None
+
+        return HealBiteWaterTracker(
+            db_path=db_path,
+            water_target_resolver=_target_res,
+            timezone_resolver=_tz_res,
+        )
+
     return HealBiteWaterTracker(
         water_target_resolver=_default_water_target_resolver,
         timezone_resolver=_default_user_timezone_resolver,

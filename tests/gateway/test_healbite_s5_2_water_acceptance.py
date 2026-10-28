@@ -434,8 +434,8 @@ class TestAC07DashboardIntegration:
         )
         tracker.add_water_intake(101, 1000)
 
-        monkeypatch.setattr("gateway.healbite_water_tracker.get_default_water_tracker", lambda: tracker)
-        monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda: tracker)
+        monkeypatch.setattr("gateway.healbite_water_tracker.get_default_water_tracker", lambda *a, **kw: tracker)
+        monkeypatch.setattr("gateway.platforms.telegram.get_default_water_tracker", lambda *a, **kw: tracker)
         monkeypatch.setattr("gateway.platforms.telegram.get_default_healbite_user_profile", lambda: store)
 
         adapter = _adapter()

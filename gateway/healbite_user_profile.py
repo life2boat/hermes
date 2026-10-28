@@ -20,13 +20,23 @@ from gateway.healbite_nutrition_targets import (
     NUTRITION_CALCULATION_VERSION,
     NutritionProfileInputs,
     NutritionTargetValidationError,
+    activity_level_description,
     activity_level_label,
     calculate_nutrition_targets,
+    calculation_method_label,
     goal_label,
     normalize_activity_level,
     normalize_goal,
     normalize_sex,
     sex_label,
+    validate_calculation_method,
+)
+from gateway.healbite_time import (
+    COMMON_CITY_TIMEZONES,
+    DEFAULT_TIMEZONE_NAME,
+    format_local_now,
+    normalize_timezone_name,
+    validate_timezone,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +124,8 @@ _GLOBAL_PROFILE_LOCK = threading.Lock()
 _GLOBAL_PROFILE_STORE: HealBiteUserProfileStore | None = None
 _UNSET = object()
 
+REFERRALS_TABLE = "referrals"
+
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS {USERS_TABLE} (
     user_id INTEGER PRIMARY KEY,
@@ -149,6 +161,13 @@ CREATE TABLE IF NOT EXISTS {PROFILES_TABLE} (
     preferences TEXT,
     medical_flags TEXT,
     onboarding_done INTEGER NOT NULL DEFAULT 0,
+    location TEXT,
+    timezone TEXT,
+    diet_type TEXT,
+    calculation_method TEXT,
+    initial_age INTEGER,
+    initial_height_cm REAL,
+    initial_weight_kg REAL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -158,6 +177,13 @@ CREATE TABLE IF NOT EXISTS {USER_ONBOARDING_TABLE} (
     step TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS {REFERRALS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_id INTEGER NOT NULL,
+    referred_id INTEGER NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer_id ON {REFERRALS_TABLE}(referrer_id);
 """
 
 _USER_COLUMNS = {
@@ -184,6 +210,13 @@ _PROFILE_COLUMNS = {
     "budget": "TEXT",
     "activity_level": "TEXT",
     "water_target_ml": "INTEGER",
+    "location": "TEXT",
+    "timezone": "TEXT",
+    "diet_type": "TEXT",
+    "calculation_method": "TEXT",
+    "initial_age": "INTEGER",
+    "initial_height_cm": "REAL",
+    "initial_weight_kg": "REAL",
 }
 
 
@@ -218,6 +251,13 @@ class HealBiteUserProfile:
     allergies: str | None = None
     stop_products: str | None = None
     preferences: str | None = None
+    location: str | None = None
+    timezone: str | None = None
+    diet_type: str | None = None
+    calculation_method: str | None = None
+    initial_age: int | None = None
+    initial_height_cm: float | None = None
+    initial_weight_kg: float | None = None
 
     @property
     def daily_protein_target(self) -> float | None:
@@ -371,16 +411,30 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
             "Нажми /start, и я помогу заполнить базовый профиль."
         )
 
+    weight_str = _format_target(profile.weight_kg, "кг")
+    if (
+        profile.initial_weight_kg is not None
+        and profile.weight_kg is not None
+        and abs(profile.initial_weight_kg - profile.weight_kg) >= 0.05
+    ):
+        weight_str += f" (на старте: {_format_target(profile.initial_weight_kg, 'кг')})"
+
     lines = [
         "👤 Ваш профиль",
         f"🎯 Цель: {html.escape(goal_label(profile.goal))}",
         f"⚧ Пол: {sex_label(profile.sex)}",
         f"🎂 Возраст: {_format_target(profile.age, 'лет')}",
         f"📏 Рост: {_format_target(profile.height_cm, 'см')}",
-        f"⚖️ Вес: {_format_target(profile.weight_kg, 'кг')}",
+        f"⚖️ Вес: {weight_str}",
         f"🏃 Активность: {activity_level_label(profile.activity_level)}",
-        "",
     ]
+    if profile.location or profile.timezone:
+        loc = profile.location or "—"
+        tz = profile.timezone or DEFAULT_TIMEZONE_NAME
+        lines.append(f"📍 Локация: {html.escape(loc)} ({html.escape(tz)})")
+    if profile.diet_type:
+        lines.append(f"🥗 Тип питания: {html.escape(profile.diet_type)}")
+    lines.append("")
 
     if profile.daily_kcal_target is not None:
         lines.extend(
@@ -434,6 +488,45 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
                 "• " + "\n• ".join(missing),
             ]
         )
+    return "\n".join(lines)
+
+
+def format_healbite_settings_report(
+    profile: HealBiteUserProfile | None,
+    referral_count: int = 0,
+    referral_link: str = "",
+) -> str:
+    lines = [
+        "⚙️ <b>Настройки профиля</b>",
+        "",
+    ]
+    if profile is None:
+        lines.append("Профиль ещё не заполнен. Нажмите /start для настройки.")
+        return "\n".join(lines)
+
+    tz_str = profile.timezone or DEFAULT_TIMEZONE_NAME
+    loc_str = profile.location or "Не указан"
+    lines.append(f"📍 <b>Локация:</b> {html.escape(loc_str)}")
+    lines.append(f"🕒 <b>Часовой пояс:</b> <code>{html.escape(tz_str)}</code>")
+
+    calc_method = profile.calculation_method or ("manual" if profile.target_source == "manual" else "mifflin_v1")
+    lines.append(f"🧮 <b>Метод расчёта КБЖУ:</b> {html.escape(calculation_method_label(calc_method))}")
+    lines.append(f"🏃 <b>Активность:</b> {activity_level_label(profile.activity_level)}")
+
+    diet = profile.diet_type or "Обычное (без ограничений)"
+    lines.append(f"🥗 <b>Тип питания:</b> {html.escape(diet)}")
+    if profile.allergies:
+        lines.append(f"⚠️ <b>Аллергии:</b> {html.escape(profile.allergies)}")
+    if profile.stop_products:
+        lines.append(f"🚫 <b>Исключения (стоп-продукты):</b> {html.escape(profile.stop_products)}")
+    if profile.preferences:
+        lines.append(f"💡 <b>Предпочтения:</b> {html.escape(profile.preferences)}")
+
+    lines.append("")
+    lines.append(f"👥 <b>Приглашено друзей:</b> {referral_count}")
+    if referral_link:
+        lines.append(f"🔗 <b>Ваша ссылка:</b> <code>{referral_link}</code>")
+
     return "\n".join(lines)
 
 
@@ -610,6 +703,38 @@ def parse_profile_field_update(text: str) -> tuple[str, Any] | None:
         act_val = normalize_activity_level(m.group(1).strip())
         if act_val:
             return "activity_level", act_val
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:город|локация)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "location", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:часовой\s+пояс|таймзона|timezone)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "timezone", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:тип\s+питания|диета)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "diet_type", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:метод\s+расч[её]та|формула)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "calculation_method", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мои\s+)?аллерги[ия](?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "allergies", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мои\s+)?(?:стоп-продукты|нелюбимые\s+продукты|исключения)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "stop_products", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мои\s+)?предпочтения(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        return "preferences", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?вес(?:\s*[:=]|\s+)\s*(\d+(?:[.,]\d+)?)(?:\s*кг)?", cleaned)
+    if m:
+        return "weight_kg", float(m.group(1).replace(",", "."))
 
     return None
 
@@ -845,9 +970,28 @@ class HealBiteUserProfileStore:
             ),
         )
         if profile_row is not None:
-            for field in ("household_size", "cooking_frequency", "budget", "allergies", "stop_products", "preferences"):
+            for field in (
+                "household_size",
+                "cooking_frequency",
+                "budget",
+                "allergies",
+                "stop_products",
+                "preferences",
+                "location",
+                "timezone",
+                "diet_type",
+                "calculation_method",
+                "initial_age",
+                "initial_height_cm",
+                "initial_weight_kg",
+            ):
                 if field in profile_row.keys():
-                    setattr(profile, field, profile_row[field])
+                    val = profile_row[field]
+                    if field == "initial_age":
+                        val = _to_int(val)
+                    elif field in ("initial_height_cm", "initial_weight_kg"):
+                        val = _to_float(val)
+                    setattr(profile, field, val)
         return profile
 
     def apply_conversational_delta(self, *, user_id: int, delta: object) -> dict[str, str]:
@@ -979,6 +1123,16 @@ class HealBiteUserProfileStore:
         nutrition_calculation_version: str | None | object = _UNSET,
         nutrition_calculated_at: str | None | object = _UNSET,
         target_source: str | None | object = _UNSET,
+        location: str | None | object = _UNSET,
+        timezone: str | None | object = _UNSET,
+        diet_type: str | None | object = _UNSET,
+        calculation_method: str | None | object = _UNSET,
+        allergies: str | None | object = _UNSET,
+        stop_products: str | None | object = _UNSET,
+        preferences: str | None | object = _UNSET,
+        initial_age: int | None | object = _UNSET,
+        initial_height_cm: float | None | object = _UNSET,
+        initial_weight_kg: float | None | object = _UNSET,
         created_at: str | None = None,
     ) -> HealBiteUserProfile:
         timestamp = created_at or _sqlite_timestamp()
@@ -1024,9 +1178,31 @@ class HealBiteUserProfileStore:
                     tuple(values),
                 )
 
-            raw_updates_present = any(value is not _UNSET for value in (sex, age, height_cm, weight_kg, goal, activity_level, manual_kcal_target))
+            raw_updates_present = any(
+                value is not _UNSET
+                for value in (
+                    sex,
+                    age,
+                    height_cm,
+                    weight_kg,
+                    goal,
+                    activity_level,
+                    manual_kcal_target,
+                    location,
+                    timezone,
+                    diet_type,
+                    calculation_method,
+                    allergies,
+                    stop_products,
+                    preferences,
+                    initial_age,
+                    initial_height_cm,
+                    initial_weight_kg,
+                )
+            )
             if raw_updates_present:
                 self._ensure_profile_row(conn, user_id=normalized_user_id)
+                profile_columns = self._table_columns(conn, PROFILES_TABLE)
                 profile_updates: list[str] = []
                 profile_values: list[Any] = []
                 if sex is not _UNSET:
@@ -1041,6 +1217,32 @@ class HealBiteUserProfileStore:
                 if weight_kg is not _UNSET:
                     profile_updates.append("weight_kg = ?")
                     profile_values.append(_to_float(weight_kg))
+
+                # Baseline immutability: freeze initial measurements if not already recorded
+                if "initial_age" in profile_columns:
+                    if initial_age is not _UNSET and initial_age is not None:
+                        profile_updates.append("initial_age = COALESCE(initial_age, ?)")
+                        profile_values.append(_to_int(initial_age))
+                    elif age is not _UNSET and age is not None:
+                        profile_updates.append("initial_age = COALESCE(initial_age, ?)")
+                        profile_values.append(_to_int(age))
+
+                if "initial_height_cm" in profile_columns:
+                    if initial_height_cm is not _UNSET and initial_height_cm is not None:
+                        profile_updates.append("initial_height_cm = COALESCE(initial_height_cm, ?)")
+                        profile_values.append(_to_float(initial_height_cm))
+                    elif height_cm is not _UNSET and height_cm is not None:
+                        profile_updates.append("initial_height_cm = COALESCE(initial_height_cm, ?)")
+                        profile_values.append(_to_float(height_cm))
+
+                if "initial_weight_kg" in profile_columns:
+                    if initial_weight_kg is not _UNSET and initial_weight_kg is not None:
+                        profile_updates.append("initial_weight_kg = COALESCE(initial_weight_kg, ?)")
+                        profile_values.append(_to_float(initial_weight_kg))
+                    elif weight_kg is not _UNSET and weight_kg is not None:
+                        profile_updates.append("initial_weight_kg = COALESCE(initial_weight_kg, ?)")
+                        profile_values.append(_to_float(weight_kg))
+
                 if goal is not _UNSET:
                     profile_updates.append("goal = ?")
                     profile_values.append(normalize_goal(goal) if goal not in (None, "") else None)
@@ -1048,12 +1250,41 @@ class HealBiteUserProfileStore:
                     normalized_activity = normalize_activity_level(activity_level) if activity_level not in (None, "") else None
                     profile_updates.append("activity = ?")
                     profile_values.append(normalized_activity)
-                    if "activity_level" in self._table_columns(conn, PROFILES_TABLE):
+                    if "activity_level" in profile_columns:
                         profile_updates.append("activity_level = ?")
                         profile_values.append(normalized_activity)
                 if manual_kcal_target is not _UNSET:
                     profile_updates.append("calories_limit = ?")
                     profile_values.append(_to_float(manual_kcal_target))
+
+                if "location" in profile_columns and location is not _UNSET:
+                    profile_updates.append("location = ?")
+                    profile_values.append(str(location).strip() if location not in (None, "") else None)
+                if "timezone" in profile_columns and timezone is not _UNSET:
+                    norm_tz = normalize_timezone_name(timezone) if timezone not in (None, "") else None
+                    if norm_tz is not None:
+                        validate_timezone(norm_tz)
+                    profile_updates.append("timezone = ?")
+                    profile_values.append(norm_tz)
+                if "diet_type" in profile_columns and diet_type is not _UNSET:
+                    profile_updates.append("diet_type = ?")
+                    profile_values.append(str(diet_type).strip() if diet_type not in (None, "") else None)
+                if "calculation_method" in profile_columns and calculation_method is not _UNSET:
+                    norm_cm = str(calculation_method).strip() if calculation_method not in (None, "") else None
+                    if norm_cm is not None:
+                        validate_calculation_method(norm_cm)
+                    profile_updates.append("calculation_method = ?")
+                    profile_values.append(norm_cm)
+                if "allergies" in profile_columns and allergies is not _UNSET:
+                    profile_updates.append("allergies = ?")
+                    profile_values.append(str(allergies).strip() if allergies not in (None, "") else None)
+                if "stop_products" in profile_columns and stop_products is not _UNSET:
+                    profile_updates.append("stop_products = ?")
+                    profile_values.append(str(stop_products).strip() if stop_products not in (None, "") else None)
+                if "preferences" in profile_columns and preferences is not _UNSET:
+                    profile_updates.append("preferences = ?")
+                    profile_values.append(str(preferences).strip() if preferences not in (None, "") else None)
+
                 profile_updates.append("updated_at = ?")
                 profile_values.append(timestamp)
                 profile_values.append(normalized_user_id)
@@ -1372,8 +1603,22 @@ class HealBiteUserProfileStore:
         field: str,
         value: Any,
     ) -> tuple[HealBiteUserProfile, bool]:
-        """Update single profile field and recalculate targets if appropriate (R1-05)."""
-        valid_fields = {"sex", "age", "height_cm", "weight_kg", "goal", "activity_level"}
+        """Update single profile field and recalculate targets if appropriate (R1-05, R1-12)."""
+        valid_fields = {
+            "sex",
+            "age",
+            "height_cm",
+            "weight_kg",
+            "goal",
+            "activity_level",
+            "location",
+            "timezone",
+            "diet_type",
+            "calculation_method",
+            "allergies",
+            "stop_products",
+            "preferences",
+        }
         if field not in valid_fields:
             raise ValueError(f"Недопустимое поле профиля: {field}")
 
@@ -1402,13 +1647,27 @@ class HealBiteUserProfileStore:
             norm_value = normalize_activity_level(value)
             if norm_value is None:
                 raise ValueError("Укажите корректный уровень активности.")
+        elif field == "location":
+            norm_value = str(value).strip() if value not in (None, "") else None
+        elif field == "timezone":
+            norm_value = validate_timezone(str(value).strip()) if value not in (None, "") else None
+        elif field == "diet_type":
+            norm_value = str(value).strip() if value not in (None, "") else None
+        elif field == "calculation_method":
+            norm_value = validate_calculation_method(str(value).strip())
+        elif field in {"allergies", "stop_products", "preferences"}:
+            raw_s = str(value).strip() if value not in (None, "") else ""
+            norm_value = None if raw_s.lower() in {"очистить", "нет", "none", ""} else raw_s
 
         self.upsert_user_profile(user_id=int(user_id), username=username, **{field: norm_value})
         updated = self.get_user_profile(int(user_id))
         if updated is None:
             raise RuntimeError("Failed to load updated profile")
 
-        if updated.target_source == "manual":
+        if updated.target_source == "manual" and field != "calculation_method":
+            return updated, False
+
+        if field in {"location", "timezone", "diet_type", "allergies", "stop_products", "preferences"}:
             return updated, False
 
         if not profile_missing_fields(updated):
@@ -1424,6 +1683,159 @@ class HealBiteUserProfileStore:
                 return updated, False
 
         return updated, False
+
+    def record_referral(self, referrer_id: int, referred_id: int) -> bool:
+        """Record referral attribution. Prevent self-referral and duplicate attribution."""
+        try:
+            ref_id = int(referrer_id)
+            new_id = int(referred_id)
+        except (TypeError, ValueError):
+            return False
+        if ref_id <= 0 or new_id <= 0 or ref_id == new_id:
+            return False
+        with self._connect() as conn:
+            try:
+                cursor = conn.execute(
+                    f"INSERT INTO {REFERRALS_TABLE} (referrer_id, referred_id, created_at) VALUES (?, ?, ?)",
+                    (ref_id, new_id, _sqlite_timestamp()),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_referral_count(self, user_id: int) -> int:
+        """Return total unique users referred by user_id."""
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            return 0
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {REFERRALS_TABLE} WHERE referrer_id = ?",
+                (uid,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def get_referral_link(self, user_id: int, bot_username: str = "HealBitebot") -> str:
+        """Return public Telegram referral deep-link."""
+        clean_bot = (bot_username or "HealBitebot").lstrip("@")
+        return f"https://t.me/{clean_bot}?start=ref_{int(user_id)}"
+
+    def update_location_and_timezone(
+        self,
+        user_id: int,
+        location: str | None = None,
+        timezone_name: str | None = None,
+    ) -> HealBiteUserProfile:
+        """Set location and/or timezone with automatic Russian city mapping."""
+        tz_to_set = timezone_name
+        loc_to_set = location
+        if tz_to_set is not None:
+            tz_to_set = validate_timezone(tz_to_set)
+        elif loc_to_set is not None:
+            norm_loc = loc_to_set.strip().lower()
+            if norm_loc in COMMON_CITY_TIMEZONES:
+                tz_to_set = COMMON_CITY_TIMEZONES[norm_loc]
+        return self.upsert_user_profile(
+            user_id=int(user_id),
+            location=loc_to_set if loc_to_set is not None else _UNSET,
+            timezone=tz_to_set if tz_to_set is not None else _UNSET,
+        )
+
+    def update_dietary_preferences(
+        self,
+        user_id: int,
+        diet_type: str | None = None,
+        allergies: str | None = None,
+        stop_products: str | None = None,
+        preferences: str | None = None,
+    ) -> HealBiteUserProfile:
+        """Update dietary preferences non-destructively."""
+        kwargs: dict[str, Any] = {}
+        if diet_type is not None:
+            kwargs["diet_type"] = None if diet_type.strip().lower() in {"очистить", "нет", "none", ""} else diet_type.strip()
+        if allergies is not None:
+            kwargs["allergies"] = None if allergies.strip().lower() in {"очистить", "нет", "none", ""} else allergies.strip()
+        if stop_products is not None:
+            kwargs["stop_products"] = None if stop_products.strip().lower() in {"очистить", "нет", "none", ""} else stop_products.strip()
+        if preferences is not None:
+            kwargs["preferences"] = None if preferences.strip().lower() in {"очистить", "нет", "none", ""} else preferences.strip()
+        return self.upsert_user_profile(user_id=int(user_id), **kwargs)
+
+    def update_activity_level(
+        self,
+        user_id: int,
+        activity_level: str,
+        username: str = "",
+    ) -> tuple[HealBiteUserProfile, Any, bool]:
+        """Update activity level.
+        If user has manual target overrides, preserve manual targets and do not silently overwrite.
+        Returns (profile, calculation_or_none, manual_conflict_flag).
+        """
+        norm_level = normalize_activity_level(activity_level)
+        if norm_level is None:
+            raise ValueError(f"Неизвестный уровень активности: {activity_level}")
+
+        profile = self.get_user_profile(int(user_id))
+        is_manual = (profile is not None and profile.target_source == "manual")
+
+        self.upsert_user_profile(user_id=int(user_id), username=username, activity_level=norm_level)
+
+        if is_manual:
+            inputs = NutritionProfileInputs(
+                sex=normalize_sex(profile.sex) or "",
+                age=int(profile.age or 0),
+                height_cm=float(profile.height_cm or 0.0),
+                weight_kg=float(profile.weight_kg or 0.0),
+                activity_level=norm_level,
+                goal=normalize_goal(profile.goal) or "",
+            )
+            calc = calculate_nutrition_targets(inputs, target_source="calculated")
+            updated = self.get_user_profile(int(user_id))
+            return updated, calc, True
+        else:
+            recalculated = self.recalculate_profile_targets(
+                user_id=int(user_id),
+                username=username,
+                target_source="calculated",
+            )
+            return recalculated, None, False
+
+    def set_calculation_method(
+        self,
+        user_id: int,
+        method: str,
+        username: str = "",
+    ) -> HealBiteUserProfile:
+        """Set calculation method (mifflin_v1 or manual). Fail closed on unsupported methods."""
+        validated_method = validate_calculation_method(method)
+        profile = self.get_user_profile(int(user_id))
+        if validated_method == "manual":
+            return self.upsert_user_profile(
+                user_id=int(user_id),
+                username=username,
+                calculation_method="manual",
+                target_source="manual",
+            )
+        else:
+            self.upsert_user_profile(
+                user_id=int(user_id),
+                username=username,
+                calculation_method="mifflin_v1",
+                target_source="calculated",
+            )
+            if profile is not None and not profile_missing_fields(profile):
+                return self.recalculate_profile_targets(
+                    user_id=int(user_id),
+                    username=username,
+                    target_source="calculated",
+                )
+            return self.get_user_profile(int(user_id))
+
+    def reset_user_profile(self, user_id: int) -> None:
+        """Reset profile for re-onboarding. Preserves nutrition diary and weight log."""
+        self.delete_user_profile(int(user_id))
 
     def recalculate_profile_targets(
         self,

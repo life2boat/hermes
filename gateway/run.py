@@ -1938,7 +1938,7 @@ def _healbite_public_lane_reply(*, has_profile: bool, onboarding_active: bool) -
         return "Чтобы начать пользоваться HealBite, нажми /start и заполни базовый профиль."
     return (
         "В публичном режиме HealBite сейчас доступны /profile, /diary, /stats, /water, /weight, "
-        "фото еды и ответы Да/Нет для сохранения."
+        "/settings, /invite, /targets, фото еды и ответы Да/Нет для сохранения."
     )
 
 
@@ -2062,6 +2062,15 @@ def _healbite_public_lane_decision(
             "enabled": True,
             "action": "allow",
             "route": "public_weight_tracker",
+            "has_profile": True,
+            "onboarding_active": False,
+        }
+
+    if first_token in {"/settings", "/настройки", "/invite", "/пригласить", "/targets", "/norm", "/goals", "/кбжу", "/цели", "/reset_profile", "/profile"}:
+        return {
+            "enabled": True,
+            "action": "allow",
+            "route": f"public_command_{first_token.lstrip('/')}",
             "has_profile": True,
             "onboarding_active": False,
         }

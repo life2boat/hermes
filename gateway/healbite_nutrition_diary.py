@@ -679,8 +679,8 @@ def _parse_sqlite_timestamp(value: str | None) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc)
 
 
-def _local_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
-    return local_day_window_utc(now)
+def _local_day_window(now: datetime | None = None, timezone_name: str | None = None) -> tuple[datetime, datetime]:
+    return local_day_window_utc(now, timezone_name=timezone_name)
 
 
 def _rolling_window(days: int, now: datetime | None = None) -> tuple[datetime, datetime]:
@@ -6910,6 +6910,23 @@ class HealBiteNutritionDiary:
         )
         return sqlite_id, duplicate
 
+    def _resolve_user_timezone(self, user_id: int) -> str | None:
+        try:
+            with self._connect() as conn:
+                cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(profiles)").fetchall()}
+                if "timezone" in cols:
+                    id_col = "telegram_id" if "telegram_id" in cols else "user_id" if "user_id" in cols else None
+                    if id_col is not None:
+                        row = conn.execute(
+                            f"SELECT timezone FROM profiles WHERE {id_col} = ? LIMIT 1",
+                            (int(user_id),),
+                        ).fetchone()
+                        if row and row[0]:
+                            return str(row[0])
+        except Exception:
+            pass
+        return None
+
     def delete_last_meal(
         self,
         user_id: str | int,
@@ -6917,7 +6934,8 @@ class HealBiteNutritionDiary:
         now: datetime | None = None,
     ) -> UndoMealResult:
         normalized_user_id = int(user_id)
-        start_utc, end_utc = _local_day_window(now)
+        tz_name = self._resolve_user_timezone(normalized_user_id)
+        start_utc, end_utc = _local_day_window(now, timezone_name=tz_name)
         params = (
             normalized_user_id,
             _sqlite_timestamp(start_utc),
@@ -6999,7 +7017,8 @@ class HealBiteNutritionDiary:
         ):
             raise ValueError("Provide at least one field to update.")
 
-        start_utc, end_utc = _local_day_window(now)
+        tz_name = self._resolve_user_timezone(normalized_user_id)
+        start_utc, end_utc = _local_day_window(now, timezone_name=tz_name)
         params = (
             normalized_user_id,
             _sqlite_timestamp(start_utc),
@@ -7166,10 +7185,12 @@ class HealBiteNutritionDiary:
         user_id: int,
         now: datetime | None = None,
         days: int = 1,
+        timezone_name: str | None = None,
     ) -> dict[str, Any]:
         normalized_days = max(1, int(days))
         if normalized_days == 1:
-            start_utc, end_utc = _local_day_window(now)
+            tz_name = timezone_name or self._resolve_user_timezone(int(user_id))
+            start_utc, end_utc = _local_day_window(now, timezone_name=tz_name)
             period_key = "today"
             period_label = "\u0441\u0435\u0433\u043e\u0434\u043d\u044f"
         else:

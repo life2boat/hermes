@@ -3445,19 +3445,32 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
 
     if (all_weights_present or (snapshot and total_calories > 0.0)) and has_any_nutrition:
+        # Determine precision: exact only when all items have user-confirmed weights
+        is_all_exact = all(
+            getattr(it, "user_modified", False)
+            for it in pending_inventory.items
+            if not getattr(it, "suppressed_by_item_id", None)
+        )
+        is_approx = bool((snapshot and snapshot.get("is_approximate_range")) or not is_all_exact)
+        calc_status = "📊 Ориентировочный расчёт (~КБЖУ)" if is_approx else "🎯 Точный расчёт"
         total_label = "Итого (частично)" if has_unmapped_component else "Итого"
+        cal_prefix = "~" if is_approx else ""
         lines.extend([
             "",
-            f"{total_label}: ~{_format_kcal(round(total_calories, 1))} · "
+            calc_status,
+            f"{total_label}: {cal_prefix}{_format_kcal(round(total_calories, 1))} · "
             f"Б {_format_grams(round(total_protein, 1))} · "
             f"Ж {_format_grams(round(total_fat, 1))} · "
             f"У {_format_grams(round(total_carbs, 1))}",
         ])
-        if snapshot and snapshot.get("is_approximate_range") and snapshot.get("calories_min") and snapshot.get("calories_max"):
+        if is_approx and snapshot and snapshot.get("calories_min") and snapshot.get("calories_max"):
             c_min = int(round(snapshot["calories_min"]))
             c_max = int(round(snapshot["calories_max"]))
             if c_min != c_max:
-                lines.append(f"Ориентировочный диапазон: ~{c_min}–{c_max} ккал (приблизительный интервал)")
+                lines.append(f"Ориентировочный диапазон: ~{c_min}–{c_max} ккал")
+        if is_approx and not has_unmapped_component:
+            from gateway.nutrition.household_measures import HOUSEHOLD_DISCLAIMER
+            lines.append(HOUSEHOLD_DISCLAIMER)
 
     if has_unmapped_component:
         lines.extend([
@@ -3483,6 +3496,7 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             "• Вес 1: 80 г (общий вес группы)",
             "• Удалить 1",
             "• Добавить: сыр, 30 г",
+            "• Исправь состав: рис 150 г, курица 120 г",
         ])
     elif n_items == 2:
         has_qty_1 = getattr(active_items[0], "quantity", None) and getattr(active_items[0], "quantity", 0) > 1
@@ -3491,6 +3505,7 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             "• Исправить 2: куриная грудка, 120 г",
             "• Удалить 2",
             "• Добавить: сыр, 30 г",
+            "• Замени свинину на говядину, вес 150 г",
         ])
     else:
         has_qty_1 = getattr(active_items[0], "quantity", None) and getattr(active_items[0], "quantity", 0) > 1
@@ -3499,6 +3514,7 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             "• Исправить 2: куриная грудка, 120 г",
             f"• Удалить {n_items}",
             "• Добавить: сыр, 30 г",
+            "• Убери лук, добавь морковь 50 г",
         ])
     return "\n".join(lines)
 
@@ -3667,7 +3683,7 @@ def build_food_vision_inventory_keyboard(
     inv_id = str(inventory.inventory_id or "")
 
     edit_button = {
-        "text": "✏️ Исправить",
+        "text": "✏️ Уточнить состав",
         "callback_data": f"food_inv:edit:{user_id}:{inv_id}",
     }
     cancel_button = {
@@ -4771,8 +4787,9 @@ class HealBiteNutritionDiary:
         if parsed_text and is_full_food_description(parsed_text):
             text_items = []
             for idx, ing in enumerate(parsed_text.ingredients, start=1):
-                min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
-                max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+                # Use parsed ingredient bounds when available; fall back to ±10%
+                min_g = ing.grams_min if ing.grams_min is not None else (round(ing.grams * 0.9, 1) if ing.grams else 80.0)
+                max_g = ing.grams_max if ing.grams_max is not None else (round(ing.grams * 1.1, 1) if ing.grams else 120.0)
                 text_items.append(PendingFoodVisionItem(
                     index=idx,
                     visible_name=ing.name,
@@ -4781,12 +4798,12 @@ class HealBiteNutritionDiary:
                     estimated_grams_min=min_g,
                     estimated_grams_max=max_g,
                     selected_grams=round(ing.grams, 1),
-                    user_modified=True,
-                    preparation="",
+                    user_modified=ing.is_exact,
+                    preparation=ing.preparation or "",
                     is_sauce=False,
                     uncertainty=ing.uncertainty,
                     quantity=ing.quantity,
-                    count_type="COUNT_CONFIRMED",
+                    count_type="COUNT_CONFIRMED" if ing.is_exact else "COUNT_ESTIMATED",
                     piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
                     edible_yield_ratio=1.0,
                 ))
@@ -5393,8 +5410,9 @@ class HealBiteNutritionDiary:
             return None
         text_items = []
         for idx, ing in enumerate(parsed.ingredients, start=1):
-            min_g = round(ing.grams * 0.9, 1) if ing.grams else 100.0
-            max_g = round(ing.grams * 1.1, 1) if ing.grams else 100.0
+            # Use parsed ingredient bounds when available; fall back to ±10%
+            min_g = ing.grams_min if ing.grams_min is not None else (round(ing.grams * 0.9, 1) if ing.grams else 80.0)
+            max_g = ing.grams_max if ing.grams_max is not None else (round(ing.grams * 1.1, 1) if ing.grams else 120.0)
             text_items.append(PendingFoodVisionItem(
                 index=idx,
                 visible_name=ing.name,
@@ -5403,12 +5421,12 @@ class HealBiteNutritionDiary:
                 estimated_grams_min=min_g,
                 estimated_grams_max=max_g,
                 selected_grams=round(ing.grams, 1),
-                user_modified=True,
-                preparation="",
+                user_modified=ing.is_exact,
+                preparation=ing.preparation or "",
                 is_sauce=False,
                 uncertainty=ing.uncertainty,
                 quantity=ing.quantity,
-                count_type="COUNT_CONFIRMED",
+                count_type="COUNT_CONFIRMED" if ing.is_exact else "COUNT_ESTIMATED",
                 piece_grams=round(ing.grams / ing.quantity, 1) if ing.quantity else ing.grams,
                 edible_yield_ratio=1.0,
             ))
@@ -6009,8 +6027,11 @@ class HealBiteNutritionDiary:
                     item.user_modified = True
 
             elif action.operation == ActionOperation.ADD_ITEM:
+                add_seq = 1
+                while f"item_add_{add_seq}" in items_by_id or f"item_add_{add_seq}" in removed_ids:
+                    add_seq += 1
+                new_id = f"item_add_{add_seq}"
                 new_idx = len(items_by_id) + 1
-                new_id = f"item_add_{new_idx}"
                 new_itm = PendingFoodVisionItem(
                     index=new_idx,
                     visible_name=action.name or "Новый продукт",
@@ -6031,6 +6052,8 @@ class HealBiteNutritionDiary:
                 items_by_id[new_id] = new_itm
 
         remaining = [itm for itm in items_by_id.values() if itm.item_id not in removed_ids]
+        if not remaining:
+            return None, "Нельзя удалить все позиции. В приёме пищи должен остаться хотя бы один продукт."
         for pos, itm in enumerate(remaining, start=1):
             itm.index = pos
         working.items = remaining

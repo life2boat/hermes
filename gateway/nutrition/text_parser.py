@@ -39,7 +39,33 @@ _PIECE_WEIGHT_REFERENCE: dict[str, float] = {
     "вафли": 40.0,
     "кусок": 100.0,
     "ломтик": 30.0,
+    "хлебцы": 30.0,
+    "хлебец": 15.0,
+    "сырник": 50.0,
+    "сырники": 120.0,
+    "блин": 40.0,
+    "блины": 120.0,
+    "котлета": 100.0,
+    "котлеты": 150.0,
 }
+
+_PREPARATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:запеч[её]нн?[а-я]*|в\s+духовке)\b", re.IGNORECASE), "запечённый"),
+    (re.compile(r"\b(?:отварн[а-я]*|вар[её]нн?[а-я]*|сваренн?[а-я]*)\b", re.IGNORECASE), "отварной"),
+    (re.compile(r"\b(?:жаренн?[а-я]*|поджаренн?[а-я]*)\b", re.IGNORECASE), "жареный"),
+    (re.compile(r"\b(?:туш[её]нн?[а-я]*)\b", re.IGNORECASE), "тушёный"),
+    (re.compile(r"\b(?:на\s+пару|паров[а-я]*)\b", re.IGNORECASE), "на пару"),
+    (re.compile(r"\b(?:на\s+гриле|гриль)\b", re.IGNORECASE), "на гриле"),
+    (re.compile(r"\b(?:свеж[а-я]*|сыр[а-я]*)\b", re.IGNORECASE), "сырой"),
+    (re.compile(r"\b(?:слабосол[её]нн?[а-я]*|солен[а-я]*|сол[её]нн?[а-я]*)\b", re.IGNORECASE), "слабосолёный"),
+)
+
+
+def _extract_preparation(text: str) -> str:
+    for pat, prep in _PREPARATION_RULES:
+        if pat.search(text):
+            return prep
+    return ""
 
 # Non-food prompt phrases / command triggers that should not be parsed as food
 _NON_FOOD_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -77,6 +103,11 @@ class ParsedIngredient:
     fat_percent: float | None = None
     uncertainty: str = ""
     is_piece: bool = False
+    is_exact: bool = True
+    grams_min: float | None = None
+    grams_max: float | None = None
+    preparation: str = ""
+    household_measure: str | None = None
 
 
 @dataclass(slots=True)
@@ -87,6 +118,7 @@ class ParsedFoodText:
     is_structured: bool = False
     has_food_intent: bool = False
     total_grams: float = 0.0
+    is_all_exact: bool = False
 
 
 def _parse_fraction(token: str) -> float | None:
@@ -167,10 +199,63 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         if not part:
             continue
 
-        # Skip exclusions or meta-weight fragments
+        # Check exclusions or meta-weight fragments
         if re.match(r"^(?:без|не\s+добавлять|убрать|исключить)\b", part, re.IGNORECASE):
             continue
         if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)\s+(?:весит|вес|масса|здесь|тут)?\s*\d", part, re.IGNORECASE):
+            continue
+
+        # Check egg dish pattern, e.g. "яичница из 2 яиц", "омлет из 3 яиц"
+        egg_dish_match = re.search(
+            r"\b(?:яичниц[аыеу]|омлет[а-я]*|глазунь[а-я]*)\s+(?:из|с)?\s*(\d+)\s*(?:яиц|яйца|яйцо)\b",
+            part,
+            re.IGNORECASE,
+        )
+        if egg_dish_match:
+            cnt = int(egg_dish_match.group(1))
+            calc_grams = round(cnt * 55.0, 1)
+            prep = "жареный" if any(w in part.lower() for w in ("яичниц", "глазунь")) else "омлет"
+            ingredients.append(
+                ParsedIngredient(
+                    raw_text=part,
+                    name=f"Яичница из {cnt} яиц" if "яичниц" in part.lower() else f"Омлет из {cnt} яиц",
+                    normalized_name="яйцо куриное",
+                    grams=calc_grams,
+                    grams_min=round(cnt * 45.0, 1),
+                    grams_max=round(cnt * 65.0, 1),
+                    quantity=float(cnt),
+                    unit="шт",
+                    uncertainty=f"{cnt} шт (~{calc_grams} г)",
+                    is_piece=True,
+                    is_exact=False,
+                    preparation=prep,
+                )
+            )
+            continue
+
+        # Check calibrated household measure, e.g. "тарелка борща", "горсть миндаля", "столовая ложка масла"
+        from gateway.nutrition.household_measures import extract_household_measure_from_phrase
+        hm_res = extract_household_measure_from_phrase(part)
+        if hm_res:
+            resolution, food_name = hm_res
+            prep = _extract_preparation(part)
+            ingredients.append(
+                ParsedIngredient(
+                    raw_text=part,
+                    name=food_name.capitalize(),
+                    normalized_name=food_name.lower(),
+                    grams=resolution.grams_center,
+                    grams_min=resolution.grams_min,
+                    grams_max=resolution.grams_max,
+                    quantity=resolution.quantity,
+                    unit=resolution.typical_unit,
+                    uncertainty=resolution.uncertainty_text,
+                    is_piece=False,
+                    is_exact=False,
+                    preparation=prep,
+                    household_measure=resolution.measure_type,
+                )
+            )
             continue
 
         # Check for fraction piece format, e.g. "1/2 яйца", "2 яйца", "1.5 яблока"
@@ -188,16 +273,21 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                 matched_pk = next(pk for pk in _PIECE_WEIGHT_REFERENCE if pk in item_name)
                 unit_weight = _PIECE_WEIGHT_REFERENCE[matched_pk]
                 calc_grams = round(qty * unit_weight, 1)
+                prep = _extract_preparation(part)
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,
                         name=item_name.capitalize(),
                         normalized_name=matched_pk,
                         grams=calc_grams,
+                        grams_min=round(calc_grams * 0.85, 1),
+                        grams_max=round(calc_grams * 1.15, 1),
                         quantity=qty,
                         unit="шт",
                         uncertainty=f"{qty_str} шт (~{calc_grams} г)",
                         is_piece=True,
+                        is_exact=False,
+                        preparation=prep,
                     )
                 )
                 fraction_parsed = True
@@ -231,21 +321,31 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             fat_match = re.search(r"(\d+(?:\.\d+)?)\s*%", name_part)
             fat_percent = float(fat_match.group(1)) if fat_match else None
             clean_name = re.sub(r"\d+(?:\.\d+)?\s*%", "", name_part).strip()
+            prep = _extract_preparation(part)
+            clean_name = re.sub(r"\b(?:запеч[её]нн?[а-я]*|отварн[а-я]*|жаренн?[а-я]*|туш[её]нн?[а-я]*|свеж[а-я]*|сыр[а-я]*)\b", "", clean_name, flags=re.IGNORECASE).strip()
             clean_name = re.sub(r"\s+", " ", clean_name).strip()
 
             if clean_name:
                 if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", clean_name, re.IGNORECASE):
                     continue
+                from gateway.nutrition.household_measures import normalize_food_inflection
+                norm_key = re.sub(r"\b(?:стейк\s+(?:из|от)?|шницель\s+(?:из|от)?)\s*", "", clean_name, flags=re.IGNORECASE).strip()
+                norm_key = normalize_food_inflection(norm_key.lower()) if norm_key else clean_name.lower()
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,
                         name=name_part.capitalize() if name_part else clean_name.capitalize(),
-                        normalized_name=clean_name.lower(),
+                        normalized_name=norm_key,
                         grams=grams,
+                        grams_min=grams,
+                        grams_max=grams,
                         quantity=1.0,
                         unit="грамм",
                         fat_percent=fat_percent,
                         uncertainty=f"{grams} г" + (f" ({fat_percent}%)" if fat_percent is not None else ""),
+                        is_piece=False,
+                        is_exact=True,
+                        preparation=prep,
                     )
                 )
                 continue
@@ -257,17 +357,44 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                 continue
             if re.match(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)?\s*(?:весит|вес|масса|здесь|тут)?$", clean_text, re.IGNORECASE):
                 continue
-            ingredients.append(
-                ParsedIngredient(
-                    raw_text=part,
-                    name=clean_text.capitalize(),
-                    normalized_name=clean_text.lower(),
-                    grams=100.0,  # Default provisional portion
-                    quantity=1.0,
-                    unit="порция",
-                    uncertainty="Вес не указан (~100 г)",
+            prep = _extract_preparation(clean_text)
+            low_text = clean_text.lower()
+            matched_ref = next((pk for pk in _PIECE_WEIGHT_REFERENCE if pk in low_text), None)
+            if matched_ref:
+                pw = _PIECE_WEIGHT_REFERENCE[matched_ref]
+                ingredients.append(
+                    ParsedIngredient(
+                        raw_text=part,
+                        name=clean_text.capitalize(),
+                        normalized_name=matched_ref,
+                        grams=pw,
+                        grams_min=round(pw * 0.85, 1),
+                        grams_max=round(pw * 1.15, 1),
+                        quantity=1.0,
+                        unit="шт" if pw <= 150.0 else "порция",
+                        uncertainty=f"~{pw:g} г ({matched_ref})",
+                        is_piece=True,
+                        is_exact=False,
+                        preparation=prep,
+                    )
                 )
-            )
+            else:
+                ingredients.append(
+                    ParsedIngredient(
+                        raw_text=part,
+                        name=clean_text.capitalize(),
+                        normalized_name=clean_text.lower(),
+                        grams=100.0,  # Default provisional portion
+                        grams_min=80.0,
+                        grams_max=120.0,
+                        quantity=1.0,
+                        unit="порция",
+                        uncertainty="Вес не указан (~100 г)",
+                        is_piece=False,
+                        is_exact=False,
+                        preparation=prep,
+                    )
+                )
 
     if not ingredients and not dish_title:
         # Check single food item without recipe structure

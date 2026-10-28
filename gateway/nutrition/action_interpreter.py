@@ -21,6 +21,11 @@ from gateway.nutrition.user_override import (
     StructuredActionPlan,
     UserNutritionOverride,
 )
+from gateway.nutrition.household_measures import (
+    detect_household_measure_token,
+    extract_household_measure_from_phrase,
+    normalize_food_inflection,
+)
 
 logger = logging.getLogger("gateway.nutrition.action_interpreter")
 
@@ -162,18 +167,70 @@ def parse_deterministic_action_plan(
             raw_user_message=raw,
         )
 
-    # Check for ambiguous units: e.g. "160 ложек", "90 баррелей"
+    # Check wholesale composition rewrite: e.g. "Исправь состав: рис 150 г, курица 120 г, масло 10 г"
+    recipe_replace_match = re.search(
+        r"^(?:(?:пожалуйста\s+)?(?:исправь|замени|измени|новый|полный)?\s*состав\s*[:]\s*(.+)|состав\s*[:]\s*(.+))$",
+        raw,
+        re.IGNORECASE,
+    )
+    if recipe_replace_match:
+        body = (recipe_replace_match.group(1) or recipe_replace_match.group(2)).strip()
+        protected_body = re.sub(r"(\d+),(\d+)", r"\1.\2", body)
+        recipe_tokens = re.split(r"[\n;,]+", protected_body)
+        parsed_actions: list[StructuredAction] = []
+        for itm in items:
+            parsed_actions.append(StructuredAction(
+                operation=ActionOperation.REMOVE_ITEM,
+                target_index=itm.index,
+            ))
+        for tok in recipe_tokens:
+            t = tok.strip()
+            if not t:
+                continue
+            hm_res = extract_household_measure_from_phrase(t)
+            if hm_res:
+                resolution, food_name = hm_res
+                parsed_actions.append(StructuredAction(
+                    operation=ActionOperation.ADD_ITEM,
+                    name=food_name.capitalize(),
+                    grams=resolution.grams_center,
+                ))
+                continue
+            g_m = _GRAMS_TOKEN_RE.search(t)
+            g_val = _to_float(g_m.group(1)) if g_m else None
+            n_part = t[:g_m.start()] + t[g_m.end():] if g_m else t
+            n_clean = re.sub(r"[,:\-\s]+", " ", n_part).strip()
+            if n_clean:
+                norm_name = normalize_food_inflection(n_clean)
+                parsed_actions.append(StructuredAction(
+                    operation=ActionOperation.ADD_ITEM,
+                    name=norm_name.capitalize(),
+                    grams=g_val if g_val is not None else 100.0,
+                ))
+        if parsed_actions:
+            return StructuredActionPlan(
+                inventory_id=inventory_id,
+                inventory_version=inventory_version,
+                user_id=user_id,
+                actions=parsed_actions,
+                confidence=1.0,
+                requires_clarification=False,
+                raw_user_message=raw,
+            )
+
+    # Check for ambiguous units: e.g. "160 ложек", "90 баррелей", but allow calibrated household measures
     if re.search(r"\d+\s*(?:ложек|ложки|стаканов|стакана|литров|баррелей|ведр[ао])\b", raw, re.IGNORECASE):
-        return StructuredActionPlan(
-            inventory_id=inventory_id,
-            inventory_version=inventory_version,
-            user_id=user_id,
-            actions=[],
-            confidence=0.5,
-            requires_clarification=True,
-            clarification_question="Уточните вес продукта в граммах или штуках.",
-            raw_user_message=raw,
-        )
+        if not detect_household_measure_token(raw):
+            return StructuredActionPlan(
+                inventory_id=inventory_id,
+                inventory_version=inventory_version,
+                user_id=user_id,
+                actions=[],
+                confidence=0.5,
+                requires_clarification=True,
+                clarification_question="Уточните вес продукта в граммах или штуках.",
+                raw_user_message=raw,
+            )
 
     actions: list[StructuredAction] = []
     request_save = bool(_SAVE_COMMAND_RE.search(raw))
@@ -181,8 +238,22 @@ def parse_deterministic_action_plan(
     # Protect decimal commas in numbers (e.g. 16,8 -> 16.8)
     protected = re.sub(r"(\d+),(\d+)", r"\1.\2", raw)
 
-    # Split into lines or distinct sentences
-    clauses = re.split(r"[\n;]+|(?<=\w)[.!?]+(?=\s+|$)", protected)
+    # Split into lines, distinct sentences, or comma/conjunction-separated actions
+    action_trigger_re = re.compile(
+        r"(?:,\s*|\s+(?:а|и|но)\s+)(?=(?:добавь(?:те)?|добавить|убери(?:те)?|удали(?:ть)?|исключи(?:ть)?|вычеркни|замени(?:ть)?|исправь(?:ть)?|вместо|переименуй(?:те)?|назови|вес\s+(?:позиции\s+|строки\s+|номера\s+)?\d+\s*[:\.\-—]|вес\s*[:]\s*\d+)\b)",
+        re.IGNORECASE,
+    )
+    major_clauses = re.split(r"[\n;]+|(?<=\w)[.!?]+(?=\s+|$)", protected)
+    clauses: list[str] = []
+    for major in major_clauses:
+        m_str = major.strip()
+        if not m_str:
+            continue
+        sub_parts = action_trigger_re.split(m_str)
+        for sp in sub_parts:
+            sp_clean = sp.strip()
+            if sp_clean:
+                clauses.append(sp_clean)
 
     last_target_index: int | None = None
 
@@ -213,7 +284,7 @@ def parse_deterministic_action_plan(
             actions.append(StructuredAction(operation=ActionOperation.SCALE_PORTION, scale_factor=0.25))
             continue
 
-        # B. Check removal: "Удалить 6", "Удали апельсин", "Удали последнюю позицию"
+        # B. Check removal: "Удалить 6", "Удали апельсин", "Удали последнюю позицию", "Убери лук"
         remove_match = re.search(
             r"^(?:удали(?:ть)?|убери|исключи|вычеркни)\s+(?:позицию\s+|номер\s+|строку\s+)?(\d{1,2}|последн[юя][юя](?:\s+позицию)?|.+?)(?:\s+из\s+списка|\s+из\s+блюда)?$",
             c_clean,
@@ -221,16 +292,18 @@ def parse_deterministic_action_plan(
         )
         if remove_match:
             target_str = remove_match.group(1).strip()
+            target_str = re.sub(r"[,:\.\s]+$", "", target_str).strip()
             if target_str.isdigit():
                 idx = int(target_str)
                 actions.append(StructuredAction(operation=ActionOperation.REMOVE_ITEM, target_index=idx))
             elif "последн" in target_str.lower():
                 actions.append(StructuredAction(operation=ActionOperation.REMOVE_ITEM, target_index=-1))
             else:
-                actions.append(StructuredAction(operation=ActionOperation.REMOVE_ITEM, target_name=target_str))
+                norm_target = normalize_food_inflection(target_str)
+                actions.append(StructuredAction(operation=ActionOperation.REMOVE_ITEM, target_name=norm_target))
             continue
 
-        # C. Check addition: "Добавить: сыр, 30 г", "Добавь 30 г сыра"
+        # C. Check addition: "Добавить: сыр, 30 г", "Добавь 30 г сыра", "Добавь столовую ложку масла"
         add_match = re.search(
             r"^(?:добавь(?:те)?|добавить)\s*[:]?\s*(.+)$",
             c_clean,
@@ -238,6 +311,15 @@ def parse_deterministic_action_plan(
         )
         if add_match:
             body = add_match.group(1).strip()
+            hm_res = extract_household_measure_from_phrase(body)
+            if hm_res:
+                resolution, food_name = hm_res
+                actions.append(StructuredAction(
+                    operation=ActionOperation.ADD_ITEM,
+                    name=food_name.capitalize(),
+                    grams=resolution.grams_center,
+                ))
+                continue
             g_match = _GRAMS_TOKEN_RE.search(body)
             grams_val = _to_float(g_match.group(1)) if g_match else 100.0
             name_part = body[:g_match.start()] + body[g_match.end():] if g_match else body
@@ -255,9 +337,10 @@ def parse_deterministic_action_plan(
                         clarification_question="Уточните, что именно вы хотите добавить и в каком количестве.",
                         raw_user_message=raw,
                     )
+                norm_name = normalize_food_inflection(name_clean)
                 actions.append(StructuredAction(
                     operation=ActionOperation.ADD_ITEM,
-                    name=name_clean.strip(),
+                    name=norm_name.capitalize(),
                     grams=grams_val,
                 ))
                 continue
@@ -309,7 +392,7 @@ def parse_deterministic_action_plan(
             ))
             continue
 
-        # D3. Check "Замени 2 на рыбу" / "Замени вторую позицию на рыбу"
+        # D3. Check "Замени 2 на рыбу" / "Замени свинину на говядину, вес мяса 150 г"
         replace_named_match = re.search(
             r"^(?:замени(?:ть)?|исправь(?:ть)?)\s+(?:позицию\s+|строку\s+|номер\s+)?(\d{1,2}|перв[уюоея][юя]?\s*(?:позицию)?|втор[уюоея][юя]?\s*(?:позицию)?|трет[ьюея][юя]?\s*(?:позицию)?|четверт[уюоея][юя]?\s*(?:позицию)?|пят[уюоея][юя]?\s*(?:позицию)?|шест[уюоея][юя]?\s*(?:позицию)?|последн[юяе][юя]?\s*(?:позицию)?|[а-яa-z\s]+?)\s+на\s+(.+)$",
             c_clean,
@@ -330,16 +413,62 @@ def parse_deterministic_action_plan(
             g_m = _GRAMS_TOKEN_RE.search(new_val)
             g_val = _to_float(g_m.group(1)) if g_m else None
             n_part = new_val[:g_m.start()] + new_val[g_m.end():] if g_m else new_val
+            n_part = re.sub(r"\b(?:вес\s*(?:мяса|продукта|позиции|блюда)?|масса)\b", "", n_part, flags=re.IGNORECASE)
             n_clean = re.sub(r"[,:\-\s]+", " ", n_part).strip()
+            hm_res = extract_household_measure_from_phrase(new_val)
+            if hm_res and g_val is None:
+                resolution, food_name = hm_res
+                n_clean = food_name
+                g_val = resolution.grams_center
+            if n_clean:
+                n_clean = normalize_food_inflection(n_clean)
+            if t_name:
+                t_name = normalize_food_inflection(t_name)
             actions.append(StructuredAction(
                 operation=ActionOperation.REPLACE_ITEM,
                 target_index=idx,
                 target_name=t_name,
-                name=n_clean.strip() if n_clean else None,
+                name=n_clean.capitalize() if n_clean else None,
                 grams=g_val,
             ))
             if idx:
                 last_target_index = idx
+            continue
+
+        # D4. Check "Вместо жареной курицы используй запечённую, вес 180 г"
+        instead_match = re.search(
+            r"^вместо\s+(.+?)\s+(?:используй(?:те)?|возьми(?:те)?|поставь(?:те)?|сделай(?:те)?|напиши(?:те)?|выбери(?:те)?)\s+(.+)$",
+            c_clean,
+            re.IGNORECASE,
+        )
+        if instead_match:
+            old_name = instead_match.group(1).strip()
+            new_val = instead_match.group(2).strip()
+            g_m = _GRAMS_TOKEN_RE.search(new_val)
+            g_val = _to_float(g_m.group(1)) if g_m else None
+            n_part = new_val[:g_m.start()] + new_val[g_m.end():] if g_m else new_val
+            n_part = re.sub(r"\b(?:вес\s*(?:мяса|продукта|позиции|блюда)?|масса)\b", "", n_part, flags=re.IGNORECASE)
+            n_clean = re.sub(r"[,:\-\s]+", " ", n_part).strip()
+            hm_res = extract_household_measure_from_phrase(new_val)
+            if hm_res and g_val is None:
+                resolution, food_name = hm_res
+                n_clean = food_name
+                g_val = resolution.grams_center
+            if n_clean:
+                n_clean = normalize_food_inflection(n_clean)
+            if old_name:
+                old_name = normalize_food_inflection(old_name)
+            if n_clean.endswith(("ую", "ый", "ая", "ое", "ые", "ой")) and any(noun in old_name.lower() for noun in ("куриц", "индейк", "говядин", "свинин", "рыб", "мяс")):
+                for noun in ("курица", "индейка", "говядина", "свинина", "рыба", "мясо"):
+                    if noun[:4] in old_name.lower():
+                        n_clean = f"{noun} {n_clean}"
+                        break
+            actions.append(StructuredAction(
+                operation=ActionOperation.REPLACE_ITEM,
+                target_name=old_name,
+                name=n_clean.capitalize() if n_clean else new_val.strip(),
+                grams=g_val,
+            ))
             continue
 
         # E. Check conversational weight update: "Вафель было не 125, а 160 граммов"
@@ -452,18 +581,6 @@ def parse_deterministic_action_plan(
         if prefix_m:
             compound_idx = int(prefix_m.group(1))
             body_to_parse = prefix_m.group(2).strip()
-            # If multiple weights in a single item edit without nutrition macros: ambiguous/invalid
-            if len(_GRAMS_TOKEN_RE.findall(body_to_parse)) > 1 and not (_CALORIE_TOKEN_RE.search(body_to_parse) or _PROTEIN_TOKEN_RE.search(body_to_parse)):
-                return StructuredActionPlan(
-                    inventory_id=inventory_id,
-                    inventory_version=inventory_version,
-                    user_id=user_id,
-                    actions=[],
-                    confidence=0.5,
-                    requires_clarification=True,
-                    clarification_question="Не понял команду. В одной команде можно указать только один компонент, например: Исправить 2: Сливочный сыр, 50 г или Вес 6: 200 г.",
-                    raw_user_message=raw,
-                )
             # If multiple weights in a single item edit without nutrition macros: ambiguous/invalid
             if len(_GRAMS_TOKEN_RE.findall(body_to_parse)) > 1 and not (_CALORIE_TOKEN_RE.search(body_to_parse) or _PROTEIN_TOKEN_RE.search(body_to_parse)):
                 return StructuredActionPlan(

@@ -6617,8 +6617,11 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.debug("Failed to load diary summary for dashboard: %s", e)
 
         try:
-            from gateway.healbite_water_tracker import HealBiteWaterTracker, _format_ml
-            water_tracker = HealBiteWaterTracker(db_path=db_path)
+            from gateway.healbite_water_tracker import get_default_water_tracker, _format_ml
+            try:
+                water_tracker = get_default_water_tracker(db_path=db_path)
+            except TypeError:
+                water_tracker = get_default_water_tracker()
             water_summary = water_tracker.get_water_summary(user_id)
             if water_summary.target_ml:
                 water_line = f"💧 <b>Вода сегодня:</b> {_format_ml(water_summary.consumed_ml)} / {_format_ml(water_summary.target_ml)} ({water_summary.progress_percent or 0}%)"

@@ -452,6 +452,8 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
                     f"Расчёт: {format_calculation_version(profile.nutrition_calculation_version)}",
                 ]
             )
+        if profile.water_target_ml:
+            lines.append(f"💧 Вода: {_format_target(profile.water_target_ml, 'мл')}")
         if profile.target_source == "manual":
             lines.append("Источник цели: ручная калорийность сохранена.")
         lines.extend(
@@ -462,6 +464,8 @@ def format_healbite_profile_report(profile: HealBiteUserProfile | None) -> str:
         )
     else:
         lines.append("🔥 Суточная норма: —")
+        if profile.water_target_ml:
+            lines.append(f"💧 Вода: {_format_target(profile.water_target_ml, 'мл')}")
 
     additional = []
     for label, value in (
@@ -515,6 +519,8 @@ def format_healbite_settings_report(
 
     diet = profile.diet_type or "Обычное (без ограничений)"
     lines.append(f"🥗 <b>Тип питания:</b> {html.escape(diet)}")
+    if profile.water_target_ml:
+        lines.append(f"💧 <b>Цель по воде:</b> {_format_target(profile.water_target_ml, 'мл')}")
     if profile.allergies:
         lines.append(f"⚠️ <b>Аллергии:</b> {html.escape(profile.allergies)}")
     if profile.stop_products:
@@ -711,6 +717,20 @@ def parse_profile_field_update(text: str) -> tuple[str, Any] | None:
     m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:часовой\s+пояс|таймзона|timezone)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
     if m:
         return "timezone", m.group(1).strip()
+
+    m = re.fullmatch(r"(?:/profile\s+)?(?:моя\s+)?(?:цель\s+по\s+воде|норма\s+воды|вода)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
+    if m:
+        from gateway.healbite_water_tracker import parse_water_amount
+        raw_val = m.group(1).strip()
+        parsed_ml = parse_water_amount(raw_val)
+        if parsed_ml is not None:
+            return "water_target_ml", parsed_ml
+        try:
+            val = int(raw_val)
+            if 500 <= val <= 10000:
+                return "water_target_ml", val
+        except ValueError:
+            pass
 
     m = re.fullmatch(r"(?:/profile\s+)?(?:мой\s+)?(?:тип\s+питания|диета)(?:\s*[:=]|\s+)\s*(.+)", cleaned)
     if m:
@@ -1044,6 +1064,10 @@ class HealBiteUserProfileStore:
         target = profile.water_target_ml
         return int(target) if target is not None and int(target) > 0 else None
 
+    def update_water_target(self, user_id: int, target_ml: int | None) -> HealBiteUserProfile:
+        val = int(target_ml) if target_ml is not None and int(target_ml) > 0 else None
+        return self.upsert_user_profile(user_id=int(user_id), water_target_ml=val)
+
     def get_weekly_menu_profile_snapshot(self, user_id: int) -> HealBiteWeeklyMenuProfileSnapshot | None:
         profile = self.get_user_profile(int(user_id))
         if profile is None:
@@ -1130,6 +1154,7 @@ class HealBiteUserProfileStore:
         allergies: str | None | object = _UNSET,
         stop_products: str | None | object = _UNSET,
         preferences: str | None | object = _UNSET,
+        water_target_ml: int | None | object = _UNSET,
         initial_age: int | None | object = _UNSET,
         initial_height_cm: float | None | object = _UNSET,
         initial_weight_kg: float | None | object = _UNSET,
@@ -1195,6 +1220,7 @@ class HealBiteUserProfileStore:
                     allergies,
                     stop_products,
                     preferences,
+                    water_target_ml,
                     initial_age,
                     initial_height_cm,
                     initial_weight_kg,
@@ -1284,6 +1310,12 @@ class HealBiteUserProfileStore:
                 if "preferences" in profile_columns and preferences is not _UNSET:
                     profile_updates.append("preferences = ?")
                     profile_values.append(str(preferences).strip() if preferences not in (None, "") else None)
+                if "water_target_ml" in profile_columns and water_target_ml is not _UNSET:
+                    norm_wt = int(water_target_ml) if water_target_ml not in (None, "") else None
+                    if norm_wt is not None and norm_wt <= 0:
+                        norm_wt = None
+                    profile_updates.append("water_target_ml = ?")
+                    profile_values.append(norm_wt)
 
                 profile_updates.append("updated_at = ?")
                 profile_values.append(timestamp)
@@ -1618,6 +1650,7 @@ class HealBiteUserProfileStore:
             "allergies",
             "stop_products",
             "preferences",
+            "water_target_ml",
         }
         if field not in valid_fields:
             raise ValueError(f"Недопустимое поле профиля: {field}")
@@ -1655,6 +1688,11 @@ class HealBiteUserProfileStore:
             norm_value = str(value).strip() if value not in (None, "") else None
         elif field == "calculation_method":
             norm_value = validate_calculation_method(str(value).strip())
+        elif field == "water_target_ml":
+            val_int = _to_int(value)
+            if val_int is not None and not (500 <= val_int <= 10000):
+                raise ValueError("Цель по воде должна быть от 500 до 10000 мл.")
+            norm_value = val_int
         elif field in {"allergies", "stop_products", "preferences"}:
             raw_s = str(value).strip() if value not in (None, "") else ""
             norm_value = None if raw_s.lower() in {"очистить", "нет", "none", ""} else raw_s
@@ -1667,7 +1705,7 @@ class HealBiteUserProfileStore:
         if updated.target_source == "manual" and field != "calculation_method":
             return updated, False
 
-        if field in {"location", "timezone", "diet_type", "allergies", "stop_products", "preferences"}:
+        if field in {"location", "timezone", "diet_type", "allergies", "stop_products", "preferences", "water_target_ml"}:
             return updated, False
 
         if not profile_missing_fields(updated):

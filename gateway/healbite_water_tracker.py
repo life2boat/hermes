@@ -112,7 +112,9 @@ def _row_to_entry(row: sqlite3.Row) -> WaterIntakeEntry:
 
 
 def parse_water_amount(text: str) -> int | None:
-    normalized = " ".join((text or "").strip().lower().replace(",", ".").split())
+    raw = (text or "").strip().lower().replace(",", ".")
+    raw = re.sub(r"(?<=\d)\s+(?=\d)", "", raw)
+    normalized = " ".join(raw.split())
     if not normalized:
         return None
     match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(мл|ml)?", normalized)
@@ -140,11 +142,24 @@ class HealBiteWaterTracker:
         db_path: str | Path | None = None,
         *,
         water_target_resolver: Callable[[int], int | None] | None = None,
+        timezone_resolver: Callable[[int], str | None] | None = None,
     ) -> None:
         self.db_path = resolve_healbite_db_path(db_path)
         self._water_target_resolver = water_target_resolver
+        self._timezone_resolver = timezone_resolver
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
+
+    def _resolve_user_timezone(self, user_id: int, requested: str | None = None) -> str | None:
+        if requested:
+            return requested
+        if self._timezone_resolver is None:
+            return None
+        try:
+            tz = self._timezone_resolver(int(user_id))
+            return str(tz) if tz else None
+        except Exception:
+            return None
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -213,7 +228,8 @@ class HealBiteWaterTracker:
         now: datetime | None = None,
         timezone_name: str | None = None,
     ) -> list[WaterIntakeEntry]:
-        start_utc, end_utc = local_day_window_utc(now=now, timezone_name=timezone_name)
+        effective_tz = self._resolve_user_timezone(user_id, timezone_name)
+        start_utc, end_utc = local_day_window_utc(now=now, timezone_name=effective_tz)
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -241,7 +257,8 @@ class HealBiteWaterTracker:
         now: datetime | None = None,
         timezone_name: str | None = None,
     ) -> UndoWaterResult:
-        start_utc, end_utc = local_day_window_utc(now=now, timezone_name=timezone_name)
+        effective_tz = self._resolve_user_timezone(user_id, timezone_name)
+        start_utc, end_utc = local_day_window_utc(now=now, timezone_name=effective_tz)
         with self._connect() as conn:
             row = conn.execute(
                 f"""
@@ -280,7 +297,8 @@ class HealBiteWaterTracker:
         now: datetime | None = None,
         timezone_name: str | None = None,
     ) -> WaterSummary:
-        entries = self.list_water_intake_today(user_id, now=now, timezone_name=timezone_name)
+        effective_tz = self._resolve_user_timezone(user_id, timezone_name)
+        entries = self.list_water_intake_today(user_id, now=now, timezone_name=effective_tz)
         consumed = sum(entry.amount_ml for entry in entries)
         target = self.get_water_target_ml(user_id)
         remaining = max(target - consumed, 0) if target is not None else None
@@ -382,5 +400,37 @@ def _default_water_target_resolver(user_id: int) -> int | None:
     return get_default_healbite_user_profile().get_water_target_ml(int(user_id))
 
 
-def get_default_water_tracker() -> HealBiteWaterTracker:
-    return HealBiteWaterTracker(water_target_resolver=_default_water_target_resolver)
+def _default_user_timezone_resolver(user_id: int) -> str | None:
+    from gateway.healbite_user_profile import get_default_healbite_user_profile
+
+    profile = get_default_healbite_user_profile().get_user_profile(int(user_id))
+    return profile.timezone if profile is not None else None
+
+
+def get_default_water_tracker(db_path: str | Path | None = None) -> HealBiteWaterTracker:
+    if db_path is not None:
+        def _target_res(uid: int) -> int | None:
+            try:
+                from gateway.healbite_user_profile import HealBiteUserProfileStore
+                return HealBiteUserProfileStore(db_path=db_path).get_water_target_ml(int(uid))
+            except Exception:
+                return None
+
+        def _tz_res(uid: int) -> str | None:
+            try:
+                from gateway.healbite_user_profile import HealBiteUserProfileStore
+                p = HealBiteUserProfileStore(db_path=db_path).get_user_profile(int(uid))
+                return p.timezone if p is not None else None
+            except Exception:
+                return None
+
+        return HealBiteWaterTracker(
+            db_path=db_path,
+            water_target_resolver=_target_res,
+            timezone_resolver=_tz_res,
+        )
+
+    return HealBiteWaterTracker(
+        water_target_resolver=_default_water_target_resolver,
+        timezone_resolver=_default_user_timezone_resolver,
+    )

@@ -406,7 +406,7 @@ class PendingFoodVisionItem:
     selected_grams: float | None
     preparation: str
     is_sauce: bool
-    uncertainty: str
+    uncertainty: str = ""
     user_modified: bool = False
     item_id: str = ""
     suppressed_by_item_id: str | None = None
@@ -1602,6 +1602,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "запеченный",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -1646,6 +1647,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "тушеный",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -1684,6 +1686,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "запеченный",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -1714,6 +1717,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "вареный",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -1744,6 +1748,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "готовый",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -1774,6 +1779,7 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "тушеный",
             "is_sauce": False,
+            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
             "quantity": 1,
             "count_type": "COUNT_CONFIRMED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
@@ -2731,7 +2737,7 @@ def _build_inventory_calculation_snapshot(
 
     components = []
     for item in deduped_items:
-        if item.selected_grams is not None:
+        if getattr(item, "selected_grams", None) is not None:
             if getattr(item, "user_modified", False):
                 bounds = MassBounds(
                     grams_min=float(item.selected_grams),
@@ -3524,7 +3530,7 @@ def calculate_food_vision_meal_nutrition(
     for item in items:
         if getattr(item, "suppressed_by_item_id", None):
             continue
-        if item.selected_grams is not None:
+        if getattr(item, "selected_grams", None) is not None:
             if getattr(item, "user_modified", False):
                 bounds = MassBounds(
                     grams_min=float(item.selected_grams),

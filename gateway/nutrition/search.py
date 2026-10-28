@@ -27,8 +27,10 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _RUSSIAN_SUFFIXES = (
     # Adjectives 3-letter & 4-letter
     "ными", "ними", "ского", "скому", "ском", "ской",
-    "чный", "чная", "чное", "чные", "чным", "чных", "чную",
-    "нный", "нная", "нное", "нные", "нным", "нных", "нную",
+    "чный", "чная", "чное", "чные", "чным", "чных", "чную", "чной",
+    "нный", "нная", "нное", "нные", "нным", "нных", "нную", "нной",
+    # Adjectives & Participles 3-letter (genitive / dative oblique cases)
+    "ого", "его", "ому", "ему",
     # Adjectives & Participles 2-letter
     "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие",
     "ую", "юю", "ым", "им", "ом", "ем", "ых", "их",
@@ -121,6 +123,7 @@ def match_query_against_aliases(
     id_to_name: dict[str, str],  # target_id -> display_name
     id_to_stemmed_tokens: dict[str, tuple[str, ...]] | None = None,
     fuzzy_threshold: float = 0.85,
+    stemmed_alias_map: dict[tuple[str, ...], str] | None = None,
 ) -> tuple[str | None, float, str, tuple[str, ...]]:
     """
     Matches query against known aliases using multi-stage matching.
@@ -139,26 +142,29 @@ def match_query_against_aliases(
 
     query_stems = extract_stemmed_tokens(norm_query)
 
-    # Stage 2: Token set match
-    if id_to_stemmed_tokens and query_stems:
-        query_set = set(query_stems)
-        best_token_id: str | None = None
-        best_jaccard = 0.0
+    # Stage 2: Token set match (against aliases and display stems)
+    if query_stems:
+        sorted_query = tuple(sorted(query_stems))
+        if stemmed_alias_map and sorted_query in stemmed_alias_map:
+            return stemmed_alias_map[sorted_query], 0.98, "token_set", ()
 
-        for target_id, target_stems in id_to_stemmed_tokens.items():
-            target_set = set(target_stems)
-            intersection = query_set & target_set
-            if not intersection:
-                continue
-            # Jaccard index
-            jaccard = len(intersection) / len(query_set | target_set)
-            if jaccard > best_jaccard:
-                best_jaccard = jaccard
-                best_token_id = target_id
+        if id_to_stemmed_tokens:
+            query_set = set(query_stems)
+            best_token_id: str | None = None
+            best_jaccard = 0.0
+            for target_id, target_stems in id_to_stemmed_tokens.items():
+                target_set = set(target_stems)
+                intersection = query_set & target_set
+                if not intersection:
+                    continue
+                jaccard = len(intersection) / len(query_set | target_set)
+                if jaccard > best_jaccard:
+                    best_jaccard = jaccard
+                    best_token_id = target_id
 
-        # If all query tokens or target tokens match
-        if best_token_id and best_jaccard >= 0.70:
-            return best_token_id, round(best_jaccard, 2), "token_set", ()
+            # If all query tokens or target tokens match with high confidence
+            if best_token_id and best_jaccard >= 0.75:
+                return best_token_id, round(best_jaccard, 2), "token_set", ()
 
     # Stage 3: Substring match (whole word contained in query or alias)
     for alias, target_id in alias_map.items():

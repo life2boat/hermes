@@ -158,6 +158,7 @@ class HFKBCatalog:
         self._alias_map: dict[str, str] = {}
         self._id_to_name: dict[str, str] = {}
         self._id_to_stemmed_tokens: dict[str, tuple[str, ...]] = {}
+        self._stemmed_alias_map: dict[tuple[str, ...], str] = {}
         self._food_cache: dict[str, HFKBFoodItem] = {}
         self._is_indexed = False
 
@@ -266,6 +267,7 @@ class HFKBCatalog:
             alias_map: dict[str, str] = {}
             id_to_name: dict[str, str] = {}
             id_to_stemmed_tokens: dict[str, tuple[str, ...]] = {}
+            stemmed_alias_map: dict[tuple[str, ...], str] = {}
 
             with self.connect() as conn:
                 food_rows = conn.execute("SELECT food_id, name_ru FROM foods").fetchall()
@@ -276,6 +278,9 @@ class HFKBCatalog:
                     stems = extract_stemmed_tokens(name)
                     if stems:
                         id_to_stemmed_tokens[fid] = stems
+                        sorted_stems = tuple(sorted(stems))
+                        if sorted_stems not in stemmed_alias_map:
+                            stemmed_alias_map[sorted_stems] = fid
 
                 alias_rows = conn.execute("SELECT food_id, normalized_alias FROM food_aliases").fetchall()
                 for row in alias_rows:
@@ -283,10 +288,14 @@ class HFKBCatalog:
                     norm = str(row["normalized_alias"])
                     if norm and norm not in alias_map:
                         alias_map[norm] = fid
+                        alias_stems = tuple(sorted(extract_stemmed_tokens(norm)))
+                        if alias_stems and alias_stems not in stemmed_alias_map:
+                            stemmed_alias_map[alias_stems] = fid
 
             self._alias_map = alias_map
             self._id_to_name = id_to_name
             self._id_to_stemmed_tokens = id_to_stemmed_tokens
+            self._stemmed_alias_map = stemmed_alias_map
             self._is_indexed = True
 
     def get_food_by_id(self, food_id: str) -> HFKBFoodItem | None:
@@ -373,6 +382,7 @@ class HFKBCatalog:
             id_to_name=self._id_to_name,
             id_to_stemmed_tokens=self._id_to_stemmed_tokens,
             fuzzy_threshold=0.85,
+            stemmed_alias_map=self._stemmed_alias_map,
         )
 
         if target_id is None:

@@ -7080,6 +7080,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     cache.pop(old_key, None)
         return corr
 
+    # HealBite structured logging helper.
+    # Emits sanitized telemetry markers for observability.
+    # Note: Preserves PII safety invariant and prevents log-line collision.
     def _log_healbite_marker(
         self,
         marker: str,

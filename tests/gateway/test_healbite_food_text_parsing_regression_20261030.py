@@ -20,8 +20,8 @@ import pytest
 
 from gateway.config import Platform
 from gateway.healbite_nutrition_diary import (
+    HealBiteNutritionDiary,
     format_food_vision_inventory_reply,
-    get_default_nutrition_diary,
 )
 from gateway.nutrition.text_parser import (
     is_full_food_description,
@@ -66,10 +66,10 @@ def test_operator_reported_meal_parsing():
     assert "молок" in milk.name.lower() or "молок" in milk.normalized_name.lower()
 
 
-def test_operator_reported_meal_nutrition_resolution():
+def test_operator_reported_meal_nutrition_resolution(tmp_path):
     """Verify that all three products are independently resolved in the nutrition catalog with ~524 kcal total."""
     text = "На завтрак съел 2 варёных яйца, 100 г хлеба и выпил 200 мл молока."
-    diary = get_default_nutrition_diary()
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test_diary.db", background_write=False)
 
     pending = diary.stage_pending_inventory_from_text(user_id=12345001, text=text)
     assert pending is not None, "Failed to stage pending inventory from text"
@@ -105,15 +105,17 @@ def test_operator_reported_meal_nutrition_resolution():
 
 
 @pytest.mark.asyncio
-async def test_duplicate_telegram_response_prevention():
+async def test_duplicate_telegram_response_prevention(tmp_path):
     """Verify that handling a text_meal turn returns already_sent=True and dispatches exactly once."""
     runner = GatewayRunner()
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "test_diary.db", background_write=False)
+    runner._healbite_nutrition_diary = diary
+
     mock_adapter = mock.AsyncMock()
     mock_adapter.send = mock.AsyncMock()
     runner.adapters[Platform.TELEGRAM] = mock_adapter
 
     test_uid = 999111222
-    diary = runner._get_healbite_nutrition_diary()
     diary.clear_pending_state(test_uid)
 
     source = SessionSource(

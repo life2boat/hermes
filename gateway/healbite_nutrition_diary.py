@@ -7437,10 +7437,10 @@ class HealBiteNutritionDiary:
             carbs_min = sum(float(row["carbs_min"] if row["carbs_min"] is not None else (row["carbs_g"] or 0.0)) for row in rows)
             carbs_max = sum(float(row["carbs_max"] if row["carbs_max"] is not None else (row["carbs_g"] or 0.0)) for row in rows)
             intervals: dict[str, dict[str, float]] | None = {
-                "calories_kcal": {"min": round(cal_min, 1), "center": round(calories_total, 1), "max": round(cal_max, 1)},
-                "protein_g": {"min": round(prot_min, 1), "center": round(protein_total, 1), "max": round(prot_max, 1)},
-                "fat_g": {"min": round(fat_min, 1), "center": round(fat_total, 1), "max": round(fat_max, 1)},
-                "carbs_g": {"min": round(carbs_min, 1), "center": round(carbs_total, 1), "max": round(carbs_max, 1)},
+                "calories_kcal": {"min": round(cal_min, 1), "center": round(calories_total if calories_total is not None else cal_min, 1), "max": round(cal_max, 1)},
+                "protein_g": {"min": round(prot_min, 1), "center": round(protein_total if protein_total is not None else prot_min, 1), "max": round(prot_max, 1)},
+                "fat_g": {"min": round(fat_min, 1), "center": round(fat_total if fat_total is not None else fat_min, 1), "max": round(fat_max, 1)},
+                "carbs_g": {"min": round(carbs_min, 1), "center": round(carbs_total if carbs_total is not None else carbs_min, 1), "max": round(carbs_max, 1)},
             }
         else:
             intervals = None

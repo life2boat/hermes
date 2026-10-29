@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from gateway.memory.embedding_adapter import EmbeddingAdapter
-from gateway.healbite_time import local_day_window_utc
+from gateway.healbite_time import _local_timezone, local_day_window_utc
 from gateway.memory.qdrant_adapter import QdrantMemoryAdapter
 from gateway.healbite_food_composition import (
     NUTRITION_REFERENCE_PROVENANCE,
@@ -689,16 +689,132 @@ def _rolling_window(days: int, now: datetime | None = None) -> tuple[datetime, d
     return start_utc, end_utc
 
 
-def _format_kcal(value: Any) -> str:
-    numeric = float(value or 0.0)
-    return f"{numeric:.0f} \u043a\u043a\u0430\u043b"
+def _format_kcal(value: Any, *, approx: bool = False, default: str = "—") -> str:
+    if value is None:
+        return default
+    try:
+        numeric = float(value)
+    except (ValueError, TypeError):
+        return default
+    prefix = "~" if approx else ""
+    return f"{prefix}{numeric:.0f} \u043a\u043a\u0430\u043b"
 
 
-def _format_grams(value: Any) -> str:
-    numeric = float(value or 0.0)
+def _format_grams(value: Any, *, approx: bool = False, default: str = "—") -> str:
+    if value is None:
+        return default
+    try:
+        numeric = float(value)
+    except (ValueError, TypeError):
+        return default
+    prefix = "~" if approx else ""
     if abs(numeric - round(numeric)) < 0.05:
-        return f"{int(round(numeric))} \u0433"
-    return f"{numeric:.1f} \u0433"
+        return f"{prefix}{int(round(numeric))} \u0433"
+    return f"{prefix}{numeric:.1f} \u0433"
+
+
+def _format_nutrients_summary(
+    calories: Any,
+    protein: Any,
+    fat: Any,
+    carbs: Any,
+    *,
+    approx: bool = False,
+    default: str = "—",
+) -> str:
+    if calories is None and protein is None and fat is None and carbs is None:
+        return "\u041a\u0411\u0416\u0423 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e"
+    c_str = _format_kcal(calories, approx=approx, default=default)
+    p_str = _format_grams(protein, approx=approx, default=default)
+    f_str = _format_grams(fat, approx=approx, default=default)
+    u_str = _format_grams(carbs, approx=approx, default=default)
+    return f"{c_str} \u00b7 \u0411 {p_str} \u00b7 \u0416 {f_str} \u00b7 \u0423 {u_str}"
+
+
+def _format_meal_local_time(occurred_at_raw: Any, timezone_name: str | None = None) -> str:
+    if not occurred_at_raw:
+        return ""
+    dt = None
+    if isinstance(occurred_at_raw, datetime):
+        dt = occurred_at_raw
+    elif isinstance(occurred_at_raw, str):
+        dt = _parse_sqlite_timestamp(occurred_at_raw)
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(occurred_at_raw)
+            except Exception:
+                return ""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    tzinfo = _local_timezone(timezone_name)
+    local_dt = dt.astimezone(tzinfo)
+    return local_dt.strftime("%H:%M")
+
+
+def _extract_item_info(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("suppressed_by_item_id"):
+        return None
+    name = (
+        item.get("display_name")
+        or item.get("visible_name")
+        or item.get("name")
+        or item.get("meal_name")
+    )
+    if not name:
+        return None
+
+    user_nutr = item.get("user_nutrition") or {}
+    if not isinstance(user_nutr, dict) and hasattr(user_nutr, "to_dict"):
+        try:
+            user_nutr = user_nutr.to_dict()
+        except Exception:
+            user_nutr = {}
+
+    weight_val = (
+        user_nutr.get("grams")
+        if isinstance(user_nutr, dict) and user_nutr.get("grams") is not None
+        else (
+            item.get("selected_grams")
+            or item.get("estimated_weight_g")
+            or item.get("weight_g")
+            or item.get("grams")
+            or item.get("portion_g")
+        )
+    )
+
+    def _pick(key_user: str, key_item: str, alt_key: str | None = None) -> Any:
+        if isinstance(user_nutr, dict) and user_nutr.get(key_user) is not None:
+            return user_nutr.get(key_user)
+        if item.get(key_item) is not None:
+            return item.get(key_item)
+        if alt_key and item.get(alt_key) is not None:
+            return item.get(alt_key)
+        return None
+
+    cals = _pick("calories_kcal", "calories_kcal", "calories")
+    prot = _pick("protein_g", "protein_g", "protein")
+    fat = _pick("fat_g", "fat_g", "fat")
+    carbs = _pick("carbs_g", "carbs_g", "carbs")
+
+    is_approx = bool(
+        item.get("is_approximate")
+        or item.get("is_approximate_range")
+        or (item.get("uncertainty") and item.get("uncertainty") != "exact")
+    )
+
+    return {
+        "name": str(name),
+        "weight_g": weight_val,
+        "calories_kcal": cals,
+        "protein_g": prot,
+        "fat_g": fat,
+        "carbs_g": carbs,
+        "is_approximate": is_approx,
+    }
 
 
 def _format_grams_val(value: Any) -> str:
@@ -869,7 +985,7 @@ def _load_nutrition_targets(conn: sqlite3.Connection, *, user_id: int) -> Nutrit
 
 
 def _build_target_progress(
-    current_values: dict[str, float],
+    current_values: dict[str, Any],
     targets: NutritionTargets,
 ) -> dict[str, dict[str, float]]:
     progress: dict[str, dict[str, float]] = {}
@@ -877,7 +993,10 @@ def _build_target_progress(
         target_value = getattr(targets, metric_name)
         if target_value is None or float(target_value) <= 0:
             continue
-        current_value = float(current_values.get(metric_name, 0.0))
+        current_raw = current_values.get(metric_name)
+        if current_raw is None:
+            continue
+        current_value = float(current_raw)
         progress[metric_name] = {
             "current": current_value,
             "target": float(target_value),
@@ -912,17 +1031,20 @@ def _format_progress_line(
     emoji: str,
     label: str,
     metric_name: str,
-    current_value: float,
+    current_value: Any,
     progress: dict[str, dict[str, float]],
     is_partial: bool = False,
+    is_approximate: bool = False,
 ) -> str:
     formatter = _format_kcal if metric_name == "calories_kcal" else _format_grams
+    if current_value is None:
+        return f"{emoji} {label}: не указано"
     metric_progress = progress.get(metric_name)
     if metric_progress is None:
-        return f"{emoji} {label}: {formatter(current_value)}"
+        return f"{emoji} {label}: {formatter(current_value, approx=is_approximate)}"
     percent_str = f"не менее {_format_percent(metric_progress['percent'])}" if is_partial else _format_percent(metric_progress['percent'])
     return (
-        f"{emoji} {label}: {formatter(metric_progress['current'])} / "
+        f"{emoji} {label}: {formatter(metric_progress['current'], approx=is_approximate)} / "
         f"{formatter(metric_progress['target'])} ({percent_str})"
     )
 
@@ -4523,6 +4645,12 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
                 "fat_g": _to_float(raw_item.get("fat_g") or raw_item.get("fat")),
                 "carbs_g": _to_float(raw_item.get("carbs_g") or raw_item.get("carbs")),
             }
+            if raw_item.get("suppressed_by_item_id"):
+                item["suppressed_by_item_id"] = raw_item.get("suppressed_by_item_id")
+            if raw_item.get("user_nutrition"):
+                item["user_nutrition"] = raw_item.get("user_nutrition")
+            if raw_item.get("item_id"):
+                item["item_id"] = raw_item.get("item_id")
         else:
             continue
         if not item.get("name"):
@@ -7211,8 +7339,8 @@ class HealBiteNutritionDiary:
         timezone_name: str | None = None,
     ) -> dict[str, Any]:
         normalized_days = max(1, int(days))
+        tz_name = timezone_name or self._resolve_user_timezone(int(user_id))
         if normalized_days == 1:
-            tz_name = timezone_name or self._resolve_user_timezone(int(user_id))
             start_utc, end_utc = _local_day_window(now, timezone_name=tz_name)
             period_key = "today"
             period_label = "\u0441\u0435\u0433\u043e\u0434\u043d\u044f"
@@ -7232,15 +7360,50 @@ class HealBiteNutritionDiary:
             ).fetchall()
             targets = _load_nutrition_targets(conn, user_id=int(user_id))
         entries = [dict(row) for row in rows]
-        calories_total = sum(float(row["calories_kcal"] or 0.0) for row in rows)
-        protein_total = sum(float(row["protein_g"] or 0.0) for row in rows)
-        fat_total = sum(float(row["fat_g"] or 0.0) for row in rows)
-        carbs_total = sum(float(row["carbs_g"] or 0.0) for row in rows)
+        for entry in entries:
+            items_raw = entry.get("items_json")
+            if items_raw and isinstance(items_raw, str):
+                try:
+                    entry["items"] = json.loads(items_raw)
+                except Exception:
+                    entry["items"] = []
+            elif isinstance(items_raw, list):
+                entry["items"] = items_raw
+            else:
+                entry["items"] = []
+
+        calories_known = [float(row["calories_kcal"]) for row in rows if row["calories_kcal"] is not None]
+        protein_known = [float(row["protein_g"]) for row in rows if row["protein_g"] is not None]
+        fat_known = [float(row["fat_g"]) for row in rows if row["fat_g"] is not None]
+        carbs_known = [float(row["carbs_g"]) for row in rows if row["carbs_g"] is not None]
+
+        has_incomplete_entries = any(
+            row["calories_kcal"] is None
+            or row["protein_g"] is None
+            or row["fat_g"] is None
+            or row["carbs_g"] is None
+            for row in rows
+        )
+        is_complete = not has_incomplete_entries
+        incomplete_entry_count = sum(
+            1 for row in rows
+            if row["calories_kcal"] is None
+            or row["protein_g"] is None
+            or row["fat_g"] is None
+            or row["carbs_g"] is None
+        )
+        complete_entry_count = len(rows) - incomplete_entry_count
+
+        calories_total = sum(calories_known) if calories_known or not rows else None
+        protein_total = sum(protein_known) if protein_known or not rows else None
+        fat_total = sum(fat_known) if fat_known or not rows else None
+        carbs_total = sum(carbs_known) if carbs_known or not rows else None
+
         average_values = {
-            "calories_kcal": calories_total / normalized_days,
-            "protein_g": protein_total / normalized_days,
-            "fat_g": fat_total / normalized_days,
-            "carbs_g": carbs_total / normalized_days,
+            "calories_kcal": (calories_total / normalized_days) if calories_total is not None else None,
+            "protein_g": (protein_total / normalized_days) if protein_total is not None else None,
+            "fat_g": (fat_total / normalized_days) if fat_total is not None else None,
+            "carbs_g": (carbs_total / normalized_days) if carbs_total is not None else None,
         }
         comparison_values = average_values if normalized_days > 1 else {
             "calories_kcal": calories_total,
@@ -7249,10 +7412,6 @@ class HealBiteNutritionDiary:
             "carbs_g": carbs_total,
         }
         progress = _build_target_progress(comparison_values, targets)
-        has_incomplete_entries = any(row["calories_kcal"] is None for row in rows)
-        is_complete = not has_incomplete_entries
-        incomplete_entry_count = sum(1 for row in rows if row["calories_kcal"] is None)
-        complete_entry_count = len(rows) - incomplete_entry_count
         known_subtotal = {
             "calories_kcal": calories_total,
             "protein_g": protein_total,
@@ -7317,10 +7476,46 @@ class HealBiteNutritionDiary:
             "progress": progress,
             "comparison_values": comparison_values,
             "hints": _build_progress_hints(progress, has_incomplete_entries=has_incomplete_entries),
+            "timezone_name": tz_name,
+            "has_approximate": any(
+                bool(
+                    entry.get("is_approximate_range")
+                    or entry.get("uncertainty_model_type")
+                    or (entry.get("confidence") is not None and float(entry.get("confidence") or 1.0) < 0.95)
+                )
+                for entry in entries
+            ),
         }
 
     def get_daily_summary(self, *, user_id: int, now: datetime | None = None) -> dict[str, Any]:
         return self.get_summary(user_id=user_id, now=now, days=1)
+
+    def get_daily_report(
+        self,
+        *,
+        user_id: int,
+        now: datetime | None = None,
+        timezone_name: str | None = None,
+    ) -> str:
+        summary = self.get_summary(
+            user_id=user_id,
+            now=now,
+            days=1,
+            timezone_name=timezone_name,
+        )
+        return format_nutrition_diary_report(summary)
+
+
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        if key in row.keys():
+            val = row[key]
+            return val if val is not None else default
+    except Exception:
+        pass
+    return getattr(row, key, default)
 
 
 def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
@@ -7328,10 +7523,10 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     days = max(1, int(summary.get("days") or 1))
     progress = summary.get("progress") or {}
     comparison_values = summary.get("comparison_values") or {
-        "calories_kcal": float(summary.get("calories_kcal") or 0.0),
-        "protein_g": float(summary.get("protein_g") or 0.0),
-        "fat_g": float(summary.get("fat_g") or 0.0),
-        "carbs_g": float(summary.get("carbs_g") or 0.0),
+        "calories_kcal": summary.get("calories_kcal"),
+        "protein_g": summary.get("protein_g"),
+        "fat_g": summary.get("fat_g"),
+        "carbs_g": summary.get("carbs_g"),
     }
     no_target_hint = "\U0001f3af \u0426\u0435\u043b\u044c \u0435\u0449\u0451 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430. \u0417\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u0435 /profile, \u0447\u0442\u043e\u0431\u044b \u044f \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u043b \u043f\u0440\u043e\u0433\u0440\u0435\u0441\u0441."
     if not entries:
@@ -7345,23 +7540,37 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
 
     has_incomplete = bool(summary.get("has_incomplete_entries"))
     incomplete_count = int(summary.get("incomplete_entry_count") or (1 if has_incomplete else 0))
+    has_approximate = bool(summary.get("has_approximate"))
 
     if days == 1:
         if has_incomplete:
-            title = f"\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>\n\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423). \u041d\u0438\u0436\u0435 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435.</i>"
+            title = (
+                f"\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>\n"
+                f"\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423). "
+                f"\u041d\u0438\u0436\u0435 \u043f\u0440\u0438\u0432\u0435\u0434\u0451\u043d \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435.</i>"
+            )
         else:
             title = "\U0001f4ca <b>\u0422\u0432\u043e\u0439 \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u0437\u0430 \u0441\u0435\u0433\u043e\u0434\u043d\u044f:</b>"
     else:
         if has_incomplete:
-            title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>\n\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423).</i>"
+            title = (
+                f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>\n"
+                f"\u26a0\ufe0f <i>\u0412\u043d\u0438\u043c\u0430\u043d\u0438\u0435: \u0443\u0447\u0442\u0435\u043d\u043e \u0447\u0430\u0441\u0442\u0438\u0447\u043d\u043e ({incomplete_count} \u0431\u043b\u044e\u0434(\u0430) \u0431\u0435\u0437 \u041a\u0411\u0416\u0423).</i>"
+            )
         else:
             title = f"\U0001f4ca <b>\u0422\u0432\u043e\u044f \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
 
     lines = [title]
     if days > 1:
-        lines.append("\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>" if has_incomplete else "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>")
+        lines.append(
+            "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>"
+            if has_incomplete
+            else "\U0001f4c8 <b>\u0412 \u0441\u0440\u0435\u0434\u043d\u0435\u043c \u0437\u0430 \u0434\u0435\u043d\u044c:</b>"
+        )
     elif has_incomplete:
         lines.append("\U0001f4cc <b>\u0418\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433:</b>")
+    else:
+        lines.append("\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 \u0434\u0435\u043d\u044c:</b>")
 
     lines.extend(
         [
@@ -7369,38 +7578,46 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
                 emoji="\U0001f525",
                 label="\u041a\u0430\u043b\u043e\u0440\u0438\u0438" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="calories_kcal",
-                current_value=float(comparison_values.get("calories_kcal") or 0.0),
+                current_value=comparison_values.get("calories_kcal"),
                 progress=progress,
                 is_partial=has_incomplete,
+                is_approximate=False,
             ),
             _format_progress_line(
                 emoji="\U0001f969",
                 label="\u0411\u0435\u043b\u043a\u0438" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="protein_g",
-                current_value=float(comparison_values.get("protein_g") or 0.0),
+                current_value=comparison_values.get("protein_g"),
                 progress=progress,
                 is_partial=has_incomplete,
+                is_approximate=False,
             ),
             _format_progress_line(
                 emoji="\U0001f9c8",
                 label="\u0416\u0438\u0440\u044b" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="fat_g",
-                current_value=float(comparison_values.get("fat_g") or 0.0),
+                current_value=comparison_values.get("fat_g"),
                 progress=progress,
                 is_partial=has_incomplete,
+                is_approximate=False,
             ),
             _format_progress_line(
                 emoji="\U0001f35e",
                 label="\u0423\u0433\u043b\u0435\u0432\u043e\u0434\u044b" + (" (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433)" if has_incomplete else ""),
                 metric_name="carbs_g",
-                current_value=float(comparison_values.get("carbs_g") or 0.0),
+                current_value=comparison_values.get("carbs_g"),
                 progress=progress,
                 is_partial=has_incomplete,
+                is_approximate=False,
             ),
         ]
     )
     if days > 1:
-        total_subhead = f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439 (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>" if has_incomplete else f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
+        total_subhead = (
+            f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439 (\u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433):</b>"
+            if has_incomplete
+            else f"\U0001f4e6 <b>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 {days} \u0434\u043d\u0435\u0439:</b>"
+        )
         lines.extend(
             [
                 "",
@@ -7416,20 +7633,68 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
     hints = summary.get("hints") or []
     if hints:
         lines.extend(["", "\U0001f4a1 <b>\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438:</b>"])
-        lines.extend(f"\u2022 {html.escape(str(hint))}" for hint in hints)
+        lines.extend(f"• {html.escape(str(hint))}" for hint in hints)
+
     lines.extend(["", "\U0001f37d <b>\u041f\u0440\u0438\u0435\u043c\u044b \u043f\u0438\u0449\u0438:</b>"])
+    tz_name = summary.get("timezone_name")
     for row in entries:
         meal_name = html.escape(localized_meal_display_name(row, "\u0411\u043b\u044e\u0434\u043e"))
-        kcal = _format_kcal(row.get("calories_kcal"))
-        lines.append(f"\u2022 {meal_name} (~{kcal})")
+        time_str = _format_meal_local_time(_row_get(row, "occurred_at"), tz_name)
+        time_prefix = f" ({time_str})" if time_str else ""
+        row_approx = bool(
+            _row_get(row, "is_approximate_range")
+            or _row_get(row, "uncertainty_model_type")
+            or (_row_get(row, "confidence") is not None and float(_row_get(row, "confidence") or 1.0) < 0.95)
+        )
+
+        if days == 1:
+            items_raw = _row_get(row, "items")
+            if not items_raw and _row_get(row, "items_json"):
+                try:
+                    items_raw = json.loads(_row_get(row, "items_json"))
+                except Exception:
+                    items_raw = []
+
+            valid_items = []
+            if isinstance(items_raw, list):
+                for itm in items_raw:
+                    extracted = _extract_item_info(itm)
+                    if extracted:
+                        valid_items.append(extracted)
+
+            meal_subtotal = _format_nutrients_summary(
+                _row_get(row, "calories_kcal"),
+                _row_get(row, "protein_g"),
+                _row_get(row, "fat_g"),
+                _row_get(row, "carbs_g"),
+                approx=row_approx,
+            )
+
+            if valid_items:
+                lines.append(f"• <b>{meal_name}</b>{time_prefix}:")
+                for itm in valid_items:
+                    w_str = f", {_format_grams(itm['weight_g'])}" if itm.get("weight_g") is not None else ""
+                    itm_nutr = _format_nutrients_summary(
+                        itm.get("calories_kcal"),
+                        itm.get("protein_g"),
+                        itm.get("fat_g"),
+                        itm.get("carbs_g"),
+                        approx=itm.get("is_approximate", False),
+                    )
+                    lines.append(f"  ▫️ {html.escape(itm['name'])}{w_str} — {itm_nutr}")
+                lines.append(f"  <i>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 \u043f\u0440\u0438\u0451\u043c: {meal_subtotal}</i>")
+            else:
+                lines.append(f"• <b>{meal_name}</b>{time_prefix} — {meal_subtotal}")
+        else:
+            kcal = _format_kcal(_row_get(row, "calories_kcal"), approx=row_approx)
+            lines.append(f"• {meal_name} (~{kcal})" if not row_approx else f"• {meal_name} ({kcal})")
+
     if has_incomplete:
         lines.extend([
             "",
             "\u26a0\ufe0f \u041d\u0435\u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b \u0431\u0435\u0437 \u041a\u0411\u0416\u0423, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u0438\u0442\u043e\u0433\u0438 \u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u043e\u043b\u043d\u044b\u043c\u0438. \u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0451\u043d \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435 \u0438\u043b\u0438 \u0434\u043e\u0441\u0442\u0438\u0436\u0435\u043d\u0438\u0435 \u0446\u0435\u043b\u0438."
         ])
     return "\n".join(lines)
-
-
 def format_undo_meal_report(result: UndoMealResult) -> str:
     if not result.deleted:
         return "\u0423\u0434\u0430\u043b\u044f\u0442\u044c \u043d\u0435\u0447\u0435\u0433\u043e \u2014 \u0441\u0435\u0433\u043e\u0434\u043d\u044f \u0434\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0443\u0441\u0442."
@@ -7557,9 +7822,10 @@ def compute_nutrition_diary_summary(
     user_id: int,
     now: datetime | None = None,
     days: int = 1,
+    timezone_name: str | None = None,
 ) -> dict[str, Any]:
     diary = HealBiteNutritionDiary(db_path=db_path, background_write=False)
-    return diary.get_summary(user_id=user_id, now=now, days=days)
+    return diary.get_summary(user_id=user_id, now=now, days=days, timezone_name=timezone_name)
 
 
 def get_existing_nutrition_diary() -> HealBiteNutritionDiary | None:

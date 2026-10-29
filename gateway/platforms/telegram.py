@@ -11062,8 +11062,12 @@ class TelegramAdapter(BasePlatformAdapter):
         usage = "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /stats [7d]" if command_token == "/stats" else "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /diary [7d]"
         if len(parts) <= 1:
             return default_days, None
-        if len(parts) == 2 and parts[1].lower() == "7d":
-            return 7, None
+        if len(parts) == 2:
+            arg = parts[1].lower()
+            if arg in {"today", "\u0441\u0435\u0433\u043e\u0434\u043d\u044f", "1d", "1"}:
+                return 1, None
+            if arg in {"7d", "7"}:
+                return 7, None
         return None, usage
 
     @staticmethod

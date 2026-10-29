@@ -13016,11 +13016,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         tokens = (text or "").strip().split()
         if not tokens:
             return None, "Использование: /diary [7d] или /stats [7d]"
+        command_token = tokens[0].split("@", 1)[0].lower()
+        default_days = 7 if command_token == "/stats" else 1
+        usage = "Использование: /stats [7d]" if command_token == "/stats" else "Использование: /diary [7d]"
         if len(tokens) == 1:
-            return 1, None
-        if len(tokens) == 2 and tokens[1].lower() == "7d":
-            return 7, None
-        return None, "Использование: /diary [7d] или /stats [7d]"
+            return default_days, None
+        if len(tokens) == 2:
+            arg = tokens[1].lower()
+            if arg in {"today", "сегодня", "1d", "1"}:
+                return 1, None
+            if arg in {"7d", "7"}:
+                return 7, None
+        return None, usage
 
     @staticmethod
     def _plain_healbite_nutrition_diary_report(report: str) -> str:

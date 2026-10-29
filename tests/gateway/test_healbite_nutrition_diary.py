@@ -999,7 +999,7 @@ def test_duplicate_photo_retry_does_not_double_save(tmp_path):
 
 def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     older = _build_record(
         meal_name="Овсянка",
         calories_kcal=200,
@@ -1048,7 +1048,7 @@ def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
 
 def test_delete_last_meal_does_not_touch_other_users(tmp_path):
     diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     user_one = _build_record(
         meal_name="Суп",
         calories_kcal=180,
@@ -1128,7 +1128,7 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
         qdrant_adapter=adapter,
         background_write=False,
     )
-    now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    now = datetime.now(timezone.utc)
     older = _build_record(
         meal_name="\u0413\u0440\u0435\u0447\u043a\u0430",
         calories_kcal=310,

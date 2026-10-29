@@ -13226,8 +13226,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         elif classification == "text_meal":
             diary = self._get_healbite_nutrition_diary()
+            try:
+                user_id_int = int(source.user_id)
+            except (TypeError, ValueError):
+                user_id_int = 0
             pending_inv = diary.stage_pending_inventory_from_text(
-                user_id=int(source.user_id),
+                user_id=user_id_int,
                 text=message,
             )
             if pending_inv is not None:
@@ -13237,12 +13241,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 final_response = format_food_vision_inventory_reply(pending_inv)
                 adapter = self.adapters.get(source.platform)
+                already_sent = False
                 if adapter and source.chat_id:
                     meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
                     meta = dict(meta) if meta else {}
                     meta["parse_mode"] = "HTML"
                     meta["reply_markup"] = build_food_vision_inventory_keyboard(pending_inv)
                     asyncio.create_task(adapter.send(source.chat_id, final_response, metadata=meta))
+                    already_sent = True
                 return {
                     "final_response": final_response,
                     "messages": [
@@ -13255,6 +13261,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "session_id": session_id,
                     "completed": True,
                     "response_previewed": False,
+                    "already_sent": already_sent,
                 }
             return None
         else:

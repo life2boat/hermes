@@ -49,15 +49,56 @@ _PIECE_WEIGHT_REFERENCE: dict[str, float] = {
     "котлеты": 150.0,
 }
 
+_RUSSIAN_WORD_NUMBERS: dict[str, float] = {
+    "один": 1.0,
+    "одна": 1.0,
+    "одно": 1.0,
+    "одну": 1.0,
+    "два": 2.0,
+    "две": 2.0,
+    "двух": 2.0,
+    "три": 3.0,
+    "трёх": 3.0,
+    "трех": 3.0,
+    "четыре": 4.0,
+    "четырёх": 4.0,
+    "четырех": 4.0,
+    "пять": 5.0,
+    "пяти": 5.0,
+    "шесть": 6.0,
+    "шести": 6.0,
+    "семь": 7.0,
+    "семи": 7.0,
+    "восемь": 8.0,
+    "восьми": 8.0,
+    "девять": 9.0,
+    "девяти": 9.0,
+    "десять": 10.0,
+    "десяти": 10.0,
+    "пол": 0.5,
+    "половина": 0.5,
+    "половинку": 0.5,
+    "половинка": 0.5,
+    "половину": 0.5,
+    "полтора": 1.5,
+    "полторы": 1.5,
+    "полутора": 1.5,
+}
+
+_CONVERSATIONAL_PREAMBLE_RE: re.Pattern[str] = re.compile(
+    r"^(?:(?:я\s+)?(?:сегодня\s+)?(?:на\s+)?(завтрак|обед|ужин|перекус|полдник)\s+(?:съел[а-яё]*|поел[а-яё]*|скушал[а-яё]*|выпил[а-яё]*|употребил[а-яё]*|завтракал[а-яё]*|обедал[а-яё]*|ужинал[а-яё]*)\s+|(?:я\s+)?(?:сегодня\s+)?(?:съел[а-яё]*|поел[а-яё]*|скушал[а-яё]*|выпил[а-яё]*|употребил[а-яё]*)\s+|(?:сегодня\s+)?(?:на\s+(завтрак|обед|ужин|перекус|полдник))\s*[:,-]?\s*)",
+    re.IGNORECASE,
+)
+
 _PREPARATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(?:запеч[её]нн?[а-я]*|в\s+духовке)\b", re.IGNORECASE), "запечённый"),
-    (re.compile(r"\b(?:отварн[а-я]*|вар[её]нн?[а-я]*|сваренн?[а-я]*)\b", re.IGNORECASE), "отварной"),
-    (re.compile(r"\b(?:жаренн?[а-я]*|поджаренн?[а-я]*)\b", re.IGNORECASE), "жареный"),
-    (re.compile(r"\b(?:туш[её]нн?[а-я]*)\b", re.IGNORECASE), "тушёный"),
-    (re.compile(r"\b(?:на\s+пару|паров[а-я]*)\b", re.IGNORECASE), "на пару"),
+    (re.compile(r"\b(?:запеч[её]нн?[а-яё]*|в\s+духовке)\b", re.IGNORECASE), "запечённый"),
+    (re.compile(r"\b(?:отварн[а-яё]*|вар[её]нн?[а-яё]*|сваренн?[а-яё]*)\b", re.IGNORECASE), "отварной"),
+    (re.compile(r"\b(?:жаренн?[а-яё]*|поджаренн?[а-яё]*)\b", re.IGNORECASE), "жареный"),
+    (re.compile(r"\b(?:туш[её]нн?[а-яё]*)\b", re.IGNORECASE), "тушёный"),
+    (re.compile(r"\b(?:на\s+пару|паров[а-яё]*)\b", re.IGNORECASE), "на пару"),
     (re.compile(r"\b(?:на\s+гриле|гриль)\b", re.IGNORECASE), "на гриле"),
-    (re.compile(r"\b(?:свеж[а-я]*|сыр[а-я]*)\b", re.IGNORECASE), "сырой"),
-    (re.compile(r"\b(?:слабосол[её]нн?[а-я]*|солен[а-я]*|сол[её]нн?[а-я]*)\b", re.IGNORECASE), "слабосолёный"),
+    (re.compile(r"\b(?:свеж[а-яё]*|сыр[а-яё]*)\b", re.IGNORECASE), "сырой"),
+    (re.compile(r"\b(?:слабосол[её]нн?[а-яё]*|солен[а-яё]*|сол[её]нн?[а-яё]*)\b", re.IGNORECASE), "слабосолёный"),
 )
 
 
@@ -80,7 +121,7 @@ _NON_FOOD_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
 _META_INSTRUCTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:это\s+)?(?:блюдо|порция|еда|тарелка|всё|всего)\s+(?:весит|вес|масса|здесь|тут)?\s*\d+(?:[.,]\d+)?\s*(?:г|гр|грам|грамм|граммов|кг|г\.)\b", re.IGNORECASE),
     re.compile(r"^(?:весит|вес|масса|общий\s+вес|вес\s+блюда|вес\s+порции)\s*(?:составляет|:)?\s*\d+(?:[.,]\d+)?\s*(?:г|гр|грам|грамм|граммов|кг|г\.)\b", re.IGNORECASE),
-    re.compile(r"^(?:без|не\s+добавлять|убрать|исключить)\s+[а-яa-z\s]+$", re.IGNORECASE),
+    re.compile(r"^(?:без|не\s+добавлять|убрать|исключить)\s+[а-яёa-z\s]+$", re.IGNORECASE),
 )
 
 
@@ -182,11 +223,38 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             dish_title = re.sub(r"^это\s+", "", dish_title, flags=re.IGNORECASE).strip()
             recipe_body = comp_split[1].strip()
 
+    # Check for conversational preamble, e.g. "На завтрак съел 2 варёных яйца..." or "Я съел 1 яблоко..."
+    preamble_match = _CONVERSATIONAL_PREAMBLE_RE.match(recipe_body)
+    if preamble_match:
+        meal_hint = preamble_match.group(1) or preamble_match.group(2)
+        if meal_hint and not dish_title:
+            dish_title = meal_hint.capitalize()
+        recipe_body = recipe_body[preamble_match.end():].strip()
+
+    # Normalize natural language connectors into standard delimiters
+    # 1. Connective verbs with optional "и" (e.g. "и выпил", "и съел", "поел", "запил")
+    recipe_body = re.sub(
+        r"\s+(?:и\s+)?(?:выпил[а-яё]*|съел[а-яё]*|поел[а-яё]*|скушал[а-яё]*|добавил[а-яё]*|запил[а-яё]*|употребил[а-яё]*)\s+",
+        ", ",
+        recipe_body,
+        flags=re.IGNORECASE,
+    )
+    # 2. Coordinating conjunctions "а также", "плюс"
+    recipe_body = re.sub(r"\s+(?:а\s+также|плюс)\s+", ", ", recipe_body, flags=re.IGNORECASE)
+    # 3. Coordinating conjunction "и" before numbers/quantities, measures, or number words
+    _num_words_alt = "|".join(_RUSSIAN_WORD_NUMBERS.keys())
+    recipe_body = re.sub(
+        rf"\s+и\s+(?=(?:\d+(?:[.,]\d+)?\s*(?:[а-яёa-z]+)|{_num_words_alt}\b|стакан|чашк|тарелк|порци|ложд?к))",
+        ", ",
+        recipe_body,
+        flags=re.IGNORECASE,
+    )
+
     # Split recipe body into items
     # Delimiters: newline, semicolon, comma (except comma inside numbers or "творог, 100г")
     # First protect decimal commas in numbers like "1,5" or "0,5"
     protected_body = re.sub(r"(\d+),(\d+)", r"\1.\2", recipe_body)
-    raw_lines = re.split(r"[\n;\u2022\*\+]|(?<=\D),(?=\s*[а-яa-z0-9])", protected_body, flags=re.IGNORECASE)
+    raw_lines = re.split(r"[\n;\u2022\*\+]|(?<=\D),(?=\s*[а-яёa-z0-9])", protected_body, flags=re.IGNORECASE)
 
     ingredients: list[ParsedIngredient] = []
 
@@ -196,6 +264,10 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             continue
         # Strip leading dashes / bullets
         part = re.sub(r"^[-–—\s*]+", "", part).strip()
+        # Strip trailing punctuation (. , ; !)
+        part = re.sub(r"[.,;!]+$", "", part).strip()
+        # Strip leftover connective verbs at start of part (e.g. "съел 2 яйца", "выпил 200 мл молока")
+        part = re.sub(r"^(?:съел[а-яё]*|поел[а-яё]*|скушал[а-яё]*|выпил[а-яё]*|употребил[а-яё]*|добавил[а-яё]*|взял[а-яё]*)\s+", "", part, flags=re.IGNORECASE).strip()
         if not part:
             continue
 
@@ -207,7 +279,7 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
 
         # Check egg dish pattern, e.g. "яичница из 2 яиц", "омлет из 3 яиц"
         egg_dish_match = re.search(
-            r"\b(?:яичниц[аыеу]|омлет[а-я]*|глазунь[а-я]*)\s+(?:из|с)?\s*(\d+)\s*(?:яиц|яйца|яйцо)\b",
+            r"\b(?:яичниц[аыеу]|омлет[а-яё]*|глазунь[а-яё]*)\s+(?:из|с)?\s*(\d+)\s*(?:яиц|яйца|яйцо)\b",
             part,
             re.IGNORECASE,
         )
@@ -258,26 +330,57 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
             )
             continue
 
-        # Check for fraction piece format, e.g. "1/2 яйца", "2 яйца", "1.5 яблока"
+        # Check for fraction / piece format, e.g. "1/2 яйца", "2 варёных яйца", "два варёных яйца", "1.5 яблока"
+        _num_words_alt = "|".join(_RUSSIAN_WORD_NUMBERS.keys())
         piece_match = re.match(
-            r"^(\d+(?:[./]\d+)?)\s*(?:шт(?:ук[аи]?)?\.?\s*)?([а-яa-z\s]+)$",
+            rf"^(\d+(?:[./]\d+)?|{_num_words_alt})\s*(?:шт(?:ук[аи]?)?\.?\s*)?([а-яёa-z\s]+)$",
             part,
             re.IGNORECASE,
         )
+        if not piece_match:
+            postfix_match = re.match(
+                rf"^([а-яёa-z\s]+?)\s+(\d+(?:[./]\d+)?|{_num_words_alt})\s*(?:шт(?:ук[аи]?)?\.?)$",
+                part,
+                re.IGNORECASE,
+            )
+            if postfix_match:
+                qty_token = postfix_match.group(2).strip().lower()
+                name_token = postfix_match.group(1).strip().lower()
+            else:
+                qty_token = ""
+                name_token = ""
+        else:
+            qty_token = piece_match.group(1).strip().lower()
+            name_token = piece_match.group(2).strip().lower()
+
         fraction_parsed = False
-        if piece_match:
-            qty_str = piece_match.group(1)
-            item_name = piece_match.group(2).strip().lower()
-            qty = _parse_fraction(qty_str)
-            if qty is not None and any(pk in item_name for pk in _PIECE_WEIGHT_REFERENCE):
-                matched_pk = next(pk for pk in _PIECE_WEIGHT_REFERENCE if pk in item_name)
+        if qty_token and name_token:
+            if qty_token in _RUSSIAN_WORD_NUMBERS:
+                qty = _RUSSIAN_WORD_NUMBERS[qty_token]
+                qty_str = str(int(qty)) if qty.is_integer() else str(qty)
+            else:
+                qty = _parse_fraction(qty_token)
+                qty_str = qty_token
+            if qty is not None and any(pk in name_token for pk in _PIECE_WEIGHT_REFERENCE):
+                matched_pk = next(pk for pk in _PIECE_WEIGHT_REFERENCE if pk in name_token)
                 unit_weight = _PIECE_WEIGHT_REFERENCE[matched_pk]
                 calc_grams = round(qty * unit_weight, 1)
                 prep = _extract_preparation(part)
+
+                # Format user-friendly name for plural boiled/fried eggs or general inflections
+                if "варён" in name_token or "варен" in name_token:
+                    disp_name = "Варёные яйца" if qty > 1 else "Варёное яйцо"
+                elif "жарен" in name_token or "поджарен" in name_token:
+                    disp_name = "Жареные яйца" if qty > 1 else "Жареное яйцо"
+                else:
+                    from gateway.nutrition.household_measures import normalize_food_inflection
+                    norm_cand = normalize_food_inflection(name_token)
+                    disp_name = norm_cand.capitalize() if norm_cand else name_token.capitalize()
+
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,
-                        name=item_name.capitalize(),
+                        name=disp_name,
                         normalized_name=matched_pk,
                         grams=calc_grams,
                         grams_min=round(calc_grams * 0.85, 1),
@@ -314,8 +417,8 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
 
             # Name is the part without the weight match
             name_part = part[:weight_match.start()] + part[weight_match.end():]
-            name_part = re.sub(r"[,:\-\s]+$", "", name_part).strip()
-            name_part = re.sub(r"^[,:\-\s]+", "", name_part).strip()
+            name_part = re.sub(r"[,:\-\s.]+$", "", name_part).strip()
+            name_part = re.sub(r"^[,:\-\s.]+", "", name_part).strip()
 
             # Check fat percentage: e.g. "творог 2%"
             fat_match = re.search(r"(\d+(?:\.\d+)?)\s*%", name_part)
@@ -330,26 +433,46 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                 from gateway.healbite_food_composition import resolve_food_composition
                 from gateway.nutrition.household_measures import normalize_food_inflection
                 norm_key = clean_name.lower()
-                direct_match = resolve_food_composition(norm_key)
-                if not (direct_match and direct_match.matched):
-                    cut_stripped = re.sub(r"\b(?:стейк\s+(?:из|от)?|шницель\s+(?:из|от)?)\s*", "", clean_name, flags=re.IGNORECASE).strip()
-                    cand = normalize_food_inflection(cut_stripped.lower()) if cut_stripped else ""
-                    if cand:
-                        cand_res = resolve_food_composition(cand)
+                cand = normalize_food_inflection(norm_key)
+                if cand and cand != norm_key:
+                    cand_res = resolve_food_composition(cand)
+                    if cand_res and cand_res.matched:
+                        norm_key = cand
+                if norm_key == clean_name.lower():
+                    direct_match = resolve_food_composition(norm_key)
+                    if not (direct_match and direct_match.matched):
+                        cand_res = resolve_food_composition(cand) if cand else None
                         if cand_res and cand_res.matched:
                             norm_key = cand
+                        else:
+                            cut_stripped = re.sub(r"\b(?:стейк\s+(?:из|от)?|шницель\s+(?:из|от)?)\s*", "", clean_name, flags=re.IGNORECASE).strip()
+                            cand2 = normalize_food_inflection(cut_stripped.lower()) if cut_stripped else ""
+                            if cand2:
+                                cand2_res = resolve_food_composition(cand2)
+                                if cand2_res and cand2_res.matched:
+                                    norm_key = cand2
+
+                # If clean_name is an inflected form (e.g. "хлеба", "молока"), use nominative for display
+                norm_display = normalize_food_inflection(clean_name.lower())
+                disp_title = norm_display.capitalize() if norm_display != clean_name.lower() else (name_part.capitalize() if name_part else clean_name.capitalize())
+
+                unit_label = "мл" if unit_raw in {"мл", "миллилитров"} else ("литр" if unit_raw in {"л", "литр"} else "грамм")
+                uncertainty_label = f"{grams} мл" if unit_raw in {"мл", "миллилитров"} else f"{grams} г"
+                if fat_percent is not None:
+                    uncertainty_label += f" ({fat_percent}%)"
+
                 ingredients.append(
                     ParsedIngredient(
                         raw_text=part,
-                        name=name_part.capitalize() if name_part else clean_name.capitalize(),
+                        name=disp_title,
                         normalized_name=norm_key,
                         grams=grams,
                         grams_min=grams,
                         grams_max=grams,
                         quantity=1.0,
-                        unit="грамм",
+                        unit=unit_label,
                         fat_percent=fat_percent,
-                        uncertainty=f"{grams} г" + (f" ({fat_percent}%)" if fat_percent is not None else ""),
+                        uncertainty=uncertainty_label,
                         is_piece=False,
                         is_exact=True,
                         preparation=prep,
@@ -500,7 +623,7 @@ def parse_text_meal_constraints(text: str) -> TextMealConstraint | None:
     # 3. Partial item weights with explicit context indicators
     # e.g. "курицы здесь 120 г", "курица здесь 120г", "здесь 120г курицы"
     for m in re.finditer(
-        r"\b([а-яa-z]+(?:\s+[а-яa-z]+)?)\s+(?:здесь|тут)\s*(?:весит|вес)?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\b",
+        r"\b([а-яёa-z]+(?:\s+[а-яёa-z]+)?)\s+(?:здесь|тут)\s*(?:весит|вес)?\s*(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\b",
         cleaned,
         re.IGNORECASE,
     ):
@@ -516,7 +639,7 @@ def parse_text_meal_constraints(text: str) -> TextMealConstraint | None:
             pass
 
     for m in re.finditer(
-        r"(?:здесь|тут)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\s+([а-яa-z]+(?:\s+[а-яa-z]+)?)\b",
+        r"(?:здесь|тут)\s+(\d+(?:[.,]\d+)?)\s*(?:г|гр|грам|грамм|г\.)\s+([а-яёa-z]+(?:\s+[а-яёa-z]+)?)\b",
         cleaned,
         re.IGNORECASE,
     ):

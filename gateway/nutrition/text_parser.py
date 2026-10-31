@@ -249,6 +249,13 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
         recipe_body,
         flags=re.IGNORECASE,
     )
+    # 4. Coordinating conjunction "и" after a completed unit/quantity clause (e.g. "весом 180 г и натуральный йогурт...")
+    recipe_body = re.sub(
+        r"(\d+(?:\.\d+)?\s*(?:г|гр|грам|грамм|граммов|кг|килограмм|мл|миллилитров|л|литр|г\.|шт|порци[яиею]|штук[аи]?)\.?\)?)\s+и\s+",
+        r"\1, ",
+        recipe_body,
+        flags=re.IGNORECASE,
+    )
 
     # Split recipe body into items
     # Delimiters: newline, semicolon, comma (except comma inside numbers or "творог, 100г")
@@ -400,30 +407,70 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
 
         # Look for grams / kilograms / ml / liters
         # Examples: "армянский лаваш 38 грамм", "творог 2% 100 грамм", "мак 30 грам", "молоко 200мл"
-        weight_match = re.search(
-            r"(\d+(?:\.\d+)?)\s*(?:[xх]\s*(\d+(?:\.\d+)?))?\s*(г|гр|грам|грамм|граммов|кг|килограмм|мл|миллилитров|л|литр|г\.)\b",
+        paren_weight = re.search(
+            r"\(\s*(?:(?:весом|массой)\s+(?:в\s+)?)?(\d+(?:\.\d+)?)\s*(?:[xх]\s*(\d+(?:\.\d+)?))?\s*(г|гр|грам|грамм|граммов|кг|килограмм|мл|миллилитров|л|литр|г\.)\s*\)",
             part,
             re.IGNORECASE,
         )
-        if weight_match:
+        if paren_weight:
+            weight_match = paren_weight
             num1 = float(weight_match.group(1))
             num2 = float(weight_match.group(2)) if weight_match.group(2) else 1.0
             unit_raw = weight_match.group(3).lower()
             val = num1 * num2
-            if unit_raw in {"кг", "килограмм", "л", "литр"}:
-                grams = round(val * 1000.0, 1)
-            else:
-                grams = round(val, 1)
-
-            # Name is the part without the weight match
+            grams = round(val * 1000.0, 1) if unit_raw in {"кг", "килограмм", "л", "литр"} else round(val, 1)
             name_part = part[:weight_match.start()] + part[weight_match.end():]
+        else:
+            weight_match = re.search(
+                r"(?:(?:весом|массой)\s+(?:в\s+)?)?(\d+(?:\.\d+)?)\s*(?:[xх]\s*(\d+(?:\.\d+)?))?\s*(г|гр|грам|грамм|граммов|кг|килограмм|мл|миллилитров|л|литр|г\.)\b",
+                part,
+                re.IGNORECASE,
+            )
+            if weight_match:
+                num1 = float(weight_match.group(1))
+                num2 = float(weight_match.group(2)) if weight_match.group(2) else 1.0
+                unit_raw = weight_match.group(3).lower()
+                val = num1 * num2
+                grams = round(val * 1000.0, 1) if unit_raw in {"кг", "килограмм", "л", "литр"} else round(val, 1)
+                name_part = part[:weight_match.start()] + part[weight_match.end():]
+            else:
+                weight_match = None
+
+        if weight_match:
+            # Strip leftover empty parentheses, punctuation, and weight words like 'весом'
+            name_part = re.sub(r"\(\s*\)", "", name_part).strip()
+            name_part = re.sub(r"\b(?:весом|массой)\s*(?:в)?\b", "", name_part, flags=re.IGNORECASE).strip()
             name_part = re.sub(r"[,:\-\s.]+$", "", name_part).strip()
             name_part = re.sub(r"^[,:\-\s.]+", "", name_part).strip()
+
+            # Check if name_part has a leading quantity (e.g. "один банан", "2 варёных яйца")
+            _num_words_alt = "|".join(_RUSSIAN_WORD_NUMBERS.keys())
+            lead_qty_match = re.match(
+                rf"^(\d+(?:[./]\d+)?|{_num_words_alt})\s*(?:шт(?:ук[аи]?)?\.?\s+)?(.+)$",
+                name_part,
+                re.IGNORECASE,
+            )
+            item_qty = 1.0
+            is_piece_item = False
+            if lead_qty_match:
+                q_token = lead_qty_match.group(1).lower()
+                r_name = lead_qty_match.group(2).strip()
+                if q_token in _RUSSIAN_WORD_NUMBERS:
+                    item_qty = _RUSSIAN_WORD_NUMBERS[q_token]
+                    is_piece_item = True
+                    name_part = r_name
+                else:
+                    parsed_lead_q = _parse_fraction(q_token)
+                    if parsed_lead_q is not None:
+                        item_qty = parsed_lead_q
+                        is_piece_item = True
+                        name_part = r_name
 
             # Check fat percentage: e.g. "творог 2%"
             fat_match = re.search(r"(\d+(?:\.\d+)?)\s*%", name_part)
             fat_percent = float(fat_match.group(1)) if fat_match else None
             clean_name = re.sub(r"\d+(?:\.\d+)?\s*%", "", name_part).strip()
+            clean_name = re.sub(r"\(\s*\)", "", clean_name).strip()
             prep = _extract_preparation(part)
             clean_name = re.sub(r"\s+", " ", clean_name).strip()
 
@@ -452,12 +499,23 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                                 if cand2_res and cand2_res.matched:
                                     norm_key = cand2
 
-                # If clean_name is an inflected form (e.g. "хлеба", "молока"), use nominative for display
-                norm_display = normalize_food_inflection(clean_name.lower())
-                disp_title = norm_display.capitalize() if norm_display != clean_name.lower() else (name_part.capitalize() if name_part else clean_name.capitalize())
+                # Format display title:
+                # If plural boiled/fried eggs:
+                if ("варён" in clean_name.lower() or "варен" in clean_name.lower()) and "яйц" in clean_name.lower():
+                    disp_title = "Варёные яйца" if item_qty > 1 else "Варёное яйцо"
+                elif ("жарен" in clean_name.lower() or "поджарен" in clean_name.lower()) and "яйц" in clean_name.lower():
+                    disp_title = "Жареные яйца" if item_qty > 1 else "Жареное яйцо"
+                else:
+                    norm_display = normalize_food_inflection(clean_name.lower())
+                    disp_title = norm_display.capitalize() if norm_display != clean_name.lower() else (name_part.capitalize() if name_part else clean_name.capitalize())
 
-                unit_label = "мл" if unit_raw in {"мл", "миллилитров"} else ("литр" if unit_raw in {"л", "литр"} else "грамм")
+                disp_title = re.sub(r"\(\s*\)", "", disp_title).strip()
+
+                unit_label = "шт" if is_piece_item else ("мл" if unit_raw in {"мл", "миллилитров"} else ("литр" if unit_raw in {"л", "литр"} else "грамм"))
                 uncertainty_label = f"{grams} мл" if unit_raw in {"мл", "миллилитров"} else f"{grams} г"
+                if is_piece_item:
+                    qty_str = str(int(item_qty)) if item_qty.is_integer() else str(item_qty)
+                    uncertainty_label += f" ({qty_str} шт)"
                 if fat_percent is not None:
                     uncertainty_label += f" ({fat_percent}%)"
 
@@ -469,11 +527,11 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                         grams=grams,
                         grams_min=grams,
                         grams_max=grams,
-                        quantity=1.0,
+                        quantity=item_qty,
                         unit=unit_label,
                         fat_percent=fat_percent,
                         uncertainty=uncertainty_label,
-                        is_piece=False,
+                        is_piece=is_piece_item,
                         is_exact=True,
                         preparation=prep,
                     )

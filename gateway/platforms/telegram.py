@@ -341,6 +341,13 @@ def _is_structured_inventory_input(text: str) -> bool:
         return False
     if _is_weekly_menu_intent(raw):
         return False
+    # Food diary meal messages should never be hijacked by unprompted inventory
+    meal_prefixes = ("перекус", "завтрак", "обед", "ужин", "полдник")
+    low = raw.lower()
+    if any(low.startswith(p) for p in meal_prefixes) or any(re.search(rf"\b{p}\s*[:,-]", low) for p in meal_prefixes):
+        return False
+    if any(w in low for w in ["съел", "поел", "выпил", "завтракал", "обедал", "ужинал"]):
+        return False
     from gateway.healbite_inventory import (
         _PREFIX_QUANTITY_RE,
         _SUFFIX_QUANTITY_RE,
@@ -360,7 +367,8 @@ def _is_structured_inventory_input(text: str) -> bool:
         conversational_words = {
             "привет", "здравствуй", "подскажи", "как", "сколько",
             "почему", "зачем", "что", "рецепт", "какая", "какой",
-            "я", "ел", "съел", "поел", "выпил",
+            "я", "ел", "съел", "поел", "выпил", "завтрак", "обед",
+            "ужин", "перекус", "полдник",
         }
         tokens = set(re.findall(r"\b\w+\b", raw.lower()))
         if not (tokens & conversational_words):
@@ -11115,8 +11123,13 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return True
 
-        summary = compute_nutrition_diary_summary(user_id=int(user_id), days=int(days or 1))
-        report = format_nutrition_diary_report(summary)
+        effective_days = 1 if command_token == "/diary" else int(days or 7)
+        summary = compute_nutrition_diary_summary(user_id=int(user_id), days=effective_days)
+        if command_token == "/stats":
+            from gateway.healbite_nutrition_diary import format_nutrition_stats_report
+            report = format_nutrition_stats_report(summary)
+        else:
+            report = format_nutrition_diary_report(summary)
         kwargs = {
             "chat_id": chat_id,
             "text": report,

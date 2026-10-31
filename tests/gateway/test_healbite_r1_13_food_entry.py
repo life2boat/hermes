@@ -304,7 +304,7 @@ class TestDiaryFormattingAndEditing:
         )
         assert inv is not None
         reply = format_food_vision_inventory_reply(inv)
-        assert "🎯 Точный расчёт" in reply
+        assert "Вес подтверждён · КБЖУ по справочнику (ориентировочно)" in reply
         assert "Итого:" in reply
         assert HOUSEHOLD_DISCLAIMER not in reply
 

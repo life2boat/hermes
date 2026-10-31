@@ -3381,9 +3381,17 @@ def _pending_inventory_notice_lines(
     *,
     has_any_nutrition: bool = False,
     has_unmapped_component: bool = False,
+    is_confirmed_weight: bool = False,
+    is_user_override: bool = False,
 ) -> list[str]:
     if notice:
         return [notice]
+    if is_user_override:
+        return []
+    if is_confirmed_weight:
+        if has_any_nutrition and not has_unmapped_component:
+            return ["КБЖУ по справочнику продуктов (ориентировочно). Проверьте состав перед сохранением."]
+        return ["КБЖУ не рассчитаны окончательно: проверьте состав перед сохранением."]
     if has_any_nutrition and not has_unmapped_component:
         return ["КБЖУ рассчитаны приблизительно. Проверьте количество и вес перед сохранением."]
     return ["КБЖУ не рассчитаны окончательно: проверьте состав перед сохранением."]
@@ -3566,17 +3574,37 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
         lines.extend(["", "Уточнения:"])
         lines.extend(f"• {html.escape(warning)}" for warning in pending_inventory.warnings)
 
+    active_inv_items = [
+        it for it in pending_inventory.items
+        if not getattr(it, "suppressed_by_item_id", None)
+    ]
+    has_user_nutrition_override = bool(active_inv_items) and all(
+        getattr(it, "user_nutrition", None) is not None
+        for it in active_inv_items
+    )
+    is_all_exact = bool(active_inv_items) and all(
+        getattr(it, "user_modified", False)
+        for it in active_inv_items
+    )
+
+    if has_user_nutrition_override:
+        calc_status = "🎯 Точный расчёт"
+        cal_prefix = ""
+        is_approx = False
+        is_confirmed_weight = True
+    elif is_all_exact:
+        calc_status = "🎯 Вес подтверждён · КБЖУ по справочнику (ориентировочно)"
+        cal_prefix = "~"
+        is_approx = True
+        is_confirmed_weight = True
+    else:
+        calc_status = "📊 Ориентировочный расчёт (~КБЖУ)"
+        cal_prefix = "~"
+        is_approx = True
+        is_confirmed_weight = False
+
     if (all_weights_present or (snapshot and total_calories > 0.0)) and has_any_nutrition:
-        # Determine precision: exact only when all items have user-confirmed weights
-        is_all_exact = all(
-            getattr(it, "user_modified", False)
-            for it in pending_inventory.items
-            if not getattr(it, "suppressed_by_item_id", None)
-        )
-        is_approx = bool((snapshot and snapshot.get("is_approximate_range")) or not is_all_exact)
-        calc_status = "📊 Ориентировочный расчёт (~КБЖУ)" if is_approx else "🎯 Точный расчёт"
         total_label = "Итого (частично)" if has_unmapped_component else "Итого"
-        cal_prefix = "~" if is_approx else ""
         lines.extend([
             "",
             calc_status,
@@ -3585,12 +3613,12 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             f"Ж {_format_grams(round(total_fat, 1))} · "
             f"У {_format_grams(round(total_carbs, 1))}",
         ])
-        if is_approx and snapshot and snapshot.get("calories_min") and snapshot.get("calories_max"):
+        if not is_all_exact and not has_user_nutrition_override and snapshot and snapshot.get("calories_min") and snapshot.get("calories_max"):
             c_min = int(round(snapshot["calories_min"]))
             c_max = int(round(snapshot["calories_max"]))
             if c_min != c_max:
                 lines.append(f"Ориентировочный диапазон: ~{c_min}–{c_max} ккал")
-        if is_approx and not has_unmapped_component:
+        if not is_all_exact and not has_user_nutrition_override and is_approx and not has_unmapped_component:
             from gateway.nutrition.household_measures import HOUSEHOLD_DISCLAIMER
             lines.append(HOUSEHOLD_DISCLAIMER)
 
@@ -3601,7 +3629,13 @@ def format_food_vision_inventory_reply(inventory: FoodVisionInventory | PendingF
             "Можно исправить название или сохранить без КБЖУ.",
         ])
 
-    notice_lines = _pending_inventory_notice_lines(notice, has_any_nutrition=has_any_nutrition, has_unmapped_component=has_unmapped_component)
+    notice_lines = _pending_inventory_notice_lines(
+        notice,
+        has_any_nutrition=has_any_nutrition,
+        has_unmapped_component=has_unmapped_component,
+        is_confirmed_weight=is_confirmed_weight,
+        is_user_override=has_user_nutrition_override,
+    )
     if notice_lines:
         lines.extend(["", *notice_lines])
 
@@ -4656,18 +4690,19 @@ def normalize_nutrition_payload(payload_text: str) -> NutritionRecord | None:
         if not item.get("name"):
             continue
         items.append(item)
-        if item.get("calories_kcal") is not None:
-            item_calories_sum += float(item["calories_kcal"])
-            has_item_calories = True
-        if item.get("protein_g") is not None:
-            item_protein_sum += float(item["protein_g"])
-            has_item_protein = True
-        if item.get("fat_g") is not None:
-            item_fat_sum += float(item["fat_g"])
-            has_item_fat = True
-        if item.get("carbs_g") is not None:
-            item_carbs_sum += float(item["carbs_g"])
-            has_item_carbs = True
+        if not item.get("suppressed_by_item_id"):
+            if item.get("calories_kcal") is not None:
+                item_calories_sum += float(item["calories_kcal"])
+                has_item_calories = True
+            if item.get("protein_g") is not None:
+                item_protein_sum += float(item["protein_g"])
+                has_item_protein = True
+            if item.get("fat_g") is not None:
+                item_fat_sum += float(item["fat_g"])
+                has_item_fat = True
+            if item.get("carbs_g") is not None:
+                item_carbs_sum += float(item["carbs_g"])
+                has_item_carbs = True
 
     if total_calories is None and has_item_calories:
         total_calories = item_calories_sum
@@ -7372,32 +7407,82 @@ class HealBiteNutritionDiary:
             else:
                 entry["items"] = []
 
-        calories_known = [float(row["calories_kcal"]) for row in rows if row["calories_kcal"] is not None]
-        protein_known = [float(row["protein_g"]) for row in rows if row["protein_g"] is not None]
-        fat_known = [float(row["fat_g"]) for row in rows if row["fat_g"] is not None]
-        carbs_known = [float(row["carbs_g"]) for row in rows if row["carbs_g"] is not None]
+            active_items = []
+            for itm in entry["items"]:
+                extracted = _extract_item_info(itm)
+                if extracted:
+                    active_items.append(extracted)
 
-        has_incomplete_entries = any(
-            row["calories_kcal"] is None
-            or row["protein_g"] is None
-            or row["fat_g"] is None
-            or row["carbs_g"] is None
-            for row in rows
-        )
+            has_missing_comp = any(
+                itm.get("calories_kcal") is None
+                or itm.get("protein_g") is None
+                or itm.get("fat_g") is None
+                or itm.get("carbs_g") is None
+                for itm in active_items
+            )
+
+            row_cal = entry.get("calories_kcal")
+            row_prot = entry.get("protein_g")
+            row_fat = entry.get("fat_g")
+            row_carbs = entry.get("carbs_g")
+
+            is_row_complete = (
+                row_cal is not None
+                and row_prot is not None
+                and row_fat is not None
+                and row_carbs is not None
+            )
+
+            entry_is_incomplete = (not is_row_complete) or has_missing_comp
+
+            # 1. Use row-level totals when present.
+            # 2. Otherwise calculate known subtotals from independently resolved components.
+            # 3. Ignore suppressed composite-dish components (filtered in _extract_item_info).
+            # 4. Preserve NULL for unresolved components.
+            if row_cal is not None:
+                cal_val = float(row_cal)
+            else:
+                known_cals = [float(itm["calories_kcal"]) for itm in active_items if itm.get("calories_kcal") is not None]
+                cal_val = round(sum(known_cals), 1) if known_cals else None
+
+            if row_prot is not None:
+                prot_val = float(row_prot)
+            else:
+                known_prots = [float(itm["protein_g"]) for itm in active_items if itm.get("protein_g") is not None]
+                prot_val = round(sum(known_prots), 1) if known_prots else None
+
+            if row_fat is not None:
+                fat_val = float(row_fat)
+            else:
+                known_fats = [float(itm["fat_g"]) for itm in active_items if itm.get("fat_g") is not None]
+                fat_val = round(sum(known_fats), 1) if known_fats else None
+
+            if row_carbs is not None:
+                carbs_val = float(row_carbs)
+            else:
+                known_carbs = [float(itm["carbs_g"]) for itm in active_items if itm.get("carbs_g") is not None]
+                carbs_val = round(sum(known_carbs), 1) if known_carbs else None
+
+            entry["resolved_calories"] = cal_val
+            entry["resolved_protein"] = prot_val
+            entry["resolved_fat"] = fat_val
+            entry["resolved_carbs"] = carbs_val
+            entry["is_incomplete"] = entry_is_incomplete
+
+        calories_known = [float(e["resolved_calories"]) for e in entries if e.get("resolved_calories") is not None]
+        protein_known = [float(e["resolved_protein"]) for e in entries if e.get("resolved_protein") is not None]
+        fat_known = [float(e["resolved_fat"]) for e in entries if e.get("resolved_fat") is not None]
+        carbs_known = [float(e["resolved_carbs"]) for e in entries if e.get("resolved_carbs") is not None]
+
+        incomplete_entry_count = sum(1 for e in entries if e.get("is_incomplete"))
+        has_incomplete_entries = incomplete_entry_count > 0
         is_complete = not has_incomplete_entries
-        incomplete_entry_count = sum(
-            1 for row in rows
-            if row["calories_kcal"] is None
-            or row["protein_g"] is None
-            or row["fat_g"] is None
-            or row["carbs_g"] is None
-        )
-        complete_entry_count = len(rows) - incomplete_entry_count
+        complete_entry_count = len(entries) - incomplete_entry_count
 
-        calories_total = sum(calories_known) if calories_known or not rows else None
-        protein_total = sum(protein_known) if protein_known or not rows else None
-        fat_total = sum(fat_known) if fat_known or not rows else None
-        carbs_total = sum(carbs_known) if carbs_known or not rows else None
+        calories_total = round(sum(calories_known), 1) if (calories_known or not entries) else None
+        protein_total = round(sum(protein_known), 1) if (protein_known or not entries) else None
+        fat_total = round(sum(fat_known), 1) if (fat_known or not entries) else None
+        carbs_total = round(sum(carbs_known), 1) if (carbs_known or not entries) else None
 
         average_values = {
             "calories_kcal": (calories_total / normalized_days) if calories_total is not None else None,
@@ -7663,10 +7748,10 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
                         valid_items.append(extracted)
 
             meal_subtotal = _format_nutrients_summary(
-                _row_get(row, "calories_kcal"),
-                _row_get(row, "protein_g"),
-                _row_get(row, "fat_g"),
-                _row_get(row, "carbs_g"),
+                _row_get(row, "resolved_calories", _row_get(row, "calories_kcal")),
+                _row_get(row, "resolved_protein", _row_get(row, "protein_g")),
+                _row_get(row, "resolved_fat", _row_get(row, "fat_g")),
+                _row_get(row, "resolved_carbs", _row_get(row, "carbs_g")),
                 approx=row_approx,
             )
 
@@ -7682,17 +7767,145 @@ def format_nutrition_diary_report(summary: dict[str, Any]) -> str:
                         approx=itm.get("is_approximate", False),
                     )
                     lines.append(f"  ▫️ {html.escape(itm['name'])}{w_str} — {itm_nutr}")
-                lines.append(f"  <i>\u0418\u0442\u043e\u0433\u043e \u0437\u0430 \u043f\u0440\u0438\u0451\u043c: {meal_subtotal}</i>")
+                subtotal_label = "Итого за приём (частично)" if (row.get("is_incomplete") and row.get("resolved_calories") is not None) else "Итого за приём"
+                lines.append(f"  <i>{subtotal_label}: {meal_subtotal}</i>")
             else:
                 lines.append(f"• <b>{meal_name}</b>{time_prefix} — {meal_subtotal}")
         else:
-            kcal = _format_kcal(_row_get(row, "calories_kcal"), approx=row_approx)
+            c_val = _row_get(row, "resolved_calories", _row_get(row, "calories_kcal"))
+            kcal = _format_kcal(c_val, approx=row_approx)
             lines.append(f"• {meal_name} (~{kcal})" if not row_approx else f"• {meal_name} ({kcal})")
 
     if has_incomplete:
         lines.extend([
             "",
-            "\u26a0\ufe0f \u041d\u0435\u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b \u0431\u0435\u0437 \u041a\u0411\u0416\u0423, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u0438\u0442\u043e\u0433\u0438 \u044f\u0432\u043b\u044f\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u043e\u043b\u043d\u044b\u043c\u0438. \u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0451\u043d \u0442\u043e\u043b\u044c\u043a\u043e \u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u0435\u0436\u0443\u0442\u043e\u0447\u043d\u044b\u0439 \u0438\u0442\u043e\u0433, \u0430 \u043d\u0435 \u043f\u043e\u043b\u043d\u043e\u0435 \u043f\u043e\u0442\u0440\u0435\u0431\u043b\u0435\u043d\u0438\u0435 \u0438\u043b\u0438 \u0434\u043e\u0441\u0442\u0438\u0436\u0435\u043d\u0438\u0435 \u0446\u0435\u043b\u0438."
+            "⚠️ Некоторые приёмы пищи сохранены без КБЖУ, поэтому дневные итоги являются неполными. Отображён только известный промежуточный итог, а не полное потребление или достижение цели."
+        ])
+    return "\n".join(lines)
+
+
+def format_nutrition_stats_report(summary: dict[str, Any]) -> str:
+    entries = summary.get("entries") or []
+    days = max(1, int(summary.get("days") or 1))
+    progress = summary.get("progress") or {}
+    comparison_values = summary.get("comparison_values") or {
+        "calories_kcal": summary.get("calories_kcal"),
+        "protein_g": summary.get("protein_g"),
+        "fat_g": summary.get("fat_g"),
+        "carbs_g": summary.get("carbs_g"),
+    }
+    no_target_hint = "🎯 Цель ещё не настроена. Заполните /profile, чтобы я показывал прогресс."
+    if not entries:
+        if days == 1:
+            message = "📊 <b>Твоя статистика за сегодня пока пуста.</b>"
+        else:
+            message = f"📊 <b>Твоя статистика за {days} дней пока пуста.</b>"
+        if not summary.get("targets_available"):
+            message += "\n\n" + no_target_hint
+        return message
+
+    has_incomplete = bool(summary.get("has_incomplete_entries"))
+    incomplete_count = int(summary.get("incomplete_entry_count") or (1 if has_incomplete else 0))
+
+    if days == 1:
+        if has_incomplete:
+            title = (
+                f"📊 <b>Статистика питания за сегодня:</b>\n"
+                f"⚠️ <i>Внимание: учтено частично ({incomplete_count} блюд(а) без КБЖУ). "
+                f"Приведён известный промежуточный итог, а не полное потребление.</i>"
+            )
+        else:
+            title = "📊 <b>Статистика питания за сегодня:</b>"
+    else:
+        if has_incomplete:
+            title = (
+                f"📊 <b>Статистика питания за {days} дней:</b>\n"
+                f"⚠️ <i>Внимание: учтено частично ({incomplete_count} блюд(а) без КБЖУ).</i>"
+            )
+        else:
+            title = f"📊 <b>Статистика питания за {days} дней:</b>"
+
+    lines = [title]
+    if days > 1:
+        lines.append(
+            "📈 <b>В среднем за день (промежуточный итог):</b>"
+            if has_incomplete
+            else "📈 <b>В среднем за день:</b>"
+        )
+    elif has_incomplete:
+        lines.append("📌 <b>Известный промежуточный итог:</b>")
+    else:
+        lines.append("📦 <b>Итого за день:</b>")
+
+    lines.extend(
+        [
+            _format_progress_line(
+                emoji="🔥",
+                label="Калории" + (" (промежуточный итог)" if has_incomplete else ""),
+                metric_name="calories_kcal",
+                current_value=comparison_values.get("calories_kcal"),
+                progress=progress,
+                is_partial=has_incomplete,
+                is_approximate=False,
+            ),
+            _format_progress_line(
+                emoji="🥩",
+                label="Белки" + (" (промежуточный итог)" if has_incomplete else ""),
+                metric_name="protein_g",
+                current_value=comparison_values.get("protein_g"),
+                progress=progress,
+                is_partial=has_incomplete,
+                is_approximate=False,
+            ),
+            _format_progress_line(
+                emoji="🧈",
+                label="Жиры" + (" (промежуточный итог)" if has_incomplete else ""),
+                metric_name="fat_g",
+                current_value=comparison_values.get("fat_g"),
+                progress=progress,
+                is_partial=has_incomplete,
+                is_approximate=False,
+            ),
+            _format_progress_line(
+                emoji="🍞",
+                label="Углеводы" + (" (промежуточный итог)" if has_incomplete else ""),
+                metric_name="carbs_g",
+                current_value=comparison_values.get("carbs_g"),
+                progress=progress,
+                is_partial=has_incomplete,
+                is_approximate=False,
+            ),
+        ]
+    )
+    if days > 1:
+        lines.append("")
+        lines.append("ℹ️ <i>Пустые дни включены в расчёт среднего значения за календарный период.</i>")
+        total_subhead = (
+            f"📦 <b>Итого за {days} дней (промежуточный итог):</b>"
+            if has_incomplete
+            else f"📦 <b>Итого за {days} дней:</b>"
+        )
+        lines.extend(
+            [
+                "",
+                total_subhead,
+                f"🔥 Калории: {_format_kcal(summary.get('calories_kcal'))}",
+                f"🥩 Белки: {_format_grams(summary.get('protein_g'))}",
+                f"🧈 Жиры: {_format_grams(summary.get('fat_g'))}",
+                f"🍞 Углеводы: {_format_grams(summary.get('carbs_g'))}",
+            ]
+        )
+    if not summary.get("targets_available"):
+        lines.extend(["", no_target_hint])
+    hints = summary.get("hints") or []
+    if hints:
+        lines.extend(["", "💡 <b>Подсказки:</b>"])
+        lines.extend(f"• {html.escape(str(hint))}" for hint in hints)
+
+    if has_incomplete:
+        lines.extend([
+            "",
+            "⚠️ Некоторые приёмы пищи сохранены без КБЖУ, поэтому статистика является неполной. Отображён только известный промежуточный итог, а не полное потребление или достижение цели."
         ])
     return "\n".join(lines)
 def format_undo_meal_report(result: UndoMealResult) -> str:

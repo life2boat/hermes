@@ -191,6 +191,10 @@ _GENITIVE_TO_NOMINATIVE: dict[str, str] = {
     "сливочного масла": "сливочное масло",
     "растительного масла": "растительное масло",
     "подсолнечного масла": "подсолнечное масло",
+    "пшеничного хлеба": "пшеничный хлеб",
+    "белого хлеба": "белый хлеб",
+    "ржаного хлеба": "ржаной хлеб",
+    "цельнозернового хлеба": "цельнозерновой хлеб",
     "масла": "масло",
     "сыра": "сыр",
     "молока": "молоко",
@@ -218,6 +222,20 @@ _GENITIVE_TO_NOMINATIVE: dict[str, str] = {
     "творога": "творог",
     "яйца": "яйцо",
     "яиц": "яйцо",
+    "варёного яйца": "варёное яйцо",
+    "вареного яйца": "вареное яйцо",
+    "варёных яиц": "варёные яйца",
+    "вареных яиц": "вареные яйца",
+    "варёных яйца": "варёные яйца",
+    "вареных яйца": "вареные яйца",
+    "жареного яйца": "жареное яйцо",
+    "жареных яиц": "жареные яйца",
+    "куриного филе": "куриное филе",
+    "куриной грудки": "куриная грудка",
+    "гречневой каши": "гречневая каша",
+    "овсяной каши": "овсяная каша",
+    "натурального йогурта": "натуральный йогурт",
+    "греческого йогурта": "греческий йогурт",
     "банана": "банан",
     "бананов": "банан",
     "яблока": "яблоко",
@@ -232,31 +250,51 @@ _GENITIVE_TO_NOMINATIVE: dict[str, str] = {
     "сосисок": "сосиска",
     "котлеты": "котлета",
     "котлет": "котлета",
+    "грецких орехов": "грецкие орехи",
+    "грецкого ореха": "грецкий орех",
 }
+
+
+def _normalize_single_word_inflection(w: str) -> str:
+    cleaned = w.strip().lower()
+    if cleaned in _GENITIVE_TO_NOMINATIVE:
+        return _GENITIVE_TO_NOMINATIVE[cleaned]
+    if cleaned.endswith("ую"):
+        return cleaned[:-2] + "ая"
+    if cleaned.endswith("ого"):
+        return cleaned[:-3] + "ый"
+    if cleaned.endswith("его"):
+        return cleaned[:-3] + "ий"
+    if cleaned.endswith("ых") or cleaned.endswith("их"):
+        return cleaned[:-2] + "ые"
+    if cleaned.endswith("у") and len(cleaned) >= 4 and not cleaned.endswith(("муку", "пасту")):
+        return cleaned[:-1] + "а"
+    if cleaned.endswith(("муку", "пасту")):
+        return cleaned[:-1] + "а"
+    if (cleaned.endswith("ы") or cleaned.endswith("и")) and len(cleaned) >= 4:
+        return cleaned[:-1] + "а"
+    if cleaned.endswith("а") and len(cleaned) >= 4 and cleaned in (
+        "риса", "сыра", "хлеба", "супа", "борща", "чая", "лука", "чеснока",
+        "перца", "мака", "банана", "помидора", "огурца", "творога",
+    ):
+        return cleaned[:-1]
+    if cleaned.endswith("я") and len(cleaned) >= 4 and cleaned in ("миндаля", "бульона"):
+        return cleaned[:-1] + "ь" if cleaned == "миндаля" else cleaned[:-1]
+    return cleaned
 
 
 def normalize_food_inflection(food: str) -> str:
     cleaned = food.strip().lower()
     if cleaned in _GENITIVE_TO_NOMINATIVE:
         return _GENITIVE_TO_NOMINATIVE[cleaned]
-    # Adjective accusative -> nominative: e.g. "запечённую" -> "запечённая"
-    if cleaned.endswith("ую"):
-        return cleaned[:-2] + "ая"
-    if cleaned.endswith("ого"):
-        return cleaned[:-3] + "ый"
-    # Noun accusative -> nominative: e.g. "говядину" -> "говядина", "свинину" -> "свинина", "рыбу" -> "рыба"
-    if cleaned.endswith("у") and len(cleaned) >= 4 and not cleaned.endswith(("муку", "пасту")):
-        return cleaned[:-1] + "а"
-    if cleaned.endswith(("муку", "пасту")):
-        return cleaned[:-1] + "а"
-    # Noun genitive feminine -> nominative: e.g. "курицы" -> "курица", "свинины" -> "свинина"
-    if (cleaned.endswith("ы") or cleaned.endswith("и")) and len(cleaned) >= 4:
-        # e.g. "курицы" -> "курица", "говядины" -> "говядина", "рыбы" -> "рыба"
-        return cleaned[:-1] + "а"
-    # Noun genitive masculine -> nominative: e.g. "риса" -> "рис", "сыра" -> "сыр", "хлеба" -> "хлеб"
-    if cleaned.endswith("а") and len(cleaned) >= 4 and cleaned in ("риса", "сыра", "хлеба", "супа", "борща", "чая", "лука", "чеснока", "перца", "мака"):
-        return cleaned[:-1]
-    return cleaned
+    words = cleaned.split()
+    if len(words) > 1:
+        norm_words = [_normalize_single_word_inflection(w) for w in words]
+        cand = " ".join(norm_words)
+        if cand in _GENITIVE_TO_NOMINATIVE:
+            return _GENITIVE_TO_NOMINATIVE[cand]
+        return cand
+    return _normalize_single_word_inflection(cleaned)
 
 
 def _categorize_food_for_measure(food_name: str) -> str:

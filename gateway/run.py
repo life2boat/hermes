@@ -13053,16 +13053,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if error:
             return error
 
+        tokens = (event.text or "").strip().split()
+        command_token = tokens[0].split("@", 1)[0].lower() if tokens else ""
+        effective_days = 1 if command_token == "/diary" else int(days or 7)
         try:
             summary = compute_nutrition_diary_summary(
                 user_id=int(user_id),
-                days=int(days or 1),
+                days=effective_days,
             )
         except Exception as exc:
             _log_healbite_diary_command_failure("slash_diary", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
-        report = format_nutrition_diary_report(summary)
+        cmd_text = (event.text or "").lower()
+        if "/stats" in cmd_text or "статист" in cmd_text:
+            from gateway.healbite_nutrition_diary import format_nutrition_stats_report
+            report = format_nutrition_stats_report(summary)
+        else:
+            report = format_nutrition_diary_report(summary)
         return self._plain_healbite_nutrition_diary_report(report)
 
     @staticmethod
@@ -13155,7 +13163,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _log_healbite_diary_command_failure("text_query", exc)
             return "Не удалось открыть дневник питания. Попробуйте еще раз чуть позже."
 
-        report = format_nutrition_diary_report(summary)
+        cmd_text = (text or "").lower()
+        if "/stats" in cmd_text or "статист" in cmd_text:
+            from gateway.healbite_nutrition_diary import format_nutrition_stats_report
+            report = format_nutrition_stats_report(summary)
+        else:
+            report = format_nutrition_diary_report(summary)
         return self._plain_healbite_nutrition_diary_report(report)
 
     async def _maybe_handle_healbite_nutrition_diary_turn(

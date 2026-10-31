@@ -7413,6 +7413,13 @@ class HealBiteNutritionDiary:
                 if extracted:
                     active_items.append(extracted)
 
+            has_item_level_nutrition = any(
+                itm.get("calories_kcal") is not None
+                or itm.get("protein_g") is not None
+                or itm.get("fat_g") is not None
+                or itm.get("carbs_g") is not None
+                for itm in active_items
+            )
             has_missing_comp = any(
                 itm.get("calories_kcal") is None
                 or itm.get("protein_g") is None
@@ -7433,7 +7440,12 @@ class HealBiteNutritionDiary:
                 and row_carbs is not None
             )
 
-            entry_is_incomplete = (not is_row_complete) or has_missing_comp
+            if not is_row_complete:
+                entry_is_incomplete = True
+            elif has_item_level_nutrition and has_missing_comp:
+                entry_is_incomplete = True
+            else:
+                entry_is_incomplete = False
 
             # 1. Use row-level totals when present.
             # 2. Otherwise calculate known subtotals from independently resolved components.
@@ -7443,25 +7455,25 @@ class HealBiteNutritionDiary:
                 cal_val = float(row_cal)
             else:
                 known_cals = [float(itm["calories_kcal"]) for itm in active_items if itm.get("calories_kcal") is not None]
-                cal_val = round(sum(known_cals), 1) if known_cals else None
+                cal_val = sum(known_cals) if known_cals else None
 
             if row_prot is not None:
                 prot_val = float(row_prot)
             else:
                 known_prots = [float(itm["protein_g"]) for itm in active_items if itm.get("protein_g") is not None]
-                prot_val = round(sum(known_prots), 1) if known_prots else None
+                prot_val = sum(known_prots) if known_prots else None
 
             if row_fat is not None:
                 fat_val = float(row_fat)
             else:
                 known_fats = [float(itm["fat_g"]) for itm in active_items if itm.get("fat_g") is not None]
-                fat_val = round(sum(known_fats), 1) if known_fats else None
+                fat_val = sum(known_fats) if known_fats else None
 
             if row_carbs is not None:
                 carbs_val = float(row_carbs)
             else:
                 known_carbs = [float(itm["carbs_g"]) for itm in active_items if itm.get("carbs_g") is not None]
-                carbs_val = round(sum(known_carbs), 1) if known_carbs else None
+                carbs_val = sum(known_carbs) if known_carbs else None
 
             entry["resolved_calories"] = cal_val
             entry["resolved_protein"] = prot_val
@@ -7479,10 +7491,10 @@ class HealBiteNutritionDiary:
         is_complete = not has_incomplete_entries
         complete_entry_count = len(entries) - incomplete_entry_count
 
-        calories_total = round(sum(calories_known), 1) if (calories_known or not entries) else None
-        protein_total = round(sum(protein_known), 1) if (protein_known or not entries) else None
-        fat_total = round(sum(fat_known), 1) if (fat_known or not entries) else None
-        carbs_total = round(sum(carbs_known), 1) if (carbs_known or not entries) else None
+        calories_total = sum(calories_known) if (calories_known or not entries) else None
+        protein_total = sum(protein_known) if (protein_known or not entries) else None
+        fat_total = sum(fat_known) if (fat_known or not entries) else None
+        carbs_total = sum(carbs_known) if (carbs_known or not entries) else None
 
         average_values = {
             "calories_kcal": (calories_total / normalized_days) if calories_total is not None else None,

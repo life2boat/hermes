@@ -13055,7 +13055,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         tokens = (event.text or "").strip().split()
         command_token = tokens[0].split("@", 1)[0].lower() if tokens else ""
-        effective_days = 1 if command_token == "/diary" else int(days or 7)
+        effective_days = int(days or (7 if command_token == "/stats" else 1))
         try:
             summary = compute_nutrition_diary_summary(
                 user_id=int(user_id),

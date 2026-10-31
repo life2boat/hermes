@@ -11123,7 +11123,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return True
 
-        effective_days = 1 if command_token == "/diary" else int(days or 7)
+        effective_days = int(days or (7 if command_token == "/stats" else 1))
         summary = compute_nutrition_diary_summary(user_id=int(user_id), days=effective_days)
         if command_token == "/stats":
             from gateway.healbite_nutrition_diary import format_nutrition_stats_report

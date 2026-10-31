@@ -538,6 +538,13 @@ async def test_stats_slash_handler_preserves_weekly_arg(monkeypatch):
             "<b>В среднем за день:</b>"
         ),
     )
+    monkeypatch.setattr(
+        "gateway.healbite_nutrition_diary.format_nutrition_stats_report",
+        lambda summary: (
+            f"<b>Твоя статистика за {summary['days']} дней:</b>\n"
+            "<b>В среднем за день:</b>"
+        ),
+    )
 
     result = await runner._handle_healbite_nutrition_diary_command(
         _make_event("/stats 7d")

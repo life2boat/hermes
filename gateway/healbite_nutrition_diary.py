@@ -7372,27 +7372,65 @@ class HealBiteNutritionDiary:
             else:
                 entry["items"] = []
 
+            is_without_kbzhu = "без КБЖУ" in (entry.get("raw_summary") or "")
+
+            active_items = []
+            if not is_without_kbzhu:
+                for itm in entry["items"]:
+                    if not isinstance(itm, dict) or itm.get("suppressed_by_item_id"):
+                        continue
+                    extracted = _extract_item_info(itm)
+                    if not extracted:
+                        continue
+                    is_dummy_meal_wrapper = (
+                        len(entry["items"]) == 1
+                        and extracted.get("weight_g") is None
+                        and extracted.get("calories_kcal") is None
+                        and extracted.get("protein_g") is None
+                        and extracted.get("fat_g") is None
+                        and extracted.get("carbs_g") is None
+                        and (
+                            extracted.get("name") == entry.get("meal_name")
+                            or extracted.get("name") == entry.get("display_name")
+                        )
+                    )
+                    if not is_dummy_meal_wrapper:
+                        active_items.append(extracted)
+
+            has_missing_comp = any(
+                itm.get("calories_kcal") is None
+                or itm.get("protein_g") is None
+                or itm.get("fat_g") is None
+                or itm.get("carbs_g") is None
+                for itm in active_items
+            )
+
+            row_cal = entry.get("calories_kcal")
+            row_prot = entry.get("protein_g")
+            row_fat = entry.get("fat_g")
+            row_carbs = entry.get("carbs_g")
+
+            is_row_complete = (
+                row_cal is not None
+                and row_prot is not None
+                and row_fat is not None
+                and row_carbs is not None
+            )
+
+            entry_is_incomplete = (
+                has_missing_comp if active_items else not is_row_complete
+            )
+            entry["is_incomplete"] = entry_is_incomplete
+
         calories_known = [float(row["calories_kcal"]) for row in rows if row["calories_kcal"] is not None]
         protein_known = [float(row["protein_g"]) for row in rows if row["protein_g"] is not None]
         fat_known = [float(row["fat_g"]) for row in rows if row["fat_g"] is not None]
         carbs_known = [float(row["carbs_g"]) for row in rows if row["carbs_g"] is not None]
 
-        has_incomplete_entries = any(
-            row["calories_kcal"] is None
-            or row["protein_g"] is None
-            or row["fat_g"] is None
-            or row["carbs_g"] is None
-            for row in rows
-        )
+        incomplete_entry_count = sum(1 for e in entries if e.get("is_incomplete"))
+        has_incomplete_entries = incomplete_entry_count > 0
         is_complete = not has_incomplete_entries
-        incomplete_entry_count = sum(
-            1 for row in rows
-            if row["calories_kcal"] is None
-            or row["protein_g"] is None
-            or row["fat_g"] is None
-            or row["carbs_g"] is None
-        )
-        complete_entry_count = len(rows) - incomplete_entry_count
+        complete_entry_count = len(entries) - incomplete_entry_count
 
         calories_total = sum(calories_known) if calories_known or not rows else None
         protein_total = sum(protein_known) if protein_known or not rows else None

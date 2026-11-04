@@ -15,6 +15,7 @@ from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS, is_gateway_known_command
 from gateway.healbite_nutrition_diary import (
     FOOD_VISION_SCHEMA_VERSION,
     HealBiteNutritionDiary,
+    local_day_window_utc,
     PENDING_MEALS_TABLE,
     UndoMealResult,
     compute_nutrition_diary_summary,
@@ -71,6 +72,22 @@ def _build_record(
             ensure_ascii=False,
         )
     )
+
+
+def _today_at(now: datetime, minutes: int) -> datetime:
+    """A timestamp inside the local day window the diary queries for ``now``.
+
+    "Today" is the user's local day (Europe/Moscow when no profile timezone is
+    stored), so `now - 2h` falls into yesterday whenever the suite runs between
+    00:00 and 02:00 MSK — the window the GitHub runner executed in. Anchor
+    scenario timestamps to the same day window instead of to an offset from the
+    wall clock, and stay out of the future just after local midnight.
+    """
+    start_utc, _ = local_day_window_utc(now)
+    target = start_utc + timedelta(minutes=minutes)
+    if target >= now:
+        target = max(start_utc, now - timedelta(seconds=1))
+    return target
 
 
 def _install_target_tables(db_path):
@@ -1020,14 +1037,14 @@ def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
         source="text",
         record=older,
         image_ref="telegram:70:1",
-        occurred_at=now - timedelta(hours=2),
+        occurred_at=_today_at(now, 1),
     )
     newer_id, _ = diary.save_record(
         user_id=70,
         source="text",
         record=newer,
         image_ref="telegram:70:2",
-        occurred_at=now - timedelta(minutes=5),
+        occurred_at=_today_at(now, 2),
     )
 
     deleted = diary.delete_last_meal(70, now=now)
@@ -1044,6 +1061,65 @@ def test_delete_last_meal_removes_only_latest_record_for_user(tmp_path):
     assert summary["calories_kcal"] == pytest.approx(200.0)
     assert "Овсянка" in report
     assert "Запеченная семга" not in report
+
+
+@pytest.mark.parametrize(
+    "now_utc",
+    [
+        datetime(2026, 11, 4, 21, 0, 30, tzinfo=timezone.utc),  # 00:00:30 MSK
+        datetime(2026, 11, 4, 21, 30, tzinfo=timezone.utc),  # 00:30 MSK
+        datetime(2026, 11, 4, 22, 51, tzinfo=timezone.utc),  # 01:51 MSK (CI run)
+        datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc),  # 06:00 MSK
+    ],
+)
+def test_today_window_scenario_is_clock_independent(tmp_path, now_utc):
+    """Regression: the delete/update "latest entry" scenario must not depend on
+    the wall clock relative to the local day boundary.
+
+    CI ran at 21:00-23:00 UTC (00:00-02:00 MSK) and the `now - 2h` entry fell
+    into the previous local day, so the summary legitimately returned 0 rows.
+    """
+    diary = HealBiteNutritionDiary(db_path=tmp_path / "healbite.db", background_write=False)
+    older = _build_record(
+        meal_name="Овсянка",
+        calories_kcal=200,
+        protein_g=8,
+        fat_g=4,
+        carbs_g=32,
+    )
+    newer = _build_record(
+        meal_name="Запеченная семга",
+        calories_kcal=520,
+        protein_g=35,
+        fat_g=20,
+        carbs_g=30,
+    )
+
+    older_id, _ = diary.save_record(
+        user_id=70,
+        source="text",
+        record=older,
+        image_ref="telegram:70:1",
+        occurred_at=_today_at(now_utc, 1),
+    )
+    newer_id, _ = diary.save_record(
+        user_id=70,
+        source="text",
+        record=newer,
+        image_ref="telegram:70:2",
+        occurred_at=_today_at(now_utc, 2),
+    )
+
+    before = diary.get_daily_summary(user_id=70, now=now_utc)
+    deleted = diary.delete_last_meal(70, now=now_utc)
+    after = diary.get_daily_summary(user_id=70, now=now_utc)
+
+    assert before["entry_count"] == 2
+    assert deleted.deleted is True
+    assert deleted.sqlite_id == newer_id
+    assert after["entry_count"] == 1
+    assert after["entries"][0]["id"] == older_id
+    assert after["calories_kcal"] == pytest.approx(200.0)
 
 
 def test_delete_last_meal_does_not_touch_other_users(tmp_path):
@@ -1069,14 +1145,14 @@ def test_delete_last_meal_does_not_touch_other_users(tmp_path):
         source="text",
         record=user_one,
         image_ref="telegram:80:1",
-        occurred_at=now - timedelta(minutes=30),
+        occurred_at=_today_at(now, 10),
     )
     other_id, _ = diary.save_record(
         user_id=81,
         source="text",
         record=user_two,
         image_ref="telegram:81:1",
-        occurred_at=now - timedelta(minutes=10),
+        occurred_at=_today_at(now, 20),
     )
 
     deleted = diary.delete_last_meal(80, now=now)
@@ -1148,14 +1224,14 @@ def test_update_last_meal_tool_updates_only_latest_entry(tmp_path, monkeypatch):
         source="text",
         record=older,
         image_ref="telegram:92:1",
-        occurred_at=now - timedelta(hours=2),
+        occurred_at=_today_at(now, 1),
     )
     newer_id, _ = diary.save_record(
         user_id=92,
         source="text",
         record=newer,
         image_ref="telegram:92:2",
-        occurred_at=now - timedelta(minutes=5),
+        occurred_at=_today_at(now, 2),
     )
     monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
     tokens = set_session_vars(platform="telegram", chat_id="chat-92", user_id="92", session_key="s-92", session_id="session-92")
@@ -1263,14 +1339,14 @@ def test_update_last_meal_tool_isolated_by_user_id(tmp_path, monkeypatch):
         source="text",
         record=user_one,
         image_ref="telegram:95:1",
-        occurred_at=now - timedelta(minutes=10),
+        occurred_at=_today_at(now, 10),
     )
     second_id, _ = diary.save_record(
         user_id=96,
         source="text",
         record=user_two,
         image_ref="telegram:96:1",
-        occurred_at=now - timedelta(minutes=5),
+        occurred_at=_today_at(now, 20),
     )
     monkeypatch.setattr("tools.healbite_nutrition_diary_tool.get_default_nutrition_diary", lambda: diary)
     tokens = set_session_vars(platform="telegram", chat_id="chat-96", user_id="96", session_key="s-96", session_id="session-96")

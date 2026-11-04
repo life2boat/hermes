@@ -4377,13 +4377,15 @@ _INVENTORY_AMBIGUOUS_ERROR = (
     "\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u0421\u043b\u0438\u0432\u043e\u0447\u043d\u044b\u0439 \u0441\u044b\u0440, 50 \u0433 \u0438\u043b\u0438 \u0412\u0435\u0441 6: 200 \u0433."
 )
 
-_INVENTORY_REPLACE_RE = re.compile(rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c)\s+)?(?P<index>\d{{1,2}})\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
+# "Исправить:" (verb plus a colon) is as valid as "исправить " — users type both.
+_INVENTORY_ACTION_PREFIX = r"(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c|\u043f\u0440\u0430\u0432\u043a\u0430|\u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c)\s*:?\s*)?"
+_INVENTORY_REPLACE_RE = re.compile(rf"^{_INVENTORY_ACTION_PREFIX}(?P<index>\d{{1,2}})\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_ADD_RE = re.compile(rf"^(?:\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c)\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_REMOVE_RE = re.compile(r"^(?:\u0443\u0434\u0430\u043b\u0438\u0442\u044c)\s+(?P<index>\d{1,2})\s*$", re.IGNORECASE)
 _INVENTORY_WEIGHT_RE = re.compile(rf"^(?:\u0432\u0435\u0441)\s+(?P<index>\d{{1,2}})\s*:\s*(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _COUNT_SUFFIX_RE = r"(?:шт(?:ук[а-я]*)?|\u0448\u0442(?:\u0443\u043a[\u0430-\u044f]*)?)"
 _INVENTORY_COUNT_RE = re.compile(
-    rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c)\s+)?(?P<index>\d{{1,2}})\s*:\s*(?P<count>\d+)\s*{_COUNT_SUFFIX_RE}\s*$",
+    rf"^{_INVENTORY_ACTION_PREFIX}(?P<index>\d{{1,2}})\s*:\s*(?P<count>\d+)\s*{_COUNT_SUFFIX_RE}\s*$",
     re.IGNORECASE,
 )
 
@@ -4578,6 +4580,13 @@ def _mutate_single_pending_inventory(inventory: PendingFoodVisionInventory, acti
         return None, "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435."
     updated.items = _reindex_pending_inventory_items(items)
     return updated, None
+
+
+def _pending_inventory_signature(payload: PendingFoodVisionInventory) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (item.visible_name.casefold(), item.selected_grams, item.quantity, item.count_type)
+        for item in payload.items
+    )
 
 
 def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: PendingInventoryAction) -> tuple[PendingFoodVisionInventory | None, str | None]:
@@ -5559,12 +5568,28 @@ class HealBiteNutritionDiary:
                 edible_yield_ratio=1.0,
             ))
         dish_note = f"Записано по описанию: {parsed.dish_title}" if parsed.dish_title else "Записано по тексту"
+        warnings = [f"ℹ️ {dish_note}"]
+        # Macros the user stated for a portion are metadata, not ingredients:
+        # keep them with the pending payload so the reply shows what was given.
+        macro_notes: list[str] = []
+        for ing in parsed.ingredients:
+            macro_parts: list[str] = []
+            if ing.protein_g is not None:
+                macro_parts.append(f"Б {ing.protein_g:g} г")
+            if ing.fat_g is not None:
+                macro_parts.append(f"Ж {ing.fat_g:g} г")
+            if ing.carbs_g is not None:
+                macro_parts.append(f"У {ing.carbs_g:g} г")
+            if macro_parts:
+                macro_notes.append(f"{ing.name}: " + ", ".join(macro_parts))
+        if macro_notes:
+            warnings.append("ℹ️ Указано на порцию: " + "; ".join(macro_notes))
         text_inv = FoodVisionInventory(
             schema_version=FOOD_VISION_SCHEMA_VERSION,
             items=text_items,
             overall_confidence=0.95,
             needs_user_confirmation=False,
-            warnings=[f"ℹ️ {dish_note}"],
+            warnings=warnings,
         )
         return self.stage_pending_inventory(
             user_id=user_id,
@@ -5951,6 +5976,13 @@ class HealBiteNutritionDiary:
             return PendingInventoryReplyResult(
                 status="invalid_action",
                 reply_text=format_food_vision_inventory_reply(payload, notice=error or "Не удалось применить исправление."),
+                inventory=payload,
+            )
+        # Never report success when the correction produced no change.
+        if _pending_inventory_signature(updated) == _pending_inventory_signature(payload):
+            return PendingInventoryReplyResult(
+                status="unchanged",
+                reply_text=format_food_vision_inventory_reply(payload, notice="Ничего не изменено: укажите другой вес или название."),
                 inventory=payload,
             )
         updated.calculation_snapshot = _build_inventory_calculation_snapshot(updated)

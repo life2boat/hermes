@@ -149,6 +149,11 @@ class ParsedIngredient:
     grams_max: float | None = None
     preparation: str = ""
     household_measure: str | None = None
+    # Macros the user stated for this portion ("20 грамм белка"). Portion
+    # totals exactly as stated; no per-100 g base is assumed.
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
 
 
 @dataclass(slots=True)
@@ -178,6 +183,103 @@ def _parse_fraction(token: str) -> float | None:
         return float(token.replace(",", "."))
     except ValueError:
         return None
+
+
+_MACRO_NOUN_RE = re.compile(r"^(?P<macro>белк\w*|жир(?:а|ов|ы)?|углевод(?:ов|а|ы)?)$", re.IGNORECASE)
+_MACRO_TRAILING_RE = re.compile(r"^(?P<name>.*\S)\s+(?P<macro>белк\w*|жир(?:а|ов|ы)?|углевод(?:ов|а|ы)?)$", re.IGNORECASE)
+_BARE_WEIGHT_NAME_RE = re.compile(r"^(?P<grams>\d+(?:[.,]\d+)?)\s*(?:г|гр|грам\w*|гр\.)?$", re.IGNORECASE)
+_CAPTION_MEAL_PREFIX_RE = re.compile(
+    r"^(?:завтрак|обед|ужин|перекус|первый перекус|второй перекус)\s*[—:–-]\s*",
+    re.IGNORECASE,
+)
+_MACRO_ATTRIBUTES = {"protein": "protein_g", "fat": "fat_g", "carbs": "carbs_g"}
+
+
+def _macro_key(token: str) -> str:
+    lowered = token.casefold()
+    if lowered.startswith("белк"):
+        return "protein"
+    if lowered.startswith("жир"):
+        return "fat"
+    return "carbs"
+
+
+def _attach_macro(ingredient: ParsedIngredient, key: str, value: float) -> None:
+    attribute = _MACRO_ATTRIBUTES[key]
+    if getattr(ingredient, attribute) is None:
+        setattr(ingredient, attribute, value)
+
+
+def _reconcile_caption_ingredients(ingredients: list[ParsedIngredient]) -> list[ParsedIngredient]:
+    """Make stated macros and a bare weight belong to the right ingredient.
+
+    "фарш куриный (20 грамм белка, 5 грамм жира), 160 грамм" must yield one
+    ingredient at 160 g with protein/fat kept as portion metadata: the macro
+    numbers are not weights and must not become components, and a bare weight
+    belongs to the ingredient before it. Text without macro statements is
+    returned unchanged.
+    """
+    if not ingredients:
+        return ingredients
+
+    reconciled: list[ParsedIngredient] = []
+    for ingredient in ingredients:
+        cleaned = re.sub(r"[()\[\]]", " ", ingredient.name or "")
+        name = " ".join(cleaned.split()).strip(" ,;.-—–")
+
+        macro_only = _MACRO_NOUN_RE.match(name)
+        if macro_only:
+            if reconciled:
+                _attach_macro(reconciled[-1], _macro_key(macro_only.group("macro")), float(ingredient.grams or 0.0))
+                continue
+            # Nothing to attach to — keep it as a plain ingredient.
+            reconciled.append(ingredient)
+            continue
+
+        trailing = _MACRO_TRAILING_RE.match(name)
+        if trailing and re.search(r"[а-яёa-z]", trailing.group("name"), re.IGNORECASE):
+            remainder = trailing.group("name").strip()
+            _attach_macro(ingredient, _macro_key(trailing.group("macro")), float(ingredient.grams or 0.0))
+            ingredient.name = remainder
+            ingredient.normalized_name = remainder.casefold()
+            # The parsed number was the macro, not a weight: fall back to the
+            # estimated portion default until a bare weight says otherwise.
+            ingredient.grams = 100.0
+            ingredient.grams_min = None
+            ingredient.grams_max = None
+            ingredient.is_exact = False
+            reconciled.append(ingredient)
+            continue
+
+        bare_weight = _BARE_WEIGHT_NAME_RE.match(name)
+        if bare_weight:
+            grams = _parse_fraction(bare_weight.group("grams"))
+            if grams is not None and reconciled:
+                target = reconciled[-1]
+                target.grams = float(grams)
+                target.grams_min = float(grams)
+                target.grams_max = float(grams)
+                target.is_exact = True
+                continue
+            if reconciled:
+                continue
+            reconciled.append(ingredient)
+            continue
+
+        if not name:
+            continue
+        reconciled.append(ingredient)
+
+    if not reconciled:
+        return ingredients
+
+    first = reconciled[0]
+    stripped_first = _CAPTION_MEAL_PREFIX_RE.sub("", first.name).strip(" ,;.-—–")
+    if stripped_first and stripped_first != first.name:
+        first.name = stripped_first
+        first.normalized_name = stripped_first.casefold()
+
+    return reconciled
 
 
 def parse_food_text_description(text: str) -> ParsedFoodText | None:
@@ -553,6 +655,8 @@ def parse_food_text_description(text: str) -> ParsedFoodText | None:
                 total_grams=150.0,
             )
         return None
+
+    ingredients = _reconcile_caption_ingredients(ingredients)
 
     if not ingredients:
         return None

@@ -300,6 +300,23 @@ class PendingFoodVisionItem:
     is_sauce: bool
     uncertainty: str
     user_modified: bool = False
+    # Macros the user stated for this portion, when the caption carried them
+    # ("20 грамм белка, 5 грамм жира"). They are portion totals, never per-100g
+    # values: the caption does not name a per-100g base, so none is assumed.
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
+
+
+@dataclass(slots=True)
+class MealCaptionItem:
+    """One ingredient parsed out of the free-form meal caption."""
+
+    name: str
+    grams: float | None = None
+    protein_g: float | None = None
+    fat_g: float | None = None
+    carbs_g: float | None = None
 
 
 @dataclass(slots=True)
@@ -1182,6 +1199,9 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
             "is_sauce": item.is_sauce,
             "uncertainty": item.uncertainty,
             "user_modified": item.user_modified,
+            "protein_g": item.protein_g,
+            "fat_g": item.fat_g,
+            "carbs_g": item.carbs_g,
         } for item in payload.items],
         "overall_confidence": payload.overall_confidence,
         "needs_user_confirmation": payload.needs_user_confirmation,
@@ -1217,6 +1237,9 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
             is_sauce=bool(item_payload.get("is_sauce")),
             uncertainty=_normalize_optional_text(item_payload.get("uncertainty"), _MAX_FOOD_VISION_UNCERTAINTY_LENGTH),
             user_modified=bool(item_payload.get("user_modified")),
+            protein_g=_parse_selected_grams(item_payload.get("protein_g")),
+            fat_g=_parse_selected_grams(item_payload.get("fat_g")),
+            carbs_g=_parse_selected_grams(item_payload.get("carbs_g")),
         ))
     return PendingFoodVisionInventory(
         kind=PENDING_INVENTORY_KIND,
@@ -1244,7 +1267,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         schema_version=payload.schema_version,
         user_id=payload.user_id,
         source=payload.source,
-        items=[PendingFoodVisionItem(index=item.index, visible_name=item.visible_name, normalized_name=item.normalized_name, confidence=item.confidence, estimated_grams_min=item.estimated_grams_min, estimated_grams_max=item.estimated_grams_max, selected_grams=item.selected_grams, preparation=item.preparation, is_sauce=item.is_sauce, uncertainty=item.uncertainty, user_modified=item.user_modified) for item in payload.items],
+        items=[PendingFoodVisionItem(index=item.index, visible_name=item.visible_name, normalized_name=item.normalized_name, confidence=item.confidence, estimated_grams_min=item.estimated_grams_min, estimated_grams_max=item.estimated_grams_max, selected_grams=item.selected_grams, preparation=item.preparation, is_sauce=item.is_sauce, uncertainty=item.uncertainty, user_modified=item.user_modified, protein_g=item.protein_g, fat_g=item.fat_g, carbs_g=item.carbs_g) for item in payload.items],
         overall_confidence=payload.overall_confidence,
         needs_user_confirmation=payload.needs_user_confirmation,
         warnings=list(payload.warnings),
@@ -1431,6 +1454,24 @@ def _estimate_component_nutrition(item: PendingFoodVisionItem) -> NutritionCompo
     if item.selected_grams is None:
         return None
     resolved = _resolve_synthetic_food_reference(item.normalized_name or item.visible_name)
+    if item.protein_g is not None or item.fat_g is not None or item.carbs_g is not None:
+        # The user stated this portion's macros. Use them as totals (never scaled
+        # from a per-100g base the caption never mentioned) and derive energy from
+        # the standard 4/9/4 factors so a stated macro pair still yields calories.
+        protein = float(item.protein_g or 0.0)
+        fat = float(item.fat_g or 0.0)
+        carbs = float(item.carbs_g or 0.0)
+        display_name = resolved[0] if resolved is not None else _normalize_inventory_item_name(
+            item.visible_name, fallback=item.visible_name
+        )
+        return NutritionComponentEstimate(
+            name=display_name,
+            grams=float(item.selected_grams),
+            calories_kcal=round(4.0 * protein + 9.0 * fat + 4.0 * carbs, 1),
+            protein_g=round(protein, 1),
+            fat_g=round(fat, 1),
+            carbs_g=round(carbs, 1),
+        )
     if resolved is None:
         return None
     display_name, reference = resolved
@@ -1494,10 +1535,17 @@ def calculate_inventory_nutrition(inventory: PendingFoodVisionInventory) -> Inve
 _RU_CONFIRM_WORDS = {"\u0434\u0430", "\u0430\u0433\u0430", "\u043e\u043a", "\u043e\u043a\u0435\u0439", "yes", "y", "\u0441\u043e\u0445\u0440\u0430\u043d\u0438", "\u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0439"}
 _RU_CANCEL_WORDS = {"\u043d\u0435\u0442", "\u043d\u0435\u0430", "\u043e\u0442\u043c\u0435\u043d\u0430", "\u043e\u0442\u043c\u0435\u043d\u0438", "cancel", "no", "n"}
 _GRAM_SUFFIX_RE = r"(?:\u0433|\u0433\u0440|\u0433\u0440\u0430\u043c(?:\u043c|\u0430|\u043e\u0432|\u044b)?)"
-_INVENTORY_REPLACE_RE = re.compile(rf"^(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c)\s+)?(?P<index>\d{{1,2}})\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
+# "Исправить:" (with a colon, as users actually type it) is as valid as
+# "исправить " — the optional verb may carry a colon and any spacing before the
+# component index.
+_INVENTORY_ACTION_PREFIX = r"(?:(?:\u0438\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c|\u043f\u0440\u0430\u0432\u043a\u0430|\u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c)\s*:?\s*)?"
+_INVENTORY_REPLACE_RE = re.compile(rf"^{_INVENTORY_ACTION_PREFIX}(?P<index>\d{{1,2}})\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_ADD_RE = re.compile(rf"^(?:\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c)\s*:\s*(?P<name>[^,:]{{1,80}}?)(?:\s*,\s*|\s+)(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
 _INVENTORY_REMOVE_RE = re.compile(r"^(?:\u0443\u0434\u0430\u043b\u0438\u0442\u044c)\s+(?P<index>\d{1,2})\s*$", re.IGNORECASE)
 _INVENTORY_WEIGHT_RE = re.compile(rf"^(?:\u0432\u0435\u0441)\s+(?P<index>\d{{1,2}})\s*:\s*(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*$", re.IGNORECASE)
+# One message may carry several corrections. A comma that starts a new "N:",
+# a newline, a semicolon, or "и 2:" separates the clauses.
+_INVENTORY_CLAUSE_SPLIT_RE = re.compile(r"(?:;|\r?\n|\s+\u0438\s+(?=\d{1,2}\s*:)|,\s*(?=\d{1,2}\s*:))", re.IGNORECASE)
 
 
 def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResult:
@@ -1526,6 +1574,26 @@ def parse_pending_inventory_action(text: str) -> PendingInventoryActionParseResu
     return PendingInventoryActionParseResult(ok=False, error="\u041d\u0435 \u043f\u043e\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u043e\u0434\u0438\u043d \u0438\u0437 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: \u0414\u0430, \u041d\u0435\u0442, \u0418\u0441\u043f\u0440\u0430\u0432\u0438\u0442\u044c 2: \u043a\u0443\u0440\u0438\u043d\u0430\u044f \u0433\u0440\u0443\u0434\u043a\u0430, 120 \u0433, \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c: \u0441\u044b\u0440, 30 \u0433, \u0423\u0434\u0430\u043b\u0438\u0442\u044c 5, \u0412\u0435\u0441 3: 80 \u0433.")
 
 
+def parse_pending_inventory_actions(text: str) -> list[PendingInventoryActionParseResult]:
+    """Parse one message into one or more correction actions.
+
+    A single action keeps the historical behaviour; several clauses
+    ("Исправить: 1: ..., 2: ...") are applied together so the user can fix a
+    whole plate in one message instead of one reply per ingredient.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/"):
+        return [parse_pending_inventory_action(raw)]
+    collapsed = re.sub(r"\s+", " ", raw)
+    lowered = collapsed.casefold()
+    if lowered in _RU_CONFIRM_WORDS or lowered in _RU_CANCEL_WORDS:
+        return [parse_pending_inventory_action(collapsed)]
+    clauses = [clause.strip() for clause in _INVENTORY_CLAUSE_SPLIT_RE.split(raw) if clause.strip()]
+    if len(clauses) <= 1:
+        return [parse_pending_inventory_action(collapsed)]
+    return [parse_pending_inventory_action(clause) for clause in clauses]
+
+
 def _reindex_pending_inventory_items(items: list[PendingFoodVisionItem]) -> list[PendingFoodVisionItem]:
     for position, item in enumerate(items, start=1):
         item.index = position
@@ -1552,6 +1620,11 @@ def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: Pen
         target.is_sauce = target.is_sauce or _infer_inventory_sauce_flag(action.name)
         target.uncertainty = ""
         target.user_modified = True
+        # A replaced ingredient is a different food; macros stated for the old
+        # one no longer describe it.
+        target.protein_g = None
+        target.fat_g = None
+        target.carbs_g = None
     elif action.kind == "add":
         if len(items) >= _MAX_PENDING_INVENTORY_ITEMS:
             return None, "\u0421\u043b\u0438\u0448\u043a\u043e\u043c \u043c\u043d\u043e\u0433\u043e \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u043e\u0432 \u0432 \u043e\u0434\u043d\u043e\u043c \u0444\u043e\u0442\u043e. \u0423\u0434\u0430\u043b\u0438\u0442\u0435 \u043b\u0438\u0448\u043d\u0435\u0435 \u0438 \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437."
@@ -1559,14 +1632,255 @@ def _mutate_pending_inventory(inventory: PendingFoodVisionInventory, action: Pen
     elif action.kind == "remove" and target is not None:
         del items[action.index - 1]
     elif action.kind == "weight" and target is not None:
+        previous_grams = target.selected_grams
         target.selected_grams = action.grams
         target.estimated_grams_min = target.estimated_grams_min if target.estimated_grams_min is not None else action.grams
         target.estimated_grams_max = target.estimated_grams_max if target.estimated_grams_max is not None else action.grams
+        # User-stated macros describe the portion, so a weight change rescales
+        # them to the new portion instead of silently keeping stale totals.
+        if action.grams is not None and previous_grams:
+            ratio = float(action.grams) / float(previous_grams)
+            for attribute in ("protein_g", "fat_g", "carbs_g"):
+                value = getattr(target, attribute)
+                if value is not None:
+                    setattr(target, attribute, round(float(value) * ratio, 1))
         target.user_modified = True
     else:
         return None, "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435."
     updated.items = _reindex_pending_inventory_items(items)
     return updated, None
+
+
+_CAPTION_MEAL_PREFIX_RE = re.compile(
+    r"^\s*(?:завтрак|обед|ужин|перекус|первый перекус|второй перекус)\s*[—:–\-]\s*",
+    re.IGNORECASE,
+)
+_CAPTION_MACRO_RE = re.compile(
+    rf"(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}?\s*(?P<macro>белк\w*|жир\w*|углевод\w*)",
+    re.IGNORECASE,
+)
+_CAPTION_MACRO_ONLY_RE = re.compile(r"^(?:белк\w*|жир\w*|углевод\w*)$", re.IGNORECASE)
+_CAPTION_WEIGHT_RE = re.compile(
+    rf"(?P<grams>\d+(?:[.,]\d+)?)\s*{_GRAM_SUFFIX_RE}(?=$|[\s,;.)])",
+    re.IGNORECASE,
+)
+_CAPTION_PAREN_RE = re.compile(r"\([^)]*\)")
+_CAPTION_MACRO_ATTRS = {"protein": "protein_g", "fat": "fat_g", "carbs": "carbs_g"}
+
+
+def _caption_macro_key(token: str) -> str | None:
+    lowered = token.casefold()
+    if lowered.startswith("белк"):
+        return "protein"
+    if lowered.startswith("жир"):
+        return "fat"
+    if lowered.startswith("углевод"):
+        return "carbs"
+    return None
+
+
+def _split_caption_segments(text: str) -> list[str]:
+    segments: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    for char in text:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0 and char in ",;":
+            segment = "".join(buffer).strip()
+            if segment:
+                segments.append(segment)
+            buffer = []
+            continue
+        buffer.append(char)
+    tail = "".join(buffer).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _merge_caption_fragment(item: MealCaptionItem, grams: float | None, macros: dict[str, float]) -> None:
+    if grams is not None and item.grams is None:
+        item.grams = grams
+    for key, value in macros.items():
+        attribute = _CAPTION_MACRO_ATTRS[key]
+        if getattr(item, attribute) is None:
+            setattr(item, attribute, value)
+
+
+def parse_meal_caption_items(text: str) -> list[MealCaptionItem]:
+    """Deterministically parse the user's free-form meal caption.
+
+    "Обед — фарш куриный (20 грамм белка, 5 грамм жира), 160 грамм, грибы
+    50 грамм" yields two ingredients: "фарш куриный" with the 160 g (a bare
+    weight belongs to the ingredient before it) and protein/fat stored as
+    portion metadata, not as ingredients; "грибы" with 50 g.
+    """
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return []
+    items: list[MealCaptionItem] = []
+    for raw_segment in _split_caption_segments(normalized):
+        segment = _CAPTION_MEAL_PREFIX_RE.sub("", raw_segment).strip(" —–-:;.")
+        if not segment:
+            continue
+        macros: dict[str, float] = {}
+        body = segment
+        for match in list(_CAPTION_MACRO_RE.finditer(segment)):
+            value = _parse_selected_grams(match.group("grams"))
+            key = _caption_macro_key(match.group("macro"))
+            if value is not None and key is not None and key not in macros:
+                macros[key] = value
+            body = body.replace(match.group(0), " ")
+        body = _CAPTION_PAREN_RE.sub(" ", body)
+        body = " ".join(body.split()).strip(" ,;.")
+        grams: float | None = None
+        weight_match = _CAPTION_WEIGHT_RE.search(body)
+        if weight_match is not None:
+            grams = _parse_selected_grams(weight_match.group("grams"))
+            body = f"{body[:weight_match.start()]} {body[weight_match.end():]}"
+        name = " ".join(body.split()).strip(" ,;.—–-")
+        if not name or _CAPTION_MACRO_ONLY_RE.match(name):
+            if items:
+                _merge_caption_fragment(items[-1], grams, macros)
+            continue
+        items.append(
+            MealCaptionItem(
+                name=name,
+                grams=grams,
+                protein_g=macros.get("protein"),
+                fat_g=macros.get("fat"),
+                carbs_g=macros.get("carbs"),
+            )
+        )
+    return items
+
+
+def _caption_name_key(value: str) -> str:
+    text = _normalize_meal_name_text(value, "").casefold()
+    text = re.sub(r"[()\[\]]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" ,;.:—–-")
+    return text
+
+
+def _is_caption_artifact(item: PendingFoodVisionItem) -> bool:
+    name = _caption_name_key(item.visible_name)
+    if not name:
+        return True
+    if _CAPTION_MACRO_ONLY_RE.match(name):
+        return True
+    if re.fullmatch(rf"\d+(?:[.,]\d+)?\s*{_GRAM_SUFFIX_RE}?", name, re.IGNORECASE):
+        return True
+    return len(name) <= 2
+
+
+def _match_caption_item(
+    items: list[PendingFoodVisionItem],
+    name: str,
+    used: set[int],
+) -> int | None:
+    key = _caption_name_key(name)
+    if not key:
+        return None
+    tokens = set(key.split())
+    best_position: int | None = None
+    best_score = 0.0
+    for position, item in enumerate(items):
+        if position in used:
+            continue
+        candidate = _caption_name_key(item.visible_name)
+        if not candidate:
+            continue
+        if candidate == key:
+            return position
+        candidate_tokens = set(candidate.split())
+        if not tokens:
+            continue
+        overlap = len(tokens & candidate_tokens) / float(len(tokens))
+        if overlap > best_score:
+            best_score = overlap
+            best_position = position
+    return best_position if best_score >= 0.5 else None
+
+
+def _apply_caption_to_pending_inventory(
+    payload: PendingFoodVisionInventory,
+    caption_text: str,
+) -> PendingFoodVisionInventory:
+    """Make the user's caption authoritative over the vision model's guess.
+
+    The caption names the ingredients and their weights; the model must not turn
+    "20 грамм белка" / "5 грамм жира" into components, and a bare "160 грамм"
+    belongs to the ingredient before it. Macro words and bare weights are
+    dropped, matched ingredients take the caption's weight and macros, and any
+    real component the caption did not mention (a visible sauce) is kept.
+    """
+    caption_items = parse_meal_caption_items(caption_text)
+    if not caption_items:
+        return payload
+    updated = _clone_pending_inventory(payload)
+    existing = updated.items
+    used: set[int] = set()
+    merged: list[PendingFoodVisionItem] = []
+    for caption in caption_items:
+        match_index = _match_caption_item(existing, caption.name, used)
+        if match_index is None:
+            merged.append(
+                PendingFoodVisionItem(
+                    index=0,
+                    visible_name=caption.name,
+                    normalized_name=caption.name.casefold(),
+                    confidence=0.9,
+                    estimated_grams_min=caption.grams,
+                    estimated_grams_max=caption.grams,
+                    selected_grams=caption.grams,
+                    preparation="",
+                    is_sauce=_infer_inventory_sauce_flag(caption.name),
+                    uncertainty="",
+                    user_modified=True,
+                    protein_g=caption.protein_g,
+                    fat_g=caption.fat_g,
+                    carbs_g=caption.carbs_g,
+                )
+            )
+            continue
+        used.add(match_index)
+        item = existing[match_index]
+        item.visible_name = caption.name
+        item.normalized_name = caption.name.casefold()
+        item.confidence = 1.0
+        if caption.grams is not None:
+            item.estimated_grams_min = caption.grams
+            item.estimated_grams_max = caption.grams
+            item.selected_grams = caption.grams
+        item.protein_g = caption.protein_g
+        item.fat_g = caption.fat_g
+        item.carbs_g = caption.carbs_g
+        item.user_modified = True
+        merged.append(item)
+    for position, item in enumerate(existing):
+        if position in used:
+            continue
+        if _is_caption_artifact(item):
+            continue
+        merged.append(item)
+    updated.items = _reindex_pending_inventory_items(merged)
+    return updated
+
+
+def _pending_inventory_signature(payload: PendingFoodVisionInventory) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            item.visible_name.casefold(),
+            item.selected_grams,
+            item.protein_g,
+            item.fat_g,
+            item.carbs_g,
+        )
+        for item in payload.items
+    )
 
 
 def _format_component_estimate_line(component: NutritionComponentEstimate) -> str:
@@ -1804,13 +2118,17 @@ class HealBiteNutritionDiary:
                 validation_status=validation.status,
             )
 
-        pending_inventory = self.stage_pending_inventory(
-            user_id=user_id,
-            source=source,
-            inventory=validation.inventory,
+        pending_inventory = _pending_inventory_from_food_vision(
+            user_id,
+            validation.inventory,
             image_ref=image_ref,
             occurred_at=occurred_at,
         )
+        # The caption is authoritative: it decides the ingredient list, the
+        # grams and any stated macros, so the model cannot turn "20 грамм
+        # белка" or a bare "160 грамм" into separate components.
+        pending_inventory = _apply_caption_to_pending_inventory(pending_inventory, user_text)
+        self._store_pending_inventory(pending_inventory)
         logger.info(
             "[HealBite][vision_parse_ok] ok=true is_food=true confidence_bucket=%s validation_status=%s",
             _confidence_bucket(validation.inventory.overall_confidence),
@@ -1906,6 +2224,9 @@ class HealBiteNutritionDiary:
                         "is_sauce": item.is_sauce,
                         "uncertainty": item.uncertainty,
                         "user_modified": item.user_modified,
+                        "protein_g": item.protein_g,
+                        "fat_g": item.fat_g,
+                        "carbs_g": item.carbs_g,
                     }
                     for item in payload.items
                 ],
@@ -2145,6 +2466,55 @@ class HealBiteNutritionDiary:
             inventory=updated,
         )
 
+    def apply_pending_inventory_actions(
+        self,
+        user_id: str | int,
+        actions: list[PendingInventoryAction],
+        *,
+        expected_inventory_id: str | None = None,
+        now: datetime | None = None,
+    ) -> PendingInventoryReplyResult:
+        """Apply every correction in one message atomically.
+
+        Nothing is stored and no success is reported unless at least one value
+        actually changed, so a no-op or a failed clause never claims success.
+        """
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(status="missing", reply_text="Не нашёл активное подтверждение по фото. Отправьте фото ещё раз.")
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
+        updated = payload
+        for action in actions:
+            mutated, error = _mutate_pending_inventory(updated, action)
+            if mutated is None:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice=error or "Не удалось применить исправление."),
+                    inventory=payload,
+                )
+            updated = mutated
+        if _pending_inventory_signature(updated) == _pending_inventory_signature(payload):
+            return PendingInventoryReplyResult(
+                status="unchanged",
+                reply_text=format_food_vision_inventory_reply(payload, notice="Ничего не изменено: укажите другой вес или название."),
+                inventory=payload,
+            )
+        self._store_pending_inventory(updated)
+        return PendingInventoryReplyResult(
+            status="updated",
+            reply_text=format_food_vision_inventory_reply(updated, notice="Изменения сохранены. Проверьте состав ещё раз."),
+            inventory=updated,
+        )
+
     def handle_pending_inventory_reply(
         self,
         user_id: str | int,
@@ -2156,20 +2526,28 @@ class HealBiteNutritionDiary:
         payload = self.get_pending_inventory(user_id, now=now, include_expired=True)
         if payload is None:
             return PendingInventoryReplyResult(status="missing", reply_text="\u041d\u0435 \u043d\u0430\u0448\u0451\u043b \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u043f\u043e \u0444\u043e\u0442\u043e. \u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u0444\u043e\u0442\u043e \u0435\u0449\u0451 \u0440\u0430\u0437.")
-        parse_result = parse_pending_inventory_action(message)
-        if not parse_result.ok or parse_result.action is None:
+        parse_results = parse_pending_inventory_actions(message)
+        invalid = next((result for result in parse_results if not result.ok or result.action is None), None)
+        if invalid is not None:
             return PendingInventoryReplyResult(
                 status="invalid_action",
-                reply_text=format_food_vision_inventory_reply(payload, notice=parse_result.error),
+                reply_text=format_food_vision_inventory_reply(payload, notice=invalid.error),
                 inventory=payload,
             )
-        action = parse_result.action
-        if action.kind == "cancel":
+        actions = [result.action for result in parse_results if result.action is not None]
+        kinds = {action.kind for action in actions}
+        if "cancel" in kinds:
             self.clear_pending_state(user_id)
             return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
-        if action.kind == "confirm":
+        if "confirm" in kinds:
+            if len(actions) != 1:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice="Подтверждение нельзя объединять с правками."),
+                    inventory=payload,
+                )
             return self.confirm_pending_inventory(user_id, expected_inventory_id=expected_inventory_id, now=now)
-        return self.apply_pending_inventory_action(user_id, action, expected_inventory_id=expected_inventory_id, now=now)
+        return self.apply_pending_inventory_actions(user_id, actions, expected_inventory_id=expected_inventory_id, now=now)
 
     def confirm_pending_meal(
         self,
@@ -2275,6 +2653,9 @@ class HealBiteNutritionDiary:
                     is_sauce=bool(raw_item.get("is_sauce")),
                     uncertainty=_bounded_text(raw_item.get("uncertainty", ""), max_length=_MAX_FOOD_VISION_UNCERTAINTY_LENGTH) or "",
                     user_modified=bool(raw_item.get("user_modified")),
+                    protein_g=_parse_selected_grams(raw_item.get("protein_g")),
+                    fat_g=_parse_selected_grams(raw_item.get("fat_g")),
+                    carbs_g=_parse_selected_grams(raw_item.get("carbs_g")),
                 )
             )
         return PendingFoodVisionInventory(

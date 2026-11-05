@@ -13176,13 +13176,62 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 normalized_user_id = None
 
         if normalized_user_id is not None:
-            from gateway.healbite_nutrition_diary import get_existing_nutrition_diary
+            from gateway.healbite_nutrition_diary import (
+                build_food_vision_inventory_keyboard,
+                build_pending_inventory_choice_keyboard,
+                get_existing_nutrition_diary,
+            )
             diary = getattr(self, '_healbite_nutrition_diary', None) or get_existing_nutrition_diary()
             if diary is not None:
                 pending_inventory = diary.get_pending_inventory(normalized_user_id, include_expired=True)
                 if pending_inventory is not None:
-                    inventory_result = await diary.handle_pending_inventory_reply_async(normalized_user_id, message)
+                    # A meal description while another dish is unsaved must not be
+                    # folded into that dish: ask which meal the user means.
+                    pending_classification = _classify_telegram_diary_turn(
+                        source=source,
+                        event=event,
+                        message=message,
+                        history=history,
+                    )
+                    if pending_classification == "text_meal":
+                        inventory_result = diary.offer_pending_inventory_choice(
+                            normalized_user_id,
+                            message,
+                            expected_inventory_id=pending_inventory.inventory_id,
+                        )
+                        keyboard_rows = (
+                            build_pending_inventory_choice_keyboard(inventory_result.inventory)
+                            if inventory_result.inventory is not None
+                            else None
+                        )
+                    else:
+                        inventory_result = await diary.handle_pending_inventory_reply_async(
+                            normalized_user_id,
+                            message,
+                            expected_inventory_id=pending_inventory.inventory_id,
+                        )
+                        keyboard_rows = None
+                        if inventory_result.inventory is not None and inventory_result.status in {
+                            "updated",
+                            "invalid_action",
+                            "needs_clarification",
+                            "unchanged",
+                            "conflict",
+                        }:
+                            keyboard_rows = build_food_vision_inventory_keyboard(inventory_result.inventory)
                     final_response = inventory_result.reply_text
+                    already_sent = False
+                    adapter = (getattr(self, "adapters", None) or {}).get(source.platform)
+                    if keyboard_rows and adapter and source.chat_id:
+                        try:
+                            meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                        except Exception:
+                            meta = {}
+                        meta = dict(meta) if meta else {}
+                        meta["parse_mode"] = "HTML"
+                        meta["reply_markup"] = keyboard_rows
+                        asyncio.create_task(adapter.send(source.chat_id, final_response, metadata=meta))
+                        already_sent = True
                     return {
                         "final_response": final_response,
                         "messages": [
@@ -13195,6 +13244,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "session_id": session_id,
                         "completed": True,
                         "response_previewed": False,
+                        "already_sent": already_sent,
                     }
 
         pending_response = self._maybe_handle_healbite_pending_meal_confirmation(

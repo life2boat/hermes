@@ -452,6 +452,9 @@ class PendingFoodVisionInventory:
     album_processing_status: str = ALBUM_PROCESSING_COMPLETE
     album_overlap_decision: str = ALBUM_OVERLAP_NONE
     inventory_version: int = 1
+    # Text of a meal the user described while this inventory was still open.
+    # Kept so the "new meal" choice can start it without the user retyping.
+    deferred_new_meal_text: str | None = None
 
     def __post_init__(self) -> None:
         if self.album_decision == ALBUM_PROCESSING_PARTIAL and self.album_processing_status == ALBUM_PROCESSING_COMPLETE:
@@ -3243,6 +3246,7 @@ def _serialize_pending_inventory(payload: PendingFoodVisionInventory) -> str:
         "album_processing_status": getattr(payload, "album_processing_status", ALBUM_PROCESSING_COMPLETE),
         "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
         "inventory_version": getattr(payload, "inventory_version", 1),
+        "deferred_new_meal_text": getattr(payload, "deferred_new_meal_text", None),
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -3326,7 +3330,20 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
         album_processing_status=proc_status,
         album_overlap_decision=overlap_decision,
         inventory_version=int(payload.get("inventory_version") or 1),
+        deferred_new_meal_text=_normalize_deferred_meal_text(payload.get("deferred_new_meal_text")),
     )
+
+
+_MAX_DEFERRED_MEAL_TEXT = 512
+
+
+def _normalize_deferred_meal_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).split())
+    if not text:
+        return None
+    return text[:_MAX_DEFERRED_MEAL_TEXT]
 
 
 def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFoodVisionInventory:
@@ -3373,6 +3390,7 @@ def _clone_pending_inventory(payload: PendingFoodVisionInventory) -> PendingFood
         album_processing_status=payload.album_processing_status,
         album_overlap_decision=payload.album_overlap_decision,
         inventory_version=getattr(payload, "inventory_version", 1),
+        deferred_new_meal_text=getattr(payload, "deferred_new_meal_text", None),
     )
 
 
@@ -3874,6 +3892,32 @@ def build_food_vision_inventory_keyboard(
     return [
         [save_button],
         [edit_button, cancel_button],
+    ]
+
+
+def build_pending_inventory_choice_keyboard(
+    inventory: PendingFoodVisionInventory,
+) -> list[list[dict[str, str]]]:
+    """Buttons for "new meal arrived while a dish is unsaved" disambiguation."""
+    user_id = int(inventory.user_id or 0)
+    inv_id = str(inventory.inventory_id or "")
+    return [
+        [
+            {
+                "text": "✏️ Продолжить блюдо",
+                "callback_data": f"food_inv:choice_continue:{user_id}:{inv_id}",
+            }
+        ],
+        [
+            {
+                "text": "🍽 Новый приём",
+                "callback_data": f"food_inv:choice_newmeal:{user_id}:{inv_id}",
+            },
+            {
+                "text": "❌ Отменить блюдо",
+                "callback_data": f"food_inv:choice_cancel:{user_id}:{inv_id}",
+            },
+        ],
     ]
 
 
@@ -5484,6 +5528,7 @@ class HealBiteNutritionDiary:
                 "album_overlap_decision": getattr(payload, "album_overlap_decision", ALBUM_OVERLAP_NONE),
                 "needs_user_confirmation": getattr(payload, "needs_user_confirmation", False),
                 "inventory_version": getattr(payload, "inventory_version", 1),
+                "deferred_new_meal_text": getattr(payload, "deferred_new_meal_text", None),
             },
             ensure_ascii=False,
         )
@@ -5986,6 +6031,8 @@ class HealBiteNutritionDiary:
                 inventory=payload,
             )
         updated.calculation_snapshot = _build_inventory_calculation_snapshot(updated)
+        # An explicit correction of the open dish resolves any new-meal prompt.
+        updated.deferred_new_meal_text = None
         self._store_pending_inventory(updated)
         return PendingInventoryReplyResult(
             status="updated",
@@ -6428,6 +6475,132 @@ class HealBiteNutritionDiary:
                 payload,
                 notice=parse_result.error or "Не удалось распознать изменения. Вы можете написать исправление свободным текстом, например:\n• Вафли 160 г, 248 ккал\n• Удали апельсин\n• Съела половину",
             ),
+            inventory=payload,
+        )
+
+    def offer_pending_inventory_choice(
+        self,
+        user_id: str | int,
+        new_meal_text: str,
+        *,
+        now: datetime | None = None,
+        expected_inventory_id: str | None = None,
+    ) -> PendingInventoryReplyResult:
+        """A new meal description arrived while an unsaved dish is open.
+
+        Never merge it into the open inventory: keep the description aside and
+        ask which meal the user means.
+        """
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(status="missing", reply_text="Не нашёл активное подтверждение. Отправьте описание ещё раз.")
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото. Проверьте последнее фото ещё раз.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
+        deferred = _normalize_deferred_meal_text(new_meal_text)
+        if not deferred:
+            return PendingInventoryReplyResult(
+                status="invalid_action",
+                reply_text=format_food_vision_inventory_reply(payload, notice="Опишите новый приём пищи текстом."),
+                inventory=payload,
+            )
+        working = _clone_pending_inventory(payload)
+        working.deferred_new_meal_text = deferred
+        current_version = getattr(payload, "inventory_version", 1)
+        working.inventory_version = current_version + 1
+        try:
+            self._store_pending_inventory(working, expected_version=current_version)
+        except ConcurrentEditConflict:
+            return PendingInventoryReplyResult(
+                status="conflict",
+                reply_text=format_food_vision_inventory_reply(payload, notice="Данные были изменены другим действием. Проверьте текущее состояние и повторите."),
+                inventory=payload,
+            )
+        notice = (
+            "⚠️ Похоже, это новый приём пищи, а текущее блюдо ещё не сохранено.\n"
+            "Выберите действие кнопкой ниже:\n"
+            "• ✏️ Продолжить блюдо — вернуться к текущему составу;\n"
+            "• 🍽 Новый приём — отменить текущее и записать новое описание;\n"
+            "• ❌ Отменить блюдо — удалить незавершённое без записи в дневник."
+        )
+        return PendingInventoryReplyResult(
+            status="choice_required",
+            reply_text=format_food_vision_inventory_reply(working, notice=notice),
+            inventory=working,
+        )
+
+    def resolve_pending_inventory_choice(
+        self,
+        user_id: str | int,
+        choice: str,
+        *,
+        now: datetime | None = None,
+        expected_inventory_id: str | None = None,
+    ) -> PendingInventoryReplyResult:
+        normalized_user_id = int(user_id)
+        payload = self.get_pending_inventory(normalized_user_id, now=now, include_expired=True)
+        if payload is None:
+            return PendingInventoryReplyResult(status="missing", reply_text=format_pending_inventory_cancelled_reply())
+        if expected_inventory_id and payload.inventory_id != expected_inventory_id:
+            return PendingInventoryReplyResult(
+                status="stale",
+                reply_text="Это подтверждение уже заменено новым фото.",
+                inventory=payload,
+            )
+        if self.is_pending_meal_expired(payload, now=now):
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="expired", reply_text=format_pending_inventory_expired_reply())
+        if choice == "continue":
+            working = _clone_pending_inventory(payload)
+            working.deferred_new_meal_text = None
+            current_version = getattr(payload, "inventory_version", 1)
+            working.inventory_version = current_version + 1
+            try:
+                self._store_pending_inventory(working, expected_version=current_version)
+            except ConcurrentEditConflict:
+                return PendingInventoryReplyResult(
+                    status="conflict",
+                    reply_text=format_food_vision_inventory_reply(payload, notice="Данные были изменены другим действием. Проверьте текущее состояние и повторите."),
+                    inventory=payload,
+                )
+            return PendingInventoryReplyResult(
+                status="updated",
+                reply_text=format_food_vision_inventory_reply(working, notice="Продолжаем редактировать это блюдо."),
+                inventory=working,
+            )
+        if choice == "cancel":
+            self.clear_pending_state(normalized_user_id)
+            return PendingInventoryReplyResult(status="cancelled", reply_text=format_pending_inventory_cancelled_reply())
+        if choice == "new_meal":
+            deferred = getattr(payload, "deferred_new_meal_text", None)
+            if not deferred:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice="Нет сохранённого описания нового приёма. Отправьте его ещё раз."),
+                    inventory=payload,
+                )
+            staged = self.stage_pending_inventory_from_text(user_id=normalized_user_id, text=deferred)
+            if staged is None:
+                return PendingInventoryReplyResult(
+                    status="invalid_action",
+                    reply_text=format_food_vision_inventory_reply(payload, notice="Не удалось распознать новый приём. Опишите его ещё раз."),
+                    inventory=payload,
+                )
+            return PendingInventoryReplyResult(
+                status="new_meal_staged",
+                reply_text=format_food_vision_inventory_reply(staged, notice="🍽 Новый приём пищи создан. Проверьте состав и подтвердите сохранение."),
+                inventory=staged,
+            )
+        return PendingInventoryReplyResult(
+            status="invalid_action",
+            reply_text=format_food_vision_inventory_reply(payload, notice="Не понял выбор. Нажмите одну из кнопок ниже."),
             inventory=payload,
         )
 
@@ -7026,6 +7199,7 @@ class HealBiteNutritionDiary:
             album_processing_status=proc_status,
             album_overlap_decision=overlap_decision,
             inventory_version=int(payload.get("inventory_version") or 1),
+            deferred_new_meal_text=_normalize_deferred_meal_text(payload.get("deferred_new_meal_text")),
         )
 
     def _deserialize_pending_meal(

@@ -10213,6 +10213,55 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
             return
 
+        if action in {"choice_continue", "choice_newmeal", "choice_cancel"}:
+            choice = {
+                "choice_continue": "continue",
+                "choice_newmeal": "new_meal",
+                "choice_cancel": "cancel",
+            }[action]
+            result = diary.resolve_pending_inventory_choice(
+                target_user_id,
+                choice,
+                expected_inventory_id=inventory_id,
+            )
+            self._log_healbite_marker(
+                "healbite_route_selected",
+                route="food_inventory_callback",
+                action=action,
+                lane="healbite_public",
+                result=result.status,
+            )
+            if result.inventory is not None and result.status in {"updated", "new_meal_staged"}:
+                try:
+                    from gateway.healbite_nutrition_diary import build_food_vision_inventory_keyboard
+                    new_keyboard_rows = build_food_vision_inventory_keyboard(result.inventory)
+                    new_markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(b["text"], callback_data=b["callback_data"]) for b in row]
+                        for row in new_keyboard_rows
+                    ])
+                    await query.edit_message_text(
+                        text=result.reply_text,
+                        reply_markup=new_markup,
+                        parse_mode=ParseMode.HTML if ParseMode is not None else "HTML",
+                    )
+                except Exception:
+                    await self._send_food_inventory_callback_reply(query, result.reply_text)
+                try:
+                    await query.answer(text="Готово!")
+                except Exception:
+                    pass
+                return
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            try:
+                await query.answer(text="Готово!")
+            except Exception:
+                pass
+            await self._send_food_inventory_callback_reply(query, result.reply_text)
+            return
+
         if action == "cancel":
             pending = diary.get_pending_inventory(target_user_id, include_expired=True)
             if pending is None or (inventory_id and pending.inventory_id != inventory_id):

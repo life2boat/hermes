@@ -3368,9 +3368,14 @@ def _apply_prior_weights_to_unweighted_items(items: list[PendingFoodVisionItem])
             continue
         if bounds is None:
             continue
-        item.estimated_grams_min = round(float(bounds.grams_min), 1)
-        item.estimated_grams_max = round(float(bounds.grams_max), 1)
-        note = "вес оценён по типовой порции"
+        # Keep the prior centre as the midpoint of the visible range so the
+        # calculation snapshot lands on the category centre, while the widened
+        # anchor bounds still express the uncertainty.
+        center_g = float(bounds.grams_center)
+        half_width = max(center_g - float(bounds.grams_min), float(bounds.grams_max) - center_g)
+        item.estimated_grams_min = round(max(1.0, center_g - half_width), 1)
+        item.estimated_grams_max = round(center_g + half_width, 1)
+        note = "вес не подтверждён — оценён по типовой порции"
         if note not in (item.uncertainty or ""):
             item.uncertainty = f"{item.uncertainty}; {note}" if item.uncertainty else note
         auto_filled.append(item)

@@ -3172,6 +3172,7 @@ def _pending_inventory_from_food_vision(
             user_nutrition=getattr(item, "user_nutrition", None),
         ))
     items = _aggregate_identical_food_vision_items(items)
+    items = _apply_prior_weights_to_unweighted_items(items)
     inventory_hash_payload = {
         "items": [{"name": item.normalized_name or item.visible_name, "grams_min": item.estimated_grams_min, "grams_max": item.estimated_grams_max} for item in items],
         "image_ref": image_ref or "",
@@ -3335,6 +3336,69 @@ def _deserialize_pending_inventory(payload: dict[str, Any], *, created_at: datet
 
 
 _MAX_DEFERRED_MEAL_TEXT = 512
+# Upper bound for an auto-estimated dish: component priors must never add up to
+# a plate that no single photo could contain.
+_MAX_AUTO_DISH_TOTAL_G = 1200.0
+
+
+def _apply_prior_weights_to_unweighted_items(items: list[PendingFoodVisionItem]) -> list[PendingFoodVisionItem]:
+    """Give every component without a model weight its own category estimate.
+
+    A vision provider that could not infer scale returns null ranges for every
+    component. Leaving them null makes the reply and calculation fall back to a
+    single default portion (180 g) for every unknown name, so seven ingredients
+    read as seven identical 180 g portions. Fill each component from its own
+    category prior instead, keep the range visible as uncertainty, and only
+    scale down when the auto-estimated sum exceeds a plausible dish weight.
+    """
+    from gateway.nutrition.hipe import estimate_portion_mass
+
+    auto_filled: list[PendingFoodVisionItem] = []
+    for item in items:
+        if item.selected_grams is not None:
+            continue
+        if item.estimated_grams_min is not None and item.estimated_grams_max is not None:
+            continue
+        name = getattr(item, "normalized_name", None) or getattr(item, "visible_name", None) or ""
+        if not name:
+            continue
+        try:
+            bounds = estimate_portion_mass(name)
+        except Exception:
+            continue
+        if bounds is None:
+            continue
+        # Keep the prior centre as the midpoint of the visible range so the
+        # calculation snapshot lands on the category centre, while the widened
+        # anchor bounds still express the uncertainty.
+        center_g = float(bounds.grams_center)
+        half_width = max(center_g - float(bounds.grams_min), float(bounds.grams_max) - center_g)
+        item.estimated_grams_min = round(max(1.0, center_g - half_width), 1)
+        item.estimated_grams_max = round(center_g + half_width, 1)
+        note = "вес не подтверждён — оценён по типовой порции"
+        if note not in (item.uncertainty or ""):
+            item.uncertainty = f"{item.uncertainty}; {note}" if item.uncertainty else note
+        auto_filled.append(item)
+
+    if not auto_filled:
+        return items
+
+    def _center(value: PendingFoodVisionItem) -> float:
+        if value.estimated_grams_min is not None and value.estimated_grams_max is not None:
+            return (float(value.estimated_grams_min) + float(value.estimated_grams_max)) / 2.0
+        return float(value.selected_grams or 0.0)
+
+    auto_total = sum(_center(item) for item in auto_filled)
+    if auto_total > _MAX_AUTO_DISH_TOTAL_G:
+        scale = _MAX_AUTO_DISH_TOTAL_G / auto_total
+        for item in auto_filled:
+            if item.selected_grams is not None:
+                item.selected_grams = round(float(item.selected_grams) * scale, 1)
+            if item.estimated_grams_min is not None:
+                item.estimated_grams_min = round(float(item.estimated_grams_min) * scale, 1)
+            if item.estimated_grams_max is not None:
+                item.estimated_grams_max = round(float(item.estimated_grams_max) * scale, 1)
+    return items
 
 
 def _normalize_deferred_meal_text(value: Any) -> str | None:

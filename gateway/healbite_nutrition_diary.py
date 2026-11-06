@@ -3372,7 +3372,7 @@ def _apply_prior_weights_to_unweighted_items(items: list[PendingFoodVisionItem])
         # calculation snapshot lands on the category centre, while the widened
         # anchor bounds still express the uncertainty.
         center_g = float(bounds.grams_center)
-        half_width = max(center_g - float(bounds.grams_min), float(bounds.grams_max) - center_g)
+        half_width = ((center_g - float(bounds.grams_min)) + (float(bounds.grams_max) - center_g)) / 2.0
         item.estimated_grams_min = round(max(1.0, center_g - half_width), 1)
         item.estimated_grams_max = round(center_g + half_width, 1)
         note = "вес не подтверждён — оценён по типовой порции"

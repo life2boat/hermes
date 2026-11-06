@@ -169,6 +169,10 @@ _PORTION_PRIORS_TABLE: dict[str, PortionPrior] = {
     "meat_sauce": PortionPrior(150.0, 220.0, 320.0, category="meat_sauce", typical_unit="порция"),
     "cutlet": PortionPrior(70.0, 100.0, 150.0, category="meat_cutlet", typical_unit="штука"),
     "meat_cutlet": PortionPrior(70.0, 100.0, 150.0, category="meat_cutlet", typical_unit="штука"),
+    "herbs": PortionPrior(8.0, 15.0, 30.0, category="herbs", typical_unit="щепотка/пучок"),
+    "spice": PortionPrior(2.0, 5.0, 10.0, category="spice", typical_unit="щепотка"),
+    "chili": PortionPrior(5.0, 12.0, 25.0, category="chili", typical_unit="стручок"),
+    "garnish": PortionPrior(80.0, 120.0, 180.0, category="garnish", typical_unit="порция гарнира"),
     "default": PortionPrior(100.0, 180.0, 300.0, category="default", typical_unit="порция"),
 }
 
@@ -177,6 +181,11 @@ _PRIOR_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(сырник)"), "syrniki"),
     (re.compile(r"(омлет|яичниц|глазунь)"), "omelette"),
     (re.compile(r"(тефтел.*соус|фрикадельк.*соус|бефстроганов|гуляш|рагу.*мяс)"), "meat_sauce"),
+    (re.compile(r"(петрушк|укроп|зелень|базилик|кинза|мята|тимьян|зелён\w* лук|зелен\w* лук)"), "herbs"),
+    (re.compile(r"(чили|халапеньо|острый перец)"), "chili"),
+    (re.compile(r"(специ|приправ|паприк|куркум|корица|чёрн\w* перец|черн\w* перец|соль)"), "spice"),
+    (re.compile(r"(гёдз|гедз|gyoza|дзёдз)"), "dumplings"),
+    (re.compile(r"(гарнир)"), "garnish"),
     (re.compile(r"(котлет|тефтел|биточк|фрикадельк)"), "meat_cutlet"),
     (re.compile(r"(плов)"), "pilaf"),
     (re.compile(r"(запеканк)"), "casserole"),

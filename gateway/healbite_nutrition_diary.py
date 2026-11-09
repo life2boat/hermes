@@ -1519,6 +1519,18 @@ class ReconcileAlbumResult(tuple):
         inst.album_decision = album_decision
         return inst
 
+    @property
+    def items(self) -> list[Any]:
+        return self[0]
+
+    @property
+    def warnings(self) -> list[str]:
+        return self[1]
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return self[2]
+
 
 def _item_to_raw_dict(item: Any) -> dict[str, Any]:
     return {
@@ -1740,19 +1752,32 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
         return [item_cls(**attrs)] + non_pizza_items
 
     # 4. Plov consolidation
-    plov_markers = {"плов", "узбекский плов"}
+    plov_explicit_markers = {"плов", "узбекский плов", "для плова", "в плове"}
+    plov_conflict_markers = {
+        "терияки", "teriyaki", "гёдза", "гедза", "gyoza", "дамплинг", "dumpling",
+        "суши", "ролл", "вок", "wok", "кисло-сладк", "карри", "соевый", "по-азиатски",
+        "на гарнир", "отдельно", "стейк", "отбивная", "гриль", "жарен", "запечен",
+        "котлет", "филе", "шашлык", "куриное филе", "курица терияки", "курица гриль",
+        "крылышк", "наггетс", "колбаск", "сосиск", "шницель",
+    }
     rice_markers = {"рис", "вареный рис", "рис отварной", "рис для плова", "рис с мясом"}
     meat_markers = {"мясо", "говядина", "баранина", "курица", "свинина", "кусочки мяса", "кусочки говядины", "кусочки курицы"}
+
+    has_global_conflict = any(
+        any(c in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for c in plov_conflict_markers)
+        for it in items
+    )
+
     plov_candidates = [
         it for it in items
-        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in plov_markers | rice_markers | meat_markers | {"морковь"})
+        if any(m in f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for m in plov_explicit_markers | rice_markers | meat_markers | {"морковь"})
     ]
     non_plov_items = [
         it for it in items
         if it not in plov_candidates
     ]
     plov_names_lower = [f"{getattr(it, 'visible_name', '')} {getattr(it, 'normalized_name', '')}".lower() for it in plov_candidates]
-    has_plov_explicit = any(any(m in n for m in plov_markers) for n in plov_names_lower)
+    has_plov_explicit = any(any(m in n for m in plov_explicit_markers) for n in plov_names_lower)
     has_rice = any(any(m in n for m in rice_markers) for n in plov_names_lower)
     has_meat = any(any(m in n for m in meat_markers) for n in plov_names_lower)
     has_separate_garnish = any(
@@ -1760,27 +1785,30 @@ def apply_dish_first_policy_to_items(items: list[Any]) -> list[Any]:
             for w in ("на гарнир", "отдельно", "стейк", "отбивная", "гриль"))
         for it in plov_candidates
     )
-    if len(plov_candidates) > 1 and not has_separate_garnish and (has_plov_explicit or (has_rice and has_meat and (has_plov_explicit or any("морков" in n or "рис с мясом" in n for n in plov_names_lower)))):
+
+    # Never collapse distinct foods (e.g. teriyaki chicken + rice + gyoza) into plov without explicit plov evidence
+    if len(plov_candidates) > 1 and not has_separate_garnish and not has_global_conflict and has_plov_explicit:
         sum_min = sum(float(it.estimated_grams_min) for it in plov_candidates if getattr(it, "estimated_grams_min", None) is not None) or 250.0
         sum_max = sum(float(it.estimated_grams_max) for it in plov_candidates if getattr(it, "estimated_grams_max", None) is not None) or 350.0
         max_conf = max(getattr(it, "confidence", 0.85) for it in plov_candidates)
         attrs = {
             "visible_name": "Плов",
             "normalized_name": "плов",
-            "confidence": max_conf,
+            "confidence": min(max_conf, 0.90),
             "estimated_grams_min": round(sum_min, 1),
             "estimated_grams_max": round(sum_max, 1),
             "preparation": "тушеный",
             "is_sauce": False,
-            "uncertainty": f"{round((sum_min + sum_max) / 2.0, 1)} г",
+            "uncertainty": f"вес не подтверждён — оценён по сумме компонентов ({round((sum_min + sum_max) / 2.0, 1)} г)",
             "quantity": 1,
-            "count_type": "COUNT_CONFIRMED",
+            "count_type": "COUNT_ESTIMATED",
             "piece_grams": round((sum_min + sum_max) / 2.0, 1),
             "edible_yield_ratio": 1.0,
         }
         if hasattr(items[0], "index"):
             attrs["index"] = 1
-            attrs["selected_grams"] = round((sum_min + sum_max) / 2.0, 1)
+            # Keep selected_grams unset for auto-consolidated composite dishes per PR #489
+            attrs["selected_grams"] = None
             attrs["user_modified"] = False
         return [item_cls(**attrs)] + non_plov_items
 
@@ -1927,6 +1955,86 @@ def apply_food_vision_dish_first_policy(inventory: FoodVisionInventory) -> FoodV
 
 
 
+def _are_semantically_matching_items(
+    canonical_stem: str,
+    ex_stem: str,
+    prep_a: str = "",
+    prep_b: str = "",
+) -> bool:
+    if canonical_stem == ex_stem:
+        return True
+
+    connectors = (" с ", " со ", " из ", " под ", " в ", " во ")
+    base_a = canonical_stem
+    for conn in connectors:
+        if conn in base_a:
+            base_a = base_a.split(conn, 1)[0].strip()
+            break
+
+    base_b = ex_stem
+    for conn in connectors:
+        if conn in base_b:
+            base_b = base_b.split(conn, 1)[0].strip()
+            break
+
+    for conn in connectors:
+        if conn in canonical_stem:
+            base = canonical_stem.split(conn, 1)[0].strip()
+            if base and (base == ex_stem or base in ex_stem or ex_stem in base or base == base_b or base in base_b or base_b in base):
+                return True
+        if conn in ex_stem:
+            base = ex_stem.split(conn, 1)[0].strip()
+            if base and (base == canonical_stem or base in canonical_stem or canonical_stem in base or base == base_a or base in base_a or base_a in base):
+                return True
+
+    stop_words = {"с", "со", "из", "под", "в", "во", "на", "и", "по", "для", "от"}
+    toks_a = set(base_a.split()) - stop_words
+    toks_b = set(base_b.split()) - stop_words
+    if toks_a and toks_b:
+        if toks_a.issubset(toks_b) or toks_b.issubset(toks_a):
+            conflicting_pairs = [
+                ("борщ", "суп"),
+                ("куриц", "говядин"),
+                ("куриц", "свинин"),
+                ("говядин", "свинин"),
+                ("рыб", "мясо"),
+            ]
+            has_conflict = False
+            for p1, p2 in conflicting_pairs:
+                if (any(p1 in t for t in toks_a) and any(p2 in t for t in toks_b)) or \
+                   (any(p2 in t for t in toks_a) and any(p1 in t for t in toks_b)):
+                    has_conflict = True
+                    break
+            if not has_conflict:
+                return True
+
+    if base_a in base_b or base_b in base_a:
+        core_stems = (
+            "фарш", "мясо", "говядин", "свинин", "баранин", "куриц", "цыплен", "индейк",
+            "рыб", "лосос", "семг", "тун", "форел", "минта", "треск", "котлет", "тефтел",
+            "фрикадел", "биточ", "гуляш", "шашлык", "стейк", "отбивн", "рис", "гречк",
+            "картоф", "картошк", "пюре", "макарон", "паст", "лапш", "булгур", "кускус",
+            "киноа", "каш", "овсянк", "яйц", "омлет", "яичниц", "творог", "сыр", "суп",
+            "щи", "уха", "солянк", "рагу", "плов", "запеканк", "пирог", "шарлотк",
+            "штрудел", "выпечк", "булочк", "пицц", "бургер", "салат", "оливье",
+        )
+        if ("борщ" in canonical_stem) != ("борщ" in ex_stem):
+            return False
+        if any(stem in base_a and stem in base_b for stem in core_stems):
+            return True
+
+    specific_distinct_pastries = {"рулет", "вафл", "блин", "торт", "печень"}
+    has_specific_distinct = any(p in canonical_stem or p in ex_stem for p in specific_distinct_pastries)
+    both_general_bakery = (
+        not has_specific_distinct
+        and any(w in canonical_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
+        and any(w in ex_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
+    )
+    both_pizza = ("пицц" in canonical_stem or "pizza" in canonical_stem) and ("пицц" in ex_stem or "pizza" in ex_stem)
+    both_burger = ("бургер" in canonical_stem or "burger" in canonical_stem) and ("бургер" in ex_stem or "burger" in ex_stem)
+    return both_general_bakery or both_pizza or both_burger
+
+
 def _reconcile_multi_photo_inventories(
     photo_item_lists: list[list[Any]],
     *,
@@ -1995,26 +2103,7 @@ def _reconcile_multi_photo_inventories(
                 ex_prep = (getattr(existing, "preparation", "") or "").strip().casefold()
                 ex_form = "in_shell" if _is_food_in_shell(ex_norm) else "edible"
 
-                is_stem_match = (canonical_stem == ex_stem)
-                if not is_stem_match and (canonical_stem in ex_stem or ex_stem in canonical_stem):
-                    # Only match substring if sharing core specific dish identifier
-                    is_stem_match = (
-                        (any(w in canonical_stem for w in ["пирог", "шарлотк", "штрудел"]) and any(w in ex_stem for w in ["пирог", "шарлотк", "штрудел"]))
-                        or ("пицц" in canonical_stem and "пицц" in ex_stem)
-                        or ("бургер" in canonical_stem and "бургер" in ex_stem)
-                        or ("суп" in canonical_stem and "суп" in ex_stem and ("борщ" in canonical_stem) == ("борщ" in ex_stem))
-                    )
-                if not is_stem_match:
-                    specific_distinct_pastries = {"рулет", "вафл", "блин", "торт", "печень"}
-                    has_specific_distinct = any(p in canonical_stem or p in ex_stem for p in specific_distinct_pastries)
-                    both_general_bakery = (
-                        not has_specific_distinct
-                        and any(w in canonical_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
-                        and any(w in ex_stem for w in ["выпечк", "пирог", "булочк", "шарлотк", "штрудел", "pastry", "pie"])
-                    )
-                    both_pizza = ("пицц" in canonical_stem or "pizza" in canonical_stem) and ("пицц" in ex_stem or "pizza" in ex_stem)
-                    both_burger = ("бургер" in canonical_stem or "burger" in canonical_stem) and ("бургер" in ex_stem or "burger" in ex_stem)
-                    is_stem_match = both_general_bakery or both_pizza or both_burger
+                is_stem_match = _are_semantically_matching_items(canonical_stem, ex_stem, prep, ex_prep)
 
                 if is_stem_match and edible_form == ex_form:
                     matched_idx = idx
@@ -2039,26 +2128,43 @@ def _reconcile_multi_photo_inventories(
                     if ALBUM_DECISION_PROMPT not in warnings:
                         warnings.append(ALBUM_DECISION_PROMPT)
                     # Keep existing with note, do not double count automatically
-                    if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
+                    conn_words = (" с ", " со ", " из ", " под ", " в ", " во ")
+                    item_is_composite = any(c in getattr(item, "normalized_name", "").casefold() or c in getattr(item, "visible_name", "").casefold() for c in conn_words)
+                    existing_is_composite = any(c in getattr(existing, "normalized_name", "").casefold() or c in getattr(existing, "visible_name", "").casefold() for c in conn_words)
+                    if item_is_composite and not existing_is_composite:
+                        existing.visible_name = item.visible_name
+                        existing.normalized_name = item.normalized_name
+                    elif getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
                         existing.visible_name = item.visible_name
                         existing.confidence = item.confidence
                     ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
                     new_ids = list(getattr(item, "grouped_item_ids", []) or [])
                     existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
                 elif is_same:
-                    # SAME_PORTION confirmed -> deduplicate
-                    if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0):
+                    # SAME_PORTION confirmed -> deduplicate without summing weights
+                    conn_words = (" с ", " со ", " из ", " под ", " в ", " во ")
+                    item_is_composite = any(c in getattr(item, "normalized_name", "").casefold() or c in getattr(item, "visible_name", "").casefold() for c in conn_words)
+                    existing_is_composite = any(c in getattr(existing, "normalized_name", "").casefold() or c in getattr(existing, "visible_name", "").casefold() for c in conn_words)
+                    prefer_item_name = item_is_composite and not existing_is_composite
+                    prefer_existing_name = existing_is_composite and not item_is_composite
+
+                    if prefer_item_name or (not prefer_existing_name and getattr(item, "confidence", 0) > getattr(existing, "confidence", 0)):
                         existing.visible_name = item.visible_name
                         existing.normalized_name = item.normalized_name
-                        existing.confidence = item.confidence
-                        if getattr(item, "quantity", None) is not None:
-                            existing.quantity = item.quantity
-                            existing.count_type = getattr(item, "count_type", "COUNT_CONFIRMED")
-                        if getattr(item, "estimated_grams_min", None) is not None:
+                    existing.confidence = max(getattr(existing, "confidence", 0.8), getattr(item, "confidence", 0.8))
+                    if getattr(item, "quantity", None) is not None and not getattr(existing, "quantity", None):
+                        existing.quantity = item.quantity
+                        existing.count_type = getattr(item, "count_type", "COUNT_CONFIRMED")
+                    # Do NOT sum weights on SAME_PORTION! Retain single-portion bounds.
+                    if existing.estimated_grams_min is None and item.estimated_grams_min is not None:
+                        existing.estimated_grams_min = item.estimated_grams_min
+                        existing.estimated_grams_max = item.estimated_grams_max
+                        if hasattr(existing, "selected_grams"):
+                            existing.selected_grams = getattr(item, "selected_grams", None)
+                    elif item.estimated_grams_min is not None and existing.estimated_grams_min is not None:
+                        if getattr(item, "confidence", 0) > getattr(existing, "confidence", 0) + 0.1:
                             existing.estimated_grams_min = item.estimated_grams_min
                             existing.estimated_grams_max = item.estimated_grams_max
-                            if hasattr(existing, "selected_grams"):
-                                existing.selected_grams = getattr(item, "selected_grams", None)
                     ex_ids = list(getattr(existing, "grouped_item_ids", []) or [])
                     new_ids = list(getattr(item, "grouped_item_ids", []) or [])
                     existing.grouped_item_ids = list(dict.fromkeys(ex_ids + new_ids))
@@ -2599,6 +2705,8 @@ def _detect_and_deduplicate_composite_inventory(
         "чай", "кофе", "компот", "сок", "морс", "вода", "минеральная вода", "напиток", "квас",
         "гречка", "макароны", "паста",
         "салат из помидоров", "салат из огурцов",
+        "гёдза", "гедза", "gyoza", "дамплинги", "дамплинг", "пельмени", "вареники", "чебурек", "спринг-ролл", "суши", "роллы",
+        "терияки", "крылышки", "наггетсы", "котлета", "шницель", "филе", "шашлык",
     })
 
     def _stem(t: str) -> str:
@@ -2615,7 +2723,7 @@ def _detect_and_deduplicate_composite_inventory(
             continue
 
         cand_norm = normalize_russian_food_query(candidate.normalized_name or candidate.visible_name)
-        connectors = (" с ", " со ", " из ", " под ")
+        connectors = (" с ", " со ", " из ", " под ", " в ", " во ")
         has_connector = any(conn in cand_norm for conn in connectors)
         matched_dish_type = None
         for dtype in _KNOWN_RECIPE_INGREDIENTS:
@@ -2670,6 +2778,10 @@ def _detect_and_deduplicate_composite_inventory(
                     or "отбивная" in other_norm
                     or "шашлык" in other_norm
                     or "котлета" in other_norm
+                    or "терияки" in other_norm
+                    or "филе" in other_norm
+                    or "крылышк" in other_norm
+                    or "наггетс" in other_norm
                     or any(w in other_prep for w in ("жарен", "гриль", "запечен"))
                 )
             )
@@ -2694,7 +2806,21 @@ def _detect_and_deduplicate_composite_inventory(
                     for tok in other_tokens
                 )
 
-            if matches_connector or matches_recipe:
+            matches_base = False
+            if has_connector:
+                for conn in connectors:
+                    if conn in cand_norm:
+                        cand_base = cand_norm.split(conn, 1)[0].strip()
+                        if cand_base and (other_norm == cand_base or _stem(other_norm) == _stem(cand_base) or other_norm in cand_base or cand_base in other_norm):
+                            has_distinct_evidence = (
+                                (getattr(other, "quantity", 1) or 1) > 1
+                                or any(w in other_vis or w in other_prep for w in ("вторая порция", "отдельная порция", "2 порции", "две порции", "на двоих", "другая тарелка"))
+                            )
+                            if not has_distinct_evidence:
+                                matches_base = True
+                        break
+
+            if matches_connector or matches_recipe or matches_base:
                 matching_others.append(other)
             else:
                 external_others.append(other)
@@ -5947,7 +6073,7 @@ class HealBiteNutritionDiary:
             for index, item in enumerate(reconciled_items, start=1):
                 g_min = item.estimated_grams_min
                 g_max = item.estimated_grams_max
-                sel_g = _maybe_proposed_selected_grams(g_min, g_max)
+                sel_g = getattr(item, "selected_grams", None) or _maybe_proposed_selected_grams(g_min, g_max)
                 item_id = getattr(item, "item_id", "") or f"item_{index}"
                 pending_items.append(PendingFoodVisionItem(
                     index=index,
@@ -5969,7 +6095,15 @@ class HealBiteNutritionDiary:
                     edible_yield_ratio=getattr(item, "edible_yield_ratio", None) or _get_edible_yield_ratio(item.normalized_name, item.visible_name, preparation=item.preparation),
                     grouped_item_ids=list(getattr(item, "grouped_item_ids", None) or [item_id]),
                 ))
-            payload.items = _reindex_pending_inventory_items(pending_items)
+
+            # Post-decision normalization:
+            # 1. Aggregate identical items
+            pending_items = _aggregate_identical_food_vision_items(pending_items)
+            # 2. Fill category priors for unweighted items (herbs, spices, sauces)
+            pending_items = _apply_prior_weights_to_unweighted_items(pending_items)
+            # 3. Deduplicate composite items (e.g. base meat vs composite meat)
+            deduped_items, _ = _detect_and_deduplicate_composite_inventory(pending_items)
+            payload.items = _reindex_pending_inventory_items(deduped_items)
 
         payload.warnings = [
             w for w in payload.warnings
